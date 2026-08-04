@@ -929,7 +929,6 @@ async fn mint_ticket(
             err(StatusCode::INTERNAL_SERVER_ERROR, "database error")
         })?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "worktree not found"))?;
-
     // A live session is claimed by the worktree it was started in. Without
     // this check a pane could name another worktree's session and adopt a
     // shell running somewhere the user isn't looking.
@@ -943,6 +942,25 @@ async fn mint_ticket(
         Some(_) => true,
         None => false,
     };
+
+    // No NEW shells in a checkout that is in the trash. It is still a real directory
+    // for the whole retention period, so nothing stops a URL or a direct API call
+    // from opening a terminal in one — and nothing reaps sessions when a worktree is
+    // deleted, so the eventual `git worktree remove` would pull the directory out
+    // from under that shell with no warning.
+    //
+    // **Reattaching is deliberately still allowed.** A worktree can be binned from
+    // another window while a terminal is open in it, and that shell keeps running for
+    // the whole retention period — so refusing the reattach would strand a live
+    // session behind a page reload and make the user restore the worktree just to
+    // reach output that never went anywhere. Hence the check sits after `resumed` is
+    // known rather than at the top of the handler.
+    if !resumed && !wt.trashed_at.is_empty() {
+        return Err(err(
+            StatusCode::CONFLICT,
+            "this worktree is in the trash — restore it to open a new terminal",
+        ));
+    }
 
     // Capacity is checked *here*, not only at attach time, because this is the
     // last point whose body a browser can read: the WebSocket API exposes

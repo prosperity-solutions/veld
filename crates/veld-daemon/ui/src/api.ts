@@ -100,6 +100,33 @@ export interface Worktree {
   marker_color: string;
   is_main: boolean;
   created_at: string;
+  /**
+   * The rail lane this worktree is grouped under, or `""` for ungrouped.
+   *
+   * The lane's **name**, not an id — see the v10 migration. A name this repo has
+   * no lane for renders as ungrouped rather than as an error.
+   */
+  lane: string;
+  /**
+   * Manual position within the lane, or `null` for "the user has not placed this
+   * one", which sorts to an alias-ordered tail rather than to position 0. A newly
+   * discovered worktree is always `null`.
+   */
+  sort_position: number | null;
+  /**
+   * When this checkout was moved to the trash, or `""` if it is not in the trash.
+   *
+   * A timestamp rather than a flag because it is also the retention clock: the
+   * checkout stays on disk until `worktree.trashRetentionDays` elapses from here, or
+   * until the user deletes it explicitly. Nothing has been deleted while this is set.
+   */
+  trashed_at: string;
+  /**
+   * Why the last deletion attempt failed, or `""`. Set together with clearing
+   * `trashed_at`, so a worktree carrying this is *out* of the trash and back in the
+   * rail — the failure is neither silent nor still pending.
+   */
+  trash_error: string;
   has_veld_config: boolean;
   /** Presets in display order, as resolved by the daemon. */
   presets: Preset[];
@@ -233,6 +260,32 @@ export interface Repo {
   /** False when the repo can't be listed on disk right now (moved/deleted). */
   available: boolean;
   worktrees: Worktree[];
+  /**
+   * The repo's rail lanes, in their own order.
+   *
+   * Sent with the repo rather than fetched separately so the rail never has a
+   * frame where a worktree's `lane` names a group it has not heard of.
+   */
+  lanes: Lane[];
+}
+
+/**
+ * Longest lane name the daemon accepts.
+ *
+ * Mirrors `MAX_LANE_NAME_LEN` in `crates/veld-core/src/db/worktrees.rs`. Nothing
+ * pins the pair, and it does not need pinning: this only stops the input
+ * accepting a name the daemon would reject, and the daemon is the enforcement. If
+ * it drifts low the field truncates early; if it drifts high the user gets the
+ * server's error, which is the behaviour without this constant at all.
+ */
+export const MAX_LANE_NAME_LEN = 32;
+
+/** A user-defined rail lane. Identified by `(repo root, name)` — there is no id. */
+export interface Lane {
+  repo_root: string;
+  name: string;
+  position: number;
+  created_at: string;
 }
 
 export interface RepoList {
@@ -572,10 +625,21 @@ export const api = {
       method: "POST",
       body: JSON.stringify(body),
     }),
-  /** Partial update — send any combination of alias, emoji and marker_color. */
+  /**
+   * Partial update — any combination of alias, emoji, marker_color and lane.
+   *
+   * Lane assignment rides here rather than on its own endpoint because
+   * `Db::patch_worktree` is the one owner of worktree-row edits. Send `lane: ""`
+   * to ungroup.
+   */
   patchWorktree: (
     id: number,
-    patch: { alias?: string; emoji?: string; marker_color?: string },
+    patch: {
+      alias?: string;
+      emoji?: string;
+      marker_color?: string;
+      lane?: string;
+    },
   ) =>
     request<Worktree>(`/api/worktrees/${id}`, {
       method: "PATCH",
@@ -592,8 +656,70 @@ export const api = {
    */
   worktreeEmoji: () =>
     request<{ emoji: string[]; colors: string[] }>("/api/worktree-emoji"),
+  /**
+   * Move a checkout to the trash (202) — or, with `force`, delete it outright.
+   *
+   * Binning deletes nothing: the checkout stays on disk until its retention expires
+   * or it is deleted explicitly, so this returns immediately and restoring is a real
+   * undo. Forcing is inline (204/422/409) because it answers a refusal the user has
+   * already been shown.
+   */
   deleteWorktree: (id: number, force: boolean) =>
     request<void>(`/api/worktrees/${id}?force=${force}`, { method: "DELETE" }),
+  /**
+   * Take a worktree out of the trash. Fails with 404 only if an explicit deletion
+   * already got there.
+   */
+  restoreWorktree: (id: number) =>
+    request<Worktree>(`/api/worktrees/${id}/restore`, { method: "POST" }),
+  /**
+   * Delete a trashed worktree now instead of waiting for its retention (202).
+   * `409` if it is not in the trash — this is not a shortcut past the confirmation.
+   */
+  deleteTrashedWorktree: (id: number) =>
+    request<void>(`/api/worktrees/${id}/delete`, { method: "POST" }),
+  /** Delete every trashed worktree of a repo now. */
+  emptyTrash: (repo_root: string) =>
+    request<{ queued: number }>(
+      `/api/trash?repo_root=${encodeURIComponent(repo_root)}`,
+      { method: "DELETE" },
+    ),
+  /** Clear a recorded deletion failure — the user has read it. */
+  dismissTrashError: (id: number) =>
+    request<void>(`/api/worktrees/${id}/trash-error`, { method: "DELETE" }),
+  /**
+   * Rewrite the manual worktree order for a repo.
+   *
+   * Send the **full order being displayed**, as paths: paths because
+   * `worktrees.id` is a reused rowid, and the full list because that makes the
+   * write idempotent — omitted paths go back to unplaced.
+   */
+  reorderWorktrees: (repo_root: string, order: string[]) =>
+    request<void>("/api/worktree-order", {
+      method: "POST",
+      body: JSON.stringify({ repo_root, order }),
+    }),
+  createLane: (repo_root: string, name: string) =>
+    request<{ lane: Lane }>("/api/lanes", {
+      method: "POST",
+      body: JSON.stringify({ repo_root, name }),
+    }),
+  renameLane: (repo_root: string, from: string, name: string) =>
+    request<void>(`/api/lanes/${encodeURIComponent(from)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ repo_root, name }),
+    }),
+  /** Delete a lane. Its members are ungrouped, never removed. */
+  deleteLane: (repo_root: string, name: string) =>
+    request<void>(
+      `/api/lanes/${encodeURIComponent(name)}?repo_root=${encodeURIComponent(repo_root)}`,
+      { method: "DELETE" },
+    ),
+  reorderLanes: (repo_root: string, order: string[]) =>
+    request<void>("/api/lane-order", {
+      method: "POST",
+      body: JSON.stringify({ repo_root, order }),
+    }),
   /**
    * Every setting's **effective** value — the daemon merges its own defaults
    * under whatever is stored, so this is always a complete document and the UI

@@ -39,6 +39,7 @@ import {
 } from "../shared/terminalFonts";
 import {
   detachGraceMinutes,
+  trashRetentionDays,
   markerStyle,
   quickSwitchPrefs,
   terminalPrefs,
@@ -97,6 +98,8 @@ export function SettingsDialog(props: {
   const [scrollback, setScrollback] = useState<number | string>(term.scrollback);
   const graceValue = detachGraceMinutes(settings ?? {});
   const [grace, setGrace] = useState<number | string>(graceValue);
+  const retentionValue = trashRetentionDays(settings ?? {});
+  const [retention, setRetention] = useState<number | string>(retentionValue);
   const [fontFamily, setFontFamily] = useState(term.fontFamily);
   // Availability is probed against the DOM, so compute it once per open rather
   // than on every render — the list cannot change while the dialog is up.
@@ -117,6 +120,7 @@ export function SettingsDialog(props: {
     setScrollback(term.scrollback);
     setFontFamily(term.fontFamily);
     setGrace(graceValue);
+    setRetention(retentionValue);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [settings]);
 
@@ -179,6 +183,48 @@ export function SettingsDialog(props: {
               onChange={(e) =>
                 set({ "worktree.markerStyle": e.currentTarget.value as MarkerStyle })
               }
+            />
+          </Row>
+        </Stack>
+
+        <Stack gap="xs">
+          <SectionTitle>Worktrees</SectionTitle>
+          <Row
+            label="Empty the trash after"
+            /* Blunt on purpose. This is the only thing veld does that deletes a
+               checkout without asking again, so it cannot be described in the
+               register of an ordinary preference — and the last sentence is why it
+               is defensible: the deletion is still git's un-forced one, so
+               uncommitted work is refused rather than discarded. */
+            help="0 keeps trashed worktrees until you empty the trash yourself — the default. Set a number of days and a worktree you moved to the trash is deleted for good after that long. Deleting still goes through git, so a checkout that picked up uncommitted changes comes back with the reason instead of being discarded."
+          >
+            <NumberInput
+              size="xs"
+              w={140}
+              min={0}
+              /* Mirrors MAX_TRASH_RETENTION_DAYS in veld-core's settings.rs, the
+                 same way the scrollback and grace boxes mirror theirs — a control
+                 offering a range the server refuses is a #204 review finding. */
+              max={365}
+              step={7}
+              value={retention}
+              disabled={locked}
+              /* Zero is "keep until I empty it", so it must be reachable — and it
+                 is what the placeholder says an empty box means. */
+              placeholder="keep"
+              suffix={typeof retention === "number" && retention > 0 ? " days" : ""}
+              onChange={setRetention}
+              onBlur={() =>
+                commitNumber(
+                  "worktree.trashRetentionDays",
+                  retention,
+                  retentionValue,
+                  setRetention,
+                )
+              }
+              onKeyDown={(e) => {
+                if (e.key === "Enter") e.currentTarget.blur();
+              }}
             />
           </Row>
         </Stack>

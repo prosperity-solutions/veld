@@ -116,7 +116,7 @@ pub(crate) fn root_key(project_root: &Path) -> String {
 /// are never edited) — changing the live set requires a NEW migration that
 /// rebuilds `idx_runs_one_live`, or the one-live-run invariant silently stops
 /// covering the new status.
-const LIVE_SET: &str = "('starting','running','stopping')";
+pub(super) const LIVE_SET: &str = "('starting','running','stopping')";
 
 /// Map a unique-constraint violation on the one-live-run index to the typed
 /// error; pass every other error through. SQLite reports a partial-index

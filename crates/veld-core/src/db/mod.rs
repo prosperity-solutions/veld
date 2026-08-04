@@ -27,8 +27,8 @@ mod worktrees;
 pub use logs::{LogFilter, LogRow, LogStream, stream_is_per_node};
 pub use settings::DEFAULT_DETACH_GRACE_MINUTES;
 pub use worktrees::{
-    DiscoveredWorktree, RepoRecord, WORKTREE_COLORS, WORKTREE_EMOJI, WorktreeRecord, default_alias,
-    is_worktree_color, is_worktree_emoji,
+    DiscoveredWorktree, LaneRecord, MAX_LANE_NAME_LEN, MAX_ORDER_LEN, RepoRecord, WORKTREE_COLORS,
+    WORKTREE_EMOJI, WorktreeRecord, default_alias, is_worktree_color, is_worktree_emoji,
 };
 
 use std::path::{Path, PathBuf};
@@ -71,6 +71,30 @@ pub enum DbError {
 
     #[error("another checkout of this repo is already called {0:?} — pick a different alias")]
     AliasTaken(String),
+
+    #[error("this repo has no lane called {0:?}")]
+    UnknownLane(String),
+
+    #[error("this repo already has a lane called {0:?}")]
+    LaneTaken(String),
+
+    #[error(
+        "a lane name must be 1–{max} characters",
+        max = crate::db::worktrees::MAX_LANE_NAME_LEN
+    )]
+    InvalidLaneName(String),
+
+    #[error("this repo already has the maximum of {0} lanes")]
+    TooManyLanes(usize),
+
+    #[error(
+        "a reorder may list at most {max} entries (got {0})",
+        max = crate::db::worktrees::MAX_ORDER_LEN
+    )]
+    OrderTooLong(usize),
+
+    #[error("refusing to remove the main checkout — remove the repo instead")]
+    RefusingMainWorktree,
 
     #[error("database error: {0}")]
     Sqlite(#[from] rusqlite::Error),
@@ -423,6 +447,11 @@ const MIGRATIONS: &[Migration] = &[
         version: 9,
         name: "worktree-marker-color",
         apply: migrate_v9_worktree_marker_color,
+    },
+    Migration {
+        version: 10,
+        name: "rail-lanes-and-worktree-trash",
+        apply: migrate_v10_rail_lanes_and_trash,
     },
 ];
 
@@ -880,6 +909,86 @@ fn migrate_v8_settings(conn: &Connection) -> rusqlite::Result<()> {
 /// an unrelated worktree.
 fn migrate_v9_worktree_marker_color(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch("ALTER TABLE worktrees ADD COLUMN marker_color TEXT NOT NULL DEFAULT '';")
+}
+
+/// v10: rail organisation (`lanes`, `worktrees.lane`, `worktrees.sort_position`)
+/// and worktree trash (`worktrees.trashed_at`, `worktrees.trash_error`).
+///
+/// **Why this is not in the `settings` table.** The `scope` column added in v8
+/// exists for per-project *user* state and this is per-project user state, so the
+/// settings store is the obvious home and it is the wrong one. Lanes are a
+/// relation, not a scalar: `settings.validate` is built for clamped numbers and
+/// `one_of` enums, a lane document has no referential relationship to `worktrees`
+/// and so no cascade, and drag-and-drop is the highest-concurrency gesture in a
+/// two-window app while a document is the coarsest possible write grain — the
+/// exact property v8's one-row-per-setting shape was chosen to get. The settings
+/// store keeps the *scalars* this feature needs (`worktree.evictAfterDays`).
+///
+/// **Lane membership lives on the worktree row, and there is no join key.** Both
+/// hazards this codebase has already paid for — rowid reuse (three stores got it
+/// wrong in #201) and path reuse — exist because user state was stored *beside* a
+/// worktree and had to point at it. Storing the assignment *on* the row it
+/// describes removes the pointer, so a reused rowid cannot inherit a stale lane,
+/// and a trashed worktree keeps its lane and position for the whole pending-removal
+/// window for free.
+///
+/// **`lane` holds the name, not a surrogate id.** A rename is
+/// `UPDATE lanes SET name` plus `UPDATE worktrees SET lane` — two statements, but
+/// both tables live in this one database, so one IMMEDIATE transaction makes it
+/// atomic and the usual "denormalising the name means a non-atomic N-row rewrite"
+/// objection does not apply. Skipping the surrogate id also avoids reintroducing
+/// rowid reuse in a brand-new table, which is what an `INTEGER PRIMARY KEY` on
+/// `lanes` would have done.
+///
+/// **`sort_position` is NULL for "the user has not placed this one".** Unplaced
+/// worktrees render as an alias-sorted tail, so the reconcile pass never has to
+/// invent user intent when it discovers a checkout, and a new worktree can never
+/// appear silently wedged into the middle of a hand-made order. With no lanes
+/// defined and nothing placed, the rail order is byte-identical to v9's.
+///
+/// **Trash is a holding area, and `trashed_at` is its clock.**
+///
+/// Removing a worktree marks the row and **leaves the checkout on disk**. It shows
+/// in the rail as trashed, restoring it is a real undo rather than a race, and the
+/// actual `git worktree remove` happens when the retention period
+/// (`worktree.trashRetentionDays`) expires, or when the user asks for it now. A
+/// recycle bin, not a progress indicator on a deletion already underway.
+///
+/// That is what makes `trashed_at` a *timestamp* rather than a flag: it is the only
+/// thing that says when the grace period started, so it is both the record of intent
+/// and the retention clock.
+///
+/// The reconcile pass has to know about it. `git worktree list --porcelain` keeps
+/// reporting the path for the whole retention window — the checkout is genuinely
+/// still there — so without checking `trashed_at` the next poll would resurrect the
+/// row it was just asked to trash.
+///
+/// **The removal is always git's, and always un-forced.** Relocating the checkout
+/// instead would be O(1) and tempting, and it would bypass every safety check
+/// `git worktree remove` exists to enforce while pulling the directory out from
+/// under the PTY sessions, runs and browser panes rooted at that path — failing
+/// immediately and invisibly rather than at removal time.
+///
+/// `trash_error` is the other half: a removal that fails after the user has moved
+/// on takes the row back *out* of trash with the reason attached, because a
+/// background job that fails silently is worse than a blocking one that reports.
+fn migrate_v10_rail_lanes_and_trash(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        r#"
+        ALTER TABLE worktrees ADD COLUMN lane TEXT NOT NULL DEFAULT '';
+        ALTER TABLE worktrees ADD COLUMN sort_position INTEGER;
+        ALTER TABLE worktrees ADD COLUMN trashed_at TEXT NOT NULL DEFAULT '';
+        ALTER TABLE worktrees ADD COLUMN trash_error TEXT NOT NULL DEFAULT '';
+
+        CREATE TABLE lanes (
+            repo_root  TEXT NOT NULL REFERENCES repos(root) ON DELETE CASCADE,
+            name       TEXT NOT NULL,
+            position   INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (repo_root, name)
+        );
+        "#,
+    )
 }
 
 // ---------------------------------------------------------------------------

@@ -77,6 +77,22 @@ pub const DEFAULT_SCROLLBACK: i64 = 10_000;
 /// memory with a number in a box.
 pub const MAX_SCROLLBACK: i64 = 100_000;
 
+/// Days a worktree stays in the trash before it is deleted for good.
+///
+/// **Zero means "keep until I empty it", and that is the default.** The trash is a
+/// holding area: moving a worktree there deletes nothing, and this is the only thing
+/// that ever deletes one without the user asking again. A default of zero means the
+/// only destructive act veld performs unprompted is one the user opted into by
+/// setting a number.
+pub const DEFAULT_TRASH_RETENTION_DAYS: i64 = 0;
+
+/// Shortest retention that is still a grace period. Below a day, "trash" would not
+/// give anyone time to notice they had binned the wrong checkout.
+pub const MIN_TRASH_RETENTION_DAYS: i64 = 1;
+/// Longest retention. Past a year the trash is not a holding area, it is a disk
+/// full of checkouts nobody remembers binning.
+pub const MAX_TRASH_RETENTION_DAYS: i64 = 365;
+
 /// Longest accepted `terminal.fontFamily`. A CSS font-family list that needs more
 /// than this is not a font list.
 const MAX_FONT_FAMILY_LEN: usize = 200;
@@ -105,6 +121,7 @@ pub enum SettingKey {
     TerminalShiftEnterNewline,
     TerminalDetachGrace,
     WorktreeMarkerStyle,
+    WorktreeTrashRetention,
     BrowserQuickSwitchResponsive,
     BrowserQuickSwitchColorScheme,
     Unknown(String),
@@ -130,6 +147,7 @@ impl SettingKey {
         Self::TerminalShiftEnterNewline,
         Self::TerminalDetachGrace,
         Self::WorktreeMarkerStyle,
+        Self::WorktreeTrashRetention,
         Self::BrowserQuickSwitchResponsive,
         Self::BrowserQuickSwitchColorScheme,
     ];
@@ -144,6 +162,7 @@ impl SettingKey {
             Self::TerminalShiftEnterNewline => "terminal.shiftEnterNewline",
             Self::TerminalDetachGrace => "terminal.detachGraceMinutes",
             Self::WorktreeMarkerStyle => "worktree.markerStyle",
+            Self::WorktreeTrashRetention => "worktree.trashRetentionDays",
             Self::BrowserQuickSwitchResponsive => "browser.quickSwitch.responsive",
             Self::BrowserQuickSwitchColorScheme => "browser.quickSwitch.colorScheme",
             Self::Unknown(k) => k,
@@ -160,6 +179,7 @@ impl SettingKey {
             "terminal.shiftEnterNewline" => Self::TerminalShiftEnterNewline,
             "terminal.detachGraceMinutes" => Self::TerminalDetachGrace,
             "worktree.markerStyle" => Self::WorktreeMarkerStyle,
+            "worktree.trashRetentionDays" => Self::WorktreeTrashRetention,
             "browser.quickSwitch.responsive" => Self::BrowserQuickSwitchResponsive,
             "browser.quickSwitch.colorScheme" => Self::BrowserQuickSwitchColorScheme,
             other => Self::Unknown(other.to_string()),
@@ -190,6 +210,18 @@ impl SettingKey {
                 clamp_i64(value, MIN_DETACH_GRACE_MINUTES, MAX_DETACH_GRACE_MINUTES)
                     .ok_or_else(bad)?,
             ),
+            // Zero is "keep until emptied" and is deliberately outside the clamped
+            // range, because this is the one numeric setting whose off state is not a
+            // small value — clamping it up to `MIN` would arm a timer that deletes
+            // checkouts for a user who was trying to turn it off.
+            Self::WorktreeTrashRetention => {
+                let n = clamp_i64(value, 0, MAX_TRASH_RETENTION_DAYS).ok_or_else(bad)?;
+                Value::from(if n == 0 {
+                    0
+                } else {
+                    n.max(MIN_TRASH_RETENTION_DAYS)
+                })
+            }
             Self::TerminalCursorBlink
             | Self::TerminalShiftEnterNewline
             | Self::BrowserQuickSwitchResponsive
@@ -295,6 +327,12 @@ pub fn defaults() -> BTreeMap<String, Value> {
         // emulating lives in that pane's layout.
         (SettingKey::BrowserQuickSwitchResponsive, Value::from(true)),
         (SettingKey::BrowserQuickSwitchColorScheme, Value::from(true)),
+        // Keep until emptied. The trash deleting things on its own is opt-in, and
+        // the default has to be the one that cannot surprise anybody.
+        (
+            SettingKey::WorktreeTrashRetention,
+            Value::from(DEFAULT_TRASH_RETENTION_DAYS),
+        ),
     ]
     .into_iter()
     .map(|(k, v)| (k.as_str().to_string(), v))
@@ -400,6 +438,28 @@ impl Db {
             .unwrap_or(DEFAULT_DETACH_GRACE_MINUTES)
             .clamp(MIN_DETACH_GRACE_MINUTES, MAX_DETACH_GRACE_MINUTES);
         std::time::Duration::from_secs(minutes as u64 * 60)
+    }
+
+    /// How long a worktree stays in the trash before it is deleted, or `None` for
+    /// "keep until emptied" — the default, and what this returns for anything it
+    /// cannot read.
+    ///
+    /// Re-read per GC pass rather than cached, so turning automatic deletion off
+    /// takes effect at the next pass instead of at the next daemon restart. Turning
+    /// *off* the one thing that deletes a checkout unprompted must not need a
+    /// restart.
+    pub fn trash_retention(&self) -> Option<std::time::Duration> {
+        let days = self
+            .setting(&SettingKey::WorktreeTrashRetention)
+            .ok()
+            .flatten()
+            .and_then(|v| v.as_i64())
+            .unwrap_or(DEFAULT_TRASH_RETENTION_DAYS);
+        if days <= 0 {
+            return None;
+        }
+        let days = days.clamp(MIN_TRASH_RETENTION_DAYS, MAX_TRASH_RETENTION_DAYS);
+        Some(std::time::Duration::from_secs(days as u64 * 86_400))
     }
 }
 
@@ -603,6 +663,42 @@ mod tests {
         assert_eq!(
             db.detach_grace(),
             std::time::Duration::from_secs(MAX_DETACH_GRACE_MINUTES as u64 * 60)
+        );
+    }
+
+    #[test]
+    fn trash_retention_defaults_to_keep_forever_and_zero_survives_the_clamp() {
+        let (_dir, db) = test_db();
+        assert_eq!(
+            db.trash_retention(),
+            None,
+            "the only thing that deletes a checkout unprompted must be opt-in"
+        );
+
+        // Zero means "keep until emptied" and is deliberately outside the clamped
+        // range. Clamping it up to MIN would arm automatic deletion for a user
+        // trying to turn it off — the one numeric setting where the nearest legal
+        // value is the wrong answer.
+        db.patch_settings(&patch(&[("worktree.trashRetentionDays", Value::from(0))]))
+            .unwrap();
+        assert_eq!(db.trash_retention(), None);
+
+        db.patch_settings(&patch(&[("worktree.trashRetentionDays", Value::from(14))]))
+            .unwrap();
+        assert_eq!(
+            db.trash_retention(),
+            Some(std::time::Duration::from_secs(14 * 86_400))
+        );
+
+        // Above the ceiling clamps down, as every other number does.
+        db.patch_settings(&patch(&[(
+            "worktree.trashRetentionDays",
+            Value::from(MAX_TRASH_RETENTION_DAYS + 500),
+        )]))
+        .unwrap();
+        assert_eq!(
+            db.settings().unwrap().get("worktree.trashRetentionDays"),
+            Some(&Value::from(MAX_TRASH_RETENTION_DAYS))
         );
     }
 

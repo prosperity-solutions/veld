@@ -9,7 +9,7 @@ import {
   Text,
   TextInput,
 } from "@mantine/core";
-import { api, type EmojiHolder, type Repo } from "../api";
+import { api, MAX_LANE_NAME_LEN, type EmojiHolder, type Repo } from "../api";
 import type { MarkerStyle } from "../shared/settings";
 
 /**
@@ -406,6 +406,18 @@ export function RenameWorktreeDialog(props: {
   onRename: (alias: string) => Promise<void>;
   onDelete: (force: boolean) => Promise<void>;
   isMain: boolean;
+  /**
+   * Why the last deletion failed, or `""`.
+   *
+   * Load-bearing, not decoration. Deletion happens later than the click — on the
+   * retention sweep or from the trash — so git's refusal arrives on the row and can
+   * never land in this dialog's own `useSubmit` error. Gating the force checkbox on
+   * that error made `?force=true` unreachable: click → 202 → dialog closes →
+   * reopening gives a fresh, empty error. This is the durable record of the refusal,
+   * and it is what keeps forcing an answer to something the user has been shown
+   * rather than a checkbox offered up front.
+   */
+  trashError: string;
   /** Open with the remove confirmation already expanded (context menu). */
   deleteFocus: boolean;
   onClose: () => void;
@@ -415,6 +427,9 @@ export function RenameWorktreeDialog(props: {
   const [force, setForce] = useState(false);
   const rename = useSubmit(() => props.onRename(alias.trim()));
   const del = useSubmit(() => props.onDelete(force));
+  // Either source of a refusal: this attempt's own (a 4xx from the forced path, or
+  // a rejected precondition) or the last background attempt's.
+  const refusal = del.error ?? (props.trashError || null);
   return (
     <Modal title="Edit worktree" onClose={props.onClose}>
       <form onSubmit={rename.submit}>
@@ -442,16 +457,20 @@ export function RenameWorktreeDialog(props: {
           {confirmDelete ? (
             <>
               <Text size="sm" c="dimmed">
-                Removes the checkout from disk (git refuses if it has
-                uncommitted changes). The branch itself is kept. Stop any
-                running environment in this worktree first — removing pulls
-                the directory out from under it.
+                Moves the checkout to the trash. Nothing is deleted yet — it
+                stays on disk and you can restore it from the rail. It is
+                deleted for good when its retention period runs out (Settings →
+                Worktrees, off by default) or when you delete it from the trash.
+                The branch itself is always kept.
+                {force
+                  ? " Forcing deletes it right now and discards uncommitted changes; it will not start if an environment is still running."
+                  : ""}
               </Text>
-              <ErrorText error={del.error} />
-              {del.error && (
+              <ErrorText error={refusal} />
+              {refusal && (
                 <Checkbox
                   color="red"
-                  label="Force remove — discards uncommitted changes"
+                  label="Delete now, discarding uncommitted changes"
                   checked={force}
                   onChange={(e) => setForce(e.currentTarget.checked)}
                 />
@@ -465,7 +484,7 @@ export function RenameWorktreeDialog(props: {
                   void del.submit(e);
                 }}
               >
-                Really remove worktree
+                {force ? "Delete permanently" : "Move to trash"}
               </Button>
             </>
           ) : (
@@ -477,11 +496,68 @@ export function RenameWorktreeDialog(props: {
                 setConfirmDelete(true);
               }}
             >
-              Remove worktree…
+              Move to trash…
             </Button>
           )}
         </Stack>
       )}
+    </Modal>
+  );
+}
+
+/**
+ * Create or rename a rail lane.
+ *
+ * One component for both because the only difference is the initial value and
+ * the button label — and because the collision rule has to be identical in
+ * both, which two components would eventually get wrong.
+ *
+ * The taken-name check here is a courtesy, not the enforcement: `create_lane`
+ * and `rename_lane` decide inside their transaction, so two windows creating
+ * "review" at once still resolve correctly. Checking here only means the user
+ * finds out before pressing the button.
+ */
+export function LaneNameDialog(props: {
+  title: string;
+  confirmLabel: string;
+  initial: string;
+  /** Existing lane names, excluding the one being renamed. */
+  taken: string[];
+  onSubmit: (name: string) => Promise<void>;
+  onClose: () => void;
+}) {
+  const [name, setName] = useState(props.initial);
+  const trimmed = name.trim();
+  // Case-insensitive, matching the daemon: two rail headers differing only in
+  // case is a mistake every time.
+  const collides = props.taken.some(
+    (n) => n.toLowerCase() === trimmed.toLowerCase(),
+  );
+  const { busy, error, submit } = useSubmit(() => props.onSubmit(trimmed));
+  return (
+    <Modal title={props.title} onClose={props.onClose}>
+      <form onSubmit={submit}>
+        <Stack gap="sm">
+          <TextInput
+            label="Lane name"
+            placeholder="review"
+            value={name}
+            maxLength={MAX_LANE_NAME_LEN}
+            onChange={(e) => setName(e.currentTarget.value)}
+            error={collides ? "This repo already has a lane with that name" : null}
+            data-autofocus
+          />
+          <Text size="sm" c="dimmed">
+            Lanes group the worktrees in the rail. They are yours, not the
+            repository&apos;s — nothing is written to the project&apos;s config, so
+            your lanes never show up in someone else&apos;s checkout.
+          </Text>
+          <ErrorText error={error} />
+          <Button type="submit" loading={busy} disabled={!trimmed || collides}>
+            {props.confirmLabel}
+          </Button>
+        </Stack>
+      </form>
     </Modal>
   );
 }

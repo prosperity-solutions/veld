@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   api,
   runRef,
   type EmojiHolder,
   type EnvironmentList,
+  type Lane,
   type Repo,
   type RepoList,
   type RunInfo,
@@ -26,12 +27,16 @@ import {
   bestFuzzyMatch,
   diagnosticsRun,
   fuzzyMatch,
+  moveWorktree,
   prunePending,
+  railGroups,
   runSignature,
   runsForWorktree,
   sortedUrls,
   worktreeStatus,
+  TRASH_LANE,
   type PendingAction,
+  type RailGroup,
   type PendingMap,
   type WorktreeStatus,
 } from "./model";
@@ -48,6 +53,7 @@ import {
   TextInput,
 } from "@mantine/core";
 import {
+  IconArrowBackUp,
   IconArrowsExchange,
   IconChevronLeft,
   IconChevronRight,
@@ -74,7 +80,7 @@ import { theme as mantineTheme } from "./theme";
 import { RunsMode } from "./runs/RunsMode";
 import { PaneArea } from "./panes/PaneArea";
 import type { RunPaneContext } from "./panes/RunPanes";
-import { notifyError, notifyRedirect } from "./shared/notify";
+import { notifyDone, notifyError, notifyRedirect } from "./shared/notify";
 import {
   JoinRequestRow,
   RunSharePanel,
@@ -142,6 +148,7 @@ import {
 import {
   ChangeMarkerDialog,
   ImportRepoDialog,
+  LaneNameDialog,
   Modal,
   NewWorktreeDialog,
   RemoveRepoDialog,
@@ -246,6 +253,9 @@ function usePersisted(key: string, initial: string): [string, (v: string) => voi
  * A plain browser tab has no slot and therefore only the unscoped key, which is
  * the behaviour it had before windows existed.
  */
+/** Removal failures this window has already announced. See the effect that uses it. */
+const TRASH_ACK_KEY = "veld.trashAcked";
+
 function selectionKeys(name: string): [string, string] {
   return layoutSlot ? [`${name}.slot.${layoutSlot}`, name] : [name, name];
 }
@@ -533,10 +543,18 @@ function AppInner(props: {
   const repo: Repo | null =
     repos.find((r) => r.root === activeRepoRoot) ?? repos[0] ?? null;
   const worktrees = useMemo(() => repo?.worktrees ?? [], [repo]);
+  const lanes = useMemo(() => repo?.lanes ?? [], [repo]);
+  // The fallbacks skip pending removals: when the worktree you were looking at is
+  // being deleted, the app has to land somewhere that still exists rather than
+  // opening panes on a vanishing directory.
+  const selectable = useMemo(
+    () => worktrees.filter((w) => !w.trashed_at),
+    [worktrees],
+  );
   const worktree: Worktree | null =
-    worktrees.find((w) => String(w.id) === activeWtKey) ??
-    worktrees.find((w) => w.is_main) ??
-    worktrees[0] ??
+    selectable.find((w) => String(w.id) === activeWtKey) ??
+    selectable.find((w) => w.is_main) ??
+    selectable[0] ??
     null;
 
   /**
@@ -851,6 +869,9 @@ function AppInner(props: {
     | { kind: "new-worktree" }
     | { kind: "rename"; worktree: Worktree; deleteFocus?: boolean }
     | { kind: "marker"; worktree: Worktree }
+    /** `worktree` set means "create it, then move this one into it". */
+    | { kind: "new-lane"; worktree?: Worktree }
+    | { kind: "rename-lane"; lane: string }
     | { kind: "settings" }
     | { kind: "remove-repo"; repo: Repo }
     | { kind: "search" }
@@ -926,6 +947,27 @@ function AppInner(props: {
   };
 
   const worktreeMenu = (w: Worktree) => {
+    // A worktree on its way out has exactly one useful action. Offering the full
+    // menu would put "Remove worktree…" on a row already being removed, and
+    // "Start run" on a directory about to disappear.
+    if (w.trashed_at) {
+      return showContextMenu([
+        {
+          key: "restore",
+          icon: <IconArrowBackUp size={14} />,
+          title: "Restore",
+          onClick: () => void restoreWorktree(w),
+        },
+        { key: "trash-divider" },
+        {
+          key: "delete-now",
+          icon: <IconTrash size={14} />,
+          title: "Delete permanently",
+          color: "red",
+          onClick: () => void deleteTrashedWorktree(w),
+        },
+      ]);
+    }
     const running = worktreeStatus(runsForWorktree(envs, w)) !== "stopped";
     // Run entries live here as well as on the row, because the collapsed rail
     // has no space for inline controls and right-click is its only affordance.
@@ -977,6 +1019,38 @@ function AppInner(props: {
         title: "Change marker…",
         onClick: () => setDialog({ kind: "marker", worktree: w }),
       },
+      // Lane assignment as a submenu of the *existing* lanes, plus "New lane…".
+      // A free-text field here would let two rows sit in "review" and "Review"
+      // believing they are together, which is what `create_lane`'s
+      // case-insensitive uniqueness exists to prevent.
+      {
+        key: "lane",
+        title: "Move to lane",
+        items: [
+          ...lanes.map((l) => ({
+            key: `lane:${l.name}`,
+            title: l.name,
+            disabled: w.lane === l.name,
+            onClick: () => void assignLane(w, l.name),
+          })),
+          ...(w.lane ? [{ key: "lane-none-divider" }] : []),
+          ...(w.lane
+            ? [
+                {
+                  key: "lane-none",
+                  title: "Remove from lane",
+                  onClick: () => void assignLane(w, ""),
+                },
+              ]
+            : []),
+          ...(lanes.length > 0 ? [{ key: "lane-new-divider" }] : []),
+          {
+            key: "lane-new",
+            title: "New lane…",
+            onClick: () => setDialog({ kind: "new-lane", worktree: w }),
+          },
+        ],
+      },
       {
         key: "copy-path",
         title: "Copy path",
@@ -987,10 +1061,32 @@ function AppInner(props: {
         title: "Copy branch",
         onClick: () => void navigator.clipboard.writeText(w.branch),
       },
+      ...(w.trash_error
+        ? [
+            { key: "trash-error-divider" },
+            {
+              key: "trash-retry",
+              title: "Deletion failed — try again…",
+              color: "red",
+              // Straight into the confirmation, which now shows the recorded
+              // refusal and the force checkbox beside it. Without this entry the
+              // only way back to a forced removal was a dialog that no longer
+              // knew a removal had been refused.
+              onClick: () =>
+                setDialog({ kind: "rename", worktree: w, deleteFocus: true }),
+            },
+            {
+              key: "trash-error",
+              title: "Dismiss deletion error",
+              onClick: () => void dismissTrashError(w),
+            },
+          ]
+        : []),
       { key: "divider" },
       {
         key: "remove",
-        title: "Remove worktree…",
+        icon: <IconTrash size={14} />,
+        title: "Move to trash…",
         color: "red",
         disabled: w.is_main,
         onClick: () =>
@@ -998,6 +1094,70 @@ function AppInner(props: {
       },
     ]);
   };
+  const assignLane = async (w: Worktree, lane: string) => {
+    try {
+      await api.patchWorktree(w.id, { lane });
+    } catch (e) {
+      notifyError(`Could not move ${w.alias}`, e);
+    }
+    await refresh();
+  };
+
+  const laneMenu = (lane: string) => {
+    const index = lanes.findIndex((l) => l.name === lane);
+    const move = async (to: number) => {
+      if (!repo) return;
+      const order = lanes.map((l) => l.name);
+      const [name] = order.splice(index, 1);
+      order.splice(to, 0, name);
+      try {
+        await api.reorderLanes(repo.root, order);
+      } catch (e) {
+        notifyError("Could not reorder the lanes", e);
+      }
+      await refresh();
+    };
+    return showContextMenu([
+      {
+        key: "lane-rename",
+        title: "Rename lane…",
+        onClick: () => setDialog({ kind: "rename-lane", lane }),
+      },
+      {
+        key: "lane-up",
+        title: "Move lane up",
+        disabled: index <= 0,
+        onClick: () => void move(index - 1),
+      },
+      {
+        key: "lane-down",
+        title: "Move lane down",
+        disabled: index < 0 || index >= lanes.length - 1,
+        onClick: () => void move(index + 1),
+      },
+      { key: "lane-divider" },
+      {
+        key: "lane-delete",
+        title: "Delete lane",
+        color: "red",
+        // No confirm: deleting a lane ungroups its worktrees and removes
+        // nothing, so there is nothing to lose and a dialog would only train
+        // people to dismiss dialogs.
+        onClick: () => void deleteLane(lane),
+      },
+    ]);
+  };
+
+  const deleteLane = async (lane: string) => {
+    if (!repo) return;
+    try {
+      await api.deleteLane(repo.root, lane);
+    } catch (e) {
+      notifyError(`Could not delete the lane "${lane}"`, e);
+    }
+    await refresh();
+  };
+
   const closeDialog = () => setDialog({ kind: "none" });
 
   // `dialog` is read inside the listener but deliberately not a dependency —
@@ -1462,10 +1622,146 @@ function AppInner(props: {
   };
 
   // Rail expanded by default; the choice sticks across reloads/windows.
-  const [railWideRaw, setRailWideRaw] = usePersisted("veld.railWide", "1");
-  const railWide = railWideRaw === "1";
+  //
+  // Per window, like the width and for the same reason #199 settled for layouts:
+  // two windows on two monitors want different rails. `usePersistedPerWindow`
+  // writes both the slot-scoped and the unscoped key and reads the unscoped one as
+  // a fallback, so a window that has never been sized inherits whatever was last
+  // chosen instead of snapping back to the default.
+  const [railWideRaw, setRailWideRaw] = usePersistedPerWindow("veld.railWide");
+  const railWide = railWideRaw !== "0";
   const setRailWide = (fn: (v: boolean) => boolean) =>
     setRailWideRaw(fn(railWide) ? "1" : "0");
+  const [railWidthRaw, setRailWidthRaw] = usePersistedPerWindow("veld.railWidth");
+  const railW = railWidth(railWidthRaw);
+
+  /**
+   * Move a worktree in the rail: assign its lane, then rewrite the order.
+   *
+   * Two writes, in that sequence, because they live in different places — the lane
+   * is a column on the worktree row and the order is a full-list rewrite. The lane
+   * goes first so that if the second call fails the worktree is at least in the
+   * group the user dropped it into; the reverse would leave it ordered inside a
+   * group it does not belong to.
+   */
+  const moveWorktreeTo = async (
+    path: string,
+    toLane: string,
+    toIndex: number,
+  ) => {
+    if (!repo) return;
+    const move = moveWorktree(railGroups(worktrees, lanes), path, toLane, toIndex);
+    if (!move) return;
+    const moved = worktrees.find((w) => w.path === path);
+    try {
+      if (moved && moved.lane !== move.lane) {
+        await api.patchWorktree(moved.id, { lane: move.lane });
+      }
+      await api.reorderWorktrees(repo.root, move.order);
+    } catch (e) {
+      notifyError("Could not reorder the rail", e);
+    }
+    await refresh();
+  };
+
+  /**
+   * Announce a failed deletion exactly once, across every window.
+   *
+   * The daemon cannot push, so the failure arrives on the 5s poll and would
+   * otherwise toast on every poll forever. Two halves do the work: the row keeps
+   * the reason visibly (that is the durable surface), and this announces it once.
+   *
+   * Acked in `localStorage`, not in a ref: the reason is stored on the row until
+   * dismissed, so a page reload would re-announce a failure the user already read —
+   * and people reload often. Keyed on path *and* message so a second, different
+   * failure on the same worktree is announced again.
+   *
+   * Deliberately **not** slot-scoped through `selectionKeys`, unlike every other
+   * persisted value in this file. Those are preferences, which belong to a window; a
+   * removal that failed is a fact about a worktree, and three windows announcing the
+   * same failure three times is noise rather than thoroughness. The row keeps the
+   * reason visible in all of them regardless, which is the durable surface.
+   */
+  useEffect(() => {
+    const failed = worktrees.filter((w) => w.trash_error);
+    if (failed.length === 0) return;
+    let acked: string[] = [];
+    try {
+      acked = JSON.parse(window.localStorage.getItem(TRASH_ACK_KEY) ?? "[]");
+    } catch {
+      acked = [];
+    }
+    const keys = failed.map((w) => `${w.path}\u0000${w.trash_error}`);
+    const fresh = failed.filter((_, i) => !acked.includes(keys[i]));
+    for (const w of fresh) {
+      notifyError(
+        `Could not delete ${w.alias}`,
+        new Error(`${w.trash_error} — it is still in the rail.`),
+      );
+    }
+    if (fresh.length > 0) {
+      try {
+        // Pruned to the keys still present, so the list cannot grow without
+        // bound as worktrees come and go.
+        window.localStorage.setItem(TRASH_ACK_KEY, JSON.stringify(keys));
+      } catch {
+        // Storage unavailable: the cost is a repeated toast, not a lost failure —
+        // the reason stays on the row either way.
+      }
+    }
+  }, [worktrees]);
+
+  const dismissTrashError = async (w: Worktree) => {
+    try {
+      await api.dismissTrashError(w.id);
+    } catch (e) {
+      notifyError(`Could not dismiss the error on ${w.alias}`, e);
+    }
+    await refresh();
+  };
+
+  const deleteTrashedWorktree = async (w: Worktree) => {
+    try {
+      await api.deleteTrashedWorktree(w.id);
+      notifyDone(`Deleting ${w.alias}`);
+    } catch (e) {
+      notifyError(`Could not delete ${w.alias}`, e);
+    }
+    await refresh();
+  };
+
+  const emptyTrash = async () => {
+    if (!repo) return;
+    try {
+      const { queued } = await api.emptyTrash(repo.root);
+      notifyDone(
+        queued === 1 ? "Deleting 1 worktree" : `Deleting ${queued} worktrees`,
+      );
+    } catch (e) {
+      notifyError("Could not empty the trash", e);
+    }
+    await refresh();
+  };
+
+  const restoreWorktree = async (w: Worktree) => {
+    try {
+      await api.restoreWorktree(w.id);
+      notifyDone(`Restored ${w.alias}`);
+    } catch (e) {
+      // 404 is the expected failure — the worker got there first — and saying so is
+      // better than a generic error for a race the design admits to. Anything else
+      // (a 500, a dead daemon) must NOT claim the worktree was removed, because it
+      // is still there and the user would stop looking for it.
+      const gone = e instanceof Error && /not found|already removed/i.test(e.message);
+      notifyError(
+        gone
+          ? `${w.alias} has already been deleted`
+          : `Could not restore ${w.alias}`,
+        e,
+      );
+    }
+    await refresh();
+  };
 
   // Hover lives here so the crossfade survives LogoModeSwitch remounting
   // when it moves between the runs and IDE bars.
@@ -1488,6 +1784,9 @@ function AppInner(props: {
     const items: PaletteItem[] = [];
 
     for (const w of worktrees) {
+      // Pending removals are omitted: ⌘K exists to *go* somewhere, and there is
+      // nowhere to go in a checkout that is being deleted.
+      if (w.trashed_at) continue;
       items.push({
         id: `wt:${w.id}`,
         group: "Worktrees",
@@ -2008,20 +2307,28 @@ function AppInner(props: {
         <div className="workspace">
           <Rail
             worktrees={worktrees}
+            lanes={lanes}
             active={worktree}
             envs={envs}
             settings={settings}
             wide={railWide}
+            width={railW}
             canRun={canRunWorktreeNow}
             canStart={canStartWorktree}
             pendingFor={pendingFor}
             elsewhere={elsewhere}
             onToggle={() => setRailWide((v) => !v)}
+            onWidth={(w) => setRailWidthRaw(String(w))}
             onSelect={selectWorktree}
             onAdd={() => setDialog({ kind: "new-worktree" })}
             onMenu={(e, w) => worktreeMenu(w)(e)}
             onStart={startWorktree}
             onStop={stopWorktree}
+            onAddLane={() => setDialog({ kind: "new-lane" })}
+            onLaneMenu={(e, lane) => laneMenu(lane)(e)}
+            onMove={moveWorktreeTo}
+            onRestore={restoreWorktree}
+            onEmptyTrash={emptyTrash}
           />
           {worktree && layout && (
             <PaneArea
@@ -2089,6 +2396,12 @@ function AppInner(props: {
         <RenameWorktreeDialog
           current={dialog.worktree.alias}
           isMain={dialog.worktree.is_main}
+          /* Read off the LIVE row, not the one captured when the dialog opened: a
+             background removal can fail while it is open, and the force affordance
+             has to appear when the refusal arrives. */
+          trashError={
+            worktrees.find((w) => w.id === dialog.worktree.id)?.trash_error ?? ""
+          }
           deleteFocus={dialog.deleteFocus ?? false}
           onClose={closeDialog}
           onRename={async (alias) => {
@@ -2115,6 +2428,43 @@ function AppInner(props: {
           onClose={closeDialog}
           onPick={async (patch) => {
             await api.patchWorktree(dialog.worktree.id, patch);
+            await refresh();
+            closeDialog();
+          }}
+        />
+      )}
+      {dialog.kind === "new-lane" && (
+        <LaneNameDialog
+          title="New lane"
+          confirmLabel="Create lane"
+          initial=""
+          taken={lanes.map((l) => l.name)}
+          onClose={closeDialog}
+          onSubmit={async (name) => {
+            if (!repo) return;
+            await api.createLane(repo.root, name);
+            // Creating a lane from a worktree's own menu is one gesture, so it
+            // finishes the gesture: an empty lane the user then has to drag into
+            // is not what they asked for.
+            const target = dialog.kind === "new-lane" ? dialog.worktree : undefined;
+            if (target) await api.patchWorktree(target.id, { lane: name });
+            await refresh();
+            closeDialog();
+          }}
+        />
+      )}
+      {dialog.kind === "rename-lane" && (
+        <LaneNameDialog
+          title="Rename lane"
+          confirmLabel="Rename"
+          initial={dialog.lane}
+          taken={lanes
+            .map((l) => l.name)
+            .filter((n) => n !== (dialog.kind === "rename-lane" ? dialog.lane : ""))}
+          onClose={closeDialog}
+          onSubmit={async (name) => {
+            if (!repo || dialog.kind !== "rename-lane") return;
+            await api.renameLane(repo.root, dialog.lane, name);
             await refresh();
             closeDialog();
           }}
@@ -2357,13 +2707,135 @@ function actionColor(label: PendingAction): string {
   }
 }
 
+/**
+ * Rail width bounds, in px.
+ *
+ * The minimum is well clear of the collapsed rail's 64px on purpose: the
+ * collapsed rail is a **mode** (it hides the alias, the branch and the inline run
+ * control), not a narrow width, so dragging must never slide into it. Crossing
+ * that line by drag would silently drop three columns without saying so, and the
+ * user would have no way back except finding the chevron.
+ */
+const RAIL_MIN_WIDTH = 180;
+const RAIL_MAX_WIDTH = 480;
+const RAIL_DEFAULT_WIDTH = 236;
+
+/** Parse a stored rail width, clamped; the default for anything unusable. */
+function railWidth(raw: string): number {
+  const n = Number.parseInt(raw, 10);
+  if (!Number.isFinite(n)) return RAIL_DEFAULT_WIDTH;
+  return Math.max(RAIL_MIN_WIDTH, Math.min(RAIL_MAX_WIDTH, n));
+}
+
+/**
+ * The rail's drag-to-resize edge.
+ *
+ * Pointer events with capture rather than mouse events: capture keeps the drag
+ * alive when the pointer crosses a pane's native `WebContentsView`, which does
+ * not forward mouse events to the page above it (#188). Without it a drag that
+ * strayed right froze at the pane boundary.
+ */
+function RailResizer(props: {
+  width: number;
+  onWidth: (w: number) => void;
+  /** Told when a drag starts and ends, so the rail can suspend its width
+   *  transition — see `.rail.resizing`. */
+  onDragging: (active: boolean) => void;
+}) {
+  const drag = useRef<{ startX: number; startWidth: number } | null>(null);
+  return (
+    <div
+      className="rail-resizer"
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="Resize the worktree rail"
+      aria-valuenow={props.width}
+      aria-valuemin={RAIL_MIN_WIDTH}
+      aria-valuemax={RAIL_MAX_WIDTH}
+      tabIndex={0}
+      onPointerDown={(e) => {
+        drag.current = { startX: e.clientX, startWidth: props.width };
+        props.onDragging(true);
+        e.currentTarget.setPointerCapture(e.pointerId);
+      }}
+      onPointerMove={(e) => {
+        const d = drag.current;
+        if (!d) return;
+        props.onWidth(
+          Math.max(
+            RAIL_MIN_WIDTH,
+            Math.min(RAIL_MAX_WIDTH, d.startWidth + (e.clientX - d.startX)),
+          ),
+        );
+      }}
+      onPointerUp={(e) => {
+        drag.current = null;
+        props.onDragging(false);
+        e.currentTarget.releasePointerCapture(e.pointerId);
+      }}
+      // A capture that ends without a pointerup (the pointer is cancelled by the
+      // OS, another element steals capture) must still clear the flag, or the rail
+      // keeps its transition suppressed until the next drag.
+      onPointerCancel={() => {
+        drag.current = null;
+        props.onDragging(false);
+      }}
+      onLostPointerCapture={() => {
+        drag.current = null;
+        props.onDragging(false);
+      }}
+      // Keyboard resize, because a separator that only responds to a pointer is
+      // unreachable for anyone who cannot make a 200px drag.
+      onKeyDown={(e) => {
+        const step = e.shiftKey ? 32 : 8;
+        if (e.key === "ArrowLeft") {
+          e.preventDefault();
+          props.onWidth(Math.max(RAIL_MIN_WIDTH, props.width - step));
+        } else if (e.key === "ArrowRight") {
+          e.preventDefault();
+          props.onWidth(Math.min(RAIL_MAX_WIDTH, props.width + step));
+        }
+      }}
+    />
+  );
+}
+
+/** Whether a drag is over the lower half of the row it is on. */
+function below(e: React.DragEvent): boolean {
+  const box = e.currentTarget.getBoundingClientRect();
+  return e.clientY > box.top + box.height / 2;
+}
+
+/**
+ * The rail's insertion caret — the same 3px glowing bar the pane tab strip uses,
+ * turned horizontal.
+ *
+ * **A sibling element, not a pseudo-element on the row.** `.wt-row` carries
+ * `overflow: hidden` with an 8px `border-radius`, and overflow clips pseudo-elements
+ * too — so a caret drawn on the row was clipped to the row's rounded rect, which is
+ * exactly what it looked like: a highlighted row border rather than a gap opening
+ * between two rows. Rendering it as its own element puts it outside every row's
+ * clipping context, and makes "after the last row" the same code path as any other
+ * position instead of a second special case.
+ *
+ * Contributes no height: `height: 0` plus an absolutely positioned bar. The
+ * negative margin cancels the one extra flex `gap` that inserting an element into
+ * the column would otherwise add — the list must not shift under the pointer
+ * mid-drag.
+ */
+function RailCaret() {
+  return <div className="rail-caret" aria-hidden />;
+}
+
 function Rail(props: {
   worktrees: Worktree[];
+  lanes: Lane[];
   active: Worktree | null;
   envs: EnvironmentList | null;
   /** Drives which marker face the rows render; `null` before the first read. */
   settings: SettingsDoc | null;
   wide: boolean;
+  width: number;
   canRun: (w: Worktree) => boolean;
   canStart: (w: Worktree) => boolean;
   pendingFor: (w: Worktree) => PendingAction | null;
@@ -2371,14 +2843,71 @@ function Rail(props: {
    *  opening it here, so it is marked rather than left to surprise. */
   elsewhere: Set<number>;
   onToggle: () => void;
+  onWidth: (w: number) => void;
   onSelect: (w: Worktree) => void;
   onAdd: () => void;
   onMenu: (e: React.MouseEvent, w: Worktree) => void;
   onStart: (w: Worktree) => void;
   onStop: (w: Worktree) => void;
+  onAddLane: () => void;
+  onLaneMenu: (e: React.MouseEvent, lane: string) => void;
+  onMove: (path: string, toLane: string, toIndex: number) => void;
+  onRestore: (w: Worktree) => void;
+  onEmptyTrash: () => void;
 }) {
+  const groups = railGroups(props.worktrees, props.lanes);
+  // Drag state is local: it is transient pointer feedback, and lifting it would
+  // re-render the pane area on every dragover.
+  const [dragPath, setDragPath] = useState<string | null>(null);
+  const [dropAt, setDropAt] = useState<{ key: string; index: number } | null>(
+    null,
+  );
+  // Suppresses the rail's width transition for the duration of a resize drag. The
+  // transition exists for the collapse/expand toggle, where 236px→64px should
+  // animate; during a drag it re-animates on every pointer move, so the edge
+  // visibly lags behind the cursor instead of tracking it.
+  const [resizing, setResizing] = useState(false);
+  const endDrag = () => {
+    setDragPath(null);
+    setDropAt(null);
+  };
+  // Dropping is disabled while the rail is collapsed. A 64px row shows only a
+  // marker, so there is no way to see *where* a drop would land — and a reorder
+  // whose result you cannot see is a reorder you did not mean.
+  const canDrag = props.wide;
+
+  /**
+   * Drop handlers for a section, resolving to an insertion index.
+   *
+   * `half` splits a row into its top and bottom halves so the gap *below* the last
+   * row is reachable — without it, appending to a group was impossible: the row's
+   * own handler stops propagation before the section's `index = length` handler
+   * runs, and a flex column has no blank space under its last child to aim at.
+   */
+  const dropZone = (group: RailGroup, index: number, half = false) => ({
+    onDragOver: (e: React.DragEvent) => {
+      if (!dragPath || group.pinned) return;
+      // Both required: preventDefault marks the element a valid drop target, and
+      // without stopPropagation the enclosing section's own zone also fires and the
+      // indicator flickers between the two.
+      e.preventDefault();
+      e.stopPropagation();
+      setDropAt({ key: group.key, index: index + (half && below(e) ? 1 : 0) });
+    },
+    onDrop: (e: React.DragEvent) => {
+      if (!dragPath || group.pinned) return;
+      e.preventDefault();
+      e.stopPropagation();
+      props.onMove(dragPath, group.key, index + (half && below(e) ? 1 : 0));
+      endDrag();
+    },
+  });
+
   return (
-    <div className={`rail${props.wide ? " wide" : ""}`}>
+    <div
+      className={`rail${props.wide ? " wide" : ""}${resizing ? " resizing" : ""}`}
+      style={props.wide ? { width: props.width } : undefined}
+    >
       <div className="rail-head">
         <ActionIcon
           size="sm"
@@ -2389,6 +2918,17 @@ function Rail(props: {
         >
           {props.wide ? <IconChevronLeft size={13} /> : <IconChevronRight size={13} />}
         </ActionIcon>
+        {props.wide && (
+          <ActionIcon
+            size="sm"
+            variant="subtle"
+            color="gray"
+            title="New lane"
+            onClick={props.onAddLane}
+          >
+            <IconFolderPlus size={14} />
+          </ActionIcon>
+        )}
         <ActionIcon
           size="sm"
           variant="subtle"
@@ -2399,126 +2939,287 @@ function Rail(props: {
           <IconPlus size={14} />
         </ActionIcon>
       </div>
-      <div className="rail-list">
-        {props.worktrees.map((w) => {
-          const status = worktreeStatus(runsForWorktree(props.envs, w));
-          const running = status !== "stopped";
-          const pending = props.pendingFor(w);
-          // Inline controls are wide-only — a 64px collapsed row has no space
-          // for them. Right-click reaches the same actions in either mode.
-          const showRunControl = props.wide && props.canRun(w);
-          const away = props.elsewhere.has(w.id);
-          return (
-            /* A div with role=button, not a <button>: the row carries nested
-               controls of its own, and a <button> inside a <button> violates
-               the content model (the HTML parser closes the OUTER button when
-               it meets the inner start tag; React's createElement path builds
-               the invalid tree instead). Cost of the workaround: role=button
-               takes presentational children, so the nested ▶ and ⋮ are not
-               exposed to assistive tech. The honest fix is role=listbox on
-               .rail-list with role=option rows — deferred, see issue #167. */
-            <div
-              key={w.id}
-              role="button"
-              tabIndex={0}
-              /* Selection is "which one am I looking at", not a toggle that
-                 can be un-pressed — aria-current, not aria-pressed. */
-              aria-current={props.active?.id === w.id ? true : undefined}
-              className={`wt-row${props.active?.id === w.id ? " active" : ""}${props.wide ? "" : " slim"}${away ? " away" : ""}`}
-              title={
-                away
-                  ? `${w.alias} — ${w.branch} (open in another window)`
-                  : `${w.alias} — ${w.branch}`
-              }
-              onClick={() => props.onSelect(w)}
-              onKeyDown={(e) => {
-                // Only the row's OWN key events. Keydown bubbles from the
-                // nested buttons, and preventDefault() here would cancel
-                // their native activation — Enter on ▶ would silently select
-                // the row instead of starting the run.
-                if (e.target !== e.currentTarget) return;
-                if (e.key === "Enter" || e.key === " ") {
-                  e.preventDefault();
-                  props.onSelect(w);
+      <div className="rail-list" onDragEnd={endDrag}>
+        {groups.map((group) => (
+          <div
+            key={group.key}
+            className={`rail-group${group.key === TRASH_LANE ? " trash" : ""}${
+              // Lit while a drag is over this section, so the target reads as a
+              // whole area and not only as a caret between two rows. This is the
+              // only feedback an EMPTY lane can give.
+              dragPath && !group.pinned && dropAt?.key === group.key
+                ? " drop-in"
+                : ""
+            }`}
+            // The section itself is the fallback target, and it resolves to its
+            // FIRST position rather than its last. What actually reaches this
+            // handler is the header and the padding above it — the rows stop
+            // propagation — and both sit at the *top* of the section, so
+            // appending here contradicted where the pointer was: dragging down
+            // into a lane crossed its header and the caret jumped to the bottom.
+            // Appending is still reachable, and unambiguously so: it is the lower
+            // half of the last row.
+            {...dropZone(group, 0)}
+          >
+            {group.label !== null && props.wide && (
+              <div
+                className="lane-head"
+                onContextMenu={
+                  group.pinned
+                    ? undefined
+                    : (e) => props.onLaneMenu(e, group.lane)
                 }
-              }}
-              onContextMenu={(e) => props.onMenu(e, w)}
-            >
-              <span className={`dot ${status}`} />
-              {/* Before the alias, where the eye already is for the dot — and
-                  rendered in the collapsed rail too, which is exactly where a
-                  greyed row alone would be too subtle to read. */}
-              {away && (
-                <IconExternalLink
-                  size={11}
-                  className="wt-away"
-                  /* Decorative, and it has to be. The row is a `role=button`
-                     whose accessible name comes from its content, so a label
-                     here would be folded into that name *before* the alias —
-                     "open in another window Sonnet feat/x" — and the `title`
-                     that already says it would be demoted to the description,
-                     announcing it a second time. The title carries it. */
-                  aria-hidden
-                />
-              )}
-              <WorktreeMark settings={props.settings} worktree={w} />
-              {props.wide && <span className="wt-alias">{w.alias}</span>}
-              {props.wide && <span className="wt-branch">{w.branch}</span>}
-              {showRunControl && (
-                <button
-                  type="button"
-                  className={`wt-run${running ? " on" : ""}`}
+              >
+                <span className="lane-name">{group.label}</span>
+                <span className="lane-count">{group.worktrees.length}</span>
+                {/* The trash's own action, in the place a lane keeps its menu:
+                    emptying it is the only thing the section as a whole can do. */}
+                {group.key === TRASH_LANE && (
+                  <button
+                    type="button"
+                    className="lane-edit"
+                    title="Delete everything in the trash"
+                    aria-label="Empty the trash"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      props.onEmptyTrash();
+                    }}
+                  >
+                    <IconTrash size={12} />
+                  </button>
+                )}
+                {/* Right-click alone is not an affordance — nothing on screen says
+                    the header has a menu. The same ⋮ the rows carry, so the two read
+                    as the same gesture. Not on a pinned section: the trash has no
+                    lane to rename or delete. */}
+                {!group.pinned && (
+                  <button
+                    type="button"
+                    className="lane-edit"
+                    title={`Lane menu for ${group.label}`}
+                    aria-label={`Menu for lane ${group.label}`}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      props.onLaneMenu(e, group.lane);
+                    }}
+                  >
+                    <IconDotsVertical size={12} />
+                  </button>
+                )}
+              </div>
+            )}
+            {/* An empty lane needs a target you can see and hit. Without this the
+                only droppable area was the header's few pixels of margin, so a lane
+                you had just made looked like it refused worktrees. */}
+            {props.wide && !group.pinned && group.worktrees.length === 0 && (
+              <div className="lane-empty">
+                {dragPath ? "Drop here" : "Empty — drag a worktree in"}
+              </div>
+            )}
+            {group.worktrees.map((w, index) => {
+              const caretHere =
+                dropAt !== null &&
+                dropAt.key === group.key &&
+                dropAt.index === index;
+              // The append caret rides on the last row, because a caret after the
+              // final element has no following sibling to attach to.
+              const caretAfter =
+                dropAt !== null &&
+                dropAt.key === group.key &&
+                index === group.worktrees.length - 1 &&
+                dropAt.index >= group.worktrees.length;
+              const status = worktreeStatus(runsForWorktree(props.envs, w));
+              const running = status !== "stopped";
+              const pending = props.pendingFor(w);
+              const trashed = w.trashed_at !== "";
+              // Inline controls are wide-only — a 64px collapsed row has no space
+              // for them. Right-click reaches the same actions in either mode.
+              // A worktree on its way out gets none: it cannot be started, and a
+              // run control on it would be a button that only ever fails.
+              const showRunControl = props.wide && !trashed && props.canRun(w);
+              const away = props.elsewhere.has(w.id);
+              return (
+                /* A Fragment so the carets are the row's SIBLINGS. Drawn on the row
+                   they were clipped by its `overflow: hidden` and rounded by its
+                   `border-radius`, which is why an insertion point looked like a
+                   selected row rather than a gap opening between two rows. */
+                <Fragment key={w.id}>
+                  {caretHere && <RailCaret />}
+                  {/* A div with role=button, not a <button>: the row carries nested
+                      controls of its own, and a <button> inside a <button> violates
+                      the content model (the HTML parser closes the OUTER button when
+                      it meets the inner start tag; React's createElement path builds
+                      the invalid tree instead). Cost of the workaround: role=button
+                      takes presentational children, so the nested ▶ and ⋮ are not
+                      exposed to assistive tech. The honest fix is role=listbox on
+                      .rail-list with role=option rows — deferred, see issue #167. */}
+                  <div
+                  role="button"
+                  tabIndex={0}
+                  /* Selection is "which one am I looking at", not a toggle that
+                     can be un-pressed — aria-current, not aria-pressed. */
+                  aria-current={props.active?.id === w.id ? true : undefined}
+                  className={`wt-row${props.active?.id === w.id ? " active" : ""}${props.wide ? "" : " slim"}${away ? " away" : ""}${trashed ? " trashed" : ""}${w.trash_error ? " failed-remove" : ""}${dragPath === w.path ? " dragging" : ""}`}
                   title={
-                    pending
-                      ? `${pending}…`
-                      : running
-                        ? `Stop ${w.alias}`
-                        : `Start ${w.alias}`
+                    trashed
+                      ? `${w.alias} — in the trash, still on disk`
+                      : w.trash_error
+                        ? `${w.alias} — could not be deleted: ${w.trash_error}`
+                        : away
+                          ? `${w.alias} — ${w.branch} (open in another window)`
+                          : `${w.alias} — ${w.branch}`
                   }
-                  aria-label={running ? `Stop ${w.alias}` : `Start ${w.alias}`}
-                  // Mirrors the context menu and the palette. Without the
-                  // start guard the button looked live but its click hit a
-                  // no-op for a worktree with no presets and no nodes.
-                  disabled={
-                    pending !== null || (!running && !props.canStart(w))
-                  }
-                  onClick={(e) => {
-                    // The row is clickable too; without this, starting a run
-                    // would also switch the selection out from under the user.
-                    e.stopPropagation();
-                    if (running) props.onStop(w);
-                    else props.onStart(w);
+                  /* Pending removals are not draggable: they are leaving, so a
+                     position for them means nothing. */
+                  /* The main checkout is never dragged, even when the user has put
+                     it in a lane (which un-pins its section). `WT_ORDER` sorts
+                     `is_main DESC` ahead of `sort_position`, so a position given to
+                     main is ignored and the row visibly snaps back to the top of its
+                     group — a drag that appears to do nothing. It leads its lane
+                     instead, which is the same rule it follows ungrouped. */
+                  draggable={canDrag && !trashed && !group.pinned && !w.is_main}
+                  onDragStart={(e) => {
+                    setDragPath(w.path);
+                    e.dataTransfer.effectAllowed = "move";
+                    // Firefox ignores a drag with no payload, and the path is the
+                    // key everything downstream uses anyway.
+                    e.dataTransfer.setData("text/plain", w.path);
                   }}
+                  {...dropZone(group, index, true)}
+                  /* A pending removal is not selectable: selecting it would open
+                     panes, terminals and a browser rooted at a directory that is
+                     about to stop existing. The restore control and the context
+                     menu are still live. */
+                  onClick={() => {
+                    if (!trashed) props.onSelect(w);
+                  }}
+                  onKeyDown={(e) => {
+                    // Only the row's OWN key events. Keydown bubbles from the
+                    // nested buttons, and preventDefault() here would cancel
+                    // their native activation — Enter on ▶ would silently select
+                    // the row instead of starting the run.
+                    if (e.target !== e.currentTarget) return;
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      if (!trashed) props.onSelect(w);
+                    }
+                  }}
+                  onContextMenu={(e) => props.onMenu(e, w)}
                 >
-                  {pending ? (
-                    // The spinner carries the action's colour, so a row that
-                    // is stopping reads as stopping and not as starting.
-                    <Loader size={10} color={actionColor(pending)} />
-                  ) : running ? (
-                    <IconPlayerStopFilled size={10} />
-                  ) : (
-                    <IconPlayerPlayFilled size={10} />
+                  <span className={`dot ${status}`} />
+                  {/* Before the alias, where the eye already is for the dot — and
+                      rendered in the collapsed rail too, which is exactly where a
+                      greyed row alone would be too subtle to read. */}
+                  {away && (
+                    <IconExternalLink
+                      size={11}
+                      className="wt-away"
+                      /* Decorative, and it has to be. The row is a `role=button`
+                         whose accessible name comes from its content, so a label
+                         here would be folded into that name *before* the alias —
+                         "open in another window Sonnet feat/x" — and the `title`
+                         that already says it would be demoted to the description,
+                         announcing it a second time. The title carries it. */
+                      aria-hidden
+                    />
                   )}
-                </button>
-              )}
-              {props.wide && (
-                <button
-                  type="button"
-                  className="wt-edit"
-                  title="Worktree menu"
-                  aria-label={`Menu for ${w.alias}`}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    props.onMenu(e, w);
-                  }}
-                >
-                  <IconDotsVertical size={12} />
-                </button>
-              )}
-            </div>
-          );
-        })}
+                  <WorktreeMark settings={props.settings} worktree={w} />
+                  {props.wide && <span className="wt-alias">{w.alias}</span>}
+                  {props.wide && (
+                    <span className="wt-branch">
+                      {/* The branch column carries the removal failure, because
+                          that is the one thing about this row that is not the
+                          branch any more. Trashed rows say what is happening to
+                          them; the branch is not the news. */}
+                      {trashed
+                        ? "in trash"
+                        : w.trash_error
+                          ? w.trash_error
+                          : w.branch}
+                    </span>
+                  )}
+                  {showRunControl && (
+                    <button
+                      type="button"
+                      className={`wt-run${running ? " on" : ""}`}
+                      title={
+                        pending
+                          ? `${pending}…`
+                          : running
+                            ? `Stop ${w.alias}`
+                            : `Start ${w.alias}`
+                      }
+                      aria-label={running ? `Stop ${w.alias}` : `Start ${w.alias}`}
+                      // Mirrors the context menu and the palette. Without the
+                      // start guard the button looked live but its click hit a
+                      // no-op for a worktree with no presets and no nodes.
+                      disabled={
+                        pending !== null || (!running && !props.canStart(w))
+                      }
+                      onClick={(e) => {
+                        // The row is clickable too; without this, starting a run
+                        // would also switch the selection out from under the user.
+                        e.stopPropagation();
+                        if (running) props.onStop(w);
+                        else props.onStart(w);
+                      }}
+                    >
+                      {pending ? (
+                        // The spinner carries the action's colour, so a row that
+                        // is stopping reads as stopping and not as starting.
+                        <Loader size={10} color={actionColor(pending)} />
+                      ) : running ? (
+                        <IconPlayerStopFilled size={10} />
+                      ) : (
+                        <IconPlayerPlayFilled size={10} />
+                      )}
+                    </button>
+                  )}
+                  {props.wide && !trashed && (
+                    <button
+                      type="button"
+                      className="wt-edit"
+                      title="Worktree menu"
+                      aria-label={`Menu for ${w.alias}`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        props.onMenu(e, w);
+                      }}
+                    >
+                      <IconDotsVertical size={12} />
+                    </button>
+                  )}
+                  {props.wide && trashed && (
+                    <button
+                      type="button"
+                      className="wt-edit"
+                      title={`Restore ${w.alias}`}
+                      aria-label={`Restore ${w.alias}`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        props.onRestore(w);
+                      }}
+                    >
+                      <IconArrowBackUp size={12} />
+                    </button>
+                  )}
+                  </div>
+                  {caretAfter && <RailCaret />}
+                </Fragment>
+              );
+            })}
+          </div>
+        ))}
       </div>
+      {/* Only when expanded: collapsed is a mode with a fixed width, so there is
+          nothing to drag. */}
+      {props.wide && (
+        <RailResizer
+          width={props.width}
+          onWidth={props.onWidth}
+          onDragging={setResizing}
+        />
+      )}
     </div>
   );
 }

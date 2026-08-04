@@ -65,6 +65,9 @@ const FALLBACK = {
   detachGraceMinutes: 30,
   quickSwitchResponsive: true,
   quickSwitchColorScheme: true,
+  // Keep until emptied. Matches the Rust default, and the direction to err in if it
+  // ever drifts: the value that cannot delete anybody's checkout.
+  trashRetentionDays: 0,
 } as const;
 
 function num(doc: SettingsDoc, key: string, fallback: number): number {
@@ -225,4 +228,16 @@ export function quickSwitchPrefs(doc: SettingsDoc): QuickSwitchPrefs {
  */
 export function detachGraceMinutes(doc: SettingsDoc): number {
   return num(doc, "terminal.detachGraceMinutes", FALLBACK.detachGraceMinutes);
+}
+
+/**
+ * Days a worktree stays in the trash before it is deleted, or `0` for "keep until
+ * I empty it" — which is the default.
+ *
+ * Zero is not "clamp to the minimum": it is the off switch, and the daemon treats it
+ * that way, because clamping it up would arm automatic deletion for a user trying to
+ * turn it off.
+ */
+export function trashRetentionDays(doc: SettingsDoc): number {
+  return num(doc, "worktree.trashRetentionDays", FALLBACK.trashRetentionDays);
 }

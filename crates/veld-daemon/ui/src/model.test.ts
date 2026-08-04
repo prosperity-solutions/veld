@@ -1,15 +1,18 @@
 import { describe, expect, it } from "vitest";
-import type { EnvironmentList, RunInfo, Worktree } from "./api";
+import type { EnvironmentList, Lane, RunInfo, Worktree } from "./api";
 import {
   activeRun,
   bestFuzzyMatch,
   diagnosticsRun,
   fuzzyMatch,
+  moveWorktree,
   prunePending,
+  railGroups,
   runSignature,
   runsForWorktree,
   sortedUrls,
   worktreeStatus,
+  TRASH_LANE,
 } from "./model";
 
 const wt = (path: string): Worktree => ({
@@ -22,6 +25,10 @@ const wt = (path: string): Worktree => ({
   marker_color: "#008cff",
   is_main: false,
   created_at: "2026-01-01T00:00:00Z",
+  lane: "",
+  sort_position: null,
+  trashed_at: "",
+  trash_error: "",
   has_veld_config: true,
   presets: [],
   nodes: [],
@@ -324,5 +331,219 @@ describe("bestFuzzyMatch", () => {
   it("is null only when no haystack matches", () => {
     expect(bestFuzzyMatch(["chk", "feat/x"], "zzz")).toBeNull();
     expect(bestFuzzyMatch([], "a")).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Rail grouping and drag ordering (§18/§19)
+// ---------------------------------------------------------------------------
+
+/** A worktree with just the fields the rail's grouping reads. */
+const rw = (path: string, over: Partial<Worktree> = {}): Worktree => ({
+  ...wt(path),
+  alias: path.replace("/wts/", ""),
+  ...over,
+});
+
+const lane = (name: string, position: number): Lane => ({
+  repo_root: "/repo",
+  name,
+  position,
+  created_at: "2026-01-01T00:00:00Z",
+});
+
+describe("railGroups", () => {
+  it("gives the main checkout its own pinned section", () => {
+    // Main is the repository, not one of the branches you are juggling, so it gets
+    // a divider under it. Pinned: it always leads, so it takes no part in ordering.
+    const groups = railGroups(
+      [rw("/repo", { is_main: true }), rw("/wts/a")],
+      [],
+    );
+    expect(groups.map((g) => g.key)).toEqual(["main", ""]);
+    expect(groups[0].pinned).toBe(true);
+    expect(groups[0].worktrees.map((w) => w.path)).toEqual(["/repo"]);
+    expect(groups[1].pinned).toBe(false);
+    expect(groups[1].worktrees.map((w) => w.path)).toEqual(["/wts/a"]);
+  });
+
+  it("keeps main inside a lane the user assigned it to", () => {
+    // Its own section is a default, not a rule — assigned to a lane it belongs
+    // there, because that is where someone put it on purpose.
+    const groups = railGroups(
+      [rw("/repo", { is_main: true, lane: "review" })],
+      [lane("review", 0)],
+    );
+    expect(groups.map((g) => g.key)).toEqual(["", "review"]);
+    expect(groups[1].worktrees.map((w) => w.path)).toEqual(["/repo"]);
+  });
+
+  it("distinguishes the main section from the ungrouped one by key, not lane", () => {
+    // Both write `lane: ""`. Keying drop targets on `lane` made them the same
+    // target, so a drop meant for the ungrouped list also lit main's section.
+    const groups = railGroups([rw("/repo", { is_main: true }), rw("/wts/a")], []);
+    expect(groups.map((g) => g.lane)).toEqual(["", ""]);
+    expect(new Set(groups.map((g) => g.key)).size).toBe(2);
+  });
+
+  it("puts ungrouped worktrees first and keeps empty lanes", () => {
+    const groups = railGroups(
+      [rw("/wts/a"), rw("/wts/b", { lane: "review" })],
+      [lane("review", 0), lane("spikes", 1)],
+    );
+    expect(groups.map((g) => g.lane)).toEqual(["", "review", "spikes"]);
+    expect(groups[0].label).toBeNull();
+    expect(groups[0].worktrees.map((w) => w.path)).toEqual(["/wts/a"]);
+    expect(groups[1].worktrees.map((w) => w.path)).toEqual(["/wts/b"]);
+    // An empty lane is kept: it is where you drop the first worktree into it.
+    expect(groups[2].worktrees).toEqual([]);
+  });
+
+  it("preserves the daemon's order rather than re-sorting", () => {
+    // The daemon already applies the manual order (WT_ORDER). Re-sorting here
+    // would silently re-derive it from a different rule and undo the drag.
+    const groups = railGroups(
+      [rw("/wts/z"), rw("/wts/a"), rw("/wts/m")],
+      [],
+    );
+    expect(groups[0].worktrees.map((w) => w.path)).toEqual([
+      "/wts/z",
+      "/wts/a",
+      "/wts/m",
+    ]);
+  });
+
+  it("renders a worktree whose lane no longer exists as ungrouped", () => {
+    // Unreachable in practice — delete_lane clears assignments in the same
+    // transaction — but a row the client cannot place is a row the user cannot
+    // reach, which is the worse failure.
+    const groups = railGroups([rw("/wts/a", { lane: "ghost" })], []);
+    expect(groups[0].worktrees.map((w) => w.path)).toEqual(["/wts/a"]);
+  });
+
+  it("separates trashed worktrees into their own group, last", () => {
+    const groups = railGroups(
+      [
+        rw("/wts/a"),
+        rw("/wts/going", { trashed_at: "2026-01-01T00:00:00Z", lane: "review" }),
+      ],
+      [lane("review", 0)],
+    );
+    expect(groups.map((g) => g.lane)).toEqual(["", "review", TRASH_LANE]);
+    // Out of its lane while it sits in the trash, even though the row still carries
+    // it — the lane comes back when it is restored.
+    expect(groups[1].worktrees).toEqual([]);
+    expect(groups[2].worktrees.map((w) => w.path)).toEqual(["/wts/going"]);
+    expect(groups[2].label).toBe("Trash");
+  });
+
+  it("omits the trash group entirely when the trash is empty", () => {
+    const groups = railGroups([rw("/wts/a")], []);
+    expect(groups.map((g) => g.lane)).toEqual([""]);
+  });
+});
+
+describe("moveWorktree", () => {
+  const groups = () =>
+    railGroups(
+      [
+        rw("/wts/a"),
+        rw("/wts/b"),
+        rw("/wts/x", { lane: "review" }),
+        rw("/wts/y", { lane: "review" }),
+      ],
+      [lane("review", 0)],
+    );
+
+  it("reorders within a group and returns the full path order", () => {
+    // Full list, not a delta: that is what makes the write idempotent, and paths
+    // rather than ids because worktrees.id is a rowid SQLite reuses.
+    expect(moveWorktree(groups(), "/wts/b", "", 0)).toEqual({
+      lane: "",
+      order: ["/wts/b", "/wts/a", "/wts/x", "/wts/y"],
+    });
+  });
+
+  it("moves across lanes and reports the destination lane", () => {
+    expect(moveWorktree(groups(), "/wts/a", "review", 1)).toEqual({
+      lane: "review",
+      order: ["/wts/b", "/wts/x", "/wts/a", "/wts/y"],
+    });
+  });
+
+  it("clamps an index past the end of a list that just shrank", () => {
+    // The index comes from a drop position, so a stale render can hand over one
+    // past the end — the source row is removed before the insert.
+    expect(moveWorktree(groups(), "/wts/a", "", 99)?.order).toEqual([
+      "/wts/b",
+      "/wts/a",
+      "/wts/x",
+      "/wts/y",
+    ]);
+  });
+
+  it("refuses a drop into a pinned section", () => {
+    expect(moveWorktree(groups(), "/wts/a", TRASH_LANE, 0)).toBeNull();
+    const withMain = railGroups(
+      [rw("/repo", { is_main: true }), rw("/wts/a")],
+      [],
+    );
+    expect(moveWorktree(withMain, "/wts/a", "main", 0)).toBeNull();
+  });
+
+  it("refuses a drop into a section that does not exist", () => {
+    expect(moveWorktree(groups(), "/wts/a", "ghost", 0)).toBeNull();
+  });
+
+  it("leaves the main checkout out of the written order", () => {
+    // Main needs no position — the daemon sorts `is_main DESC` first — and giving
+    // it one would let a reorder of the branches move the repository.
+    const withMain = railGroups(
+      [rw("/repo", { is_main: true }), rw("/wts/a"), rw("/wts/b")],
+      [],
+    );
+    expect(moveWorktree(withMain, "/wts/b", "", 0)?.order).toEqual([
+      "/wts/b",
+      "/wts/a",
+    ]);
+  });
+
+  it("inserts at the top when dropped on a lane's header", () => {
+    // The section-level fallback resolves to index 0 — the header and the padding
+    // above it are what reach it, and both are at the top of the section.
+    const g = railGroups(
+      [rw("/wts/a", { lane: "spikes" }), rw("/wts/b", { lane: "spikes" })],
+      [lane("spikes", 0)],
+    );
+    expect(moveWorktree(g, "/wts/b", "spikes", 0)?.order).toEqual([
+      "/wts/b",
+      "/wts/a",
+    ]);
+  });
+
+  it("appends when dropped past the end of an empty lane", () => {
+    // The empty-lane target reports index 0 (its length), and the write has to be
+    // the destination lane with the worktree in it.
+    const g = railGroups([rw("/wts/a")], [lane("spikes", 0)]);
+    expect(moveWorktree(g, "/wts/a", "spikes", 0)).toEqual({
+      lane: "spikes",
+      order: ["/wts/a"],
+    });
+  });
+
+  it("returns null for a path it cannot find", () => {
+    expect(moveWorktree(groups(), "/wts/nope", "", 0)).toBeNull();
+  });
+
+  it("excludes trashed worktrees from the written order", () => {
+    // They are on their way out, so a position would be written and then deleted.
+    const g = railGroups(
+      [rw("/wts/a"), rw("/wts/b"), rw("/wts/gone", { trashed_at: "t" })],
+      [],
+    );
+    expect(moveWorktree(g, "/wts/b", "", 0)?.order).toEqual([
+      "/wts/b",
+      "/wts/a",
+    ]);
   });
 });

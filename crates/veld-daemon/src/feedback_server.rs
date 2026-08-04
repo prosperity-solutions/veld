@@ -26,6 +26,9 @@ pub mod management;
 #[path = "desktop.rs"]
 mod desktop;
 
+#[path = "worktree_trash.rs"]
+pub mod worktree_trash;
+
 #[path = "pty.rs"]
 mod pty;
 
@@ -130,6 +133,11 @@ pub async fn run_feedback_server(share_manager: Arc<crate::share::manager::Share
     // before the listener binds, so no attach can race a half-adopted registry.
     pty::adopt_existing_sessions().await;
     pty::spawn_session_reaper();
+    // Worktree removals recorded but not finished by a previous daemon resume
+    // here — `worktrees.trashed_at` is the durable record, so a crash mid-removal
+    // costs a restart, not a stuck row. Started for the same reason the reaper is
+    // (not inside `routes()`), so building a router in a test starts no worker.
+    worktree_trash::spawn();
 
     let addr = SocketAddr::from(([127, 0, 0, 1], veld_core::instance::daemon_port()));
     info!("feedback server listening on {addr}");

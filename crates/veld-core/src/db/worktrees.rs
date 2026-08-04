@@ -57,7 +57,65 @@ pub struct WorktreeRecord {
     pub marker_color: String,
     pub is_main: bool,
     pub created_at: String,
+    /// The rail lane this worktree is grouped into — a [`LaneRecord::name`] of
+    /// the same repo, or `""` for ungrouped.
+    ///
+    /// **The name, not a surrogate id, and stored on this row rather than in a
+    /// side table.** Markers are auto-assigned for uniqueness; lanes group
+    /// deliberately, so a lane is a many-to-one label and its natural home is the
+    /// row it labels. Keeping it here is also what makes it immune to the rowid
+    /// reuse that broke three stores in #201: there is no key pointing at this
+    /// worktree that could outlive it. See the v10 migration.
+    ///
+    /// A name this repo has no lane for renders as ungrouped rather than as an
+    /// error — the read path is deliberately tolerant, and [`Db::delete_lane`]
+    /// clears assignments in the same transaction so it should not arise.
+    pub lane: String,
+    /// Manual position within the lane, or `None` for "the user has not placed
+    /// this one" — which sorts to an alias-ordered tail rather than to position 0.
+    ///
+    /// A newly discovered worktree is always `None`, so the reconcile pass never
+    /// authors user intent and a new checkout cannot appear wedged into the middle
+    /// of a hand-made order.
+    pub sort_position: Option<i64>,
+    /// When the user asked for this worktree to be removed, or `""` for a live
+    /// worktree. Removal runs in the background, so this is the durable record of
+    /// intent that survives a daemon restart *and* the flag
+    /// [`Db::sync_worktrees`] checks so it does not resurrect the row.
+    pub trashed_at: String,
+    /// Why the last removal attempt failed, or `""`. Set together with clearing
+    /// [`Self::trashed_at`]: a failed removal takes the worktree back out of trash
+    /// with the reason attached, rather than leaving it in a state that looks like
+    /// pending work forever.
+    pub trash_error: String,
 }
+
+/// A user-defined rail lane — a named group of worktrees within one repo.
+///
+/// Identified by `(repo_root, name)`; there is deliberately no surrogate id (see
+/// the v10 migration). `position` orders the lanes in the rail.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LaneRecord {
+    pub repo_root: String,
+    pub name: String,
+    pub position: i64,
+    pub created_at: String,
+}
+
+/// Longest accepted lane name. Lanes are rail labels read at a glance in a
+/// 236px-wide column, so the cap is about legibility, not storage.
+pub const MAX_LANE_NAME_LEN: usize = 32;
+
+/// Most lanes one repo may define. A rail that needs more than this is not
+/// being organised by it.
+pub const MAX_LANES_PER_REPO: usize = 32;
+
+/// Longest accepted reorder payload, for worktrees or lanes.
+///
+/// Generous against any real repo (a rail with a thousand checkouts is not a rail)
+/// and small enough that the per-element `UPDATE` loop cannot hold the write lock
+/// long enough to stall the daemon's other writers.
+pub const MAX_ORDER_LEN: usize = 1024;
 
 /// A worktree as discovered on disk (`git worktree list --porcelain`), used
 /// to sync the table with reality.
@@ -73,8 +131,8 @@ pub struct DiscoveredWorktree {
 // field means touching all of them (plus a NEW migration — never edit v5) AND
 // the TS `Worktree` interface in crates/veld-daemon/ui/src/api.ts — serde
 // flattens the new field into the API, but TS ignores unknown fields silently.
-const WT_COLS: &str =
-    "id, repo_root, path, branch, alias, emoji, is_main, created_at, marker_color";
+const WT_COLS: &str = "id, repo_root, path, branch, alias, emoji, is_main, created_at, \
+     marker_color, lane, sort_position, trashed_at, trash_error";
 
 fn wt_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorktreeRecord> {
     Ok(WorktreeRecord {
@@ -87,8 +145,27 @@ fn wt_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorktreeRecord> {
         is_main: row.get::<_, i64>(6)? != 0,
         created_at: row.get(7)?,
         marker_color: row.get(8)?,
+        lane: row.get(9)?,
+        sort_position: row.get(10)?,
+        trashed_at: row.get(11)?,
+        trash_error: row.get(12)?,
     })
 }
+
+/// The rail's render order, shared by every query that returns worktrees.
+///
+/// Ungrouped worktrees (`lane = ''`) come first, so a repo with no lanes defined
+/// sorts exactly as it did before v10; then lanes in their own `position` order,
+/// resolved by a correlated subquery because `lane` stores the name. Within a
+/// group the main checkout leads, then hand-placed worktrees in their positions,
+/// then everything unplaced alias-sorted — `sort_position IS NULL` sorts the
+/// unplaced *after* the placed rather than treating NULL as position zero.
+const WT_ORDER: &str = "ORDER BY lane != '',
+              COALESCE((SELECT position FROM lanes l
+                        WHERE l.repo_root = worktrees.repo_root AND l.name = worktrees.lane), 0),
+              lane COLLATE NOCASE,
+              is_main DESC, sort_position IS NULL, sort_position,
+              alias COLLATE NOCASE";
 
 impl Db {
     /// Register (or re-register) a repo. Idempotent: an existing row keeps its
@@ -185,17 +262,46 @@ impl Db {
             )?;
 
             for d in discovered {
-                let existing: Option<i64> = tx
+                let existing: Option<(i64, String)> = tx
                     .query_row(
-                        "SELECT id FROM worktrees WHERE path = ?1",
+                        "SELECT id, trashed_at FROM worktrees WHERE path = ?1",
                         params![d.path],
-                        |r| r.get(0),
+                        |r| Ok((r.get(0)?, r.get(1)?)),
                     )
                     .optional()?;
-                if let Some(id) = existing {
-                    // Write only on change: steady-state syncs (the UI polls
-                    // refresh every few seconds) must not take the write path
-                    // and append WAL frames for identical rows.
+                // Trashed rows are updated like any other, and that is deliberate.
+                //
+                // A worktree in the trash is still a real `git worktree` — the
+                // checkout stays on disk for the whole retention period, which
+                // defaults to "until the user empties it", i.e. possibly forever. An
+                // earlier version skipped these rows to avoid writing to something
+                // "about to be deleted"; with an unbounded retention that reasoning
+                // does not hold, and the cost was that a branch switch made inside a
+                // trashed checkout stayed invisible for as long as it sat there.
+                //
+                // Nothing here clears `trashed_at`, so the row cannot be resurrected
+                // by a poll. The anti-resurrection property comes from the DELETE
+                // above sparing it: its path is still in `discovered`, because the
+                // checkout is still there. And the mirror case needs no code either —
+                // once the deletion runs, the path leaves `discovered` and that same
+                // DELETE reaps the row, which is what makes a re-run of an
+                // already-completed deletion idempotent.
+                if let Some((id, _)) = existing {
+                    // **Only columns derived from git belong in this UPDATE.**
+                    // It runs on every discovery poll (every few seconds), so a
+                    // column listed here is overwritten from `discovered` forever —
+                    // and a *user-choice* column would therefore be silently reset
+                    // seconds after the user set it, having appeared to work when
+                    // tested by hand. `lane`, `sort_position`, `alias`, the marker
+                    // faces and the trash columns are all deliberately absent for
+                    // that reason; they are written by `patch_worktree`,
+                    // `reorder_worktrees` and the trash helpers instead. The
+                    // file-header note about "touching all of them" when adding a
+                    // column means WT_COLS, `wt_from_row` and the INSERT — not this
+                    // statement.
+                    //
+                    // Write only on change: steady-state syncs must not take the
+                    // write path and append WAL frames for identical rows.
                     tx.execute(
                         "UPDATE worktrees SET branch = ?1, is_main = ?2, repo_root = ?3
                          WHERE id = ?4
@@ -260,15 +366,30 @@ impl Db {
         self.list_worktrees(repo_root)
     }
 
-    /// All worktrees of a repo — main checkout first, then alias-sorted.
+    /// All worktrees of a repo in rail order ([`WT_ORDER`]): ungrouped first,
+    /// then lanes in their own order, main checkout leading its group, then
+    /// hand-placed worktrees, then the unplaced alias-sorted.
+    ///
+    /// Trashed worktrees are included — the rail renders them as a pending-removal
+    /// group, which is what makes a background removal visible at all.
     pub fn list_worktrees(&self, repo_root: &Path) -> Result<Vec<WorktreeRecord>, DbError> {
         let conn = self.lock();
         let mut stmt = conn.prepare_cached(&format!(
-            "SELECT {WT_COLS} FROM worktrees WHERE repo_root = ?1
-             ORDER BY is_main DESC, alias COLLATE NOCASE"
+            "SELECT {WT_COLS} FROM worktrees WHERE repo_root = ?1 {WT_ORDER}"
         ))?;
         let rows = stmt.query_map(params![root_key(repo_root)], wt_from_row)?;
         Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Look up one worktree by its checkout path.
+    ///
+    /// `path` is `UNIQUE`, so this is the stable lookup — unlike an id, which is a
+    /// rowid SQLite reuses.
+    pub fn get_worktree_by_path(&self, path: &str) -> Result<Option<WorktreeRecord>, DbError> {
+        let conn = self.lock();
+        let mut stmt =
+            conn.prepare_cached(&format!("SELECT {WT_COLS} FROM worktrees WHERE path = ?1"))?;
+        Ok(stmt.query_row(params![path], wt_from_row).optional()?)
     }
 
     /// Look up one worktree by id.
@@ -283,7 +404,7 @@ impl Db {
     /// [`DbError::AliasTaken`] when a sibling of the same repo already holds
     /// the alias.
     pub fn rename_worktree(&self, id: i64, alias: &str) -> Result<bool, DbError> {
-        self.patch_worktree(id, Some(alias), None, None)
+        self.patch_worktree(id, Some(alias), None, None, None)
     }
 
     /// Update alias and/or emoji in one write, inside one transaction.
@@ -315,6 +436,7 @@ impl Db {
         alias: Option<&str>,
         emoji: Option<&str>,
         marker_color: Option<&str>,
+        lane: Option<&str>,
     ) -> Result<bool, DbError> {
         // Both marker channels are validated before either is written, for the
         // same both-or-neither reason the alias is: a patch carrying a good glyph
@@ -393,13 +515,46 @@ impl Db {
                 return Err(DbError::AliasTaken(alias.to_owned()));
             }
         }
+        // A lane assignment must name a lane this repo actually defines (or `""`
+        // to ungroup). Checked inside the same transaction as the write, so a
+        // concurrent `delete_lane` cannot slip a dangling name past it. The read
+        // path tolerates a dangling name anyway — belt and braces, because the
+        // alternative is a worktree the user cannot see in any group.
+        if let Some(lane) = lane {
+            if !lane.is_empty() {
+                let known: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM lanes
+                      WHERE repo_root = (SELECT repo_root FROM worktrees WHERE id = ?1)
+                        AND name = ?2)",
+                    params![id, lane],
+                    |r| r.get(0),
+                )?;
+                if !known {
+                    return Err(DbError::UnknownLane(lane.to_owned()));
+                }
+            }
+        }
+        // A lane change clears the manual position.
+        //
+        // A position is only meaningful *within* a lane, and positions are dense
+        // repo-wide once anything has been dragged (`reorder_worktrees` writes array
+        // indices), so a worktree carrying its old lane's position into a new one
+        // almost always ties an existing member — and `WT_ORDER` then falls through
+        // to the alias, landing it somewhere in the middle rather than where "Move to
+        // lane" implied. Unplaced is the honest state for a worktree the user moved
+        // by menu rather than by dragging it to a position.
         let n = tx.execute(
             "UPDATE worktrees
                 SET alias = COALESCE(?1, alias),
                     emoji = COALESCE(?2, emoji),
-                    marker_color = COALESCE(?3, marker_color)
-              WHERE id = ?4",
-            params![alias, emoji, marker_color, id],
+                    marker_color = COALESCE(?3, marker_color),
+                    lane = COALESCE(?4, lane),
+                    sort_position = CASE
+                        WHEN ?4 IS NOT NULL AND ?4 != lane THEN NULL
+                        ELSE sort_position
+                    END
+              WHERE id = ?5",
+            params![alias, emoji, marker_color, lane, id],
         )?;
         tx.commit()?;
         Ok(n > 0)
@@ -407,10 +562,405 @@ impl Db {
 
     /// Delete a worktree row (DB only — `git worktree remove` is the caller's
     /// job). Returns whether the row existed.
+    ///
+    /// **Not the way to delete a worktree.** This is the last step of a removal,
+    /// not a removal: it skips stopping the runs in the checkout, the git removal
+    /// itself, and the trash state that makes the operation visible and undoable.
+    /// A handler that calls this directly leaves the checkout on disk with no row
+    /// pointing at it — until the next reconcile poll re-registers it under a fresh
+    /// alias, with its lane, marker and position gone.
+    ///
+    /// The two legitimate callers are `worktree_trash::process` (after git has
+    /// actually removed it) and the forced branch of the `delete_worktree` handler.
+    /// Anything else wants [`Self::trash_worktree`].
     pub fn remove_worktree(&self, id: i64) -> Result<bool, DbError> {
         let conn = self.lock();
         let n = conn.execute("DELETE FROM worktrees WHERE id = ?1", params![id])?;
         Ok(n > 0)
+    }
+
+    // -----------------------------------------------------------------------
+    // Rail lanes (§18)
+    // -----------------------------------------------------------------------
+
+    /// A repo's lanes, in rail order.
+    pub fn list_lanes(&self, repo_root: &Path) -> Result<Vec<LaneRecord>, DbError> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare_cached(
+            "SELECT repo_root, name, position, created_at FROM lanes
+              WHERE repo_root = ?1 ORDER BY position, name COLLATE NOCASE",
+        )?;
+        let rows = stmt.query_map(params![root_key(repo_root)], |r| {
+            Ok(LaneRecord {
+                repo_root: r.get(0)?,
+                name: r.get(1)?,
+                position: r.get(2)?,
+                created_at: r.get(3)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Validate a lane name, returning the trimmed form.
+    ///
+    /// Control characters are rejected, not stripped. A lane name is rendered as a
+    /// rail header and used as a client-side group key, so a name carrying a NUL or
+    /// a newline is either invisible garbage in the UI or a collision with a
+    /// sentinel — and silently rewriting what the user typed is worse than telling
+    /// them it is not a name.
+    fn valid_lane_name(name: &str) -> Result<&str, DbError> {
+        let name = name.trim();
+        if name.is_empty()
+            || name.chars().count() > MAX_LANE_NAME_LEN
+            || name.chars().any(char::is_control)
+            // `.` and `..` are rejected because the name is a URL path segment:
+            // `encodeURIComponent` leaves dots unescaped and the URL parser then
+            // resolves them away, so `PATCH /api/lanes/..` arrives as `/api/` and
+            // `DELETE /api/lanes/.` as `/api/lanes/`. A lane so named would sit in
+            // the rail permanently, impossible to rename or delete.
+            || name == "."
+            || name == ".."
+        {
+            return Err(DbError::InvalidLaneName(name.to_owned()));
+        }
+        Ok(name)
+    }
+
+    /// Case-fold a lane name for collision checks.
+    ///
+    /// `to_lowercase`, not `eq_ignore_ascii_case`: the client checks with
+    /// JavaScript's `toLowerCase`, which is Unicode-aware, so an ASCII-only compare
+    /// here made the two disagree — the dialog refused `ärger` beside `Ärger` as a
+    /// duplicate while the daemon would have accepted it, and the reverse for
+    /// `K` (U+212A). The `lanes` primary key collates BINARY, so this comparison is
+    /// the *only* thing enforcing case-insensitive uniqueness; it has to be the same
+    /// rule on both sides.
+    fn lane_fold(name: &str) -> String {
+        name.to_lowercase()
+    }
+
+    /// Create a lane at the end of the repo's rail.
+    ///
+    /// Names are trimmed and compared case-insensitively: `Review` and `review`
+    /// are the same lane, because two rail headers differing only in case is a
+    /// mistake every time. Rejects a duplicate rather than silently returning the
+    /// existing one, so the UI can say so.
+    pub fn create_lane(&self, repo_root: &Path, name: &str) -> Result<LaneRecord, DbError> {
+        let name = Self::valid_lane_name(name)?;
+        let root = root_key(repo_root);
+        let mut conn = self.lock();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let existing: Vec<(String, i64)> = tx
+            .prepare("SELECT name, position FROM lanes WHERE repo_root = ?1")?
+            .query_map(params![root], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        if existing.len() >= MAX_LANES_PER_REPO {
+            return Err(DbError::TooManyLanes(MAX_LANES_PER_REPO));
+        }
+        let folded = Self::lane_fold(name);
+        if existing.iter().any(|(n, _)| Self::lane_fold(n) == folded) {
+            return Err(DbError::LaneTaken(name.to_owned()));
+        }
+        let position = existing.iter().map(|(_, p)| *p).max().unwrap_or(-1) + 1;
+        let created_at = now_str();
+        tx.execute(
+            "INSERT INTO lanes (repo_root, name, position, created_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![root, name, position, created_at],
+        )?;
+        tx.commit()?;
+        Ok(LaneRecord {
+            repo_root: root,
+            name: name.to_owned(),
+            position,
+            created_at,
+        })
+    }
+
+    /// Rename a lane, carrying its members with it.
+    ///
+    /// Two statements in one IMMEDIATE transaction. `worktrees.lane` stores the
+    /// name rather than a surrogate id precisely because both tables live in this
+    /// one database, so the "denormalised name means a non-atomic N-row rewrite"
+    /// objection does not apply here — and skipping the surrogate id is what keeps
+    /// rowid reuse out of a brand-new table.
+    pub fn rename_lane(&self, repo_root: &Path, from: &str, to: &str) -> Result<bool, DbError> {
+        let to = Self::valid_lane_name(to)?;
+        let root = root_key(repo_root);
+        let mut conn = self.lock();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let existing: Vec<String> = tx
+            .prepare("SELECT name FROM lanes WHERE repo_root = ?1")?
+            .query_map(params![root], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        if !existing.iter().any(|n| n == from) {
+            return Ok(false);
+        }
+        // A pure case change (`review` → `Review`) is a legal rename of the same
+        // lane, so exclude the source before testing for a collision.
+        let folded = Self::lane_fold(to);
+        if existing
+            .iter()
+            .any(|n| n != from && Self::lane_fold(n) == folded)
+        {
+            return Err(DbError::LaneTaken(to.to_owned()));
+        }
+        tx.execute(
+            "UPDATE lanes SET name = ?1 WHERE repo_root = ?2 AND name = ?3",
+            params![to, root, from],
+        )?;
+        tx.execute(
+            "UPDATE worktrees SET lane = ?1 WHERE repo_root = ?2 AND lane = ?3",
+            params![to, root, from],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// Delete a lane and ungroup its members, in one transaction.
+    ///
+    /// Explicit rather than leaning on a foreign key: `worktrees.lane` is a plain
+    /// name column with no FK to cascade from, which is the trade for having no
+    /// surrogate id. Doing it here means the two stores can never disagree about
+    /// whether a lane exists.
+    pub fn delete_lane(&self, repo_root: &Path, name: &str) -> Result<bool, DbError> {
+        let root = root_key(repo_root);
+        let mut conn = self.lock();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        tx.execute(
+            "UPDATE worktrees SET lane = '' WHERE repo_root = ?1 AND lane = ?2",
+            params![root, name],
+        )?;
+        let n = tx.execute(
+            "DELETE FROM lanes WHERE repo_root = ?1 AND name = ?2",
+            params![root, name],
+        )?;
+        tx.commit()?;
+        Ok(n > 0)
+    }
+
+    /// Rewrite lane order from a full ordered list of names.
+    ///
+    /// Takes the whole list rather than a move-this-one delta so the write is
+    /// idempotent and there is no partial-state arithmetic to get wrong: names the
+    /// caller omits keep their relative order after the ones it listed. Unknown
+    /// names are ignored.
+    pub fn reorder_lanes(&self, repo_root: &Path, order: &[String]) -> Result<(), DbError> {
+        if order.len() > MAX_ORDER_LEN {
+            return Err(DbError::OrderTooLong(order.len()));
+        }
+        let root = root_key(repo_root);
+        let mut conn = self.lock();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let mut next = 0i64;
+        for name in order {
+            let n = tx.execute(
+                "UPDATE lanes SET position = ?1 WHERE repo_root = ?2 AND name = ?3",
+                params![next, root, name],
+            )?;
+            if n > 0 {
+                next += 1;
+            }
+        }
+        // Anything the caller did not mention lands after the listed lanes,
+        // keeping its own relative order.
+        let rest: Vec<String> = tx
+            .prepare(
+                "SELECT name FROM lanes WHERE repo_root = ?1 AND name NOT IN
+                   (SELECT value FROM json_each(?2)) ORDER BY position, name COLLATE NOCASE",
+            )?
+            .query_map(
+                params![root, serde_json::to_string(order).unwrap_or_default()],
+                |r| r.get(0),
+            )?
+            .collect::<rusqlite::Result<_>>()?;
+        for name in rest {
+            tx.execute(
+                "UPDATE lanes SET position = ?1 WHERE repo_root = ?2 AND name = ?3",
+                params![next, root, name],
+            )?;
+            next += 1;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Rewrite manual worktree order from a full ordered list of **paths**.
+    ///
+    /// Keyed on `path` (which is `UNIQUE`), never on `worktrees.id`: rowids are
+    /// reused, so an id-keyed order outlives the worktree and lands on the next
+    /// one created — the bug three stores shipped in #201.
+    ///
+    /// Paths the caller omits are reset to `sort_position = NULL`, i.e. back to the
+    /// alias-sorted tail. That is what makes the write idempotent: the UI sends the
+    /// order it is displaying, and the stored order becomes exactly that.
+    pub fn reorder_worktrees(&self, repo_root: &Path, order: &[String]) -> Result<(), DbError> {
+        // Bounded before taking the write lock. The body is a caller-supplied array
+        // and each element costs one UPDATE inside an IMMEDIATE transaction, so an
+        // oversized list stalls every other writer in the daemon — run bookkeeping,
+        // PTY logging, the GC pass — for as long as it takes. Nothing legitimate
+        // sends more entries than the repo has worktrees.
+        if order.len() > MAX_ORDER_LEN {
+            return Err(DbError::OrderTooLong(order.len()));
+        }
+        let root = root_key(repo_root);
+        let mut conn = self.lock();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        // Trashed rows are exempt from the reset. The UI omits them from the order
+        // it sends (they are leaving, so a position for them is meaningless), and
+        // without this exemption any unrelated drag would strip the position off a
+        // worktree whose removal is still pending — so a removal that then failed
+        // would put it back unplaced. That is what makes the v10 migration's claim
+        // that a trashed worktree keeps its lane AND its position true.
+        tx.execute(
+            "UPDATE worktrees SET sort_position = NULL
+              WHERE repo_root = ?1 AND sort_position IS NOT NULL AND trashed_at = ''",
+            params![root],
+        )?;
+        for (i, path) in order.iter().enumerate() {
+            tx.execute(
+                "UPDATE worktrees SET sort_position = ?1 WHERE repo_root = ?2 AND path = ?3",
+                params![i as i64, root, path],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Worktree trash (§19)
+    // -----------------------------------------------------------------------
+
+    /// Environment names of every live run rooted at `project_root`.
+    ///
+    /// The background remover's stop step needs two things from this: which runs to
+    /// ask `veld stop` about, and — by polling until it returns empty — whether
+    /// teardown has actually finished. Runs became two-phase in #162 precisely so
+    /// that the persisted status is the thing to observe rather than the exit of a
+    /// spawned command, and `veld stop` is fire-and-forget from the daemon's side,
+    /// so there is nothing else to wait on.
+    pub fn live_run_names(&self, project_root: &Path) -> Result<Vec<String>, DbError> {
+        let live = super::state::LIVE_SET;
+        let conn = self.lock();
+        let mut stmt = conn.prepare_cached(&format!(
+            "SELECT e.name FROM runs r JOIN environments e ON e.id = r.environment_id
+              WHERE e.project_root = ?1 AND r.status IN {live}
+              ORDER BY e.name"
+        ))?;
+        let rows = stmt.query_map(params![root_key(project_root)], |r| r.get(0))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Move a worktree to the trash. Returns the row as it now stands, or `None` if
+    /// there is no such worktree.
+    ///
+    /// **Nothing is deleted here.** The checkout stays on disk for the whole
+    /// retention period (`worktree.trashRetentionDays`); this only starts its clock.
+    /// The actual `git worktree remove` happens when
+    /// [`Self::expired_trashed_worktrees`] surfaces the row, or when the user asks
+    /// for it immediately.
+    ///
+    /// Refuses the main checkout — removing it means removing the repo, which is a
+    /// different operation with a different confirmation.
+    ///
+    /// Idempotent: trashing an already-trashed worktree just refreshes the
+    /// timestamp and clears any previous error, which is exactly what a retry
+    /// wants.
+    pub fn trash_worktree(&self, id: i64) -> Result<Option<WorktreeRecord>, DbError> {
+        let mut conn = self.lock();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let is_main: Option<bool> = tx
+            .query_row(
+                "SELECT is_main FROM worktrees WHERE id = ?1",
+                params![id],
+                |r| Ok(r.get::<_, i64>(0)? != 0),
+            )
+            .optional()?;
+        match is_main {
+            None => return Ok(None),
+            Some(true) => return Err(DbError::RefusingMainWorktree),
+            Some(false) => {}
+        }
+        tx.execute(
+            "UPDATE worktrees SET trashed_at = ?1, trash_error = '' WHERE id = ?2",
+            params![now_str(), id],
+        )?;
+        let wt = tx
+            .query_row(
+                &format!("SELECT {WT_COLS} FROM worktrees WHERE id = ?1"),
+                params![id],
+                wt_from_row,
+            )
+            .optional()?;
+        tx.commit()?;
+        Ok(wt)
+    }
+
+    /// Take a worktree back out of trash, recording why its removal failed.
+    ///
+    /// The two halves are one write on purpose: a row that is out of trash but
+    /// carries no reason looks like nothing happened, and a row that stays in
+    /// trash with a reason looks like pending work forever. Pass an empty `reason`
+    /// to restore a worktree at the user's request rather than after a failure.
+    pub fn untrash_worktree(&self, id: i64, reason: &str) -> Result<bool, DbError> {
+        let conn = self.lock();
+        let n = conn.execute(
+            "UPDATE worktrees SET trashed_at = '', trash_error = ?1 WHERE id = ?2",
+            params![reason, id],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Clear a worktree's recorded removal failure (the user has read it).
+    pub fn clear_trash_error(&self, id: i64) -> Result<bool, DbError> {
+        let conn = self.lock();
+        let n = conn.execute(
+            "UPDATE worktrees SET trash_error = '' WHERE id = ?1 AND trash_error != ''",
+            params![id],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Every trashed worktree across all repos, oldest request first.
+    ///
+    /// This is how the background remover finds its work at daemon boot: the row
+    /// state *is* the durable queue, so a crash between "user clicked delete" and
+    /// "git finished" needs no separate journal to reconcile. Re-running a removal
+    /// that already succeeded is safe — git errors, the path is gone from disk, and
+    /// the caller's `git worktree prune` fallback finishes the job.
+    pub fn list_trashed_worktrees(&self) -> Result<Vec<WorktreeRecord>, DbError> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare_cached(&format!(
+            "SELECT {WT_COLS} FROM worktrees WHERE trashed_at != '' ORDER BY trashed_at"
+        ))?;
+        let rows = stmt.query_map([], wt_from_row)?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Trashed worktrees whose retention period has expired, oldest request first.
+    ///
+    /// The GC pass hands these to the background remover. `retention_secs` comes from
+    /// `worktree.trashRetentionDays`; a value of zero means "keep until I purge" and
+    /// the caller must not call this at all in that case.
+    ///
+    /// Unbounded on purpose. Every row here is one the user explicitly asked to
+    /// delete and then left alone for the whole retention period, so there is nothing
+    /// to ration and no candidate worth skipping — unlike a scan for *inactivity*,
+    /// which is a different feature and deliberately not this one.
+    pub fn expired_trashed_worktrees(
+        &self,
+        retention_secs: i64,
+    ) -> Result<Vec<WorktreeRecord>, DbError> {
+        let cutoff =
+            super::ts_to_str(chrono::Utc::now() - chrono::Duration::seconds(retention_secs));
+        let conn = self.lock();
+        let mut stmt = conn.prepare_cached(&format!(
+            "SELECT {WT_COLS} FROM worktrees
+              WHERE trashed_at != '' AND trashed_at < ?1
+              ORDER BY trashed_at"
+        ))?;
+        let rows = stmt.query_map(params![cutoff], wt_from_row)?;
+        Ok(rows.collect::<Result<_, _>>()?)
     }
 }
 
@@ -759,7 +1309,7 @@ mod tests {
             .find(|g| **g != other.emoji)
             .expect("curated set has more than one glyph");
         assert!(
-            db.patch_worktree(other.id, Some(&main.alias), Some(glyph), None)
+            db.patch_worktree(other.id, Some(&main.alias), Some(glyph), None, None)
                 .is_err()
         );
         assert_eq!(
@@ -1084,7 +1634,10 @@ mod tests {
             .iter()
             .find(|c| **c != wts[0].marker_color)
             .expect("palette has more than one colour");
-        assert!(db.patch_worktree(id, None, None, Some(chosen)).unwrap());
+        assert!(
+            db.patch_worktree(id, None, None, Some(chosen), None)
+                .unwrap()
+        );
         // A user's explicit colour must not be clobbered by the UI's refresh poll.
         db.sync_worktrees(root, &[wt("/tmp/repoMarkerPick", "main", true)])
             .unwrap();
@@ -1093,7 +1646,7 @@ mod tests {
         for bad in ["", "#12345", "nope"] {
             assert!(
                 matches!(
-                    db.patch_worktree(id, None, None, Some(bad)),
+                    db.patch_worktree(id, None, None, Some(bad), None),
                     Err(DbError::InvalidColor(_))
                 ),
                 "{bad} must be rejected"
@@ -1101,7 +1654,7 @@ mod tests {
         }
         // A rejected colour must not commit the alias that travelled with it.
         assert!(
-            db.patch_worktree(id, Some("nope"), None, Some("#12345"))
+            db.patch_worktree(id, Some("nope"), None, Some("#12345"), None)
                 .is_err()
         );
         assert_ne!(db.get_worktree(id).unwrap().unwrap().alias, "nope");
@@ -1123,7 +1676,10 @@ mod tests {
             .iter()
             .find(|e| **e != wts[0].emoji)
             .expect("curated set has more than one glyph");
-        assert!(db.patch_worktree(id, None, Some(chosen), None).unwrap());
+        assert!(
+            db.patch_worktree(id, None, Some(chosen), None, None)
+                .unwrap()
+        );
         assert_eq!(&db.get_worktree(id).unwrap().unwrap().emoji, chosen);
 
         // Reconciliation backfills only empty emoji — an explicit choice must
@@ -1145,7 +1701,7 @@ mod tests {
         for bad in ["", "🍕", "🦊🦊", "👨‍👩‍👧", "not-an-emoji"] {
             assert!(
                 matches!(
-                    db.patch_worktree(1, None, Some(bad), None),
+                    db.patch_worktree(1, None, Some(bad), None, None),
                     Err(DbError::InvalidEmoji(_))
                 ),
                 "{bad:?} must be rejected"
@@ -1177,19 +1733,25 @@ mod tests {
             .unwrap();
 
         // None leaves a column untouched.
-        assert!(db.patch_worktree(id, Some("renamed"), None, None).unwrap());
+        assert!(
+            db.patch_worktree(id, Some("renamed"), None, None, None)
+                .unwrap()
+        );
         let after = db.get_worktree(id).unwrap().unwrap();
         assert_eq!(after.alias, "renamed");
         assert_eq!(after.emoji, original.emoji);
 
-        assert!(db.patch_worktree(id, None, Some(glyph), None).unwrap());
+        assert!(
+            db.patch_worktree(id, None, Some(glyph), None, None)
+                .unwrap()
+        );
         let after = db.get_worktree(id).unwrap().unwrap();
         assert_eq!(after.alias, "renamed");
         assert_eq!(&after.emoji, glyph);
 
         // Both at once.
         assert!(
-            db.patch_worktree(id, Some("both"), Some(&original.emoji), None)
+            db.patch_worktree(id, Some("both"), Some(&original.emoji), None, None)
                 .unwrap()
         );
         let after = db.get_worktree(id).unwrap().unwrap();
@@ -1198,19 +1760,22 @@ mod tests {
 
         // A rejected emoji must not commit the alias that travelled with it.
         assert!(
-            db.patch_worktree(id, Some("nope"), Some("🍕"), None)
+            db.patch_worktree(id, Some("nope"), Some("🍕"), None, None)
                 .is_err()
         );
         assert_eq!(db.get_worktree(id).unwrap().unwrap().alias, "both");
 
         // Neither field: a no-op write that still reports row existence.
-        assert!(db.patch_worktree(id, None, None, None).unwrap());
+        assert!(db.patch_worktree(id, None, None, None, None).unwrap());
         let after = db.get_worktree(id).unwrap().unwrap();
         assert_eq!(after.alias, "both");
         assert_eq!(after.emoji, original.emoji);
 
-        assert!(!db.patch_worktree(4242, Some("x"), None, None).unwrap());
-        assert!(!db.patch_worktree(4242, None, None, None).unwrap());
+        assert!(
+            !db.patch_worktree(4242, Some("x"), None, None, None)
+                .unwrap()
+        );
+        assert!(!db.patch_worktree(4242, None, None, None, None).unwrap());
     }
 
     #[test]
@@ -1235,5 +1800,591 @@ mod tests {
         assert_eq!(default_alias("fix/auth-retry"), "auth-retry");
         assert_eq!(default_alias("///"), "wt");
         assert_eq!(default_alias("(detached)"), "detached");
+    }
+
+    // -----------------------------------------------------------------------
+    // Lanes and manual order (§18)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn lane_names_are_trimmed_bounded_and_case_insensitively_unique() {
+        let (_dir, db) = test_db();
+        let root = Path::new("/tmp/lanes");
+        db.upsert_repo(root, "lanes").unwrap();
+
+        let lane = db.create_lane(root, "  review  ").unwrap();
+        assert_eq!(lane.name, "review", "the name is stored trimmed");
+        assert_eq!(lane.position, 0);
+
+        // Case-insensitive, because two rail headers differing only in case is a
+        // mistake every time.
+        assert!(matches!(
+            db.create_lane(root, "Review"),
+            Err(DbError::LaneTaken(_))
+        ));
+        assert!(matches!(
+            db.create_lane(root, ""),
+            Err(DbError::InvalidLaneName(_))
+        ));
+        assert!(matches!(
+            db.create_lane(root, &"x".repeat(MAX_LANE_NAME_LEN + 1)),
+            Err(DbError::InvalidLaneName(_))
+        ));
+        // Control characters are rejected rather than stripped: the name renders as
+        // a rail header and is the client's group key, where the UI reserves a
+        // NUL-prefixed sentinel for pending removals.
+        for bad in ["\u{0}trash", "two\nlines", "tab\there"] {
+            assert!(
+                matches!(db.create_lane(root, bad), Err(DbError::InvalidLaneName(_))),
+                "expected {bad:?} to be rejected"
+            );
+        }
+
+        assert_eq!(db.create_lane(root, "spikes").unwrap().position, 1);
+    }
+
+    #[test]
+    fn renaming_a_lane_carries_its_members() {
+        let (_dir, db) = test_db();
+        let root = Path::new("/tmp/renlane");
+        db.upsert_repo(root, "renlane").unwrap();
+        db.sync_worktrees(
+            root,
+            &[
+                wt("/tmp/renlane", "main", true),
+                wt("/tmp/wt-a", "a", false),
+            ],
+        )
+        .unwrap();
+        db.create_lane(root, "review").unwrap();
+        let id = db.get_worktree_by_path("/tmp/wt-a").unwrap().unwrap().id;
+        db.patch_worktree(id, None, None, None, Some("review"))
+            .unwrap();
+
+        assert!(db.rename_lane(root, "review", "in review").unwrap());
+        // The whole point of storing the NAME on the row: the rename has to carry
+        // membership, and it does so in one transaction.
+        assert_eq!(db.get_worktree(id).unwrap().unwrap().lane, "in review");
+        assert_eq!(db.list_lanes(root).unwrap()[0].name, "in review");
+
+        // A pure case change is a legal rename of the same lane, not a collision.
+        assert!(db.rename_lane(root, "in review", "In Review").unwrap());
+        assert_eq!(db.get_worktree(id).unwrap().unwrap().lane, "In Review");
+        assert!(!db.rename_lane(root, "nope", "x").unwrap());
+    }
+
+    #[test]
+    fn deleting_a_lane_ungroups_its_members() {
+        let (_dir, db) = test_db();
+        let root = Path::new("/tmp/dellane");
+        db.upsert_repo(root, "dellane").unwrap();
+        db.sync_worktrees(
+            root,
+            &[
+                wt("/tmp/dellane", "main", true),
+                wt("/tmp/wt-a", "a", false),
+            ],
+        )
+        .unwrap();
+        db.create_lane(root, "spikes").unwrap();
+        let id = db.get_worktree_by_path("/tmp/wt-a").unwrap().unwrap().id;
+        db.patch_worktree(id, None, None, None, Some("spikes"))
+            .unwrap();
+
+        assert!(db.delete_lane(root, "spikes").unwrap());
+        // No FK to cascade from — `delete_lane` clears the assignments itself, in
+        // the same transaction, so the two can never disagree.
+        assert_eq!(db.get_worktree(id).unwrap().unwrap().lane, "");
+        assert!(!db.delete_lane(root, "spikes").unwrap());
+    }
+
+    #[test]
+    fn a_lane_assignment_must_name_a_lane_of_this_repo() {
+        let (_dir, db) = test_db();
+        let root = Path::new("/tmp/badlane");
+        db.upsert_repo(root, "badlane").unwrap();
+        db.sync_worktrees(root, &[wt("/tmp/badlane", "main", true)])
+            .unwrap();
+        let id = db.get_worktree_by_path("/tmp/badlane").unwrap().unwrap().id;
+
+        assert!(matches!(
+            db.patch_worktree(id, None, None, None, Some("ghost")),
+            Err(DbError::UnknownLane(_))
+        ));
+        // Ungrouping is always legal.
+        assert!(db.patch_worktree(id, None, None, None, Some("")).unwrap());
+    }
+
+    #[test]
+    fn rail_order_is_ungrouped_first_then_lanes_then_manual_position() {
+        let (_dir, db) = test_db();
+        let root = Path::new("/tmp/order");
+        db.upsert_repo(root, "order").unwrap();
+        db.sync_worktrees(
+            root,
+            &[
+                wt("/tmp/order", "main", true),
+                wt("/tmp/zeta", "zeta", false),
+                wt("/tmp/alpha", "alpha", false),
+                wt("/tmp/beta", "beta", false),
+            ],
+        )
+        .unwrap();
+
+        // With no lanes and nothing placed, the order is v9's exactly.
+        let aliases: Vec<String> = db
+            .list_worktrees(root)
+            .unwrap()
+            .into_iter()
+            .map(|w| w.alias)
+            .collect();
+        assert_eq!(aliases, vec!["main", "alpha", "beta", "zeta"]);
+
+        // A manual order puts placed worktrees first, unplaced alias-sorted after.
+        db.reorder_worktrees(root, &["/tmp/zeta".into(), "/tmp/beta".into()])
+            .unwrap();
+        let aliases: Vec<String> = db
+            .list_worktrees(root)
+            .unwrap()
+            .into_iter()
+            .map(|w| w.alias)
+            .collect();
+        assert_eq!(aliases, vec!["main", "zeta", "beta", "alpha"]);
+
+        // A lane moves its members below every ungrouped worktree.
+        db.create_lane(root, "review").unwrap();
+        let zeta = db.get_worktree_by_path("/tmp/zeta").unwrap().unwrap().id;
+        db.patch_worktree(zeta, None, None, None, Some("review"))
+            .unwrap();
+        let rows = db.list_worktrees(root).unwrap();
+        let aliases: Vec<&str> = rows.iter().map(|w| w.alias.as_str()).collect();
+        assert_eq!(aliases, vec!["main", "beta", "alpha", "zeta"]);
+        assert_eq!(rows.last().unwrap().lane, "review");
+    }
+
+    #[test]
+    fn manual_order_is_keyed_on_path_so_a_reused_rowid_inherits_nothing() {
+        let (_dir, db) = test_db();
+        let root = Path::new("/tmp/reuse");
+        db.upsert_repo(root, "reuse").unwrap();
+        db.sync_worktrees(
+            root,
+            &[
+                wt("/tmp/reuse", "main", true),
+                wt("/tmp/gone", "gone", false),
+            ],
+        )
+        .unwrap();
+        let old = db.get_worktree_by_path("/tmp/gone").unwrap().unwrap();
+        db.reorder_worktrees(root, &["/tmp/gone".into()]).unwrap();
+        assert_eq!(
+            db.get_worktree(old.id).unwrap().unwrap().sort_position,
+            Some(0)
+        );
+
+        // The worktree vanishes and a different one takes its place. SQLite reuses
+        // rowids, so this is the #201 hazard — an id-keyed position would be
+        // inherited here.
+        db.sync_worktrees(root, &[wt("/tmp/reuse", "main", true)])
+            .unwrap();
+        db.sync_worktrees(
+            root,
+            &[
+                wt("/tmp/reuse", "main", true),
+                wt("/tmp/fresh", "fresh", false),
+            ],
+        )
+        .unwrap();
+        let fresh = db.get_worktree_by_path("/tmp/fresh").unwrap().unwrap();
+        assert_eq!(
+            fresh.sort_position, None,
+            "a newly discovered worktree is unplaced, whatever rowid it landed on"
+        );
+        assert_eq!(fresh.lane, "");
+    }
+
+    #[test]
+    fn reorder_omissions_go_back_to_unplaced() {
+        let (_dir, db) = test_db();
+        let root = Path::new("/tmp/omit");
+        db.upsert_repo(root, "omit").unwrap();
+        db.sync_worktrees(
+            root,
+            &[
+                wt("/tmp/omit", "main", true),
+                wt("/tmp/a", "a", false),
+                wt("/tmp/b", "b", false),
+            ],
+        )
+        .unwrap();
+        db.reorder_worktrees(root, &["/tmp/a".into(), "/tmp/b".into()])
+            .unwrap();
+        // Sending a shorter list is how the UI expresses "b is no longer placed";
+        // the write is the whole order, so it must not leave b's old position.
+        db.reorder_worktrees(root, &["/tmp/a".into()]).unwrap();
+        assert_eq!(
+            db.get_worktree_by_path("/tmp/b")
+                .unwrap()
+                .unwrap()
+                .sort_position,
+            None
+        );
+    }
+
+    #[test]
+    fn reorder_lanes_appends_unmentioned_lanes() {
+        let (_dir, db) = test_db();
+        let root = Path::new("/tmp/lorder");
+        db.upsert_repo(root, "lorder").unwrap();
+        for name in ["a", "b", "c"] {
+            db.create_lane(root, name).unwrap();
+        }
+        db.reorder_lanes(root, &["c".into(), "a".into()]).unwrap();
+        let names: Vec<String> = db
+            .list_lanes(root)
+            .unwrap()
+            .into_iter()
+            .map(|l| l.name)
+            .collect();
+        assert_eq!(names, vec!["c", "a", "b"]);
+    }
+
+    // -----------------------------------------------------------------------
+    // Trash (§19)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn sync_does_not_resurrect_a_trashed_worktree() {
+        let (_dir, db) = test_db();
+        let root = Path::new("/tmp/trash");
+        db.upsert_repo(root, "trash").unwrap();
+        let discovered = [
+            wt("/tmp/trash", "main", true),
+            wt("/tmp/doomed", "doomed", false),
+        ];
+        db.sync_worktrees(root, &discovered).unwrap();
+        let id = db.get_worktree_by_path("/tmp/doomed").unwrap().unwrap().id;
+        assert!(db.trash_worktree(id).unwrap().is_some());
+
+        // The checkout still exists on disk until `git worktree remove` runs, so
+        // git still reports it — this is the pass that used to resurrect the row it
+        // was just asked to delete.
+        db.sync_worktrees(root, &discovered).unwrap();
+        let row = db.get_worktree(id).unwrap().unwrap();
+        assert!(!row.trashed_at.is_empty(), "still trashed after a sync");
+
+        // Once removal succeeds the path leaves git's list and the existing prune
+        // branch reaps the row. No third outcome needed for the success case.
+        db.sync_worktrees(root, &[wt("/tmp/trash", "main", true)])
+            .unwrap();
+        assert!(db.get_worktree(id).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_trashed_worktree_still_tracks_its_branch() {
+        // The checkout stays on disk for the whole retention period, which defaults
+        // to "until emptied" — so skipping the update for trashed rows meant a branch
+        // switch made inside one was invisible in the rail indefinitely.
+        let (_dir, db) = test_db();
+        let root = Path::new("/tmp/track");
+        db.upsert_repo(root, "track").unwrap();
+        db.sync_worktrees(
+            root,
+            &[
+                wt("/tmp/track", "main", true),
+                wt("/tmp/wt", "before", false),
+            ],
+        )
+        .unwrap();
+        let id = db.get_worktree_by_path("/tmp/wt").unwrap().unwrap().id;
+        db.trash_worktree(id).unwrap();
+
+        db.sync_worktrees(
+            root,
+            &[
+                wt("/tmp/track", "main", true),
+                wt("/tmp/wt", "after", false),
+            ],
+        )
+        .unwrap();
+        let row = db.get_worktree(id).unwrap().unwrap();
+        assert_eq!(row.branch, "after", "a trashed row still follows git");
+        assert!(
+            !row.trashed_at.is_empty(),
+            "and updating it must not take it out of the trash"
+        );
+    }
+
+    #[test]
+    fn trashing_refuses_the_main_checkout() {
+        let (_dir, db) = test_db();
+        let root = Path::new("/tmp/mainwt");
+        db.upsert_repo(root, "mainwt").unwrap();
+        db.sync_worktrees(root, &[wt("/tmp/mainwt", "main", true)])
+            .unwrap();
+        let id = db.get_worktree_by_path("/tmp/mainwt").unwrap().unwrap().id;
+        assert!(matches!(
+            db.trash_worktree(id),
+            Err(DbError::RefusingMainWorktree)
+        ));
+        assert!(db.trash_worktree(9_999).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_failed_removal_comes_back_out_of_trash_with_its_reason() {
+        let (_dir, db) = test_db();
+        let root = Path::new("/tmp/failwt");
+        db.upsert_repo(root, "failwt").unwrap();
+        db.sync_worktrees(
+            root,
+            &[
+                wt("/tmp/failwt", "main", true),
+                wt("/tmp/dirty", "d", false),
+            ],
+        )
+        .unwrap();
+        let id = db.get_worktree_by_path("/tmp/dirty").unwrap().unwrap().id;
+        db.trash_worktree(id).unwrap();
+        assert_eq!(db.list_trashed_worktrees().unwrap().len(), 1);
+
+        db.untrash_worktree(id, "contains modified files").unwrap();
+        let row = db.get_worktree(id).unwrap().unwrap();
+        assert!(row.trashed_at.is_empty(), "out of trash");
+        assert_eq!(row.trash_error, "contains modified files");
+        // A row out of trash is no longer work — otherwise the worker would spin on
+        // a removal git has already refused.
+        assert!(db.list_trashed_worktrees().unwrap().is_empty());
+
+        // Retrying clears the previous reason, so a stale error can't outlive it.
+        let retried = db.trash_worktree(id).unwrap().unwrap();
+        assert_eq!(retried.trash_error, "");
+
+        db.untrash_worktree(id, "again").unwrap();
+        assert!(db.clear_trash_error(id).unwrap());
+        assert!(!db.clear_trash_error(id).unwrap(), "idempotent");
+    }
+
+    #[test]
+    fn trashing_preserves_lane_and_position() {
+        let (_dir, db) = test_db();
+        let root = Path::new("/tmp/keeps");
+        db.upsert_repo(root, "keeps").unwrap();
+        db.sync_worktrees(
+            root,
+            &[wt("/tmp/keeps", "main", true), wt("/tmp/wt", "wt", false)],
+        )
+        .unwrap();
+        db.create_lane(root, "review").unwrap();
+        let id = db.get_worktree_by_path("/tmp/wt").unwrap().unwrap().id;
+        db.patch_worktree(id, None, None, None, Some("review"))
+            .unwrap();
+        db.reorder_worktrees(root, &["/tmp/wt".into()]).unwrap();
+
+        db.trash_worktree(id).unwrap();
+        // The reason lane membership lives on the row: a restore after a failed
+        // removal must not silently ungroup the worktree.
+        db.untrash_worktree(id, "nope").unwrap();
+        let row = db.get_worktree(id).unwrap().unwrap();
+        assert_eq!(row.lane, "review");
+        assert_eq!(row.sort_position, Some(0));
+    }
+
+    #[test]
+    fn a_sync_poll_does_not_reset_user_chosen_columns() {
+        // The trap a new column walks into: `sync_worktrees`'s UPDATE runs on every
+        // discovery poll, so a user-choice column listed there is silently reset
+        // seconds after the user sets it — having appeared to work when tested by
+        // hand. This pins the whole set, so adding a column to that statement fails
+        // here rather than in someone's afternoon.
+        let (_dir, db) = test_db();
+        let root = Path::new("/tmp/survive");
+        db.upsert_repo(root, "survive").unwrap();
+        let discovered = [wt("/tmp/survive", "main", true), wt("/tmp/wt", "wt", false)];
+        db.sync_worktrees(root, &discovered).unwrap();
+        db.create_lane(root, "review").unwrap();
+        let id = db.get_worktree_by_path("/tmp/wt").unwrap().unwrap().id;
+        db.patch_worktree(
+            id,
+            Some("chosen"),
+            Some("🦊"),
+            Some("#123456"),
+            Some("review"),
+        )
+        .unwrap();
+        db.reorder_worktrees(root, &["/tmp/wt".into()]).unwrap();
+
+        // Several polls, including one where git reports a different branch — the
+        // case that actually takes the write path.
+        db.sync_worktrees(root, &discovered).unwrap();
+        db.sync_worktrees(
+            root,
+            &[
+                wt("/tmp/survive", "main", true),
+                wt("/tmp/wt", "renamed-branch", false),
+            ],
+        )
+        .unwrap();
+
+        let row = db.get_worktree(id).unwrap().unwrap();
+        assert_eq!(row.alias, "chosen");
+        assert_eq!(row.emoji, "🦊");
+        assert_eq!(row.marker_color, "#123456");
+        assert_eq!(row.lane, "review");
+        assert_eq!(row.sort_position, Some(0));
+        // ...while the git-derived column DID follow git.
+        assert_eq!(row.branch, "renamed-branch");
+    }
+
+    #[test]
+    fn only_trashed_worktrees_past_their_retention_expire() {
+        let (_dir, db) = test_db();
+        let root = Path::new("/tmp/retain");
+        db.upsert_repo(root, "retain").unwrap();
+        db.sync_worktrees(
+            root,
+            &[
+                wt("/tmp/retain", "main", true),
+                wt("/tmp/live", "live", false),
+                wt("/tmp/binned", "binned", false),
+            ],
+        )
+        .unwrap();
+        let binned = db.get_worktree_by_path("/tmp/binned").unwrap().unwrap().id;
+
+        // Nothing is trashed yet, so nothing can expire however long the horizon.
+        assert!(db.expired_trashed_worktrees(0).unwrap().is_empty());
+
+        db.trash_worktree(binned).unwrap();
+        // Inside the retention window the checkout stays put — that is the whole
+        // point of the holding area, and what makes restore an undo and not a race.
+        assert!(db.expired_trashed_worktrees(3600).unwrap().is_empty());
+
+        // Past it, and only the trashed one is offered. A worktree nobody binned is
+        // never a candidate, whatever its activity: this is retention, not a scan for
+        // idleness.
+        let expired = db.expired_trashed_worktrees(0).unwrap();
+        assert_eq!(expired.len(), 1);
+        assert_eq!(expired[0].path, "/tmp/binned");
+
+        // Restoring takes it back out of the queue entirely.
+        db.untrash_worktree(binned, "").unwrap();
+        assert!(db.expired_trashed_worktrees(0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn reordering_does_not_unplace_a_trashed_worktree() {
+        let (_dir, db) = test_db();
+        let root = Path::new("/tmp/keeppos");
+        db.upsert_repo(root, "keeppos").unwrap();
+        db.sync_worktrees(
+            root,
+            &[
+                wt("/tmp/keeppos", "main", true),
+                wt("/tmp/going", "going", false),
+                wt("/tmp/staying", "staying", false),
+            ],
+        )
+        .unwrap();
+        db.reorder_worktrees(root, &["/tmp/going".into(), "/tmp/staying".into()])
+            .unwrap();
+        let going = db.get_worktree_by_path("/tmp/going").unwrap().unwrap();
+        db.trash_worktree(going.id).unwrap();
+
+        // The UI omits pending removals from the order it sends, so without the
+        // `trashed_at = ''` exemption any unrelated drag would strip the position off
+        // a worktree mid-removal — and a removal that then failed would put it back
+        // unplaced. This is what makes v10's "keeps its lane AND its position" true.
+        db.reorder_worktrees(root, &["/tmp/staying".into()])
+            .unwrap();
+        assert_eq!(
+            db.get_worktree(going.id).unwrap().unwrap().sort_position,
+            Some(0),
+            "a trashed worktree keeps its position through an unrelated reorder"
+        );
+    }
+
+    #[test]
+    fn an_oversized_reorder_is_rejected_before_the_write_lock() {
+        let (_dir, db) = test_db();
+        let root = Path::new("/tmp/toolong");
+        db.upsert_repo(root, "toolong").unwrap();
+        let huge: Vec<String> = (0..=MAX_ORDER_LEN).map(|i| format!("/p/{i}")).collect();
+        assert!(matches!(
+            db.reorder_worktrees(root, &huge),
+            Err(DbError::OrderTooLong(_))
+        ));
+        assert!(matches!(
+            db.reorder_lanes(root, &huge),
+            Err(DbError::OrderTooLong(_))
+        ));
+    }
+
+    #[test]
+    fn moving_a_worktree_to_another_lane_clears_its_manual_position() {
+        let (_dir, db) = test_db();
+        let root = Path::new("/tmp/lanepos");
+        db.upsert_repo(root, "lanepos").unwrap();
+        db.sync_worktrees(
+            root,
+            &[
+                wt("/tmp/lanepos", "main", true),
+                wt("/tmp/a", "a", false),
+                wt("/tmp/b", "b", false),
+            ],
+        )
+        .unwrap();
+        db.create_lane(root, "review").unwrap();
+        let a = db.get_worktree_by_path("/tmp/a").unwrap().unwrap().id;
+        db.reorder_worktrees(root, &["/tmp/a".into(), "/tmp/b".into()])
+            .unwrap();
+        assert_eq!(db.get_worktree(a).unwrap().unwrap().sort_position, Some(0));
+
+        // Positions are dense repo-wide once anything has been dragged, so carrying
+        // one into another lane would tie an existing member and land the worktree
+        // mid-lane instead of where "Move to lane" implied.
+        db.patch_worktree(a, None, None, None, Some("review"))
+            .unwrap();
+        let row = db.get_worktree(a).unwrap().unwrap();
+        assert_eq!(row.lane, "review");
+        assert_eq!(row.sort_position, None);
+
+        // A patch that does NOT change the lane leaves the position alone.
+        db.reorder_worktrees(root, &["/tmp/a".into()]).unwrap();
+        db.patch_worktree(a, Some("renamed"), None, None, Some("review"))
+            .unwrap();
+        assert_eq!(db.get_worktree(a).unwrap().unwrap().sort_position, Some(0));
+    }
+
+    #[test]
+    fn lane_names_that_would_break_a_url_path_are_rejected() {
+        let (_dir, db) = test_db();
+        let root = Path::new("/tmp/dots");
+        db.upsert_repo(root, "dots").unwrap();
+        // `encodeURIComponent` leaves dots unescaped and the URL parser resolves
+        // them away, so a lane named `..` could never be renamed or deleted.
+        for bad in [".", ".."] {
+            assert!(
+                matches!(db.create_lane(root, bad), Err(DbError::InvalidLaneName(_))),
+                "expected {bad:?} to be rejected"
+            );
+        }
+        // A name merely containing dots is fine.
+        assert!(db.create_lane(root, "v1.2").is_ok());
+    }
+
+    #[test]
+    fn lane_collisions_fold_case_the_way_the_client_does() {
+        let (_dir, db) = test_db();
+        let root = Path::new("/tmp/fold");
+        db.upsert_repo(root, "fold").unwrap();
+        db.create_lane(root, "Ärger").unwrap();
+        // Non-ASCII too: the client compares with JavaScript's Unicode-aware
+        // `toLowerCase`, and an ASCII-only compare here made the two disagree about
+        // what counts as a duplicate.
+        assert!(matches!(
+            db.create_lane(root, "ärger"),
+            Err(DbError::LaneTaken(_))
+        ));
+        assert!(db.create_lane(root, "andere").is_ok());
     }
 }

@@ -14,7 +14,7 @@ use std::path::{Path as FsPath, PathBuf};
 
 use axum::extract::{Path, Query};
 use axum::http::StatusCode;
-use axum::routing::{get, patch, post};
+use axum::routing::{delete, get, patch, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
@@ -45,7 +45,26 @@ pub fn routes() -> Router {
             patch(patch_worktree).delete(delete_worktree),
         )
         .route("/api/worktrees/{id}/start", post(start_worktree_run))
+        .route("/api/worktrees/{id}/restore", post(restore_worktree))
+        .route("/api/worktrees/{id}/delete", post(delete_trashed_worktree))
+        .route("/api/trash", delete(empty_trash))
+        .route(
+            "/api/worktrees/{id}/trash-error",
+            delete(dismiss_trash_error),
+        )
+        // `/api/lane-order`, not `/api/lanes/order`: a static segment wins over a
+        // dynamic one, so `/api/lanes/order` would shadow `/api/lanes/{name}` for a
+        // lane the user is allowed to call "order" — `PATCH`/`DELETE` would hit this
+        // POST-only node and 405, leaving that lane impossible to rename or delete.
+        // Same reasoning for the worktree order against `/api/worktrees/{id}`, where
+        // the id is numeric and so cannot actually collide — kept parallel anyway,
+        // because the next reader should not have to work out which of the two was
+        // safe by accident.
+        .route("/api/worktree-order", post(reorder_worktrees))
         .route("/api/worktree-emoji", get(worktree_emoji))
+        .route("/api/lanes", get(list_lanes).post(create_lane))
+        .route("/api/lane-order", post(reorder_lanes))
+        .route("/api/lanes/{name}", patch(rename_lane).delete(delete_lane))
         .route("/api/pick-directory", post(pick_directory))
         .layer(axum::middleware::from_fn(csrf_layer))
 }
@@ -333,6 +352,28 @@ fn write_err(e: veld_core::db::DbError) -> ApiError {
             StatusCode::CONFLICT,
             format!("another checkout of this repo is already called \"{alias}\""),
         ),
+        // The main-checkout refusal lives in the DB layer (`trash_worktree`) rather
+        // than in this handler, so every path that can bin a worktree inherits it
+        // instead of each one having to remember. Keeping the 400 here preserves the
+        // status the UI already handles.
+        veld_core::db::DbError::RefusingMainWorktree => err(
+            StatusCode::BAD_REQUEST,
+            "refusing to remove the main checkout",
+        ),
+        veld_core::db::DbError::UnknownLane(_) => {
+            warn!("rejected lane assignment: {e}");
+            err(StatusCode::BAD_REQUEST, "no such lane in this repo")
+        }
+        veld_core::db::DbError::OrderTooLong(_) => {
+            warn!("rejected oversized reorder: {e}");
+            err(
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "a reorder may list at most {} entries",
+                    veld_core::db::MAX_ORDER_LEN
+                ),
+            )
+        }
         other => db_err(other),
     }
 }
@@ -347,7 +388,7 @@ fn open_desktop_db() -> Result<Db, ApiError> {
 
 /// Run `git -C <dir> <args…>` with the user's login-shell PATH. Returns
 /// trimmed stdout, or the trimmed stderr as the error message.
-async fn git(dir: &FsPath, args: &[&str]) -> Result<String, String> {
+pub(super) async fn git(dir: &FsPath, args: &[&str]) -> Result<String, String> {
     let path_env = cached_user_path().await;
     let output = tokio::process::Command::new("git")
         .arg("-C")
@@ -372,6 +413,29 @@ async fn git(dir: &FsPath, args: &[&str]) -> Result<String, String> {
 /// Parse `git worktree list --porcelain` output. The first entry is the main
 /// checkout. Detached checkouts get the branch label `(detached)`; bare
 /// entries are skipped (nothing to open or run there).
+///
+/// **`prunable` entries are skipped too**, which is a correctness requirement and
+/// not a tidy-up. Git keeps a worktree's administrative entry under
+/// `.git/worktrees/<n>/` after the checkout itself is gone, and reports it with a
+/// `prunable <reason>` line (e.g. "gitdir file points to non-existent location")
+/// until `git worktree prune` runs — whose default expiry is
+/// `gc.worktreePruneExpire`, **three months**. Treating such an entry as
+/// discovered means `sync_worktrees` sees the path and keeps the row alive, so a
+/// worktree deleted outside veld (`rm -rf`, a `git worktree move`, a wiped
+/// scratch disk) stayed in the rail indefinitely pointing at nothing. Skipping it
+/// lets the existing `path NOT IN (…)` delete reap the row on the next poll.
+///
+/// **The cost, stated because it is not free.** Reaping the row also discards the
+/// user state on it — alias, marker, lane, manual position — and git reports
+/// `prunable` for *any* absent checkout, including one on an unmounted external or
+/// network volume, which is transient. So a worktree on a disk that is currently
+/// unmounted comes back re-registered with a fresh alias and marker and no lane.
+/// A grace period (`missing_since`, reap only after N hours) is the fix that serves
+/// both cases and is deliberately not in this change: it puts a clock in the
+/// reconcile pass, and the pass having exactly one new branch is what makes it
+/// reviewable. Note the repo-level case is already covered — if the *repo root*
+/// is unreachable, `git worktree list` fails, `sync_repo_worktrees` returns `Err`,
+/// and `RepoView.available` goes false with every row left untouched.
 fn parse_worktree_list(porcelain: &str) -> Vec<DiscoveredWorktree> {
     let mut out = Vec::new();
     let mut first = true;
@@ -380,6 +444,7 @@ fn parse_worktree_list(porcelain: &str) -> Vec<DiscoveredWorktree> {
         let mut branch: Option<&str> = None;
         let mut bare = false;
         let mut detached = false;
+        let mut prunable = false;
         for line in block.lines() {
             if let Some(p) = line.strip_prefix("worktree ") {
                 path = Some(p);
@@ -389,11 +454,15 @@ fn parse_worktree_list(porcelain: &str) -> Vec<DiscoveredWorktree> {
                 bare = true;
             } else if line == "detached" {
                 detached = true;
+            } else if line == "prunable" || line.starts_with("prunable ") {
+                prunable = true;
             }
         }
         let Some(path) = path else { continue };
+        // `is_main` is consumed before the skips so that a bare or prunable first
+        // block does not promote the next worktree to main.
         let is_main = std::mem::take(&mut first);
-        if bare {
+        if bare || prunable {
             continue;
         }
         let branch = if detached {
@@ -529,6 +598,13 @@ struct RepoView {
     /// known state, not fresh.
     available: bool,
     worktrees: Vec<WorktreeView>,
+    /// The repo's rail lanes, in their own order.
+    ///
+    /// Travels with the repo rather than on its own poll because the rail cannot
+    /// render a group header without both halves, and fetching them separately
+    /// means a frame where a worktree's `lane` names a lane the client has not
+    /// heard of yet.
+    lanes: Vec<veld_core::db::LaneRecord>,
 }
 
 #[derive(Serialize)]
@@ -632,10 +708,12 @@ async fn repo_view(db: &Db, repo: RepoRecord, available: bool) -> Result<RepoVie
         .into_iter()
         .map(worktree_view)
         .collect();
+    let lanes = db.list_lanes(FsPath::new(&repo.root)).map_err(db_err)?;
     Ok(RepoView {
         repo,
         available,
         worktrees,
+        lanes,
     })
 }
 
@@ -929,18 +1007,27 @@ struct PatchWorktreeBody {
     /// the `worktree.markerStyle` setting.
     #[serde(default)]
     marker_color: Option<String>,
+    /// The rail lane to group this worktree under, or `""` to ungroup it.
+    ///
+    /// A lane name of this repo — validated inside `Db::patch_worktree`'s
+    /// transaction, so a concurrent lane deletion cannot slip a dangling name past
+    /// it. Assignment rides on the worktree PATCH rather than getting its own
+    /// endpoint because `patch_worktree` is the one owner of worktree-row edits.
+    #[serde(default)]
+    lane: Option<String>,
 }
 
 impl PatchWorktreeBody {
-    /// Derived from the fields, so adding a fourth can't leave the
+    /// Derived from the fields, so adding a fifth can't leave the
     /// "nothing to update" guard silently behind.
     fn is_empty(&self) -> bool {
         let Self {
             alias,
             emoji,
             marker_color,
+            lane,
         } = self;
-        alias.is_none() && emoji.is_none() && marker_color.is_none()
+        alias.is_none() && emoji.is_none() && marker_color.is_none() && lane.is_none()
     }
 }
 
@@ -951,7 +1038,7 @@ async fn patch_worktree(
     if body.is_empty() {
         return Err(err(
             StatusCode::BAD_REQUEST,
-            "nothing to update: send an alias, an emoji, a marker_color, or any combination",
+            "nothing to update: send an alias, an emoji, a marker_color, a lane, or any combination",
         ));
     }
     // Validate everything before touching the database: a request carrying a
@@ -975,6 +1062,7 @@ async fn patch_worktree(
             body.alias.as_deref(),
             body.emoji.as_deref(),
             body.marker_color.as_deref(),
+            body.lane.as_deref(),
         )
         .map_err(write_err)?;
     if !existed {
@@ -989,44 +1077,297 @@ async fn patch_worktree(
 
 #[derive(Deserialize)]
 struct DeleteQuery {
+    /// Remove the checkout even with modified or untracked files
+    /// (`git worktree remove --force`).
+    ///
+    /// Deliberately **not** persisted with the trash state. If the daemon dies
+    /// mid-removal, recovery retries without it — a crash must not silently
+    /// upgrade a removal to one that discards uncommitted work, and forcing is a
+    /// decision worth re-taking rather than inheriting.
     #[serde(default)]
     force: bool,
 }
 
+/// Move a worktree to the trash — or, with `?force=true`, delete it outright.
+///
+/// Binning deletes nothing: it marks the row and returns. The checkout stays on
+/// disk, restoring it is a real undo, and `git worktree remove` runs when the
+/// retention period expires (the GC pass) or when the user asks for it now
+/// (`POST /api/worktrees/{id}/delete`). This used to await the removal inline, which
+/// froze the UI for as long as a large checkout took.
+///
+/// `force` remains inline and immediate: it exists to get past a refusal the user has
+/// already been shown, so the answer they need is whether *this* attempt worked.
 async fn delete_worktree(
     Path(id): Path<i64>,
     Query(q): Query<DeleteQuery>,
 ) -> Result<StatusCode, ApiError> {
     let db = open_desktop_db()?;
     let wt = db
-        .get_worktree(id)
-        .map_err(db_err)?
+        .trash_worktree(id)
+        .map_err(write_err)?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "worktree not found"))?;
-    if wt.is_main {
+
+    if !q.force {
+        // Nothing is queued and nothing is deleted: the checkout stays on disk until
+        // its retention expires or the user asks for it now. This is why the request
+        // is fast — there is no slow work left in it at all.
+        return Ok(StatusCode::ACCEPTED);
+    }
+
+    // Forced removal stays inline: the user has already been told why the
+    // un-forced attempt failed and has chosen to discard the changes, so the
+    // answer they need is whether *this* attempt worked.
+    //
+    // It does NOT stop runs first — the background worker is what does that, and
+    // awaiting a teardown inside a request is the freeze this batch removed. So
+    // refuse instead of quietly deleting the directory out from under a live run:
+    // `--force` is about discarding *file* changes, and letting it also mean "and
+    // kill whatever is running in there" is a promise the dialog's copy does not
+    // make. In practice this is a safety net rather than a common path, because the
+    // un-forced attempt that produced the refusal already stopped the runs.
+    // Untrash on the error path too, not just on the refusal below. `?` here would
+    // return a 500 having already set `trashed_at`, leaving the row in "Pending
+    // removal" with nothing queued to act on it until the next daemon restart —
+    // every other exit from this function releases the row.
+    let live = match db.live_run_names(FsPath::new(&wt.path)) {
+        Ok(live) => live,
+        Err(e) => {
+            let _ = db.untrash_worktree(id, "");
+            return Err(db_err(e));
+        }
+    };
+    if let Some(name) = live.first() {
+        let _ = db.untrash_worktree(id, "");
         return Err(err(
-            StatusCode::BAD_REQUEST,
-            "refusing to remove the main checkout",
+            StatusCode::CONFLICT,
+            format!("environment \"{name}\" is still running in this worktree — stop it first"),
         ));
     }
 
-    let repo_root = PathBuf::from(&wt.repo_root);
-    let mut args = vec!["worktree", "remove"];
-    if q.force {
-        args.push("--force");
-    }
-    args.push("--");
-    args.push(&wt.path);
-    match git(&repo_root, &args).await {
-        Ok(_) => {}
-        // Already gone from disk (removed manually): prune git's bookkeeping
-        // and drop the row instead of failing.
-        Err(_) if !FsPath::new(&wt.path).exists() => {
-            let _ = git(&repo_root, &["worktree", "prune"]).await;
+    // Through the same single owner the worker uses, so it inherits the
+    // deletion guard instead of being a second unguarded path — which is exactly
+    // what it was, and what round 3 of the review found.
+    match super::worktree_trash::delete_checkout_forced(&db, &wt).await {
+        Ok(()) => Ok(StatusCode::NO_CONTENT),
+        Err(reason) => {
+            // Back out of the trash with the reason, as the worker would — otherwise
+            // a failed force leaves a row that looks like pending work forever.
+            let _ = db.untrash_worktree(id, &reason);
+            Err(err(StatusCode::UNPROCESSABLE_ENTITY, reason))
         }
-        Err(e) => return Err(err(StatusCode::UNPROCESSABLE_ENTITY, e)),
     }
-    db.remove_worktree(id).map_err(db_err)?;
+}
+
+/// Take a worktree out of the trash (undo).
+///
+/// A real undo for the whole retention period, since binning deletes nothing. It can
+/// still lose a race against an explicit "delete now" already in the worker, which is
+/// why it reports whether the row was there rather than assuming it was.
+async fn restore_worktree(Path(id): Path<i64>) -> Result<Json<WorktreeView>, ApiError> {
+    let db = open_desktop_db()?;
+    // Refuse rather than lie. Once a deletion has started the directory is going and
+    // no database write brings it back, so clearing `trashed_at` here would hand back
+    // a live-looking row for a checkout that disappears moments later — the silent
+    // loss the trash exists to prevent. The check and the write share one lock, so
+    // the deletion cannot start between them.
+    if !super::worktree_trash::try_restore(&db, id).map_err(db_err)? {
+        return Err(err(
+            StatusCode::CONFLICT,
+            "this worktree is already being deleted",
+        ));
+    }
+    let wt = db
+        .get_worktree(id)
+        .map_err(db_err)?
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "worktree already removed"))?;
+    Ok(Json(worktree_view(wt)))
+}
+
+/// Delete a trashed worktree now, without waiting for its retention to expire.
+///
+/// Queues the same worker the retention sweep uses, so there is exactly one code path
+/// that ever runs `git worktree remove`. Returns `409` for a worktree that is not in
+/// the trash: emptying the bin is not a shortcut around the confirmation that puts
+/// things in it.
+async fn delete_trashed_worktree(Path(id): Path<i64>) -> Result<StatusCode, ApiError> {
+    let db = open_desktop_db()?;
+    let wt = db
+        .get_worktree(id)
+        .map_err(db_err)?
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "worktree not found"))?;
+    if wt.trashed_at.is_empty() {
+        return Err(err(
+            StatusCode::CONFLICT,
+            "this worktree is not in the trash",
+        ));
+    }
+    super::worktree_trash::enqueue(wt.id);
+    Ok(StatusCode::ACCEPTED)
+}
+
+/// Empty the trash: delete every trashed worktree of a repo now.
+async fn empty_trash(Query(q): Query<RepoQuery>) -> Result<Json<serde_json::Value>, ApiError> {
+    let db = open_desktop_db()?;
+    let trashed: Vec<i64> = db
+        .list_worktrees(FsPath::new(&q.repo_root))
+        .map_err(db_err)?
+        .into_iter()
+        .filter(|w| !w.trashed_at.is_empty())
+        .map(|w| w.id)
+        .collect();
+    for id in &trashed {
+        super::worktree_trash::enqueue(*id);
+    }
+    Ok(Json(serde_json::json!({ "queued": trashed.len() })))
+}
+
+/// Clear a recorded removal failure — the user has read it.
+async fn dismiss_trash_error(Path(id): Path<i64>) -> Result<StatusCode, ApiError> {
+    let db = open_desktop_db()?;
+    db.clear_trash_error(id).map_err(db_err)?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+struct WorktreeOrderBody {
+    repo_root: String,
+    /// The full order the client is displaying, as worktree **paths**.
+    ///
+    /// Paths, never ids: `worktrees.id` is a rowid and SQLite reuses it, so an
+    /// id-keyed order outlives the worktree and lands on the next one created
+    /// (#201). Sending the whole list rather than a move-one delta keeps the write
+    /// idempotent — omitted paths go back to unplaced.
+    order: Vec<String>,
+}
+
+async fn reorder_worktrees(Json(body): Json<WorktreeOrderBody>) -> Result<StatusCode, ApiError> {
+    let db = open_desktop_db()?;
+    db.reorder_worktrees(FsPath::new(&body.repo_root), &body.order)
+        .map_err(write_err)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------------------------------------------------------------------------
+// Rail lanes
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct RepoQuery {
+    repo_root: String,
+}
+
+async fn list_lanes(Query(q): Query<RepoQuery>) -> Result<Json<serde_json::Value>, ApiError> {
+    let db = open_desktop_db()?;
+    let lanes = db.list_lanes(FsPath::new(&q.repo_root)).map_err(db_err)?;
+    Ok(Json(serde_json::json!({ "lanes": lanes })))
+}
+
+#[derive(Deserialize)]
+struct LaneBody {
+    repo_root: String,
+    name: String,
+}
+
+async fn create_lane(Json(body): Json<LaneBody>) -> Result<Json<serde_json::Value>, ApiError> {
+    let db = open_desktop_db()?;
+    let lane = db
+        .create_lane(FsPath::new(&body.repo_root), &body.name)
+        .map_err(lane_err)?;
+    Ok(Json(serde_json::json!({ "lane": lane })))
+}
+
+#[derive(Deserialize)]
+struct RenameLaneBody {
+    repo_root: String,
+    name: String,
+}
+
+async fn rename_lane(
+    Path(from): Path<String>,
+    Json(body): Json<RenameLaneBody>,
+) -> Result<StatusCode, ApiError> {
+    let db = open_desktop_db()?;
+    let existed = db
+        .rename_lane(FsPath::new(&body.repo_root), &from, &body.name)
+        .map_err(lane_err)?;
+    if !existed {
+        return Err(err(StatusCode::NOT_FOUND, "lane not found"));
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn delete_lane(
+    Path(name): Path<String>,
+    Query(q): Query<RepoQuery>,
+) -> Result<StatusCode, ApiError> {
+    let db = open_desktop_db()?;
+    let existed = db
+        .delete_lane(FsPath::new(&q.repo_root), &name)
+        .map_err(db_err)?;
+    if !existed {
+        return Err(err(StatusCode::NOT_FOUND, "lane not found"));
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+struct LaneOrderBody {
+    repo_root: String,
+    /// The full lane order the client is displaying, as lane **names** — lanes are
+    /// identified by `(repo_root, name)` and have no id. Names the caller omits keep
+    /// their relative order after the ones it lists.
+    order: Vec<String>,
+}
+
+async fn reorder_lanes(Json(body): Json<LaneOrderBody>) -> Result<StatusCode, ApiError> {
+    let db = open_desktop_db()?;
+    db.reorder_lanes(FsPath::new(&body.repo_root), &body.order)
+        .map_err(lane_err)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Lane-name rejections are client errors, not database errors.
+///
+/// Same posture as [`write_err`]: the message is fixed and the offending value goes
+/// only to the log, because echoing unbounded client input back into a response
+/// body is a habit worth not starting.
+fn lane_err(e: veld_core::db::DbError) -> ApiError {
+    use veld_core::db::DbError;
+    match e {
+        DbError::LaneTaken(_) => {
+            warn!("rejected lane name: {e}");
+            err(
+                StatusCode::CONFLICT,
+                "this repo already has a lane with that name",
+            )
+        }
+        DbError::InvalidLaneName(_) => {
+            warn!("rejected lane name: {e}");
+            err(
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "a lane name must be 1–{} characters",
+                    veld_core::db::MAX_LANE_NAME_LEN
+                ),
+            )
+        }
+        DbError::TooManyLanes(max) => err(
+            StatusCode::CONFLICT,
+            format!("this repo already has the maximum of {max} lanes"),
+        ),
+        DbError::OrderTooLong(_) => {
+            warn!("rejected oversized reorder: {e}");
+            err(
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "a reorder may list at most {} entries",
+                    veld_core::db::MAX_ORDER_LEN
+                ),
+            )
+        }
+        other => db_err(other),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1210,6 +1551,37 @@ mod tests {
     }
 
     #[test]
+    fn porcelain_parsing_skips_prunable_entries() {
+        // Git keeps a worktree's admin entry under `.git/worktrees/<n>/` after the
+        // checkout is gone and reports it as `prunable` until `git worktree prune`
+        // runs — whose default expiry is `gc.worktreePruneExpire`, three months.
+        // Treating it as discovered kept the row alive for that whole window, so a
+        // worktree deleted outside veld sat in the rail pointing at nothing.
+        // Verified against real `git worktree list --porcelain` output (git 2.50).
+        let out = "worktree /repo\nHEAD abc\nbranch refs/heads/main\n\n\
+                   worktree /wts/gone\nHEAD def\nbranch refs/heads/gone\n\
+                   prunable gitdir file points to non-existent location\n\n\
+                   worktree /wts/live\nHEAD 123\nbranch refs/heads/live\n";
+        let wts = parse_worktree_list(out);
+        assert_eq!(wts.len(), 2);
+        assert_eq!(wts[0].path, "/repo");
+        assert!(wts[0].is_main);
+        assert_eq!(wts[1].path, "/wts/live");
+        assert!(!wts[1].is_main, "the skip must not promote a worktree");
+    }
+
+    #[test]
+    fn porcelain_parsing_skips_a_prunable_main_without_promoting() {
+        // Same rule as the bare case: consuming `first` before the skip is what
+        // stops the next worktree inheriting main-ness.
+        let out = "worktree /repo\nHEAD abc\nprunable gitdir file points nowhere\n\n\
+                   worktree /wts/a\nHEAD abc\nbranch refs/heads/a\n";
+        let wts = parse_worktree_list(out);
+        assert_eq!(wts.len(), 1);
+        assert!(!wts[0].is_main);
+    }
+
+    #[test]
     fn branch_validation() {
         assert!(validate_branch("feat/checkout-v2").is_ok());
         assert!(validate_branch("-oops").is_err());
@@ -1300,6 +1672,27 @@ mod tests {
                 ("PATCH", "/api/worktrees/1", r#"{"alias":"a"}"#),
                 ("DELETE", "/api/worktrees/1", ""),
                 ("POST", "/api/worktrees/1/start", "{}"),
+                ("POST", "/api/worktrees/1/restore", ""),
+                ("POST", "/api/worktrees/1/delete", ""),
+                ("DELETE", "/api/trash?repo_root=/tmp", ""),
+                ("DELETE", "/api/worktrees/1/trash-error", ""),
+                (
+                    "POST",
+                    "/api/worktree-order",
+                    r#"{"repo_root":"/tmp","order":[]}"#,
+                ),
+                ("POST", "/api/lanes", r#"{"repo_root":"/tmp","name":"x"}"#),
+                (
+                    "POST",
+                    "/api/lane-order",
+                    r#"{"repo_root":"/tmp","order":[]}"#,
+                ),
+                (
+                    "PATCH",
+                    "/api/lanes/x",
+                    r#"{"repo_root":"/tmp","name":"y"}"#,
+                ),
+                ("DELETE", "/api/lanes/x?repo_root=/tmp", ""),
                 ("POST", "/api/pick-directory", ""),
             ] {
                 let res = super::super::routes()

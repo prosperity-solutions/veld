@@ -311,11 +311,229 @@ select:focus {
   transition: width 0.15s;
   overflow: hidden;
 }
+/* Expanded width is set inline from the per-window preference; this is only the
+   fallback for a window that has never been sized (and for a browser tab, which
+   has no window slot). The transition is on width, so a drag would animate
+   against the pointer — it is suppressed while dragging via `.rail.resizing`. */
 .rail.wide {
   width: 236px;
+  position: relative;
+}
+
+/* Live resize: no transition.
+ *
+ * `.rail`'s `transition: width 0.15s` is for the collapse/expand toggle, where
+ * 236px → 64px should animate. During a drag it re-animates on every pointer move,
+ * so the edge chases the cursor 150ms behind and the drag feels like it is lagging.
+ * The class is only present while the pointer is down. */
+.rail.resizing {
+  transition: none;
 }
 .rail:not(.wide) {
   width: 64px;
+}
+
+/* The drag edge. Wider than it looks (8px hit area, 1px of visible line on
+   hover) because a 1px target is a target you miss. */
+.rail-resizer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 8px;
+  height: 100%;
+  cursor: col-resize;
+  /* Above the list so the edge stays grabbable over a row, but the rail itself
+     is not a stacking context competitor with the panes. */
+  z-index: 2;
+  background: transparent;
+  transition: background 0.12s;
+}
+.rail-resizer:hover,
+.rail-resizer:focus-visible {
+  background: var(--accent);
+  outline: none;
+}
+
+/* One section of the rail. Rows inside stay tight so a section reads as a block
+   rather than as scattered rows. */
+.rail-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* A hairline between sections, on top of the gap.
+ *
+ * The gap alone left the boundary ambiguous once a lane had a header — the header's
+ * own leading felt like the separation, so two adjacent lanes read as one list with
+ * a stray label in it. Inset from the rail's padding so it reads as a divider
+ * between groups rather than as the panel's own edge, and it is what separates the
+ * MAIN checkout from the branches in the collapsed rail, where no header exists to
+ * do it. */
+.rail-group + .rail-group {
+  margin-top: 9px;
+  padding-top: 9px;
+  border-top: 1px solid var(--border);
+}
+
+/* Lit while a drag is over the section. The one affordance an empty lane has, and
+   the reason a drop into a lane's blank space reads as landing somewhere. */
+.rail-group.drop-in {
+  background: color-mix(in oklab, var(--accent) 9%, transparent);
+  border-radius: 8px;
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--accent) 35%, transparent);
+}
+
+/* The empty-lane target. Sized so it is actually hittable: a freshly created lane
+   used to offer only the few pixels of its header's margin, which made it look like
+   it refused worktrees. */
+.lane-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 34px;
+  margin: 1px 3px 2px;
+  border: 1px dashed var(--border2);
+  border-radius: 8px;
+  color: var(--faint);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  user-select: none;
+}
+.rail-group.drop-in .lane-empty {
+  border-color: var(--accent);
+  border-style: solid;
+  color: var(--accent);
+}
+
+.lane-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 7px 3px;
+  color: var(--muted);
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  user-select: none;
+}
+.lane-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.lane-count {
+  flex: none;
+  margin-left: auto;
+  /* Aligned with the rows' ⋮ column, so the count and the run controls below it
+     sit on the same right edge instead of a few pixels apart. */
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The lane menu button.
+ *
+ * Always visible, exactly like the rows' ⋮, for two reasons. It is the point of
+ * having it — right-click alone is not an affordance, so a control that appears only
+ * once you are already hovering the thing you did not know was interactive
+ * discovers nothing. And a hover-revealed control cannot be reached by keyboard: a
+ * `display: none` button is not focusable, so pairing it with `:focus-visible` is a
+ * rule that can never fire (the same trap as a disabled button's tooltip in #205).
+ *
+ * Sits after the count rather than replacing it — swapping the two on hover moves
+ * the thing under the pointer. */
+.lane-edit {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 17px;
+  height: 17px;
+  margin-left: 4px;
+  padding: 0;
+  border: none;
+  border-radius: 5px;
+  background: none;
+  color: var(--faint);
+  cursor: pointer;
+}
+.lane-edit:hover {
+  background: var(--elev);
+  color: var(--text);
+}
+/* Pending removal is a state, not a lane — coloured so it does not read as a
+   group the user made. */
+.rail-group.trash .lane-head {
+  color: var(--danger);
+}
+
+/* Dragging. The source row fades rather than disappearing: a list that reflows
+   under the pointer makes the drop target move as you aim at it. */
+.wt-row.dragging {
+  opacity: 0.4;
+}
+/* The insertion caret — the same 3px glowing bar the pane tab strip uses, turned
+ * horizontal.
+ *
+ * **Its own element, a sibling of the rows.** The first version drew it as a
+ * pseudo-element on `.wt-row`, which does not work here: the row carries
+ * `overflow: hidden` and an 8px `border-radius`, and overflow clips pseudo-elements
+ * too — so the caret was clipped to the row's rounded rect and read as a
+ * highlighted row border rather than as a gap opening between two rows. A sibling
+ * sits outside every row's clipping context, and it makes "after the last row" the
+ * same code path as any other position rather than a second special case.
+ *
+ * Zero height, so the list does not shift under the pointer mid-drag. The negative
+ * margin cancels the single extra 2px flex `gap` that inserting one more child into
+ * the column costs — exactly one, wherever the caret sits, because `gap` applies
+ * between every adjacent pair. */
+.rail-caret {
+  position: relative;
+  height: 0;
+  margin-top: -2px;
+}
+.rail-caret::before {
+  content: "";
+  position: absolute;
+  /* Inset to the rows' own rounded corners, so the bar spans the row it points at
+     rather than the full width of the rail. */
+  left: 3px;
+  right: 3px;
+  /* Centred on the 2px gutter between rows: half the bar either side of the
+     boundary, so it reads as a gap and not as a line belonging to one row. */
+  top: -1px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--accent);
+  /* The glow does the standing out — and a box-shadow contributes nothing to
+     layout, which is why it can be generous. */
+  box-shadow:
+    0 0 0 1px color-mix(in oklab, var(--accent) 40%, transparent),
+    0 0 9px 1px color-mix(in oklab, var(--accent) 75%, transparent);
+  /* Above the neighbouring rows, so the caret is never half-hidden behind one. */
+  z-index: 2;
+}
+
+/* On its way out: dimmed and struck through, because the row is still listed and
+   must not look like something you can still work in. Not hidden — a removal that
+   silently made a worktree vanish is exactly what makes a background job feel like
+   a bug when it later fails. */
+.wt-row.trashed {
+  opacity: 0.5;
+  cursor: default;
+}
+.wt-row.trashed .wt-alias {
+  text-decoration: line-through;
+}
+/* Came *back* out of trash because the removal failed. Full opacity — it is a
+   live worktree again — with the branch column carrying the reason. */
+.wt-row.failed-remove {
+  border-left-color: var(--danger);
+}
+.wt-row.failed-remove .wt-branch {
+  color: var(--danger);
 }
 
 /* Collapsed rows: status dot + emoji only, centered. Height comes from
@@ -364,6 +582,8 @@ select:focus {
      emoji. Must clear the tallest expanded child plus vertical padding. */
   min-height: 28px;
   box-sizing: border-box;
+  /* Positioning context for the drop caret's pseudo-element. */
+  position: relative;
 }
 .wt-row:hover {
   background: var(--panel);
