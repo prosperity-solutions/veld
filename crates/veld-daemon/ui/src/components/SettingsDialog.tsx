@@ -194,7 +194,7 @@ export function SettingsDialog(props: {
               that pane's layout. */}
           <Row
             label="Responsive switch in the pane toolbar"
-            help="One click into the resizable viewport, whose edges you drag to find where a layout breaks. Off means no emulation at all — it does not go back to a device you picked earlier."
+            help="One click into the resizable viewport, whose edges you drag to find where a layout breaks. The switch's own off state is no emulation at all — it does not go back to a device you picked earlier. Unchecking this hides the button; it changes nothing a pane is currently emulating."
           >
             <Checkbox
               size="xs"

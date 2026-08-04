@@ -28,6 +28,20 @@ export type MarkerStyle = "color" | "emoji";
  * Not the defaults — see the file header. Each entry exists because rendering
  * cannot proceed without *something*, and the honest choice is the behaviour the
  * release before the setting had.
+ *
+ * **One stated exception: a setting that decides whether a *new control exists*
+ * takes the shipped default, not the previous release's behaviour.** By the rule
+ * above `quickSwitch*` would be `false`, since the release before them had no
+ * switches — but this value is only ever reached when the *daemon* is older than
+ * this UI, and hiding a button this build's user has been told about, because the
+ * daemon has not heard of the key, is the wrong answer. Applying the rule literally
+ * would make an old daemon look like a broken new UI.
+ *
+ * Note what nothing checks: that these values match `defaults()` in
+ * `veld-core/src/db/settings.rs`. `every_known_key_round_trips_and_has_a_default`
+ * pins that a key *has* a Rust default, never that this copy agrees with it — so
+ * this is the one Rust↔TS pair that can still drift, and a deliberate divergence
+ * like the exception above has to stay written down rather than merely true.
  */
 const FALLBACK = {
   fontSize: 12,
@@ -166,8 +180,10 @@ export function markerFace(
  *
  * A preference rather than a fixed pair because the chrome already carries
  * back/forward/reload, the permission shield, the address bar, the session dot, the
- * device picker and DevTools, and it has to stay usable in a 300px pane. Both
- * default on — see the note beside the Rust defaults.
+ * device picker and DevTools — so whether two more buttons belong there is the
+ * user's call. Global and standing, **not** an answer to one narrow pane: see the
+ * note beside the Rust defaults for why a measured bar width would be that, and why
+ * this is not it. Both default on.
  */
 export interface QuickSwitchPrefs {
   responsive: boolean;

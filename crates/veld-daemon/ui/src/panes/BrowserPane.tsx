@@ -667,9 +667,10 @@ export function BrowserPane(props: {
   // ---- Quick switches -----------------------------------------------------
   //
   // The two things people do dozens of times an hour while working on a layout,
-  // both three levels deep in the device menu. Nothing here is new capability —
-  // it is reach, and which of them appears is a preference because the chrome is
-  // already eight controls wide and has to stay usable at 300px.
+  // both three levels deep in the device menu. Nothing here is new capability — it
+  // is reach, and which of them appears is a global preference: whether you want
+  // the shortcut at all, deliberately *not* an answer to one narrow pane (see the
+  // note beside the Rust defaults).
   //
   // **Each switch's off is one definite state, never menu history.** The colour scheme cycles
   // System → Dark → Light → System rather than toggling dark on and off: System is
@@ -1040,10 +1041,16 @@ export function BrowserPane(props: {
               size="sm"
               variant={responsiveOn ? "light" : "subtle"}
               color={responsiveOn ? "blue" : "gray"}
+              // The reason and the cost go in the *name*, not only the tooltip:
+              // Mantine's Tooltip wires no `aria-describedby`, so anything stated
+              // only there reaches sighted users only — and what this click discards
+              // is exactly what someone who cannot see the chip needs told.
               aria-label={
                 responsiveOn
                   ? "Turn off the responsive viewport"
-                  : "Turn on the responsive viewport"
+                  : emulation
+                    ? `Replace ${emulationLabel(emulation)}, ${emulationSize(emulation)}, with a responsive viewport at pane size`
+                    : "Turn on the responsive viewport"
               }
               aria-pressed={responsiveOn}
               onClick={() => (responsiveOn ? applyEmulation(null) : enterResponsive())}
@@ -1077,10 +1084,15 @@ export function BrowserPane(props: {
               // toggle, and a two-valued attribute would have to lie about one of
               // them. The label carries the state instead, the way the app's own
               // theme button does.
+              // Same rule as the responsive switch's name: `aria-disabled` with no
+              // reason is the screen-reader equivalent of the unreachable tooltip
+              // `bbaa9b7` fixed, so the reason belongs in the name too.
               aria-label={
-                schemeSuspended
-                  ? `Page colour scheme: ${schemeLabel}, paused`
-                  : `Page colour scheme: ${schemeLabel}`
+                iframeBackend
+                  ? `Page colour scheme: ${schemeLabel} — needs the desktop app`
+                  : schemeSuspended
+                    ? `Page colour scheme: ${schemeLabel}, paused — Chromium's debugger is in use elsewhere`
+                    : `Page colour scheme: ${schemeLabel} — click for ${nextSchemeLabel}`
               }
               data-disabled={iframeBackend || undefined}
               aria-disabled={iframeBackend || undefined}
