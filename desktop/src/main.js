@@ -374,7 +374,12 @@ async function trayMenu() {
     const shownRuns = running.slice(0, 10);
     // Two clones of one repo share `project.name` (it comes from veld.json), so
     // their rows would be indistinguishable (#172). Mark those rows with the
-    // worktree emoji + alias — and only those, since for the single-checkout
+    // worktree **emoji** — always the glyph, never the colour, regardless of the
+    // `worktree.markerStyle` setting: this label is a plain string handed to the
+    // OS, and a CSS custom property means nothing there. The same rule applies to
+    // the window title. A worktree always has a glyph, so there is nothing to fall
+    // back to.
+    // Mark those rows with the worktree emoji + alias — and only those, since for the single-checkout
     // majority it is noise, and then `/api/repos` isn't fetched at all.
     const nameCounts = new Map();
     for (const { project } of shownRuns) {

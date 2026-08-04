@@ -3,10 +3,9 @@ import { describe, expect, it } from "vitest";
 import {
   hasMarkerHue,
   markerFace,
-  markerGlyph,
+  detachGraceMinutes,
   markerHueVar,
   markerStyle,
-  quickSwitchPrefs,
   terminalPrefs,
 } from "./settings";
 
@@ -19,8 +18,6 @@ describe("terminalPrefs", () => {
       "terminal.cursorBlink": false,
       "terminal.scrollback": 1000,
       "terminal.shiftEnterNewline": false,
-      "terminal.copyOnSelect": true,
-      "terminal.middleClickPaste": true,
     });
     expect(p).toEqual({
       fontSize: 15,
@@ -29,8 +26,6 @@ describe("terminalPrefs", () => {
       cursorBlink: false,
       scrollback: 1000,
       shiftEnterNewline: false,
-      copyOnSelect: true,
-      middleClickPaste: true,
     });
   });
 
@@ -125,23 +120,14 @@ describe("markerHueVar", () => {
   });
 });
 
-describe("markerGlyph", () => {
-  it("ignores the style, because an OS string cannot carry a colour", () => {
-    // The native tray menu label and the window title are plain strings handed
-    // to the OS; a CSS custom property means nothing there.
-    expect(markerGlyph({ emoji: "🦊" })).toBe("🦊");
-    expect(markerGlyph({ emoji: "" })).toBe("");
-  });
-});
 
-describe("quickSwitchPrefs", () => {
-  it("shows both switches unless told otherwise", () => {
-    expect(quickSwitchPrefs({})).toEqual({
-      responsive: true,
-      colorScheme: true,
-    });
+describe("detachGraceMinutes", () => {
+  it("reads the stored value and falls back for an older daemon", () => {
+    expect(detachGraceMinutes({ "terminal.detachGraceMinutes": 90 })).toBe(90);
+    expect(detachGraceMinutes({})).toBe(30);
+    // A wrong-typed value must not reach a NumberInput as a string.
     expect(
-      quickSwitchPrefs({ "browser.quickSwitch.colorScheme": false }),
-    ).toEqual({ responsive: true, colorScheme: false });
+      detachGraceMinutes({ "terminal.detachGraceMinutes": "soon" as unknown as number }),
+    ).toBe(30);
   });
 });

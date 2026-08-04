@@ -120,4 +120,59 @@ mod tests {
         let res = routes().oneshot(req("PATCH", true, "{}")).await.unwrap();
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     }
+
+    #[tokio::test]
+    async fn a_malformed_body_is_a_client_error_not_a_panic() {
+        // axum rejects at deserialization, before the handler — pinned so a future
+        // change to the extractor type cannot turn this into a 500.
+        let res = routes()
+            .oneshot(req("PATCH", true, "not json"))
+            .await
+            .unwrap();
+        assert!(
+            res.status().is_client_error(),
+            "expected 4xx, got {}",
+            res.status()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rejected_value_is_a_400() {
+        // `InvalidSetting` must not surface as "database error".
+        let res = routes()
+            .oneshot(req("PATCH", true, r#"{"terminal.cursorStyle":"wobble"}"#))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn a_write_echoes_the_clamped_effective_document() {
+        // The handler doc calls this "the point": the response carries what was
+        // *stored*, so a clamp is visible instead of a control sitting at a value
+        // the daemon refused. Uses an isolated database — these tests would
+        // otherwise write the developer's dev DB.
+        let dir = tempfile::TempDir::new().unwrap();
+        // SAFETY: single-threaded test process; the daemon reads this per request.
+        unsafe { std::env::set_var("VELD_DB_PATH", dir.path().join("t.db")) };
+
+        let res = routes()
+            .oneshot(req("PATCH", true, r#"{"terminal.fontSize":9999}"#))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(res.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let doc: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(doc["settings"]["terminal.fontSize"], serde_json::json!(72));
+        // An untouched key still arrives, because the response is the effective
+        // document rather than the patch.
+        assert_eq!(
+            doc["settings"]["worktree.markerStyle"],
+            serde_json::json!("color")
+        );
+
+        unsafe { std::env::remove_var("VELD_DB_PATH") };
+    }
 }

@@ -134,16 +134,22 @@ impl Db {
     /// production behaviour is untouched. Dev and test get a dev database
     /// automatically, with no env var to remember.
     ///
-    /// **The path deliberately matches the `justfile`'s `dev_db`**
-    /// (`<worktree>/.veld-dev/veld.db`), so there is exactly one dev database
-    /// rather than a second one only `cargo` knows about. That matters because
-    /// `just dev-db-from-real` snapshots the real database into it precisely so a
-    /// migration can be exercised against real-shaped data — a guard pointing
-    /// somewhere else would have quietly excluded `cargo test` from the one tool
-    /// built for this. The `justfile` next to the target directory's parent is what
-    /// identifies the worktree; without it (a vendored build, an unusual
-    /// `CARGO_TARGET_DIR`) it falls back inside the target directory, which is
-    /// still never the user's real database.
+    /// **It sits beside the `justfile`'s `dev_db` but is not the same file.**
+    /// `just dev` and `just dev-daemon` set `VELD_DB_PATH` explicitly
+    /// (`justfile:46`, `:73`) and own `.veld-dev/veld.db`; a cargo-built binary gets
+    /// `.veld-dev/veld-cargo.db`. Same gitignored directory, so `just dev-db-reset`
+    /// territory and nothing new to explain — but a separate file, because
+    /// `cargo test --workspace` would otherwise migrate and write the database a
+    /// *running* dev daemon owns, and a `cargo test` between
+    /// `just dev-db-from-real` and `just dev` would silently migrate the snapshot
+    /// to head so the rehearsal verified nothing. Caught in review; the first
+    /// version shared one file on the reasoning that one dev database is simpler,
+    /// which was true and wrong.
+    ///
+    /// The `justfile` beside the target directory's parent is what identifies the
+    /// worktree; without it (a vendored build, a `CARGO_TARGET_DIR` outside the
+    /// tree) it falls back inside the target directory, which is still never the
+    /// user's real database.
     ///
     /// `VELD_DB_PATH` still wins over this, so a test wanting true isolation keeps
     /// saying so explicitly — and `Db::open_at` remains the right call for a test
@@ -153,19 +159,28 @@ impl Db {
         // `target/debug/veld`, `target/release/veld`, `target/debug/deps/<test>`,
         // and `target/<triple>/debug/veld` all sit below the marked directory, so
         // walk up until the marker is found rather than assuming a depth.
+        // Bounded: the walk stops at the home directory rather than climbing to
+        // `/`. An unbounded walk means any tagged ancestor — a stray
+        // `CACHEDIR.TAG` in `~/Library/Caches`, say — silently diverts an
+        // *installed* binary onto a dev database, presenting as empty state, which
+        // is the failure mode this guard was written in response to.
+        let home = dirs::home_dir();
         let mut dir = exe.parent()?;
         let marked = loop {
             if dir.join("CACHEDIR.TAG").is_file() {
                 break dir;
             }
+            if home.as_deref() == Some(dir) {
+                return None;
+            }
             dir = dir.parent()?;
         };
         // The worktree root is the marked directory's parent for a default
         // `target/`; require the justfile before claiming it, since that is what
-        // defines `dev_db` and therefore what makes the paths agree.
+        // names the dev directory these two files share.
         if let Some(root) = marked.parent() {
             if root.join("justfile").is_file() {
-                return Some(root.join(".veld-dev").join("veld.db"));
+                return Some(root.join(".veld-dev").join("veld-cargo.db"));
             }
         }
         Some(marked.join("veld-dev.db"))
@@ -959,12 +974,21 @@ mod tests {
         // database into `dev_db` so a migration can be exercised against
         // real-shaped data, and a guard pointing elsewhere would have quietly
         // excluded `cargo test` from the one tool built for that.
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap();
-        assert_eq!(resolved, root.join(".veld-dev").join("veld.db"));
+        // Beside the justfile's dev DB, in the same gitignored directory, but a
+        // separate file — `cargo test` must not write the database a running
+        // `just dev` daemon owns. Asserted by shape rather than by exact path so
+        // the supported `CARGO_TARGET_DIR`-outside-the-tree configuration, which
+        // takes the `veld-dev.db` fallback, does not fail this.
+        let name = resolved.file_name().unwrap().to_str().unwrap();
+        assert!(
+            name == "veld-cargo.db" || name == "veld-dev.db",
+            "unexpected dev database name {name}"
+        );
+        assert_ne!(
+            resolved.file_name().unwrap(),
+            "veld.db",
+            "must not be the dev *instance*'s database — `just dev` owns that one"
+        );
     }
 
     #[test]

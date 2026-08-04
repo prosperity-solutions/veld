@@ -174,20 +174,27 @@ and several were paid for in this codebase already.
   | Command | What it does |
   |---|---|
   | `just dev <cmd>` | Run the dev CLI against the dev DB (`.veld-dev/veld.db`, gitignored) on its own daemon port |
-  | `just dev-db-from-real` | Snapshot the **real** DB into the dev DB — the way to exercise a migration against real-shaped data. The real file is never written |
+  | `just dev-db-from-real` | Snapshot the **real** DB into the dev DB — the way to exercise a migration against real-shaped data. The real file is never written. **macOS-only path today** |
   | `just dev-db-reset` | Wipe the dev DB for a fresh-install path |
+
+  Two files, both in `.veld-dev/`: `veld.db` belongs to the `just dev` instance,
+  and `veld-cargo.db` is what a plain `cargo run`/`cargo test` gets. They are split
+  on purpose — sharing one meant `cargo test --workspace` wrote the database a
+  running dev daemon owned, and a `cargo test` between `dev-db-from-real` and
+  `just dev` silently migrated the snapshot to head so the rehearsal verified
+  nothing. So run the rehearsal through `just dev <cmd>`, not through `cargo run`.
 
   **Test a new migration with `just dev-db-from-real`, not only with fixtures.** A
   synthetic row cannot tell you that 16 worktrees across 2 repos survive, that
   `PRAGMA foreign_key_check` stays quiet, or that a backfill sentinel lands on
   every pre-existing row. Verify counts before and after, plus `integrity_check`.
 
-  As a backstop, `Db::default_path()` resolves *any* cargo-built binary to the same
-  `.veld-dev/veld.db` automatically — detected by walking up from `current_exe()` to
-  the directory cargo marks with `CACHEDIR.TAG` (`Db::cargo_target_db`), then
-  requiring the worktree's `justfile` so the path agrees with `dev_db` instead of
-  inventing a second dev database. `VELD_DB_PATH` still overrides, and `Db::open_at`
-  with a tempdir remains right for an isolated test.
+  As a backstop, `Db::default_path()` resolves *any* cargo-built binary to
+  `.veld-dev/veld-cargo.db` automatically — detected by walking up from
+  `current_exe()` to the directory cargo marks with `CACHEDIR.TAG`
+  (`Db::cargo_target_db`), bounded at `$HOME` so a stray marker cannot divert an
+  installed binary, then requiring the worktree's `justfile`. `VELD_DB_PATH` still
+  overrides, and `Db::open_at` with a tempdir remains right for an isolated test.
 
   **Do not "simplify" the backstop away**, and do not replace it with a
   `#[cfg(test)]` guard: `veld-core` is compiled *without* `cfg(test)` when

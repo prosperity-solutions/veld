@@ -783,9 +783,15 @@ function openSettings() {
     (r) => r.kind === "main" && !r.win.isDestroyed(),
   );
   if (!target) {
-    // No main window left: focusPrimary opens one, and the page opens settings
-    // itself on boot via the query flag — a `send` here would race the load.
-    focusPrimary({ settings: true });
+    // No main window left — open one that opens settings itself on boot via the
+    // query flag, since a `send` would race the page load.
+    //
+    // Deliberately NOT `focusPrimary`: its second fallback matches *any* live
+    // window, so with only a chrome-less detached window alive it would focus that
+    // and return, dropping the flag — ⌘, would silently do nothing, which is the
+    // exact outcome this function exists to prevent. Caught in review.
+    if (takenSuffixes().has(null)) openWindow({ kind: "main", settings: true });
+    else openWindow({ kind: "main", suffix: null, settings: true });
     return;
   }
   if (target.win.isMinimized()) target.win.restore();
@@ -795,7 +801,7 @@ function openSettings() {
 
 /** Focus a main window, opening one if every window is gone (macOS keeps the
  *  app alive with no windows). */
-function focusPrimary(opts = {}) {
+function focusPrimary() {
   const target =
     allRecords().find((r) => r.kind === "main" && !r.win.isDestroyed()) ??
     allRecords().find((r) => !r.win.isDestroyed()) ??
@@ -805,8 +811,8 @@ function focusPrimary(opts = {}) {
     // is destroyed is removed on `closed`, and there is no ordering guarantee
     // between that and the `activate` this runs from. Two windows on one slot is
     // the one outcome worth a branch to avoid.
-    if (takenSuffixes().has(null)) openWindow({ kind: "main", ...opts });
-    else openWindow({ kind: "main", suffix: null, ...opts });
+    if (takenSuffixes().has(null)) openWindow({ kind: "main" });
+    else openWindow({ kind: "main", suffix: null });
     return;
   }
   if (target.win.isMinimized()) target.win.restore();

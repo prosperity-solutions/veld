@@ -37,11 +37,8 @@ const FALLBACK = {
   cursorBlink: true,
   scrollback: 5000,
   shiftEnterNewline: true,
-  copyOnSelect: false,
-  middleClickPaste: false,
   markerStyle: "color" as MarkerStyle,
-  quickSwitchResponsive: true,
-  quickSwitchColorScheme: true,
+  detachGraceMinutes: 30,
 } as const;
 
 function num(doc: SettingsDoc, key: string, fallback: number): number {
@@ -83,8 +80,6 @@ export interface TerminalPrefs {
   cursorBlink: boolean;
   scrollback: number;
   shiftEnterNewline: boolean;
-  copyOnSelect: boolean;
-  middleClickPaste: boolean;
 }
 
 export function terminalPrefs(doc: SettingsDoc): TerminalPrefs {
@@ -104,12 +99,6 @@ export function terminalPrefs(doc: SettingsDoc): TerminalPrefs {
       "terminal.shiftEnterNewline",
       FALLBACK.shiftEnterNewline,
     ),
-    copyOnSelect: bool(doc, "terminal.copyOnSelect", FALLBACK.copyOnSelect),
-    middleClickPaste: bool(
-      doc,
-      "terminal.middleClickPaste",
-      FALLBACK.middleClickPaste,
-    ),
   };
 }
 
@@ -127,26 +116,6 @@ export function markerStyle(doc: SettingsDoc): MarkerStyle {
     ["color", "emoji"] as const,
     FALLBACK.markerStyle,
   );
-}
-
-export interface QuickSwitchPrefs {
-  responsive: boolean;
-  colorScheme: boolean;
-}
-
-export function quickSwitchPrefs(doc: SettingsDoc): QuickSwitchPrefs {
-  return {
-    responsive: bool(
-      doc,
-      "browser.quickSwitch.responsive",
-      FALLBACK.quickSwitchResponsive,
-    ),
-    colorScheme: bool(
-      doc,
-      "browser.quickSwitch.colorScheme",
-      FALLBACK.quickSwitchColorScheme,
-    ),
-  };
 }
 
 /**
@@ -191,12 +160,14 @@ export function markerFace(
 }
 
 /**
- * The marker for a plain-string context — an OS window title, a native menu row.
+ * How long a detached shell is kept, in minutes.
  *
- * Always the glyph, never the colour, and independent of `worktree.markerStyle`:
- * those strings are handed to the OS, where a CSS custom property means nothing.
- * Empty when the worktree has no glyph, so callers can omit the separator.
+ * Has a reader of its own rather than being read raw at the call site, so the
+ * settings surface cannot hardcode a second copy of the default — which it did,
+ * and which is exactly the drift this store exists to remove. The daemon is the
+ * authority and clamps this on both write and read; the fallback here is only for
+ * a daemon too old to know the key.
  */
-export function markerGlyph(wt: { emoji: string }): string {
-  return wt.emoji ?? "";
+export function detachGraceMinutes(doc: SettingsDoc): number {
+  return num(doc, "terminal.detachGraceMinutes", FALLBACK.detachGraceMinutes);
 }

@@ -913,6 +913,40 @@ mod tests {
     }
 
     #[test]
+    fn every_hue_has_a_css_variable_in_both_themes() {
+        // `WORKTREE_HUES` is a Rust constant and the ink lives in CSS, with nothing
+        // in either language tying them together — so appending a 13th hue here
+        // (which the constant's own doc invites) would emit
+        // `var(--wt-hue-12)`, resolve to nothing, and render an invisible marker
+        // and a blank picker cell. Same drift-gate shape as
+        // `documented_detach_grace_matches_the_default`.
+        let css = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .join("veld-daemon/ui/src/styles.css"),
+        )
+        .expect("read styles.css");
+        // Two theme blocks define the palette (`:root` and
+        // `body[data-theme="light"]`), so every index must appear twice.
+        for hue in 0..WORKTREE_HUES {
+            let n = css.matches(&format!("--wt-hue-{hue}:")).count();
+            assert_eq!(
+                n, 2,
+                "--wt-hue-{hue} is defined {n} times in styles.css; expected once \
+                 per theme block (dark and light)"
+            );
+        }
+        // And nothing beyond the range, which would be a hue the picker can never
+        // offer and the allowlist would reject.
+        assert!(
+            !css.contains(&format!("--wt-hue-{}:", WORKTREE_HUES)),
+            "styles.css defines --wt-hue-{} but WORKTREE_HUES is {WORKTREE_HUES}",
+            WORKTREE_HUES
+        );
+    }
+
+    #[test]
     fn markers_are_assigned_and_distinct_within_a_repo() {
         let (_dir, db) = test_db();
         let root = Path::new("/tmp/repoMarkerA");

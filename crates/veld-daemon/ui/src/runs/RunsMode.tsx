@@ -160,6 +160,7 @@ export function RunsMode(props: { modeSwitch: ReactNode; themeButton: ReactNode;
         <Text size="xs" c="dimmed">
           {meta}
         </Text>
+        {props.settingsButton}
         {props.themeButton}
       </div>
 

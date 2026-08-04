@@ -35,7 +35,7 @@ use serde_json::Value;
 
 use super::{Db, DbError, now_str};
 
-/// The scope a setting is stored under. Only [`Scope::Global`] is written today;
+/// The scope a setting is stored under. Only [`SCOPE_GLOBAL`] is written today;
 /// the column exists so per-project overrides do not need a migration later.
 pub const SCOPE_GLOBAL: &str = "global";
 
@@ -54,6 +54,20 @@ pub const MIN_DETACH_GRACE_MINUTES: i64 = 1;
 /// already generous; unbounded means a leak with a preference in front of it.
 pub const MAX_DETACH_GRACE_MINUTES: i64 = 10_080;
 
+/// Longest accepted `terminal.fontFamily`. A CSS font-family list that needs more
+/// than this is not a font list.
+const MAX_FONT_FAMILY_LEN: usize = 200;
+
+/// Bounds on a key this binary does not recognise.
+///
+/// Unknown keys are preserved rather than rejected (see the module docs), which
+/// makes them the one unbounded thing a client can put in this table. Preserving a
+/// newer build's preference does not require accepting an arbitrary blob: the whole
+/// document is returned by `GET` to every client on every window focus and mirrored
+/// into `localStorage`, so an unbounded write is a cost every future read pays.
+const MAX_UNKNOWN_KEY_LEN: usize = 128;
+const MAX_UNKNOWN_VALUE_LEN: usize = 4096;
+
 /// Every setting this binary understands.
 ///
 /// `Unknown` is not an error case — see the module docs. It is how a preference
@@ -66,12 +80,8 @@ pub enum SettingKey {
     TerminalCursorBlink,
     TerminalScrollback,
     TerminalShiftEnterNewline,
-    TerminalCopyOnSelect,
-    TerminalMiddleClickPaste,
     TerminalDetachGrace,
     WorktreeMarkerStyle,
-    BrowserQuickSwitchResponsive,
-    BrowserQuickSwitchColorScheme,
     Unknown(String),
 }
 
@@ -84,12 +94,8 @@ impl SettingKey {
             Self::TerminalCursorBlink => "terminal.cursorBlink",
             Self::TerminalScrollback => "terminal.scrollback",
             Self::TerminalShiftEnterNewline => "terminal.shiftEnterNewline",
-            Self::TerminalCopyOnSelect => "terminal.copyOnSelect",
-            Self::TerminalMiddleClickPaste => "terminal.middleClickPaste",
             Self::TerminalDetachGrace => "terminal.detachGraceMinutes",
             Self::WorktreeMarkerStyle => "worktree.markerStyle",
-            Self::BrowserQuickSwitchResponsive => "browser.quickSwitch.responsive",
-            Self::BrowserQuickSwitchColorScheme => "browser.quickSwitch.colorScheme",
             Self::Unknown(k) => k,
         }
     }
@@ -102,12 +108,8 @@ impl SettingKey {
             "terminal.cursorBlink" => Self::TerminalCursorBlink,
             "terminal.scrollback" => Self::TerminalScrollback,
             "terminal.shiftEnterNewline" => Self::TerminalShiftEnterNewline,
-            "terminal.copyOnSelect" => Self::TerminalCopyOnSelect,
-            "terminal.middleClickPaste" => Self::TerminalMiddleClickPaste,
             "terminal.detachGraceMinutes" => Self::TerminalDetachGrace,
             "worktree.markerStyle" => Self::WorktreeMarkerStyle,
-            "browser.quickSwitch.responsive" => Self::BrowserQuickSwitchResponsive,
-            "browser.quickSwitch.colorScheme" => Self::BrowserQuickSwitchColorScheme,
             other => Self::Unknown(other.to_string()),
         }
     }
@@ -134,26 +136,44 @@ impl SettingKey {
                 clamp_i64(value, MIN_DETACH_GRACE_MINUTES, MAX_DETACH_GRACE_MINUTES)
                     .ok_or_else(bad)?,
             ),
-            Self::TerminalCursorBlink
-            | Self::TerminalShiftEnterNewline
-            | Self::TerminalCopyOnSelect
-            | Self::TerminalMiddleClickPaste
-            | Self::BrowserQuickSwitchResponsive
-            | Self::BrowserQuickSwitchColorScheme => Value::from(value.as_bool().ok_or_else(bad)?),
+            Self::TerminalCursorBlink | Self::TerminalShiftEnterNewline => {
+                Value::from(value.as_bool().ok_or_else(bad)?)
+            }
             Self::TerminalCursorStyle => {
                 one_of(value, &["block", "underline", "bar"]).ok_or_else(bad)?
             }
             Self::WorktreeMarkerStyle => one_of(value, &["color", "emoji"]).ok_or_else(bad)?,
-            // A font family is free text; an empty string would render as the
-            // browser default and read as a bug, so it falls back to the default.
+            // A font family is free text, but **not** free-form: xterm's DOM
+            // renderer interpolates it into a CSS *rule* —
+            // `font-family: ${rawOptions.fontFamily};` inside a stylesheet's
+            // textContent — so a `}` closes the rule and everything after it is
+            // appended as arbitrary CSS to every `/ide` window, persistently,
+            // because it is stored. The daemon is reachable same-origin from a
+            // developer's own app through the helper's `/__veld__` proxy, so
+            // "only our own UI writes this" is not true.
+            //
+            // Bounded rather than escaped: a font-family list needs none of these
+            // characters, and a validator that tries to neutralise CSS is a
+            // validator that will be wrong eventually.
             Self::TerminalFontFamily => {
                 let s = value.as_str().ok_or_else(bad)?.trim();
-                if s.is_empty() {
+                if s.is_empty()
+                    || s.len() > MAX_FONT_FAMILY_LEN
+                    || s.contains(['{', '}', ';', '<', '>', '\n', '\r'])
+                {
                     return Err(bad());
                 }
                 Value::from(s)
             }
-            Self::Unknown(_) => value.clone(),
+            // Preserved, but bounded — see MAX_UNKNOWN_* above.
+            Self::Unknown(k) => {
+                if k.len() > MAX_UNKNOWN_KEY_LEN
+                    || serde_json::to_string(value)?.len() > MAX_UNKNOWN_VALUE_LEN
+                {
+                    return Err(bad());
+                }
+                value.clone()
+            }
         })
     }
 }
@@ -191,8 +211,6 @@ pub fn defaults() -> BTreeMap<String, Value> {
         // Claude Code's `/terminal-setup` configures, so matching it means no
         // extra setup. The toggle exists for anyone whose TUI binds meta-Enter.
         (SettingKey::TerminalShiftEnterNewline, Value::from(true)),
-        (SettingKey::TerminalCopyOnSelect, Value::from(false)),
-        (SettingKey::TerminalMiddleClickPaste, Value::from(false)),
         (
             SettingKey::TerminalDetachGrace,
             Value::from(DEFAULT_DETACH_GRACE_MINUTES),
@@ -200,8 +218,6 @@ pub fn defaults() -> BTreeMap<String, Value> {
         // Colour is the new default marker; the emoji face stays stored, so this
         // is a rendering choice and switching back is lossless.
         (SettingKey::WorktreeMarkerStyle, Value::from("color")),
-        (SettingKey::BrowserQuickSwitchResponsive, Value::from(true)),
-        (SettingKey::BrowserQuickSwitchColorScheme, Value::from(true)),
     ]
     .into_iter()
     .map(|(k, v)| (k.as_str().to_string(), v))
@@ -224,7 +240,15 @@ impl Db {
             // whole request — the same posture every other JSON-in-a-column read
             // in this module takes.
             if let Ok(value) = serde_json::from_str::<Value>(&raw) {
-                out.insert(key, value);
+                // Re-validated on the way out, not only on the way in. The
+                // downgrade case this store is built around is a *newer* build
+                // having written a value with a wider range — validating only on
+                // write would hand that straight to a client. A value that fails
+                // now degrades to the default, the same posture the corrupt-JSON
+                // branch above takes.
+                if let Ok(clean) = SettingKey::parse(&key).validate(&value) {
+                    out.insert(key, clean);
+                }
             }
         }
         Ok(out)

@@ -34,6 +34,7 @@ import {
 import type { SettingsDoc } from "../api";
 import { Modal } from "./dialogs";
 import {
+  detachGraceMinutes,
   markerStyle,
   terminalPrefs,
   type MarkerStyle,
@@ -76,6 +77,7 @@ export function SettingsDialog(props: {
   onClose: () => void;
 }) {
   const { settings } = props;
+  const locked = !settings || props.saving;
   const term = terminalPrefs(settings ?? {});
   const marker = markerStyle(settings ?? {});
 
@@ -84,20 +86,14 @@ export function SettingsDialog(props: {
   // clamp lands in the box rather than leaving the rejected number on screen.
   const [fontSize, setFontSize] = useState<number | string>(term.fontSize);
   const [scrollback, setScrollback] = useState<number | string>(term.scrollback);
-  const [grace, setGrace] = useState<number | string>(
-    typeof settings?.["terminal.detachGraceMinutes"] === "number"
-      ? (settings["terminal.detachGraceMinutes"] as number)
-      : 30,
-  );
+  const graceValue = detachGraceMinutes(settings ?? {});
+  const [grace, setGrace] = useState<number | string>(graceValue);
   const [fontFamily, setFontFamily] = useState(term.fontFamily);
 
   useEffect(() => setFontSize(term.fontSize), [term.fontSize]);
   useEffect(() => setScrollback(term.scrollback), [term.scrollback]);
   useEffect(() => setFontFamily(term.fontFamily), [term.fontFamily]);
-  useEffect(() => {
-    const v = settings?.["terminal.detachGraceMinutes"];
-    if (typeof v === "number") setGrace(v);
-  }, [settings]);
+  useEffect(() => setGrace(graceValue), [graceValue]);
 
   const set = (patch: SettingsDoc) => {
     // Fire and forget: the hook holds the error, and awaiting here would freeze
@@ -105,12 +101,21 @@ export function SettingsDialog(props: {
     void props.onSave(patch).catch(() => {});
   };
 
-  const commitNumber = (key: string, value: number | string, fallback: number) => {
-    // An empty or half-typed box must not be sent as NaN — the daemon would
-    // reject it and the user would see an error for having selected the text.
+  const commitNumber = (
+    key: string,
+    value: number | string,
+    fallback: number,
+    // The setter for *this* box. Passed rather than closed over: the first version
+    // reset `fontSize` for every key, so clearing the scrollback box reset the font
+    // size and left the bad scrollback text on screen.
+    reset: (v: number | string) => void,
+  ) => {
+    // Mantine's NumberInput emits raw strings while typing, so an empty or
+    // half-typed box ("1e") must not be sent as NaN — the daemon would reject it
+    // and the user would see an error for having selected the text.
     const n = typeof value === "number" ? value : Number(value);
     if (!Number.isFinite(n)) {
-      setFontSize(term.fontSize);
+      reset(fallback);
       return;
     }
     if (n === fallback) return;
@@ -141,7 +146,7 @@ export function SettingsDialog(props: {
               size="xs"
               w={140}
               value={marker}
-              disabled={!settings}
+              disabled={locked}
               data={[
                 { value: "color", label: "Colour" },
                 { value: "emoji", label: "Emoji" },
@@ -162,10 +167,10 @@ export function SettingsDialog(props: {
               min={6}
               max={72}
               value={fontSize}
-              disabled={!settings}
+              disabled={locked}
               onChange={setFontSize}
               onBlur={() =>
-                commitNumber("terminal.fontSize", fontSize, term.fontSize)
+                commitNumber("terminal.fontSize", fontSize, term.fontSize, setFontSize)
               }
             />
           </Row>
@@ -177,7 +182,7 @@ export function SettingsDialog(props: {
               size="xs"
               w={240}
               value={fontFamily}
-              disabled={!settings}
+              disabled={locked}
               onChange={(e) => setFontFamily(e.currentTarget.value)}
               onBlur={() => {
                 const v = fontFamily.trim();
@@ -197,7 +202,7 @@ export function SettingsDialog(props: {
               size="xs"
               w={140}
               value={term.cursorStyle}
-              disabled={!settings}
+              disabled={locked}
               data={[
                 { value: "block", label: "Block" },
                 { value: "underline", label: "Underline" },
@@ -212,7 +217,7 @@ export function SettingsDialog(props: {
             <Checkbox
               size="xs"
               checked={term.cursorBlink}
-              disabled={!settings}
+              disabled={locked}
               onChange={(e) =>
                 set({ "terminal.cursorBlink": e.currentTarget.checked })
               }
@@ -228,10 +233,15 @@ export function SettingsDialog(props: {
               min={0}
               max={500000}
               value={scrollback}
-              disabled={!settings}
+              disabled={locked}
               onChange={setScrollback}
               onBlur={() =>
-                commitNumber("terminal.scrollback", scrollback, term.scrollback)
+                commitNumber(
+                  "terminal.scrollback",
+                  scrollback,
+                  term.scrollback,
+                  setScrollback,
+                )
               }
             />
           </Row>
@@ -242,29 +252,9 @@ export function SettingsDialog(props: {
             <Checkbox
               size="xs"
               checked={term.shiftEnterNewline}
-              disabled={!settings}
+              disabled={locked}
               onChange={(e) =>
                 set({ "terminal.shiftEnterNewline": e.currentTarget.checked })
-              }
-            />
-          </Row>
-          <Row label="Selecting text copies it">
-            <Checkbox
-              size="xs"
-              checked={term.copyOnSelect}
-              disabled={!settings}
-              onChange={(e) =>
-                set({ "terminal.copyOnSelect": e.currentTarget.checked })
-              }
-            />
-          </Row>
-          <Row label="Middle click pastes">
-            <Checkbox
-              size="xs"
-              checked={term.middleClickPaste}
-              disabled={!settings}
-              onChange={(e) =>
-                set({ "terminal.middleClickPaste": e.currentTarget.checked })
               }
             />
           </Row>
@@ -279,13 +269,16 @@ export function SettingsDialog(props: {
               max={10080}
               suffix=" min"
               value={grace}
-              disabled={!settings}
+              disabled={locked}
               onChange={setGrace}
-              onBlur={() => {
-                const n = typeof grace === "number" ? grace : Number(grace);
-                if (!Number.isFinite(n)) return;
-                set({ "terminal.detachGraceMinutes": n });
-              }}
+              onBlur={() =>
+                commitNumber(
+                  "terminal.detachGraceMinutes",
+                  grace,
+                  graceValue,
+                  setGrace,
+                )
+              }
             />
           </Row>
         </Stack>

@@ -161,12 +161,38 @@ const DETACH_GRACE: Duration =
 /// reap": a daemon that cannot read its settings still leaks shells without a
 /// bound, and the default is the behaviour every release before this one had.
 fn configured_detach_grace() -> Duration {
-    match veld_core::db::Db::open() {
+    let grace = match veld_core::db::Db::open() {
         Ok(db) => db.detach_grace(),
         Err(e) => {
             warn!("could not read the detach grace setting, using the default: {e}");
             DETACH_GRACE
         }
+    };
+    GRACE_HINT.store(grace.as_secs(), Ordering::Relaxed);
+    grace
+}
+
+/// Last grace read from the database, in seconds; `0` = never read.
+///
+/// The reaper refreshes it once a minute, and [`detach_grace_hint`] is what the
+/// session-spawn path reads. A published value only ever gets *more* stale than the
+/// database, never wrong in a way that matters: it is handed to a holder as its
+/// self-destruct timeout, and being a minute behind a preference change is not a
+/// behaviour anyone can observe.
+static GRACE_HINT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The grace to hand a newly spawned holder, without touching the database.
+///
+/// `obtain_session` runs on the attach path, and opening SQLite there is exactly the
+/// thing AGENTS.md's dev-database rule calls out as a design decision rather than a
+/// detail: it made every terminal spawn do file I/O, and it is what let a plain
+/// `cargo test` migrate a real database in the first place. The reaper already reads
+/// the setting every minute, so the spawn path reads its published value and only
+/// falls back to a real read when no reaper pass has happened yet.
+fn detach_grace_hint() -> Duration {
+    match GRACE_HINT.load(Ordering::Relaxed) {
+        0 => configured_detach_grace(),
+        secs => Duration::from_secs(secs),
     }
 }
 
@@ -1257,7 +1283,7 @@ async fn obtain_session(
         // the daemon-side reaper immediately but cannot reach into holders already
         // running, and reaching into them would mean a protocol message whose only
         // job is to move a timer nobody is waiting on.
-        orphan_grace_secs: configured_detach_grace().as_secs(),
+        orphan_grace_secs: detach_grace_hint().as_secs(),
     };
     let attached = start_holder(&cfg).await.map_err(SessionError::Spawn)?;
 

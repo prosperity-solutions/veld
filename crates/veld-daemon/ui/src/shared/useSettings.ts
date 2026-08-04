@@ -26,6 +26,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { api, type SettingsDoc } from "../api";
+import { notifyError } from "./notify";
 
 /** Where the local mirror lives. Not a store — a cache of the last good read. */
 export const SETTINGS_CACHE_KEY = "veld.settings";
@@ -57,9 +58,11 @@ export interface SettingsState {
    * The effective document, or `null` before the first read of *either* the
    * cache or the daemon resolves.
    *
-   * Callers that render sized content — a terminal above all — must wait for
-   * non-null rather than substituting a default. A terminal that mounts at one
-   * font size and then jumps has already cost the user their scroll position.
+   * Callers that render sized content should prefer non-null over substituting a
+   * default. Nothing enforces it, and a terminal mounted before the first read
+   * recovers rather than breaking: `applyTerminalPrefs` re-styles and re-fits every
+   * live session on the first publish, so the worst case is one frame at the
+   * previous release's metrics — not a permanently wrong grid.
    */
   settings: SettingsDoc | null;
   /** Write some keys. Optimistic locally, reconciled from the response. */
@@ -87,8 +90,9 @@ export function useSettings(): SettingsState {
       setSettings(doc);
       writeCache(doc);
     } catch {
-      // Unreachable daemon: keep the mirror. The offline banner is already the
-      // app's one signal for this, so a second error surface would be noise.
+      // Unreachable daemon: keep the mirror and stay quiet. The offline banner is
+      // already the app's one signal for a daemon that is gone, and a toast per
+      // window-focus while it is down would be a stream of them.
     }
   }, []);
 
@@ -120,6 +124,11 @@ export function useSettings(): SettingsState {
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
+      // Also a toast: a save can fail after the dialog has been closed, and the
+      // in-dialog message would then be invisible. Toasts are the app's one error
+      // surface (see `notify.ts`), so a silent failed write is the one outcome
+      // this must not have — the optimistic value is still on screen.
+      notifyError("Could not save settings", e);
       // Re-read rather than trying to invert the optimistic write: the daemon is
       // the only thing that knows what actually landed.
       await load();
