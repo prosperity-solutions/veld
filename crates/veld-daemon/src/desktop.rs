@@ -1145,29 +1145,18 @@ async fn delete_worktree(
         ));
     }
 
-    let repo_root = PathBuf::from(&wt.repo_root);
-    match git(
-        &repo_root,
-        &["worktree", "remove", "--force", "--", &wt.path],
-    )
-    .await
-    {
-        Ok(_) => {}
-        // Already gone from disk (removed manually): prune git's bookkeeping
-        // and drop the row instead of failing.
-        Err(_) if !FsPath::new(&wt.path).exists() => {
-            let _ = git(&repo_root, &["worktree", "prune"]).await;
-        }
-        Err(e) => {
-            // Take it back out of trash with the reason, exactly as the
-            // background worker would — otherwise a failed force leaves a row
-            // that looks like pending work forever.
-            let _ = db.untrash_worktree(id, &e);
-            return Err(err(StatusCode::UNPROCESSABLE_ENTITY, e));
+    // Through the same single owner the worker uses, so it inherits the
+    // deletion guard instead of being a second unguarded path — which is exactly
+    // what it was, and what round 3 of the review found.
+    match super::worktree_trash::delete_checkout_forced(&db, &wt).await {
+        Ok(()) => Ok(StatusCode::NO_CONTENT),
+        Err(reason) => {
+            // Back out of the trash with the reason, as the worker would — otherwise
+            // a failed force leaves a row that looks like pending work forever.
+            let _ = db.untrash_worktree(id, &reason);
+            Err(err(StatusCode::UNPROCESSABLE_ENTITY, reason))
         }
     }
-    db.remove_worktree(id).map_err(db_err)?;
-    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Take a worktree out of the trash (undo).
@@ -1177,17 +1166,17 @@ async fn delete_worktree(
 /// why it reports whether the row was there rather than assuming it was.
 async fn restore_worktree(Path(id): Path<i64>) -> Result<Json<WorktreeView>, ApiError> {
     let db = open_desktop_db()?;
-    // Refuse rather than lie. Once `git worktree remove` has started, the directory
-    // is going and no database write brings it back — so clearing `trashed_at` here
-    // would hand back a live-looking row for a checkout that disappears moments
-    // later, which is exactly the silent loss the trash exists to prevent.
-    if super::worktree_trash::is_deleting(id) {
+    // Refuse rather than lie. Once a deletion has started the directory is going and
+    // no database write brings it back, so clearing `trashed_at` here would hand back
+    // a live-looking row for a checkout that disappears moments later — the silent
+    // loss the trash exists to prevent. The check and the write share one lock, so
+    // the deletion cannot start between them.
+    if !super::worktree_trash::try_restore(&db, id).map_err(db_err)? {
         return Err(err(
             StatusCode::CONFLICT,
             "this worktree is already being deleted",
         ));
     }
-    db.untrash_worktree(id, "").map_err(db_err)?;
     let wt = db
         .get_worktree(id)
         .map_err(db_err)?

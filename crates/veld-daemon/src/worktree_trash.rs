@@ -73,7 +73,13 @@ static DELETING: Mutex<Option<std::collections::HashSet<i64>>> = Mutex::new(None
 
 /// Whether a deletion for this worktree has passed the point where restoring can
 /// still work.
-pub fn is_deleting(worktree_id: i64) -> bool {
+///
+/// **Test-only, and deliberately not public.** Reading this and then writing is the
+/// racy pattern [`try_restore`] exists to replace — a caller can lose the window
+/// between the two — so exposing it would invite exactly the defect three rounds of
+/// review kept finding. Production code holds the lock across both halves instead.
+#[cfg(test)]
+fn is_deleting(worktree_id: i64) -> bool {
     DELETING
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -218,53 +224,107 @@ async fn process(id: i64) {
         return;
     }
 
-    // Claimed before the final re-read, which is what makes the two possible
-    // interleavings both correct: a restore that landed first is seen by the re-read
-    // below and aborts the deletion, and one that arrives after this line is told
-    // "too late" by `is_deleting` rather than being silently overruled.
-    let _deleting = DeletingGuard::claim(id);
+    match delete_checkout(&db, &wt, false).await {
+        Ok(Deleted::Yes) => info!("worktree trash: deleted {}", wt.path),
+        Ok(Deleted::Restored) => {}
+        Err(reason) => fail(reason),
+    }
+}
 
-    // Re-read the intent immediately before the destructive step.
-    //
-    // `stop_runs` above can take up to STOP_TIMEOUT, and `git worktree remove` is
-    // slow by definition — that slowness is why this worker exists. A user who
-    // clicks "Keep it after all" anywhere in that window gets a 200 and sees the row
-    // back in the rail, so deleting the checkout anyway would be the one thing this
-    // module promises cannot happen: a silent loss with no error attached. The
-    // check at the top of `process` only covers the time spent queued.
-    match db.get_worktree(id) {
-        Ok(Some(current)) if current.trashed_at.is_empty() => {
-            info!("worktree trash: {} was restored — not removing", wt.path);
-            return;
-        }
-        Ok(None) => return,
-        Err(e) => {
-            warn!("worktree trash: cannot re-check {}: {e}", wt.path);
-            return;
-        }
+/// Whether a deletion actually happened.
+pub enum Deleted {
+    Yes,
+    /// The worktree was taken out of the trash before the deletion could start, so
+    /// nothing was deleted and nothing went wrong.
+    Restored,
+}
+
+/// **The one function that deletes a checkout.** Both the background worker and the
+/// inline forced path go through it, and that is the point.
+///
+/// Three separate rounds of review found the same defect here — a restore that
+/// returned `200` while the checkout was deleted anyway — and the first two fixes
+/// were correct but incomplete, because each guarded *one* of the two code paths that
+/// ran `git worktree remove`. A third guard would have been the same mistake again.
+/// So there is now one path, it claims the guard itself, and a future caller cannot
+/// bypass what it does not implement.
+///
+/// The order is load-bearing: **claim the guard, then re-read the intent.** That
+/// makes both interleavings safe. A restore that landed before the claim is seen by
+/// the re-read and cancels the deletion; one that arrives after it is refused by
+/// [`is_deleting`] rather than granted and then silently overruled. There is no third
+/// window, because from the claim onwards `restore_worktree` cannot succeed.
+async fn delete_checkout(
+    db: &Db,
+    wt: &veld_core::db::WorktreeRecord,
+    force: bool,
+) -> Result<Deleted, String> {
+    let _deleting = DeletingGuard::claim(wt.id);
+
+    // Re-read the intent now that no restore can slip past. `stop_runs` may have
+    // taken up to STOP_TIMEOUT, and the retention sweep may have queued this minutes
+    // ago; the check when the job was picked up covers neither.
+    match db.get_worktree(wt.id) {
+        Ok(Some(current)) if current.trashed_at.is_empty() => return Ok(Deleted::Restored),
+        Ok(None) => return Ok(Deleted::Restored),
+        Err(e) => return Err(format!("cannot re-check the worktree: {e}")),
         Ok(Some(_)) => {}
     }
 
     let repo_root = PathBuf::from(&wt.repo_root);
-    match super::desktop::git(&repo_root, &["worktree", "remove", "--", &wt.path]).await {
+    let mut args = vec!["worktree", "remove"];
+    if force {
+        args.push("--force");
+    }
+    args.push("--");
+    args.push(&wt.path);
+    match super::desktop::git(&repo_root, &args).await {
         Ok(_) => {}
-        // Already gone from disk — removed by hand, or by an attempt that died
-        // after git finished but before the row was dropped. Prune git's
-        // bookkeeping and treat it as done; this is what makes retrying a
-        // half-finished removal idempotent.
+        // Already gone from disk — deleted by hand, or by an attempt that died after
+        // git finished but before the row was dropped. Prune git's bookkeeping and
+        // treat it as done; this is what makes retrying a half-finished deletion
+        // idempotent.
         Err(_) if !FsPath::new(&wt.path).exists() => {
             let _ = super::desktop::git(&repo_root, &["worktree", "prune"]).await;
         }
-        Err(e) => {
-            fail(e.to_string());
-            return;
-        }
+        Err(e) => return Err(e),
     }
-    if let Err(e) = db.remove_worktree(id) {
-        warn!("worktree trash: removed {} but kept its row: {e}", wt.path);
-        return;
+    if let Err(e) = db.remove_worktree(wt.id) {
+        // The checkout is gone; only the row survived. The next reconcile poll reaps
+        // it, since the path has left `git worktree list`.
+        warn!("worktree trash: deleted {} but kept its row: {e}", wt.path);
     }
-    info!("worktree trash: removed {}", wt.path);
+    Ok(Deleted::Yes)
+}
+
+/// Delete a trashed worktree inline, discarding uncommitted changes.
+///
+/// The forced path, for the request handler. Same single owner as the worker, so it
+/// inherits the guard rather than needing its own — the omission round 3 found.
+pub async fn delete_checkout_forced(
+    db: &Db,
+    wt: &veld_core::db::WorktreeRecord,
+) -> Result<(), String> {
+    match delete_checkout(db, wt, true).await {
+        Ok(_) => Ok(()),
+        Err(reason) => Err(reason),
+    }
+}
+
+/// Take a worktree out of the trash, unless its deletion has already started.
+///
+/// The check and the write share the `DELETING` lock. Two separate calls left a
+/// window — narrow, but real on a multi-core runtime — where the worker could claim
+/// the guard between a restore's check and its write, so the worker saw a trashed row
+/// and the caller got a `200`.
+pub fn try_restore(db: &Db, id: i64) -> Result<bool, veld_core::db::DbError> {
+    let deleting = DELETING.lock().unwrap_or_else(|e| e.into_inner());
+    if deleting.as_ref().is_some_and(|set| set.contains(&id)) {
+        return Ok(false);
+    }
+    db.untrash_worktree(id, "")?;
+    drop(deleting);
+    Ok(true)
 }
 
 /// Ask every live run in the worktree to stop, then wait for the runs to leave
@@ -376,6 +436,24 @@ mod tests {
         // Released on drop, so an early return anywhere in `process` cannot wedge a
         // worktree as permanently un-restorable.
         assert!(!is_deleting(41));
+    }
+
+    /// Pins the property that three rounds of review kept breaking: there is exactly
+    /// one function that runs `git worktree remove`, so a guard added to it covers
+    /// every caller. A second such call site is how the force path ended up
+    /// unguarded, and a grep is the only thing that can catch a third.
+    #[test]
+    fn only_one_function_runs_git_worktree_remove() {
+        let src = include_str!("worktree_trash.rs");
+        let daemon_desktop = include_str!("desktop.rs");
+        let occurrences = src.matches("\"worktree\", \"remove\"").count()
+            + daemon_desktop.matches("\"worktree\", \"remove\"").count();
+        assert_eq!(
+            occurrences, 1,
+            "`git worktree remove` must be spawned from exactly one place \
+             (`delete_checkout`); a second call site is a second unguarded deletion \
+             path, which is the defect rounds 1-3 each found a different half of"
+        );
     }
 
     #[test]
