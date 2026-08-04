@@ -459,11 +459,10 @@ pub fn is_worktree_emoji(emoji: &str) -> bool {
 /// real database, the repos held 9 and 7 checkouts, and distinctness is only ever
 /// needed *within* one repo.
 ///
-/// Index order is **interleaved rather than spectral**, because [`pick_hue`] hashes
-/// and then probes forward: consecutive indices are handed out together, so ordering
-/// them around the wheel would give two worktrees created back to back two adjacent
-/// hues. The pair that collapses under deuteranopia (3 red and 7 green) is kept far
-/// apart in the sequence and separated by lightness.
+/// Index order is the palette's given order. [`pick_hue`] hashes the seed before
+/// probing forward, so two worktrees created back to back start from unrelated
+/// slots rather than adjacent ones — the ordering only becomes visible once a single
+/// repo has nearly as many checkouts as there are hues.
 ///
 /// **Colour is never the only channel.** The alias renders beside the badge
 /// everywhere the badge appears, so the swatch is a scanning aid over a text label
@@ -471,12 +470,15 @@ pub fn is_worktree_emoji(emoji: &str) -> bool {
 /// decoration, not function — which is why this does not need a pattern or a
 /// monogram bolted on.
 ///
-/// Stored as an **index**, not a colour string: the actual values are CSS custom
-/// properties (`--wt-hue-N`) resolved per theme — the dark theme is neon, because a
-/// desaturated swatch on near-black reads as grey, and the light theme is the same
-/// identity deepened so it carries on white. A light-theme swatch is therefore not
-/// the same ink as a dark-theme one, which is precisely why the database stores an
-/// index and has no opinion about colour.
+/// Stored as an **index**, not a colour string: the values are CSS custom properties
+/// (`--wt-hue-N`) and the stylesheet owns them, so the palette can be retuned
+/// without a migration and the schema never carries a colour it would then have to
+/// keep in step with a theme.
+///
+/// The palette is **identical in both themes**, by decision. An earlier version
+/// deepened each hue for the light theme, which meant a worktree changed appearance
+/// when the theme was switched — a marker is an identity, and an identity that
+/// depends on the surface behind it is doing its job badly.
 ///
 /// Entries may be **appended, never reordered** — the index is persisted per
 /// worktree, so a reorder silently repaints every rail. Shrinking the set is safe
@@ -941,14 +943,16 @@ mod tests {
                 .join("veld-daemon/ui/src/styles.css"),
         )
         .expect("read styles.css");
-        // Two theme blocks define the palette (`:root` and
-        // `body[data-theme="light"]`), so every index must appear twice.
+        // **One** definition each: the palette is deliberately identical in both
+        // themes, so there is no `body[data-theme="light"]` override. A second
+        // definition would mean a worktree's marker changes appearance when the
+        // theme is switched, which is the thing that reversal was for.
         for hue in 0..WORKTREE_HUES {
             let n = css.matches(&format!("--wt-hue-{hue}:")).count();
             assert_eq!(
-                n, 2,
-                "--wt-hue-{hue} is defined {n} times in styles.css; expected once \
-                 per theme block (dark and light)"
+                n, 1,
+                "--wt-hue-{hue} is defined {n} times in styles.css; expected exactly \
+                 one, since the palette is theme-independent"
             );
         }
         // And nothing beyond the range, which would be a hue the picker can never

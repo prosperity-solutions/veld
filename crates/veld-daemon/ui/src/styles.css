@@ -79,35 +79,33 @@
   --chart-grid: #23262b;
   --chart-axis: #363b43;
 
-  /* Worktree marker hues (dark) — full-chroma, in the register of a printed swatch
-     card rather than a muted UI accent, because the rail sits on near-black and a
-     desaturated dot at 11px reads as grey.
-     **Eight, not twelve.** Fewer and genuinely distinct beats more and merely
-     different: past about eight steps neighbours stop being tellable apart at rail
-     size, and the four dropped ones bought collision headroom nobody needs —
-     measured on a real database the repos held 9 and 7 checkouts, and distinctness
-     is only ever needed *within* one repo.
-     **Index order is interleaved, not spectral.** The allocator hashes and then
-     probes *forward*, so consecutive indices get handed out together; ordering these
-     around the wheel would give two adjacent worktrees two adjacent hues. Magenta →
-     yellow → blue → red keeps sequential allocations far apart.
-     Six are lifted from a swatch-card reference; blue and violet were added at the
-     same chroma because the reference covers only magenta→teal, and a palette that
-     omits half the wheel spends its distinctness on near-duplicates.
-     Colour is never the only channel: the alias renders beside the badge everywhere,
-     so a swatch is a scanning aid over a text label, not the identifier — which is
-     also the honest answer for the ~1 in 12 men with a colour vision deficiency.
-     Entries may be APPENDED but never reordered — the index is persisted, so a
+  /* Worktree marker hues — one palette, identical in both themes.
+     Chosen as a set by the maintainer and used **as given**: no per-theme
+     variant, no lightness adjustment. That is a deliberate reversal of the earlier
+     design, which deepened each hue for the light theme and meant a worktree
+     changed appearance when you switched theme — the marker is an identity, and an
+     identity that looks different depending on the surface behind it is doing its
+     job badly. Consequence, stated rather than discovered: the pale members
+     (FFF827, 41FFFC) sit low-contrast on a white panel, so the swatch's inner ring
+     is strengthened in the light theme to hold its edge. The fill itself is exact.
+     Eight, because fewer and genuinely distinct beats more and merely different —
+     past about eight steps neighbours stop being tellable apart at 11px.
+     Colour is never the only channel: the alias renders beside the badge
+     everywhere, so a swatch is a scanning aid over a text label, not the
+     identifier — which is also the honest answer for the ~1 in 12 men with a colour
+     vision deficiency.
+     Order is the maintainer's list order. Indices are persisted
+     (`worktrees.marker_hue`), so entries may be APPENDED but never reordered — a
      reorder silently repaints every rail. Shrinking is safe only because
      `sync_worktrees` re-picks any hue outside `WORKTREE_HUES`. */
-  --wt-hue-0: #f5228e;
-  --wt-hue-1: #ffed02;
-  --wt-hue-2: #13c2f9;
-  --wt-hue-3: #f81919;
-  --wt-hue-4: #13d4c7;
-  --wt-hue-5: #ff8000;
-  --wt-hue-6: #9d2bf5;
-  --wt-hue-7: #27b621;
+  --wt-hue-0: #008cff;
+  --wt-hue-1: #41fffc;
+  --wt-hue-2: #7dff1a;
+  --wt-hue-3: #9719ff;
+  --wt-hue-4: #ff17e0;
+  --wt-hue-5: #ff3502;
+  --wt-hue-6: #ffa31a;
+  --wt-hue-7: #fff827;
 }
 
 body[data-theme="light"] {
@@ -151,20 +149,6 @@ body[data-theme="light"] {
   --chart-grid: #e9ebee;
   --chart-axis: #d5d8dc;
 
-  /* Worktree marker hues (light) — the same eight identities, deepened.
-     Full chroma on white is a pale smudge, and #ffed02 in particular is invisible
-     there, so each one keeps its hue and loses lightness. That the same index is
-     `#ffed02` in dark and `#8f7f00` here is exactly why the database stores an
-     *index* and not a colour: neither the schema nor the daemon has any business
-     claiming what hue 1 looks like. */
-  --wt-hue-0: #c4106f;
-  --wt-hue-1: #8f7f00;
-  --wt-hue-2: #0b7fa8;
-  --wt-hue-3: #cf1010;
-  --wt-hue-4: #0a8f86;
-  --wt-hue-5: #c06000;
-  --wt-hue-6: #7014c4;
-  --wt-hue-7: #1c8417;
 }
 
 * {
@@ -491,6 +475,14 @@ select:focus {
 
 .wt-row.away .wt-dot {
   opacity: 0.45;
+}
+
+/* The palette is identical in both themes by request, so the pale hues (FFF827,
+   41FFFC) land low-contrast on a white panel. Only the ring is strengthened — the
+   fill is used exactly as given. */
+body[data-theme="light"] .wt-dot,
+body[data-theme="light"] .hue-cell > span {
+  box-shadow: inset 0 0 0 1px rgb(0 0 0 / 0.45);
 }
 
 /* Marker picker: the colour grid, beside the existing glyph grid. Both are always
