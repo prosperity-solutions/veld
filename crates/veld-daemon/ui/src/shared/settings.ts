@@ -28,6 +28,30 @@ export type MarkerStyle = "color" | "emoji";
  * Not the defaults — see the file header. Each entry exists because rendering
  * cannot proceed without *something*, and the honest choice is the behaviour the
  * release before the setting had.
+ *
+ * **One stated exception: a setting that decides whether a *new control exists*
+ * takes the shipped default, not the previous release's behaviour.** By the rule
+ * above `quickSwitch*` would be `false`, since the release before them had no
+ * switches — but hiding a button this build's user has been told about, because the
+ * daemon has not heard of the key, is the wrong answer: it makes an old daemon look
+ * like a broken new UI.
+ *
+ * Note the reachable path this exception is chosen *for*, because it is not only the
+ * old-daemon one: both callers read `quickSwitchPrefs(settings ?? {})`, so the
+ * fallback also decides the **first paint** on any client with no `localStorage`
+ * mirror. That is deliberate and it is the cheaper of two reflows — the switches
+ * default on, so substituting the default matches what most clients are about to
+ * receive and the bar does not move at all, where deferring until `settings !== null`
+ * would add two buttons on every fresh client instead. The residual cost is real and
+ * accepted: someone who turned both switches *off* sees them painted for one frame.
+ * `useSettings`'s "prefer non-null for sized content" advice points the other way, so
+ * do not quietly reverse this without re-deciding which population eats the reflow.
+ *
+ * Note what nothing checks: that these values match `defaults()` in
+ * `veld-core/src/db/settings.rs`. `every_known_key_round_trips_and_has_a_default`
+ * pins that a key *has* a Rust default, never that this copy agrees with it — so
+ * this is the one Rust↔TS pair that can still drift, and a deliberate divergence
+ * like the exception above has to stay written down rather than merely true.
  */
 const FALLBACK = {
   fontSize: 12,
@@ -39,6 +63,8 @@ const FALLBACK = {
   shiftEnterNewline: true,
   markerStyle: "color" as MarkerStyle,
   detachGraceMinutes: 30,
+  quickSwitchResponsive: true,
+  quickSwitchColorScheme: true,
 } as const;
 
 function num(doc: SettingsDoc, key: string, fallback: number): number {
@@ -157,6 +183,35 @@ export function markerFace(
     return { kind: "color", color: wt.marker_color };
   }
   return null;
+}
+
+/**
+ * Which one-click toggles a browser pane puts in its chrome.
+ *
+ * A preference rather than a fixed pair because the chrome already carries most of a
+ * browser's toolbar before these — so whether two more buttons belong there is the
+ * user's call. Global and standing, **not** an answer to one narrow pane: see the
+ * note beside the Rust defaults for why a measured bar width would be that, and why
+ * this is not it. Both default on.
+ */
+export interface QuickSwitchPrefs {
+  responsive: boolean;
+  colorScheme: boolean;
+}
+
+export function quickSwitchPrefs(doc: SettingsDoc): QuickSwitchPrefs {
+  return {
+    responsive: bool(
+      doc,
+      "browser.quickSwitch.responsive",
+      FALLBACK.quickSwitchResponsive,
+    ),
+    colorScheme: bool(
+      doc,
+      "browser.quickSwitch.colorScheme",
+      FALLBACK.quickSwitchColorScheme,
+    ),
+  };
 }
 
 /**

@@ -101,6 +101,7 @@ import {
   updateTab,
 } from "./model";
 import { notifyError } from "../shared/notify";
+import type { QuickSwitchPrefs } from "../shared/settings";
 import type { Quicklink } from "../api";
 import { desktopWindow } from "../shell";
 import { type DropZone, sameZone, zoneAt } from "./dropModel";
@@ -258,6 +259,8 @@ export function PaneArea(props: {
   sessions: BrowserProfile[];
   onAddSession: ((tabId: string) => void) | undefined;
   onRemoveSession: (profile: BrowserProfile) => void;
+  /** Which one-click toggles a browser pane's chrome shows. */
+  quickSwitches: QuickSwitchPrefs;
   /** The selected worktree's run, for the `logs` and `nodes` panes. */
   runCtx: RunPaneContext;
 }) {
@@ -770,6 +773,7 @@ export function PaneArea(props: {
               sessions={props.sessions}
               onAddSession={props.onAddSession}
               onRemoveSession={props.onRemoveSession}
+              quickSwitches={props.quickSwitches}
               runCtx={props.runCtx}
               onDetach={desktopWindow ? detachTabs : undefined}
               onDropOut={desktopWindow ? dropOutTabs : undefined}
@@ -824,6 +828,7 @@ function DockView(props: {
   sessions: BrowserProfile[];
   onAddSession: ((tabId: string) => void) | undefined;
   onRemoveSession: (profile: BrowserProfile) => void;
+  quickSwitches: QuickSwitchPrefs;
   runCtx: RunPaneContext;
   /** Pull tabs out into a window of their own. Absent outside Electron, which
    *  has no window manager to pull them into. */
@@ -1216,6 +1221,7 @@ function DockView(props: {
               props.onAddSession && (() => props.onAddSession?.(active.id))
             }
             onRemoveSession={props.onRemoveSession}
+            quickSwitches={props.quickSwitches}
             // Updater form on purpose: both docks can hold a browser pane, and
             // two navigations landing in the same commit would otherwise write
             // from the same stale `layout` and lose one.

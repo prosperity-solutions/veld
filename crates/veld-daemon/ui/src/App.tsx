@@ -12,7 +12,12 @@ import {
   type StatsResponse,
   type Worktree,
 } from "./api";
-import { markerFace, markerStyle, terminalPrefs } from "./shared/settings";
+import {
+  markerFace,
+  markerStyle,
+  quickSwitchPrefs,
+  terminalPrefs,
+} from "./shared/settings";
 import { applyTerminalPrefs } from "./panes/terminalHost";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { useSettings } from "./shared/useSettings";
@@ -432,6 +437,11 @@ function AppInner(props: {
     if (!settings) return;
     applyTerminalPrefs(terminalPrefs(settings));
   }, [settings]);
+
+  // Which quick switches a browser pane's chrome shows. Read here and threaded,
+  // rather than each pane calling `useSettings` — that would be a fetch and a
+  // focus listener per pane for one document the app already holds.
+  const quickSwitches = quickSwitchPrefs(settings ?? {});
 
   // View mode: worktree cockpit ("ide") vs runs management ("runs").
   // Defaults by serving path (the app will also own `/` at v1 parity);
@@ -1898,6 +1908,7 @@ function AppInner(props: {
             sessions={sessions}
             onAddSession={nextSession ? addSession : undefined}
             onRemoveSession={removeSession}
+            quickSwitches={quickSwitches}
             runCtx={runCtx}
           />
         )}
@@ -2028,6 +2039,7 @@ function AppInner(props: {
               sessions={sessions}
               onAddSession={nextSession ? addSession : undefined}
               onRemoveSession={removeSession}
+              quickSwitches={quickSwitches}
               runCtx={runCtx}
             />
           )}

@@ -5,6 +5,7 @@ import {
   markerFace,
   detachGraceMinutes,
   markerStyle,
+  quickSwitchPrefs,
   terminalPrefs,
 } from "./settings";
 
@@ -115,6 +116,31 @@ describe("markerFace", () => {
 
   it("is null only when neither face exists", () => {
     expect(markerFace({}, { emoji: "", marker_color: "" })).toBeNull();
+  });
+});
+
+describe("quickSwitchPrefs", () => {
+  it("reads both switches and defaults them on", () => {
+    expect(
+      quickSwitchPrefs({
+        "browser.quickSwitch.responsive": false,
+        "browser.quickSwitch.colorScheme": true,
+      }),
+    ).toEqual({ responsive: false, colorScheme: true });
+    // A daemon that predates the keys shows both, which is the shipped default.
+    expect(quickSwitchPrefs({})).toEqual({ responsive: true, colorScheme: true });
+  });
+
+  it("type-checks rather than coercing", () => {
+    // `0` distinguishes the two readings: a truthiness test would report the
+    // switch as hidden, while a type check falls back to the default. The daemon
+    // rejects a non-bool on write, so this is the path where one got in another
+    // way — a hand-edited row, or a key a newer build gave a different type.
+    expect(
+      quickSwitchPrefs({
+        "browser.quickSwitch.colorScheme": 0 as unknown as boolean,
+      }).colorScheme,
+    ).toBe(true);
   });
 });
 

@@ -555,6 +555,74 @@ requests at runtime — branding rule.
   `setUserAgent` takes a header value, so a CR or LF in one is header injection
   against every origin the pane visits. Printable ASCII, bounded, and rejected
   rather than repaired.
+- **The quick switches are reach, not capability — so they are a preference.**
+  The responsive viewport and the page's colour scheme are the two things people
+  change dozens of times an hour while working on a layout, and both were three
+  levels deep in the device menu. They are now one click each in the pane's
+  chrome, beside the device button, and the menu keeps every control it had: a
+  switch turned off costs a shortcut and nothing else. Which of them appears is
+  `browser.quickSwitch.responsive` / `browser.quickSwitch.colorScheme` in the
+  settings store, and both default **on**, since a control defaulted off is a
+  control nobody finds and reach was the whole point. The keys say whether the
+  *switch is shown*; the emulation itself stays per pane in the layout. They live
+  in the settings store rather than the layout for the same reason the font size
+  does: this is a preference about the app, not state belonging to one pane.
+  **Which also means it is not the answer to the 300px pane**, and should not be
+  read as one: the document is global, so a switch turned off is off in every pane,
+  every window and every browser tab, while bar width is per pane and changes on
+  every split. Hiding the switches below a *measured* bar width would answer that
+  case directly and would need no key at all — it is the better answer to that
+  specific problem, and deliberately not what this is. What the preference actually
+  answers is "do I want this shortcut on my toolbar at all".
+- **The colour scheme is a three-state cycle, not a dark toggle.**
+  System → Dark → Light → System (`nextColorScheme` in `panes/devices.ts`, pure
+  and tested). The first version toggled dark against System, which is the shape
+  the roadmap described, and it was wrong for one reason: a light-only layout bug
+  is as ordinary as a dark one, so half the feature's audience was still going
+  three levels into the menu. **System stays the absence of an override** rather
+  than becoming a third stored value — it is what `withMediaFeature(…, null)`
+  produces, and therefore what lets the CDP session be released, so it has to be
+  reachable *by cycling* and not only from the menu. An unrecognised scheme (one a
+  newer build wrote) returns System, which is the same answer `light` gets — that is
+  the function being total, **not** a guard against a reachable state:
+  `sanitizeMedia` already drops any scheme outside `MEDIA_FEATURES` on every layout
+  load, so the real defence is upstream and this is not licence to weaken it.
+- **`data-disabled`, not `disabled`, on the inert colour-scheme switch.** A real
+  `<button disabled>` dispatches no pointer events, and Mantine puts a Tooltip's
+  hover handlers on the child element itself while adding no `pointer-events` rule of
+  its own — so a disabled button's tooltip never opens, and the browser build would
+  get a grey button with its one explanation unreachable. That is precisely the
+  "control that silently does nothing" this feature was told to avoid. `data-disabled`
+  drives the styling through `mod` and leaves the element hoverable, which moves the
+  refusal into the click handler and the semantics into `aria-disabled`. The device
+  menu never hit this because it states its gaps in a `Menu.Label`, which renders
+  regardless of any item's state. **The same defect still exists on the chrome's
+  Back/Forward buttons** ("History needs the desktop app" is unreachable in the
+  iframe backend) — pre-existing, out of that diff's scope, worth fixing next.
+- **Sun and moon, but not the top bar's System glyph.** The lit states reuse the
+  app's own theme icons because they answer the same question, and the tooltip says
+  *the page's* colour scheme because Veld themes itself too. System deliberately
+  does **not** reuse `IconDeviceDesktop`: one button away sits the device picker,
+  and two monitor shapes side by side read as two device controls.
+- **A switch's off is one definite state, never menu history.** Responsive's off is
+  **no emulation at all**, deliberately not the device that was selected before: the
+  switch then answers exactly one question ("am I in the resizable viewport"), and a
+  lit switch means the same thing every time. Restoring a previous device would have
+  made the control's meaning depend on menu history that nothing on screen shows.
+  The cost, stated because it is not obvious: a *dragged* preset or a hand-entered
+  size is `custom`, not `responsive` (`resizeEmulation`), so the switch reads off
+  over a viewport that already has draggable edges, and clicking it replaces that
+  size with a pane-measured one that the layout cannot undo. An off-looking toggle
+  reads as costless, so the tooltip names what the click will replace rather than
+  leaving it to be discovered.
+- **They report `mediaActive`, not what was asked for.** The colour-scheme switch
+  shows as *paused* rather than as set while Chromium's debugger is held elsewhere,
+  for the same reason `touchActive` exists: a switch claiming Dark over a page that
+  is still light is the exact lie those flags were added to prevent. Responsive has
+  no equivalent — nothing can take a viewport size away — so it reads straight off
+  `emulation.device`, the same source the menu's own checkmark uses. Entering the
+  state is `enterResponsive`, shared with the menu item, so the "measured from the
+  pane's own box, skipped when there is no box" rule has one owner.
 - **The browser build gets the layout half and says so.** An iframe's own width
   *is* a real viewport, so a page in a 393px frame sees 393px in its media queries,
   and a CSS `transform` scales the rendered result to fit the pane. What a frame has

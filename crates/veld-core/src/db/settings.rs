@@ -105,6 +105,8 @@ pub enum SettingKey {
     TerminalShiftEnterNewline,
     TerminalDetachGrace,
     WorktreeMarkerStyle,
+    BrowserQuickSwitchResponsive,
+    BrowserQuickSwitchColorScheme,
     Unknown(String),
 }
 
@@ -128,6 +130,8 @@ impl SettingKey {
         Self::TerminalShiftEnterNewline,
         Self::TerminalDetachGrace,
         Self::WorktreeMarkerStyle,
+        Self::BrowserQuickSwitchResponsive,
+        Self::BrowserQuickSwitchColorScheme,
     ];
 
     pub fn as_str(&self) -> &str {
@@ -140,6 +144,8 @@ impl SettingKey {
             Self::TerminalShiftEnterNewline => "terminal.shiftEnterNewline",
             Self::TerminalDetachGrace => "terminal.detachGraceMinutes",
             Self::WorktreeMarkerStyle => "worktree.markerStyle",
+            Self::BrowserQuickSwitchResponsive => "browser.quickSwitch.responsive",
+            Self::BrowserQuickSwitchColorScheme => "browser.quickSwitch.colorScheme",
             Self::Unknown(k) => k,
         }
     }
@@ -154,6 +160,8 @@ impl SettingKey {
             "terminal.shiftEnterNewline" => Self::TerminalShiftEnterNewline,
             "terminal.detachGraceMinutes" => Self::TerminalDetachGrace,
             "worktree.markerStyle" => Self::WorktreeMarkerStyle,
+            "browser.quickSwitch.responsive" => Self::BrowserQuickSwitchResponsive,
+            "browser.quickSwitch.colorScheme" => Self::BrowserQuickSwitchColorScheme,
             other => Self::Unknown(other.to_string()),
         }
     }
@@ -182,9 +190,10 @@ impl SettingKey {
                 clamp_i64(value, MIN_DETACH_GRACE_MINUTES, MAX_DETACH_GRACE_MINUTES)
                     .ok_or_else(bad)?,
             ),
-            Self::TerminalCursorBlink | Self::TerminalShiftEnterNewline => {
-                Value::from(value.as_bool().ok_or_else(bad)?)
-            }
+            Self::TerminalCursorBlink
+            | Self::TerminalShiftEnterNewline
+            | Self::BrowserQuickSwitchResponsive
+            | Self::BrowserQuickSwitchColorScheme => Value::from(value.as_bool().ok_or_else(bad)?),
             Self::TerminalCursorStyle => {
                 one_of(value, &["block", "underline", "bar"]).ok_or_else(bad)?
             }
@@ -267,6 +276,25 @@ pub fn defaults() -> BTreeMap<String, Value> {
         // Colour is the new default marker; the emoji face stays stored, so this
         // is a rendering choice and switching back is lossless.
         (SettingKey::WorktreeMarkerStyle, Value::from("color")),
+        // Both quick switches ship **on**. Whether two more buttons belong in a
+        // pane's chrome for everyone is a real question — the bar already carries
+        // most of a browser's toolbar and has to read at 300px — but the alternative is
+        // worse: a control defaulted off is a control nobody finds, and the whole
+        // point of these two is reach. The responsive viewport and the page's colour
+        // scheme are three levels deep in the device menu and are changed dozens of
+        // times an hour while working on a layout.
+        //
+        // Note what this preference is **not**: it is one global document, so turning
+        // a switch off hides it in every pane, every window and every browser tab on
+        // this daemon. It cannot answer the 300px case on its own — pane width is
+        // per pane and changes on every split — and it is a standing choice about
+        // whether you want the shortcut at all. Hiding the switches below a measured
+        // bar width would answer the narrow-pane case directly and needs no key; it
+        // is the better answer to that specific problem and is deliberately not what
+        // this is. Each key says whether the *switch is shown*; what a pane is
+        // emulating lives in that pane's layout.
+        (SettingKey::BrowserQuickSwitchResponsive, Value::from(true)),
+        (SettingKey::BrowserQuickSwitchColorScheme, Value::from(true)),
     ]
     .into_iter()
     .map(|(k, v)| (k.as_str().to_string(), v))
@@ -496,6 +524,31 @@ mod tests {
         assert!(matches!(err, DbError::InvalidSetting { .. }));
         // Both-or-neither: the valid half of a rejected patch must not survive.
         assert_eq!(db.settings().unwrap()["terminal.fontSize"], Value::from(12));
+    }
+
+    #[test]
+    fn a_quick_switch_takes_a_bool_and_nothing_else() {
+        // The only server-side behaviour these two keys have. Rejected rather than
+        // coerced: `Value::from(truthy)` would store a `1` that the UI's `bool`
+        // reader then ignores in favour of the fallback, so the daemon would report
+        // a saved setting the app does not honour.
+        let (_dir, db) = test_db();
+        db.patch_settings(&patch(&[(
+            "browser.quickSwitch.colorScheme",
+            Value::from(false),
+        )]))
+        .unwrap();
+        assert_eq!(
+            db.settings().unwrap()["browser.quickSwitch.colorScheme"],
+            Value::from(false)
+        );
+        let err = db
+            .patch_settings(&patch(&[(
+                "browser.quickSwitch.responsive",
+                Value::from("yes"),
+            )]))
+            .unwrap_err();
+        assert!(matches!(err, DbError::InvalidSetting { .. }));
     }
 
     #[test]

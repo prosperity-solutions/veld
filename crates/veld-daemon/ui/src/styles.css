@@ -1105,9 +1105,23 @@ body[data-theme="light"] .swatch-cell > span {
   background: var(--panel);
 }
 
+/* Wraps rather than clipping. Every control here is an `ActionIcon` carrying
+   `min-width: var(--ai-size)`, so none of them can shrink, and `.dock-body` is
+   `overflow: hidden` — so without `flex-wrap` the bar's rightmost items (the device
+   menu, DevTools, open-externally) are simply cut off past the width where the row
+   stops fitting, with no way to scroll them into reach. `MIN_RATIO` (0.15) lets a
+   split pane be ~216px on a 1440px dock and a detached pane window can be narrower,
+   so that is a configuration people actually get to. Adding the two quick switches
+   moved the boundary far enough to matter, which is what surfaced it.
+
+   The compounding case is the one that decided this: turning the responsive switch
+   *on* widens the device button with its size chip, pushing the very menu you would
+   use to turn it off towards the clip. A control that can make itself unreachable is
+   worse than a second row. */
 .browser-bar {
   flex: none;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 3px;
   padding: 5px 7px;
@@ -1116,7 +1130,12 @@ body[data-theme="light"] .swatch-cell > span {
 
 .browser-address {
   flex: 1;
-  min-width: 0;
+  /* A floor, not zero, and it is what makes the bar's `flex-wrap` fire at a useful
+     point. Flex only moves items to a second line once they cannot fit at their
+     minimum — so with `min-width: 0` this input would be squeezed to invisible
+     *first* and the buttons would wrap only after that. Wrapping while the address
+     is still readable is the whole point. */
+  min-width: 96px;
   height: 24px;
   padding: 0 9px;
   border: 1px solid var(--border);
