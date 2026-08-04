@@ -1056,6 +1056,17 @@ function AppInner(props: {
         ? [
             { key: "trash-error-divider" },
             {
+              key: "trash-retry",
+              title: "Removal failed — try again…",
+              color: "red",
+              // Straight into the confirmation, which now shows the recorded
+              // refusal and the force checkbox beside it. Without this entry the
+              // only way back to a forced removal was a dialog that no longer
+              // knew a removal had been refused.
+              onClick: () =>
+                setDialog({ kind: "rename", worktree: w, deleteFocus: true }),
+            },
+            {
               key: "trash-error",
               title: "Dismiss removal error",
               onClick: () => void dismissTrashError(w),
@@ -1698,9 +1709,15 @@ function AppInner(props: {
       await api.restoreWorktree(w.id);
       notifyDone(`Keeping ${w.alias}`);
     } catch (e) {
-      // The expected failure: the worker already removed it. Say so rather than
-      // reporting a generic error for a race the design admits to.
-      notifyError(`${w.alias} has already been removed`, e);
+      // 404 is the expected failure — the worker got there first — and saying so is
+      // better than a generic error for a race the design admits to. Anything else
+      // (a 500, a dead daemon) must NOT claim the worktree was removed, because it
+      // is still there and the user would stop looking for it.
+      const gone = e instanceof Error && /not found|already removed/i.test(e.message);
+      notifyError(
+        gone ? `${w.alias} has already been removed` : `Could not keep ${w.alias}`,
+        e,
+      );
     }
     await refresh();
   };
@@ -2337,6 +2354,12 @@ function AppInner(props: {
         <RenameWorktreeDialog
           current={dialog.worktree.alias}
           isMain={dialog.worktree.is_main}
+          /* Read off the LIVE row, not the one captured when the dialog opened: a
+             background removal can fail while it is open, and the force affordance
+             has to appear when the refusal arrives. */
+          trashError={
+            worktrees.find((w) => w.id === dialog.worktree.id)?.trash_error ?? ""
+          }
           deleteFocus={dialog.deleteFocus ?? false}
           onClose={closeDialog}
           onRename={async (alias) => {

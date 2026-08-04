@@ -110,6 +110,13 @@ pub const MAX_LANE_NAME_LEN: usize = 32;
 /// being organised by it.
 pub const MAX_LANES_PER_REPO: usize = 32;
 
+/// Longest accepted reorder payload, for worktrees or lanes.
+///
+/// Generous against any real repo (a rail with a thousand checkouts is not a rail)
+/// and small enough that the per-element `UPDATE` loop cannot hold the write lock
+/// long enough to stall the daemon's other writers.
+pub const MAX_ORDER_LEN: usize = 1024;
+
 /// A worktree as discovered on disk (`git worktree list --porcelain`), used
 /// to sync the table with reality.
 #[derive(Debug, Clone)]
@@ -679,6 +686,9 @@ impl Db {
     /// caller omits keep their relative order after the ones it listed. Unknown
     /// names are ignored.
     pub fn reorder_lanes(&self, repo_root: &Path, order: &[String]) -> Result<(), DbError> {
+        if order.len() > MAX_ORDER_LEN {
+            return Err(DbError::OrderTooLong(order.len()));
+        }
         let root = root_key(repo_root);
         let mut conn = self.lock();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -725,12 +735,26 @@ impl Db {
     /// alias-sorted tail. That is what makes the write idempotent: the UI sends the
     /// order it is displaying, and the stored order becomes exactly that.
     pub fn reorder_worktrees(&self, repo_root: &Path, order: &[String]) -> Result<(), DbError> {
+        // Bounded before taking the write lock. The body is a caller-supplied array
+        // and each element costs one UPDATE inside an IMMEDIATE transaction, so an
+        // oversized list stalls every other writer in the daemon — run bookkeeping,
+        // PTY logging, the GC pass — for as long as it takes. Nothing legitimate
+        // sends more entries than the repo has worktrees.
+        if order.len() > MAX_ORDER_LEN {
+            return Err(DbError::OrderTooLong(order.len()));
+        }
         let root = root_key(repo_root);
         let mut conn = self.lock();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        // Trashed rows are exempt from the reset. The UI omits them from the order
+        // it sends (they are leaving, so a position for them is meaningless), and
+        // without this exemption any unrelated drag would strip the position off a
+        // worktree whose removal is still pending — so a removal that then failed
+        // would put it back unplaced. That is what makes the v10 migration's claim
+        // that a trashed worktree keeps its lane AND its position true.
         tx.execute(
             "UPDATE worktrees SET sort_position = NULL
-              WHERE repo_root = ?1 AND sort_position IS NOT NULL",
+              WHERE repo_root = ?1 AND sort_position IS NOT NULL AND trashed_at = ''",
             params![root],
         )?;
         for (i, path) in order.iter().enumerate() {
@@ -2079,6 +2103,54 @@ mod tests {
         let row = db.get_worktree(id).unwrap().unwrap();
         assert_eq!(row.lane, "review");
         assert_eq!(row.sort_position, Some(0));
+    }
+
+    #[test]
+    fn reordering_does_not_unplace_a_trashed_worktree() {
+        let (_dir, db) = test_db();
+        let root = Path::new("/tmp/keeppos");
+        db.upsert_repo(root, "keeppos").unwrap();
+        db.sync_worktrees(
+            root,
+            &[
+                wt("/tmp/keeppos", "main", true),
+                wt("/tmp/going", "going", false),
+                wt("/tmp/staying", "staying", false),
+            ],
+        )
+        .unwrap();
+        db.reorder_worktrees(root, &["/tmp/going".into(), "/tmp/staying".into()])
+            .unwrap();
+        let going = db.get_worktree_by_path("/tmp/going").unwrap().unwrap();
+        db.trash_worktree(going.id).unwrap();
+
+        // The UI omits pending removals from the order it sends, so without the
+        // `trashed_at = ''` exemption any unrelated drag would strip the position off
+        // a worktree mid-removal — and a removal that then failed would put it back
+        // unplaced. This is what makes v10's "keeps its lane AND its position" true.
+        db.reorder_worktrees(root, &["/tmp/staying".into()])
+            .unwrap();
+        assert_eq!(
+            db.get_worktree(going.id).unwrap().unwrap().sort_position,
+            Some(0),
+            "a trashed worktree keeps its position through an unrelated reorder"
+        );
+    }
+
+    #[test]
+    fn an_oversized_reorder_is_rejected_before_the_write_lock() {
+        let (_dir, db) = test_db();
+        let root = Path::new("/tmp/toolong");
+        db.upsert_repo(root, "toolong").unwrap();
+        let huge: Vec<String> = (0..=MAX_ORDER_LEN).map(|i| format!("/p/{i}")).collect();
+        assert!(matches!(
+            db.reorder_worktrees(root, &huge),
+            Err(DbError::OrderTooLong(_))
+        ));
+        assert!(matches!(
+            db.reorder_lanes(root, &huge),
+            Err(DbError::OrderTooLong(_))
+        ));
     }
 
     #[test]

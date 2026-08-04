@@ -406,6 +406,18 @@ export function RenameWorktreeDialog(props: {
   onRename: (alias: string) => Promise<void>;
   onDelete: (force: boolean) => Promise<void>;
   isMain: boolean;
+  /**
+   * Why the last background removal failed, or `""`.
+   *
+   * Load-bearing, not decoration. Removal is asynchronous now, so an un-forced
+   * `DELETE` returns 202 and git's refusal arrives later on the row — it can never
+   * land in this dialog's own `useSubmit` error. Gating the force checkbox on that
+   * error therefore made `?force=true` unreachable: click → 202 → the dialog closes
+   * → reopening gives a fresh, empty error. This is the durable record of the
+   * refusal, and it is what makes forcing an answer to a refusal the user has
+   * actually been shown rather than a checkbox offered up front.
+   */
+  trashError: string;
   /** Open with the remove confirmation already expanded (context menu). */
   deleteFocus: boolean;
   onClose: () => void;
@@ -415,6 +427,9 @@ export function RenameWorktreeDialog(props: {
   const [force, setForce] = useState(false);
   const rename = useSubmit(() => props.onRename(alias.trim()));
   const del = useSubmit(() => props.onDelete(force));
+  // Either source of a refusal: this attempt's own (a 4xx from the forced path, or
+  // a rejected precondition) or the last background attempt's.
+  const refusal = del.error ?? (props.trashError || null);
   return (
     <Modal title="Edit worktree" onClose={props.onClose}>
       <form onSubmit={rename.submit}>
@@ -447,9 +462,12 @@ export function RenameWorktreeDialog(props: {
                 environment here is stopped first, and the removal continues in
                 the background — you can keep working in other worktrees, and
                 if it fails the worktree comes back with the reason.
+                {force
+                  ? " Forcing runs immediately and discards uncommitted changes; it will not start if an environment is still running."
+                  : ""}
               </Text>
-              <ErrorText error={del.error} />
-              {del.error && (
+              <ErrorText error={refusal} />
+              {refusal && (
                 <Checkbox
                   color="red"
                   label="Force remove — discards uncommitted changes"

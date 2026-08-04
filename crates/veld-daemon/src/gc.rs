@@ -52,13 +52,17 @@ pub async fn run_gc_scheduler(share_manager: Arc<ShareManager>) {
         match run_gc().await {
             Ok(summary) => {
                 info!(
-                    "gc complete: {} stale removed, {} orphans killed, {} logs pruned, {} stats pruned ({} per-process), {} routes cleaned",
+                    "gc complete: {} stale removed, {} orphans killed, {} logs pruned, {} stats pruned ({} per-process), {} routes cleaned, {} worktrees evicted",
                     summary.stale_removed,
                     summary.orphans_killed,
                     summary.logs_pruned,
                     summary.stats_pruned,
                     summary.process_stats_pruned,
-                    summary.routes_cleaned
+                    summary.routes_cleaned,
+                    // Logged because it is the only destructive number in this
+                    // summary: if a checkout disappeared overnight, this line is
+                    // where the answer has to be.
+                    summary.worktrees_evicted
                 );
                 // Stop any shares whose run just died so they don't outlive the
                 // environment they expose (crash path — CLI `veld stop` already
@@ -300,7 +304,7 @@ pub async fn run_gc() -> anyhow::Result<GcSummary> {
     // comes back out of trash with the reason attached. That is the safety
     // property that makes a timer allowed to touch a developer's checkout at all:
     // it can never override git, only ask.
-    summary.worktrees_evicted = crate::feedback_server::worktree_trash::mark_evictions(&db);
+    summary.worktrees_evicted = crate::feedback_server::worktree_trash::mark_evictions(&db).await;
 
     // Phase 3: Prune leftover pre-SQLite log files from each project's
     // .veld/logs/ directory (written by old veld versions and by legacy

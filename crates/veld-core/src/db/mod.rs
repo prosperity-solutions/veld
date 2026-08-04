@@ -27,8 +27,8 @@ mod worktrees;
 pub use logs::{LogFilter, LogRow, LogStream, stream_is_per_node};
 pub use settings::DEFAULT_DETACH_GRACE_MINUTES;
 pub use worktrees::{
-    DiscoveredWorktree, LaneRecord, MAX_LANE_NAME_LEN, RepoRecord, WORKTREE_COLORS, WORKTREE_EMOJI,
-    WorktreeRecord, default_alias, is_worktree_color, is_worktree_emoji,
+    DiscoveredWorktree, LaneRecord, MAX_LANE_NAME_LEN, MAX_ORDER_LEN, RepoRecord, WORKTREE_COLORS,
+    WORKTREE_EMOJI, WorktreeRecord, default_alias, is_worktree_color, is_worktree_emoji,
 };
 
 use std::path::{Path, PathBuf};
@@ -86,6 +86,12 @@ pub enum DbError {
 
     #[error("this repo already has the maximum of {0} lanes")]
     TooManyLanes(usize),
+
+    #[error(
+        "a reorder may list at most {max} entries (got {0})",
+        max = crate::db::worktrees::MAX_ORDER_LEN
+    )]
+    OrderTooLong(usize),
 
     #[error("refusing to remove the main checkout — remove the repo instead")]
     RefusingMainWorktree,

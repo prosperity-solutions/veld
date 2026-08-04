@@ -276,6 +276,25 @@ pub fn routes() -> Router {
 ///
 /// Separate from [`routes`] so that building a router in a test doesn't leave a
 /// timer running; the daemon calls this once at startup.
+/// Worktree ids that currently have a live terminal session.
+///
+/// Used by worktree auto-eviction, which must not delete a checkout somebody has a
+/// shell open in. A veld run is not the only sign of life — and it is not even the
+/// common one here, since a worktree can be used all day through terminal panes
+/// alone without `veld start` ever running. Sessions deliberately outlive a daemon
+/// restart, so this outlives one too.
+pub async fn worktree_ids_with_sessions() -> std::collections::HashSet<i64> {
+    SESSIONS
+        .lock()
+        .await
+        .values()
+        // An exited shell is not a reason to keep a checkout alive; its pane is
+        // still there, but nothing is running in it.
+        .filter(|s| s.exit.borrow().is_none())
+        .map(|s| s.worktree_id)
+        .collect()
+}
+
 pub fn spawn_session_reaper() {
     tokio::spawn(async move {
         loop {

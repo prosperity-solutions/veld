@@ -50,10 +50,18 @@ pub fn routes() -> Router {
             "/api/worktrees/{id}/trash-error",
             delete(dismiss_trash_error),
         )
-        .route("/api/worktrees/order", post(reorder_worktrees))
+        // `/api/lane-order`, not `/api/lanes/order`: a static segment wins over a
+        // dynamic one, so `/api/lanes/order` would shadow `/api/lanes/{name}` for a
+        // lane the user is allowed to call "order" — `PATCH`/`DELETE` would hit this
+        // POST-only node and 405, leaving that lane impossible to rename or delete.
+        // Same reasoning for the worktree order against `/api/worktrees/{id}`, where
+        // the id is numeric and so cannot actually collide — kept parallel anyway,
+        // because the next reader should not have to work out which of the two was
+        // safe by accident.
+        .route("/api/worktree-order", post(reorder_worktrees))
         .route("/api/worktree-emoji", get(worktree_emoji))
         .route("/api/lanes", get(list_lanes).post(create_lane))
-        .route("/api/lanes/order", post(reorder_lanes))
+        .route("/api/lane-order", post(reorder_lanes))
         .route("/api/lanes/{name}", patch(rename_lane).delete(delete_lane))
         .route("/api/pick-directory", post(pick_directory))
         .layer(axum::middleware::from_fn(csrf_layer))
@@ -353,6 +361,16 @@ fn write_err(e: veld_core::db::DbError) -> ApiError {
             warn!("rejected lane assignment: {e}");
             err(StatusCode::BAD_REQUEST, "no such lane in this repo")
         }
+        veld_core::db::DbError::OrderTooLong(_) => {
+            warn!("rejected oversized reorder: {e}");
+            err(
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "a reorder may list at most {} entries",
+                    veld_core::db::MAX_ORDER_LEN
+                ),
+            )
+        }
         other => db_err(other),
     }
 }
@@ -403,6 +421,18 @@ pub(super) async fn git(dir: &FsPath, args: &[&str]) -> Result<String, String> {
 /// worktree deleted outside veld (`rm -rf`, a `git worktree move`, a wiped
 /// scratch disk) stayed in the rail indefinitely pointing at nothing. Skipping it
 /// lets the existing `path NOT IN (…)` delete reap the row on the next poll.
+///
+/// **The cost, stated because it is not free.** Reaping the row also discards the
+/// user state on it — alias, marker, lane, manual position — and git reports
+/// `prunable` for *any* absent checkout, including one on an unmounted external or
+/// network volume, which is transient. So a worktree on a disk that is currently
+/// unmounted comes back re-registered with a fresh alias and marker and no lane.
+/// A grace period (`missing_since`, reap only after N hours) is the fix that serves
+/// both cases and is deliberately not in this change: it puts a clock in the
+/// reconcile pass, and the pass having exactly one new branch is what makes it
+/// reviewable. Note the repo-level case is already covered — if the *repo root*
+/// is unreachable, `git worktree list` fails, `sync_repo_worktrees` returns `Err`,
+/// and `RepoView.available` goes false with every row left untouched.
 fn parse_worktree_list(porcelain: &str) -> Vec<DiscoveredWorktree> {
     let mut out = Vec::new();
     let mut first = true;
@@ -1084,6 +1114,23 @@ async fn delete_worktree(
     // Forced removal stays inline: the user has already been told why the
     // un-forced attempt failed and has chosen to discard the changes, so the
     // answer they need is whether *this* attempt worked.
+    //
+    // It does NOT stop runs first — the background worker is what does that, and
+    // awaiting a teardown inside a request is the freeze this batch removed. So
+    // refuse instead of quietly deleting the directory out from under a live run:
+    // `--force` is about discarding *file* changes, and letting it also mean "and
+    // kill whatever is running in there" is a promise the dialog's copy does not
+    // make. In practice this is a safety net rather than a common path, because the
+    // un-forced attempt that produced the refusal already stopped the runs.
+    let live = db.live_run_names(FsPath::new(&wt.path)).map_err(db_err)?;
+    if let Some(name) = live.first() {
+        let _ = db.untrash_worktree(id, "");
+        return Err(err(
+            StatusCode::CONFLICT,
+            format!("environment \"{name}\" is still running in this worktree — stop it first"),
+        ));
+    }
+
     let repo_root = PathBuf::from(&wt.repo_root);
     match git(
         &repo_root,
@@ -1132,7 +1179,7 @@ async fn dismiss_trash_error(Path(id): Path<i64>) -> Result<StatusCode, ApiError
 }
 
 #[derive(Deserialize)]
-struct OrderBody {
+struct WorktreeOrderBody {
     repo_root: String,
     /// The full order the client is displaying, as worktree **paths**.
     ///
@@ -1143,10 +1190,10 @@ struct OrderBody {
     order: Vec<String>,
 }
 
-async fn reorder_worktrees(Json(body): Json<OrderBody>) -> Result<StatusCode, ApiError> {
+async fn reorder_worktrees(Json(body): Json<WorktreeOrderBody>) -> Result<StatusCode, ApiError> {
     let db = open_desktop_db()?;
     db.reorder_worktrees(FsPath::new(&body.repo_root), &body.order)
-        .map_err(db_err)?;
+        .map_err(write_err)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1213,10 +1260,19 @@ async fn delete_lane(
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn reorder_lanes(Json(body): Json<OrderBody>) -> Result<StatusCode, ApiError> {
+#[derive(Deserialize)]
+struct LaneOrderBody {
+    repo_root: String,
+    /// The full lane order the client is displaying, as lane **names** — lanes are
+    /// identified by `(repo_root, name)` and have no id. Names the caller omits keep
+    /// their relative order after the ones it lists.
+    order: Vec<String>,
+}
+
+async fn reorder_lanes(Json(body): Json<LaneOrderBody>) -> Result<StatusCode, ApiError> {
     let db = open_desktop_db()?;
     db.reorder_lanes(FsPath::new(&body.repo_root), &body.order)
-        .map_err(db_err)?;
+        .map_err(lane_err)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1249,6 +1305,16 @@ fn lane_err(e: veld_core::db::DbError) -> ApiError {
             StatusCode::CONFLICT,
             format!("this repo already has the maximum of {max} lanes"),
         ),
+        DbError::OrderTooLong(_) => {
+            warn!("rejected oversized reorder: {e}");
+            err(
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "a reorder may list at most {} entries",
+                    veld_core::db::MAX_ORDER_LEN
+                ),
+            )
+        }
         other => db_err(other),
     }
 }
@@ -1555,6 +1621,25 @@ mod tests {
                 ("PATCH", "/api/worktrees/1", r#"{"alias":"a"}"#),
                 ("DELETE", "/api/worktrees/1", ""),
                 ("POST", "/api/worktrees/1/start", "{}"),
+                ("POST", "/api/worktrees/1/restore", ""),
+                ("DELETE", "/api/worktrees/1/trash-error", ""),
+                (
+                    "POST",
+                    "/api/worktree-order",
+                    r#"{"repo_root":"/tmp","order":[]}"#,
+                ),
+                ("POST", "/api/lanes", r#"{"repo_root":"/tmp","name":"x"}"#),
+                (
+                    "POST",
+                    "/api/lane-order",
+                    r#"{"repo_root":"/tmp","order":[]}"#,
+                ),
+                (
+                    "PATCH",
+                    "/api/lanes/x",
+                    r#"{"repo_root":"/tmp","name":"y"}"#,
+                ),
+                ("DELETE", "/api/lanes/x?repo_root=/tmp", ""),
                 ("POST", "/api/pick-directory", ""),
             ] {
                 let res = super::super::routes()

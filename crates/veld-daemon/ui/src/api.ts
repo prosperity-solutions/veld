@@ -684,7 +684,7 @@ export const api = {
    * write idempotent — omitted paths go back to unplaced.
    */
   reorderWorktrees: (repo_root: string, order: string[]) =>
-    request<void>("/api/worktrees/order", {
+    request<void>("/api/worktree-order", {
       method: "POST",
       body: JSON.stringify({ repo_root, order }),
     }),
@@ -705,7 +705,7 @@ export const api = {
       { method: "DELETE" },
     ),
   reorderLanes: (repo_root: string, order: string[]) =>
-    request<void>("/api/lanes/order", {
+    request<void>("/api/lane-order", {
       method: "POST",
       body: JSON.stringify({ repo_root, order }),
     }),
