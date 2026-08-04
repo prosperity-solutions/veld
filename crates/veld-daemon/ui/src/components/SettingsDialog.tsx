@@ -39,7 +39,7 @@ import {
 } from "../shared/terminalFonts";
 import {
   detachGraceMinutes,
-  evictAfterDays,
+  trashRetentionDays,
   markerStyle,
   quickSwitchPrefs,
   terminalPrefs,
@@ -98,7 +98,7 @@ export function SettingsDialog(props: {
   const [scrollback, setScrollback] = useState<number | string>(term.scrollback);
   const graceValue = detachGraceMinutes(settings ?? {});
   const [grace, setGrace] = useState<number | string>(graceValue);
-  const evictValue = evictAfterDays(settings ?? {});
+  const evictValue = trashRetentionDays(settings ?? {});
   const [evict, setEvict] = useState<number | string>(evictValue);
   const [fontFamily, setFontFamily] = useState(term.fontFamily);
   // Availability is probed against the DOM, so compute it once per open rather
@@ -190,33 +190,37 @@ export function SettingsDialog(props: {
         <Stack gap="xs">
           <SectionTitle>Worktrees</SectionTitle>
           <Row
-            label="Remove unused worktrees"
-            /* The copy is deliberately blunt about what this does and where it
-               stops. A timer that deletes a developer's checkout while they are
-               not looking cannot be described in the register of a preference —
-               and the second sentence is the reason it is defensible at all:
-               eviction only *asks* git, so uncommitted work is never what gets
-               discarded. */
-            help="Off by default. When set, a worktree with no runs for this many days is queued for removal — never the main checkout, and never one with a run going. git still refuses a checkout with uncommitted changes, and a worktree it refuses comes back with the reason."
+            label="Empty the trash after"
+            /* Blunt on purpose. This is the only thing veld does that deletes a
+               checkout without asking again, so it cannot be described in the
+               register of an ordinary preference — and the last sentence is why it
+               is defensible: the deletion is still git's un-forced one, so
+               uncommitted work is refused rather than discarded. */
+            help="0 keeps trashed worktrees until you empty the trash yourself — the default. Set a number of days and a worktree you moved to the trash is deleted for good after that long. Deleting still goes through git, so a checkout that picked up uncommitted changes comes back with the reason instead of being discarded."
           >
             <NumberInput
               size="xs"
               w={140}
               min={0}
-              /* Mirrors MAX_WORKTREE_EVICT_DAYS in veld-core's settings.rs, the
+              /* Mirrors MAX_TRASH_RETENTION_DAYS in veld-core's settings.rs, the
                  same way the scrollback and grace boxes mirror theirs — a control
                  offering a range the server refuses is a #204 review finding. */
               max={365}
               step={7}
               value={evict}
               disabled={locked}
-              /* Zero is the off switch, so it must be reachable — and it is what
-                 the placeholder says the empty box means. */
-              placeholder="off"
+              /* Zero is "keep until I empty it", so it must be reachable — and it
+                 is what the placeholder says an empty box means. */
+              placeholder="keep"
               suffix={typeof evict === "number" && evict > 0 ? " days" : ""}
               onChange={setEvict}
               onBlur={() =>
-                commitNumber("worktree.evictAfterDays", evict, evictValue, setEvict)
+                commitNumber(
+                  "worktree.trashRetentionDays",
+                  evict,
+                  evictValue,
+                  setEvict,
+                )
               }
               onKeyDown={(e) => {
                 if (e.key === "Enter") e.currentTarget.blur();

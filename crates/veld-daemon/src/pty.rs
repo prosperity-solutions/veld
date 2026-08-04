@@ -285,52 +285,6 @@ pub fn spawn_session_reaper() {
     });
 }
 
-/// Set once [`adopt_existing_sessions`] has run.
-///
-/// Anything that treats "no session here" as permission to do something destructive
-/// must wait for this: before adoption the map is empty, and empty is
-/// indistinguishable from "nothing is running" while actually meaning "we have not
-/// looked yet". Worktree auto-eviction is the consumer.
-static SESSIONS_ADOPTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-/// Whether the session registry reflects reality yet. See [`SESSIONS_ADOPTED`].
-pub fn sessions_adopted() -> bool {
-    SESSIONS_ADOPTED.load(std::sync::atomic::Ordering::SeqCst)
-}
-
-/// Worktree ids that currently have a live terminal session.
-///
-/// Used by worktree auto-eviction, which must not delete a checkout somebody has a
-/// shell open in. A veld run is not the only sign of life — and it is not even the
-/// common one here, since a worktree can be used all day through terminal panes
-/// alone without `veld start` ever running. Sessions deliberately outlive a daemon
-/// restart, so this outlives one too.
-///
-/// **These are rowids, and SQLite reuses them** (#201). Nothing tears a session
-/// down when its worktree's row is deleted, so a shell left open across a removal
-/// keeps an id in this set that a later worktree can be assigned. The consequence
-/// is bounded and one-directional: the stale entry makes eviction *skip* that
-/// worktree, so the failure is a checkout that outlives its horizon, never one
-/// deleted while in use. That asymmetry is why an id is acceptable here and would
-/// not be in a store that grants rather than withholds. The real fix is reaping a
-/// worktree's sessions when it is removed, which is a change to the session
-/// lifecycle rather than to eviction.
-pub async fn worktree_ids_with_sessions() -> std::collections::HashSet<i64> {
-    debug_assert!(
-        SESSIONS_ADOPTED.load(std::sync::atomic::Ordering::SeqCst),
-        "read before adoption — the answer would be falsely empty"
-    );
-    SESSIONS
-        .lock()
-        .await
-        .values()
-        // An exited shell is not a reason to keep a checkout alive; its pane is
-        // still there, but nothing is running in it.
-        .filter(|s| s.exit.borrow().is_none())
-        .map(|s| s.worktree_id)
-        .collect()
-}
-
 type ApiError = (StatusCode, Json<serde_json::Value>);
 
 fn err(code: StatusCode, msg: impl Into<String>) -> ApiError {
@@ -1477,9 +1431,6 @@ pub async fn adopt_existing_sessions() {
     if adopted > 0 {
         info!(adopted, "adopted terminal sessions from a previous daemon");
     }
-    // Published last: until this flips, an empty session map means "not looked yet"
-    // rather than "nothing running", and worktree auto-eviction must not read it.
-    SESSIONS_ADOPTED.store(true, std::sync::atomic::Ordering::SeqCst);
 }
 
 /// Adopt one holder, or clean up after it. `true` if it became a session.

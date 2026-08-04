@@ -407,15 +407,15 @@ export function RenameWorktreeDialog(props: {
   onDelete: (force: boolean) => Promise<void>;
   isMain: boolean;
   /**
-   * Why the last background removal failed, or `""`.
+   * Why the last deletion failed, or `""`.
    *
-   * Load-bearing, not decoration. Removal is asynchronous now, so an un-forced
-   * `DELETE` returns 202 and git's refusal arrives later on the row — it can never
-   * land in this dialog's own `useSubmit` error. Gating the force checkbox on that
-   * error therefore made `?force=true` unreachable: click → 202 → the dialog closes
-   * → reopening gives a fresh, empty error. This is the durable record of the
-   * refusal, and it is what makes forcing an answer to a refusal the user has
-   * actually been shown rather than a checkbox offered up front.
+   * Load-bearing, not decoration. Deletion happens later than the click — on the
+   * retention sweep or from the trash — so git's refusal arrives on the row and can
+   * never land in this dialog's own `useSubmit` error. Gating the force checkbox on
+   * that error made `?force=true` unreachable: click → 202 → dialog closes →
+   * reopening gives a fresh, empty error. This is the durable record of the refusal,
+   * and it is what keeps forcing an answer to something the user has been shown
+   * rather than a checkbox offered up front.
    */
   trashError: string;
   /** Open with the remove confirmation already expanded (context menu). */
@@ -457,20 +457,20 @@ export function RenameWorktreeDialog(props: {
           {confirmDelete ? (
             <>
               <Text size="sm" c="dimmed">
-                Removes the checkout from disk (git refuses if it has
-                uncommitted changes). The branch itself is kept. Any running
-                environment here is stopped first, and the removal continues in
-                the background — you can keep working in other worktrees, and
-                if it fails the worktree comes back with the reason.
+                Moves the checkout to the trash. Nothing is deleted yet — it
+                stays on disk and you can restore it from the rail. It is
+                deleted for good when its retention period runs out (Settings →
+                Worktrees, off by default) or when you delete it from the trash.
+                The branch itself is always kept.
                 {force
-                  ? " Forcing runs immediately and discards uncommitted changes; it will not start if an environment is still running."
+                  ? " Forcing deletes it right now and discards uncommitted changes; it will not start if an environment is still running."
                   : ""}
               </Text>
               <ErrorText error={refusal} />
               {refusal && (
                 <Checkbox
                   color="red"
-                  label="Force remove — discards uncommitted changes"
+                  label="Delete now, discarding uncommitted changes"
                   checked={force}
                   onChange={(e) => setForce(e.currentTarget.checked)}
                 />
@@ -484,7 +484,7 @@ export function RenameWorktreeDialog(props: {
                   void del.submit(e);
                 }}
               >
-                Really remove worktree
+                {force ? "Delete permanently" : "Move to trash"}
               </Button>
             </>
           ) : (
@@ -496,7 +496,7 @@ export function RenameWorktreeDialog(props: {
                 setConfirmDelete(true);
               }}
             >
-              Remove worktree…
+              Move to trash…
             </Button>
           )}
         </Stack>

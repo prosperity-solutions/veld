@@ -953,9 +953,18 @@ function AppInner(props: {
     if (w.trashed_at) {
       return showContextMenu([
         {
-          key: "keep",
-          title: "Keep it after all",
+          key: "restore",
+          icon: <IconArrowBackUp size={14} />,
+          title: "Restore",
           onClick: () => void restoreWorktree(w),
+        },
+        { key: "trash-divider" },
+        {
+          key: "delete-now",
+          icon: <IconTrash size={14} />,
+          title: "Delete permanently",
+          color: "red",
+          onClick: () => void deleteTrashedWorktree(w),
         },
       ]);
     }
@@ -1057,7 +1066,7 @@ function AppInner(props: {
             { key: "trash-error-divider" },
             {
               key: "trash-retry",
-              title: "Removal failed — try again…",
+              title: "Deletion failed — try again…",
               color: "red",
               // Straight into the confirmation, which now shows the recorded
               // refusal and the force checkbox beside it. Without this entry the
@@ -1068,7 +1077,7 @@ function AppInner(props: {
             },
             {
               key: "trash-error",
-              title: "Dismiss removal error",
+              title: "Dismiss deletion error",
               onClick: () => void dismissTrashError(w),
             },
           ]
@@ -1076,7 +1085,8 @@ function AppInner(props: {
       { key: "divider" },
       {
         key: "remove",
-        title: "Remove worktree…",
+        icon: <IconTrash size={14} />,
+        title: "Move to trash…",
         color: "red",
         disabled: w.is_main,
         onClick: () =>
@@ -1655,7 +1665,7 @@ function AppInner(props: {
   };
 
   /**
-   * Announce a failed background removal exactly once per window.
+   * Announce a failed deletion exactly once, across every window.
    *
    * The daemon cannot push, so the failure arrives on the 5s poll and would
    * otherwise toast on every poll forever. Two halves do the work: the row keeps
@@ -1665,6 +1675,12 @@ function AppInner(props: {
    * dismissed, so a page reload would re-announce a failure the user already read —
    * and people reload often. Keyed on path *and* message so a second, different
    * failure on the same worktree is announced again.
+   *
+   * Deliberately **not** slot-scoped through `selectionKeys`, unlike every other
+   * persisted value in this file. Those are preferences, which belong to a window; a
+   * removal that failed is a fact about a worktree, and three windows announcing the
+   * same failure three times is noise rather than thoroughness. The row keeps the
+   * reason visible in all of them regardless, which is the durable surface.
    */
   useEffect(() => {
     const failed = worktrees.filter((w) => w.trash_error);
@@ -1679,7 +1695,7 @@ function AppInner(props: {
     const fresh = failed.filter((_, i) => !acked.includes(keys[i]));
     for (const w of fresh) {
       notifyError(
-        `Could not remove ${w.alias}`,
+        `Could not delete ${w.alias}`,
         new Error(`${w.trash_error} — it is still in the rail.`),
       );
     }
@@ -1704,10 +1720,33 @@ function AppInner(props: {
     await refresh();
   };
 
+  const deleteTrashedWorktree = async (w: Worktree) => {
+    try {
+      await api.deleteTrashedWorktree(w.id);
+      notifyDone(`Deleting ${w.alias}`);
+    } catch (e) {
+      notifyError(`Could not delete ${w.alias}`, e);
+    }
+    await refresh();
+  };
+
+  const emptyTrash = async () => {
+    if (!repo) return;
+    try {
+      const { queued } = await api.emptyTrash(repo.root);
+      notifyDone(
+        queued === 1 ? "Deleting 1 worktree" : `Deleting ${queued} worktrees`,
+      );
+    } catch (e) {
+      notifyError("Could not empty the trash", e);
+    }
+    await refresh();
+  };
+
   const restoreWorktree = async (w: Worktree) => {
     try {
       await api.restoreWorktree(w.id);
-      notifyDone(`Keeping ${w.alias}`);
+      notifyDone(`Restored ${w.alias}`);
     } catch (e) {
       // 404 is the expected failure — the worker got there first — and saying so is
       // better than a generic error for a race the design admits to. Anything else
@@ -1715,7 +1754,9 @@ function AppInner(props: {
       // is still there and the user would stop looking for it.
       const gone = e instanceof Error && /not found|already removed/i.test(e.message);
       notifyError(
-        gone ? `${w.alias} has already been removed` : `Could not keep ${w.alias}`,
+        gone
+          ? `${w.alias} has already been deleted`
+          : `Could not restore ${w.alias}`,
         e,
       );
     }
@@ -2287,6 +2328,7 @@ function AppInner(props: {
             onLaneMenu={(e, lane) => laneMenu(lane)(e)}
             onMove={moveWorktreeTo}
             onRestore={restoreWorktree}
+            onEmptyTrash={emptyTrash}
           />
           {worktree && layout && (
             <PaneArea
@@ -2693,7 +2735,13 @@ function railWidth(raw: string): number {
  * not forward mouse events to the page above it (#188). Without it a drag that
  * strayed right froze at the pane boundary.
  */
-function RailResizer(props: { width: number; onWidth: (w: number) => void }) {
+function RailResizer(props: {
+  width: number;
+  onWidth: (w: number) => void;
+  /** Told when a drag starts and ends, so the rail can suspend its width
+   *  transition — see `.rail.resizing`. */
+  onDragging: (active: boolean) => void;
+}) {
   const drag = useRef<{ startX: number; startWidth: number } | null>(null);
   return (
     <div
@@ -2707,6 +2755,7 @@ function RailResizer(props: { width: number; onWidth: (w: number) => void }) {
       tabIndex={0}
       onPointerDown={(e) => {
         drag.current = { startX: e.clientX, startWidth: props.width };
+        props.onDragging(true);
         e.currentTarget.setPointerCapture(e.pointerId);
       }}
       onPointerMove={(e) => {
@@ -2721,7 +2770,19 @@ function RailResizer(props: { width: number; onWidth: (w: number) => void }) {
       }}
       onPointerUp={(e) => {
         drag.current = null;
+        props.onDragging(false);
         e.currentTarget.releasePointerCapture(e.pointerId);
+      }}
+      // A capture that ends without a pointerup (the pointer is cancelled by the
+      // OS, another element steals capture) must still clear the flag, or the rail
+      // keeps its transition suppressed until the next drag.
+      onPointerCancel={() => {
+        drag.current = null;
+        props.onDragging(false);
+      }}
+      onLostPointerCapture={() => {
+        drag.current = null;
+        props.onDragging(false);
       }}
       // Keyboard resize, because a separator that only responds to a pointer is
       // unreachable for anyone who cannot make a 200px drag.
@@ -2792,6 +2853,7 @@ function Rail(props: {
   onLaneMenu: (e: React.MouseEvent, lane: string) => void;
   onMove: (path: string, toLane: string, toIndex: number) => void;
   onRestore: (w: Worktree) => void;
+  onEmptyTrash: () => void;
 }) {
   const groups = railGroups(props.worktrees, props.lanes);
   // Drag state is local: it is transient pointer feedback, and lifting it would
@@ -2800,6 +2862,11 @@ function Rail(props: {
   const [dropAt, setDropAt] = useState<{ key: string; index: number } | null>(
     null,
   );
+  // Suppresses the rail's width transition for the duration of a resize drag. The
+  // transition exists for the collapse/expand toggle, where 236px→64px should
+  // animate; during a drag it re-animates on every pointer move, so the edge
+  // visibly lags behind the cursor instead of tracking it.
+  const [resizing, setResizing] = useState(false);
   const endDrag = () => {
     setDragPath(null);
     setDropAt(null);
@@ -2838,7 +2905,7 @@ function Rail(props: {
 
   return (
     <div
-      className={`rail${props.wide ? " wide" : ""}`}
+      className={`rail${props.wide ? " wide" : ""}${resizing ? " resizing" : ""}`}
       style={props.wide ? { width: props.width } : undefined}
     >
       <div className="rail-head">
@@ -2905,10 +2972,26 @@ function Rail(props: {
               >
                 <span className="lane-name">{group.label}</span>
                 <span className="lane-count">{group.worktrees.length}</span>
+                {/* The trash's own action, in the place a lane keeps its menu:
+                    emptying it is the only thing the section as a whole can do. */}
+                {group.key === TRASH_LANE && (
+                  <button
+                    type="button"
+                    className="lane-edit"
+                    title="Delete everything in the trash"
+                    aria-label="Empty the trash"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      props.onEmptyTrash();
+                    }}
+                  >
+                    <IconTrash size={12} />
+                  </button>
+                )}
                 {/* Right-click alone is not an affordance — nothing on screen says
                     the header has a menu. The same ⋮ the rows carry, so the two read
-                    as the same gesture. Not on a pinned section: pending removal has
-                    no lane to rename or delete. */}
+                    as the same gesture. Not on a pinned section: the trash has no
+                    lane to rename or delete. */}
                 {!group.pinned && (
                   <button
                     type="button"
@@ -2979,16 +3062,22 @@ function Rail(props: {
                   className={`wt-row${props.active?.id === w.id ? " active" : ""}${props.wide ? "" : " slim"}${away ? " away" : ""}${trashed ? " trashed" : ""}${w.trash_error ? " failed-remove" : ""}${dragPath === w.path ? " dragging" : ""}`}
                   title={
                     trashed
-                      ? `${w.alias} — removing…`
+                      ? `${w.alias} — in the trash, still on disk`
                       : w.trash_error
-                        ? `${w.alias} — could not be removed: ${w.trash_error}`
+                        ? `${w.alias} — could not be deleted: ${w.trash_error}`
                         : away
                           ? `${w.alias} — ${w.branch} (open in another window)`
                           : `${w.alias} — ${w.branch}`
                   }
                   /* Pending removals are not draggable: they are leaving, so a
                      position for them means nothing. */
-                  draggable={canDrag && !trashed && !group.pinned}
+                  /* The main checkout is never dragged, even when the user has put
+                     it in a lane (which un-pins its section). `WT_ORDER` sorts
+                     `is_main DESC` ahead of `sort_position`, so a position given to
+                     main is ignored and the row visibly snaps back to the top of its
+                     group — a drag that appears to do nothing. It leads its lane
+                     instead, which is the same rule it follows ungrouped. */
+                  draggable={canDrag && !trashed && !group.pinned && !w.is_main}
                   onDragStart={(e) => {
                     setDragPath(w.path);
                     e.dataTransfer.effectAllowed = "move";
@@ -3043,7 +3132,7 @@ function Rail(props: {
                           branch any more. Trashed rows say what is happening to
                           them; the branch is not the news. */}
                       {trashed
-                        ? "removing…"
+                        ? "in trash"
                         : w.trash_error
                           ? w.trash_error
                           : w.branch}
@@ -3104,8 +3193,8 @@ function Rail(props: {
                     <button
                       type="button"
                       className="wt-edit"
-                      title={`Keep ${w.alias} after all`}
-                      aria-label={`Keep ${w.alias}`}
+                      title={`Restore ${w.alias}`}
+                      aria-label={`Restore ${w.alias}`}
                       onClick={(e) => {
                         e.stopPropagation();
                         props.onRestore(w);
@@ -3124,7 +3213,13 @@ function Rail(props: {
       </div>
       {/* Only when expanded: collapsed is a mode with a fixed width, so there is
           nothing to drag. */}
-      {props.wide && <RailResizer width={props.width} onWidth={props.onWidth} />}
+      {props.wide && (
+        <RailResizer
+          width={props.width}
+          onWidth={props.onWidth}
+          onDragging={setResizing}
+        />
+      )}
     </div>
   );
 }

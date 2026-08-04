@@ -52,7 +52,7 @@ pub async fn run_gc_scheduler(share_manager: Arc<ShareManager>) {
         match run_gc().await {
             Ok(summary) => {
                 info!(
-                    "gc complete: {} stale removed, {} orphans killed, {} logs pruned, {} stats pruned ({} per-process), {} routes cleaned, {} worktrees evicted",
+                    "gc complete: {} stale removed, {} orphans killed, {} logs pruned, {} stats pruned ({} per-process), {} routes cleaned, {} trash purged",
                     summary.stale_removed,
                     summary.orphans_killed,
                     summary.logs_pruned,
@@ -62,7 +62,7 @@ pub async fn run_gc_scheduler(share_manager: Arc<ShareManager>) {
                     // Logged because it is the only destructive number in this
                     // summary: if a checkout disappeared overnight, this line is
                     // where the answer has to be.
-                    summary.worktrees_evicted
+                    summary.trash_purged
                 );
                 // Stop any shares whose run just died so they don't outlive the
                 // environment they expose (crash path — CLI `veld stop` already
@@ -89,9 +89,10 @@ pub struct GcSummary {
     /// the two tables are pruned on different horizons.
     pub process_stats_pruned: usize,
     pub routes_cleaned: usize,
-    /// Worktrees marked for removal by auto-eviction this pass. Zero unless the
-    /// user has set `worktree.evictAfterDays`, which defaults to off.
-    pub worktrees_evicted: usize,
+    /// Trashed worktrees whose retention expired this pass and are now queued for
+    /// deletion. Zero unless the user has set `worktree.trashRetentionDays`, which
+    /// defaults to "keep until emptied".
+    pub trash_purged: usize,
     /// Run ids whose processes were found dead this pass — their P2P shares
     /// should be stopped.
     pub orphaned_runs: Vec<Uuid>,
@@ -296,15 +297,14 @@ pub async fn run_gc() -> anyhow::Result<GcSummary> {
         .unwrap_or(0);
     let _ = db.vacuum();
 
-    // Phase 2b: Auto-evict idle worktrees, if the user turned it on.
+    // Phase 2b: Empty the worktree trash of anything past its retention period.
     //
-    // Marks only. The actual `git worktree remove` goes through the same
-    // background worker and the same **un-forced** removal as a hand-clicked
-    // delete, so git still refuses a dirty or locked checkout and the worktree
-    // comes back out of trash with the reason attached. That is the safety
-    // property that makes a timer allowed to touch a developer's checkout at all:
-    // it can never override git, only ask.
-    summary.worktrees_evicted = crate::feedback_server::worktree_trash::mark_evictions(&db).await;
+    // Off unless the user set `worktree.trashRetentionDays`, and it only ever acts on
+    // worktrees they put in the trash themselves. The deletion goes through the same
+    // background worker and the same **un-forced** `git worktree remove` as a
+    // hand-clicked one, so a checkout that picked up uncommitted changes while it sat
+    // in the trash comes back with git's reason rather than being discarded.
+    summary.trash_purged = crate::feedback_server::worktree_trash::purge_expired_trash(&db);
 
     // Phase 3: Prune leftover pre-SQLite log files from each project's
     // .veld/logs/ directory (written by old veld versions and by legacy

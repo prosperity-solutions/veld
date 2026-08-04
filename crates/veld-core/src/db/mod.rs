@@ -27,9 +27,8 @@ mod worktrees;
 pub use logs::{LogFilter, LogRow, LogStream, stream_is_per_node};
 pub use settings::DEFAULT_DETACH_GRACE_MINUTES;
 pub use worktrees::{
-    DiscoveredWorktree, LaneRecord, MAX_LANE_NAME_LEN, MAX_ORDER_LEN, RepoRecord,
-    TRASH_BY_EVICTION, TRASH_BY_USER, WORKTREE_COLORS, WORKTREE_EMOJI, WorktreeRecord,
-    default_alias, is_worktree_color, is_worktree_emoji,
+    DiscoveredWorktree, LaneRecord, MAX_LANE_NAME_LEN, MAX_ORDER_LEN, RepoRecord, WORKTREE_COLORS,
+    WORKTREE_EMOJI, WorktreeRecord, default_alias, is_worktree_color, is_worktree_emoji,
 };
 
 use std::path::{Path, PathBuf};
@@ -947,35 +946,32 @@ fn migrate_v9_worktree_marker_color(conn: &Connection) -> rusqlite::Result<()> {
 /// appear silently wedged into the middle of a hand-made order. With no lanes
 /// defined and nothing placed, the rail order is byte-identical to v9's.
 ///
-/// **Trash is a state on the row, not a directory move.** Until
-/// `git worktree remove` actually runs, `git worktree list --porcelain` still
-/// reports the path, so the reconcile pass would resurrect the row it was just
-/// asked to delete; `trashed_at` is what it checks. Relocating the checkout
+/// **Trash is a holding area, and `trashed_at` is its clock.**
+///
+/// Removing a worktree marks the row and **leaves the checkout on disk**. It shows
+/// in the rail as trashed, restoring it is a real undo rather than a race, and the
+/// actual `git worktree remove` happens when the retention period
+/// (`worktree.trashRetentionDays`) expires, or when the user asks for it now. A
+/// recycle bin, not a progress indicator on a deletion already underway.
+///
+/// That is what makes `trashed_at` a *timestamp* rather than a flag: it is the only
+/// thing that says when the grace period started, so it is both the record of intent
+/// and the retention clock.
+///
+/// The reconcile pass has to know about it. `git worktree list --porcelain` keeps
+/// reporting the path for the whole retention window — the checkout is genuinely
+/// still there — so without checking `trashed_at` the next poll would resurrect the
+/// row it was just asked to trash.
+///
+/// **The removal is always git's, and always un-forced.** Relocating the checkout
 /// instead would be O(1) and tempting, and it would bypass every safety check
-/// `git worktree remove` exists to enforce — leaving a hand-rolled preflight as
-/// the only thing between two clicks and someone's uncommitted work — while
-/// pulling the directory out from under live PTY sessions, runs and browser panes
-/// rooted at that path, failing immediately and invisibly rather than at removal.
+/// `git worktree remove` exists to enforce while pulling the directory out from
+/// under the PTY sessions, runs and browser panes rooted at that path — failing
+/// immediately and invisibly rather than at removal time.
 ///
 /// `trash_error` is the other half: a removal that fails after the user has moved
 /// on takes the row back *out* of trash with the reason attached, because a
 /// background job that fails silently is worse than a blocking one that reports.
-///
-/// `trashed_by` records **who asked** — `'user'` or `'eviction'` — and it is not
-/// bookkeeping. The worker's two jobs differ by origin: a removal the user clicked
-/// may stop the runs in the checkout, because that is what they asked for; an
-/// eviction may not, and must re-check its own preconditions (no live run, no
-/// terminal session, no local files) immediately before deleting, because minutes
-/// can pass between the timer marking a worktree and the queue reaching it, and in
-/// that window somebody may have started working in it. Without the origin the
-/// worker cannot tell the two apart and an unattended timer would stop a
-/// developer's environment. It defaults to `'user'` so that any row already
-/// trashed when this column arrives takes the more conservative path.
-///
-/// **This migration is edited in place, not superseded.** v10 has not shipped in a
-/// release, so there is nothing in the wild to upgrade *from* — a checkout of this
-/// branch from before `trashed_by` existed needs `just dev-db-reset`. Once v10
-/// ships, this file becomes append-only again.
 fn migrate_v10_rail_lanes_and_trash(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
         r#"
@@ -983,7 +979,6 @@ fn migrate_v10_rail_lanes_and_trash(conn: &Connection) -> rusqlite::Result<()> {
         ALTER TABLE worktrees ADD COLUMN sort_position INTEGER;
         ALTER TABLE worktrees ADD COLUMN trashed_at TEXT NOT NULL DEFAULT '';
         ALTER TABLE worktrees ADD COLUMN trash_error TEXT NOT NULL DEFAULT '';
-        ALTER TABLE worktrees ADD COLUMN trashed_by TEXT NOT NULL DEFAULT 'user';
 
         CREATE TABLE lanes (
             repo_root  TEXT NOT NULL REFERENCES repos(root) ON DELETE CASCADE,

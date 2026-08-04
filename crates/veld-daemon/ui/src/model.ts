@@ -103,18 +103,18 @@ export interface RailGroup {
 }
 
 /**
- * Group key for worktrees pending removal.
+ * Group key for the trash.
  *
- * Not a lane name: a lane is user-defined and this is a state, so a repo with a
- * lane literally called "pending removal" must not merge with it. The leading
- * NUL cannot occur in a lane name (the daemon trims and bounds them, and the
- * name comes from a text input) so the two key spaces cannot collide.
+ * Not a lane name: a lane is user-defined and this is a state, so a repo with a lane
+ * literally called "Trash" must not merge with it. A leading NUL cannot occur in a
+ * lane name — `valid_lane_name` rejects control characters — so the two key spaces
+ * cannot collide.
  */
 export const TRASH_LANE = "\u0000trash";
 
 /**
  * Split a repo's worktrees into rail sections: ungrouped first, then each lane in
- * its own order, then pending removals.
+ * its own order, then the trash.
  *
  * The daemon already sorts the worktrees into this order (`WT_ORDER`), so this
  * only *segments* the list — it must not re-sort, or the manual order the user
@@ -161,7 +161,7 @@ export function railGroups(worktrees: Worktree[], lanes: Lane[]): RailGroup[] {
     groups.push({
       key: TRASH_LANE,
       lane: TRASH_LANE,
-      label: "Pending removal",
+      label: "Trash",
       pinned: true,
       worktrees: trashed,
     });
@@ -178,8 +178,8 @@ export function railGroups(worktrees: Worktree[], lanes: Lane[]): RailGroup[] {
  * idempotent — and **paths, not ids**, because `worktrees.id` is a rowid SQLite
  * reuses.
  *
- * Pending removals are excluded from the returned order and cannot be a drop
- * target: they are leaving, so placing one is meaningless.
+ * Trashed worktrees are excluded from the returned order and cannot be a drop
+ * target: they are on their way out, so placing one is meaningless.
  */
 export function moveWorktree(
   groups: RailGroup[],
@@ -197,7 +197,11 @@ export function moveWorktree(
   if (!moved) return null;
   const order: string[] = [];
   for (const g of placed) {
-    const rest = g.worktrees.filter((w) => w.path !== path);
+    // The main checkout never gets a position, in any group. `WT_ORDER` sorts
+    // `is_main DESC` before `sort_position`, so one would be silently ignored — and
+    // writing a value the daemon overrules is how an order starts disagreeing with
+    // what the rail shows.
+    const rest = g.worktrees.filter((w) => w.path !== path && !w.is_main);
     if (g.key === toKey) {
       // Clamped rather than trusted: the index comes from a drop position, and a
       // stale render can hand over one past the end of a list that just shrank.

@@ -114,25 +114,19 @@ export interface Worktree {
    */
   sort_position: number | null;
   /**
-   * When the user asked for this checkout to be removed, or `""` for a live
-   * worktree. Removal runs in the background, so a non-empty value means "pending
-   * removal" and the rail renders it as such.
+   * When this checkout was moved to the trash, or `""` if it is not in the trash.
+   *
+   * A timestamp rather than a flag because it is also the retention clock: the
+   * checkout stays on disk until `worktree.trashRetentionDays` elapses from here, or
+   * until the user deletes it explicitly. Nothing has been deleted while this is set.
    */
   trashed_at: string;
   /**
-   * Why the last removal attempt failed, or `""`. Set together with clearing
-   * `trashed_at`, so a worktree carrying this is *out* of trash and back in the
-   * rail — the failure is not silent and not still pending.
+   * Why the last deletion attempt failed, or `""`. Set together with clearing
+   * `trashed_at`, so a worktree carrying this is *out* of the trash and back in the
+   * rail — the failure is neither silent nor still pending.
    */
   trash_error: string;
-  /**
-   * Who asked for the pending removal: `"user"` or `"eviction"`.
-   *
-   * The UI does not branch on this today; it exists because the daemon's worker
-   * must — a user-requested removal may stop the checkout's runs, an eviction may
-   * not and re-checks its preconditions before deleting.
-   */
-  trashed_by: string;
   has_veld_config: boolean;
   /** Presets in display order, as resolved by the daemon. */
   presets: Preset[];
@@ -663,25 +657,34 @@ export const api = {
   worktreeEmoji: () =>
     request<{ emoji: string[]; colors: string[] }>("/api/worktree-emoji"),
   /**
-   * Ask for a checkout to be removed.
+   * Move a checkout to the trash (202) — or, with `force`, delete it outright.
    *
-   * Un-forced, this **returns as soon as the intent is recorded** (202) and a
-   * daemon worker does the slow `git worktree remove`; the worktree shows as
-   * pending removal until it finishes, and a failure brings it back with
-   * `trash_error` set. Forced, the removal is attempted inline (204/422) because
-   * the user has already answered git's refusal and needs to know if this attempt
-   * worked.
+   * Binning deletes nothing: the checkout stays on disk until its retention expires
+   * or it is deleted explicitly, so this returns immediately and restoring is a real
+   * undo. Forcing is inline (204/422/409) because it answers a refusal the user has
+   * already been shown.
    */
   deleteWorktree: (id: number, force: boolean) =>
     request<void>(`/api/worktrees/${id}?force=${force}`, { method: "DELETE" }),
   /**
-   * Take a worktree back out of pending removal. Fails with 404 if the worker
-   * already removed it — undo is genuinely racy and says so rather than
-   * pretending a background job can always be called off.
+   * Take a worktree out of the trash. Fails with 404 only if an explicit deletion
+   * already got there.
    */
   restoreWorktree: (id: number) =>
     request<Worktree>(`/api/worktrees/${id}/restore`, { method: "POST" }),
-  /** Clear a recorded removal failure — the user has read it. */
+  /**
+   * Delete a trashed worktree now instead of waiting for its retention (202).
+   * `409` if it is not in the trash — this is not a shortcut past the confirmation.
+   */
+  deleteTrashedWorktree: (id: number) =>
+    request<void>(`/api/worktrees/${id}/delete`, { method: "POST" }),
+  /** Delete every trashed worktree of a repo now. */
+  emptyTrash: (repo_root: string) =>
+    request<{ queued: number }>(
+      `/api/trash?repo_root=${encodeURIComponent(repo_root)}`,
+      { method: "DELETE" },
+    ),
+  /** Clear a recorded deletion failure — the user has read it. */
   dismissTrashError: (id: number) =>
     request<void>(`/api/worktrees/${id}/trash-error`, { method: "DELETE" }),
   /**

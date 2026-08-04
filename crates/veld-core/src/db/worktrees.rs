@@ -88,14 +88,6 @@ pub struct WorktreeRecord {
     /// with the reason attached, rather than leaving it in a state that looks like
     /// pending work forever.
     pub trash_error: String,
-    /// Who asked for the removal: [`TRASH_BY_USER`] or [`TRASH_BY_EVICTION`].
-    ///
-    /// Load-bearing, not an audit field. A user-requested removal is allowed to stop
-    /// the runs in the checkout — that is what the confirmation dialog says it will
-    /// do. An eviction is not, and must re-check its preconditions before deleting,
-    /// because the queue may reach it minutes after the timer marked it and somebody
-    /// may have started working there since.
-    pub trashed_by: String,
 }
 
 /// A user-defined rail lane — a named group of worktrees within one repo.
@@ -117,12 +109,6 @@ pub const MAX_LANE_NAME_LEN: usize = 32;
 /// Most lanes one repo may define. A rail that needs more than this is not
 /// being organised by it.
 pub const MAX_LANES_PER_REPO: usize = 32;
-
-/// A removal the user asked for. May stop the checkout's runs.
-pub const TRASH_BY_USER: &str = "user";
-/// A removal the idle timer asked for. May **not** stop runs, and re-checks its
-/// preconditions immediately before deleting.
-pub const TRASH_BY_EVICTION: &str = "eviction";
 
 /// Longest accepted reorder payload, for worktrees or lanes.
 ///
@@ -146,7 +132,7 @@ pub struct DiscoveredWorktree {
 // the TS `Worktree` interface in crates/veld-daemon/ui/src/api.ts — serde
 // flattens the new field into the API, but TS ignores unknown fields silently.
 const WT_COLS: &str = "id, repo_root, path, branch, alias, emoji, is_main, created_at, \
-     marker_color, lane, sort_position, trashed_at, trash_error, trashed_by";
+     marker_color, lane, sort_position, trashed_at, trash_error";
 
 fn wt_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorktreeRecord> {
     Ok(WorktreeRecord {
@@ -163,7 +149,6 @@ fn wt_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorktreeRecord> {
         sort_position: row.get(10)?,
         trashed_at: row.get(11)?,
         trash_error: row.get(12)?,
-        trashed_by: row.get(13)?,
     })
 }
 
@@ -864,8 +849,14 @@ impl Db {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
-    /// Mark a worktree for background removal. Returns the row as it now stands,
-    /// or `None` if there is no such worktree.
+    /// Move a worktree to the trash. Returns the row as it now stands, or `None` if
+    /// there is no such worktree.
+    ///
+    /// **Nothing is deleted here.** The checkout stays on disk for the whole
+    /// retention period (`worktree.trashRetentionDays`); this only starts its clock.
+    /// The actual `git worktree remove` happens when
+    /// [`Self::expired_trashed_worktrees`] surfaces the row, or when the user asks
+    /// for it immediately.
     ///
     /// Refuses the main checkout — removing it means removing the repo, which is a
     /// different operation with a different confirmation.
@@ -873,7 +864,7 @@ impl Db {
     /// Idempotent: trashing an already-trashed worktree just refreshes the
     /// timestamp and clears any previous error, which is exactly what a retry
     /// wants.
-    pub fn trash_worktree(&self, id: i64, by: &str) -> Result<Option<WorktreeRecord>, DbError> {
+    pub fn trash_worktree(&self, id: i64) -> Result<Option<WorktreeRecord>, DbError> {
         let mut conn = self.lock();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let is_main: Option<bool> = tx
@@ -889,9 +880,8 @@ impl Db {
             Some(false) => {}
         }
         tx.execute(
-            "UPDATE worktrees SET trashed_at = ?1, trash_error = '', trashed_by = ?2
-              WHERE id = ?3",
-            params![now_str(), by, id],
+            "UPDATE worktrees SET trashed_at = ?1, trash_error = '' WHERE id = ?2",
+            params![now_str(), id],
         )?;
         let wt = tx
             .query_row(
@@ -962,45 +952,29 @@ impl Db {
     /// Returns candidates only. Eviction marks them trashed and lets
     /// `git worktree remove` refuse a dirty or locked checkout; nothing here
     /// deletes anything, and nothing here bypasses git's own safety checks.
-    /// Most worktrees one eviction pass may mark.
+    /// Trashed worktrees whose retention period has expired, oldest request first.
     ///
-    /// A guard against the clock, not against scale. The horizon is
-    /// `now - N days` compared against a stored `created_at`, so a **forward** clock
-    /// correction — rows written while the machine's clock was behind (dead RTC, a
-    /// container with a bogus date, a restored VM), then NTP catching up — puts every
-    /// worktree past any horizon at once. Capping means such a pass costs a few
-    /// checkouts and a log line rather than all of them, and the next pass is 10
-    /// minutes away. This repo has the precedent: an ordering was deliberately moved
-    /// off `created_at` onto rowid for exactly this class of failure.
-    pub const MAX_EVICTIONS_PER_PASS: usize = 4;
-
-    pub fn worktree_eviction_candidates(
+    /// The GC pass hands these to the background remover. `retention_secs` comes from
+    /// `worktree.trashRetentionDays`; a value of zero means "keep until I purge" and
+    /// the caller must not call this at all in that case.
+    ///
+    /// Unbounded on purpose. Every row here is one the user explicitly asked to
+    /// delete and then left alone for the whole retention period, so there is nothing
+    /// to ration and no candidate worth skipping — unlike a scan for *inactivity*,
+    /// which is a different feature and deliberately not this one.
+    pub fn expired_trashed_worktrees(
         &self,
-        older_than_secs: i64,
+        retention_secs: i64,
     ) -> Result<Vec<WorktreeRecord>, DbError> {
         let cutoff =
-            super::ts_to_str(chrono::Utc::now() - chrono::Duration::seconds(older_than_secs));
-        let live = super::state::LIVE_SET;
+            super::ts_to_str(chrono::Utc::now() - chrono::Duration::seconds(retention_secs));
         let conn = self.lock();
         let mut stmt = conn.prepare_cached(&format!(
             "SELECT {WT_COLS} FROM worktrees
-              WHERE is_main = 0
-                AND trashed_at = ''
-                AND created_at < ?1
-                AND NOT EXISTS (
-                    SELECT 1 FROM runs r
-                      JOIN environments e ON e.id = r.environment_id
-                     WHERE e.project_root = worktrees.path
-                       AND (r.status IN {live}
-                            OR COALESCE(r.ended_at, r.created_at) >= ?1)
-                )
-              ORDER BY created_at
-              LIMIT ?2"
+              WHERE trashed_at != '' AND trashed_at < ?1
+              ORDER BY trashed_at"
         ))?;
-        let rows = stmt.query_map(
-            params![cutoff, Self::MAX_EVICTIONS_PER_PASS as i64],
-            wt_from_row,
-        )?;
+        let rows = stmt.query_map(params![cutoff], wt_from_row)?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
 }
@@ -2105,7 +2079,7 @@ mod tests {
         ];
         db.sync_worktrees(root, &discovered).unwrap();
         let id = db.get_worktree_by_path("/tmp/doomed").unwrap().unwrap().id;
-        assert!(db.trash_worktree(id, TRASH_BY_USER).unwrap().is_some());
+        assert!(db.trash_worktree(id).unwrap().is_some());
 
         // The checkout still exists on disk until `git worktree remove` runs, so
         // git still reports it — this is the pass that used to resurrect the row it
@@ -2130,10 +2104,10 @@ mod tests {
             .unwrap();
         let id = db.get_worktree_by_path("/tmp/mainwt").unwrap().unwrap().id;
         assert!(matches!(
-            db.trash_worktree(id, TRASH_BY_USER),
+            db.trash_worktree(id),
             Err(DbError::RefusingMainWorktree)
         ));
-        assert!(db.trash_worktree(9_999, TRASH_BY_USER).unwrap().is_none());
+        assert!(db.trash_worktree(9_999).unwrap().is_none());
     }
 
     #[test]
@@ -2150,7 +2124,7 @@ mod tests {
         )
         .unwrap();
         let id = db.get_worktree_by_path("/tmp/dirty").unwrap().unwrap().id;
-        db.trash_worktree(id, TRASH_BY_USER).unwrap();
+        db.trash_worktree(id).unwrap();
         assert_eq!(db.list_trashed_worktrees().unwrap().len(), 1);
 
         db.untrash_worktree(id, "contains modified files").unwrap();
@@ -2162,7 +2136,7 @@ mod tests {
         assert!(db.list_trashed_worktrees().unwrap().is_empty());
 
         // Retrying clears the previous reason, so a stale error can't outlive it.
-        let retried = db.trash_worktree(id, TRASH_BY_USER).unwrap().unwrap();
+        let retried = db.trash_worktree(id).unwrap().unwrap();
         assert_eq!(retried.trash_error, "");
 
         db.untrash_worktree(id, "again").unwrap();
@@ -2186,7 +2160,7 @@ mod tests {
             .unwrap();
         db.reorder_worktrees(root, &["/tmp/wt".into()]).unwrap();
 
-        db.trash_worktree(id, TRASH_BY_USER).unwrap();
+        db.trash_worktree(id).unwrap();
         // The reason lane membership lives on the row: a restore after a failed
         // removal must not silently ungroup the worktree.
         db.untrash_worktree(id, "nope").unwrap();
@@ -2242,6 +2216,42 @@ mod tests {
     }
 
     #[test]
+    fn only_trashed_worktrees_past_their_retention_expire() {
+        let (_dir, db) = test_db();
+        let root = Path::new("/tmp/retain");
+        db.upsert_repo(root, "retain").unwrap();
+        db.sync_worktrees(
+            root,
+            &[
+                wt("/tmp/retain", "main", true),
+                wt("/tmp/live", "live", false),
+                wt("/tmp/binned", "binned", false),
+            ],
+        )
+        .unwrap();
+        let binned = db.get_worktree_by_path("/tmp/binned").unwrap().unwrap().id;
+
+        // Nothing is trashed yet, so nothing can expire however long the horizon.
+        assert!(db.expired_trashed_worktrees(0).unwrap().is_empty());
+
+        db.trash_worktree(binned).unwrap();
+        // Inside the retention window the checkout stays put — that is the whole
+        // point of the holding area, and what makes restore an undo and not a race.
+        assert!(db.expired_trashed_worktrees(3600).unwrap().is_empty());
+
+        // Past it, and only the trashed one is offered. A worktree nobody binned is
+        // never a candidate, whatever its activity: this is retention, not a scan for
+        // idleness.
+        let expired = db.expired_trashed_worktrees(0).unwrap();
+        assert_eq!(expired.len(), 1);
+        assert_eq!(expired[0].path, "/tmp/binned");
+
+        // Restoring takes it back out of the queue entirely.
+        db.untrash_worktree(binned, "").unwrap();
+        assert!(db.expired_trashed_worktrees(0).unwrap().is_empty());
+    }
+
+    #[test]
     fn reordering_does_not_unplace_a_trashed_worktree() {
         let (_dir, db) = test_db();
         let root = Path::new("/tmp/keeppos");
@@ -2258,7 +2268,7 @@ mod tests {
         db.reorder_worktrees(root, &["/tmp/going".into(), "/tmp/staying".into()])
             .unwrap();
         let going = db.get_worktree_by_path("/tmp/going").unwrap().unwrap();
-        db.trash_worktree(going.id, TRASH_BY_USER).unwrap();
+        db.trash_worktree(going.id).unwrap();
 
         // The UI omits pending removals from the order it sends, so without the
         // `trashed_at = ''` exemption any unrelated drag would strip the position off
@@ -2287,31 +2297,6 @@ mod tests {
             db.reorder_lanes(root, &huge),
             Err(DbError::OrderTooLong(_))
         ));
-    }
-
-    #[test]
-    fn the_trash_origin_is_recorded_and_defaults_conservatively() {
-        let (_dir, db) = test_db();
-        let root = Path::new("/tmp/origin");
-        db.upsert_repo(root, "origin").unwrap();
-        db.sync_worktrees(
-            root,
-            &[wt("/tmp/origin", "main", true), wt("/tmp/a", "a", false)],
-        )
-        .unwrap();
-        let id = db.get_worktree_by_path("/tmp/a").unwrap().unwrap().id;
-
-        // Load-bearing: the worker may stop a checkout's runs for a user-requested
-        // removal and must not for an eviction, and it can only tell them apart here.
-        let user = db.trash_worktree(id, TRASH_BY_USER).unwrap().unwrap();
-        assert_eq!(user.trashed_by, TRASH_BY_USER);
-        let evicted = db.trash_worktree(id, TRASH_BY_EVICTION).unwrap().unwrap();
-        assert_eq!(evicted.trashed_by, TRASH_BY_EVICTION);
-
-        // A row that has never been trashed reads as 'user' — the column defaults to
-        // the branch that does not let an unattended timer stop anything.
-        let fresh = db.get_worktree_by_path("/tmp/origin").unwrap().unwrap();
-        assert_eq!(fresh.trashed_by, TRASH_BY_USER);
     }
 
     #[test]
@@ -2381,57 +2366,5 @@ mod tests {
             Err(DbError::LaneTaken(_))
         ));
         assert!(db.create_lane(root, "andere").is_ok());
-    }
-
-    #[test]
-    fn eviction_marks_at_most_a_capped_number_per_pass() {
-        let (_dir, db) = test_db();
-        let root = Path::new("/tmp/cap");
-        db.upsert_repo(root, "cap").unwrap();
-        let mut discovered = vec![wt("/tmp/cap", "main", true)];
-        for i in 0..(Db::MAX_EVICTIONS_PER_PASS * 3) {
-            discovered.push(wt(&format!("/tmp/cap-{i}"), &format!("b{i}"), false));
-        }
-        db.sync_worktrees(root, &discovered).unwrap();
-        // A forward clock correction can put every row past any horizon at once; the
-        // cap is what makes such a pass cost a few checkouts instead of all of them.
-        assert_eq!(
-            db.worktree_eviction_candidates(0).unwrap().len(),
-            Db::MAX_EVICTIONS_PER_PASS
-        );
-    }
-
-    #[test]
-    fn eviction_skips_main_trashed_and_recently_used_worktrees() {
-        let (_dir, db) = test_db();
-        let root = Path::new("/tmp/evict");
-        db.upsert_repo(root, "evict").unwrap();
-        db.sync_worktrees(
-            root,
-            &[
-                wt("/tmp/evict", "main", true),
-                wt("/tmp/old", "old", false),
-                wt("/tmp/pending", "pending", false),
-            ],
-        )
-        .unwrap();
-        let pending = db.get_worktree_by_path("/tmp/pending").unwrap().unwrap().id;
-        db.trash_worktree(pending, TRASH_BY_USER).unwrap();
-
-        // Nothing is old enough yet — every row was created moments ago.
-        assert!(
-            db.worktree_eviction_candidates(3600).unwrap().is_empty(),
-            "a fresh worktree is never a candidate"
-        );
-
-        // A zero horizon makes everything eligible, which is what isolates the
-        // exclusions: main is out, and the already-trashed row is out.
-        let paths: Vec<String> = db
-            .worktree_eviction_candidates(0)
-            .unwrap()
-            .into_iter()
-            .map(|w| w.path)
-            .collect();
-        assert_eq!(paths, vec!["/tmp/old".to_string()]);
     }
 }

@@ -65,9 +65,9 @@ const FALLBACK = {
   detachGraceMinutes: 30,
   quickSwitchResponsive: true,
   quickSwitchColorScheme: true,
-  // Off. Matches the Rust default, and the direction to err in if it ever drifts:
-  // the value that cannot delete anybody's checkout.
-  evictAfterDays: 0,
+  // Keep until emptied. Matches the Rust default, and the direction to err in if it
+  // ever drifts: the value that cannot delete anybody's checkout.
+  trashRetentionDays: 0,
 } as const;
 
 function num(doc: SettingsDoc, key: string, fallback: number): number {
@@ -231,13 +231,13 @@ export function detachGraceMinutes(doc: SettingsDoc): number {
 }
 
 /**
- * Days a worktree may sit idle before the daemon queues it for removal, or `0`
- * for off — which is the default.
+ * Days a worktree stays in the trash before it is deleted, or `0` for "keep until
+ * I empty it" — which is the default.
  *
- * Zero is not "clamp to the minimum": it is the off switch, and the daemon treats
- * it that way, because clamping a disabled destructive timer up to its minimum
- * would arm it for a user trying to turn it off.
+ * Zero is not "clamp to the minimum": it is the off switch, and the daemon treats it
+ * that way, because clamping it up would arm automatic deletion for a user trying to
+ * turn it off.
  */
-export function evictAfterDays(doc: SettingsDoc): number {
-  return num(doc, "worktree.evictAfterDays", FALLBACK.evictAfterDays);
+export function trashRetentionDays(doc: SettingsDoc): number {
+  return num(doc, "worktree.trashRetentionDays", FALLBACK.trashRetentionDays);
 }

@@ -1,29 +1,36 @@
-//! Background worktree removal — the worker behind the rail's trash (§19).
+//! The worktree trash and the worker that empties it (§19).
 //!
-//! `git worktree remove` on a large checkout takes long enough that awaiting it
-//! inside the HTTP request froze the UI, so the request now only records intent
-//! (`worktrees.trashed_at`) and returns; this worker does the slow part.
+//! **Removing a worktree puts it in the trash; it does not delete anything.** The
+//! row is marked (`worktrees.trashed_at`), the checkout stays on disk, and the rail
+//! shows it as trashed. `git worktree remove` runs later — when the retention period
+//! `worktree.trashRetentionDays` expires, or when the user asks for it now. A
+//! recycle bin, not a progress bar on a deletion already underway.
 //!
-//! **The row is the queue.** There is no job table and no journal. `trashed_at`
-//! is the durable record of intent, so a daemon that dies mid-removal recovers by
-//! re-reading trashed rows at boot ([`recover`]) — and re-running a removal that
-//! already succeeded is safe, because git fails, the path is gone from disk, and
-//! the `git worktree prune` fallback finishes the job. The alternative, a queue
-//! that is a separate claim about which worktrees exist, can drift from the rows
-//! it describes; a flag on the row cannot disagree with itself.
+//! That shape is what makes the two hard parts easy. Restoring is a real undo rather
+//! than a race against a worker, and the request that bins a worktree does no slow
+//! work at all — awaiting `git worktree remove` on a large checkout was what froze
+//! the UI in the first place.
 //!
-//! **Nothing here moves or deletes a directory itself.** Relocating the checkout
-//! would make the request O(1) instead of merely fast, and it would bypass every
-//! safety check `git worktree remove` exists to enforce — leaving a hand-rolled
-//! preflight as the only thing between two clicks and someone's uncommitted work —
-//! while pulling the directory out from under the PTY sessions, runs and browser
-//! panes rooted at that path. Removal is always git's decision, and git's refusal
-//! is the safety net that makes auto-eviction defensible at all.
+//! **The row is the queue.** No job table, no journal. `trashed_at` is both the
+//! durable record of intent and the retention clock, so a daemon that dies
+//! mid-removal recovers by re-reading trashed rows at boot ([`recover`]) — and
+//! re-running a removal that already succeeded is safe, because git fails, the path
+//! is gone from disk, and the `git worktree prune` fallback finishes the job. A
+//! separate queue would be a second claim about which worktrees exist and could drift
+//! from the rows it describes; a flag on the row cannot disagree with itself.
 //!
-//! **A failure is never silent.** Any step that fails takes the worktree back out
-//! of trash with the reason on the row (`worktrees.trash_error`), which the rail
-//! renders and toasts once. A background job that fails quietly is worse than the
-//! blocking version it replaced.
+//! **Nothing here moves a directory.** Relocating the checkout instead of leaving it
+//! in place would be O(1) and tempting, and it would bypass every safety check
+//! `git worktree remove` exists to enforce while pulling the directory out from under
+//! the PTY sessions, runs and browser panes rooted at that path — failing immediately
+//! and invisibly rather than when the trash is emptied.
+//!
+//! **A failure the user could act on is never silent.** Any step that fails after the
+//! row has been read takes the worktree back out of the trash with the reason on it
+//! (`worktrees.trash_error`), which the rail renders and announces once. The two
+//! exceptions leave nothing to report: a database this worker cannot open or read,
+//! which is logged and leaves the row in the trash for [`recover`] to retry at the
+//! next daemon start.
 
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::OnceLock;
@@ -93,9 +100,8 @@ pub fn spawn() {
 
 /// Re-enqueue every trashed worktree — the crash-recovery path.
 ///
-/// Called once when the worker starts. Also worth knowing: the GC pass enqueues
-/// its eviction candidates the same way, so a removal that failed and was retried
-/// by the user takes exactly this path too.
+/// Called once when the worker starts. The GC pass enqueues expired trash the same
+/// way, as does an explicit "delete now", so every removal takes this one path.
 fn recover() {
     let db = match Db::open() {
         Ok(db) => db,
@@ -152,30 +158,11 @@ async fn process(id: i64) {
         }
     };
 
-    let by_eviction = wt.trashed_by == veld_core::db::TRASH_BY_EVICTION;
-
-    if by_eviction {
-        // An eviction re-earns its preconditions at the moment of deletion, not at
-        // the moment of marking. Minutes can pass in between — the queue is serial
-        // and a removal ahead of this one can sit in `stop_runs` for STOP_TIMEOUT —
-        // and in that window somebody may have opened the worktree and started
-        // working. The timer gets to reclaim an abandoned checkout; it does not get
-        // to interrupt one that stopped being abandoned while it waited.
-        if let Err(reason) = eviction_still_warranted(&db, &wt).await {
-            info!("worktree eviction: {} is in use again — {reason}", wt.path);
-            // Silently un-trash rather than recording a failure: nothing went wrong
-            // and there is nothing for the user to read. A `trash_error` here would
-            // report the timer's own change of mind as a problem.
-            if let Err(e) = db.untrash_worktree(id, "") {
-                warn!("worktree eviction: cannot release {}: {e}", wt.path);
-            }
-            return;
-        }
-    } else if let Err(reason) = stop_runs(&db, &wt.path).await {
-        // Only a removal the user asked for may stop the runs in the checkout —
-        // that is what the confirmation dialog says it does. An eviction reaching
-        // this branch would mean an unattended timer tearing down a developer's
-        // environment, which is why the origin is persisted rather than inferred.
+    // Stopping the checkout's runs is authorised for every removal that reaches
+    // here: either the user asked for it now, or they binned the worktree and left
+    // it in the trash for the whole retention period. There is no unattended path
+    // that deletes a worktree nobody put in the trash.
+    if let Err(reason) = stop_runs(&db, &wt.path).await {
         fail(reason);
         return;
     }
@@ -223,38 +210,6 @@ async fn process(id: i64) {
     info!("worktree trash: removed {}", wt.path);
 }
 
-/// Whether an eviction still holds, checked immediately before deleting.
-///
-/// Re-runs the same three gates [`mark_evictions`] applied, because each of them can
-/// stop being true between the mark and the removal. Returns the reason it no longer
-/// holds, so the caller can log something specific.
-async fn eviction_still_warranted(
-    db: &Db,
-    wt: &veld_core::db::WorktreeRecord,
-) -> Result<(), String> {
-    match db.live_run_names(&PathBuf::from(&wt.path)) {
-        Ok(names) if !names.is_empty() => {
-            return Err(format!(
-                "environment \"{}\" is running",
-                names.join("\", \"")
-            ));
-        }
-        Ok(_) => {}
-        // Fail closed: a database we cannot query is not grounds for deleting.
-        Err(e) => return Err(format!("cannot check for running environments: {e}")),
-    }
-    if super::pty::worktree_ids_with_sessions()
-        .await
-        .contains(&wt.id)
-    {
-        return Err("a terminal session is open in it".to_owned());
-    }
-    if has_local_files(&wt.path).await {
-        return Err("it now holds local files".to_owned());
-    }
-    Ok(())
-}
-
 /// Ask every live run in the worktree to stop, then wait for the runs to leave
 /// the live set.
 ///
@@ -299,197 +254,40 @@ async fn stop_runs(db: &Db, path: &str) -> Result<(), String> {
     }
 }
 
-/// Whether a checkout holds local files that removing it would destroy for good.
+/// Delete trashed worktrees whose retention period has expired.
 ///
-/// **`git worktree remove` is not the safety net it looks like.** An un-forced
-/// removal refuses a worktree with modified or untracked *tracked-able* files, and
-/// happily deletes one whose only contents are **ignored** — which is exactly where
-/// `.env` files, credentials, local database dumps and build caches live. Verified,
-/// not assumed: a worktree containing a gitignored `.env` reports clean from
-/// `git status --porcelain` and `git worktree remove` exits 0 and deletes it
-/// (git 2.50.1).
+/// Called from the GC pass. Returns how many were queued.
 ///
-/// So eviction asks a stricter question than git does. `--ignored=matching` is the
-/// flag that makes ignored files appear in the porcelain output at all; without it
-/// they are invisible and the answer is the misleading "clean".
+/// This is the **only** thing that deletes a checkout the user has not asked about
+/// twice, and it is opt-in: `worktree.trashRetentionDays` defaults to zero, which
+/// means "keep until I empty it" and makes this a no-op. When it is set, everything
+/// it acts on is something the user put in the trash themselves and then left there
+/// for the whole period — so there is no activity heuristic here, and deliberately
+/// none: guessing that a worktree is abandoned is a different feature from honouring
+/// a request that has been sitting in the bin for a fortnight.
 ///
-/// This gates **eviction only**, never a removal the user clicked. A person looking
-/// at a confirmation dialog has asked for the checkout to be deleted and gets git's
-/// own semantics; an unattended timer does not get to make that call for them.
-///
-/// Fails **closed**: a git invocation that errors returns "has local files", because
-/// the alternative is deleting a checkout we could not inspect.
-async fn has_local_files(path: &str) -> bool {
-    // Run *in the worktree*, not in the repo root: `git()` already supplies `-C`,
-    // and a second one would only shadow the first.
-    match super::desktop::git(
-        FsPath::new(path),
-        &["status", "--porcelain", "--ignored=matching"],
-    )
-    .await
-    {
-        Ok(out) => !out.trim().is_empty(),
-        Err(e) => {
-            warn!("worktree eviction: cannot inspect {path}, leaving it alone: {e}");
-            true
-        }
-    }
-}
-
-/// Mark worktrees idle past the configured horizon for removal.
-///
-/// Called from the GC pass. Returns how many were marked.
-///
-/// Eviction only ever *marks*: the removal goes through the same worker and the
-/// same un-forced `git worktree remove`, so a checkout that has picked up changes
-/// since it was marked still comes back with git's reason attached.
-///
-/// **git's refusal is not sufficient on its own** — see [`has_local_files`], which
-/// is why an eviction candidate is additionally required to hold no ignored files
-/// and no live terminal session. Those two exclusions are the difference between a
-/// timer that reclaims abandoned checkouts and one that deletes the `.env` out of a
-/// worktree somebody has a shell open in.
-pub async fn mark_evictions(db: &Db) -> usize {
-    let Some(after) = db.worktree_evict_after() else {
-        return 0; // off, which is the default
+/// The removal itself goes through the same worker and the same un-forced
+/// `git worktree remove` as a hand-clicked one, so a checkout that picked up
+/// uncommitted changes while it sat in the trash still comes back with git's reason
+/// attached rather than being discarded.
+pub fn purge_expired_trash(db: &Db) -> usize {
+    let Some(retention) = db.trash_retention() else {
+        return 0; // keep until emptied, which is the default
     };
-    // The PTY gate below reads an in-memory session map that is populated by
-    // `pty::adopt_existing_sessions()`. The GC scheduler is spawned BEFORE the
-    // feedback server that runs adoption, and `tokio::time::interval`'s first tick
-    // completes immediately — so the very first pass after a daemon start would
-    // otherwise consult an empty map and evict a worktree with a live adopted shell,
-    // which is exactly the case sessions-outlive-the-daemon (#197) created. Skipping
-    // until adoption has run costs at most one 10-minute pass.
-    if !super::pty::sessions_adopted() {
-        return 0;
-    }
-    let candidates = match db.worktree_eviction_candidates(after.as_secs() as i64) {
-        Ok(c) => c,
+    let expired = match db.expired_trashed_worktrees(retention.as_secs() as i64) {
+        Ok(rows) => rows,
         Err(e) => {
-            warn!("worktree eviction: cannot list candidates: {e}");
+            warn!("worktree trash: cannot list expired trash: {e}");
             return 0;
         }
     };
-    if candidates.is_empty() {
-        return 0;
-    }
-    // A veld run is not the only sign of life, and in this app it is not even the
-    // common one: a worktree can be worked in all day through terminal panes with
-    // `veld start` never running. The module doc names PTY sessions as a reason a
-    // directory must not be pulled out from under someone — removal does that just
-    // as surely as a move would.
-    let busy = super::pty::worktree_ids_with_sessions().await;
-    let mut marked = 0;
-    for wt in candidates {
-        if busy.contains(&wt.id) {
-            continue;
-        }
-        if has_local_files(&wt.path).await {
-            continue;
-        }
-        match db.trash_worktree(wt.id, veld_core::db::TRASH_BY_EVICTION) {
-            Ok(Some(_)) => {
-                info!(
-                    "worktree eviction: {} idle for over {} day(s) — queued for removal",
-                    wt.path,
-                    after.as_secs() / 86_400
-                );
-                enqueue(wt.id);
-                marked += 1;
-            }
-            Ok(None) => {}
-            Err(e) => warn!("worktree eviction: cannot trash {}: {e}", wt.path),
-        }
-    }
-    marked
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::process::Command;
-
-    /// A real repo with a real worktree. `has_local_files` shells out to git, so a
-    /// fixture cannot answer the question this module gets wrong.
-    fn repo_with_worktree(ignored: &[(&str, &str)]) -> (tempfile::TempDir, PathBuf) {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let repo = dir.path().join("repo");
-        std::fs::create_dir_all(&repo).unwrap();
-        let git = |args: &[&str], cwd: &std::path::Path| {
-            let out = Command::new("git")
-                .args(args)
-                .current_dir(cwd)
-                .output()
-                .expect("git");
-            assert!(out.status.success(), "git {args:?}: {:?}", out);
-        };
-        git(&["init", "-q"], &repo);
-        git(&["config", "user.email", "t@e.st"], &repo);
-        git(&["config", "user.name", "t"], &repo);
-        std::fs::write(repo.join(".gitignore"), ".env\nbuild/\n").unwrap();
-        git(&["add", "."], &repo);
-        git(&["commit", "-qm", "init"], &repo);
-        let wt = dir.path().join("wt");
-        git(
-            &[
-                "worktree",
-                "add",
-                "-q",
-                wt.to_str().unwrap(),
-                "-b",
-                "feature",
-            ],
-            &repo,
+    for wt in &expired {
+        info!(
+            "worktree trash: {} has been in the trash over {} day(s) — deleting",
+            wt.path,
+            retention.as_secs() / 86_400
         );
-        for (name, body) in ignored {
-            let p = wt.join(name);
-            if let Some(parent) = p.parent() {
-                std::fs::create_dir_all(parent).unwrap();
-            }
-            std::fs::write(p, body).unwrap();
-        }
-        (dir, wt)
+        enqueue(wt.id);
     }
-
-    #[tokio::test]
-    async fn an_untouched_worktree_has_no_local_files() {
-        let (_dir, wt) = repo_with_worktree(&[]);
-        assert!(!has_local_files(wt.to_str().unwrap()).await);
-    }
-
-    /// The finding this gate exists for.
-    ///
-    /// `git worktree remove` (un-forced) exits 0 on a worktree whose only contents
-    /// are gitignored and deletes them — so "git refuses a dirty checkout" is NOT
-    /// sufficient protection for an unattended timer. Verified against git 2.50.1:
-    /// plain `git status --porcelain` reports this tree clean.
-    #[tokio::test]
-    async fn a_gitignored_env_file_counts_as_local_files() {
-        let (_dir, wt) = repo_with_worktree(&[(".env", "SECRET=hunter2\n")]);
-        assert!(
-            has_local_files(wt.to_str().unwrap()).await,
-            "an ignored .env must block eviction — git alone would delete it"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_gitignored_build_directory_counts_as_local_files() {
-        let (_dir, wt) = repo_with_worktree(&[("build/out.js", "artifact\n")]);
-        assert!(has_local_files(wt.to_str().unwrap()).await);
-    }
-
-    #[tokio::test]
-    async fn an_untracked_file_counts_as_local_files() {
-        let (_dir, wt) = repo_with_worktree(&[("scratch.txt", "notes\n")]);
-        assert!(has_local_files(wt.to_str().unwrap()).await);
-    }
-
-    /// Fails closed: a path git cannot inspect is treated as holding local files,
-    /// because the alternative is deleting a checkout we could not look at.
-    #[tokio::test]
-    async fn an_uninspectable_path_counts_as_local_files() {
-        let dir = tempfile::tempdir().unwrap();
-        let missing = dir.path().join("not-a-repo");
-        assert!(has_local_files(missing.to_str().unwrap()).await);
-    }
+    expired.len()
 }

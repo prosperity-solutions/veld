@@ -319,6 +319,16 @@ select:focus {
   width: 236px;
   position: relative;
 }
+
+/* Live resize: no transition.
+ *
+ * `.rail`'s `transition: width 0.15s` is for the collapse/expand toggle, where
+ * 236px → 64px should animate. During a drag it re-animates on every pointer move,
+ * so the edge chases the cursor 150ms behind and the drag feels like it is lagging.
+ * The class is only present while the pointer is down. */
+.rail.resizing {
+  transition: none;
+}
 .rail:not(.wide) {
   width: 64px;
 }

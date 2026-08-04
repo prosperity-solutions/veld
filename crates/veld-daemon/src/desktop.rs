@@ -46,6 +46,8 @@ pub fn routes() -> Router {
         )
         .route("/api/worktrees/{id}/start", post(start_worktree_run))
         .route("/api/worktrees/{id}/restore", post(restore_worktree))
+        .route("/api/worktrees/{id}/delete", post(delete_trashed_worktree))
+        .route("/api/trash", delete(empty_trash))
         .route(
             "/api/worktrees/{id}/trash-error",
             delete(dismiss_trash_error),
@@ -1035,7 +1037,7 @@ async fn patch_worktree(
     if body.is_empty() {
         return Err(err(
             StatusCode::BAD_REQUEST,
-            "nothing to update: send an alias, an emoji, a marker_color, or any combination",
+            "nothing to update: send an alias, an emoji, a marker_color, a lane, or any combination",
         ));
     }
     // Validate everything before touching the database: a request carrying a
@@ -1085,29 +1087,30 @@ struct DeleteQuery {
     force: bool,
 }
 
-/// Mark a worktree for removal and return immediately.
+/// Move a worktree to the trash — or, with `?force=true`, delete it outright.
 ///
-/// This used to await `git worktree remove` inside the request, which froze the UI
-/// for as long as a large checkout took to delete. The slow part now runs in
-/// [`crate::worktree_trash`]; the row carries the intent, so the removal survives a
-/// daemon restart and the rail can show that it is pending.
+/// Binning deletes nothing: it marks the row and returns. The checkout stays on
+/// disk, restoring it is a real undo, and `git worktree remove` runs when the
+/// retention period expires (the GC pass) or when the user asks for it now
+/// (`POST /api/worktrees/{id}/delete`). This used to await the removal inline, which
+/// froze the UI for as long as a large checkout took.
 ///
-/// `force` is honoured on this synchronous-looking path only in the sense that the
-/// forced removal is attempted here first: forcing exists to get past git's refusal
-/// *now*, at the user's explicit second click, and deferring it would leave the
-/// worktree in trash with the same refusal the user just answered.
+/// `force` remains inline and immediate: it exists to get past a refusal the user has
+/// already been shown, so the answer they need is whether *this* attempt worked.
 async fn delete_worktree(
     Path(id): Path<i64>,
     Query(q): Query<DeleteQuery>,
 ) -> Result<StatusCode, ApiError> {
     let db = open_desktop_db()?;
     let wt = db
-        .trash_worktree(id, veld_core::db::TRASH_BY_USER)
+        .trash_worktree(id)
         .map_err(write_err)?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "worktree not found"))?;
 
     if !q.force {
-        super::worktree_trash::enqueue(wt.id);
+        // Nothing is queued and nothing is deleted: the checkout stays on disk until
+        // its retention expires or the user asks for it now. This is why the request
+        // is fast — there is no slow work left in it at all.
         return Ok(StatusCode::ACCEPTED);
     }
 
@@ -1122,7 +1125,17 @@ async fn delete_worktree(
     // kill whatever is running in there" is a promise the dialog's copy does not
     // make. In practice this is a safety net rather than a common path, because the
     // un-forced attempt that produced the refusal already stopped the runs.
-    let live = db.live_run_names(FsPath::new(&wt.path)).map_err(db_err)?;
+    // Untrash on the error path too, not just on the refusal below. `?` here would
+    // return a 500 having already set `trashed_at`, leaving the row in "Pending
+    // removal" with nothing queued to act on it until the next daemon restart —
+    // every other exit from this function releases the row.
+    let live = match db.live_run_names(FsPath::new(&wt.path)) {
+        Ok(live) => live,
+        Err(e) => {
+            let _ = db.untrash_worktree(id, "");
+            return Err(db_err(e));
+        }
+    };
     if let Some(name) = live.first() {
         let _ = db.untrash_worktree(id, "");
         return Err(err(
@@ -1156,11 +1169,11 @@ async fn delete_worktree(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Take a worktree back out of trash at the user's request (undo).
+/// Take a worktree out of the trash (undo).
 ///
-/// Racy by nature — the background worker may already have run `git worktree
-/// remove` — so this reports whether the row was still there to restore rather
-/// than pretending the removal can always be called off.
+/// A real undo for the whole retention period, since binning deletes nothing. It can
+/// still lose a race against an explicit "delete now" already in the worker, which is
+/// why it reports whether the row was there rather than assuming it was.
 async fn restore_worktree(Path(id): Path<i64>) -> Result<Json<WorktreeView>, ApiError> {
     let db = open_desktop_db()?;
     db.untrash_worktree(id, "").map_err(db_err)?;
@@ -1169,6 +1182,44 @@ async fn restore_worktree(Path(id): Path<i64>) -> Result<Json<WorktreeView>, Api
         .map_err(db_err)?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "worktree already removed"))?;
     Ok(Json(worktree_view(wt)))
+}
+
+/// Delete a trashed worktree now, without waiting for its retention to expire.
+///
+/// Queues the same worker the retention sweep uses, so there is exactly one code path
+/// that ever runs `git worktree remove`. Returns `409` for a worktree that is not in
+/// the trash: emptying the bin is not a shortcut around the confirmation that puts
+/// things in it.
+async fn delete_trashed_worktree(Path(id): Path<i64>) -> Result<StatusCode, ApiError> {
+    let db = open_desktop_db()?;
+    let wt = db
+        .get_worktree(id)
+        .map_err(db_err)?
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "worktree not found"))?;
+    if wt.trashed_at.is_empty() {
+        return Err(err(
+            StatusCode::CONFLICT,
+            "this worktree is not in the trash",
+        ));
+    }
+    super::worktree_trash::enqueue(wt.id);
+    Ok(StatusCode::ACCEPTED)
+}
+
+/// Empty the trash: delete every trashed worktree of a repo now.
+async fn empty_trash(Query(q): Query<RepoQuery>) -> Result<Json<serde_json::Value>, ApiError> {
+    let db = open_desktop_db()?;
+    let trashed: Vec<i64> = db
+        .list_worktrees(FsPath::new(&q.repo_root))
+        .map_err(db_err)?
+        .into_iter()
+        .filter(|w| !w.trashed_at.is_empty())
+        .map(|w| w.id)
+        .collect();
+    for id in &trashed {
+        super::worktree_trash::enqueue(*id);
+    }
+    Ok(Json(serde_json::json!({ "queued": trashed.len() })))
 }
 
 /// Clear a recorded removal failure — the user has read it.
@@ -1622,6 +1673,8 @@ mod tests {
                 ("DELETE", "/api/worktrees/1", ""),
                 ("POST", "/api/worktrees/1/start", "{}"),
                 ("POST", "/api/worktrees/1/restore", ""),
+                ("POST", "/api/worktrees/1/delete", ""),
+                ("DELETE", "/api/trash?repo_root=/tmp", ""),
                 ("DELETE", "/api/worktrees/1/trash-error", ""),
                 (
                     "POST",

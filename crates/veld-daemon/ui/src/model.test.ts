@@ -29,7 +29,6 @@ const wt = (path: string): Worktree => ({
   sort_position: null,
   trashed_at: "",
   trash_error: "",
-  trashed_by: "user",
   has_veld_config: true,
   presets: [],
   nodes: [],
@@ -422,7 +421,7 @@ describe("railGroups", () => {
     expect(groups[0].worktrees.map((w) => w.path)).toEqual(["/wts/a"]);
   });
 
-  it("separates pending removals into their own group, last", () => {
+  it("separates trashed worktrees into their own group, last", () => {
     const groups = railGroups(
       [
         rw("/wts/a"),
@@ -431,14 +430,14 @@ describe("railGroups", () => {
       [lane("review", 0)],
     );
     expect(groups.map((g) => g.lane)).toEqual(["", "review", TRASH_LANE]);
-    // Out of its lane while it is leaving, even though the row still carries it —
-    // the lane comes back if the removal fails.
+    // Out of its lane while it sits in the trash, even though the row still carries
+    // it — the lane comes back when it is restored.
     expect(groups[1].worktrees).toEqual([]);
     expect(groups[2].worktrees.map((w) => w.path)).toEqual(["/wts/going"]);
-    expect(groups[2].label).toBe("Pending removal");
+    expect(groups[2].label).toBe("Trash");
   });
 
-  it("omits the trash group entirely when nothing is pending", () => {
+  it("omits the trash group entirely when the trash is empty", () => {
     const groups = railGroups([rw("/wts/a")], []);
     expect(groups.map((g) => g.lane)).toEqual([""]);
   });
@@ -536,8 +535,8 @@ describe("moveWorktree", () => {
     expect(moveWorktree(groups(), "/wts/nope", "", 0)).toBeNull();
   });
 
-  it("excludes pending removals from the written order", () => {
-    // They are leaving, so a position for them would be written and then deleted.
+  it("excludes trashed worktrees from the written order", () => {
+    // They are on their way out, so a position would be written and then deleted.
     const g = railGroups(
       [rw("/wts/a"), rw("/wts/b"), rw("/wts/gone", { trashed_at: "t" })],
       [],
