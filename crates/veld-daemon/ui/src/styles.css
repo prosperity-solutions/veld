@@ -439,7 +439,8 @@ select:focus {
   width: 11px;
   height: 11px;
   border-radius: 50%;
-  background: var(--wt-mark);
+  /* The fill is set inline from the stored `#rrggbb` — there is no palette
+     variable to read, which is the point of storing the colour itself. */
   /* An inner ring rather than a border: a border would grow the box and undo the
      no-reflow property above. It keeps the swatch legible where the fill is close
      to the panel it sits on, in either theme. */
@@ -463,13 +464,19 @@ body[data-theme="light"] .swatch-cell > span {
    stored — a user who prefers colours can still choose their glyph and find it
    waiting if they ever switch. */
 .swatch-grid {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 8px;
+  /* Flex, not a grid with `aspect-ratio: 1`. The grid version stretched each cell
+     to a quarter of the 560px modal and then made it square — 130px boxes around an
+     18px dot. The swatch is the content, so the cell is sized to it. `wrap` so
+     appending a ninth colour wraps rather than overflowing. */
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
 }
 
 .swatch-cell {
-  aspect-ratio: 1;
+  width: 30px;
+  height: 30px;
+  flex: none;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--panel2);
@@ -494,12 +501,17 @@ body[data-theme="light"] .swatch-cell > span {
 }
 
 .swatch-cell > span {
-  width: 18px;
-  height: 18px;
+  width: 16px;
+  height: 16px;
   border-radius: 50%;
-  background: var(--wt-mark);
   box-shadow: inset 0 0 0 1px rgb(0 0 0 / 0.25);
 }
+
+
+/* Marker picker: the colour grid, beside the existing glyph grid. Both are always
+   editable regardless of which face is being rendered, because both faces are
+   stored — a user who prefers colours can still choose their glyph and find it
+   waiting if they ever switch. */
 
 .wt-branch {
   font-family: "JetBrains Mono Variable", ui-monospace, monospace;
