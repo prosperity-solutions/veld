@@ -116,6 +116,28 @@ Rules that make it work:
   - **Coding-agent ergonomics** — how does an agent driving the CLI consume
     this? Favour `--json`, stable output, and state that is observable early.
 
+## Step 1.5 — Spar the load-bearing forks (only when there are any)
+
+If Step 1 surfaced a decision that is **expensive to reverse** — it lands in a
+schema, a migration, a wire format, a persisted value, or a surface users build
+habits on — run the design-divergence stage in
+[docs/agentic-review.md §0](../../../docs/agentic-review.md) before writing code.
+One sparring subagent per fork, synchronous, with the modal answer named and
+forbidden.
+
+Skip it otherwise, and say you skipped it. Most changes have no such fork, and
+running this on a naming choice burns tokens to be told five ways to name a field.
+
+Three rules that make it worth the spend rather than theatre:
+
+- **Verify the winner's load-bearing premise before you build on it** (§0.3). The
+  stage raises recall and lowers precision — a confident, unusual, wrong argument
+  is its characteristic failure.
+- **You decide, not the agent.** Overriding a sparring round's top pick with a
+  stated reason is a good outcome, not a wasted round.
+- **Keep the rejected candidates** in the PR body. "Why not the obvious thing" is
+  the first question a reviewer asks, and the answer is expensive to regenerate.
+
 ## Step 2 — Implement
 
 - Match surrounding code: naming, comment density, error handling, idioms.

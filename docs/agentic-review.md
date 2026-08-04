@@ -25,6 +25,87 @@ countable. Count spawns and rounds; ignore tokens.
 
 ---
 
+## 0. Design divergence (before the code exists)
+
+Everything below this section reviews a diff. This one runs *before* there is one,
+and only for a **load-bearing fork** — a decision that is expensive to reverse
+because it lands in a schema, a wire format, a persisted value, or a surface users
+will build habits on. Skip it for anything you would happily rewrite next week.
+
+The failure it addresses is not sloppiness, it is **mode collapse**: asked for a
+design, a model returns the single most typical one, and typical is exactly what
+gets chosen anyway if nobody argues. Adapted from *Verbalized Sampling*
+(CHATS-lab); what follows is the part that earned its place here, not the paper.
+
+### 0.1 The sparring brief
+
+One subagent per fork, `run_in_background: false` (the result is the deliverable —
+a background agent that fails to report costs you the whole round), opus, and a
+brief with these five clauses:
+
+1. **Name the modal answer in one sentence, then forbid it.** This is the load-
+   bearing clause. Writing down "what every assistant would say" and being barred
+   from submitting it is what forces the rest of the output somewhere new.
+2. **k candidates, each with a `<probability>` strictly below τ.** Use `k=3` for a
+   narrow fork and `k=5` at most. τ = 0.10.
+3. **Candidates must differ in *mechanism*, not in constants or wording.**
+4. **Each candidate ends with the strongest argument against it**, stated flatly
+   by the agent, not hedged.
+5. **A closing judgment: rank them, pick one, and name any trap** — a candidate
+   that looks good and fails on contact.
+
+Give it verified facts, tell it not to read the repo, and tell it not to write
+code. Its value is divergence; ours is deciding.
+
+### 0.2 Read the probabilities as a style knob, not a distribution
+
+The numbers carry no information — 0.04 versus 0.075 will not order your options,
+and you should not pretend otherwise. What works is the *instruction* to sit in the
+tail. Do not report the probabilities as if they meant something.
+
+### 0.3 Verify the winner before building it — the round's own §8.3
+
+**This stage raises recall and lowers precision.** Tail-sampling rewards unusual
+arguments, and an unusual argument that *sounds* decisive is the exact failure mode.
+Treat a sparring round's top pick as a claim, not a conclusion: check its load-
+bearing premise against the code or the docs before committing to it.
+
+This is not hypothetical. In the round that designed the settings store, the
+top-ranked candidate argued against a migration because each one is a downgrade
+cliff (`DbError::NewerSchema`). True, and irrelevant: the previous release had
+already shipped a migration, so the cliff was pre-paid and the marginal cost was
+zero. One check overturned the ranking.
+
+### 0.4 What to keep
+
+Fold the outcome into the PR body or a `docs/` note — **including the rejected
+candidates and why**. A design's discarded alternatives are the most expensive
+thing in the round to regenerate, and the first question a reviewer asks is "why
+not the obvious thing".
+
+Two signals worth trusting:
+
+- **Independent agreement across two rounds on the same question.** Run the fork
+  twice, blind, when it is worth it. Both rounds on the worktree marker
+  independently flagged a pre-existing defect nobody had asked about
+  (`pick_emoji` probing globally across every repo) — that is the strongest output
+  the method produced, and neither round was prompted toward it.
+- **A named trap.** Both marker rounds independently called deriving the marker
+  from a mutable input (branch, path) seductive and fatal. That warning arrived
+  before the code, which is the whole point of running this before §1.
+
+### 0.5 When not to run it
+
+- The decision is cheap to reverse → just build one and iterate.
+- You already know the answer and want agreement → you are shopping for a
+  rubber stamp, and this will give you five.
+- The question is a naming or formatting choice → the machinery costs more than
+  the decision.
+- The fork is genuinely constrained to two options with a decisive argument
+  already on the table → state the argument and move on.
+
+---
+
 ## 1. Boot
 
 Resolve config, then build the **context pack**. Build it once; every subagent
