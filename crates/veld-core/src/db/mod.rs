@@ -27,8 +27,9 @@ mod worktrees;
 pub use logs::{LogFilter, LogRow, LogStream, stream_is_per_node};
 pub use settings::DEFAULT_DETACH_GRACE_MINUTES;
 pub use worktrees::{
-    DiscoveredWorktree, LaneRecord, MAX_LANE_NAME_LEN, MAX_ORDER_LEN, RepoRecord, WORKTREE_COLORS,
-    WORKTREE_EMOJI, WorktreeRecord, default_alias, is_worktree_color, is_worktree_emoji,
+    DiscoveredWorktree, LaneRecord, MAX_LANE_NAME_LEN, MAX_ORDER_LEN, RepoRecord,
+    TRASH_BY_EVICTION, TRASH_BY_USER, WORKTREE_COLORS, WORKTREE_EMOJI, WorktreeRecord,
+    default_alias, is_worktree_color, is_worktree_emoji,
 };
 
 use std::path::{Path, PathBuf};
@@ -959,6 +960,22 @@ fn migrate_v9_worktree_marker_color(conn: &Connection) -> rusqlite::Result<()> {
 /// `trash_error` is the other half: a removal that fails after the user has moved
 /// on takes the row back *out* of trash with the reason attached, because a
 /// background job that fails silently is worse than a blocking one that reports.
+///
+/// `trashed_by` records **who asked** — `'user'` or `'eviction'` — and it is not
+/// bookkeeping. The worker's two jobs differ by origin: a removal the user clicked
+/// may stop the runs in the checkout, because that is what they asked for; an
+/// eviction may not, and must re-check its own preconditions (no live run, no
+/// terminal session, no local files) immediately before deleting, because minutes
+/// can pass between the timer marking a worktree and the queue reaching it, and in
+/// that window somebody may have started working in it. Without the origin the
+/// worker cannot tell the two apart and an unattended timer would stop a
+/// developer's environment. It defaults to `'user'` so that any row already
+/// trashed when this column arrives takes the more conservative path.
+///
+/// **This migration is edited in place, not superseded.** v10 has not shipped in a
+/// release, so there is nothing in the wild to upgrade *from* — a checkout of this
+/// branch from before `trashed_by` existed needs `just dev-db-reset`. Once v10
+/// ships, this file becomes append-only again.
 fn migrate_v10_rail_lanes_and_trash(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
         r#"
@@ -966,6 +983,7 @@ fn migrate_v10_rail_lanes_and_trash(conn: &Connection) -> rusqlite::Result<()> {
         ALTER TABLE worktrees ADD COLUMN sort_position INTEGER;
         ALTER TABLE worktrees ADD COLUMN trashed_at TEXT NOT NULL DEFAULT '';
         ALTER TABLE worktrees ADD COLUMN trash_error TEXT NOT NULL DEFAULT '';
+        ALTER TABLE worktrees ADD COLUMN trashed_by TEXT NOT NULL DEFAULT 'user';
 
         CREATE TABLE lanes (
             repo_root  TEXT NOT NULL REFERENCES repos(root) ON DELETE CASCADE,

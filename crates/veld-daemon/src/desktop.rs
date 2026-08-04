@@ -1102,7 +1102,7 @@ async fn delete_worktree(
 ) -> Result<StatusCode, ApiError> {
     let db = open_desktop_db()?;
     let wt = db
-        .trash_worktree(id)
+        .trash_worktree(id, veld_core::db::TRASH_BY_USER)
         .map_err(write_err)?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "worktree not found"))?;
 

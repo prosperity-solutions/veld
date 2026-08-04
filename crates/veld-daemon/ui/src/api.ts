@@ -125,6 +125,14 @@ export interface Worktree {
    * rail — the failure is not silent and not still pending.
    */
   trash_error: string;
+  /**
+   * Who asked for the pending removal: `"user"` or `"eviction"`.
+   *
+   * The UI does not branch on this today; it exists because the daemon's worker
+   * must — a user-requested removal may stop the checkout's runs, an eviction may
+   * not and re-checks its preconditions before deleting.
+   */
+  trashed_by: string;
   has_veld_config: boolean;
   /** Presets in display order, as resolved by the daemon. */
   presets: Preset[];

@@ -69,14 +69,22 @@ pub fn spawn() {
     }
     tokio::spawn(async move {
         recover();
-        // Strictly serial, on purpose: `git worktree remove` takes `.git/worktrees`
-        // for the repo, so two concurrent removals in one repo would contend on
-        // git's own lock and surface as spurious failures the user would have to
-        // retry. The cost is head-of-line blocking — one worktree whose teardown
-        // hits STOP_TIMEOUT delays the queue behind it, with the rail showing
-        // "Pending removal" meanwhile. Acceptable because removals are a handful of
-        // deliberate clicks, not a stream; if that changes, shard the queue per
-        // repo rather than making it unbounded.
+        // Strictly serial, for bounded concurrency and nothing more.
+        //
+        // An earlier version of this comment claimed git locks `.git/worktrees` per
+        // repo so concurrent removals would contend. **That is not true** — four
+        // simultaneous `git worktree remove` calls in one repo all succeed (tested,
+        // git 2.50.1) — and it is recorded here because a false justification is
+        // worse than none: the next person would have preserved serialism to protect
+        // an invariant that does not exist, and it also made the inline forced path
+        // look like a bug.
+        //
+        // The real reason is that removals are a handful of deliberate clicks plus a
+        // capped timer, so one at a time is the simplest thing that cannot spawn
+        // unboundedly. The cost is head-of-line blocking: one worktree whose teardown
+        // hits STOP_TIMEOUT delays the queue behind it while the rail shows "Pending
+        // removal". If removals ever become a stream, spawn per id — there is no
+        // ordering constraint to preserve.
         while let Some(id) = rx.recv().await {
             process(id).await;
         }
@@ -144,7 +152,30 @@ async fn process(id: i64) {
         }
     };
 
-    if let Err(reason) = stop_runs(&db, &wt.path).await {
+    let by_eviction = wt.trashed_by == veld_core::db::TRASH_BY_EVICTION;
+
+    if by_eviction {
+        // An eviction re-earns its preconditions at the moment of deletion, not at
+        // the moment of marking. Minutes can pass in between — the queue is serial
+        // and a removal ahead of this one can sit in `stop_runs` for STOP_TIMEOUT —
+        // and in that window somebody may have opened the worktree and started
+        // working. The timer gets to reclaim an abandoned checkout; it does not get
+        // to interrupt one that stopped being abandoned while it waited.
+        if let Err(reason) = eviction_still_warranted(&db, &wt).await {
+            info!("worktree eviction: {} is in use again — {reason}", wt.path);
+            // Silently un-trash rather than recording a failure: nothing went wrong
+            // and there is nothing for the user to read. A `trash_error` here would
+            // report the timer's own change of mind as a problem.
+            if let Err(e) = db.untrash_worktree(id, "") {
+                warn!("worktree eviction: cannot release {}: {e}", wt.path);
+            }
+            return;
+        }
+    } else if let Err(reason) = stop_runs(&db, &wt.path).await {
+        // Only a removal the user asked for may stop the runs in the checkout —
+        // that is what the confirmation dialog says it does. An eviction reaching
+        // this branch would mean an unattended timer tearing down a developer's
+        // environment, which is why the origin is persisted rather than inferred.
         fail(reason);
         return;
     }
@@ -190,6 +221,38 @@ async fn process(id: i64) {
         return;
     }
     info!("worktree trash: removed {}", wt.path);
+}
+
+/// Whether an eviction still holds, checked immediately before deleting.
+///
+/// Re-runs the same three gates [`mark_evictions`] applied, because each of them can
+/// stop being true between the mark and the removal. Returns the reason it no longer
+/// holds, so the caller can log something specific.
+async fn eviction_still_warranted(
+    db: &Db,
+    wt: &veld_core::db::WorktreeRecord,
+) -> Result<(), String> {
+    match db.live_run_names(&PathBuf::from(&wt.path)) {
+        Ok(names) if !names.is_empty() => {
+            return Err(format!(
+                "environment \"{}\" is running",
+                names.join("\", \"")
+            ));
+        }
+        Ok(_) => {}
+        // Fail closed: a database we cannot query is not grounds for deleting.
+        Err(e) => return Err(format!("cannot check for running environments: {e}")),
+    }
+    if super::pty::worktree_ids_with_sessions()
+        .await
+        .contains(&wt.id)
+    {
+        return Err("a terminal session is open in it".to_owned());
+    }
+    if has_local_files(&wt.path).await {
+        return Err("it now holds local files".to_owned());
+    }
+    Ok(())
 }
 
 /// Ask every live run in the worktree to stop, then wait for the runs to leave
@@ -290,6 +353,16 @@ pub async fn mark_evictions(db: &Db) -> usize {
     let Some(after) = db.worktree_evict_after() else {
         return 0; // off, which is the default
     };
+    // The PTY gate below reads an in-memory session map that is populated by
+    // `pty::adopt_existing_sessions()`. The GC scheduler is spawned BEFORE the
+    // feedback server that runs adoption, and `tokio::time::interval`'s first tick
+    // completes immediately — so the very first pass after a daemon start would
+    // otherwise consult an empty map and evict a worktree with a live adopted shell,
+    // which is exactly the case sessions-outlive-the-daemon (#197) created. Skipping
+    // until adoption has run costs at most one 10-minute pass.
+    if !super::pty::sessions_adopted() {
+        return 0;
+    }
     let candidates = match db.worktree_eviction_candidates(after.as_secs() as i64) {
         Ok(c) => c,
         Err(e) => {
@@ -314,7 +387,7 @@ pub async fn mark_evictions(db: &Db) -> usize {
         if has_local_files(&wt.path).await {
             continue;
         }
-        match db.trash_worktree(wt.id) {
+        match db.trash_worktree(wt.id, veld_core::db::TRASH_BY_EVICTION) {
             Ok(Some(_)) => {
                 info!(
                     "worktree eviction: {} idle for over {} day(s) — queued for removal",
