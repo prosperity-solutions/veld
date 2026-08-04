@@ -162,6 +162,57 @@ and several were paid for in this codebase already.
   description, commit messages, or `docs/` — don't cite `notes/` files from
   code comments, since readers of the repo can't see them.
 - **Any user-supplied command executed by a daemon must inherit the user's login-shell `PATH`.** The daemon (launchd), gateway (systemd), and helper run with a bare service `PATH`, so a raw `sh -c` cannot find user-installed CLIs (`op`, `vault`, `pg_isready`, version-manager shims) even though the same command works in the user's terminal. Pass it via `.env("PATH", …)`, resolved by one of the two helpers in `veld_core::user_path`. Anything inside a daemon uses `cached_user_path()` — every request handler (`spawn_veld`, the desktop directory picker and git plumbing, and `SecretSource::Command` token resolution in `veld-share/src/endpoint.rs`, which `POST /api/shares` reaches while the caller waits) and the health monitor's liveness probes; a dedicated `warm_user_path_cache` task keeps that entry warm, deliberately **not** the monitor's scan, whose own cadence stretches to 300s during a recovery restart. `resolve_user_path()` is the uncached primitive, for a one-shot context that resolves once and exits — today only a CLI run's lazy var sources. Resolution spawns a login shell: sub-second normally, up to 10s on a stalled rc file, and the slow rc files belong to exactly the users who need the resolved PATH — which is why a handler must not resolve inline. The cache is one writer (the warm task) publishing into a cell that readers only read, with a single rule doing the work: **a resolution that learned nothing never displaces one that did.** A stall, or a shell that exits zero while answering with nothing better than the process's own `PATH`, leaves the previous value alone — because that value is the bare service PATH, i.e. the bug itself. Resist adding a TTL or a which-resolution-wins rule back: the first version of this cache had both, and each grew its own bug. Never spawn a config-declared command on a daemon without this. **A login shell is not a substitute for the injection.** `$SHELL -l -c` sources `.zprofile` but not `.zshrc`, which is where version managers (nvm, fnm, rbenv) and `brew shellenv` live on most machines; on Debian `/etc/profile` overwrites `PATH` outright, so a login shell wrapped around an injected PATH *discards* it. That mistake shipped in `spawn_veld` and made every UI- or Desktop-initiated `veld start` resolve node commands against the bare launchd PATH (`sh: npx: command not found`). Spawn the binary directly with the injected PATH; don't reach for a shell to get it. Scope: the rule covers daemon/gateway/helper spawns only — commands the `veld` CLI itself spawns (orchestrator `command`/`start_server` steps, setup checks, actions) already inherit the terminal's `PATH` and are exempt. Only `PATH` is inherited, never the rest of the shell environment — and note that this genuinely differs from the CLI path, where a macOS terminal's zsh *is* a login shell, so `.zprofile` exports (`JAVA_HOME`, `LANG`, tool tokens) do reach a terminal-run `veld` and its node commands but not a daemon-spawned one. A node that needs such a variable must declare it in its `env`; "works in my terminal, fails from the UI" for a non-PATH variable is this asymmetry, not a bug.
+- **`rg` needs `-a` on `crates/veld-daemon/ui/src/App.tsx`.** That file contains a
+  NUL byte (`trustedOrigins.join("\0")`), so ripgrep and grep classify the largest
+  file in the UI as binary and **silently skip it** — no match, no warning. A sweep
+  for a symbol across the UI will report zero hits while the only production consumer
+  sits in that file. Found when a review agent concluded a function had no callers.
+  Use `rg -a` (or `grep -a`) for anything that greps the UI tree.
+- **Never let a dev build touch the production database — and use the dev-DB
+  recipes.** The installed veld's state lives in one file per user
+  (`<data_dir>/veld/veld.db`). A binary that opens it and applies a migration makes
+  it unreadable to the installed release, because a binary refuses a `user_version`
+  newer than it supports (`DbError::NewerSchema`) — so one careless `cargo test`
+  can take a developer's working veld offline until the schema is hand-rolled back.
+
+  The workflow, which is already built:
+
+  | Command | What it does |
+  |---|---|
+  | `just dev <cmd>` | Run the dev CLI against the dev DB (`.veld-dev/veld.db`, gitignored) on its own daemon port |
+  | `just dev-db-from-real` | Snapshot the **real** DB into the dev DB — the way to exercise a migration against real-shaped data. The real file is never written. **macOS-only path today** |
+  | `just dev-db-reset` | Wipe the dev DB for a fresh-install path |
+
+  Two files, both in `.veld-dev/`: `veld.db` belongs to the `just dev` instance,
+  and `veld-cargo.db` is what a plain `cargo run`/`cargo test` gets. They are split
+  on purpose — sharing one meant `cargo test --workspace` wrote the database a
+  running dev daemon owned, and a `cargo test` between `dev-db-from-real` and
+  `just dev` silently migrated the snapshot to head so the rehearsal verified
+  nothing. So run the rehearsal through `just dev <cmd>`, not through `cargo run`.
+
+  **Test a new migration with `just dev-db-from-real`, not only with fixtures.** A
+  synthetic row cannot tell you that 16 worktrees across 2 repos survive, that
+  `PRAGMA foreign_key_check` stays quiet, or that a backfill sentinel lands on
+  every pre-existing row. Verify counts before and after, plus `integrity_check`.
+
+  As a backstop, `Db::default_path()` resolves *any* cargo-built binary to
+  `.veld-dev/veld-cargo.db` automatically — detected by walking up from
+  `current_exe()` to the directory cargo marks with `CACHEDIR.TAG`
+  (`Db::cargo_target_db`), bounded at `$HOME` so a stray marker cannot divert an
+  installed binary, then requiring the worktree's `justfile`. `VELD_DB_PATH` still
+  overrides, and `Db::open_at` with a tempdir remains right for an isolated test.
+
+  **Do not "simplify" the backstop away**, and do not replace it with a
+  `#[cfg(test)]` guard: `veld-core` is compiled *without* `cfg(test)` when
+  `veld-daemon`'s tests link it, so a test-only panic never fires for the callers
+  that matter. It exists because a `Db::open()` reached the PTY session-spawn path
+  (reading the terminal detach grace, once that became a setting) and twelve
+  *existing* tests migrated a real database as a side effect — no test in the diff,
+  no test that looked like a database test.
+  `a_test_binary_never_resolves_to_the_real_user_database` pins it.
+
+  The corollary when adding a setting the daemon itself reads: putting a
+  `Db::open()` on a hot request path is a design decision, not a detail.
 - **Anything that must outlive the daemon leaves its process group.** A child
   spawned with `process_group(0)` survives launchd's `bootout` and systemd's
   `KillMode=process`; a plain child does not. Both halves are required and neither

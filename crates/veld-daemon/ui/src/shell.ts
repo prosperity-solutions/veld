@@ -157,6 +157,33 @@ export interface DesktopWindowApi {
 export const desktopWindow: DesktopWindowApi | null =
   (window as { veldDesktop?: { window?: DesktopWindowApi } }).veldDesktop?.window ?? null;
 
+/** App-level surfaces the Electron main process drives. */
+export interface DesktopAppApi {
+  /**
+   * The `⌘,` menu accelerator fired and this window was chosen to answer it.
+   *
+   * A menu accelerator rather than a page key handler because a focused
+   * `WebContentsView` swallows every keystroke — the page's own binding works
+   * everywhere except with a browser pane focused, which is where it is most
+   * likely to be pressed. Returns its own unsubscribe.
+   */
+  onOpenSettings(fn: () => void): () => void;
+}
+
+export const desktopApp: DesktopAppApi | null =
+  (window as { veldDesktop?: { app?: DesktopAppApi } }).veldDesktop?.app ?? null;
+
+/**
+ * Whether the page was opened with settings already requested.
+ *
+ * Set by the shell only when `⌘,` had no window to send to and opened one for it —
+ * an IPC `send` would race the page load. Read from the URL because it grants
+ * nothing: settings are a daemon-side document either way, so a forged
+ * `?settings=1` opens a dialog the gear already opens.
+ */
+export const openSettingsOnBoot: boolean =
+  new URLSearchParams(window.location.search).get("settings") === "1";
+
 /**
  * Whether this window is a bare dock: no worktree rail, no top bar, just the
  * panes that were detached into it.

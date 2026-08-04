@@ -10,6 +10,7 @@ import {
   TextInput,
 } from "@mantine/core";
 import { api, type EmojiHolder, type Repo } from "../api";
+import type { MarkerStyle } from "../shared/settings";
 
 /**
  * Shared dialog shell on Mantine's Modal (scrim, esc, focus trap, a11y) —
@@ -202,26 +203,42 @@ export function NewWorktreeDialog(props: {
 }
 
 /**
- * Emoji picker for a worktree's rail identifier.
+ * Marker picker for a worktree's rail identifier.
+ *
+ * A marker has two faces — a colour and a glyph — and `worktree.markerStyle`
+ * decides which one the rail renders. Both are editable here regardless of that
+ * setting, because both are stored: a user who prefers colours can still choose
+ * their glyph, and switching the setting later is then lossless in either
+ * direction rather than a re-pick.
  *
  * The choices come from the daemon (`/api/worktree-emoji`) rather than a
  * TypeScript copy, because the same list is the server-side allowlist. Glyphs
- * already in use elsewhere stay selectable — the assigner keeps them unique,
- * but an explicit choice is the user's to make — and are only labelled, so
- * the ambiguity is visible before it's created.
+ * already in use by another checkout of the same repo stay selectable — the assigner
+ * avoids duplicates within a repo, but an explicit choice is the user's to make —
+ * and are only labelled, so the ambiguity is visible before it's created.
  */
-export function ChangeEmojiDialog(props: {
+export function ChangeMarkerDialog(props: {
   current: string;
+  currentColor: string;
   alias: string;
   /** Identifies "this worktree" among the holders — aliases can't, since
    *  they are unique only within one repo. */
   worktreeId: number;
-  /** emoji → every worktree holding it, across all projects. */
+  /** emoji → the worktree's own repo siblings holding it. Scoped to one repo
+   *  because the assigner is: a glyph repeating across repos is expected, not a
+   *  collision, and the rail only ever renders one repo. */
   usedBy: Record<string, EmojiHolder[]>;
-  onPick: (emoji: string) => Promise<void>;
+  /** The same, for the colour face — so both halves of a marker warn alike. */
+  colorUsedBy: Record<string, EmojiHolder[]>;
+  /** Which face the rail is currently rendering, so the dialog can say which
+   *  half of the choice is the one being shown right now. Both halves stay
+   *  editable regardless — see the note at the bottom of the dialog. */
+  style: MarkerStyle;
+  onPick: (patch: { emoji?: string; marker_color?: string }) => Promise<void>;
   onClose: () => void;
 }) {
   const [choices, setChoices] = useState<string[] | null>(null);
+  const [colors, setColors] = useState<string[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -236,6 +253,11 @@ export function ChangeEmojiDialog(props: {
         // Loader spinning forever with no error and no way out.
         if (Array.isArray(r?.emoji)) setChoices(r.emoji);
         else setLoadError("The daemon returned an unexpected emoji list.");
+        // The palette comes from the daemon for the same reason the glyphs do: it
+        // is the set the server offers, and a TypeScript copy would drift. A
+        // malformed payload leaves the colour grid out rather than rendering
+        // swatches with no fill.
+        if (Array.isArray(r?.colors)) setColors(r.colors);
       })
       .catch((e: unknown) => {
         if (!cancelled) {
@@ -247,11 +269,14 @@ export function ChangeEmojiDialog(props: {
     };
   }, []);
 
-  const pick = async (emoji: string) => {
-    setBusy(emoji);
+  const pick = async (
+    key: string,
+    patch: { emoji?: string; marker_color?: string },
+  ) => {
+    setBusy(key);
     setError(null);
     try {
-      await props.onPick(emoji);
+      await props.onPick(patch);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       setBusy(null);
@@ -259,9 +284,62 @@ export function ChangeEmojiDialog(props: {
   };
 
   return (
-    <Modal title={`Emoji for ${props.alias}`} onClose={props.onClose}>
+    <Modal title={`Marker for ${props.alias}`} onClose={props.onClose}>
       <Stack gap="sm">
         {loadError && <ErrorText error={loadError} />}
+        {colors !== null && (
+          <>
+            <Text size="xs" fw={600} c="dimmed">
+              Colour{props.style === "color" ? " (shown in the rail)" : ""}
+            </Text>
+            <div className="swatch-grid">
+              {colors.map((color) => {
+                const isCurrent = color === props.currentColor;
+                // Same treatment as the glyph grid. It matters more here: eight
+                // colours against a repo that can hold more checkouts than that
+                // means a within-repo duplicate is likely, and within-repo is the
+                // only scope where distinctness is claimed.
+                const others = (props.colorUsedBy[color] ?? []).filter(
+                  (h) => h.id !== props.worktreeId,
+                );
+                const taken = others.map((h) => h.alias).join(", ");
+                return (
+                  <button
+                    key={color}
+                    type="button"
+                    className={`swatch-cell${isCurrent ? " current" : ""}`}
+                    disabled={busy !== null}
+                    aria-pressed={isCurrent}
+                    aria-label={
+                      taken
+                        ? `Colour ${color} — in use by ${taken}`
+                        : `Colour ${color}${isCurrent ? " — current" : ""}`
+                    }
+                    title={
+                      [
+                        isCurrent ? "Current" : color,
+                        taken ? `In use by ${taken}` : "",
+                      ]
+                        .filter(Boolean)
+                        .join(" · ") || undefined
+                    }
+                    onClick={() => void pick(color, { marker_color: color })}
+                  >
+                    {busy === color ? (
+                      <Loader size={14} />
+                    ) : (
+                      <span style={{ background: color }} />
+                    )}
+                    {taken && <span className="emoji-taken" />}
+                  </button>
+                );
+              })}
+            </div>
+            <Text size="xs" fw={600} c="dimmed">
+              Glyph{props.style === "emoji" ? " (shown in the rail)" : ""}
+            </Text>
+          </>
+        )}
         {!choices && !loadError && (
           <Group justify="center" py="lg">
             <Loader size="sm" aria-label="Loading emoji" />
@@ -295,7 +373,7 @@ export function ChangeEmojiDialog(props: {
                       .filter(Boolean)
                       .join(" · ") || undefined
                   }
-                  onClick={() => void pick(e)}
+                  onClick={() => void pick(e, { emoji: e })}
                 >
                   {busy === e ? (
                     <Loader size={14} />
@@ -310,8 +388,13 @@ export function ChangeEmojiDialog(props: {
         )}
         <ErrorText error={error} />
         <Text size="xs" c="dimmed">
-          A dot marks a glyph another worktree already uses. Picking it is
-          allowed — the rail just won&apos;t identify them apart.
+          A dot marks a colour or glyph another checkout of this repo already uses.
+          Picking it is allowed — the rail just won&apos;t identify them apart.
+        </Text>
+        <Text size="xs" c="dimmed">
+          Both halves are always saved, so you can set the one you aren&apos;t
+          currently showing and it will be waiting if you switch. Which one the
+          rail renders is under Settings → Appearance.
         </Text>
       </Stack>
     </Modal>

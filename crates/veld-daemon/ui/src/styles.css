@@ -1,5 +1,28 @@
 /* Design tokens from the Veld Desktop design handoff (dark default + light). */
 
+/* A second bundled terminal font, offered in Settings → Terminal.
+ *
+ * Declared by hand rather than imported as `@fontsource-variable/fira-code` because
+ * that package's `index.css` pulls **seven** subsets (cyrillic, greek, latin-ext,
+ * symbols…) totalling ~108 KB of woff2, and `vite-plugin-singlefile` base64-inlines
+ * every one of them into the daemon binary permanently. A terminal font is chosen for
+ * its latin glyphs, so this takes the 35 KB latin subset and nothing else.
+ *
+ * The relative path is what makes vite resolve and inline it; a bare package
+ * specifier in `url()` is not resolved. If the dependency moves, this breaks loudly
+ * at build time rather than silently shipping no font. */
+@font-face {
+  font-family: "Fira Code Variable";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 300 700;
+  src: url("../node_modules/@fontsource-variable/fira-code/files/fira-code-latin-wght-normal.woff2")
+    format("woff2-variations");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA,
+    U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193,
+    U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
 :root {
   --bg: #0d0e10;
   --panel: #141619;
@@ -404,6 +427,82 @@ select:focus {
   flex: none;
   font-size: 13px;
   line-height: 1;
+}
+
+/* The colour face of a worktree marker. Sized to the emoji's optical box so
+   switching `worktree.markerStyle` does not reflow the rail — a preference that
+   moves every row sideways reads as a layout bug. */
+.wt-dot {
+  flex: none;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  /* The fill is set inline from the stored `#rrggbb` — there is no palette
+     variable to read, which is the point of storing the colour itself. */
+  /* An inner ring rather than a border: a border would grow the box and undo the
+     no-reflow property above. It keeps the swatch legible where the fill is close
+     to the panel it sits on, in either theme. */
+  box-shadow: inset 0 0 0 1px rgb(0 0 0 / 0.25);
+}
+
+.wt-row.away .wt-dot {
+  opacity: 0.45;
+}
+
+/* The palette is identical in both themes by request, so the pale hues (FFF827,
+   41FFFC) land low-contrast on a white panel. Only the ring is strengthened — the
+   fill is used exactly as given. */
+body[data-theme="light"] .wt-dot,
+body[data-theme="light"] .swatch-cell > span {
+  box-shadow: inset 0 0 0 1px rgb(0 0 0 / 0.45);
+}
+
+/* Marker picker: the colour grid, beside the existing glyph grid. Both are always
+   editable regardless of which face is being rendered, because both faces are
+   stored — a user who prefers colours can still choose their glyph and find it
+   waiting if they ever switch. */
+.swatch-grid {
+  /* Flex, not a grid with `aspect-ratio: 1`. The grid version stretched each cell
+     to a quarter of the 560px modal and then made it square — 130px boxes around an
+     18px dot. The swatch is the content, so the cell is sized to it. `wrap` so
+     appending a ninth colour wraps rather than overflowing. */
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.swatch-cell {
+  width: 30px;
+  height: 30px;
+  flex: none;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel2);
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  padding: 0;
+}
+
+.swatch-cell:hover {
+  border-color: var(--border2);
+  background: var(--elev);
+}
+
+.swatch-cell.current {
+  border-color: var(--accent);
+}
+
+.swatch-cell:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.swatch-cell > span {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 1px rgb(0 0 0 / 0.25);
 }
 
 .wt-branch {
@@ -907,8 +1006,6 @@ select:focus {
   display: inline-block;
   border-radius: 50%;
 }
-
-
 
 /* The grab target is the element's own 7px box, with the 1px divider drawn
    inside it — NOT a 1px element with an overhanging `::after` hit area, which is
@@ -1457,8 +1554,6 @@ select:focus {
   gap: 8px;
   justify-content: center;
 }
-
-
 
 .browser-note {
   flex: none;
@@ -2086,7 +2181,6 @@ select:focus {
   padding: 12px 0;
 }
 
-
 /* ---- logo / mode switch ----------------------------------------------------- */
 
 .logo-switch {
@@ -2107,7 +2201,6 @@ select:focus {
 .ls-layer.show {
   opacity: 1;
 }
-
 
 /* ---- centered / empty states ------------------------------------------------ */
 
@@ -2178,7 +2271,6 @@ select:focus {
   left: 50%;
   transform: translateX(-50%);
 }
-
 
 /* ---- emoji picker ---------------------------------------------------------- */
 

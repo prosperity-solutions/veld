@@ -18,6 +18,7 @@ import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { api } from "../api";
 import { ANSI_DARK, ANSI_LIGHT } from "../shared/ansi";
+import { terminalPrefs, type TerminalPrefs } from "../shared/settings";
 import { chromeless, layoutSlot, windowSeed } from "../shell";
 import { parseLayouts, storedTerminalIds, terminalIds } from "./model";
 import { handleKeyEvent } from "./terminalKeys";
@@ -99,6 +100,25 @@ interface Session {
 const sessions = new Map<string, Session>();
 let currentTheme: "dark" | "light" = "dark";
 
+/**
+ * The terminal preferences every session is constructed with and re-styled to.
+ *
+ * Module-level rather than passed per call because `ensure()` is reached from a
+ * React render path that does not have the settings document, and threading it
+ * through would put a preference on the identity of a cached session. The app
+ * publishes changes with `applyTerminalPrefs`.
+ *
+ * `null` until the app publishes: `ensure()` falls back to `terminalPrefs({})`,
+ * which is the previous release's behaviour rather than a second copy of the
+ * defaults. In practice the app does not mount a terminal before settings
+ * resolve — this is the belt, not the braces.
+ */
+let currentPrefs: TerminalPrefs | null = null;
+
+function prefs(): TerminalPrefs {
+  return currentPrefs ?? terminalPrefs({});
+}
+
 // The ANSI palettes live in `shared/ansi.ts`, which is also what the logs panel
 // renders colour with. One owner: the same output shown in a shell and in the
 // logs would otherwise be two different sets of colours, and the divergence would
@@ -138,6 +158,43 @@ export function applyTerminalTheme(theme: "dark" | "light"): void {
   currentTheme = theme;
   for (const s of sessions.values()) {
     s.term.options.theme = xtermTheme();
+  }
+}
+
+/**
+ * Re-style every live terminal and re-measure each one.
+ *
+ * **Every** session, not only the visible one. Hidden terminals stay in the
+ * registry and keep running (that is the point of the session model), so a font
+ * change that only touched the focused pane would leave every other terminal
+ * rendering at the old metrics with a grid sized for them — and the mismatch only
+ * becomes visible when you switch to it, by which time the cause is three actions
+ * ago.
+ *
+ * A font change alters the cell box, so the grid has to be recomputed and the new
+ * dimensions sent to the pty (`TIOCSWINSZ`) — otherwise the shell keeps wrapping
+ * to the old width. `requestFit` handles both, and skips a container that is not
+ * laid out yet; those get their fit from the mount/ResizeObserver path instead.
+ */
+export function applyTerminalPrefs(next: TerminalPrefs): void {
+  const before = currentPrefs;
+  currentPrefs = next;
+  // Any change re-fits, rather than a hand-maintained list of the prefs that
+  // affect the cell box. That list was `fontSize` and `fontFamily`, and the next
+  // metric added — line height, letter spacing — would have set the xterm option
+  // and skipped the fit, leaving every open shell wrapping at the old width with
+  // nothing to catch it. A fit is rAF-deferred and bails on an unlaid-out
+  // container, so over-fitting costs a frame and under-fitting costs a wrong grid.
+  const changed = !before || JSON.stringify(before) !== JSON.stringify(next);
+  for (const s of sessions.values()) {
+    s.term.options.fontSize = next.fontSize;
+    s.term.options.fontFamily = next.fontFamily;
+    s.term.options.cursorStyle = next.cursorStyle;
+    s.term.options.cursorBlink = next.cursorBlink;
+    // Lowering scrollback drops the oldest lines immediately, which is what the
+    // settings copy promises.
+    s.term.options.scrollback = next.scrollback;
+    if (changed) requestFit(s);
   }
 }
 
@@ -227,13 +284,18 @@ function ensure(id: string, worktreeId: number): Session {
     return existing;
   }
 
+  const p = prefs();
   const term = new Terminal({
     allowProposedApi: true,
-    cursorBlink: true,
-    fontFamily: '"JetBrains Mono Variable", "JetBrains Mono", ui-monospace, monospace',
-    fontSize: 12,
-    // The shell's own scrollback plus room for a verbose build.
-    scrollback: 5000,
+    cursorBlink: p.cursorBlink,
+    cursorStyle: p.cursorStyle,
+    fontFamily: p.fontFamily,
+    fontSize: p.fontSize,
+    // The shell's own scrollback plus room for a verbose build; settable because
+    // "room for a verbose build" is a different number for everyone. A line costs
+    // 12 bytes per column in xterm, so the default is ~14 MB per terminal at 120
+    // columns — see DEFAULT_SCROLLBACK in veld-core's settings module.
+    scrollback: p.scrollback,
     theme: xtermTheme(),
   });
   const fit = new FitAddon();
@@ -283,7 +345,11 @@ function ensure(id: string, worktreeId: number): Session {
   // Keys that must be answered before xterm sees them: the palette accelerator
   // and Shift+Enter. Sending goes through the same `canSend` gate as ordinary
   // typing, so a replay in progress cannot be interrupted by a keystroke.
-  term.attachCustomKeyEventHandler((e) => handleKeyEvent(e, send));
+  // Read at event time, not at construction: the preference can change while a
+  // shell is open and re-attaching a handler per session would be pointless work.
+  term.attachCustomKeyEventHandler((e) =>
+    handleKeyEvent(e, send, prefs().shiftEnterNewline),
+  );
   // `onBinary` carries already-8-bit payloads (mouse reports), one byte per
   // char code — encoding those as UTF-8 would corrupt them.
   term.onBinary((data) => {

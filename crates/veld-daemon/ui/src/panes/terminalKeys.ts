@@ -49,6 +49,21 @@ function isPaletteChord(e: KeyboardEvent): boolean {
 }
 
 /**
+ * `⌘,` / `Ctrl+,` — the settings accelerator, which the app binds at the window.
+ *
+ * A focused terminal swallows every key, so without letting this one propagate the
+ * shortcut would work everywhere except the pane people spend the most time in.
+ * Matched on `e.key` rather than `e.code` because comma is not on the key named
+ * `Comma` on a German or French layout, and not claimed with Shift or Alt held so
+ * a shell binding on those still reaches the pty.
+ */
+function isSettingsChord(e: KeyboardEvent): boolean {
+  return (
+    (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key === ","
+  );
+}
+
+/**
  * xterm's `attachCustomKeyEventHandler` contract: return `true` to let xterm
  * handle the event normally, `false` to make it ignore the event *before* it
  * cancels it.
@@ -66,14 +81,33 @@ function isPaletteChord(e: KeyboardEvent): boolean {
  *   the browser still delivers the key to xterm's hidden textarea and the shell
  *   gets a bare `CR` as well, i.e. the newline *and* a submit.
  */
-export function handleKeyEvent(e: KeyboardEvent, send: (data: string) => void): boolean {
+export function handleKeyEvent(
+  e: KeyboardEvent,
+  send: (data: string) => void,
+  /**
+   * Whether Shift+Enter should send [`SHIFT_ENTER_SEQUENCE`]
+   * (`terminal.shiftEnterNewline`). When off, Shift+Enter is handed to xterm like
+   * any other key, which is what a TUI binding meta-Enter needs.
+   *
+   * Defaults to on so a caller that has not read settings behaves like the
+   * release that shipped this hardcoded.
+   */
+  shiftEnterNewline = true,
+): boolean {
   if (e.type !== "keydown") {
     // Only keydown is acted on, but the matching keyup must not be handed to
-    // xterm either — it would arrive with no keydown to match.
-    return !(isPaletteChord(e) || isShiftEnter(e));
+    // xterm either — it would arrive with no keydown to match. The Shift+Enter
+    // half is conditional for the same reason the keydown is: with the preference
+    // off we never claimed the keydown, so swallowing the keyup would drop a
+    // release xterm is expecting.
+    return !(
+      isPaletteChord(e) ||
+      isSettingsChord(e) ||
+      (shiftEnterNewline && isShiftEnter(e))
+    );
   }
-  if (isPaletteChord(e)) return false;
-  if (isShiftEnter(e)) {
+  if (isPaletteChord(e) || isSettingsChord(e)) return false;
+  if (shiftEnterNewline && isShiftEnter(e)) {
     e.preventDefault();
     send(SHIFT_ENTER_SEQUENCE);
     return false;

@@ -26,7 +26,9 @@ import type { ReactNode } from "react";
  * logs, stats, and sharing. Polls: envs+shares 3s, stats 5s (stats live in
  * separate state so their churn re-renders only the stat cells).
  */
-export function RunsMode(props: { modeSwitch: ReactNode; themeButton: ReactNode }) {
+export function RunsMode(props: { modeSwitch: ReactNode; themeButton: ReactNode;
+  settingsButton: ReactNode;
+}) {
   const [envs, setEnvs] = useState<EnvironmentList | null>(null);
   const [shares, setShares] = useState<SharesList | null>(null);
   const [stats, setStats] = useState<StatsResponse | null>(null);
@@ -158,6 +160,7 @@ export function RunsMode(props: { modeSwitch: ReactNode; themeButton: ReactNode 
         <Text size="xs" c="dimmed">
           {meta}
         </Text>
+        {props.settingsButton}
         {props.themeButton}
       </div>
 

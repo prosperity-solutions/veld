@@ -138,9 +138,63 @@ const MAX_SESSIONS: usize = 48;
 /// It is also the bound on the one leak the model can't avoid. Closing the
 /// browser window drops the `sessionStorage` that held the session ids, so
 /// those shells can never be reattached — but they *are* detached, so this is
-/// what collects them. Quoted as "30 minutes" in `README.md` and
-/// `website/llms-full.txt`; change it in all three places.
-const DETACH_GRACE: Duration = Duration::from_secs(30 * 60);
+/// what collects them.
+///
+/// **Now a default, not a constant.** The effective value is the
+/// `terminal.detachGraceMinutes` setting, read through [`configured_detach_grace`]
+/// — this is the fallback when there is no database to ask. The number is quoted
+/// in `README.md` and `website/llms-full.txt`; those copies are pinned by a test
+/// beside the default in `veld_core::db::settings`, so changing it there tells you
+/// which files to update.
+const DETACH_GRACE: Duration =
+    Duration::from_secs(veld_core::db::DEFAULT_DETACH_GRACE_MINUTES as u64 * 60);
+
+/// The detach grace to enforce right now.
+///
+/// Re-read on every reaper pass rather than cached at startup: a user who
+/// lengthens the grace because a build keeps getting reaped should not have to
+/// restart the daemon — and restarting it is the one thing the holder-process
+/// design made safe, so requiring it here would be a poor trade. The read is a
+/// single indexed row on a local file once a minute.
+///
+/// An unreachable database falls back to [`DETACH_GRACE`]. Deliberately not "never
+/// reap": a daemon that cannot read its settings still leaks shells without a
+/// bound, and the default is the behaviour every release before this one had.
+fn configured_detach_grace() -> Duration {
+    let grace = match veld_core::db::Db::open() {
+        Ok(db) => db.detach_grace(),
+        Err(e) => {
+            warn!("could not read the detach grace setting, using the default: {e}");
+            DETACH_GRACE
+        }
+    };
+    GRACE_HINT.store(grace.as_secs(), Ordering::Relaxed);
+    grace
+}
+
+/// Last grace read from the database, in seconds; `0` = never read.
+///
+/// The reaper refreshes it once a minute, and [`detach_grace_hint`] is what the
+/// session-spawn path reads. A published value only ever gets *more* stale than the
+/// database, never wrong in a way that matters: it is handed to a holder as its
+/// self-destruct timeout, and being a minute behind a preference change is not a
+/// behaviour anyone can observe.
+static GRACE_HINT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The grace to hand a newly spawned holder, without touching the database.
+///
+/// `obtain_session` runs on the attach path, and opening SQLite there is exactly the
+/// thing AGENTS.md's dev-database rule calls out as a design decision rather than a
+/// detail: it made every terminal spawn do file I/O, and it is what let a plain
+/// `cargo test` migrate a real database in the first place. The reaper already reads
+/// the setting every minute, so the spawn path reads its published value and only
+/// falls back to a real read when no reaper pass has happened yet.
+fn detach_grace_hint() -> Duration {
+    match GRACE_HINT.load(Ordering::Relaxed) {
+        0 => configured_detach_grace(),
+        secs => Duration::from_secs(secs),
+    }
+}
 
 /// How often the reaper looks for sessions past [`DETACH_GRACE`].
 const REAP_INTERVAL: Duration = Duration::from_secs(60);
@@ -226,7 +280,7 @@ pub fn spawn_session_reaper() {
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(REAP_INTERVAL).await;
-            reap_detached(DETACH_GRACE).await;
+            reap_detached(configured_detach_grace()).await;
         }
     });
 }
@@ -1223,7 +1277,13 @@ async fn obtain_session(
         cols: size.cols,
         rows: size.rows,
         socket: socket_for(&ticket.session_id),
-        orphan_grace_secs: DETACH_GRACE.as_secs(),
+        // The holder's own self-destruct grace, used when the *daemon* is gone and
+        // nothing is left to reap it. Read at spawn, so a holder keeps the value
+        // that was configured when its shell started: changing the setting affects
+        // the daemon-side reaper immediately but cannot reach into holders already
+        // running, and reaching into them would mean a protocol message whose only
+        // job is to move a timer nobody is waiting on.
+        orphan_grace_secs: detach_grace_hint().as_secs(),
     };
     let attached = start_holder(&cfg).await.map_err(SessionError::Spawn)?;
 

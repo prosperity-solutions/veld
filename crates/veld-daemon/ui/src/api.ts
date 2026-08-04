@@ -86,6 +86,18 @@ export interface Worktree {
    * emoji-keyed index is fine as long as its values are collections.)
    */
   emoji: string;
+  /**
+   * The colour half of the marker: a literal `#rrggbb`, or `""` when it has not
+   * been assigned yet (a row from before the column existed, filled in on the next
+   * sync).
+   *
+   * The marker is a composite and the `worktree.markerStyle` setting picks which
+   * face renders — so this and `emoji` are both always present and neither is
+   * cleared by changing the style. Rendering reads one; the picker edits both.
+   * Like `emoji`, it is not an identity: two worktrees of different repos routinely
+   * share a colour.
+   */
+  marker_color: string;
   is_main: boolean;
   created_at: string;
   has_veld_config: boolean;
@@ -100,6 +112,17 @@ export interface Worktree {
    */
   ide: IdeSection;
 }
+
+/**
+ * The settings document as the daemon sends it: a flat map of dotted keys to
+ * JSON scalars.
+ *
+ * Deliberately **not** a struct with one field per setting. The daemon preserves
+ * keys it does not recognise so a preference written by a newer build survives a
+ * downgrade, and a closed TypeScript interface would drop exactly those on the
+ * next write. `settings.ts` is where keys get their types, at the point of use.
+ */
+export type SettingsDoc = Record<string, string | number | boolean>;
 
 /** Mirrors `IdeView` in `crates/veld-daemon/src/desktop.rs`. */
 export interface IdeSection {
@@ -549,20 +572,48 @@ export const api = {
       method: "POST",
       body: JSON.stringify(body),
     }),
-  /** Partial update — send an alias, an emoji, or both. */
-  patchWorktree: (id: number, patch: { alias?: string; emoji?: string }) =>
+  /** Partial update — send any combination of alias, emoji and marker_color. */
+  patchWorktree: (
+    id: number,
+    patch: { alias?: string; emoji?: string; marker_color?: string },
+  ) =>
     request<Worktree>(`/api/worktrees/${id}`, {
       method: "PATCH",
       body: JSON.stringify(patch),
     }),
   /**
-   * The glyphs the emoji picker may offer. Served by the daemon rather than
-   * duplicated here so the picker and the server-side allowlist can't drift.
+   * What the marker picker may offer: the glyph allowlist and how many hues
+   * exist. Served by the daemon rather than duplicated here so the picker and
+   * the server-side allowlist can't drift.
+   *
+   * `colors` are the literal values the picker offers. Not the set of *storable*
+   * values — the daemon accepts any `#rrggbb`, so a custom colour is a UI addition
+   * rather than a schema change.
    */
   worktreeEmoji: () =>
-    request<{ emoji: string[] }>("/api/worktree-emoji"),
+    request<{ emoji: string[]; colors: string[] }>("/api/worktree-emoji"),
   deleteWorktree: (id: number, force: boolean) =>
     request<void>(`/api/worktrees/${id}?force=${force}`, { method: "DELETE" }),
+  /**
+   * Every setting's **effective** value — the daemon merges its own defaults
+   * under whatever is stored, so this is always a complete document and the UI
+   * holds no defaults of its own. That is deliberate: a default duplicated in
+   * TypeScript is a default that drifts from the Rust one.
+   */
+  settings: () => request<{ settings: SettingsDoc }>("/api/settings"),
+  /**
+   * Write only the keys given. A patch rather than a replacement, so two windows
+   * with the settings surface open cannot revert each other's unrelated edits.
+   *
+   * Returns the full effective document, which is the point: the daemon clamps
+   * out-of-range numbers, and a control that kept showing the requested value
+   * would sit at a number the daemon never stored.
+   */
+  patchSettings: (patch: SettingsDoc) =>
+    request<{ settings: SettingsDoc }>("/api/settings", {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    }),
   /**
    * Open the OS folder picker (hosted by the daemon — it runs in the user's
    * GUI session). Resolves to the chosen absolute path, or null on cancel.

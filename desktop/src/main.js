@@ -27,6 +27,7 @@ const {
   restoreWindows,
   setQuitting,
   windowCount,
+  openSettings,
 } = require("./windows");
 const { MAX_WINDOWS, canOpenAnother } = require("./windowState");
 const {
@@ -373,8 +374,13 @@ async function trayMenu() {
     const shownRuns = running.slice(0, 10);
     // Two clones of one repo share `project.name` (it comes from veld.json), so
     // their rows would be indistinguishable (#172). Mark those rows with the
-    // worktree emoji + alias — and only those, since for the single-checkout
-    // majority it is noise, and then `/api/repos` isn't fetched at all.
+    // worktree **emoji** — always the glyph, never the colour, regardless of the
+    // `worktree.markerStyle` setting: this label is a plain string handed to the
+    // OS, and a CSS custom property means nothing there. The same rule applies to
+    // the window title. The glyph is empty only in the window between a worktree
+    // being registered and its first sync backfilling one, which is why the label
+    // below still guards it. Only the ambiguous rows are marked, since for the
+    // single-checkout majority it is noise, and then `/api/repos` isn't fetched at all.
     const nameCounts = new Map();
     for (const { project } of shownRuns) {
       nameCounts.set(project, (nameCounts.get(project) ?? 0) + 1);
@@ -483,6 +489,16 @@ function buildAppMenu() {
             submenu: [
               { role: "about" },
               { type: "separator" },
+              // A main-process accelerator, for the same reason ⌘N is one: a
+              // focused `WebContentsView` swallows every keystroke, so the page's
+              // own ⌘, handler never sees it while a browser pane has focus. The
+              // menu is handled before web contents get the key.
+              {
+                label: "Settings…",
+                accelerator: "CmdOrCtrl+,",
+                click: () => openSettings(),
+              },
+              { type: "separator" },
               ...veldItems,
               { type: "separator" },
               { role: "services" },
@@ -510,6 +526,17 @@ function buildAppMenu() {
           click: () => newWindowOrSayWhyNot(),
         },
         { type: "separator" },
+        // On macOS this lives in the app menu, where the platform expects it.
+        ...(isMac
+          ? []
+          : [
+              {
+                label: "Settings…",
+                accelerator: "CmdOrCtrl+,",
+                click: () => openSettings(),
+              },
+              { type: "separator" },
+            ]),
         ...(isMac
           ? [{ role: "close" }]
           : [...veldItems, { type: "separator" }, { role: "about" }, { role: "quit" }]),

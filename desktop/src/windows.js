@@ -437,7 +437,7 @@ function persistWindows() {
 // Creating windows
 // ---------------------------------------------------------------------------
 
-function appUrl({ kind, repoRoot, worktreeId }) {
+function appUrl({ kind, repoRoot, worktreeId, settings }) {
   const params = new URLSearchParams({ shell: "electron" });
   // A detached window is one dock and nothing else. Unlike the layout slot this
   // is *fine* in the URL: it hides chrome and grants nothing, so a forged
@@ -446,6 +446,11 @@ function appUrl({ kind, repoRoot, worktreeId }) {
   if (kind === "detached") params.set("chrome", "none");
   if (repoRoot) params.set("repo", repoRoot);
   if (worktreeId) params.set("wt", String(worktreeId));
+  // Only set when `⌘,` had no window to send to and one is being opened for it:
+  // an IPC `send` would race the page load. Grants nothing (settings are a
+  // daemon-side document either way), so a forged `?settings=1` in a browser tab
+  // opens a dialog the user could have opened from the gear.
+  if (settings) params.set("settings", "1");
   return `${deps.baseUrl}/ide?${params.toString()}`;
 }
 
@@ -644,7 +649,7 @@ function openWindow(options = {}) {
     return { action: "deny" };
   });
 
-  const url = appUrl({ kind, repoRoot, worktreeId });
+  const url = appUrl({ kind, repoRoot, worktreeId, settings: options.settings });
   const appOrigin = new URL(url).origin;
   win.webContents.on("will-navigate", (event, target) => {
     // Fail CLOSED: an unparseable target must not fall through into the shell
@@ -751,6 +756,47 @@ function handBack(record) {
   // ordering loses it.
   target.pendingAdopt.push(snapshot);
   target.win.webContents.send("veld:window:adopt");
+}
+
+/**
+ * Ask a window with chrome to open the settings surface.
+ *
+ * `⌘,` is a *menu accelerator*, so it fires on whatever is in front — including a
+ * chrome-less detached window, which renders one pane and has no top bar and no
+ * dismissal context. A modal there would cover the only thing that window exists
+ * to show. So the accelerator is routed to the focused window when it has chrome,
+ * and otherwise to a main window (opening one if none is left), which is raised.
+ *
+ * The cost is stated rather than hidden: this bends the OS convention that a menu
+ * accelerator acts on the front window. The alternative is a key that silently
+ * does nothing in a detached window, and #201 already established that a shortcut
+ * which quietly no-ops is worse than one that moves you somewhere it works.
+ */
+function openSettings() {
+  const focused = BrowserWindow.getFocusedWindow();
+  const record = focused ? recordFor(focused) : null;
+  if (record && record.kind === "main" && !record.win.isDestroyed()) {
+    record.win.webContents.send("veld:app:settings");
+    return;
+  }
+  const target = allRecords().find(
+    (r) => r.kind === "main" && !r.win.isDestroyed(),
+  );
+  if (!target) {
+    // No main window left — open one that opens settings itself on boot via the
+    // query flag, since a `send` would race the page load.
+    //
+    // Deliberately NOT `focusPrimary`: its second fallback matches *any* live
+    // window, so with only a chrome-less detached window alive it would focus that
+    // and return, dropping the flag — ⌘, would silently do nothing, which is the
+    // exact outcome this function exists to prevent. Caught in review.
+    if (takenSuffixes().has(null)) openWindow({ kind: "main", settings: true });
+    else openWindow({ kind: "main", suffix: null, settings: true });
+    return;
+  }
+  if (target.win.isMinimized()) target.win.restore();
+  target.win.focus();
+  target.win.webContents.send("veld:app:settings");
 }
 
 /** Focus a main window, opening one if every window is gone (macOS keeps the
@@ -1277,6 +1323,7 @@ module.exports = {
   initWindows,
   openWindow,
   focusPrimary,
+  openSettings,
   restoreWindows,
   registerWindowIpc,
   setQuitting,

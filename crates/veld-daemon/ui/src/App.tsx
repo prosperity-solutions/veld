@@ -8,9 +8,14 @@ import {
   type RepoList,
   type RunInfo,
   type SharesList,
+  type SettingsDoc,
   type StatsResponse,
   type Worktree,
 } from "./api";
+import { markerFace, markerStyle, terminalPrefs } from "./shared/settings";
+import { applyTerminalPrefs } from "./panes/terminalHost";
+import { SettingsDialog } from "./components/SettingsDialog";
+import { useSettings } from "./shared/useSettings";
 import {
   activeRun,
   bestFuzzyMatch,
@@ -50,6 +55,7 @@ import {
   IconPlus,
   IconRefresh,
   IconSearch,
+  IconSettings,
   IconShare2,
   IconTrash,
   IconSun,
@@ -129,7 +135,7 @@ import {
   startStorageKey,
 } from "./components/StartConfig";
 import {
-  ChangeEmojiDialog,
+  ChangeMarkerDialog,
   ImportRepoDialog,
   Modal,
   NewWorktreeDialog,
@@ -139,8 +145,10 @@ import {
 
 import {
   chromeless,
+  desktopApp,
   desktopWindow,
   layoutSlot,
+  openSettingsOnBoot,
   topbarClass,
   windowRestored,
   windowSeed,
@@ -152,6 +160,50 @@ const POLL_MS = 5000;
  *  signature change. Several polls' worth, so a slow `veld start` isn't cut
  *  off. */
 const PENDING_TTL_MS = 60_000;
+
+/**
+ * A worktree's marker, in whichever face the `worktree.markerStyle` setting asks
+ * for.
+ *
+ * One component for every DOM render site, so the rail and the command palette
+ * cannot drift into showing different faces — which they did before this existed,
+ * because each had its own `{w.emoji && …}`.
+ *
+ * `settings` may be `null` (nothing loaded yet). `markerFace` handles that by
+ * falling back to the glyph, which is also the right answer during the upgrade
+ * window: a worktree migrated from before the colour column has no hue until the
+ * next sync, and colour is the default style, so a naive renderer would show
+ * nothing at all for every existing worktree.
+ *
+ * Deliberately not used for the OS window title or the native tray menu — those
+ * are plain strings handed to the OS, where a CSS custom property means nothing.
+ * They take the glyph unconditionally; the rule is stated in `desktop/src/main.js`,
+ * where the label is built.
+ */
+function WorktreeMark(props: {
+  settings: SettingsDoc | null;
+  worktree: { emoji: string; marker_color: string };
+}) {
+  const face = markerFace(props.settings ?? {}, props.worktree);
+  if (!face) return null;
+  if (face.kind === "emoji") {
+    return <span className="wt-emoji">{face.emoji}</span>;
+  }
+  return (
+    <span
+      className="wt-dot"
+      // The stored value is the colour itself, so there is no palette to look it up
+      // in and nothing that repaints an existing worktree when the offered set is
+      // retuned. Shape-checked by `hasMarkerColor` before reaching here.
+      style={{ background: face.color }}
+      // Decorative: the alias is rendered right beside it, so announcing a colour
+      // would add nothing a screen reader user can act on. That the label is always
+      // present is also the colour-vision answer — the swatch is a scanning aid over
+      // text, never the identifier.
+      aria-hidden
+    />
+  );
+}
 
 function usePersisted(key: string, initial: string): [string, (v: string) => void] {
   const [value, setValue] = useState(
@@ -350,6 +402,36 @@ function AppInner(props: {
   onCycleTheme: () => void;
 }) {
   const { theme, themePref, onCycleTheme } = props;
+
+  // Daemon-owned preferences, shared with every other window and with a plain
+  // browser tab against the same daemon. `settings` is null until the first read
+  // of either the local mirror or the daemon resolves.
+  const {
+    settings,
+    save: saveSettings,
+    saving: savingSettings,
+    error: settingsError,
+  } = useSettings();
+
+  // The Electron menu's ⌘, and the "opened for settings" boot flag.
+  //
+  // Both exist because a menu accelerator is the only binding that survives a
+  // focused `WebContentsView` swallowing every keystroke; the page's own handler
+  // covers a browser tab, where there is no menu.
+  useEffect(() => {
+    if (openSettingsOnBoot) setDialog({ kind: "settings" });
+    return desktopApp?.onOpenSettings(() => setDialog({ kind: "settings" }));
+  }, []);
+
+  // Publish terminal preferences to the xterm layer. xterm cannot inherit CSS
+  // variables or read the settings document, so this is the only path by which a
+  // font or cursor change reaches a live shell — and it re-fits every session,
+  // including hidden ones, which keep running and would otherwise render at the
+  // old metrics until you next looked at them.
+  useEffect(() => {
+    if (!settings) return;
+    applyTerminalPrefs(terminalPrefs(settings));
+  }, [settings]);
 
   // View mode: worktree cockpit ("ide") vs runs management ("runs").
   // Defaults by serving path (the app will also own `/` at v1 parity);
@@ -758,7 +840,8 @@ function AppInner(props: {
     | { kind: "import" }
     | { kind: "new-worktree" }
     | { kind: "rename"; worktree: Worktree; deleteFocus?: boolean }
-    | { kind: "emoji"; worktree: Worktree }
+    | { kind: "marker"; worktree: Worktree }
+    | { kind: "settings" }
     | { kind: "remove-repo"; repo: Repo }
     | { kind: "search" }
   >({ kind: "none" });
@@ -780,16 +863,28 @@ function AppInner(props: {
    * checked out on `main` — the default case — would otherwise let the picker
    * mistake another project's glyph for the current worktree's own.
    */
-  const emojiUsedBy = useMemo(() => {
-    const used: Record<string, EmojiHolder[]> = {};
-    for (const r of repos) {
-      for (const w of r.worktrees) {
-        if (!w.emoji) continue;
-        (used[w.emoji] ??= []).push({ id: w.id, alias: w.alias });
-      }
+  /**
+   * Both marker faces, and which of the *selected worktree's own repo* siblings
+   * hold each one.
+   *
+   * **Scoped to one repo**, which changed with the assigner: `pick_emoji` and
+   * `pick_color` probe per repo now, so a glyph repeating across repos is the
+   * expected result rather than a collision — `markers_may_repeat_across_repos`
+   * pins it for the common two-repos-on-`main` case. Aggregating globally made the
+   * picker warn about duplicates the assigner itself manufactures, and which the
+   * rail can never show, because the rail renders one repo at a time.
+   */
+  const markerUsedBy = useMemo(() => {
+    const emoji: Record<string, EmojiHolder[]> = {};
+    const color: Record<string, EmojiHolder[]> = {};
+    const repo = repos.find((r) => r.root === activeRepoRoot);
+    for (const w of repo?.worktrees ?? []) {
+      const holder = { id: w.id, alias: w.alias };
+      if (w.emoji) (emoji[w.emoji] ??= []).push(holder);
+      if (w.marker_color) (color[w.marker_color] ??= []).push(holder);
     }
-    return used;
-  }, [repos]);
+    return { emoji, color };
+  }, [repos, activeRepoRoot]);
 
   const { showContextMenu } = useContextMenu();
   /**
@@ -869,8 +964,8 @@ function AppInner(props: {
       },
       {
         key: "emoji",
-        title: "Change emoji…",
-        onClick: () => setDialog({ kind: "emoji", worktree: w }),
+        title: "Change marker…",
+        onClick: () => setDialog({ kind: "marker", worktree: w }),
       },
       {
         key: "copy-path",
@@ -919,6 +1014,16 @@ function AppInner(props: {
       if (mod && (e.key === "k" || ((e.key === "P" || e.key === "p") && e.shiftKey))) {
         e.preventDefault();
         setDialog({ kind: "search" });
+      }
+      // ⌘, / Ctrl+, — the platform convention for preferences. Bound here so a
+      // plain browser tab has the shortcut too; the Electron app *also* has it as
+      // a menu accelerator, which is what makes it work while a native browser
+      // pane has focus and swallows every keystroke the page would otherwise see.
+      // `e.key` rather than `e.code`: on a German or French layout comma is not
+      // on the key `Comma` names.
+      if (mod && !e.shiftKey && !e.altKey && e.key === ",") {
+        e.preventDefault();
+        setDialog({ kind: "settings" });
       }
       if (e.key === "Escape" && dialogRef.current.kind !== "none") closeDialog();
     };
@@ -1379,7 +1484,7 @@ function AppInner(props: {
         label: w.alias,
         hint: w.branch,
         alt: [w.branch],
-        emoji: w.emoji,
+        mark: { emoji: w.emoji, marker_color: w.marker_color },
         status: worktreeStatus(runsForWorktree(envs, w)),
         run: () => selectWorktree(w),
       });
@@ -1516,11 +1621,11 @@ function AppInner(props: {
         run: () => setDialog({ kind: "rename", worktree: w }),
       });
       items.push({
-        id: "wt:emoji",
+        id: "wt:marker",
         group: "Worktree",
-        label: `Change emoji for ${w.alias}…`,
+        label: `Change marker for ${w.alias}…`,
         hint: w.emoji,
-        run: () => setDialog({ kind: "emoji", worktree: w }),
+        run: () => setDialog({ kind: "marker", worktree: w }),
       });
       items.push({
         id: "wt:copy-path",
@@ -1670,6 +1775,22 @@ function AppInner(props: {
   };
 
   // ---- render -------------------------------------------------------------
+  // Beside the theme button, so both top bars get it — runs mode has no rail and
+  // no palette, and would otherwise have no door to settings at all in a browser
+  // tab, which has no application menu either.
+  const settingsButton = (
+    <Tooltip label="Settings (⌘,)">
+      <ActionIcon
+        size="md"
+        variant="default"
+        aria-label="Settings"
+        onClick={() => setDialog({ kind: "settings" })}
+      >
+        <IconSettings size={14} />
+      </ActionIcon>
+    </Tooltip>
+  );
+
   const themeButton = (
     <Tooltip
       label={`Theme: ${themePref === "auto" ? `system (${theme})` : themePref} — click to change`}
@@ -1689,7 +1810,11 @@ function AppInner(props: {
   if (mode === "runs") {
     return (
       <div className="frame">
-        <RunsMode modeSwitch={modeSwitch} themeButton={themeButton} />
+        <RunsMode
+          modeSwitch={modeSwitch}
+          themeButton={themeButton}
+          settingsButton={settingsButton}
+        />
       </div>
     );
   }
@@ -1814,6 +1939,7 @@ function AppInner(props: {
         onRestart={() => worktree && restartWorktree(worktree)}
         onSearch={() => setDialog({ kind: "search" })}
         themeButton={themeButton}
+        settingsButton={settingsButton}
       />
 
       {offline && (
@@ -1873,6 +1999,7 @@ function AppInner(props: {
             worktrees={worktrees}
             active={worktree}
             envs={envs}
+            settings={settings}
             wide={railWide}
             canRun={canRunWorktreeNow}
             canStart={canStartWorktree}
@@ -1964,24 +2091,37 @@ function AppInner(props: {
           }}
         />
       )}
-      {dialog.kind === "emoji" && (
-        <ChangeEmojiDialog
+      {dialog.kind === "marker" && (
+        <ChangeMarkerDialog
           current={dialog.worktree.emoji}
+          currentColor={dialog.worktree.marker_color}
           alias={dialog.worktree.alias}
           worktreeId={dialog.worktree.id}
-          usedBy={emojiUsedBy}
+          usedBy={markerUsedBy.emoji}
+          colorUsedBy={markerUsedBy.color}
+          style={markerStyle(settings ?? {})}
           onClose={closeDialog}
-          onPick={async (emoji) => {
-            await api.patchWorktree(dialog.worktree.id, { emoji });
+          onPick={async (patch) => {
+            await api.patchWorktree(dialog.worktree.id, patch);
             await refresh();
             closeDialog();
           }}
+        />
+      )}
+      {dialog.kind === "settings" && (
+        <SettingsDialog
+          settings={settings}
+          saving={savingSettings}
+          error={settingsError}
+          onSave={saveSettings}
+          onClose={closeDialog}
         />
       )}
       {dialog.kind === "search" && (
         <CommandPalette
           project={repo?.name ?? ""}
           items={buildPaletteItems()}
+          settings={settings}
           onClose={closeDialog}
         />
       )}
@@ -2024,6 +2164,7 @@ function TopBar(props: {
   onRestart: () => void;
   onSearch: () => void;
   themeButton: React.ReactNode;
+  settingsButton: React.ReactNode;
 }) {
   const { worktree, run } = props;
   const repoAvailable = props.repo?.available ?? false;
@@ -2172,6 +2313,7 @@ function TopBar(props: {
           <IconSearch size={14} />
         </ActionIcon>
       </Tooltip>
+      {props.settingsButton}
       {props.themeButton}
     </div>
   );
@@ -2207,6 +2349,8 @@ function Rail(props: {
   worktrees: Worktree[];
   active: Worktree | null;
   envs: EnvironmentList | null;
+  /** Drives which marker face the rows render; `null` before the first read. */
+  settings: SettingsDoc | null;
   wide: boolean;
   canRun: (w: Worktree) => boolean;
   canStart: (w: Worktree) => boolean;
@@ -2305,7 +2449,7 @@ function Rail(props: {
                   aria-hidden
                 />
               )}
-              {w.emoji && <span className="wt-emoji">{w.emoji}</span>}
+              <WorktreeMark settings={props.settings} worktree={w} />
               {props.wide && <span className="wt-alias">{w.alias}</span>}
               {props.wide && <span className="wt-branch">{w.branch}</span>}
               {showRunControl && (
@@ -2386,7 +2530,9 @@ interface PaletteItem {
   hint?: string;
   /** Extra haystacks the query may match, beyond the label. */
   alt?: string[];
-  emoji?: string;
+  /** The worktree this row stands for, when it stands for one — so the row can
+   *  render the same marker face the rail does rather than hardcoding a glyph. */
+  mark?: { emoji: string; marker_color: string };
   status?: WorktreeStatus;
   run: () => void;
 }
@@ -2426,6 +2572,7 @@ function Highlighted(props: { text: string; positions: number[] }) {
 function CommandPalette(props: {
   project: string;
   items: PaletteItem[];
+  settings: SettingsDoc | null;
   onClose: () => void;
 }) {
   const [query, setQuery] = useState("");
@@ -2539,7 +2686,9 @@ function CommandPalette(props: {
                   onClick={() => choose(item)}
                 >
                   {item.status && <span className={`dot ${item.status}`} />}
-                  {item.emoji && <span className="wt-emoji">{item.emoji}</span>}
+                  {item.mark && (
+                    <WorktreeMark settings={props.settings} worktree={item.mark} />
+                  )}
                   <span className="pal-label">
                     <Highlighted
                       text={item.label}
