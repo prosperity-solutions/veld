@@ -283,6 +283,19 @@ pub fn routes() -> Router {
         .route("/api/pty/sessions/{id}/open-url", post(open_url))
 }
 
+/// Write the shim directory a terminal's `$BROWSER` points into.
+///
+/// At startup rather than lazily on the first terminal, for two reasons: a machine
+/// with no `veld` binary beside the daemon logs the warning where somebody is
+/// looking, and `$VELD_SHIM_DIR` (the documented opt-in for `open`/`xdg-open`) is
+/// live for the very first shell instead of the second. Three small files.
+///
+/// Idempotent, and deliberately not fatal: everything else about a terminal works
+/// without it.
+pub fn prepare_shims() {
+    let _ = shims::dir();
+}
+
 /// Start the background task that collects sessions nobody came back for.
 ///
 /// Separate from [`routes`] so that building a router in a test doesn't leave a
@@ -1213,7 +1226,16 @@ fn project_external_origins(
     match veld_core::config::parse_config(&path) {
         Ok(cfg) => cfg.ide_section().external_origins,
         Err(e) => {
-            debug!("ignoring unreadable config at {}: {e}", path.display());
+            // `warn`, not `debug`: this is the one input to the routing decision that
+            // can fail silently, and the failure sends a URL the project meant to
+            // exempt into a pane instead. Degrading to "no project exemptions" rather
+            // than to "everything is exempt" is deliberate — the alternative turns one
+            // broken config into the feature not working at all — but it must be
+            // visible, because nothing else about this URL says why it went where it did.
+            warn!(
+                "ide.externalOrigins ignored — config at {} does not load: {e}",
+                path.display()
+            );
             Vec::new()
         }
     }

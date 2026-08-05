@@ -127,6 +127,23 @@ async fn main() -> Result<()> {
     // (the "another instance is already running" abort) unreachable. Stale
     // files are removed only after a connect() probe proves nobody answers.
 
+    // Checked before binding, because `bind`'s own error for an over-long path is
+    // "path must be shorter than SUN_LEN" — true, and it names neither the path nor
+    // the way out. It reaches the user as a daemon that will not start. The holder
+    // sockets already get this treatment (`veld_core::instance::pty_dir`); the
+    // control socket is reachable the same way, since `VELD_DAEMON_SOCK` can point
+    // anywhere and a checkout under `~/git/_worktrees/<long-branch-name>/` is over
+    // the bound on its own.
+    if let Some(len) = veld_core::instance::socket_path_over_limit(&args.socket_path) {
+        anyhow::bail!(
+            "the daemon socket path is {len} bytes, over the {}-byte limit a unix socket \
+             allows ({}). Set VELD_DAEMON_SOCK to a shorter path — somewhere under $HOME \
+             rather than inside a deep checkout.",
+            veld_core::instance::MAX_SOCKET_PATH,
+            args.socket_path.display()
+        );
+    }
+
     // Bind the Unix socket listener. A leftover socket FILE from a crashed
     // daemon must not block startup — but a LIVE socket means another
     // instance of this daemon is already running, which must be a loud,
