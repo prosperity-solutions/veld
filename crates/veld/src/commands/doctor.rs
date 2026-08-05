@@ -534,12 +534,22 @@ impl Diagnostics {
         // their presence says nothing about whether the feature is *on*. Reporting
         // "Terminal URLs open in Veld" while the user has switched it off is a green
         // answer to the exact question someone runs this to ask.
-        let settings = veld_core::db::Db::open().ok().map(|db| {
-            (
-                db.terminal_open_urls_in_app(),
-                db.terminal_intercept_system_open(),
-            )
-        });
+        //
+        // **The database is not opened under sudo**, for the reason check 0 states and
+        // skips itself for: `Db::open()` creates the file, so as root it either checks
+        // the wrong database or leaves root-owned `veld.db`/`-wal`/`-shm` behind and
+        // breaks every later non-sudo `veld` command. The file half of this row needs
+        // no database, so it still runs and only the settings go unread.
+        let under_sudo = std::env::var("SUDO_UID").is_ok_and(|u| !u.is_empty());
+        let settings = (!under_sudo)
+            .then(veld_core::db::Db::open)
+            .and_then(Result::ok)
+            .map(|db| {
+                (
+                    db.terminal_open_urls_in_app(),
+                    db.terminal_intercept_system_open(),
+                )
+            });
         if let Some((false, _)) = settings {
             return Check {
                 pass: true,
