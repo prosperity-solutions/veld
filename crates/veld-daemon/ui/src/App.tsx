@@ -1971,6 +1971,25 @@ function AppInner(props: {
     await refresh();
   };
 
+  /** Drop a rail row onto the trash: bin it (revertible), which is what dragging
+   *  a worktree onto the trash intuitively means. Not a lane move — the trash is
+   *  a state, not a destination that orders anything — so it goes straight to
+   *  the bin endpoint rather than `onMove`. */
+  const trashWorktree = async (path: string) => {
+    const w = worktrees.find((x) => x.path === path);
+    if (!w) return;
+    // The main checkout is the repository itself and is never draggable in the
+    // first place (the row gates on `!w.is_main`), so a drop can't reach here;
+    // this is defence in depth so binning main can never be invoked silently.
+    if (w.is_main) return;
+    try {
+      await api.deleteWorktree(w.id, false);
+    } catch (e) {
+      notifyError(`Could not move ${w.alias} to the trash`, e);
+    }
+    await refresh();
+  };
+
   // Hover lives here so the crossfade survives LogoModeSwitch remounting
   // when it moves between the runs and IDE bars.
   const [switchHover, setSwitchHover] = useState(false);
@@ -2583,6 +2602,7 @@ function AppInner(props: {
             onMove={moveWorktreeTo}
             onRestore={restoreWorktree}
             onEmptyTrash={emptyTrash}
+            onTrashDrop={trashWorktree}
             deleting={deletingIds}
           />
           {worktree && layout && (
@@ -3134,6 +3154,9 @@ function Rail(props: {
   onMove: (path: string, toLane: string, toIndex: number) => void;
   onRestore: (w: Worktree) => void;
   onEmptyTrash: () => void;
+  /** Dropping a dragged worktree onto the trash — bins it (revertible), which is
+   *  not a lane move. Receives the dragged worktree's path. */
+  onTrashDrop: (path: string) => void;
   /** Worktrees this window has optimistically confirmed for permanent deletion
    *  (see `deletingIds`). Folds into the rendering exactly like the daemon's own
    *  `worktree.deleting` flag, so the two sources can't disagree visually. */
@@ -3177,6 +3200,12 @@ function Rail(props: {
   // whose result you cannot see is a reorder you did not mean.
   const canDrag = props.wide;
 
+  /** Whether this section accepts a dropped worktree. Pinned sections are
+   *  normally not drop targets (they take no part in ordering) — the **trash is
+   *  the exception**: it is a destination in its own right, where a drop bins the
+   *  dragged worktree rather than positioning it. */
+  const canDropOn = (group: RailGroup) => !group.pinned || group.key === TRASH_LANE;
+
   /**
    * Drop handlers for a section, resolving to an insertion index.
    *
@@ -3184,10 +3213,13 @@ function Rail(props: {
    * row is reachable — without it, appending to a group was impossible: the row's
    * own handler stops propagation before the section's `index = length` handler
    * runs, and a flex column has no blank space under its last child to aim at.
+   *
+   * The trash ignores the insertion index: dropping there is a bin, not a
+   * position.
    */
   const dropZone = (group: RailGroup, index: number, half = false) => ({
     onDragOver: (e: React.DragEvent) => {
-      if (!dragPath || group.pinned) return;
+      if (!dragPath || !canDropOn(group)) return;
       // Both required: preventDefault marks the element a valid drop target, and
       // without stopPropagation the enclosing section's own zone also fires and the
       // indicator flickers between the two.
@@ -3196,10 +3228,14 @@ function Rail(props: {
       setDropAt({ key: group.key, index: index + (half && below(e) ? 1 : 0) });
     },
     onDrop: (e: React.DragEvent) => {
-      if (!dragPath || group.pinned) return;
+      if (!dragPath || !canDropOn(group)) return;
       e.preventDefault();
       e.stopPropagation();
-      props.onMove(dragPath, group.key, index + (half && below(e) ? 1 : 0));
+      if (group.key === TRASH_LANE) {
+        props.onTrashDrop(dragPath);
+      } else {
+        props.onMove(dragPath, group.key, index + (half && below(e) ? 1 : 0));
+      }
       endDrag();
     },
   });
@@ -3217,7 +3253,7 @@ function Rail(props: {
               // Lit while a drag is over this section, so the target reads as a
               // whole area and not only as a caret between two rows. This is the
               // only feedback an EMPTY lane can give.
-              dragPath && !group.pinned && dropAt?.key === group.key
+              dragPath && canDropOn(group) && dropAt?.key === group.key
                 ? " drop-in"
                 : ""
             }`}
@@ -3280,21 +3316,15 @@ function Rail(props: {
             )}
             {/* An empty lane needs a target you can see and hit. Without this the
                 only droppable area was the header's few pixels of margin, so a lane
-                you had just made looked like it refused worktrees. */}
-            {props.wide && !group.pinned && group.worktrees.length === 0 && (
+                you had just made looked like it refused worktrees. The trash is a
+                drop target too — dropping a worktree on it bins it — so an empty
+                trash needs the same affordance, saying plainly that worktrees can
+                be dropped here. */}
+            {props.wide && canDropOn(group) && group.worktrees.length === 0 && (
               <div className="lane-empty">
                 {dragPath ? "Drop here" : "Empty — drag a worktree in"}
               </div>
             )}
-            {/* The trash is always rendered, so an empty one must say so rather
-                than being a bare header — the whole point of keeping it visible is
-                that "there is a trash, and right now it is empty" reads at a
-                glance. Not a drop target (trash is pinned), hence a plain marker. */}
-            {props.wide &&
-              group.key === TRASH_LANE &&
-              group.worktrees.length === 0 && (
-                <div className="lane-empty is-empty">Empty</div>
-              )}
             {group.worktrees.map((w, index) => {
               const caretHere =
                 dropAt !== null &&

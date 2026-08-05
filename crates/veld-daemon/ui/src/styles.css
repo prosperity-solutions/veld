@@ -490,14 +490,6 @@ select:focus {
   border-top: 1px solid var(--border);
 }
 
-/* An empty *pinned* lane (the trash): a plain "Empty" marker, not the "drag a
-   worktree in" target — the trash is not a drop destination, so offering a drop
-   there would advertise an action that does nothing. */
-.lane-empty.is-empty {
-  border-style: none;
-  color: var(--faint);
-}
-
 /* Dragging. The source row fades rather than disappearing: a list that reflows
    under the pointer makes the drop target move as you aim at it. */
 .wt-row.dragging {
