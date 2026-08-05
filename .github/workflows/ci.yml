@@ -3,6 +3,11 @@ name: CI
 on:
   pull_request:
     branches: [main]
+    # `ready_for_review` is NOT in the default type set (opened, synchronize,
+    # reopened) and every job below refuses to run while the PR is a draft, so
+    # the two halves are required together: without this line, flipping a draft
+    # to ready fires nothing and the PR sits forever with no checks.
+    types: [opened, synchronize, reopened, ready_for_review]
   push:
     branches: [main]
 
@@ -11,11 +16,79 @@ env:
   RUSTFLAGS: "-D warnings"
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
+# Supersede an in-flight run when the same PR is pushed again. Two details that
+# are easy to get wrong, and one of them was:
+#
+#   * `cancel-in-progress: false` does NOT mean "a run in this group is never
+#     cancelled". Actions also cancels any *pending* run in the group when a newer
+#     one arrives, independently of this flag. So keying main pushes on
+#     `github.ref` — one shared `refs/heads/main` group — would mean three merges
+#     in quick succession silently drop the middle one's run. `github.sha` gives
+#     every main push its own group, which is what it had before this block
+#     existed: parallel, never superseded.
+#   * `github.workflow` is part of the key so CI and Release never share a group.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# ── Draft PRs do not run CI ───────────────────────────────────────────
+#
+# Every job below carries its own copy of the draft guard, in one of two forms:
+#
+#   if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+#   if: github.event_name == 'pull_request' && github.event.pull_request.draft == false   # PR-only jobs
+#
+# A draft PR is where an agent's intermediate commits land, and a pull_request run
+# of this workflow occupies five macOS legs — `integration`, `injection-test`, the
+# mac leg of `desktop-package`, and both darwin legs of `release-build` — plus a
+# four-target release build matrix. Standard macOS runners are free on public
+# repositories, so what a draft run costs is *runner time and the account's macOS
+# concurrency allowance*: five simultaneous mac jobs is a large share of it, and a
+# draft's runs queue ahead of work that matters. (The same legs bill at 10× a
+# Linux minute wherever Actions billing does apply, which is why the shape is
+# worth keeping small even here.) The house workflow (AGENTS.md → PR Workflow) is
+# local review first and ready-for-review second, so a draft has by definition not
+# earned a run yet. A push to a draft still creates a workflow run, but every job
+# in it skips.
+#
+# **A skipped job reports as a *successful* check run.** That is Actions'
+# behaviour, not something this workflow chose, and it is the trap here: a draft
+# PR looks green rather than looking unrun. Never conclude "CI passed" from a
+# check summary without confirming the PR is out of draft — see the CI cost
+# convention in AGENTS.md for the two commands that tell the cases apart.
+#
+# The guard is repeated per job rather than hoisted. Actions has no
+# workflow-level `if`, and while YAML anchors *are* supported (GA since
+# 2025-09-18), the documented pattern is to define the anchor on first use — i.e.
+# inside one job — which would make every other job's guard depend on that one
+# job's continued existence and position in the file. A copy per job stays
+# greppable and independently deletable, and the typo drift an anchor would
+# prevent is already caught by the gate below.
+#
+# Leaning on `needs:` to cascade the skip into dependent jobs would work today
+# and silently stop working the day someone drops a `needs:`, so
+# `tests/validate-workflow-gates.py` asserts the invariant instead: every job is
+# draft-guarded, push-only, or a dependent that cannot outlive a skipped root.
+#
+# Do not add a status function — `always()`, `cancelled()`, `failure()`,
+# `success()`, in any negated spelling — to a job that relies on the cascade
+# rather than on its own guard, and do not OR the guard with another condition —
+# `true || <guard>` gates nothing, and `A || <guard> && X` binds as `A || (guard
+# && X)`. All of these are holes the gate looks for.
+#
+# KNOWN BLIND SPOT, stated rather than implied: the gate runs inside the `schema`
+# job, which is itself draft-guarded, so it cannot fire on the run where a missing
+# guard actually costs something. A new unguarded job will run on draft pushes
+# until the PR is marked ready and `schema` finally reports. `just workflow-gates`
+# locally is the real mitigation, and docs/agentic-review.md §1.1 requires it
+# whenever a change touches this directory. Making the gate an unguarded sentinel
+# job would close it for ~1 ubuntu minute per draft push; that is a policy call
+# for the maintainer, not a silent one — see the PR that introduced this.
 jobs:
   commits:
     name: Conventional Commits
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' && github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@v4
         with:
@@ -47,14 +120,16 @@ jobs:
   website:
     name: Website Docker Build
     runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@v4
       - name: Build website container
         run: docker build -t veld-website website/
 
   schema:
-    name: Validate JSON Schema
+    name: Validate JSON Schema & Workflow Gates
     runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -64,10 +139,26 @@ jobs:
         run: |
           chmod +x tests/validate-schema.sh
           ./tests/validate-schema.sh --install
+      # Homed here because this is the one job that already has a managed Python
+      # and does static, checkout-only validation. Nothing in Actions enforces
+      # that a newly added job carries the draft guard, and the symptom of a
+      # missing one is a bill rather than a failure, so it gets a drift gate —
+      # the same reason THIRD-PARTY-LICENSES.md and desktop/assets have one.
+      - name: Workflows do not run on draft PRs
+        run: |
+          # Pinned to a major, same reasoning as cargo-about above: an unpinned
+          # install makes this job's behaviour depend on the day it ran.
+          pip install "pyyaml>=6,<7"
+          # --selftest first: it asserts the gate still detects the holes it
+          # claims to. A gate that has rotted into `return []` passes the real
+          # check trivially, which reads as a clean bill of health.
+          python3 tests/validate-workflow-gates.py --selftest
+          python3 tests/validate-workflow-gates.py
 
   licenses:
     name: Third-Party Licenses
     runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -96,6 +187,7 @@ jobs:
   go-test:
     name: Go Module Tests
     runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -108,6 +200,7 @@ jobs:
   check:
     name: Check & Lint
     runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -135,6 +228,7 @@ jobs:
   frontend:
     name: Frontend (TypeScript)
     runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     defaults:
       run:
         working-directory: crates/veld-daemon/frontend
@@ -154,6 +248,7 @@ jobs:
   ui:
     name: Management UI v2 (TypeScript)
     runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     defaults:
       run:
         working-directory: crates/veld-daemon/ui
@@ -175,6 +270,7 @@ jobs:
   desktop:
     name: Desktop Shell (Electron)
     runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     defaults:
       run:
         working-directory: desktop
@@ -246,6 +342,7 @@ jobs:
   desktop-package:
     name: Desktop Packaging (${{ matrix.name }})
     needs: desktop
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     # This job downloads and runs third-party build tooling (the Electron dist,
     # app-builder-bin), so it gets the token scope its release-workflow twin has
     # rather than the repo default.
@@ -313,6 +410,7 @@ jobs:
     name: Integration Tests (macOS)
     runs-on: macos-latest
     needs: check
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -704,6 +802,7 @@ jobs:
     name: Release Build (${{ matrix.suffix }})
     runs-on: ${{ matrix.os }}
     needs: check
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     strategy:
       fail-fast: false
       matrix:
@@ -775,6 +874,7 @@ jobs:
     name: Injection E2E (macOS)
     runs-on: macos-latest
     needs: check
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

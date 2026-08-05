@@ -3,7 +3,8 @@ name: ship
 description: >
   Carry a change to the veld repo from empty diff to merged PR the way this
   project expects — autonomous implementation, adversarial review rounds, draft
-  PR, wait for green CI, and (when authorized) bypass-merge. Opens with a short
+  PR, mark ready only once the local review is done (CI does not run on drafts),
+  wait for green CI, and (when authorized) bypass-merge. Opens with a short
   kickoff questionnaire that sets review depth, merge policy, and hands-on test
   checkpoints for the rest of the run. Use when the maintainer says "ship this", "build and merge X",
   "implement and open a PR", "take this to merge", or hands over a feature/fix to
@@ -58,9 +59,18 @@ in their request):
 2. **Merge policy** (AGENTS.md's default posture is **ask-first**; bypass is the
    exception and requires the maintainer's explicit upfront authorization, which
    this questionnaire captures)
-   - *Bypass-merge on green* — merge with admin bypass the moment CI is green.
-   - *Open PR, stop for human* — push the draft PR, report, do not merge.
-   - *Human PR review* — push, request review, wait for approval, then merge.
+   - *Bypass-merge on green* — mark ready, merge with admin bypass the moment CI
+     is green.
+   - *Open PR, stop for human* — push, mark ready so CI actually runs, report the
+     link and the CI result, do not merge.
+   - *Human PR review* — push, mark ready, request review, wait for approval,
+     then merge.
+
+   All three end with the PR marked ready, because **CI does not run on drafts**
+   (AGENTS.md → CI cost convention). "Stop for human" does not mean "leave it a
+   draft" — a draft PR handed over with no checks is a PR the maintainer has to
+   flip themselves to learn anything. What differs between the three is who
+   merges, not whether CI runs.
 3. **Hands-on test checkpoints** — orthogonal to the merge policy: does the
    maintainer want to drive the change themselves before it moves on? This is the
    house style for anything with a UI or a new CLI surface, because a review
@@ -207,18 +217,74 @@ opening the PR.
   Commits message.
 - Push and open a **draft** PR with a clear body: what changed, why, root cause,
   test evidence, reviewer-scope notes, and any known follow-ups.
+- **CI does not run on a draft** (AGENTS.md → CI cost convention). Every job in
+  `ci.yml` and `release.yml` skips while `draft == true`, so pushing here buys you
+  a workflow run in which nothing executes. Don't poll it, don't push extra
+  commits to "kick" it, and don't read the absence of checks as a problem — this
+  is the design. Five macOS legs plus a four-target release matrix are what a
+  draft run occupies.
+- **Those skipped jobs report as passing checks.** The draft PR you just opened
+  will show a green tick. It means nothing ran. See step 6.3 before you ever
+  report a CI result.
+- Note what this does and does not save *for this flow*: /ship pushes once, at
+  this step, with the review already done — so the guard's payoff here is the
+  `opened` run plus any push made before you mark ready (a checkpoint iteration, a
+  post-PR review fix). The per-intermediate-commit waste it was written for belongs
+  to flows that push repeatedly while drafting. Don't invent draft pushes to
+  "use" the saving, and don't treat a short draft window as a reason to skip
+  step 6.1.
 
-## Step 6 — CI and merge
+## Step 6 — Ready, CI, and merge
 
-- **Wait for CI to actually go green.** Never assume checks are missing because
-  they haven't started — poll until they report. A red or pending check is not a
-  pass. When a check fails, read the failing job's log and fix the real cause;
-  don't retry blind (a rerun re-runs the same commit).
-- Then apply the Step 0 merge policy:
-  - *Bypass-merge on green* → `gh pr ready` then `gh pr merge --squash --admin`,
-    confirm merged, report the merge commit.
-  - *Open PR, stop* → report the PR link and stop.
-  - *Human PR review* → request review, wait for approval, then merge.
+**Mark ready first, then wait.** In that order, always: nothing reports until the
+PR is ready, so waiting on a draft's checks is an infinite wait, not patience.
+
+1. **Gate yourself before spending.** Only run `gh pr ready` once the Step 4
+   review loop has met its exit criteria (or legitimately exited early per
+   §9/§11) **and** the pre-pass is green. A red pre-pass never gets marked ready
+   — fix it locally first. If Step 0 chose *review: None*, say in the PR body that
+   the only pre-merge signal is CI.
+2. `gh pr ready` — this is the step that fires `ready_for_review` and starts CI.
+3. **Wait for CI to actually go green — and do not trust a green summary.**
+   Never assume checks are missing because they haven't started; poll until they
+   report. A red or pending check is not a pass. **A *skipped* check is also not a
+   pass, and it looks exactly like one:** a draft's jobs all skip, `gh pr checks`
+   files those under the `skipping` bucket, exits 0, and prints "All checks were
+   successful". So the exit code cannot tell you whether anything ran. Assert on
+   the buckets — and scope the assertion to the **CI** workflow, because
+   `release.yml`'s push-only jobs are skipped on every healthy PR:
+
+   ```sh
+   gh pr view --json isDraft,mergeable        # isDraft must be false
+   gh pr checks --json name,bucket,workflow \
+     --jq '[.[] | select(.workflow == "CI" and .bucket == "skipping")]'   # must be []
+   ```
+
+   Apply that assertion **only when no CI check is `pending`** — it is a terminal
+   test. The ready run's check replaces the draft's for a given job name (names do
+   not duplicate), but a name whose ready-run job has not started yet still shows
+   the draft's `skipping` entry; measured on #209, four CI names read `skipping`
+   while `check` was in progress because their jobs `needs:` it. Read the run
+   itself if you want an unambiguous answer at any moment:
+
+   ```sh
+   gh run list --workflow CI --commit "$(git rev-parse HEAD)" --json databaseId
+   gh run view <id> --json jobs
+   ```
+
+   This is the failure mode to fear under autonomy: forget step 2, poll, read
+   "All checks were successful", and report a green CI on a diff nothing ran.
+   If *no* checks appear at all a minute or two after marking ready, the PR is
+   probably `CONFLICTING` — that stops `pull_request` events firing entirely.
+4. When a check fails, read the failing job's log and fix the real cause; don't
+   retry blind (a rerun re-runs the same commit). Pushing the fix fires
+   `synchronize`, and since the PR is now ready, that re-runs CI normally.
+5. Then apply the Step 0 merge policy:
+   - *Bypass-merge on green* → `gh pr merge --squash --admin`, confirm merged,
+     report the merge commit.
+   - *Open PR, stop* → report the PR link and the CI result, then stop. Leave it
+     ready, not draft.
+   - *Human PR review* → request review, wait for approval, then merge.
 
 ## When to involve the human
 

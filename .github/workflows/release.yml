@@ -5,9 +5,26 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+    # Paired with the draft guard on `plan` — see the note above `jobs:` in
+    # ci.yml. Without `ready_for_review` the version preview would never appear
+    # on a PR that started life as a draft, which is every PR this repo opens.
+    types: [opened, synchronize, reopened, ready_for_review]
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+# Only a PR's runs are cancellable. A push to main is a release: it tags,
+# publishes artifacts and pushes a container image, and cancelling that midway
+# leaves a tag with no artifacts behind it.
+#
+# Hence `github.sha`, not `github.ref`, as the non-PR key. A shared main group
+# would let a newer merge cancel an older *pending* release run — which
+# `cancel-in-progress: false` does not prevent, because that flag governs only
+# in-progress runs. Per-SHA groups keep main releases independent, as they were
+# before this block existed. See the fuller note in ci.yml.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions: {}
 
@@ -18,6 +35,10 @@ jobs:
   plan:
     name: Plan Release
     runs-on: ubuntu-latest
+    # The only job here a PR can reach — every other one is `github.event_name ==
+    # 'push'`. Draft PRs skip it: the next-version preview is worth a runner
+    # minute once the PR is real, not on every intermediate agent commit.
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     permissions:
       contents: write
       issues: write

@@ -156,6 +156,22 @@ Capture output verbatim.
 
 - **Pre-pass red → fix that first**, then start. Reviewing a diff that doesn't
   compile or whose tests fail is a category error.
+- **The pre-pass is not a warm-up for CI — it is the only signal this diff gets.**
+  CI skips every job while a PR is a draft (AGENTS.md → CI cost convention), and
+  this loop runs before the PR exists at all, or at most on a draft. So there is
+  no second opinion coming: a check you skip here is a check nobody runs. Run the
+  full list, including the UI checks when the diff touches
+  `crates/veld-daemon/ui`, and re-run it after every fix (§8.4) rather than
+  batching one run at the end.
+- **Two CI checks are now post-spend, so run them locally instead.**
+  `just workflow-gates` whenever the change touches `.github/workflows/`, and
+  `just commit-subjects` before pushing. Both used to fail on the first draft
+  push, in seconds, on a Linux runner; both are draft-guarded now and first report
+  *after* the PR is marked ready — so a malformed commit subject or an unguarded
+  new job is discovered only once the five macOS legs have already dispatched.
+  `just workflow-gates` is the sole thing standing between an unguarded job and a
+  draft that quietly runs it, because the gate's CI home (the `schema` job) is
+  draft-guarded too.
 - **Everything the pre-pass reports is out of scope for every subagent.** Put
   this line in every brief: *"The typechecker, linter and tests already ran;
   their output is in the context pack. Do not re-report it. Findings that
@@ -190,6 +206,12 @@ linters, apply fixes, re-route angles, add rounds within budget, write to
 default branch, modify CI credentials or secrets, delete tests to make them pass,
 widen scope into pre-existing bugs the diff merely exposed, reformat or "improve"
 code outside a finding's fix, change intended product behavior.
+
+**Never mark the PR ready for review** (`gh pr ready`). That is what starts CI,
+and it belongs to the caller *after* this loop exits — the whole point of the
+draft state is that an unreviewed diff costs nothing (AGENTS.md → CI cost
+convention). A loop that flips the PR ready mid-round pays for a full CI run on
+code it is about to change.
 
 **Three hard stops — halt the loop, write the report, ask:**
 

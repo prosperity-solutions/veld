@@ -13,8 +13,8 @@ Why? Because that's how this project was built, and it's how we believe modern s
 1. **Fork the repo** and create a branch from `main`.
 2. **Use an AI coding agent** to implement your changes.
 3. **Follow conventional commits** — we use [Conventional Commits](https://www.conventionalcommits.org/) for semantic versioning. Prefix your commit messages with `feat:`, `fix:`, `docs:`, `chore:`, etc.
-4. **Make sure CI passes** — `cargo fmt`, `cargo clippy`, and `cargo test` must all be green.
-5. **Open a PR** with a clear description of what changed and why.
+4. **Run the checks locally first** — `just lint` and `just test` (`cargo fmt`, `cargo clippy`, `cargo test`) must all be green *before* you ask CI for an opinion. This is not a formality: **CI does not run while a PR is a draft.**
+5. **Open a PR** with a clear description of what changed and why. Open it as a draft while you're still iterating — pushes to a draft are free — and mark it ready for review once your agent has finished reviewing the change and your local checks are green. That's the step that starts CI.
 
 ## Development setup
 
@@ -140,13 +140,17 @@ just dev-restore    # runs veld update
 | `just build` | Build Rust + frontend | No |
 | `just test` | Run all tests | No |
 | `just lint` | Clippy + TypeScript type check | No |
+| `just workflow-gates` | Assert no CI job can run on a draft PR. Needs PyYAML: `python3 -m pip install --user pyyaml` | No |
+| `just commit-subjects` | Check your commit subjects against the conventional-commits pattern CI enforces | No |
 
 ## Guidelines
 
 - Keep PRs focused — one feature or fix per PR.
 - Don't break existing behavior without discussion.
 - Add tests where it makes sense, but don't over-test trivial code.
-- If CI fails, fix it before requesting review.
+- If CI fails after you've marked the PR ready, fix it before asking for a human review.
+- **Draft PRs don't run CI.** Every job in `ci.yml` skips while a PR is a draft, and marking it ready for review is what starts them. A run occupies five macOS jobs alongside a four-target release build matrix, so a branch that gets 20 intermediate pushes while it's being written used to mean 20 full runs of that — runner time and macOS concurrency that queues ahead of everyone else's work. Keep the work in draft, run `just lint`/`just test` locally as you go, and flip to ready when it's genuinely ready.
+- **A skipped check shows up as a passing one.** So a draft PR looks green even though nothing ran — don't read that tick as a pass. `gh pr checks --json name,bucket,workflow` puts skipped ones in the `skipping` bucket; that's the only thing that distinguishes them. Note that the `Release` workflow's jobs are *supposed* to be skipped on a PR, so check the `CI` workflow's jobs specifically.
 
 ## License
 

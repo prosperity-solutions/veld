@@ -307,6 +307,56 @@ lint:
     cd crates/veld-daemon/frontend && npx tsc --noEmit
     cd crates/veld-daemon/ui && npm run typecheck
 
+# Assert no CI job can run on a draft PR (AGENTS.md → CI cost convention).
+# Deliberately not folded into `lint`: this needs PyYAML, and `lint` is the
+# recipe every contributor runs constantly — it must not grow a Python dep.
+# Install it with `python3 -m pip install --user pyyaml`.
+# The `schema` job in ci.yml is the enforcing copy — and because that job is
+# itself draft-guarded, this local recipe is the ONLY thing that catches an
+# unguarded job before it has already run on a draft push. Run it whenever you
+# touch .github/workflows/.
+workflow-gates:
+    python3 tests/validate-workflow-gates.py --selftest
+    python3 tests/validate-workflow-gates.py
+
+# Check commit subjects against the pattern the `commits` job enforces. That job
+# is draft-guarded too, so without this a malformed subject is discovered only
+# after the PR is marked ready and the expensive legs have already dispatched.
+# The regex is duplicated from .github/workflows/ci.yml on purpose: extracting it
+# from a YAML `run:` block is more fragile than two copies of a list of
+# conventional-commit types that changes approximately never. ci.yml is the
+# enforcing copy; if they disagree, ci.yml wins.
+commit-subjects base="origin/main":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    pattern='^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\(.+\))?!?: .+'
+    # Command substitution, NOT `while read ... < <(git rev-list ...)`. `set -e`
+    # does not reach into a process substitution, so a stale or unfetched
+    # {{base}} made the loop read zero lines, leave failed=0, and exit 0 —
+    # reporting "clean" for a check that never ran. An assignment carries the
+    # substitution's status, so this form actually fails. (Also avoids `mapfile`,
+    # which macOS's bundled bash 3.2 does not have.)
+    shas=$(git rev-list "{{base}}..HEAD")
+    if [ -z "$shas" ]; then
+        echo "No commits in {{base}}..HEAD — nothing to check." >&2
+        exit 0
+    fi
+    failed=0
+    # Unquoted on purpose: SHAs are hex, so word-splitting is safe here.
+    for sha in $shas; do
+        msg=$(git log --format='%s' -1 "$sha")
+        if echo "$msg" | grep -qE "$pattern"; then
+            echo "✅ $msg"
+        else
+            echo "❌ $msg"
+            failed=1
+        fi
+    done
+    if [ "$failed" -eq 1 ]; then
+        echo "Expected: type(scope)?: description — see CONTRIBUTING.md" >&2
+        exit 1
+    fi
+
 build-frontend:
     cd crates/veld-daemon/frontend && npm run build
 
