@@ -84,6 +84,7 @@ import {
   addTabToFocused,
   browserTab,
   closeTab,
+  configPaneTab,
   diagTab,
   dockOf,
   dockVisible,
@@ -96,13 +97,16 @@ import {
   paneTabLabel,
   parseTransferTabs,
   replaceTab,
+  paneAnswerFor,
+  type PaneSessionAnswer,
   setRatio,
   splitWithTab,
   updateTab,
 } from "./model";
 import { notifyError } from "../shared/notify";
 import type { QuickSwitchPrefs } from "../shared/settings";
-import type { Quicklink } from "../api";
+import type { PaneSpec, Quicklink } from "../api";
+import { paneIcon } from "./paneIcons";
 import { desktopWindow } from "../shell";
 import { type DropZone, sameZone, zoneAt } from "./dropModel";
 import { tabKeyAction } from "./tabKeys";
@@ -154,6 +158,7 @@ import {
   reconnectTerminal,
   releaseTerminal,
   restartTerminal,
+  startTerminal,
   subscribeTerminal,
   terminalStatus,
   unmountTerminal,
@@ -255,6 +260,16 @@ export function PaneArea(props: {
   serviceUrls: Array<[string, string]>;
   /** The project's own links from `ide.quicklinks`, shown beside the veld URLs. */
   quicklinks: Quicklink[];
+  /** Pane types the project declares in `ide.panes`. */
+  panes: PaneSpec[];
+  /** Which of a worktree's config panes the daemon has a token for, **carrying
+   *  the worktree it answers for**.
+   *
+   *  Compared against `worktreeId` during render rather than cleared by an
+   *  effect: a switch to another worktree must read as "not known yet", and an
+   *  effect cannot un-render the commit that already mounted the pane. `null`
+   *  before the first answer arrives. */
+  paneSessions: PaneSessionAnswer | null;
   /** Why there are none — only the app knows (no run, or no veld.json). */
   urlsEmptyHint: string;
   /** Browser sessions: the set that exists for this worktree, and how to add or
@@ -709,10 +724,12 @@ export function PaneArea(props: {
         <PaneChooser
           serviceUrls={props.serviceUrls}
           quicklinks={props.quicklinks}
+          panes={props.panes}
           urlsEmptyHint={props.urlsEmptyHint}
           onTerminal={() =>
             onLayout(addTab(layout, 0, { id: newTabId(), kind: "terminal", title: "Terminal" }))
           }
+          onPane={(spec) => onLayout(addTab(layout, 0, configPaneTab(spec)))}
           onBrowser={(tab) => onLayout(addTab(layout, 0, tab))}
           onDiag={(kind) => onLayout(addTab(layout, 0, diagTab(kind)))}
         />
@@ -772,6 +789,8 @@ export function PaneArea(props: {
               worktreeId={props.worktreeId}
               serviceUrls={props.serviceUrls}
               quicklinks={props.quicklinks}
+              panes={props.panes}
+              paneSessions={props.paneSessions}
               urlsEmptyHint={props.urlsEmptyHint}
               sessions={props.sessions}
               onAddSession={props.onAddSession}
@@ -827,6 +846,16 @@ function DockView(props: {
   serviceUrls: Array<[string, string]>;
   /** The project's own links from `ide.quicklinks`, shown beside the veld URLs. */
   quicklinks: Quicklink[];
+  /** Pane types the project declares in `ide.panes`. */
+  panes: PaneSpec[];
+  /** Which of a worktree's config panes the daemon has a token for, **carrying
+   *  the worktree it answers for**.
+   *
+   *  Compared against `worktreeId` during render rather than cleared by an
+   *  effect: a switch to another worktree must read as "not known yet", and an
+   *  effect cannot un-render the commit that already mounted the pane. `null`
+   *  before the first answer arrives. */
+  paneSessions: PaneSessionAnswer | null;
   urlsEmptyHint: string;
   sessions: BrowserProfile[];
   onAddSession: ((tabId: string) => void) | undefined;
@@ -850,6 +879,9 @@ function DockView(props: {
   const { index, layout, onLayout } = props;
   const dock = layout.docks[index];
   const active = activeTab(layout, index);
+  // Only counts for the worktree it was fetched for — see `paneAnswerFor`,
+  // which is where the reasoning and the tests live.
+  const paneAnswer = paneAnswerFor(props.paneSessions, props.worktreeId);
   const { showContextMenu } = useContextMenu();
   // Which tab currently shows a drop indicator, and on which side.
   const [dropAt, setDropAt] = useState<{ id: string; after: boolean } | null>(null);
@@ -1039,7 +1071,7 @@ function DockView(props: {
             key={tab.id}
             tab={tab}
             label={paneTabLabel(layout, tab)}
-            icon={tabIcon(tab)}
+            icon={tabIcon(tab, props.panes)}
             selected={tab.id === dock.activeId}
             panelId={dockPanelId(index)}
             // Local drag first, then one forwarded from another window — the
@@ -1147,6 +1179,30 @@ function DockView(props: {
             >
               Node health
             </Menu.Item>
+            {/* The project's own panes as their own labelled group, after the
+                four veld ships. Ungrouped, they read as more built-ins and the
+                menu's shape changed per checkout; a label says whose they are
+                and where to go to change them. Unavailable ones are dropped
+                here rather than shown disabled — a hover menu is the one-click
+                path, and an entry that cannot be clicked has no business in it
+                (the chooser still lists them, with the reason). */}
+            {props.panes.some((spec) => spec.available) && (
+              <>
+                <Menu.Divider />
+                <Menu.Label>Project panes</Menu.Label>
+                {props.panes
+                  .filter((spec) => spec.available)
+                  .map((spec) => (
+                    <Menu.Item
+                      key={spec.id}
+                      leftSection={paneIcon(spec.icon, 14)}
+                      onClick={() => convertOrAdd(active, configPaneTab(spec))}
+                    >
+                      New {spec.label} pane
+                    </Menu.Item>
+                  ))}
+              </>
+            )}
             <Menu.Divider />
             <Menu.Item
               leftSection={<IconLayoutColumns size={14} />}
@@ -1200,12 +1256,14 @@ function DockView(props: {
           <PaneChooser
             serviceUrls={props.serviceUrls}
             quicklinks={props.quicklinks}
+            panes={props.panes}
             urlsEmptyHint={props.urlsEmptyHint}
             // A `new` tab becomes the chosen kind in place; an empty dock has no
             // tab to convert, so it gets a fresh one.
             onTerminal={() =>
               convertOrAdd(active, { id: newTabId(), kind: "terminal", title: "Terminal" })
             }
+            onPane={(spec) => convertOrAdd(active, configPaneTab(spec))}
             onBrowser={(tab) => convertOrAdd(active, tab)}
             onDiag={(kind) => convertOrAdd(active, diagTab(kind))}
           />
@@ -1236,6 +1294,12 @@ function DockView(props: {
             key={active.id}
             id={active.id}
             worktreeId={props.worktreeId}
+            spec={
+              active.spec ? props.panes.find((p) => p.id === active.spec) : undefined
+            }
+            specId={active.spec}
+            resumable={paneAnswer?.resumable.has(active.id) ?? false}
+            panesKnown={paneAnswer !== null}
             // Only the focused dock's terminal takes the keyboard. Both docks
             // mount on load, so focusing unconditionally handed it to whichever
             // mounted last — which after a reload was not the pane the user
@@ -1261,8 +1325,11 @@ function PaneChooser(props: {
   serviceUrls: Array<[string, string]>;
   /** The project's own links from `ide.quicklinks`, shown beside the veld URLs. */
   quicklinks: Quicklink[];
+  /** Pane types the project declares in `ide.panes`. */
+  panes: PaneSpec[];
   urlsEmptyHint: string;
   onTerminal: () => void;
+  onPane: (spec: PaneSpec) => void;
   onBrowser: (tab: PaneTab) => void;
   onDiag: (kind: DiagKind) => void;
 }) {
@@ -1287,6 +1354,46 @@ function PaneChooser(props: {
           <IconActivityHeartbeat size={15} /> Nodes
         </button>
       </div>
+      {/* The project's own panes, below veld's and under their own heading —
+          the same `section-label` treatment `ide.quicklinks` gets below, since
+          they are the same kind of thing: something this repo added rather than
+          something veld ships. Putting them first would move Terminal and
+          Browser around depending on which checkout you are in. An unavailable
+          pane is shown disabled with the reason rather than omitted — a repo
+          that declares a Claude pane should not look like it forgot to. */}
+      {props.panes.length > 0 && (
+        <>
+          <hr className="pane-chooser-rule" />
+          <span className="section-label">Project panes</span>
+        </>
+      )}
+      {props.panes.length > 0 && (
+        <div className="pane-chooser-row pane-chooser-custom">
+          {props.panes.map((spec) => (
+            <button
+              key={spec.id}
+              className="btn big"
+              // `aria-disabled`, not `disabled`. A disabled button dispatches no
+              // pointer events, so its native tooltip can never open — the trap
+              // #205 already paid for — and the reason a pane is unavailable
+              // lives *only* in that tooltip, since the `+` menu drops
+              // unavailable panes entirely. So the button stays interactive to
+              // the browser, refuses the click itself, and can explain why.
+              aria-disabled={!spec.available || undefined}
+              title={
+                spec.available
+                  ? (spec.description ?? `Open a ${spec.label} pane`)
+                  : `${spec.label} needs ${(spec.missing ?? []).join(", ")} — not found on your PATH`
+              }
+              onClick={() => {
+                if (spec.available) props.onPane(spec);
+              }}
+            >
+              {paneIcon(spec.icon, 15)} {spec.label}
+            </button>
+          ))}
+        </div>
+      )}
       {/* The run's URLs, one click from being the pane's content. Not a third
           button opening a third kind — see VeldLinks.tsx. The rule separates
           "what should this pane be" from "where should it go", which are two
@@ -1309,10 +1416,15 @@ function PaneChooser(props: {
  * beside a separate coloured dot: two markers for one fact is noise at tab size,
  * and a tinted globe says both things at once.
  */
-function tabIcon(tab: PaneTab): React.ReactNode {
+function tabIcon(tab: PaneTab, panes: PaneSpec[]): React.ReactNode {
   switch (tab.kind) {
-    case "terminal":
-      return <IconTerminal2 size={12} />;
+    case "terminal": {
+      // A config-declared pane keeps its own glyph, so two Claude tabs and a
+      // shell are tellable apart at tab size. A spec the project has since
+      // removed falls back to the terminal glyph rather than to nothing.
+      const spec = tab.spec ? panes.find((p) => p.id === tab.spec) : undefined;
+      return tab.spec ? paneIcon(spec?.icon, 12) : <IconTerminal2 size={12} />;
+    }
     case "browser": {
       const color = browserTabDot(tab);
       return <IconWorld size={12} style={color ? { color } : undefined} />;
@@ -1587,8 +1699,38 @@ function TabButton(props: {
  * `terminalHost` and lets go of it on unmount. Unmounting must not end the
  * session: React unmounts this on every tab and worktree switch.
  */
-function TerminalPane(props: { id: string; worktreeId: number; takeFocus: boolean }) {
-  const { id, worktreeId } = props;
+function TerminalPane(props: {
+  id: string;
+  worktreeId: number;
+  /** The project's declaration for this pane, when it is one and the project
+   *  still declares it. */
+  spec: PaneSpec | undefined;
+  /** What the tab says it is, which outlives the declaration. */
+  specId: string | undefined;
+  /** Whether the daemon holds a session token for this pane. */
+  resumable: boolean;
+  /** Whether `resumable` has been fetched yet. A config pane must not decide
+   *  what to start before this is true. */
+  panesKnown: boolean;
+  takeFocus: boolean;
+}) {
+  const { id, worktreeId, spec, specId, resumable, panesKnown } = props;
+  // A plain terminal has nothing to look up, so it is ready immediately — and
+  // this must be what the mount effect depends on rather than `panesKnown`
+  // itself. `panesKnown` goes false→true once per worktree *selection*, so
+  // depending on it directly re-ran the effect for plain terminals too:
+  // unmount, remount, re-fit (a RESIZE frame, i.e. a redraw for vim or a coding
+  // agent) and re-assert focus, on every worktree switch, for a pane that never
+  // needed the answer.
+  //
+  // `existed` is the third case: a session already in the host's registry keeps
+  // running whatever it is running, and `ensure` discards the start plan for it
+  // entirely — so waiting on an answer that cannot change anything only blanks a
+  // *live* agent behind an empty pane for a round trip on every return to the
+  // worktree, and indefinitely if that request hangs. Read once per instance, so
+  // it stays a constant and cannot reintroduce a remount.
+  const [existed] = useState(() => terminalStatus(id).state !== "absent");
+  const ready = !specId || panesKnown || existed;
   const slot = useRef<HTMLDivElement>(null);
   const [, bump] = useReducer((n: number) => n + 1, 0);
   // Read through a ref so the mount effect below sees the value this pane had
@@ -1600,7 +1742,28 @@ function TerminalPane(props: { id: string; worktreeId: number; takeFocus: boolea
   useEffect(() => {
     const el = slot.current;
     if (!el) return;
-    mountTerminal(id, worktreeId, el);
+    // **Wait for the token lookup before deciding anything.** `ensure` is
+    // idempotent, so the start plan is chosen once and never revisited — and
+    // this effect runs in the same commit that *starts* the fetch (child
+    // effects run before parent ones). Mounting eagerly therefore decided every
+    // restored pane against an empty set, which silently made `auto_resume`
+    // unreachable in production: the one path the whole feature exists for.
+    if (!ready) return;
+    // `autoResume` is only ever consulted on this first mount — the
+    // materialization edge. A shell that dies later, with the user watching,
+    // gets buttons no matter what the config says.
+    mountTerminal(
+      id,
+      worktreeId,
+      el,
+      specId
+        ? {
+            spec: specId,
+            autoResume: resumable && (spec?.auto_resume ?? false),
+            closeOnExit: spec?.close_on_exit ?? false,
+          }
+        : undefined,
+    );
     const unsubscribe = subscribeTerminal(id, bump);
     if (takeFocus.current) focusTerminal(id);
     return () => {
@@ -1609,12 +1772,44 @@ function TerminalPane(props: { id: string; worktreeId: number; takeFocus: boolea
       // `pruneTerminals` in App.tsx is what actually ends one.
       unmountTerminal(id);
     };
-  }, [id, worktreeId]);
+    // `spec`/`resumable` are deliberately absent: they decide what the *first*
+    // mount does, and re-running because a poll refreshed the pane list would
+    // remount a live terminal. `ready` **is** here, because it is the gate
+    // above — for a config pane it is the moment the answer for *this* worktree
+    // arrives, and for a plain terminal it is a constant `true`.
+    // biome-ignore lint/correctness/useExhaustiveDependencies: first-mount decision, see above.
+  }, [id, worktreeId, ready]);
 
-  const { state, detail } = terminalStatus(id);
+  const { state, detail, launched } = terminalStatus(id);
+  // Whether the user has asked to see the terminal behind the panel.
+  //
+  // Reset on every state change, not just on `id`: after a resume the panel is
+  // gone anyway, and a pane that died a *second* time must present its own
+  // ending rather than inheriting a dismissal from the previous one.
+  const [showOutput, setShowOutput] = useState(false);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `state` is the reset trigger, not a value read here.
+  useEffect(() => setShowOutput(false), [id, state]);
   const dead = state === "ended" || state === "error";
   const restart = useCallback(() => restartTerminal(id), [id]);
   const reconnect = useCallback(() => reconnectTerminal(id), [id]);
+  const startFresh = useCallback(() => startTerminal(id, "fresh"), [id]);
+  const startResume = useCallback(() => startTerminal(id, "resume"), [id]);
+  // A resume that cannot work must not be a button that looks like it can, so
+  // this needs the pane to still declare a resume command *and* the daemon to
+  // hold a token for it. Where the token knowledge comes from differs by state:
+  //
+  //  - `launched` is the strongest: this session reached `ready` under a spec
+  //    in *this* window, so the daemon recorded a token. It has to be here
+  //    because `resumable` is fetched once per worktree selection and never
+  //    refreshed — a pane that launched afterwards is simply absent from it,
+  //    and without `launched` such a pane hitting `error` offered only "Start
+  //    fresh", minting a new token and abandoning the conversation.
+  //  - `ended` means a holder ran the command and it exited, so a token exists.
+  //  - `resumable` is the fetched set, and the only evidence available for a
+  //    pane restored from storage that has not connected in this window.
+  const hasToken = launched || state === "ended" || resumable;
+  const canResume = Boolean(specId && hasToken && spec?.can_resume);
+  const label = spec?.label ?? specId ?? "";
   // `error` means the pipe broke, not that the shell did — the session very
   // likely survives on the daemon (that is what the detach grace is for), so
   // offer to reattach before offering to replace it.
@@ -1628,7 +1823,65 @@ function TerminalPane(props: { id: string; worktreeId: number; takeFocus: boolea
           It goes here rather than into the terminal, which would corrupt a
           full-screen program's display — see writeNotice in terminalHost. */}
       {state === "live" && detail && <div className="term-status">{detail}</div>}
-      {dead && (
+      {/* A config pane that is not running gets the pane, not a chip in the
+          corner. It is the only thing the pane is for at that moment, and after
+          a full-screen program exits there is usually nothing else on screen.
+          
+          **Dismissible, and that is not decoration.** `close_on_exit` closes a
+          pane that ended cleanly, so a pane still sitting here has almost
+          always *failed* — and whatever is on the screen underneath is the
+          reason. Covering that permanently would repeat the mistake the
+          non-zero-exit guard exists to prevent. */}
+      {specId && (state === "idle" || dead) && !showOutput && (
+        <div className="term-overlay">
+          <div className="term-card">
+            <div className="term-card-icon">{paneIcon(spec?.icon, 26)}</div>
+            <div className="term-card-title">{label}</div>
+            <div className="term-card-detail">
+              {state === "idle"
+                ? canResume
+                  ? "is not running"
+                  : "has not started"
+                : detail || "session ended"}
+            </div>
+            <div className="term-card-actions">
+              {canReconnect && (
+                <button
+                  className="btn big"
+                  onClick={reconnect}
+                  title="Reattach to the same shell"
+                >
+                  Reconnect
+                </button>
+              )}
+              {canResume && (
+                <button
+                  className="btn big"
+                  onClick={startResume}
+                  title="Pick up where this pane left off"
+                >
+                  Resume {label}
+                </button>
+              )}
+              <button
+                className="btn big"
+                onClick={startFresh}
+                title={
+                  canResume ? "Start over, discarding the previous session" : undefined
+                }
+              >
+                {canResume ? "Start fresh" : `Start ${label}`}
+              </button>
+            </div>
+            {dead && (
+              <button className="term-card-link" onClick={() => setShowOutput(true)}>
+                Show output
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+      {dead && (!specId || showOutput) && (
         <div className="term-status">
           <span>{detail || "session ended"}</span>
           {canReconnect && (
@@ -1636,13 +1889,32 @@ function TerminalPane(props: { id: string; worktreeId: number; takeFocus: boolea
               Reconnect
             </button>
           )}
-          <button
-            className="btn"
-            onClick={restart}
-            title="End this shell and start a new one"
-          >
-            Restart
-          </button>
+          {canResume ? (
+            <>
+              <button
+                className="btn"
+                onClick={startResume}
+                title="Pick up where this pane left off"
+              >
+                Resume {label}
+              </button>
+              <button
+                className="btn"
+                onClick={startFresh}
+                title="Start over, discarding the previous session"
+              >
+                Start fresh
+              </button>
+            </>
+          ) : (
+            <button
+              className="btn"
+              onClick={restart}
+              title="End this shell and start a new one"
+            >
+              Restart
+            </button>
+          )}
         </div>
       )}
     </div>

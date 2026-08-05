@@ -72,6 +72,92 @@ pub const PERMISSION_IDS: &[&str] = &[
     "window-management",
 ];
 
+/// Every icon name a pane may name, in sorted order.
+///
+/// These are [Tabler](https://tabler.io/icons) names, the icon set every other
+/// pane tab already uses, so a config-declared pane sits beside the built-in
+/// ones without looking pasted in. An allowlist rather than "any Tabler name"
+/// because the UI must import each component statically — a name resolved at
+/// runtime would either pull the whole set into the bundle or render nothing.
+///
+/// A pane may use an emoji instead ([`PaneIcon::Emoji`]), which is unbounded and
+/// needs no entry here. The two forms are told apart by ASCII-ness, so this list
+/// can only ever grow with ASCII names.
+pub const PANE_ICON_NAMES: &[&str] = &[
+    "atom",
+    "bolt",
+    "book",
+    "brain",
+    "bug",
+    "bulb",
+    "chart-line",
+    "cloud",
+    "code",
+    "compass",
+    "cpu",
+    "database",
+    "flask",
+    "git-branch",
+    "key",
+    "map",
+    "message-chatbot",
+    "notebook",
+    "package",
+    "player-play",
+    "plug",
+    "puzzle",
+    "refresh",
+    "robot",
+    "rocket",
+    "search",
+    "server",
+    "shield",
+    "sparkles",
+    "terminal-2",
+    "tool",
+    "wand",
+];
+
+/// Every key a `terminal` pane may declare, in sorted order.
+///
+/// Mirrors the schema's `$defs.pane` terminal branch, which sets
+/// `additionalProperties: false` — so without this an editor red-squiggles
+/// `"autoresume": true` while `veld lint` accepts it and the pane silently takes
+/// the default. Both of the defaults a typo can reach change behaviour
+/// (`auto_resume` false, `close_on_exit` true), which is the worst shape for a
+/// silent one.
+pub const TERMINAL_PANE_KEYS: &[&str] = &[
+    "argv",
+    "auto_resume",
+    "close_on_exit",
+    "description",
+    "icon",
+    "id",
+    "label",
+    "requires_bin",
+    "resume",
+    "shell",
+    "type",
+];
+
+/// The `${veld.*}` names a pane command may reference, in sorted order.
+///
+/// Deliberately **not** part of [`crate::config::BUILTIN_VARS`]: `pane.*` exists
+/// only while a pane is being launched, and a node command that referenced it
+/// would resolve to nothing. Keeping the two sets separate is what lets
+/// `check_builtin_names` keep rejecting `${veld.pane.token}` in a node while this
+/// module accepts it — the closed-set rule holds per scope, not globally.
+pub const PANE_BUILTINS: &[&str] = &[
+    "branch",
+    "pane.id",
+    "pane.label",
+    "pane.token",
+    "project",
+    "root",
+    "username",
+    "worktree",
+];
+
 /// The interpreted `ide` section, plus whatever could not be interpreted.
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
 pub struct IdeSection {
@@ -82,6 +168,9 @@ pub struct IdeSection {
     /// Permissions the repo pre-answers for web content in a browser pane.
     #[serde(default)]
     pub permissions: Vec<PermissionRule>,
+    /// Extra pane types this project offers in the desktop app's pane menu.
+    #[serde(default)]
+    pub panes: Vec<PaneDef>,
     /// Origins that must open in the **system** browser rather than in a Veld
     /// browser pane — the project's half of the exempt list (the other half is the
     /// `browser.externalOrigins` setting, and the two are unioned).
@@ -109,7 +198,97 @@ impl IdeSection {
         self.quicklinks.is_empty()
             && self.permissions.is_empty()
             && self.external_origins.is_empty()
+            && self.panes.is_empty()
     }
+
+    /// The pane this id names, if the project declares one.
+    #[must_use]
+    pub fn pane(&self, id: &str) -> Option<&PaneDef> {
+        self.panes.iter().find(|p| p.id == id)
+    }
+}
+
+/// A pane type a project adds to the desktop app's pane menu.
+///
+/// The fields here are the ones every pane type needs whatever it renders — an
+/// identity, how to label it, and whether the machine can run it at all. What
+/// the pane *is* lives in [`PaneDef::body`], keyed by the `type` discriminator.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PaneDef {
+    /// Stable id, unique within the project. Names the pane on the wire and in
+    /// `${veld.pane.id}`; never shown to the user, which is what `label` is for.
+    pub id: String,
+    /// Menu text. Defaults to `id` when the author omits it.
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<PaneIcon>,
+    /// Executables that must be on `PATH` for this pane to be offered. Empty
+    /// means "always offered".
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requires_bin: Vec<String>,
+    pub body: PaneBody,
+}
+
+/// What a pane actually is. One variant today; the discriminator exists so the
+/// next one is additive rather than a reshape.
+///
+/// The names match the runtime pane kinds the UI already has
+/// (`ui/src/panes/model.ts`), so a future `type: "browser"` means there exactly
+/// what it means here. The runtime set is the larger one — `nodes` and `new` are
+/// veld's own panes and will never be config-declarable.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum PaneBody {
+    Terminal(TerminalPane),
+}
+
+/// A pane that runs a command in a terminal instead of a login shell.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TerminalPane {
+    /// What a fresh pane runs.
+    pub launch: crate::config::CommandSpec,
+    /// What a pane whose shell has died runs instead, to pick up where the tool
+    /// left off. Absent means the pane can only ever start fresh.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume: Option<crate::config::CommandSpec>,
+    /// Whether veld may run `resume` without being asked. Only ever consulted
+    /// when a pane is restored with its shell already gone, never while the user
+    /// is watching it — see `crates/veld-daemon/ui/src/panes/terminalHost.ts`.
+    ///
+    /// Defaults to false, and stays false when `resume` is absent: these
+    /// commands launch coding agents, so an unattended one spends money and runs
+    /// tools with nobody watching.
+    #[serde(default)]
+    pub auto_resume: bool,
+    /// Whether the pane closes itself when its command exits **cleanly**.
+    ///
+    /// Defaults to true, which is what a terminal emulator does and what
+    /// quitting the tool means: you are done with the pane. It can only fire on
+    /// an exit somebody was there to see — a reboot, a crashed daemon, a quit
+    /// app and a reaped session all leave the pane closed or restored from the
+    /// layout instead, so this never competes with [`Self::auto_resume`].
+    ///
+    /// **A non-zero exit never closes the pane**, whatever this says. The reason
+    /// a tool died is printed on the screen it dies on, and a pane that
+    /// disappears with it is the oldest complaint about terminal emulators.
+    #[serde(default = "default_true")]
+    pub close_on_exit: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// How a pane's tab is illustrated.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum PaneIcon {
+    /// One of [`PANE_ICON_NAMES`].
+    Name(String),
+    /// Any non-ASCII string — in practice an emoji, rendered as text.
+    Emoji(String),
 }
 
 /// A link on the browser pane's start page.
@@ -218,12 +397,444 @@ pub fn parse(value: Option<&serde_json::Value>) -> IdeSection {
         match key.as_str() {
             "quicklinks" => parse_quicklinks(child, &mut section),
             "permissions" => parse_permissions(child, &mut section),
+            "panes" => parse_panes(child, &mut section),
             "externalOrigins" => parse_external_origins(child, &mut section),
             other => section.uninterpreted.push(other.to_owned()),
         }
     }
     section.uninterpreted.sort();
     section
+}
+
+fn parse_panes(value: &serde_json::Value, out: &mut IdeSection) {
+    let Some(items) = value.as_array() else {
+        out.problems.push(IdeProblem {
+            location: "ide.panes".to_owned(),
+            message: "must be an array of pane objects; it was ignored".to_owned(),
+        });
+        return;
+    };
+    for (index, item) in items.iter().enumerate() {
+        let at = format!("ide.panes[{index}]");
+        if let Some(pane) = parse_pane(item, &at, out) {
+            if out.panes.iter().any(|p| p.id == pane.id) {
+                out.problems.push(IdeProblem {
+                    location: format!("{at}.id"),
+                    message: format!(
+                        "duplicate pane id {:?} — the first one wins and this entry was dropped",
+                        pane.id
+                    ),
+                });
+                continue;
+            }
+            out.panes.push(pane);
+        }
+    }
+}
+
+fn parse_pane(item: &serde_json::Value, at: &str, out: &mut IdeSection) -> Option<PaneDef> {
+    let entry = item.as_object().or_else(|| {
+        out.problems.push(IdeProblem {
+            location: at.to_owned(),
+            message: "must be an object with an `id` and a `type`".to_owned(),
+        });
+        None
+    })?;
+
+    // The two required keys are read before anything else so a typo in one is
+    // reported against the entry rather than as a pile of downstream problems.
+    let Some(id) = entry
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+    else {
+        out.problems.push(IdeProblem {
+            location: format!("{at}.id"),
+            message: "is required and must be a string".to_owned(),
+        });
+        return None;
+    };
+    if !valid_pane_id(id) {
+        out.problems.push(IdeProblem {
+            location: format!("{at}.id"),
+            message: format!("must be 1-64 characters of letters, digits, `-` or `_` (got {id:?})"),
+        });
+        return None;
+    }
+    let Some(pane_type) = entry.get("type").and_then(serde_json::Value::as_str) else {
+        out.problems.push(IdeProblem {
+            location: format!("{at}.type"),
+            message: "is required — the only type this version renders is \"terminal\"".to_owned(),
+        });
+        return None;
+    };
+
+    let label = match entry.get("label") {
+        None => id.to_owned(),
+        Some(v) => match v.as_str().map(str::trim) {
+            Some(text) if !text.is_empty() => text.to_owned(),
+            _ => {
+                out.problems.push(IdeProblem {
+                    location: format!("{at}.label"),
+                    message: "must be a non-empty string".to_owned(),
+                });
+                return None;
+            }
+        },
+    };
+    let description = match entry.get("description") {
+        None => None,
+        Some(v) => match v.as_str().map(str::trim) {
+            Some(text) if !text.is_empty() => Some(text.to_owned()),
+            _ => {
+                out.problems.push(IdeProblem {
+                    location: format!("{at}.description"),
+                    message: "must be a non-empty string".to_owned(),
+                });
+                return None;
+            }
+        },
+    };
+    let icon = match entry.get("icon") {
+        None => None,
+        Some(v) => Some(parse_pane_icon(v, at, out)?),
+    };
+    let requires_bin = parse_requires_bin(entry.get("requires_bin"), at, out)?;
+
+    let body = match pane_type {
+        "terminal" => PaneBody::Terminal(parse_terminal_pane(entry, at, out)?),
+        other => {
+            // Not fatal and not a typo report: a project may legitimately be
+            // written for a newer veld. Naming the version is the useful half —
+            // "unknown key" would send the author looking for a spelling mistake
+            // that isn't there.
+            out.problems.push(IdeProblem {
+                location: format!("{at}.type"),
+                message: format!(
+                    "pane type {other:?} is not one this version of veld renders (it knows: \
+                     terminal). The pane was skipped; the rest of `ide.panes` still applies"
+                ),
+            });
+            return None;
+        }
+    };
+
+    // After the body, so a pane that is being dropped for a real reason does not
+    // also collect a pile of key complaints.
+    let mut unknown: Vec<&str> = entry
+        .keys()
+        .map(String::as_str)
+        .filter(|k| !TERMINAL_PANE_KEYS.contains(k))
+        .collect();
+    if !unknown.is_empty() {
+        unknown.sort_unstable();
+        out.problems.push(IdeProblem {
+            location: at.to_owned(),
+            message: format!(
+                "unknown pane key(s) {}. A terminal pane may declare: {}",
+                unknown
+                    .iter()
+                    .map(|k| format!("{k:?}"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                TERMINAL_PANE_KEYS.join(", ")
+            ),
+        });
+    }
+
+    Some(PaneDef {
+        id: id.to_owned(),
+        label,
+        description,
+        icon,
+        requires_bin,
+        body,
+    })
+}
+
+fn parse_terminal_pane(
+    entry: &serde_json::Map<String, serde_json::Value>,
+    at: &str,
+    out: &mut IdeSection,
+) -> Option<TerminalPane> {
+    let launch = parse_command(entry, at, out)?;
+    let resume = match entry.get("resume") {
+        None => None,
+        Some(value) => {
+            let resume_at = format!("{at}.resume");
+            let Some(map) = value.as_object() else {
+                out.problems.push(IdeProblem {
+                    location: resume_at,
+                    message: "must be an object with `argv` or `shell`".to_owned(),
+                });
+                return None;
+            };
+            Some(parse_command(map, &resume_at, out)?)
+        }
+    };
+
+    let auto_resume = match entry.get("auto_resume") {
+        None => false,
+        Some(serde_json::Value::Bool(b)) => *b,
+        Some(_) => {
+            out.problems.push(IdeProblem {
+                location: format!("{at}.auto_resume"),
+                message: "must be true or false".to_owned(),
+            });
+            return None;
+        }
+    };
+    // Fail closed, and downgrade rather than drop: a pane with nothing to resume
+    // is still a perfectly good pane, but "resume this automatically" cannot mean
+    // anything, and silently leaving the flag set would read as though it did.
+    let close_on_exit = match entry.get("close_on_exit") {
+        None => true,
+        Some(serde_json::Value::Bool(b)) => *b,
+        Some(_) => {
+            out.problems.push(IdeProblem {
+                location: format!("{at}.close_on_exit"),
+                message: "must be true or false".to_owned(),
+            });
+            return None;
+        }
+    };
+
+    let auto_resume = if auto_resume && resume.is_none() {
+        out.problems.push(IdeProblem {
+            location: format!("{at}.auto_resume"),
+            message: "has no effect without a `resume` command, so it was treated as false"
+                .to_owned(),
+        });
+        false
+    } else {
+        auto_resume
+    };
+
+    Some(TerminalPane {
+        launch,
+        resume,
+        auto_resume,
+        close_on_exit,
+    })
+}
+
+/// Read the `argv` / `shell` pair out of a carrier object.
+///
+/// Hand-rolled rather than `serde`-derived for this module's reason — a bad
+/// command has to become an [`IdeProblem`], never a load error — but the accepted
+/// shape is exactly the one every other command position in the config takes, so
+/// a pane command reads the same as a node's.
+fn parse_command(
+    entry: &serde_json::Map<String, serde_json::Value>,
+    location: &str,
+    out: &mut IdeSection,
+) -> Option<crate::config::CommandSpec> {
+    let has_argv = entry.contains_key("argv");
+    let has_shell = entry.contains_key("shell");
+    if has_argv && has_shell {
+        out.problems.push(IdeProblem {
+            location: location.to_owned(),
+            message: "declares both `argv` and `shell` — name exactly one".to_owned(),
+        });
+        return None;
+    }
+    let spec = if has_argv {
+        let Some(items) = entry["argv"].as_array() else {
+            out.problems.push(IdeProblem {
+                location: format!("{location}.argv"),
+                message: "must be an array of strings".to_owned(),
+            });
+            return None;
+        };
+        let mut argv = Vec::with_capacity(items.len());
+        for item in items {
+            let Some(text) = item.as_str() else {
+                out.problems.push(IdeProblem {
+                    location: format!("{location}.argv"),
+                    message: "every argument must be a string".to_owned(),
+                });
+                return None;
+            };
+            argv.push(text.to_owned());
+        }
+        crate::config::CommandSpec::Argv(argv)
+    } else if has_shell {
+        let Some(text) = entry["shell"].as_str() else {
+            out.problems.push(IdeProblem {
+                location: format!("{location}.shell"),
+                message: "must be a string".to_owned(),
+            });
+            return None;
+        };
+        crate::config::CommandSpec::Shell(text.to_owned())
+    } else {
+        out.problems.push(IdeProblem {
+            location: location.to_owned(),
+            message: "must declare `argv` or `shell`".to_owned(),
+        });
+        return None;
+    };
+
+    if spec.is_empty() {
+        out.problems.push(IdeProblem {
+            location: location.to_owned(),
+            message: "runs nothing".to_owned(),
+        });
+        return None;
+    }
+    check_pane_variables(&spec, location, out)?;
+    Some(spec)
+}
+
+/// Refuse a pane command that references a variable a pane will not have.
+///
+/// A pane command is interpolated against a much smaller context than a node's
+/// ([`PANE_BUILTINS`]), and an unresolvable reference is not a soft failure at
+/// spawn time — the pane simply never starts, with an error the author has to
+/// read backwards from. Catching it in `veld lint` is the whole point of the
+/// scope being closed.
+fn check_pane_variables(
+    spec: &crate::config::CommandSpec,
+    location: &str,
+    out: &mut IdeSection,
+) -> Option<()> {
+    let parts: Vec<String> = match spec {
+        crate::config::CommandSpec::Argv(argv) => argv.clone(),
+        crate::config::CommandSpec::Shell(s) => vec![s.clone()],
+    };
+    for part in &parts {
+        for reference in all_references(part) {
+            let Some(name) = reference.strip_prefix("veld.") else {
+                out.problems.push(IdeProblem {
+                    location: location.to_owned(),
+                    message: format!(
+                        "`${{{reference}}}` is not available in a pane command. A pane may use: {}",
+                        pane_variable_list()
+                    ),
+                });
+                return None;
+            };
+            if !PANE_BUILTINS.contains(&name) {
+                out.problems.push(IdeProblem {
+                    location: location.to_owned(),
+                    message: format!(
+                        "`${{veld.{name}}}` is not available in a pane command. A pane may use: {}",
+                        pane_variable_list()
+                    ),
+                });
+                return None;
+            }
+        }
+    }
+    Some(())
+}
+
+fn pane_variable_list() -> String {
+    PANE_BUILTINS
+        .iter()
+        .map(|n| format!("${{veld.{n}}}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Every `${…}` reference in `s`, whatever namespace it names.
+///
+/// Wider than `config::builtin_refs`, which only sees `${veld.*}`: a pane author
+/// reaching for `${output.PORT}` has made a scope mistake worth naming, and a
+/// scanner that only knew the `veld.` prefix would let it through to fail at
+/// spawn time instead.
+fn all_references(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = s;
+    while let Some(start) = rest.find("${") {
+        let after = &rest[start + 2..];
+        match after.find('}') {
+            None => break,
+            Some(end) => {
+                out.push(after[..end].to_owned());
+                rest = &after[end + 1..];
+            }
+        }
+    }
+    out
+}
+
+fn parse_pane_icon(value: &serde_json::Value, at: &str, out: &mut IdeSection) -> Option<PaneIcon> {
+    let Some(text) = value.as_str().map(str::trim).filter(|t| !t.is_empty()) else {
+        out.problems.push(IdeProblem {
+            location: format!("{at}.icon"),
+            message: "must be a non-empty string — an icon name or an emoji".to_owned(),
+        });
+        return None;
+    };
+    // ASCII means "this is meant to be a name", so a misspelled one is reported
+    // rather than rendered as the literal text `sparkle`. Anything non-ASCII is
+    // an emoji and needs no allowlist.
+    if !text.is_ascii() {
+        return Some(PaneIcon::Emoji(text.to_owned()));
+    }
+    if PANE_ICON_NAMES.contains(&text) {
+        return Some(PaneIcon::Name(text.to_owned()));
+    }
+    out.problems.push(IdeProblem {
+        location: format!("{at}.icon"),
+        message: format!(
+            "unknown icon {text:?}. Use an emoji, or one of: {}",
+            PANE_ICON_NAMES.join(", ")
+        ),
+    });
+    None
+}
+
+fn parse_requires_bin(
+    value: Option<&serde_json::Value>,
+    at: &str,
+    out: &mut IdeSection,
+) -> Option<Vec<String>> {
+    let Some(value) = value else {
+        return Some(Vec::new());
+    };
+    let Some(items) = value.as_array() else {
+        out.problems.push(IdeProblem {
+            location: format!("{at}.requires_bin"),
+            message: "must be an array of executable names".to_owned(),
+        });
+        return None;
+    };
+    let mut names = Vec::with_capacity(items.len());
+    for item in items {
+        let Some(name) = item.as_str().map(str::trim).filter(|n| !n.is_empty()) else {
+            out.problems.push(IdeProblem {
+                location: format!("{at}.requires_bin"),
+                message: "every entry must be a non-empty executable name".to_owned(),
+            });
+            return None;
+        };
+        // A name, looked up on the user's `PATH` — not a path. A check that
+        // accepted `/opt/homebrew/bin/claude` would pass or fail on one machine's
+        // layout, which is the opposite of what this field is for.
+        if name.contains('/') || name.contains('\\') {
+            out.problems.push(IdeProblem {
+                location: format!("{at}.requires_bin"),
+                message: format!(
+                    "must be an executable name looked up on PATH, not a path (got {name:?})"
+                ),
+            });
+            return None;
+        }
+        if !names.iter().any(|existing| existing == name) {
+            names.push(name.to_owned());
+        }
+    }
+    Some(names)
+}
+
+fn valid_pane_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 fn parse_quicklinks(value: &serde_json::Value, out: &mut IdeSection) {
@@ -1355,6 +1966,335 @@ mod tests {
         assert!(!local("https://staging.example.com"));
         // Not fooled by a hostname that merely ends in the right letters.
         assert!(!local("https://evil-localhost.com"));
+    }
+
+    fn one_pane(value: serde_json::Value) -> IdeSection {
+        section(json!({ "panes": [value] }))
+    }
+
+    #[test]
+    fn a_terminal_pane_parses_with_its_defaults() {
+        let parsed = one_pane(json!({
+            "id": "claude",
+            "type": "terminal",
+            "argv": ["claude", "--session-id", "${veld.pane.token}"],
+        }));
+        assert!(parsed.problems.is_empty(), "{:?}", parsed.problems);
+        let pane = &parsed.panes[0];
+        // An omitted label is the id, not an empty tab.
+        assert_eq!(pane.label, "claude");
+        assert!(pane.icon.is_none());
+        assert!(pane.requires_bin.is_empty());
+        let PaneBody::Terminal(terminal) = &pane.body;
+        assert!(terminal.resume.is_none());
+        assert!(!terminal.auto_resume, "auto_resume must default to false");
+    }
+
+    #[test]
+    fn a_pane_declaring_everything_round_trips() {
+        let parsed = one_pane(json!({
+            "id": "claude",
+            "type": "terminal",
+            "label": "Claude",
+            "description": "Claude Code in this worktree",
+            "icon": "sparkles",
+            "requires_bin": ["claude", "claude"],
+            "argv": ["claude", "--session-id", "${veld.pane.token}"],
+            "resume": { "argv": ["claude", "--resume", "${veld.pane.token}"] },
+            "auto_resume": true,
+        }));
+        assert!(parsed.problems.is_empty(), "{:?}", parsed.problems);
+        let pane = &parsed.panes[0];
+        assert_eq!(pane.label, "Claude");
+        assert_eq!(pane.icon, Some(PaneIcon::Name("sparkles".to_owned())));
+        // Duplicates collapse, the way permission ids do.
+        assert_eq!(pane.requires_bin, vec!["claude"]);
+        let PaneBody::Terminal(terminal) = &pane.body;
+        assert!(terminal.auto_resume);
+        assert_eq!(
+            terminal.resume,
+            Some(crate::config::CommandSpec::Argv(vec![
+                "claude".to_owned(),
+                "--resume".to_owned(),
+                "${veld.pane.token}".to_owned(),
+            ]))
+        );
+    }
+
+    /// A config written for a newer veld must cost the author the one pane it
+    /// names, never the whole section — otherwise upgrading the config breaks
+    /// every older Desktop that opens the repo.
+    #[test]
+    fn an_unknown_pane_type_is_skipped_without_taking_the_block_down() {
+        let parsed = section(json!({
+            "panes": [
+                { "id": "future", "type": "webview", "url": "https://example.com" },
+                { "id": "claude", "type": "terminal", "argv": ["claude"] },
+            ]
+        }));
+        assert_eq!(parsed.panes.len(), 1);
+        assert_eq!(parsed.panes[0].id, "claude");
+        assert_eq!(parsed.problems.len(), 1);
+        assert_eq!(parsed.problems[0].location, "ide.panes[0].type");
+        assert!(
+            parsed.problems[0].message.contains("this version"),
+            "the message should point at the veld version, not at a typo: {}",
+            parsed.problems[0].message
+        );
+    }
+
+    #[test]
+    fn a_pane_must_name_exactly_one_command() {
+        let neither = one_pane(json!({ "id": "a", "type": "terminal" }));
+        assert!(neither.panes.is_empty());
+        assert!(neither.problems[0].message.contains("`argv` or `shell`"));
+
+        let both = one_pane(json!({
+            "id": "a", "type": "terminal", "argv": ["x"], "shell": "x",
+        }));
+        assert!(both.panes.is_empty());
+        assert!(both.problems[0].message.contains("exactly one"));
+
+        let empty = one_pane(json!({ "id": "a", "type": "terminal", "argv": [] }));
+        assert!(empty.panes.is_empty());
+        assert!(empty.problems[0].message.contains("runs nothing"));
+    }
+
+    /// A pane command resolves against a much smaller variable scope than a
+    /// node's, and an unresolvable reference means the pane never starts. The
+    /// author should learn that from `veld lint`, not from a dead tab.
+    #[test]
+    fn a_variable_a_pane_will_not_have_is_refused() {
+        for argv in [
+            json!(["claude", "--port", "${veld.port}"]),
+            json!(["claude", "${output.URL}"]),
+            json!(["claude", "${nodes.web.url}"]),
+            json!(["claude", "${param.FOO}"]),
+        ] {
+            let parsed = one_pane(json!({ "id": "a", "type": "terminal", "argv": argv }));
+            assert!(parsed.panes.is_empty(), "{argv} must be refused");
+            assert!(
+                parsed.problems[0].message.contains("${veld.pane.token}"),
+                "the message should list what a pane may use: {}",
+                parsed.problems[0].message
+            );
+        }
+        // …and the pane scope itself resolves, in both command forms.
+        let ok = one_pane(json!({
+            "id": "a",
+            "type": "terminal",
+            "shell": "claude --session-id ${veld.pane.token} # ${veld.worktree} ${veld.branch}",
+            "resume": { "argv": ["claude", "-r", "${veld.pane.token}"] },
+        }));
+        assert!(ok.problems.is_empty(), "{:?}", ok.problems);
+    }
+
+    /// The same scope check has to reach inside `resume`, which is the command
+    /// that runs least often and would therefore fail latest.
+    #[test]
+    fn a_bad_resume_command_is_reported_against_resume() {
+        let parsed = one_pane(json!({
+            "id": "a",
+            "type": "terminal",
+            "argv": ["claude"],
+            "resume": { "argv": ["claude", "-r", "${veld.run}"] },
+        }));
+        assert!(parsed.panes.is_empty());
+        assert_eq!(parsed.problems[0].location, "ide.panes[0].resume");
+    }
+
+    #[test]
+    fn close_on_exit_defaults_to_true_and_is_settable() {
+        let default = one_pane(json!({ "id": "a", "type": "terminal", "argv": ["x"] }));
+        let PaneBody::Terminal(terminal) = &default.panes[0].body;
+        assert!(
+            terminal.close_on_exit,
+            "a pane whose command exits cleanly should tidy itself up by default"
+        );
+
+        let off = one_pane(json!({
+            "id": "a", "type": "terminal", "argv": ["x"], "close_on_exit": false,
+        }));
+        let PaneBody::Terminal(terminal) = &off.panes[0].body;
+        assert!(!terminal.close_on_exit);
+
+        let wrong = one_pane(json!({
+            "id": "a", "type": "terminal", "argv": ["x"], "close_on_exit": "yes",
+        }));
+        assert!(wrong.panes.is_empty());
+        assert_eq!(wrong.problems[0].location, "ide.panes[0].close_on_exit");
+    }
+
+    #[test]
+    fn auto_resume_without_a_resume_command_is_downgraded_not_obeyed() {
+        let parsed = one_pane(json!({
+            "id": "a", "type": "terminal", "argv": ["claude"], "auto_resume": true,
+        }));
+        // The pane survives — it is a fine pane, the flag just cannot mean
+        // anything — but nothing may auto-run.
+        let PaneBody::Terminal(terminal) = &parsed.panes[0].body;
+        assert!(!terminal.auto_resume);
+        assert_eq!(parsed.problems[0].location, "ide.panes[0].auto_resume");
+    }
+
+    #[test]
+    fn icons_are_a_name_from_the_allowlist_or_an_emoji() {
+        let named = one_pane(json!({
+            "id": "a", "type": "terminal", "argv": ["x"], "icon": "robot",
+        }));
+        assert_eq!(
+            named.panes[0].icon,
+            Some(PaneIcon::Name("robot".to_owned()))
+        );
+
+        let emoji = one_pane(json!({
+            "id": "a", "type": "terminal", "argv": ["x"], "icon": "🤖",
+        }));
+        assert_eq!(emoji.panes[0].icon, Some(PaneIcon::Emoji("🤖".to_owned())));
+
+        // A misspelled name is reported rather than rendered as literal text —
+        // which is the whole reason ASCII means "name".
+        let typo = one_pane(json!({
+            "id": "a", "type": "terminal", "argv": ["x"], "icon": "sparkle",
+        }));
+        assert!(typo.panes.is_empty());
+        assert!(typo.problems[0].message.contains("sparkles"));
+    }
+
+    #[test]
+    fn requires_bin_takes_names_not_paths() {
+        let parsed = one_pane(json!({
+            "id": "a", "type": "terminal", "argv": ["x"],
+            "requires_bin": ["/opt/homebrew/bin/claude"],
+        }));
+        assert!(parsed.panes.is_empty());
+        assert!(parsed.problems[0].message.contains("not a path"));
+    }
+
+    /// The schema's terminal branch is `additionalProperties: false`, so an
+    /// editor already rejects these. `veld lint` accepting them meant a typo
+    /// silently took a default — and both reachable defaults change behaviour.
+    #[test]
+    fn an_unknown_key_inside_a_pane_is_named_rather_than_ignored() {
+        let parsed = one_pane(json!({
+            "id": "a", "type": "terminal", "argv": ["x"],
+            "autoresume": true, "requiresBin": ["claude"],
+        }));
+        // The pane still works — an unknown key is a warning, not a reason to
+        // drop a pane that is otherwise fine.
+        assert_eq!(parsed.panes.len(), 1);
+        assert_eq!(parsed.problems.len(), 1);
+        assert_eq!(parsed.problems[0].location, "ide.panes[0]");
+        assert!(
+            parsed.problems[0].message.contains("\"autoresume\""),
+            "{:?}",
+            parsed.problems
+        );
+        assert!(
+            parsed.problems[0].message.contains("\"requiresBin\""),
+            "{:?}",
+            parsed.problems
+        );
+    }
+
+    /// The key list and the schema's terminal branch are two hand-maintained
+    /// copies of one set; nothing but this ties them together.
+    #[test]
+    fn the_schema_terminal_pane_keys_match_the_parser() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .expect("workspace root")
+            .join("schema/v3/veld.schema.json");
+        let schema: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("schema is readable"))
+                .expect("schema is valid JSON");
+        let branch = &schema["$defs"]["pane"]["allOf"][0]["then"];
+        assert_eq!(
+            branch["additionalProperties"],
+            serde_json::json!(false),
+            "the key check below only means anything while the schema is closed"
+        );
+        let mut keys: Vec<&str> = branch["properties"]
+            .as_object()
+            .expect("$defs.pane terminal branch must list properties")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(keys, TERMINAL_PANE_KEYS.to_vec());
+    }
+
+    #[test]
+    fn a_duplicate_pane_id_keeps_the_first_and_reports_the_second() {
+        let parsed = section(json!({
+            "panes": [
+                { "id": "a", "type": "terminal", "label": "First", "argv": ["x"] },
+                { "id": "a", "type": "terminal", "label": "Second", "argv": ["y"] },
+            ]
+        }));
+        assert_eq!(parsed.panes.len(), 1);
+        assert_eq!(parsed.panes[0].label, "First");
+        assert_eq!(parsed.problems[0].location, "ide.panes[1].id");
+    }
+
+    #[test]
+    fn a_pane_missing_its_required_keys_is_reported_not_silently_dropped() {
+        let no_id = one_pane(json!({ "type": "terminal", "argv": ["x"] }));
+        assert_eq!(no_id.problems[0].location, "ide.panes[0].id");
+
+        let no_type = one_pane(json!({ "id": "a", "argv": ["x"] }));
+        assert_eq!(no_type.problems[0].location, "ide.panes[0].type");
+
+        let bad_id = one_pane(json!({ "id": "a b", "type": "terminal", "argv": ["x"] }));
+        assert_eq!(bad_id.problems[0].location, "ide.panes[0].id");
+    }
+
+    #[test]
+    fn a_wrong_typed_panes_key_is_ignored_whole_and_reported() {
+        let parsed = section(json!({ "panes": { "id": "a" } }));
+        assert!(parsed.panes.is_empty());
+        assert_eq!(parsed.problems[0].location, "ide.panes");
+    }
+
+    /// `panes` moved out of `uninterpreted` when it gained a meaning; F8 must
+    /// stop naming it or `veld lint` tells authors their panes are not rendered.
+    #[test]
+    fn panes_is_no_longer_reported_as_uninterpreted() {
+        let parsed = one_pane(json!({ "id": "a", "type": "terminal", "argv": ["x"] }));
+        assert!(parsed.uninterpreted.is_empty());
+        assert!(!parsed.is_empty());
+    }
+
+    /// Same drift gate as the permission ids: the schema's enum is what an
+    /// editor autocompletes from, and nothing else ties it to this list.
+    #[test]
+    fn the_schema_icon_enum_matches_the_allowlist() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .expect("workspace root")
+            .join("schema/v3/veld.schema.json");
+        let schema: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("schema is readable"))
+                .expect("schema is valid JSON");
+        let names: Vec<&str> = schema["$defs"]["paneIconName"]["enum"]
+            .as_array()
+            .expect("$defs.paneIconName.enum must exist")
+            .iter()
+            .map(|v| v.as_str().expect("names are strings"))
+            .collect();
+        assert_eq!(names, PANE_ICON_NAMES.to_vec());
+    }
+
+    #[test]
+    fn pane_icon_names_and_builtins_are_sorted_and_unique() {
+        for list in [PANE_ICON_NAMES, PANE_BUILTINS, TERMINAL_PANE_KEYS] {
+            let mut sorted = list.to_vec();
+            sorted.sort_unstable();
+            sorted.dedup();
+            assert_eq!(sorted, list.to_vec());
+        }
     }
 
     #[test]

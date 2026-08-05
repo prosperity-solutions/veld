@@ -1,0 +1,81 @@
+{
+  "$schema": "https://veld.oss.life.li/schema/v3/veld.schema.json",
+  "schemaVersion": "3",
+  "name": "ide-panes",
+  // Panes this project adds to Veld Desktop's pane menu. Nothing here is
+  // specific to a vendor: veld only knows how to run a command in a terminal
+  // and how to hand it a stable token, and the config decides what that
+  // command is.
+  "ide": {
+    "panes": [
+      {
+        // The worked example. `claude --session-id <uuid>` starts a
+        // conversation under an id veld chose, so `claude --resume <same uuid>`
+        // can pick that exact conversation back up after a reboot — even
+        // though the shell itself is long gone.
+        "id": "claude",
+        "type": "terminal",
+        "label": "Claude",
+        "description": "Claude Code in this worktree",
+        "icon": "sparkles",
+        "requires_bin": ["claude"],
+        "argv": ["claude", "--session-id", "${veld.pane.token}"],
+        "resume": { "argv": ["claude", "--resume", "${veld.pane.token}"] },
+        "auto_resume": true
+      },
+      {
+        // A second mode is a second pane, not a variant: panes have no
+        // dependency graph and no preset to select them by, so the flat list
+        // is the whole model. Each pane keeps its own token, so "which
+        // conversation am I resuming" is never ambiguous.
+        "id": "claude-yolo",
+        "type": "terminal",
+        "label": "Claude (skip permissions)",
+        "icon": "bolt",
+        "requires_bin": ["claude"],
+        "argv": [
+          "claude",
+          "--dangerously-skip-permissions",
+          "--session-id",
+          "${veld.pane.token}"
+        ],
+        "resume": { "argv": ["claude", "--resume", "${veld.pane.token}"] }
+      },
+      {
+        // The other shape: `codex` mints its own session id and has no flag to
+        // be told one, so this pane carries no token at all. `codex resume
+        // --last` continues the most recent session, filtered to this
+        // worktree — which still gives the pane a Resume button and still
+        // works with `auto_resume`. What it gives up is per-pane identity: two
+        // Codex panes here would resume the same session.
+        "id": "codex",
+        "type": "terminal",
+        "label": "Codex",
+        "icon": "robot",
+        "requires_bin": ["codex"],
+        "argv": ["codex"],
+        "resume": { "argv": ["codex", "resume", "--last"] }
+      },
+      {
+        // A pane needs neither a resume command nor a session id. This one is
+        // just a shortcut that saves typing, and an emoji stands in for a
+        // Tabler icon name.
+        "id": "logs",
+        "type": "terminal",
+        "label": "Tail the dev log",
+        "icon": "📜",
+        "shell": "tail -f \"${veld.root}/tmp/dev.log\""
+      }
+    ]
+  },
+  "nodes": {
+    "web": {
+      "type": "start_server",
+      "default_variant": "dev",
+      "probes": { "readiness": { "type": "port" } },
+      "variants": {
+        "dev": { "argv": ["npm", "run", "dev"] }
+      }
+    }
+  }
+}

@@ -29,6 +29,95 @@
         "origin": "https://*.veld.localhost:*",
         "allow": ["notifications", "display-capture"]
       }
+    ],
+    // Dogfooding, and the worked examples: this is a repo whose contributors
+    // run a coding agent in a terminal all day. Note that nothing about
+    // `claude` or `codex` is known to veld — they are names in this file, the
+    // same way `npx browser-sync` below is.
+    //
+    // The two agents demonstrate the **two shapes** a resumable pane can take,
+    // which is why both are here rather than one:
+    //
+    //   claude — accepts an id veld chose, so each pane owns its own
+    //            conversation and two panes never collide.
+    //   codex  — mints its own id and cannot be told one, so the pane carries
+    //            no token and leans on the tool's own "most recent session".
+    "panes": [
+      {
+        "id": "claude",
+        "type": "terminal",
+        "label": "Claude",
+        "description": "Claude Code in this worktree",
+        "icon": "robot",
+        "requires_bin": ["claude"],
+        // `--session-id` creates the conversation under an id veld chose, which
+        // is what makes the `resume` below able to name it after a reboot.
+        "argv": ["claude", "--session-id", "${veld.pane.token}"],
+        "resume": { "argv": ["claude", "--resume", "${veld.pane.token}"] },
+        "auto_resume": true
+      },
+      {
+        // The other shape. `codex` has no launch-time session-id flag — it
+        // mints its own UUID — so there is nothing to interpolate
+        // `${veld.pane.token}` into, and the pane simply does not use one.
+        //
+        // `codex resume` takes a session id, but since we cannot choose it,
+        // `--last` is the reachable handle: continue the most recent session.
+        // Codex's own resume filters by working directory unless `--all` is
+        // passed, so "most recent" means most recent *in this worktree*.
+        //
+        // The cost of having no token, and the reason the claude pane above
+        // has one: two Codex panes open in the same worktree would both resume
+        // the same session, because "the most recent one" is a single answer.
+        "id": "codex",
+        "type": "terminal",
+        "label": "Codex",
+        "description": "Codex CLI in this worktree",
+        "icon": "robot",
+        "requires_bin": ["codex"],
+        "argv": ["codex"],
+        "resume": { "argv": ["codex", "resume", "--last"] },
+        // Left off deliberately, so the two agent panes differ in this too:
+        // Claude resumes itself when Veld Desktop restarts, Codex waits for a
+        // click. Flip it to true if you prefer the other trade.
+        "auto_resume": false
+      },
+      {
+        // A second mode is a second pane, not a variant — see
+        // docs/configuration.md#there-are-no-pane-variants.
+        "id": "claude-yolo",
+        "type": "terminal",
+        "label": "Claude (skip permissions)",
+        "icon": "bolt",
+        "requires_bin": ["claude"],
+        "argv": [
+          "claude",
+          "--dangerously-skip-permissions",
+          "--session-id",
+          "${veld.pane.token}"
+        ],
+        "resume": { "argv": ["claude", "--resume", "${veld.pane.token}"] }
+      },
+      {
+        // The third shape: one-shot. No resume, no token, an emoji instead of
+        // an icon name — a pane needs none of the machinery to be worth having.
+        //
+        // Deliberately does *not* `exec $SHELL -l` afterwards. Git pages its
+        // log, so `q` quits the pager, git exits, the shell exits 0, and
+        // `close_on_exit` tidies the pane away — which is what pressing `q`
+        // ought to mean. Dropping into a shell instead left the pane sitting at
+        // a prompt nobody asked for.
+        "id": "git-log",
+        "type": "terminal",
+        "label": "Git log",
+        "icon": "📜",
+        "requires_bin": ["git"],
+        // Quoted, and `argv` would be better still — see the note on quoting
+        // in docs/configuration.md. A path with a space in it is the everyday
+        // reason; `${veld.branch}` is the sharp one, since a branch name can
+        // come from someone else's pull request.
+        "shell": "git -C \"${veld.root}\" log --oneline --graph --decorate -40"
+      }
     ]
   },
   "nodes": {

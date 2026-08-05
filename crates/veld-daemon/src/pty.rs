@@ -273,12 +273,27 @@ const VITE_DEV_PORT: u16 = 5199;
 /// Unlike `desktop::routes`, CSRF is **not** applied as a blanket layer here:
 /// `/api/pty/attach` is a GET (a WebSocket upgrade is a GET) that a layer
 /// keyed on the method would wave through anyway, and it carries its own,
-/// stronger gate. The other handlers call [`check_csrf`] explicitly. A new
-/// route added to this router gets neither gate for free — give it one.
+/// stronger gate.
+///
+/// **A new route gets no gate for free.** Which gate it needs depends on its
+/// method, and the distinction matters because getting it backwards fails in
+/// opposite directions:
+///
+/// - **A mutating route must call [`check_csrf`] explicitly**, as `mint_ticket`
+///   and `close_session` do. A blanket layer would not have helped — the one
+///   route that most needs a gate is a GET.
+/// - **A safe route's gate is the absent CORS layer.** The daemon sends no
+///   `Access-Control-Allow-Origin`, so another origin can issue the request but
+///   never read the answer. `list_pane_sessions` relies on exactly this, and
+///   `check_csrf` is the *wrong* gate for it: the UI sends `X-Veld-Request` only
+///   on mutations, so requiring it would break the call. A safe route must
+///   therefore also stay genuinely safe — if it ever grows a side effect, it
+///   needs the header and the client needs to send it.
 pub fn routes() -> Router {
     Router::new()
         .route("/api/pty/tickets", post(mint_ticket))
         .route("/api/pty/attach", get(attach))
+        .route("/api/pty/panes/{worktree_id}", get(list_pane_sessions))
         .route("/api/pty/sessions/{id}", delete(close_session))
         .route("/api/pty/sessions/{id}/open-url", post(open_url))
 }
@@ -294,6 +309,28 @@ pub fn routes() -> Router {
 /// without it.
 pub fn prepare_shims() {
     let _ = shims::dir();
+}
+
+/// Which of a worktree's config-declared panes have something to resume.
+///
+/// The UI needs this to label a restored pane's button — "Resume Claude" when
+/// the tool has a conversation waiting, "Start Claude" when it does not — and
+/// the answer lives in the database, not in the browser storage the layout came
+/// from. One request per worktree rather than one per pane, and never the token:
+/// the client has no use for it.
+async fn list_pane_sessions(
+    Path(worktree_id): Path<i64>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let db = open_db().map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "database error"))?;
+    let rows = db.resumable_panes(worktree_id).map_err(|e| {
+        warn!("pane sessions: database error: {e}");
+        err(StatusCode::INTERNAL_SERVER_ERROR, "database error")
+    })?;
+    let resumable: Vec<serde_json::Value> = rows
+        .into_iter()
+        .map(|(session_id, spec_id)| serde_json::json!({ "session_id": session_id, "pane": spec_id }))
+        .collect();
+    Ok(Json(serde_json::json!({ "resumable": resumable })))
 }
 
 /// Start the background task that collects sessions nobody came back for.
@@ -914,6 +951,10 @@ struct Ticket {
     cwd: PathBuf,
     /// Worktree alias, for log lines only.
     label: String,
+    /// What to run instead of a login shell, for a config-declared pane.
+    /// Resolved here, from the project's own config, so the client never gets
+    /// to say what the daemon executes.
+    pane: Option<PaneLaunch>,
     /// `terminal.openUrlsInApp`, read at the same moment and for the same reason as
     /// the field below. It gates the session's whole environment: with the feature
     /// off, veld puts nothing in the shell.
@@ -924,6 +965,40 @@ struct Ticket {
     /// where it is read, and the AGENTS.md note it points at.
     intercept_system_open: bool,
     expires_at: Instant,
+}
+
+/// A resolved config-declared pane launch, ready to hand to a holder.
+struct PaneLaunch {
+    /// The `ide.panes[].id` this came from.
+    spec_id: String,
+    /// The pane's display label, so the holder's exit notice can name what
+    /// actually ran instead of claiming a shell exited.
+    label: String,
+    /// The interpolated command. A `shell` spec is already wrapped as
+    /// `["sh", "-c", …]` here so the holder only ever deals with an argv.
+    argv: Vec<String>,
+    env: Vec<(String, String)>,
+    /// The token this launch runs under, and whether it is new.
+    ///
+    /// A fresh launch's token is recorded only once the holder is up (see
+    /// [`obtain_session`]); a resumed one is already in the database, so there
+    /// is nothing to write.
+    token: String,
+    fresh: bool,
+}
+
+/// Which command a config-declared pane should run.
+///
+/// Request-only: the response does not echo it back. The client already knows
+/// what it asked for, and derives everything it renders from that plus
+/// `resumed` — an echoed field with no reader is a contract nobody honours.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum PaneMode {
+    /// Start the tool from scratch under a newly minted token.
+    Fresh,
+    /// Re-run the pane's `resume` command under the token it launched with.
+    Resume,
 }
 
 static TICKETS: LazyLock<Mutex<HashMap<String, Ticket>>> =
@@ -937,6 +1012,18 @@ struct TicketRequest {
     /// reattaches to it (that is how a reload gets its shell back); an unknown
     /// id starts a new one.
     session_id: String,
+    /// The `ide.panes[].id` this pane was created from, for a config-declared
+    /// pane. Absent for an ordinary terminal, which runs a login shell.
+    ///
+    /// Only ever a *name*: the command it resolves to comes from the project's
+    /// config, read here. A client that could post a command would be a client
+    /// that could make the daemon run anything.
+    #[serde(default)]
+    pane: Option<String>,
+    /// Which of the pane's two commands to run. Ignored without `pane`, and
+    /// ignored when the session is already live — there is nothing to spawn.
+    #[serde(default)]
+    mode: Option<PaneMode>,
 }
 
 #[derive(Serialize)]
@@ -946,6 +1033,268 @@ struct TicketResponse {
     /// True when a live session with this id is waiting — the client uses it to
     /// distinguish "your shell is still here" from "starting a new one".
     resumed: bool,
+}
+
+/// Resolve a config-declared pane into the command a holder should run.
+///
+/// Everything the client supplied is a *name*; the command comes from the
+/// project's own `veld.json`, read here from the worktree the ticket already
+/// resolved. That is the same boundary the actions API keeps — the daemon never
+/// executes a command a request body contained.
+async fn resolve_pane(
+    db: &veld_core::db::Db,
+    spec_id: &str,
+    mode: PaneMode,
+    worktree_id: i64,
+    session_id: &str,
+    worktree_path: &FsPath,
+    branch: &str,
+) -> Result<PaneLaunch, ApiError> {
+    // `root_config_in`, not `discover_config`: the worktree *is* the project
+    // root here, and walking upward would find a parent repo's config and offer
+    // its panes in a checkout that never declared them. Both legal filenames are
+    // handled, which is the other half of why this helper exists.
+    let config_path = veld_core::config::root_config_in(worktree_path).ok_or_else(|| {
+        err(
+            StatusCode::CONFLICT,
+            "this worktree has no veld.json, so it declares no panes",
+        )
+    })?;
+    let config = veld_core::config::parse_config(&config_path).map_err(|e| {
+        err(
+            StatusCode::CONFLICT,
+            format!("this worktree's veld.json could not be read: {e}"),
+        )
+    })?;
+    let section = config.ide_section();
+    let pane = section.pane(spec_id).ok_or_else(|| {
+        err(
+            StatusCode::NOT_FOUND,
+            format!("this project declares no pane called {spec_id:?}"),
+        )
+    })?;
+
+    let path = veld_core::user_path::cached_user_path().await;
+    // Re-checked here and not only in the menu: the config can change, or a tool
+    // can be uninstalled, between the pane being offered and being clicked.
+    if let Some(missing) = pane
+        .requires_bin
+        .iter()
+        .find(|bin| which_on_path(bin, &path).is_none())
+    {
+        return Err(err(
+            StatusCode::CONFLICT,
+            format!(
+                "{missing} is not installed, so the {} pane cannot start",
+                pane.label
+            ),
+        ));
+    }
+
+    let veld_core::ide::PaneBody::Terminal(terminal) = &pane.body;
+    let (spec, token, fresh) = match mode {
+        PaneMode::Fresh => (&terminal.launch, veld_core::db::mint_pane_token(), true),
+        PaneMode::Resume => {
+            let resume = terminal.resume.as_ref().ok_or_else(|| {
+                err(
+                    StatusCode::CONFLICT,
+                    format!("the {} pane has no resume command", pane.label),
+                )
+            })?;
+            // No token means this pane never launched, so there is nothing for
+            // the tool to resume. Falling back to a fresh launch here is the one
+            // thing this must not do: it would silently start a new billable
+            // conversation and read to the user as the old one being lost.
+            let recorded = db
+                .pane_session(session_id)
+                .map_err(|e| {
+                    warn!("pty ticket: could not read the pane session: {e}");
+                    err(StatusCode::INTERNAL_SERVER_ERROR, "database error")
+                })?
+                .filter(|s| s.worktree_id == worktree_id && s.spec_id == spec_id)
+                .ok_or_else(|| {
+                    err(
+                        StatusCode::CONFLICT,
+                        "this pane has nothing to resume — start it fresh",
+                    )
+                })?;
+            (resume, recorded.token, false)
+        }
+    };
+
+    let ctx = pane_context(pane, &token, worktree_path, branch, &config);
+    let resolved = spec.interpolate(&ctx).map_err(|e| {
+        err(
+            StatusCode::CONFLICT,
+            format!(
+                "the {} pane's command could not be resolved: {e}",
+                pane.label
+            ),
+        )
+    })?;
+    let argv = match resolved {
+        veld_core::config::CommandSpec::Argv(argv) => argv,
+        // Wrapped here rather than in the holder so the holder only ever knows
+        // about an argv, and `shell` keeps meaning exactly what it means for
+        // every other command position in the config.
+        veld_core::config::CommandSpec::Shell(script) => {
+            vec!["sh".to_owned(), "-c".to_owned(), script]
+        }
+    };
+    if argv.is_empty() || argv[0].is_empty() {
+        return Err(err(
+            StatusCode::CONFLICT,
+            format!("the {} pane's command is empty", pane.label),
+        ));
+    }
+
+    Ok(PaneLaunch {
+        spec_id: spec_id.to_owned(),
+        label: pane.label.clone(),
+        argv,
+        env: vec![
+            // The load-bearing one. The holder's shell path skips this because a
+            // login shell computes PATH itself, but a pane command is spawned
+            // directly — without it, every user-installed CLI a pane exists to
+            // run is missing from the daemon's bare service PATH.
+            ("PATH".to_owned(), path),
+            ("VELD_PANE_ID".to_owned(), pane.id.clone()),
+            ("VELD_PANE_TOKEN".to_owned(), token.clone()),
+        ],
+        token,
+        fresh,
+    })
+}
+
+/// The variables a pane command may interpolate.
+///
+/// Deliberately small — a pane has no run, no node and no ports, so most of the
+/// `${veld.*}` family would resolve to nothing here. The names must be exactly
+/// `veld_core::ide::PANE_BUILTINS`, which is what `veld lint` accepts: a name
+/// this populates but lint rejects is unreachable, and a name lint accepts but
+/// this omits produces a pane that passes lint and then dies at spawn with
+/// "command could not be resolved". `pane_context_populates_every_lintable_name`
+/// is what actually holds the two together.
+fn pane_context(
+    pane: &veld_core::ide::PaneDef,
+    token: &str,
+    worktree_path: &FsPath,
+    branch: &str,
+    config: &veld_core::config::VeldConfig,
+) -> veld_core::variables::VariableContext {
+    let mut builtins = HashMap::new();
+    builtins.insert("pane.id".to_owned(), pane.id.clone());
+    builtins.insert("pane.label".to_owned(), pane.label.clone());
+    builtins.insert("pane.token".to_owned(), token.to_owned());
+    // **The same meanings these names have everywhere else.** `${veld.worktree}`
+    // is the slugified directory *name* and `${veld.branch}` is slugified too
+    // (`orchestrator.rs`'s `BuiltinScope::apply`, and the reference table in
+    // docs/configuration.md); `${veld.root}` is the path. Redefining `worktree`
+    // as a path here — which an earlier revision did, because a pane command
+    // wants a path far more often than a slug — made one name mean two things
+    // depending on scope, and the next person to "fix" it toward the documented
+    // meaning would silently break every `-C "${veld.worktree}"` command.
+    //
+    // Slugifying `branch` also closes the one value here an outsider chooses:
+    // check out someone's pull-request branch and the name is theirs, so a
+    // `shell` pane interpolating it raw would run whatever they named it.
+    builtins.insert(
+        "worktree".to_owned(),
+        veld_core::url::slugify(
+            &worktree_path
+                .file_name()
+                .map_or_else(String::new, |n| n.to_string_lossy().into_owned()),
+        ),
+    );
+    builtins.insert("root".to_owned(), worktree_path.display().to_string());
+
+    builtins.insert("branch".to_owned(), veld_core::url::slugify(branch));
+    builtins.insert("project".to_owned(), config.name.clone());
+    builtins.insert(
+        "username".to_owned(),
+        veld_core::orchestrator::whoami_username(),
+    );
+    veld_core::variables::VariableContext {
+        builtins,
+        ..Default::default()
+    }
+}
+
+/// How long a `requires_bin` answer is reused before the filesystem is asked
+/// again.
+///
+/// The worktree listing is polled, so an uncached lookup would `stat` every
+/// `PATH` entry for every declared pane of every worktree, several times a
+/// minute. A minute of staleness costs at most one poll's delay before a
+/// just-installed tool's pane appears, and the launch path re-checks anyway.
+const BIN_CACHE_TTL: Duration = Duration::from_secs(60);
+
+static BIN_CACHE: LazyLock<Mutex<HashMap<String, (bool, Instant)>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Which of a pane's required executables are **not** installed, for the pane
+/// menu.
+///
+/// Returns the names rather than a boolean because the menu has to say *which*
+/// tool is missing: the pane's own id is not it (`claude-yolo` needs `claude`,
+/// `git-log` needs `git`), and guessing produced tooltips like "Git log needs
+/// git-log".
+///
+/// Optimistic when the user's `PATH` has not been resolved yet — a daemon that
+/// has just started publishes it within about a second, and hiding a pane
+/// because the answer is not in yet is worse than showing one whose launch then
+/// explains itself. The launch path re-checks against the real `PATH` and is the
+/// gate that actually decides.
+pub(crate) fn missing_pane_binaries(required: &[String]) -> Vec<String> {
+    if required.is_empty() {
+        return Vec::new();
+    }
+    let Some(path) = veld_core::user_path::published_user_path() else {
+        return Vec::new();
+    };
+    required
+        .iter()
+        .filter(|bin| !installed(bin, &path))
+        .cloned()
+        .collect()
+}
+
+/// One cached `PATH` lookup. Never spawns anything — see the caller.
+fn installed(bin: &str, path: &str) -> bool {
+    let now = Instant::now();
+    if let Some((found, at)) = BIN_CACHE.lock().expect("bin cache poisoned").get(bin)
+        && now.duration_since(*at) < BIN_CACHE_TTL
+    {
+        return *found;
+    }
+    let found = which_on_path(bin, path).is_some();
+    BIN_CACHE
+        .lock()
+        .expect("bin cache poisoned")
+        .insert(bin.to_owned(), (found, now));
+    found
+}
+
+/// Whether `name` resolves to an executable file on `path`.
+///
+/// A plain lookup rather than spawning anything: deciding whether to *offer* a
+/// pane must never run a config-declared command, and this is called often
+/// enough (once per pane, per menu render) that a fork would be felt.
+fn which_on_path(name: &str, path: &str) -> Option<PathBuf> {
+    for dir in std::env::split_paths(path) {
+        let candidate = dir.join(name);
+        if is_executable_file(&candidate) {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn is_executable_file(path: &FsPath) -> bool {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::metadata(path)
+        .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
 }
 
 /// Mint a single-use ticket for a terminal in a registered worktree.
@@ -1039,6 +1388,24 @@ async fn mint_ticket(
         ));
     }
 
+    // Only a spawn needs a command. A reattach is already running whatever it
+    // was started with, so resolving here would read the config, check PATH and
+    // possibly refuse — for a session the answer cannot change.
+    let pane = match (&body.pane, resumed) {
+        (Some(spec_id), false) => Some(
+            resolve_pane(
+                &db,
+                spec_id,
+                body.mode.unwrap_or(PaneMode::Fresh),
+                body.worktree_id,
+                &body.session_id,
+                &cwd,
+                &wt.branch,
+            )
+            .await?,
+        ),
+        _ => None,
+    };
     let ticket = uuid::Uuid::new_v4().simple().to_string();
     let now = Instant::now();
     {
@@ -1054,6 +1421,7 @@ async fn mint_ticket(
                 worktree_id: body.worktree_id,
                 cwd,
                 label: wt.alias.clone(),
+                pane,
                 open_urls_in_app,
                 intercept_system_open,
                 expires_at: now + TICKET_TTL,
@@ -1532,12 +1900,22 @@ async fn obtain_session(
         // shim directory onto `PATH` after the user's own startup files have run.
         // Computed here rather than in the holder because the holder is a dumb PTY
         // owner — it knows nothing about instances, ports or the CLI's location.
-        env: shims::session_env(
-            &ticket.session_id,
-            &holder::login_shell(),
-            ticket.open_urls_in_app,
-            ticket.intercept_system_open,
-        ),
+        //
+        // A config-declared pane's own entries are layered on top: its resolved
+        // `PATH` is load-bearing (no login shell computes one for a directly
+        // spawned `argv`), so it must win over anything the shim env carries.
+        env: {
+            let mut env = shims::session_env(
+                &ticket.session_id,
+                &holder::login_shell(),
+                ticket.open_urls_in_app,
+                ticket.intercept_system_open,
+            );
+            if let Some(pane) = ticket.pane.as_ref() {
+                env.extend(pane.env.iter().cloned());
+            }
+            env
+        },
         // The holder's own self-destruct grace, used when the *daemon* is gone and
         // nothing is left to reap it. Read at spawn, so a holder keeps the value
         // that was configured when its shell started: changing the setting affects
@@ -1545,6 +1923,8 @@ async fn obtain_session(
         // running, and reaching into them would mean a protocol message whose only
         // job is to move a timer nobody is waiting on.
         orphan_grace_secs: detach_grace_hint().as_secs(),
+        argv: ticket.pane.as_ref().map(|p| p.argv.clone()),
+        pane_label: ticket.pane.as_ref().map(|p| p.label.clone()),
     };
     let attached = start_holder(&cfg).await.map_err(SessionError::Spawn)?;
 
@@ -1554,6 +1934,19 @@ async fn obtain_session(
         return Ok((existing.clone(), true));
     }
     let session = register(&mut sessions, attached, slot);
+    // **Released before the database write below.** `record_pane_launch` opens
+    // SQLite synchronously, and `Db::open` sets a 10s busy timeout — so one
+    // contended writer (the stats sampler, a concurrent `veld` CLI) would hold
+    // the *global* session registry, and park a runtime worker, for up to ten
+    // seconds. Every other attach, resize, close and the reaper queues behind it.
+    drop(sessions);
+    // Only now, with a holder actually running the command, does the pane's
+    // identity become a fact worth remembering — the row is what makes this pane
+    // resumable, and one written before the spawn would outlive a failure and
+    // offer a resume for a conversation that was never created.
+    if let Some(pane) = ticket.pane.as_ref().filter(|p| p.fresh) {
+        record_pane_launch(ticket, pane);
+    }
     info!(
         session = %session.id,
         worktree = %ticket.label,
@@ -1561,6 +1954,31 @@ async fn obtain_session(
         "terminal session started"
     );
     Ok((session, false))
+}
+
+/// Remember the identity a freshly launched pane is running under.
+///
+/// Best-effort by design: the shell is already up, and a database that cannot be
+/// written is not a reason to tear it down. The cost of the failure is that the
+/// pane cannot be resumed later, which is the same position every pane without a
+/// `resume` command is in.
+fn record_pane_launch(ticket: &Ticket, pane: &PaneLaunch) {
+    let outcome = veld_core::db::Db::open().and_then(|db| {
+        db.record_pane_session(
+            &ticket.session_id,
+            ticket.worktree_id,
+            &pane.spec_id,
+            &pane.token,
+        )
+        .map(|_| ())
+    });
+    if let Err(e) = outcome {
+        warn!(
+            session = %ticket.session_id,
+            pane = %pane.spec_id,
+            "could not record the pane session, so this pane will not be resumable: {e}"
+        );
+    }
 }
 
 /// Put an attached holder in the registry and start its two pumps.
@@ -2185,6 +2603,43 @@ fn clamp_dimension(v: Option<u16>, default: u16) -> u16 {
 mod tests {
     use super::*;
 
+    /// `veld lint` and the spawn path must agree on the pane variable scope,
+    /// exactly.
+    ///
+    /// Two hand-maintained lists: `ide::PANE_BUILTINS` (what lint accepts) and
+    /// the `builtins.insert` calls in [`pane_context`] (what actually resolves).
+    /// A name in the first but not the second is a pane that lints clean and
+    /// then dies at spawn with "command could not be resolved" — the failure a
+    /// closed scope exists to prevent. A name in the second but not the first is
+    /// unreachable. The comment on `pane_context` used to *claim* this was
+    /// checked; nothing checked it.
+    #[test]
+    fn pane_context_populates_every_lintable_name() {
+        let pane = veld_core::ide::PaneDef {
+            id: "probe".to_owned(),
+            label: "Probe".to_owned(),
+            description: None,
+            icon: None,
+            requires_bin: Vec::new(),
+            body: veld_core::ide::PaneBody::Terminal(veld_core::ide::TerminalPane {
+                launch: veld_core::config::CommandSpec::Argv(vec!["true".to_owned()]),
+                resume: None,
+                auto_resume: false,
+                close_on_exit: true,
+            }),
+        };
+        let cfg: veld_core::config::VeldConfig = serde_json::from_value(serde_json::json!({
+            "schemaVersion": "3",
+            "name": "probe",
+            "nodes": {},
+        }))
+        .expect("minimal config");
+        let ctx = pane_context(&pane, "tok", FsPath::new("/tmp/wt"), "main", &cfg);
+        let mut names: Vec<&str> = ctx.builtins.keys().map(String::as_str).collect();
+        names.sort_unstable();
+        assert_eq!(names, veld_core::ide::PANE_BUILTINS.to_vec());
+    }
+
     /// A holder speaking a version this build does not know must be refused —
     /// **and** told to hang up, or its shell would outlive every daemon that will
     /// ever refuse it identically.
@@ -2429,6 +2884,7 @@ mod tests {
                 worktree_id: 1,
                 cwd: std::env::temp_dir(),
                 label: "t".to_owned(),
+                pane: None,
                 open_urls_in_app: true,
                 intercept_system_open: true,
                 expires_at: Instant::now() + ttl,
@@ -2453,6 +2909,7 @@ mod tests {
                 worktree_id: 1,
                 cwd: std::env::temp_dir(),
                 label: "t".to_owned(),
+                pane: None,
                 open_urls_in_app: true,
                 intercept_system_open: true,
                 expires_at: Instant::now() - Duration::from_secs(1),
@@ -2690,6 +3147,7 @@ mod tests {
                     worktree_id: 1,
                     cwd: cwd.to_path_buf(),
                     label: "test".to_owned(),
+                    pane: None,
                     open_urls_in_app: true,
                     intercept_system_open: true,
                     expires_at: Instant::now() + TICKET_TTL,
@@ -2776,6 +3234,7 @@ mod tests {
                     worktree_id: 1,
                     cwd: std::env::temp_dir(),
                     label: "test".to_owned(),
+                    pane: None,
                     open_urls_in_app: true,
                     intercept_system_open: true,
                     expires_at: Instant::now() - Duration::from_secs(1),

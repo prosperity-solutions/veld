@@ -1483,7 +1483,7 @@ already lost its leading zero, so it is refused rather than guessed at.
 
 ---
 
-## `ide`: quicklinks, permissions and external origins
+## `ide`: quicklinks, permissions, external origins and panes
 
 `ide` is where a project configures Veld's own IDE surfaces — Veld Desktop and
 the `/ide` view in a browser. Three keys under it are interpreted; the rest of
@@ -1706,12 +1706,238 @@ because veld does not interpret it and has no idea how to combine two of them.
 
 ---
 
+### `ide.panes`: the project's own panes
+
+A pane is a tab in Veld Desktop's dock. Veld ships four kinds (terminal,
+browser, run logs, node health); `ide.panes` lets a project add its own to the
+`+` menu, the pane chooser and the ⌘K palette. Today a declared pane is always a
+**terminal** that runs the project's command instead of a login shell.
+
+```jsonc
+{
+  "ide": {
+    "panes": [
+      {
+        "id": "claude",
+        "type": "terminal",
+        "label": "Claude",
+        "description": "Claude Code in this worktree",
+        "icon": "sparkles",
+        "requires_bin": ["claude"],
+        "argv": ["claude", "--session-id", "${veld.pane.token}"],
+        "resume": { "argv": ["claude", "--resume", "${veld.pane.token}"] },
+        "auto_resume": true
+      }
+    ]
+  }
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `id` | **Required.** Stable, unique in the project; `[A-Za-z0-9_-]`, ≤64 characters. Names the pane on the wire and in `${veld.pane.id}` — the user sees `label`. |
+| `type` | **Required.** `terminal` is the only kind this version renders. The discriminator is required so a future kind is additive; a type veld does not know is skipped with a lint problem and the rest of `ide.panes` still applies. |
+| `label` | Menu and tab text. Defaults to `id`. |
+| `description` | One line, shown in the menu and as the tab's tooltip. |
+| `icon` | An icon name or an emoji — see [below](#pane-icons). |
+| `requires_bin` | Executable **names** (never paths) that must be on your `PATH` for the pane to be offered. Resolved with a lookup, never by running anything. |
+| `argv` / `shell` | **Required**, exactly one. What a fresh pane runs. |
+| `resume` | An object with `argv` or `shell`: what to run instead when the pane is restored and its shell is gone. |
+| `auto_resume` | Whether veld may run `resume` without being asked. Defaults to `false`. |
+| `close_on_exit` | Whether a **clean** exit closes the pane. Defaults to `true`. A non-zero exit never closes it. |
+
+Nothing about this is specific to a vendor. Veld knows how to run a command in a
+terminal and how to hand it a stable token; which tool that is, and what its
+resume flag is called, lives in your repo.
+
+#### Faking a session that survived a reboot
+
+Nothing can carry a running process across a reboot — Veld's terminals already
+survive a daemon restart and a `veld update` (each shell lives in its own holder
+process), but a reboot ends every one of them.
+
+What *can* survive is the conversation. A coding-agent CLI keeps its own
+transcript keyed by a session id it is told, so if veld launches the tool under
+an id it chose, it can later re-launch with that same id and the conversation
+comes back. That is what `${veld.pane.token}` is:
+
+- Veld mints a UUID the first time a pane launches and remembers it against that
+  pane, in its database. **The token never reaches the browser or the app** — it
+  is interpolated into the command inside the daemon.
+- A fresh launch always mints a **new** token. `--session-id` is a *create*, so
+  reusing one is at best refused, and "start fresh" has to mean a new
+  conversation.
+- Two panes of the same type in one worktree therefore get different tokens.
+  That is the case the token exists for: with only `claude --continue`, the
+  second pane would reopen the first pane's conversation.
+
+#### The other shape: a tool that won't take your id
+
+Plenty of tools mint their own session id and offer no way to be told one.
+`codex` is the worked example: there is no launch-time `--session-id`, but
+`codex resume` will continue the most recent session, and its resume is filtered
+by working directory unless `--all` is passed — so "most recent" means most
+recent *in this worktree*, which is exactly a pane's scope.
+
+```jsonc
+{
+  "id": "codex",
+  "type": "terminal",
+  "label": "Codex",
+  "icon": "robot",
+  "requires_bin": ["codex"],
+  "argv": ["codex"],
+  "resume": { "argv": ["codex", "resume", "--last"] }
+}
+```
+
+No `${veld.pane.token}` anywhere, and none needed — the pane still restores, the
+Resume button still appears, and `auto_resume` still works. The token is an
+optimisation for tools that cooperate, not a requirement.
+
+What you give up is the thing the token buys: **two Codex panes in one worktree
+would both resume the same session**, because "the most recent one" has a single
+answer. With an id per pane, they don't. If a tool ever grows a way to accept an
+externally-chosen id, moving it to the first shape is a one-line change.
+
+#### When a pane starts by itself
+
+`auto_resume` is narrower than it sounds, on purpose. These commands launch
+coding agents: an unattended one spends money and runs tools with nobody
+watching.
+
+**It only ever fires at the moment a pane comes into being** — Veld Desktop
+starting up and restoring your layout — and only when that pane's shell is
+already gone. Concretely:
+
+| What happened | What the pane does |
+|---|---|
+| You picked the pane from a menu | Runs the launch command. The click is the consent. |
+| App restarted / rebooted, shell gone | `auto_resume: true` resumes; otherwise the pane waits with a **Resume** button. |
+| The daemon restarted, or you ran `veld update` | Nothing — the shell survived, and the pane simply reattaches. |
+| The tool exited while you were looking at it | Buttons, always. `auto_resume` is not consulted; an exit you saw is one you get to answer. |
+| The session was reaped after the detach grace | Buttons, next time you look at it. |
+| You dragged the pane to another window | Nothing — the shell is alive and moves with the pane. |
+
+#### When a pane closes itself
+
+`close_on_exit` defaults to **true**: a pane whose command exits with status `0`
+closes, which is what a terminal emulator does and what quitting the tool
+usually means.
+
+Two bounds on it, both deliberate:
+
+- **A non-zero exit never closes the pane**, whatever the setting says. The
+  reason a tool died is printed on the screen it dies on, and a pane that
+  disappears with it takes the error along — the oldest complaint about terminal
+  emulators.
+- **It cannot compete with `auto_resume`**, because it only fires on an exit
+  somebody was there to see. A reboot, a quit app, a crashed daemon and a reaped
+  session all leave the pane to be *restored from the layout* instead, and that
+  is the path `auto_resume` governs.
+
+The trade to know about: with the default on, a deliberate `/exit` closes the
+pane, so the **Resume** button never appears for that exit. Set
+`"close_on_exit": false` on a pane where you would rather stop and choose.
+
+A `resume` that fails is **never** retried as a fresh launch. Silently starting a
+new conversation would spend money and read to you as the old one having been
+lost, so the pane says so and offers **Start fresh** as a separate button.
+
+`auto_resume: true` without a `resume` command is a lint problem and is treated
+as `false`.
+
+**What `auto_resume` actually consents to.** The rest of veld runs a config
+command because you asked — `veld start`, an action button, a pane you clicked.
+This is the one place a repo-declared command can run when you merely *open the
+app*, so it is worth being precise about what the consent covers.
+
+veld remembers that this pane launched once. It does **not** pin the command
+that ran. The `resume` command is re-read from the worktree's `veld.json` every
+time, so a `git pull` that rewrites it — or flips `auto_resume` from `false` to
+`true` on a pane you once started by hand — changes what runs unattended on your
+next Desktop start. That is in keeping with a config file you already trust to
+run `veld start`, but it means `auto_resume` is trust in the *repository*, not
+in the specific command you clicked. On a repo whose config you do not control,
+leave it off.
+
+#### Quote your interpolations
+
+The same rule as every other `shell` position — you own the quoting — with one
+extra reason to care here. `${veld.branch}` is the one pane variable somebody
+else can choose: check out a colleague's (or a stranger's) pull-request branch
+and the branch name is theirs, not yours. Unquoted in a `shell` command, a
+branch named `` `curl …` `` runs at pane launch.
+
+```jsonc
+"shell": "git -C \"${veld.root}\" log --oneline"       // quoted
+"argv": ["git", "-C", "${veld.root}", "log"]            // better: no shell at all
+```
+
+`argv` interpolates per element after the array is fixed, so a value containing
+spaces, quotes or backticks can never change the argument count. Prefer it.
+
+#### Variables in a pane command
+
+A pane has no run, no node and no ports, so its scope is much smaller than a
+node's — referencing anything else is a lint problem rather than a pane that
+dies on launch:
+
+`${veld.pane.id}` · `${veld.pane.label}` · `${veld.pane.token}` ·
+`${veld.worktree}` · `${veld.root}` · `${veld.branch}` · `${veld.project}` ·
+`${veld.username}`
+
+They mean exactly what they mean everywhere else — in particular
+`${veld.worktree}` is the **slugified directory name**, not a path, and
+`${veld.branch}` is slugified too. **The path you almost always want is
+`${veld.root}`**, which for a pane is the worktree's own checkout.
+
+`VELD_PANE_ID` and `VELD_PANE_TOKEN` are also set in the command's environment,
+so a `shell` pane can use `$VELD_PANE_TOKEN` directly.
+
+The command's `PATH` is your login shell's, not the daemon's — the same rule
+every other daemon-spawned command follows.
+
+#### Pane icons
+
+`icon` takes either an emoji (any non-ASCII string, e.g. `"🤖"`) or one of these
+names, from [Tabler](https://tabler.io/icons), which is the set every built-in
+pane tab uses:
+
+`atom` · `bolt` · `book` · `brain` · `bug` · `bulb` · `chart-line` · `cloud` ·
+`code` · `compass` · `cpu` · `database` · `flask` · `git-branch` · `key` ·
+`map` · `message-chatbot` · `notebook` · `package` · `player-play` · `plug` ·
+`puzzle` · `refresh` · `robot` · `rocket` · `search` · `server` · `shield` ·
+`sparkles` · `terminal-2` · `tool` · `wand`
+
+It is an allowlist rather than "any Tabler name" because the app has to bundle
+every icon that can be rendered. An ASCII string means "this is a name", so a
+misspelled one is reported by `veld lint` instead of rendering as the literal
+text.
+
+#### There are no pane variants
+
+Two modes of the same tool are two entries, not one entry with variants:
+
+```jsonc
+{ "id": "claude",      "type": "terminal", "label": "Claude",        "argv": ["claude"] },
+{ "id": "claude-yolo", "type": "terminal", "label": "Claude (yolo)",
+  "argv": ["claude", "--dangerously-skip-permissions"] }
+```
+
+Node `variants` exist because a node is a vertex in the dependency graph that a
+preset selects across. A pane is neither, so variants would import the machinery
+without the reason — and each pane owning exactly one token is what keeps "which
+conversation am I resuming" from having an answer nobody can predict.
+
+---
+
 ## Reserved: `hooks` and the rest of `ide`
 
 Both are **reserved**: they parse, are stored, and are **not executed by this
 version**. `veld lint` says so, so a hook that does nothing is distinguishable
 from a config mistake. For `ide` the notice now names the specific keys that are
-inert, since `quicklinks`, `permissions` and `externalOrigins` are not.
+inert, since `quicklinks`, `permissions`, `externalOrigins` and `panes` are not.
 
 ```jsonc
 // veld.d/hooks.jsonc

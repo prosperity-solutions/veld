@@ -180,11 +180,27 @@ pub struct HolderConfig {
     /// compiled in so the two sides cannot disagree about it, and so a test can
     /// shorten it.
     pub orphan_grace_secs: u64,
-    /// Extra environment for the shell, on top of what the holder inherits.
+    /// What to run instead of the user's login shell — a config-declared pane's
+    /// command, already resolved and interpolated by the daemon.
+    ///
+    /// `None` is the ordinary terminal: `$SHELL -l`. Additive with a default, so
+    /// this did not bump [`PROTOCOL`] (see its docs) — an old holder adopted by a
+    /// new daemon simply keeps running the shell it already started, which is the
+    /// correct outcome, since the command only ever matters at spawn time.
+    #[serde(default)]
+    pub argv: Option<Vec<String>>,
+    /// Extra environment for the session's process, on top of what the holder
+    /// inherits.
     ///
     /// The daemon computes it (`pty::shims::session_env`) because it is the side
     /// that knows about instances, ports and where the `veld` CLI lives; the holder
     /// only applies it.
+    ///
+    /// It is also how a **pane command** gets a usable `PATH`. The holder's shell
+    /// path deliberately skips `resolve_user_path()` because a login shell computes
+    /// `PATH` itself — but [`Self::argv`] is spawned *directly*, with no login shell
+    /// in front of it, so it would otherwise inherit launchd's bare service `PATH`
+    /// and fail to find every user-installed CLI it exists to run.
     ///
     /// `#[serde(default)]`, which is what keeps this off [`PROTOCOL`]: a holder
     /// spawned by an older daemon simply has no entry, and its shell has no
@@ -192,6 +208,14 @@ pub struct HolderConfig {
     /// See the note on [`PROTOCOL`] about additive fields.
     #[serde(default)]
     pub env: std::collections::BTreeMap<String, String>,
+    /// What to call [`Self::argv`] when reporting that it exited.
+    ///
+    /// `None` is the ordinary terminal, which is a shell and says so. A pane
+    /// that ran `claude` must not report that "the shell exited" — it did not
+    /// run one, and the notice is the only thing left on screen once a
+    /// full-screen program has restored the primary buffer on its way out.
+    #[serde(default)]
+    pub pane_label: Option<String>,
 }
 
 /// Write one frame.

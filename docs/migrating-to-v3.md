@@ -149,11 +149,13 @@ position named — which is a useful final check in its own right.
 
 - **`hooks` and `ide`.** Opaque to veld. A `command` key *inside* them is not
   veld's key and must not be touched — the loader deliberately does not look
-  there. (This is the rule the removed converter broke.) Three keys under `ide` are
-  now interpreted — `quicklinks`, `permissions` and `externalOrigins`, see
-  [configuration.md](configuration.md#ide-quicklinks-permissions-and-external-origins) — but they
-  are additions rather than a migration: a config that has neither is unaffected,
-  and the rest of `ide` stays opaque, including the `command` exemption.
+  there. (This is the rule the removed converter broke.) Four keys under `ide`
+  are now interpreted — `quicklinks`, `permissions`, `externalOrigins` and
+  `panes`, see [configuration.md](configuration.md#ide-quicklinks-permissions-external-origins-and-panes) — but they are additions
+  rather than a migration: a config that has none of them is unaffected, and the
+  rest of `ide` stays opaque, including the `command` exemption. Note that
+  `ide.panes[]` entries *do* use `argv`/`shell` and are read by veld, so unlike
+  the rest of `ide` they follow the v3 command rules.
   A config still spelling the key `ui` gets an unknown-top-level-key error that
   names the rename — that is the whole migration.
 - **`sensitive_outputs`.** Still supported, unchanged, not deprecated.

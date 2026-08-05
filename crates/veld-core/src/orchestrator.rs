@@ -3861,7 +3861,13 @@ async fn build_env(
     Ok((env, secret_keys))
 }
 
-fn whoami_username() -> String {
+/// The user's name for `${veld.username}`.
+///
+/// `pub(crate)` because a pane command resolves the same builtin
+/// (`veld-daemon`'s `pane_context`) and a second copy drifted immediately — its
+/// fallback was `""`, which turns an unset `USER` into an *empty argument*
+/// rather than a visible placeholder.
+pub fn whoami_username() -> String {
     std::env::var("USER")
         .or_else(|_| std::env::var("USERNAME"))
         .unwrap_or_else(|_| "unknown".to_owned())

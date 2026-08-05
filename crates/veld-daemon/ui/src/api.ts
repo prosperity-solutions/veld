@@ -160,7 +160,44 @@ export interface IdeSection {
    * these; the browser build has no panes and ignores them.
    */
   permissions: PermissionRule[];
+  /**
+   * Pane types the project adds to the pane menu.
+   *
+   * **No commands here, and no token.** The renderer names a pane by `id` and
+   * the daemon resolves what that means from the project's own config, so
+   * nothing the client holds can change what gets run.
+   */
+  panes: PaneSpec[];
 }
+
+/** Mirrors `PaneView` in `crates/veld-daemon/src/desktop.rs`. */
+export interface PaneSpec {
+  id: string;
+  label: string;
+  description?: string;
+  icon?: PaneIcon;
+  /** Which runtime pane kind this spec produces. Only `terminal` today. */
+  kind: "terminal";
+  /** False when a `requires_bin` executable is missing. Listed anyway, so the
+   *  menu can explain the absence rather than silently omitting an entry the
+   *  repo declares. */
+  available: boolean;
+  /** Whether the pane declares a resume command at all. */
+  can_resume: boolean;
+  /** Whether a restored pane whose shell is gone may resume without a click. */
+  auto_resume: boolean;
+  /** Whether a clean (status 0) exit closes the pane. Never applies to a
+   *  non-zero exit, which keeps the pane so the error stays readable. */
+  close_on_exit: boolean;
+  /** The `requires_bin` executables that were not found. Omitted when empty.
+   *  The pane's id is not a substitute — `claude-yolo` needs `claude`. */
+  missing?: string[];
+}
+
+/** Mirrors `veld_core::ide::PaneIcon`. */
+export type PaneIcon =
+  | { kind: "name"; value: string }
+  | { kind: "emoji"; value: string };
 
 /** A project link that is not veld's own, shown on a browser pane's start page. */
 export interface Quicklink {
@@ -516,6 +553,17 @@ export interface PtyOpenUrl {
 }
 
 /**
+ * Which command a config-declared pane runs.
+ *
+ * `fresh` mints a new token and runs the pane's `argv`/`shell`; `resume` runs
+ * its `resume` command under the token the pane launched with. The daemon
+ * refuses `resume` for a pane that never launched rather than quietly starting
+ * a fresh one — a silent fallback would begin a new billable conversation and
+ * read to the user as the old one having been lost.
+ */
+export type PaneLaunchMode = "fresh" | "resume";
+
+/**
  * A run address. **The name alone is not one.**
  *
  * Environments are unique per project, not globally: two repos both checked
@@ -815,11 +863,34 @@ export const api = {
    * running reattaches to it — that is how a reload gets its terminal back —
    * and any other id starts a new one.
    */
-  ptyTicket: (worktreeId: number, sessionId: string) =>
+  ptyTicket: (
+    worktreeId: number,
+    sessionId: string,
+    pane?: { spec: string; mode: PaneLaunchMode },
+  ) =>
     request<PtyTicket>("/api/pty/tickets", {
       method: "POST",
-      body: JSON.stringify({ worktree_id: worktreeId, session_id: sessionId }),
+      body: JSON.stringify({
+        worktree_id: worktreeId,
+        session_id: sessionId,
+        // A pane *name*, never a command: the daemon reads what to run from
+        // the project's config. Ignored server-side when the session is
+        // already live, since nothing is being spawned.
+        ...(pane ? { pane: pane.spec, mode: pane.mode } : {}),
+      }),
     }),
+  /**
+   * Which of a worktree's config-declared panes have a session to resume.
+   *
+   * The pane layout comes from browser storage; whether a pane ever launched
+   * is in the daemon's database. One request per worktree answers it for every
+   * pane at once, so a restored dock can label its buttons before anything
+   * connects.
+   */
+  paneSessions: (worktreeId: number) =>
+    request<{ resumable: { session_id: string; pane: string }[] }>(
+      `/api/pty/panes/${worktreeId}`,
+    ),
   /**
    * End a terminal session now.
    *

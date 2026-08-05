@@ -20,6 +20,10 @@ import {
   browserIds,
   browserProfileLabel,
   browserTab,
+  configPaneTab,
+  paneAnswerFor,
+  startPlanFor,
+  takePendingStart,
   clampRatio,
   closeTab,
   defaultLayout,
@@ -54,6 +58,7 @@ import {
   sessionSetFor,
   sessionsInUse,
   setRatio,
+  shouldCloseOnExit,
   terminalIds,
   terminalLabel,
   worktreeLayoutFrom,
@@ -71,29 +76,50 @@ const term = (): PaneTab => ({
 const ids = (layout: PaneLayout, dock: DockIndex) =>
   layout.docks[dock].tabs.map((t) => t.id);
 
+/**
+ * A layout with something in *both* docks.
+ *
+ * This used to be `defaultLayout()`, and most tests below reached for it just to
+ * get a populated second dock. That coupled every dock-mechanics test to a
+ * product decision about what a freshly opened worktree shows — so when the
+ * default became a single pane, thirty tests about `moveTab` broke for a reason
+ * that had nothing to do with moving tabs. It is a fixture now.
+ */
+const twoDock = (ratio = DEFAULT_RATIO): PaneLayout => {
+  const chooser = newPaneTab();
+  const browser = browserTab({});
+  return {
+    docks: [
+      { tabs: [chooser], activeId: chooser.id },
+      { tabs: [browser], activeId: browser.id },
+    ],
+    ratio: clampRatio(ratio),
+    focused: 0,
+  };
+};
+
 /** The default layout's right-hand pane. Captured per test rather than named by a
  *  constant: there is no singleton tab any more, so its id is generated. */
 const rightId = (layout: PaneLayout) => layout.docks[1].tabs[0].id;
 
 describe("defaultLayout", () => {
-  it("opens a chooser beside an empty browser pane, and starts no shell", () => {
-    // The right-hand pane shows the run's URLs until it is pointed somewhere, so
-    // this is the same information the old services column carried — in the thing
-    // that can act on it.
+  it("opens one undecided pane, unsplit, and starts no shell", () => {
+    // A `new` pane, deliberately: a terminal tab's id is a daemon session id, so
+    // seeding one made merely *selecting* a worktree start a real shell (and now
+    // a holder process to own it), against a cap of 48.
     //
-    // The left one is a `new` pane, deliberately: a terminal tab's id is a daemon
-    // session id, so seeding one made merely *selecting* a worktree start a real
-    // shell (and now a holder process to own it), against a cap of 48.
+    // And *one* pane: opening split put a second copy of the run's URL list —
+    // already on the chooser — beside it, and imposed two columns on every
+    // worktree the first time it was opened, including the many that want one
+    // full-width terminal.
     const l = defaultLayout();
     expect(l.docks[0].tabs).toHaveLength(1);
     expect(l.docks[0].tabs[0].kind).toBe("new");
     expect(terminalIds(l)).toEqual([]);
-    expect(l.docks[1].tabs).toHaveLength(1);
-    expect(l.docks[1].tabs[0].kind).toBe("browser");
-    expect(l.docks[1].tabs[0].url).toBeUndefined();
-    // Each dock shows the only tab it has; a null activeId would render empty.
+    expect(l.docks[1].tabs).toEqual([]);
+    expect(l.docks[1].activeId).toBeNull();
+    // The one dock shows the only tab it has; a null activeId would render empty.
     expect(l.docks[0].activeId).toBe(l.docks[0].tabs[0].id);
-    expect(l.docks[1].activeId).toBe(l.docks[1].tabs[0].id);
     expect(l.focused).toBe(0);
   });
 
@@ -112,7 +138,7 @@ describe("defaultLayout", () => {
 describe("terminal ids", () => {
   it("never repeats, even after the tab that used one is closed", () => {
     // A reused id would adopt the closed tab's live shell in terminalHost.
-    let l = defaultLayout();
+    let l = twoDock();
     const first = l.docks[0].tabs[0].id;
     l = closeTab(l, first);
     const second = term().id;
@@ -148,7 +174,7 @@ describe("clampRatio", () => {
 
 describe("addTab", () => {
   it("appends, activates, and takes focus", () => {
-    let l = defaultLayout();
+    let l = twoDock();
     const svc = rightId(l);
     const t = term();
     l = addTab(l, 1, t);
@@ -159,7 +185,7 @@ describe("addTab", () => {
 
   it("activates an existing tab instead of duplicating its id", () => {
     // Two tabs with one id would fight over a single live terminal.
-    let l = defaultLayout();
+    let l = twoDock();
     const svc = rightId(l);
     const existing = l.docks[0].tabs[0];
     l = activateTab(l, svc);
@@ -171,7 +197,7 @@ describe("addTab", () => {
   });
 
   it("addTabToFocused follows the focused dock", () => {
-    let l = focusDock(defaultLayout(), 1);
+    let l = focusDock(twoDock(), 1);
     const t = term();
     l = addTabToFocused(l, t);
     expect(ids(l, 1)).toContain(t.id);
@@ -181,7 +207,7 @@ describe("addTab", () => {
 
 describe("closeTab", () => {
   it("activates the tab to the right, then the one to the left", () => {
-    let l = defaultLayout();
+    let l = twoDock();
     const a = l.docks[0].tabs[0];
     const b = term();
     const c = term();
@@ -197,7 +223,7 @@ describe("closeTab", () => {
   });
 
   it("leaves the active tab alone when a different one closes", () => {
-    let l = defaultLayout();
+    let l = twoDock();
     const a = l.docks[0].tabs[0];
     const b = term();
     l = addTab(l, 0, b);
@@ -207,7 +233,7 @@ describe("closeTab", () => {
   });
 
   it("slides the survivors left when the left dock empties", () => {
-    let l = defaultLayout();
+    let l = twoDock();
     const svc = rightId(l);
     const only = l.docks[0].tabs[0];
     l = closeTab(l, only.id);
@@ -223,7 +249,7 @@ describe("closeTab", () => {
   });
 
   it("keeps focus put when the emptied dock was not the focused one", () => {
-    let l = defaultLayout();
+    let l = twoDock();
     const svc = rightId(l);
     l = closeTab(l, svc);
     expect(dockVisible(l, 1)).toBe(false);
@@ -231,12 +257,12 @@ describe("closeTab", () => {
   });
 
   it("is a no-op for an unknown id", () => {
-    const l = defaultLayout();
+    const l = twoDock();
     expect(closeTab(l, "nope")).toBe(l);
   });
 
   it("survives closing every tab", () => {
-    let l = defaultLayout();
+    let l = twoDock();
     for (const t of allTabs(l)) l = closeTab(l, t.id);
     expect(allTabs(l)).toHaveLength(0);
     expect(dockVisible(l, 0)).toBe(false);
@@ -252,7 +278,7 @@ describe("closeTab", () => {
 
 describe("moveTabToOtherDock", () => {
   it("moves and keeps the tab active in its new dock", () => {
-    let l = defaultLayout();
+    let l = twoDock();
     const svc = rightId(l);
     const a = l.docks[0].tabs[0];
     const b = term();
@@ -265,20 +291,20 @@ describe("moveTabToOtherDock", () => {
   });
 
   it("refuses to move a dock's last tab, which would just swap sides", () => {
-    const l = defaultLayout();
+    const l = twoDock();
     const svc = rightId(l);
     expect(moveTabToOtherDock(l, svc)).toBe(l);
   });
 
   it("is a no-op for an unknown id", () => {
-    const l = defaultLayout();
+    const l = twoDock();
     expect(moveTabToOtherDock(l, "nope")).toBe(l);
   });
 });
 
 describe("moveTab", () => {
   it("reorders within a dock, in post-removal terms", () => {
-    let l = defaultLayout();
+    let l = twoDock();
     const a = l.docks[0].tabs[0];
     const b = term();
     const c = term();
@@ -296,7 +322,7 @@ describe("moveTab", () => {
   });
 
   it("inserts at a position when moving across docks", () => {
-    let l = defaultLayout();
+    let l = twoDock();
     const svc = rightId(l);
     const a = l.docks[0].tabs[0];
     const b = term();
@@ -311,7 +337,7 @@ describe("moveTab", () => {
 
   it("returns the same object for a drop that changes nothing", () => {
     // A stray drag must not churn React or reset the dock's active tab.
-    let l = defaultLayout();
+    let l = twoDock();
     const b = term();
     l = addTab(l, 0, b);
     l = activateTab(l, l.docks[0].tabs[0].id);
@@ -320,7 +346,7 @@ describe("moveTab", () => {
   });
 
   it("clamps an out-of-range index instead of dropping the tab", () => {
-    let l = defaultLayout();
+    let l = twoDock();
     const svc = rightId(l);
     const b = term();
     l = addTab(l, 0, b);
@@ -331,7 +357,7 @@ describe("moveTab", () => {
   });
 
   it("hands the vacated dock a new active tab, or none", () => {
-    let l = defaultLayout();
+    let l = twoDock();
     const svc = rightId(l);
     const a = l.docks[0].tabs[0];
     const b = term();
@@ -350,7 +376,7 @@ describe("moveTab", () => {
   });
 
   it("leaves an unrelated active tab alone", () => {
-    let l = defaultLayout();
+    let l = twoDock();
     const a = l.docks[0].tabs[0];
     const b = term();
     l = addTab(l, 0, b);
@@ -360,14 +386,14 @@ describe("moveTab", () => {
   });
 
   it("is a no-op for an unknown id", () => {
-    const l = defaultLayout();
+    const l = twoDock();
     expect(moveTab(l, "nope", 1, 0)).toBe(l);
   });
 });
 
 describe("activateTab / focusDock", () => {
   it("activating a tab focuses the dock holding it", () => {
-    const base = defaultLayout();
+    const base = twoDock();
     const right = rightId(base);
     const l = activateTab(base, right);
     expect(l.focused).toBe(1);
@@ -375,7 +401,7 @@ describe("activateTab / focusDock", () => {
   });
 
   it("activating an unknown id changes nothing observable", () => {
-    const l = defaultLayout();
+    const l = twoDock();
     const after = activateTab(l, "nope");
     expect(after.docks[0].activeId).toBe(l.docks[0].activeId);
     expect(after.focused).toBe(l.focused);
@@ -384,12 +410,12 @@ describe("activateTab / focusDock", () => {
   it("focusDock returns the same object when nothing changes", () => {
     // Focus events fire on every click inside a dock; a new object each time
     // would re-render the whole region for nothing.
-    const l = defaultLayout();
+    const l = twoDock();
     expect(focusDock(l, 0)).toBe(l);
   });
 
   it("refuses to focus an empty dock", () => {
-    let l = defaultLayout();
+    let l = twoDock();
     const svc = rightId(l);
     l = closeTab(l, svc);
     expect(focusDock(l, 1)).toBe(l);
@@ -398,14 +424,14 @@ describe("activateTab / focusDock", () => {
 
 describe("setRatio", () => {
   it("clamps through the same rule as the seed", () => {
-    expect(setRatio(defaultLayout(), 0.95).ratio).toBe(MAX_RATIO);
-    expect(setRatio(defaultLayout(), 0.4).ratio).toBe(0.4);
+    expect(setRatio(twoDock(), 0.95).ratio).toBe(MAX_RATIO);
+    expect(setRatio(twoDock(), 0.4).ratio).toBe(0.4);
   });
 });
 
 describe("terminal bookkeeping", () => {
   it("terminalIds lists only terminals, across both docks", () => {
-    let l = defaultLayout();
+    let l = twoDock();
     const svc = rightId(l);
     const a = term();
     const b = term();
@@ -418,7 +444,7 @@ describe("terminal bookkeeping", () => {
   });
 
   it("hasTab sees both docks", () => {
-    const l = defaultLayout();
+    const l = twoDock();
     const svc = rightId(l);
     expect(hasTab(l, svc)).toBe(true);
     expect(hasTab(l, l.docks[0].tabs[0].id)).toBe(true);
@@ -426,7 +452,7 @@ describe("terminal bookkeeping", () => {
   });
 
   it("numbers terminals only once there is more than one", () => {
-    let l = defaultLayout();
+    let l = twoDock();
     const a = term();
     l = addTab(l, 0, a);
     expect(terminalLabel(l, a.id)).toBe("Terminal");
@@ -443,13 +469,13 @@ describe("terminal bookkeeping", () => {
   });
 
   it("labels an unknown id without throwing", () => {
-    expect(terminalLabel(defaultLayout(), "nope")).toBe("Terminal");
+    expect(terminalLabel(twoDock(), "nope")).toBe("Terminal");
   });
 });
 
 describe("persistence", () => {
   it("round-trips a layout", () => {
-    let l = defaultLayout(0.4);
+    let l = twoDock(0.4);
     l = addTab(l, 0, term());
     const back = parseLayouts(serializeLayouts({ 7: l }));
     expect(back[7]).toEqual(l);
@@ -471,7 +497,7 @@ describe("persistence", () => {
     expect(parseLayouts('{"1":{"docks":[]}}')).toEqual({});
     expect(parseLayouts('{"1":{"docks":[{},{}]}}')).toEqual({});
     // Non-numeric worktree keys can't index anything.
-    const layout = defaultLayout();
+    const layout = twoDock();
     const ok = parseLayouts(JSON.stringify({ abc: layout, 3: layout }));
     expect(Object.keys(ok)).toEqual(["3"]);
   });
@@ -793,7 +819,7 @@ describe("browser tabs", () => {
   });
 
   it("lists browser ids separately from terminal ids", () => {
-    let l = defaultLayout();
+    let l = twoDock();
     // The default layout already holds one (the right-hand pane).
     const opened = browserIds(l);
     expect(opened).toHaveLength(1);
@@ -804,7 +830,7 @@ describe("browser tabs", () => {
   });
 
   it("patches a tab, and returns the same layout when nothing changes", () => {
-    let l = defaultLayout();
+    let l = twoDock();
     const b = browserTab({ url: "http://x.test/" });
     l = addTab(l, 1, b);
 
@@ -823,7 +849,7 @@ describe("single-dock normalisation", () => {
   it("never leaves the left dock empty while the right one has tabs", () => {
     // The invariant behind "Move to the left pane" ever making sense: with one
     // pane visible it is always dock 0.
-    let l = defaultLayout();
+    let l = twoDock();
     for (const id of l.docks[0].tabs.map((t) => t.id)) l = closeTab(l, id);
     expect(l.docks[0].tabs.length).toBeGreaterThan(0);
     expect(l.docks[1].tabs).toHaveLength(0);
@@ -847,7 +873,7 @@ describe("single-dock normalisation", () => {
   });
 
   it("leaves a two-dock layout alone", () => {
-    const l = defaultLayout();
+    const l = twoDock();
     expect(dockVisible(l, 0)).toBe(true);
     expect(dockVisible(l, 1)).toBe(true);
     expect(closeTab(l, "nope")).toBe(l);
@@ -876,7 +902,7 @@ describe("browser sessions", () => {
   });
 
   it("reports which slots are occupied, across every layout", () => {
-    let a = defaultLayout();
+    let a = twoDock();
     // The default layout's own browser pane sits on the default session.
     expect(sessionsInUse([a])).toEqual(new Set(["default"]));
     a = addTab(a, 0, browserTab({ url: "http://a.test/", profile: "wombat" }));
@@ -884,7 +910,7 @@ describe("browser sessions", () => {
 
     // A pane in a worktree the user has switched away from still holds its jar,
     // so the union is what "exists" means.
-    const b = addTab(defaultLayout(), 0, browserTab({ profile: "badger" }));
+    const b = addTab(twoDock(), 0, browserTab({ profile: "badger" }));
     expect(sessionsInUse([a, b])).toEqual(new Set(["wombat", "default", "badger"]));
   });
 
@@ -936,7 +962,7 @@ describe("session sets", () => {
   it("unions the stored set with what the layout actually uses", () => {
     // A layout can name a session the stored set has lost (storage cleared, an
     // older build). A pane missing from its own menu is worse than an extra row.
-    const layout = addTab(defaultLayout(), 0, browserTab({ profile: "puffin" }));
+    const layout = addTab(twoDock(), 0, browserTab({ profile: "puffin" }));
     expect(sessionSetFor({}, 1, layout)).toEqual(["default", "puffin"]);
     expect(sessionSetFor({ 1: ["default", "otter"] }, 1, layout)).toEqual([
       "default",
@@ -962,7 +988,7 @@ describe("session sets", () => {
 
 describe("replaceTab", () => {
   it("swaps content in place, keeping position and active state", () => {
-    let l = defaultLayout();
+    let l = twoDock();
     const first = l.docks[0].tabs[0];
     const placeholder = newPaneTab();
     l = addTab(l, 0, placeholder);
@@ -977,7 +1003,7 @@ describe("replaceTab", () => {
   });
 
   it("leaves a non-active tab's position and the dock's active tab alone", () => {
-    let l = defaultLayout();
+    let l = twoDock();
     const placeholder = newPaneTab();
     l = addTab(l, 0, placeholder);
     const first = l.docks[0].tabs[0];
@@ -990,7 +1016,7 @@ describe("replaceTab", () => {
 
   it("refuses to create a second tab with an existing id", () => {
     // Two tabs sharing an id would fight over one live terminal or one live view.
-    let l = defaultLayout();
+    let l = twoDock();
     const existing = l.docks[0].tabs[0];
     const placeholder = newPaneTab();
     l = addTab(l, 0, placeholder);
@@ -1000,14 +1026,14 @@ describe("replaceTab", () => {
   });
 
   it("is a no-op for an unknown id", () => {
-    const l = defaultLayout();
+    const l = twoDock();
     expect(replaceTab(l, "nope", browserTab({}))).toBe(l);
   });
 
   it("survives a reload as a `new` pane", () => {
     // `new` has to be in PANE_KINDS or the restore validator drops the tab and
     // the pane vanishes on the first reload.
-    const l = addTab(defaultLayout(), 0, newPaneTab());
+    const l = addTab(twoDock(), 0, newPaneTab());
     const back = parseLayouts(serializeLayouts({ 1: l }))[1];
     expect(back.docks[0].tabs.some((t) => t.kind === "new")).toBe(true);
   });
@@ -1018,7 +1044,7 @@ describe("paneTabLabel", () => {
     // A layout written by an older build carries whatever title that build used,
     // so reading `tab.title` would leave a renamed kind mislabelled after a
     // reload. Only a browser pane's title is its own (the page's).
-    let l = defaultLayout();
+    let l = twoDock();
     const terminal = term();
     l = addTab(l, 0, terminal);
     expect(paneTabLabel(l, terminal)).toBe("Terminal");
@@ -1031,7 +1057,7 @@ describe("paneTabLabel", () => {
   });
 
   it("uses a browser pane's page title, falling back to its host", () => {
-    const l = defaultLayout();
+    const l = twoDock();
     const withTitle = browserTab({ url: "http://x.test/", title: "Veld" });
     expect(paneTabLabel(l, withTitle)).toBe("Veld");
     expect(paneTabLabel(l, { ...withTitle, title: "" })).toBe("x.test");
@@ -1042,7 +1068,7 @@ describe("paneTabLabel", () => {
 describe("lastBlankBrowserId", () => {
   it("finds the last browser pane with nothing loaded", () => {
     // What the top bar's globe asks: is a pane already showing the URL list?
-    let l = defaultLayout();
+    let l = twoDock();
     const seeded = l.docks[1].tabs[0].id;
     expect(lastBlankBrowserId(l)).toBe(seeded);
 
@@ -1059,7 +1085,7 @@ describe("lastBlankBrowserId", () => {
   });
 
   it("ignores terminals and undecided panes", () => {
-    let l = defaultLayout();
+    let l = twoDock();
     l = updateTab(l, l.docks[1].tabs[0].id, { url: "http://x.test/" });
     l = addTab(l, 0, newPaneTab());
     expect(lastBlankBrowserId(l)).toBeNull();
@@ -1123,7 +1149,7 @@ describe("layout slots", () => {
     };
   }
 
-  const layout = defaultLayout(DEFAULT_RATIO);
+  const layout = twoDock(DEFAULT_RATIO);
   const layouts = { 7: layout };
 
   it("writes a main window's layouts to the shared per-worktree store", () => {
@@ -1142,7 +1168,7 @@ describe("layout slots", () => {
     // delete every other window's worktree from the shared key. Same hazard and
     // same fix as `editSessions` — read through at write time, not at boot.
     const durable = fake({
-      [LAYOUT_WORKTREE_KEY]: serializeLayouts({ 4: defaultLayout(0.2), 7: defaultLayout(0.9) }),
+      [LAYOUT_WORKTREE_KEY]: serializeLayouts({ 4: twoDock(0.2), 7: twoDock(0.9) }),
     });
     writeLayouts(fake(), durable, "main", { 7: layout });
     const written = parseLayouts(durable.map.get(LAYOUT_WORKTREE_KEY) ?? null);
@@ -1159,7 +1185,7 @@ describe("layout slots", () => {
       // rowids are reused — so the *next* worktree created inherits a deleted
       // one's terminals and browser panes.
       const durable = fake({
-        [LAYOUT_WORKTREE_KEY]: serializeLayouts({ 4: defaultLayout(0.2), 7: layout }),
+        [LAYOUT_WORKTREE_KEY]: serializeLayouts({ 4: twoDock(0.2), 7: layout }),
       });
       dropWorktreeLayouts(durable, [7]);
       const written = parseLayouts(durable.map.get(LAYOUT_WORKTREE_KEY) ?? null);
@@ -1170,7 +1196,7 @@ describe("layout slots", () => {
     it("does not rewrite the shared key when it changed nothing", () => {
       // Two windows share this key, so a pointless write is a chance to clobber a
       // concurrent one for no gain.
-      const stored = serializeLayouts({ 4: defaultLayout(0.2) });
+      const stored = serializeLayouts({ 4: twoDock(0.2) });
       const durable = fake({ [LAYOUT_WORKTREE_KEY]: stored });
       let writes = 0;
       const counted = {
@@ -1224,7 +1250,7 @@ describe("layout slots", () => {
   });
 
   it("prefers the session store, which is this window's own state", () => {
-    const mine = { 9: defaultLayout(0.3) };
+    const mine = { 9: twoDock(0.3) };
     const stale = { 7: layout };
     const session = fake({ "veld.panes.v1": serializeLayouts(mine) });
     const durable = fake({ [layoutSlotKey("main")]: serializeLayouts(stale) });
@@ -1285,7 +1311,7 @@ describe("layout slots", () => {
     // same shells and take them from each other on every reattach.
     const durable = fake({ [LAYOUT_WORKTREE_KEY]: serializeLayouts(layouts) });
     expect(readLayouts(fake(), durable, null)).toEqual({});
-    writeLayouts(fake(), durable, null, { 9: defaultLayout(0.4) });
+    writeLayouts(fake(), durable, null, { 9: twoDock(0.4) });
     expect(parseLayouts(durable.map.get(LAYOUT_WORKTREE_KEY) ?? null)).toEqual(layouts);
   });
 
@@ -1302,7 +1328,7 @@ describe("layout slots", () => {
   });
 
   describe("the detach seed", () => {
-    const seeded = { 4: defaultLayout(0.25) };
+    const seeded = { 4: twoDock(0.25) };
     const seed = serializeLayouts(seeded);
 
     it("is what a brand-new detached window boots with", () => {
@@ -1312,7 +1338,7 @@ describe("layout slots", () => {
     });
 
     it("loses to the session store, so a reload does not resurrect it", () => {
-      const mine = { 4: defaultLayout(0.8) };
+      const mine = { 4: twoDock(0.8) };
       expect(
         readLayouts(fake({ "veld.panes.v1": serializeLayouts(mine) }), fake(), "main-w2", seed),
       ).toEqual(mine);
@@ -1329,7 +1355,7 @@ describe("layout slots", () => {
       // being moved exists in no layout at all (the origin already released and
       // closed it) so its shell dies at the grace, and the resurrected ids get
       // attached to, taking them over from the window that just adopted them.
-      const dead = { 4: defaultLayout(0.8) };
+      const dead = { 4: twoDock(0.8) };
       const durable = fake({ [layoutSlotKey("main-w2")]: serializeLayouts(dead) });
       expect(readLayouts(fake(), durable, "main-w2", seed)).toEqual(seeded);
     });
@@ -1337,7 +1363,7 @@ describe("layout slots", () => {
     it("is not consulted by a restored window, which has no seed", () => {
       // The case the wrong ordering was written for, and it cannot arise: a
       // restored window is opened with a slot and no seed at all.
-      const own = { 4: defaultLayout(0.8) };
+      const own = { 4: twoDock(0.8) };
       const durable = fake({ [layoutSlotKey("main-w2")]: serializeLayouts(own) });
       expect(readLayouts(fake(), durable, "main-w2", null, true, true)).toEqual(own);
     });
@@ -1368,7 +1394,7 @@ describe("layout slots", () => {
   });
 
   describe("only a reopened window reads the slot store", () => {
-    const stored = { 4: defaultLayout(0.8) };
+    const stored = { 4: twoDock(0.8) };
     const durable = () => fake({ [layoutSlotKey("main-w2")]: serializeLayouts(stored) });
 
     it("gives a brand-new window nothing, however full the slot is", () => {
@@ -1399,7 +1425,7 @@ describe("layout slots", () => {
     it("does not gate the session store or the seed", () => {
       // A reload of a new window still has to come back, and a detached window
       // still has to boot with what it was handed.
-      const mine = { 4: defaultLayout(0.3) };
+      const mine = { 4: twoDock(0.3) };
       expect(
         readLayouts(
           fake({ "veld.panes.v1": serializeLayouts(mine) }),
@@ -1410,7 +1436,7 @@ describe("layout slots", () => {
           true,
         ),
       ).toEqual(mine);
-      const seeded = { 5: defaultLayout(0.25) };
+      const seeded = { 5: twoDock(0.25) };
       expect(
         readLayouts(fake(), durable(), "main-w2", serializeLayouts(seeded), false, true),
       ).toEqual(seeded);
@@ -1598,6 +1624,153 @@ describe("parseTransferTabs", () => {
     ).toBe(1);
     expect(parseTransferTabs("nope")).toEqual([]);
     expect(parseTransferTabs(undefined)).toEqual([]);
+  });
+});
+
+describe("config-declared panes", () => {
+  it("carry their spec through a storage round-trip", () => {
+    const tab = configPaneTab({ id: "claude", label: "Claude" });
+    expect(tab.kind).toBe("terminal");
+    expect(tab.spec).toBe("claude");
+    expect(tab.title).toBe("Claude");
+
+    const restored = parseLayouts(
+      JSON.stringify({ 1: { docks: [{ tabs: [tab], activeId: tab.id }, { tabs: [], activeId: null }], ratio: 0.5, focused: 0 } }),
+    );
+    expect(restored[1].docks[0].tabs[0].spec).toBe("claude");
+  });
+
+  it("mark a freshly created pane exactly once", () => {
+    const tab = configPaneTab({ id: "claude", label: "Claude" });
+    // The click is the consent for one launch, and only one: a second mount
+    // (a remount, a drag between docks) must not spend it again.
+    expect(takePendingStart(tab.id)).toBe(true);
+    expect(takePendingStart(tab.id)).toBe(false);
+  });
+
+  it("do not mark a pane that came back from storage", () => {
+    const tab = configPaneTab({ id: "claude", label: "Claude" });
+    takePendingStart(tab.id);
+    const restored = parseLayouts(
+      JSON.stringify({ 1: { docks: [{ tabs: [tab], activeId: tab.id }, { tabs: [], activeId: null }], ratio: 0.5, focused: 0 } }),
+    );
+    // This is the materialization edge doing its job: a restored pane has no
+    // pending start, so nothing launches without `auto_resume`.
+    expect(takePendingStart(restored[1].docks[0].tabs[0].id)).toBe(false);
+  });
+
+  it("reject a spec that is not a legal pane id", () => {
+    const restored = parseLayouts(
+      JSON.stringify({
+        1: {
+          docks: [
+            {
+              tabs: [{ id: "t1", kind: "terminal", title: "x", spec: "../../etc/passwd" }],
+              activeId: "t1",
+            },
+            { tabs: [], activeId: null },
+          ],
+          ratio: 0.5,
+          focused: 0,
+        },
+      }),
+    );
+    // Dropped, not rejected: the pane degrades to a plain terminal rather than
+    // vanishing, which is the whole reason the token is not stored here.
+    expect(restored[1].docks[0].tabs[0].spec).toBeUndefined();
+    expect(restored[1].docks[0].tabs[0].kind).toBe("terminal");
+  });
+
+  it("keep a config pane's own name instead of numbering it among the shells", () => {
+    const shell = { id: "t1", kind: "terminal" as const, title: "Terminal" };
+    const claude = configPaneTab({ id: "claude", label: "Claude" });
+    const layout = {
+      docks: [
+        { tabs: [shell, claude], activeId: shell.id },
+        { tabs: [], activeId: null },
+      ] as PaneLayout["docks"],
+      ratio: 0.5,
+      focused: 0 as const,
+    };
+    expect(paneTabLabel(layout, shell)).toBe("Terminal 1");
+    expect(paneTabLabel(layout, claude)).toBe("Claude");
+  });
+});
+
+describe("shouldCloseOnExit", () => {
+  const base = { spec: "claude", closeOnExit: true, exitCode: 0 };
+
+  it("closes a config pane whose command exited cleanly", () => {
+    expect(shouldCloseOnExit(base)).toBe(true);
+  });
+
+  it("never closes a plain terminal", () => {
+    // A shell exiting has always left the pane open with a Restart button.
+    expect(shouldCloseOnExit({ ...base, spec: undefined })).toBe(false);
+  });
+
+  it("never closes on a non-zero exit, whatever the config says", () => {
+    // The reason a tool died is on the screen it died on; closing takes it away.
+    for (const exitCode of [1, 2, 130, 137]) {
+      expect(shouldCloseOnExit({ ...base, exitCode })).toBe(false);
+    }
+  });
+
+  it("never closes when there is no exit code", () => {
+    // `ended` is reached by three routes and only one is an exit — a takeover
+    // is another, and a pane vanishing because a second window claimed it is
+    // not tidying up.
+    expect(shouldCloseOnExit({ ...base, exitCode: null })).toBe(false);
+  });
+
+  it("respects the project turning it off", () => {
+    expect(shouldCloseOnExit({ ...base, closeOnExit: false })).toBe(false);
+  });
+});
+
+describe("paneAnswerFor", () => {
+  const answer = { worktreeId: 7, resumable: new Set(["tab-a"]) };
+
+  it("returns the answer for the worktree it was fetched for", () => {
+    expect(paneAnswerFor(answer, 7)).toBe(answer);
+  });
+
+  it("reads another worktree's answer as not-known-yet", () => {
+    // The v2 bug: selecting worktree 9 renders its panes in the same commit
+    // that starts the new fetch, so worktree 7's set is still sitting there.
+    // Non-null it would read as "nothing to resume" and every pane would commit
+    // its start plan against another checkout's tokens. No effect can fix that
+    // — an effect cannot un-render the commit that already mounted the pane.
+    expect(paneAnswerFor(answer, 9)).toBeNull();
+  });
+
+  it("reads no answer as not-known-yet", () => {
+    expect(paneAnswerFor(null, 7)).toBeNull();
+  });
+});
+
+describe("startPlanFor", () => {
+  const pane = { spec: "claude", autoResume: false, closeOnExit: true };
+
+  it("runs a login shell when there is no pane spec", () => {
+    expect(startPlanFor("t1", undefined)).toBe("shell");
+  });
+
+  it("launches fresh for a pane the user just created", () => {
+    const tab = configPaneTab({ id: "claude", label: "Claude" });
+    expect(startPlanFor(tab.id, pane)).toBe("fresh");
+    // The click is consent for one launch: a remount must not spend it again.
+    expect(startPlanFor(tab.id, pane)).not.toBe("fresh");
+  });
+
+  it("resumes a restored pane the project asked to auto-resume", () => {
+    expect(startPlanFor("restored-1", { ...pane, autoResume: true })).toBe("resume");
+  });
+
+  it("reattaches a restored pane rather than sitting idle", () => {
+    // Idle stranded a *live* tool behind two buttons that both DELETE its
+    // session — so the pane killed the thing it was restored to show.
+    expect(startPlanFor("restored-2", pane)).toBe("reattach");
   });
 });
 

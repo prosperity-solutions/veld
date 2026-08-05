@@ -121,6 +121,19 @@ fn publish_value(current: Option<&str>, resolved: Option<String>) -> Option<Stri
     }
 }
 
+/// The published `PATH`, or `None` when nothing has been resolved yet.
+///
+/// The non-blocking read, for a caller that must not `await` and must not
+/// trigger a resolution — a listing endpoint that runs once per worktree per
+/// poll, say. `None` means "not known yet", which is a different answer from
+/// "the process PATH": a caller deciding whether a tool is installed has to be
+/// able to tell those apart, because the process PATH is the bare service one
+/// and would report every user-installed CLI as missing.
+#[must_use]
+pub fn published_user_path() -> Option<String> {
+    cell().lock().ok().and_then(|g| g.clone())
+}
+
 /// The user's login-shell `PATH`, read from the cache — the entry point for
 /// anything running inside a daemon.
 ///
@@ -136,7 +149,7 @@ fn publish_value(current: Option<&str>, resolved: Option<String>) -> Option<Stri
 /// task's first resolution has not finished, and in a short-lived CLI or gateway
 /// process means this is the first call.
 pub async fn cached_user_path() -> String {
-    if let Some(published) = cell().lock().ok().and_then(|g| g.clone()) {
+    if let Some(published) = published_user_path() {
         return published;
     }
     // Cold. Two callers racing here both resolve and both publish a real

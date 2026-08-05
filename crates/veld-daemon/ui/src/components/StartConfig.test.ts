@@ -38,7 +38,7 @@ const wt = (over: Partial<Worktree> = {}): Worktree => ({
   has_veld_config: true,
   presets: [],
   nodes: [],
-  ide: { quicklinks: [], permissions: [] },
+  ide: { quicklinks: [], permissions: [], panes: [] },
   ...over,
 });
 

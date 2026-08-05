@@ -17,12 +17,20 @@ import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
-import { api } from "../api";
+import { api, type PaneLaunchMode } from "../api";
 import { ANSI_DARK, ANSI_LIGHT } from "../shared/ansi";
 import { notifyError, notifyRedirect } from "../shared/notify";
 import { terminalPrefs, type TerminalPrefs } from "../shared/settings";
 import { chromeless, layoutSlot, windowSeed } from "../shell";
-import { parseLayouts, storedTerminalIds, terminalIds } from "./model";
+import {
+  type PaneMount,
+  type StartPlan,
+  parseLayouts,
+  shouldCloseOnExit,
+  startPlanFor,
+  storedTerminalIds,
+  terminalIds,
+} from "./model";
 import { handleKeyEvent } from "./terminalKeys";
 
 /**
@@ -61,11 +69,40 @@ const EXPECTED_RESUMES: Set<string> = (() => {
   }
 })();
 
-export type TerminalState = "absent" | "connecting" | "live" | "ended" | "error";
+export type TerminalState =
+  | "absent"
+  | "idle"
+  | "connecting"
+  | "live"
+  | "ended"
+  | "error";
 
 interface Session {
   id: string;
   worktreeId: number;
+  /** The `ide.panes[].id` this pane runs, for a config-declared pane. A plain
+   *  terminal leaves it undefined and runs a login shell. */
+  spec?: string;
+  /**
+   * Whether this session is known to have a token — i.e. its command actually
+   * started under one, in *this* window.
+   *
+   * `paneSessions` is fetched once when a worktree is selected and never
+   * again, so a pane that launched afterwards is missing from it. Without this,
+   * such a pane hitting `error` (a daemon restart mid-`veld update`, a reaped
+   * holder, a dropped socket) offered only "Start fresh" — which mints a new
+   * token and abandons the conversation, the exact loss the resume path exists
+   * to prevent.
+   */
+  launched: boolean;
+  /** The pane's `close_on_exit`, captured at mount.
+   *
+   *  Held here rather than read in the renderer because a tab that is not the
+   *  active one has **no component mounted** — its session keeps running and
+   *  keeps receiving frames, so an exit observed there has to be acted on by
+   *  the host or it is silently deferred until the user next clicks the tab,
+   *  which reads as "clicking the tab closed my pane". */
+  closeOnExit: boolean;
   term: Terminal;
   fit: FitAddon;
   /** Detached until a pane mounts it; never destroyed by a mere unmount. */
@@ -76,6 +113,16 @@ interface Session {
   ws: WebSocket | null;
   state: TerminalState;
   detail: string;
+  /**
+   * The status the session's process exited with, or `null` if it has not
+   * exited *as itself*.
+   *
+   * Only the `exit` control frame sets this. A takeover and a dropped socket
+   * also land in `ended`/`error`, and neither is an exit — reading a code out of
+   * those is how "the pane closes when its command finishes cleanly" would turn
+   * into "the pane vanishes when another window steals it".
+   */
+  exitCode: number | null;
   observer: ResizeObserver | null;
   /** Generation counter: a socket from a superseded connect attempt must not
    *  write into a terminal that has since been restarted. */
@@ -265,13 +312,48 @@ export function subscribeTerminal(id: string, fn: () => void): () => void {
  * terminal as "connecting…" makes every not-yet-mounted tab look like it is
  * hanging.
  */
-export function terminalStatus(id: string): { state: TerminalState; detail: string } {
+export function terminalStatus(id: string): {
+  state: TerminalState;
+  detail: string;
+  exitCode: number | null;
+  /** Whether this session ran under a token in this window — see
+   *  [`Session.launched`]. */
+  launched: boolean;
+} {
   const s = sessions.get(id);
-  return s ? { state: s.state, detail: s.detail } : { state: "absent", detail: "" };
+  return s
+    ? {
+        state: s.state,
+        detail: s.detail,
+        exitCode: s.exitCode,
+        launched: s.launched,
+      }
+    : { state: "absent", detail: "", exitCode: null, launched: false };
+}
+
+/** How a session should start, or `null` to sit idle until the user says. */
+/**
+ * Called when a config pane's command exits cleanly and the pane asked to be
+ * tidied away. Registered once by the app, which owns the layout.
+ *
+ * A callback rather than a React effect because the pane that exited may not be
+ * mounted — see [`Session.closeOnExit`].
+ */
+let paneCloseHandler: ((id: string, worktreeId: number) => void) | null = null;
+
+export function setPaneCloseHandler(
+  fn: ((id: string, worktreeId: number) => void) | null,
+): void {
+  paneCloseHandler = fn;
 }
 
 /** Create the session (idempotent) without touching the DOM. */
-function ensure(id: string, worktreeId: number): Session {
+function ensure(
+  id: string,
+  worktreeId: number,
+  pane: PaneMount | undefined,
+  start: StartPlan,
+): Session {
   const existing = sessions.get(id);
   if (existing) {
     // The daemon refuses a cross-worktree resume with a 409; mirror that here,
@@ -321,11 +403,15 @@ function ensure(id: string, worktreeId: number): Session {
   const s: Session = {
     id,
     worktreeId,
+    spec: pane?.spec,
     term,
     fit,
     container,
     opened: false,
     ws: null,
+    exitCode: null,
+    launched: false,
+    closeOnExit: pane?.closeOnExit ?? false,
     state: "connecting",
     detail: "",
     observer: null,
@@ -376,7 +462,9 @@ function ensure(id: string, worktreeId: number): Session {
     }
   });
 
-  connect(s);
+  // `shell` and `reattach` both mean "no command to choose" — a login shell has
+  // none, and a reattach runs whatever is already there.
+  connect(s, start === "shell" || start === "reattach" ? undefined : start);
   return s;
 }
 
@@ -391,14 +479,36 @@ function attachUrl(ticket: string, cols: number, rows: number): string {
   return u.toString();
 }
 
-async function connect(s: Session): Promise<void> {
+async function connect(s: Session, mode?: PaneLaunchMode): Promise<void> {
   const generation = s.generation;
+  // Cleared before anything can observe the new attempt: a stale `0` from the
+  // previous process would make a pane that closes on clean exit close itself
+  // the instant it was restarted.
+  s.exitCode = null;
   setState(s, "connecting");
   let ticket: string;
   try {
     // The tab id *is* the daemon session id, so this reattaches to a surviving
-    // shell when there is one and starts a fresh one otherwise.
-    const minted = await api.ptyTicket(s.worktreeId, s.id);
+    // shell when there is one and starts a fresh one otherwise. `pane` names
+    // which command a config-declared pane should run if one has to be spawned;
+    // the daemon ignores it when the session is already live.
+    const pane =
+      s.spec !== undefined && mode !== undefined
+        ? { spec: s.spec, mode }
+        : undefined;
+    const minted = await api.ptyTicket(s.worktreeId, s.id, pane);
+    // **The only path to `idle`.** A config pane attaching with no mode is
+    // asking "is my session still there?" — from `startPlanFor`'s `reattach`, or
+    // from the Reconnect button. If it is not, spawning is the wrong answer
+    // twice over: the daemon has no command without a `pane`, so it would run a
+    // login shell under a tab still labelled and iconed "Claude", and no
+    // `pane_sessions` row would be written. Answer honestly and let the user
+    // choose between resuming and starting over.
+    if (s.spec !== undefined && mode === undefined && !minted.resumed) {
+      if (s.generation !== generation) return;
+      setState(s, "idle");
+      return;
+    }
     ticket = minted.ticket;
     // A tab restored from sessionStorage expected its shell to still be there.
     // If it isn't (the daemon restarted, or the detach grace expired) say so —
@@ -550,6 +660,14 @@ function handleControl(s: Session, raw: string): void {
       endReplayIfDone(s);
       break;
     case "ready":
+      // The holder is up, so for a config pane the daemon has *attempted* to
+      // record its token by now (`record_pane_launch` runs before the attach
+      // completes) — whether it just spawned the command or reattached to a
+      // session that had. Best-effort on the daemon side, so this can be true
+      // with no row; the cost is bounded, because a resume without a row is
+      // refused with "nothing to resume — start it fresh" rather than quietly
+      // starting a new conversation.
+      if (s.spec !== undefined) s.launched = true;
       setState(s, "live");
       // Deliberately silent on `msg.resumed`. A resumed shell is *live*, and
       // very likely a full-screen program (Claude Code, vim, top) mid-redraw —
@@ -561,7 +679,17 @@ function handleControl(s: Session, raw: string): void {
     case "exit":
       // `ended`, not `error`: the shell finished, which is a normal way for a
       // terminal to stop and offers a Restart rather than reading as a fault.
-      setState(s, "ended", `exit ${msg.code ?? 0}`);
+      s.exitCode = msg.code ?? 0;
+      setState(s, "ended", `exit ${s.exitCode}`);
+      if (
+        shouldCloseOnExit({
+          spec: s.spec,
+          closeOnExit: s.closeOnExit,
+          exitCode: s.exitCode,
+        })
+      ) {
+        paneCloseHandler?.(s.id, s.worktreeId);
+      }
       break;
     case "taken_over":
       // Another view of `/ide` (a second window, or a duplicated tab that
@@ -654,6 +782,13 @@ export function reconnectTerminal(id: string): void {
 export function restartTerminal(id: string): void {
   const s = sessions.get(id);
   if (!s) return;
+  // A config-declared pane has no login shell to fall back to, and "restart"
+  // for one means the same thing "start fresh" does: run its launch command
+  // again under a new identity.
+  if (s.spec !== undefined) {
+    startTerminal(id, "fresh");
+    return;
+  }
   s.generation += 1;
   s.ws?.close();
   s.ws = null;
@@ -671,8 +806,13 @@ export function restartTerminal(id: string): void {
 
 /** Mount a session's element into `parent`, creating the session on first
  *  call. Safe to call repeatedly — remounting is the normal path. */
-export function mountTerminal(id: string, worktreeId: number, parent: HTMLElement): void {
-  const s = ensure(id, worktreeId);
+export function mountTerminal(
+  id: string,
+  worktreeId: number,
+  parent: HTMLElement,
+  pane?: PaneMount,
+): void {
+  const s = ensure(id, worktreeId, pane, startPlanFor(id, pane));
   if (s.container.parentElement !== parent) parent.appendChild(s.container);
 
   if (!s.opened) {
@@ -686,6 +826,31 @@ export function mountTerminal(id: string, worktreeId: number, parent: HTMLElemen
     s.observer = new ResizeObserver(() => requestFit(s));
     s.observer.observe(s.container);
   }
+}
+
+/**
+ * Launch a config-declared pane's command because the user asked.
+ *
+ * `fresh` on a pane that has already launched replaces its identity: the daemon
+ * mints a new token, so the tool starts a new conversation rather than
+ * reopening the old one. That is what "start fresh" has to mean.
+ */
+export function startTerminal(id: string, mode: PaneLaunchMode): void {
+  const s = sessions.get(id);
+  if (!s) return;
+  s.generation += 1;
+  s.ws?.close();
+  s.ws = null;
+  const generation = s.generation;
+  setState(s, "connecting");
+  void (async () => {
+    // The id is the reattach key, so a dead session under it has to go before a
+    // new one can take the name — the same ordering `restartTerminal` needs and
+    // for the same reason.
+    await api.closePtySession(id).catch(() => {});
+    if (s.generation !== generation) return;
+    await connect(s, mode);
+  })();
 }
 
 /** Detach the element without ending the session. */

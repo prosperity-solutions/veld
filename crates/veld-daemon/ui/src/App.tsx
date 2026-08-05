@@ -21,7 +21,7 @@ import {
   terminalPrefs,
 } from "./shared/settings";
 import { pruneRunHistory } from "./shared/runHistory";
-import { applyTerminalPrefs } from "./panes/terminalHost";
+import { applyTerminalPrefs, setPaneCloseHandler } from "./panes/terminalHost";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { useSettings } from "./shared/useSettings";
 import {
@@ -107,6 +107,7 @@ import {
   browserIds,
   browserTab,
   closeTab,
+  configPaneTab,
   defaultLayout,
   diagTab,
   dockOf,
@@ -468,6 +469,33 @@ function AppInner(props: {
   // focus listener per pane for one document the app already holds.
   const quickSwitches = quickSwitchPrefs(settings ?? {});
 
+  // Which of this worktree's config-declared panes the daemon holds a session
+  // token for, so a restored pane can offer "Resume" rather than only "Start".
+  //
+  // **The answer carries the question.** A config pane decides whether to
+  // auto-resume at the moment it first mounts, and that mount happens in the
+  // same commit that starts this fetch — child effects run before parent ones,
+  // so the data is never there yet. A bare `Set` made every restored pane read
+  // "nothing to resume", which killed `auto_resume` outright; a *nullable* `Set`
+  // fixed the first render but not a worktree switch, where the previous
+  // worktree's set is still non-null and reads as an answer. No effect can fix
+  // that, because an effect cannot un-render the commit that already mounted
+  // the child.
+  //
+  // So the worktree id travels *with* the set, and `paneAnswerFor` compares it
+  // to the worktree being rendered. Nothing clears this on a switch — a stale
+  // answer is indistinguishable from no answer by *value*, at render time, with
+  // nothing to sequence. Do not "tidy" that back into an effect that resets it:
+  // that was the version this replaced, and it cannot work.
+  //
+  // Fetched once per worktree rather than polled: it only decides what a pane
+  // does as it comes into being, and a pane that launches while the window is
+  // open records that itself (see `launched` in `terminalHost`).
+  const [paneSessions, setPaneSessions] = useState<{
+    worktreeId: number;
+    resumable: Set<string>;
+  } | null>(null);
+
   // View mode: worktree cockpit ("ide") vs runs management ("runs").
   // Defaults by serving path (the app will also own `/` at v1 parity);
   // `?view=` overrides and persists across navigation.
@@ -573,6 +601,55 @@ function AppInner(props: {
     selectable.find((w) => w.is_main) ??
     selectable[0] ??
     null;
+
+  // Refetched when the selection changes, and cleared first so a pane in the
+  // new worktree can never be judged against the previous one's tokens — that
+  // would offer a resume for somebody else's conversation.
+  const worktreeId = worktree?.id ?? null;
+  useEffect(() => {
+    if (worktreeId === null) return;
+    let live = true;
+    api
+      .paneSessions(worktreeId)
+      .then((res) => {
+        if (live) {
+          setPaneSessions({
+            worktreeId,
+            resumable: new Set(res.resumable.map((r) => r.session_id)),
+          });
+        }
+      })
+      // A pane that cannot be shown as resumable still starts fresh, which is
+      // the safe direction: the alternative is offering a resume we could not
+      // confirm. It must still resolve to an *answer*, though — leaving it
+      // absent would hold every config pane unmounted forever. Not worth a toast.
+      .catch(() => {
+        if (live) setPaneSessions({ worktreeId, resumable: new Set() });
+      });
+    return () => {
+      live = false;
+    };
+  }, [worktreeId]);
+
+  // A config pane that exits cleanly closes itself, and the host is what tells
+  // us — not the pane's own component, which is only mounted while its tab is
+  // the *active* one. A background tab's session keeps running and keeps
+  // receiving frames, so deciding in the renderer deferred the close until the
+  // user next clicked that tab, which reads as the click having closed it.
+  //
+  // Keyed by worktree because a session outlives the selection: the pane that
+  // exited may belong to a worktree this window is no longer showing.
+  useEffect(() => {
+    setPaneCloseHandler((tabId, wtId) => {
+      setLayouts((prev) => {
+        const current = prev[wtId];
+        if (!current) return prev;
+        const next = closeTab(current, tabId);
+        return next === current ? prev : { ...prev, [wtId]: next };
+      });
+    });
+    return () => setPaneCloseHandler(null);
+  }, []);
 
   /**
    * Worktrees another window is showing.
@@ -2160,6 +2237,17 @@ function AppInner(props: {
             }),
           ),
       });
+      for (const spec of worktree?.ide.panes ?? []) {
+        if (!spec.available) continue;
+        items.push({
+          id: `pane:new-${spec.id}`,
+          group: "Panes",
+          label: `New ${spec.label} pane`,
+          alt: [spec.id],
+          hint: spec.description ?? worktree?.alias,
+          run: () => setLayout(addTabToFocused(layout, configPaneTab(spec))),
+        });
+      }
       items.push({
         id: "pane:new-browser",
         group: "Panes",
@@ -2387,6 +2475,8 @@ function AppInner(props: {
             repoRoot={worktree.repo_root}
             serviceUrls={urls}
             quicklinks={worktree.ide.quicklinks}
+            panes={worktree.ide.panes}
+            paneSessions={paneSessions}
             urlsEmptyHint={
               worktree.has_veld_config
                 ? "Start the run and its services appear here."
@@ -2528,6 +2618,8 @@ function AppInner(props: {
               repoRoot={worktree.repo_root}
               serviceUrls={urls}
               quicklinks={worktree.ide.quicklinks}
+              panes={worktree.ide.panes}
+              paneSessions={paneSessions}
               urlsEmptyHint={
                 worktree.has_veld_config
                   ? "Start the run and its services appear here."
