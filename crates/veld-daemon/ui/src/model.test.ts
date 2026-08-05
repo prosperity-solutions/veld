@@ -140,10 +140,16 @@ describe("activeRun / worktreeStatus", () => {
     expect(spinnerAction(null, null)).toBeNull();
   });
 
-  it("needsAttention covers exactly the states no spinner can represent", () => {
+  it("no OBSERVED state both spins and asks for attention", () => {
     // The complement matters as much as the set: anything `needsAttention`
     // rejects has to be representable by a run control on its own, or the state
     // has no surface at all.
+    //
+    // Scoped to the *observed* status on purpose — `spinnerAction(null, …)`. What
+    // the daemon reports is one state, so it may light one channel; a row showing
+    // both would mean the two-signal collision this change removed had come back
+    // through the status itself. The local-marker case is deliberately different
+    // and is pinned separately below.
     const all: RunStatus[] = [
       "starting",
       "running",
@@ -158,14 +164,29 @@ describe("activeRun / worktreeStatus", () => {
       expect(attention, `${status} -> ${s}`).toBe(
         s === "failed" || s === "recovering",
       );
-      // No state is both: a spinner and an alert on one row would be the two
-      // channels this change removed, reintroduced.
       expect(
         attention && spinnerAction(null, run("a", status, true)) !== null,
         `${status} is both spinning and alerting`,
       ).toBe(false);
     }
     expect(needsAttention(worktreeStatus([]))).toBe(false);
+  });
+
+  it("but a local marker DOES coexist with attention, and must", () => {
+    // Stopping a failed run has always been offered (`running` is
+    // `status !== "stopped"`, unchanged), so a row can carry the alert and a
+    // spinner at once between the click and the next poll. That is not the
+    // collision this change removed: the alert reports the *run's* state and the
+    // spinner reports *my action on it*, they are different shapes in different
+    // columns, and only one of them is transient. Asserted rather than assumed,
+    // because the test above reads as forbidding it — and a guard that claims more
+    // than the code holds is worse than no guard.
+    const failed = run("a", "failed", true);
+    expect(needsAttention(worktreeStatus([failed]))).toBe(true);
+    expect(spinnerAction("stop", failed)).toBe("stop");
+    const recovering = run("a", "recovering");
+    expect(needsAttention(worktreeStatus([recovering]))).toBe(true);
+    expect(spinnerAction("restart", recovering)).toBe("restart");
   });
 
   it("ignores non-live history runs", () => {

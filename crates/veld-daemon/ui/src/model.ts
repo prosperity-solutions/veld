@@ -148,6 +148,13 @@ export function spinnerAction(
  * "open the nodes view", which is why one predicate serves both — and why
  * `recovering` must not reach the spinner, where an unbounded loop reads as
  * progress.
+ *
+ * Derived from the observed status only, never from a pending marker. No
+ * *observed* state both spins and alerts, but the two **do** coexist once a local
+ * action is in flight — stopping a failed run has always been offered — and that
+ * is intended: the alert reports the run's state and the spinner reports your
+ * action on it. Both halves are pinned in `model.test.ts`, the second one
+ * precisely because the first reads as forbidding it.
  */
 export function needsAttention(status: WorktreeStatus): boolean {
   return status === "failed" || status === "recovering";
