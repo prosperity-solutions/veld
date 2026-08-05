@@ -142,14 +142,15 @@ export interface Worktree {
 
 /**
  * The settings document as the daemon sends it: a flat map of dotted keys to
- * JSON scalars.
+ * JSON values — scalars, except `browser.externalOrigins`, which is a list of
+ * origin patterns.
  *
  * Deliberately **not** a struct with one field per setting. The daemon preserves
  * keys it does not recognise so a preference written by a newer build survives a
  * downgrade, and a closed TypeScript interface would drop exactly those on the
  * next write. `settings.ts` is where keys get their types, at the point of use.
  */
-export type SettingsDoc = Record<string, string | number | boolean>;
+export type SettingsDoc = Record<string, string | number | boolean | string[]>;
 
 /** Mirrors `IdeView` in `crates/veld-daemon/src/desktop.rs`. */
 export interface IdeSection {
@@ -506,6 +507,14 @@ export interface PtyTicket {
   resumed: boolean;
 }
 
+/** Where a URL from a terminal is going. See `api.ptyOpenUrl`. */
+export interface PtyOpenUrl {
+  target: "pane" | "system";
+  /** Why it is not a pane — the exempt list, the preference, or no attached
+   *  window. Absent for `pane`. */
+  reason?: string;
+}
+
 /**
  * A run address. **The name alone is not one.**
  *
@@ -821,6 +830,24 @@ export const api = {
   closePtySession: (sessionId: string) =>
     request<void>(`/api/pty/sessions/${encodeURIComponent(sessionId)}`, {
       method: "DELETE",
+    }),
+  /**
+   * Ask where a URL a terminal produced should open.
+   *
+   * The **daemon** decides, not this page, and that is the point: half the exempt
+   * list is a setting and half is `ide.externalOrigins` in the project's
+   * `veld.json`, which the renderer does not read. A process in the shell reaches
+   * the same endpoint through `$BROWSER` → `veld open-url`, so a click and a CLI
+   * get the same answer from the same code.
+   *
+   * `pane` means the daemon has already pushed an `open_url` frame down this
+   * session's socket — the pane is opened by the frame handler, not by the caller.
+   * `system` means this page should open it externally, and `reason` says why.
+   */
+  ptyOpenUrl: (sessionId: string, url: string) =>
+    request<PtyOpenUrl>(`/api/pty/sessions/${encodeURIComponent(sessionId)}/open-url`, {
+      method: "POST",
+      body: JSON.stringify({ url }),
     }),
   stats: () => request<StatsResponse>("/api/stats"),
   /**

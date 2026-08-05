@@ -90,7 +90,8 @@ pub struct Document {
     pub nodes: Option<HashMap<String, NodeConfig>>,
 
     /// **Reserved and held.** `hooks` is never executed; under `ide` everything
-    /// except `quicklinks` and `permissions` is never rendered (F8). See
+    /// except `quicklinks`, `permissions` and `externalOrigins` is never rendered
+    /// (F8). See
     /// [`crate::config::VeldConfig::hooks`].
     #[serde(default)]
     pub hooks: Option<serde_json::Value>,
@@ -536,8 +537,9 @@ fn merge_reserved(into: &mut Option<serde_json::Value>, add: &serde_json::Value)
                     //
                     // Replacing by key was safe while both namespaces were opaque:
                     // overwriting a blob nobody interpreted lost nothing that had
-                    // meaning. It stopped being safe the moment `ide.quicklinks`
-                    // and `ide.permissions` became real — a `veld.d/*.jsonc` that
+                    // meaning. It stopped being safe the moment `ide.quicklinks`,
+                    // `ide.permissions` and `ide.externalOrigins` became real — a
+                    // `veld.d/*.jsonc` that
                     // declared either one silently discarded the root file's whole
                     // list, `deny` rules included, which is fail-*open* for a
                     // permission. And splitting config across files is exactly

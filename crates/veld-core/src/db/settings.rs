@@ -3,7 +3,10 @@
 //!
 //! # Why this is untyped at rest and typed at the edges
 //!
-//! The `settings` table stores `(scope, key, value)` with `value` a JSON scalar.
+//! The `settings` table stores `(scope, key, value)` with `value` a JSON document
+//! — a scalar for all but one key ([`SettingKey::BrowserExternalOrigins`] holds an
+//! array of origin patterns, because a list of hosts is what that preference *is*;
+//! a delimited string would be the same data with a parser bolted on).
 //! Nothing in the schema knows what keys exist. Typing lives here, in
 //! [`SettingKey`] and [`DEFAULTS`], for two reasons:
 //!
@@ -121,6 +124,17 @@ pub const MAX_RUN_HISTORY_DAYS: i64 = 7;
 /// than this is not a font list.
 const MAX_FONT_FAMILY_LEN: usize = 200;
 
+/// Most entries `browser.externalOrigins` may hold.
+///
+/// An exempt list is a handful of SSO and banking hosts. A cap keeps the settings
+/// document — which every client re-reads on every window focus — from becoming a
+/// place to store a blocklist.
+pub const MAX_EXTERNAL_ORIGINS: usize = 64;
+
+/// Longest one origin pattern may be. A hostname is capped at 253 bytes, and the
+/// scheme and port add a dozen; past that it is not an origin.
+const MAX_ORIGIN_LEN: usize = 280;
+
 /// Bounds on a key this binary does not recognise.
 ///
 /// Unknown keys are preserved rather than rejected (see the module docs), which
@@ -144,11 +158,13 @@ pub enum SettingKey {
     TerminalScrollback,
     TerminalShiftEnterNewline,
     TerminalDetachGrace,
+    TerminalOpenUrlsInApp,
     WorktreeMarkerStyle,
     WorktreeTrashRetention,
     RunsHistoryDays,
     BrowserQuickSwitchResponsive,
     BrowserQuickSwitchColorScheme,
+    BrowserExternalOrigins,
     Unknown(String),
 }
 
@@ -171,11 +187,13 @@ impl SettingKey {
         Self::TerminalScrollback,
         Self::TerminalShiftEnterNewline,
         Self::TerminalDetachGrace,
+        Self::TerminalOpenUrlsInApp,
         Self::WorktreeMarkerStyle,
         Self::WorktreeTrashRetention,
         Self::RunsHistoryDays,
         Self::BrowserQuickSwitchResponsive,
         Self::BrowserQuickSwitchColorScheme,
+        Self::BrowserExternalOrigins,
     ];
 
     pub fn as_str(&self) -> &str {
@@ -187,11 +205,13 @@ impl SettingKey {
             Self::TerminalScrollback => "terminal.scrollback",
             Self::TerminalShiftEnterNewline => "terminal.shiftEnterNewline",
             Self::TerminalDetachGrace => "terminal.detachGraceMinutes",
+            Self::TerminalOpenUrlsInApp => "terminal.openUrlsInApp",
             Self::WorktreeMarkerStyle => "worktree.markerStyle",
             Self::WorktreeTrashRetention => "worktree.trashRetentionDays",
             Self::RunsHistoryDays => "runs.historyDays",
             Self::BrowserQuickSwitchResponsive => "browser.quickSwitch.responsive",
             Self::BrowserQuickSwitchColorScheme => "browser.quickSwitch.colorScheme",
+            Self::BrowserExternalOrigins => "browser.externalOrigins",
             Self::Unknown(k) => k,
         }
     }
@@ -205,11 +225,13 @@ impl SettingKey {
             "terminal.scrollback" => Self::TerminalScrollback,
             "terminal.shiftEnterNewline" => Self::TerminalShiftEnterNewline,
             "terminal.detachGraceMinutes" => Self::TerminalDetachGrace,
+            "terminal.openUrlsInApp" => Self::TerminalOpenUrlsInApp,
             "worktree.markerStyle" => Self::WorktreeMarkerStyle,
             "worktree.trashRetentionDays" => Self::WorktreeTrashRetention,
             "runs.historyDays" => Self::RunsHistoryDays,
             "browser.quickSwitch.responsive" => Self::BrowserQuickSwitchResponsive,
             "browser.quickSwitch.colorScheme" => Self::BrowserQuickSwitchColorScheme,
+            "browser.externalOrigins" => Self::BrowserExternalOrigins,
             other => Self::Unknown(other.to_string()),
         }
     }
@@ -258,8 +280,40 @@ impl SettingKey {
             }
             Self::TerminalCursorBlink
             | Self::TerminalShiftEnterNewline
+            | Self::TerminalOpenUrlsInApp
             | Self::BrowserQuickSwitchResponsive
             | Self::BrowserQuickSwitchColorScheme => Value::from(value.as_bool().ok_or_else(bad)?),
+            // The one list-valued setting, and the one whose entries are checked
+            // by a parser that lives elsewhere: `veld_core::ide::parse_origin` is
+            // what `ide.externalOrigins` in a project config goes through, and the
+            // two halves of this exempt list are unioned — so a pattern accepted
+            // here and refused there (or the reverse) would mean the same string
+            // meant two things depending on where it was written.
+            //
+            // Rejected rather than filtered: an unparseable origin has no nearest
+            // sensible value, and silently dropping one leaves a user looking at a
+            // list they believe is in force. The whole patch fails, which is how
+            // `patch_settings` reports a bad value everywhere else.
+            Self::BrowserExternalOrigins => {
+                let items = value.as_array().ok_or_else(bad)?;
+                if items.len() > MAX_EXTERNAL_ORIGINS {
+                    return Err(bad());
+                }
+                let mut out = Vec::with_capacity(items.len());
+                for item in items {
+                    let raw = item.as_str().ok_or_else(bad)?.trim();
+                    if raw.len() > MAX_ORIGIN_LEN || crate::ide::parse_origin(raw).is_err() {
+                        return Err(bad());
+                    }
+                    // Stored as the author wrote it (trimmed), not as the parsed
+                    // shape: this is the value a text field round-trips, and the
+                    // parse happens on every read anyway.
+                    if !out.iter().any(|v| v == &Value::from(raw)) {
+                        out.push(Value::from(raw));
+                    }
+                }
+                Value::Array(out)
+            }
             Self::TerminalCursorStyle => {
                 one_of(value, &["block", "underline", "bar"]).ok_or_else(bad)?
             }
@@ -361,6 +415,14 @@ pub fn defaults() -> BTreeMap<String, Value> {
         // emulating lives in that pane's layout.
         (SettingKey::BrowserQuickSwitchResponsive, Value::from(true)),
         (SettingKey::BrowserQuickSwitchColorScheme, Value::from(true)),
+        // A URL a terminal produces opens in a pane by default — that is the
+        // feature, and a routing feature defaulted off is one nobody finds. The
+        // escape hatches are the exempt list below (per host, and per project) and
+        // this switch (all of it, everywhere).
+        (SettingKey::TerminalOpenUrlsInApp, Value::from(true)),
+        // Empty: veld ships no opinion about which hosts need the real browser.
+        // A default entry would be a guess about someone else's SSO provider.
+        (SettingKey::BrowserExternalOrigins, Value::Array(Vec::new())),
         // Keep until emptied. The trash deleting things on its own is opt-in, and
         // the default has to be the one that cannot surprise anybody.
         (
@@ -478,6 +540,43 @@ impl Db {
             .unwrap_or(DEFAULT_DETACH_GRACE_MINUTES)
             .clamp(MIN_DETACH_GRACE_MINUTES, MAX_DETACH_GRACE_MINUTES);
         std::time::Duration::from_secs(minutes as u64 * 60)
+    }
+
+    /// Whether a URL a terminal produces opens in a Veld browser pane.
+    ///
+    /// Read by the daemon (it is the daemon that routes the URL — see
+    /// `veld_core::ide::route_url`), so it goes through the same "anything that is
+    /// not a real `true`/`false` is the default" path the other daemon-read keys
+    /// take, rather than trusting the stored bytes.
+    pub fn terminal_open_urls_in_app(&self) -> bool {
+        self.setting(&SettingKey::TerminalOpenUrlsInApp)
+            .ok()
+            .flatten()
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true)
+    }
+
+    /// The global half of the exempt list: origins that must open in the system
+    /// browser rather than in a pane.
+    ///
+    /// Re-parsed on read rather than cached, and **entries that no longer parse are
+    /// dropped** — the same degrade-to-safe posture `settings()` takes for a value
+    /// a newer build wrote. Dropping an entry means that host opens in a pane, which
+    /// is the visible failure; keeping an unparseable one would mean a list that
+    /// silently matches nothing, which is not.
+    pub fn external_origins(&self) -> Vec<crate::ide::OriginPattern> {
+        self.setting(&SettingKey::BrowserExternalOrigins)
+            .ok()
+            .flatten()
+            .and_then(|v| match v {
+                Value::Array(items) => Some(items),
+                _ => None,
+            })
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .filter_map(|raw| crate::ide::parse_origin(raw).ok())
+            .collect()
     }
 
     /// How long a worktree stays in the trash before it is deleted, or `None` for
@@ -649,6 +748,66 @@ mod tests {
             )]))
             .unwrap_err();
         assert!(matches!(err, DbError::InvalidSetting { .. }));
+    }
+
+    #[test]
+    fn the_exempt_list_is_validated_by_the_config_parser_and_read_back_parsed() {
+        let (_dir, db) = test_db();
+        // Empty by default, and the master switch is on — the feature's point.
+        assert!(db.external_origins().is_empty());
+        assert!(db.terminal_open_urls_in_app());
+
+        db.patch_settings(&patch(&[(
+            "browser.externalOrigins",
+            // A duplicate collapses; whitespace is trimmed.
+            serde_json::json!([
+                "https://accounts.google.com",
+                " https://*.okta.com ",
+                "https://accounts.google.com"
+            ]),
+        )]))
+        .unwrap();
+        let stored = db.settings().unwrap()["browser.externalOrigins"].clone();
+        assert_eq!(
+            stored,
+            serde_json::json!(["https://accounts.google.com", "https://*.okta.com"])
+        );
+        // Read back as parsed patterns, which is what the router matches against.
+        let parsed = db.external_origins();
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].host, "accounts.google.com");
+        assert!(parsed[1].wildcard);
+
+        // Every refusal `ide.externalOrigins` makes in a project config, this key
+        // makes too — one parser, so a pattern cannot mean two things depending on
+        // where it was written. And a rejected entry fails the whole patch rather
+        // than being filtered out of a list the user believes is in force.
+        for bad in [
+            serde_json::json!(["accounts.google.com"]), // no scheme
+            serde_json::json!(["https://*.com"]),       // a whole TLD
+            serde_json::json!(["https://a.com/path"]),  // not an origin
+            serde_json::json!(["http://evil.com@localhost"]), // credentials
+            serde_json::json!([7]),                     // not a string
+            serde_json::json!("https://a.com"),         // not an array
+            serde_json::json!([format!("https://{}.com", "a".repeat(MAX_ORIGIN_LEN))]),
+            serde_json::json!(vec!["https://a.com"; MAX_EXTERNAL_ORIGINS + 1]),
+        ] {
+            let e = db
+                .patch_settings(&patch(&[("browser.externalOrigins", bad.clone())]))
+                .expect_err(&format!("{bad} must be refused"));
+            assert!(matches!(e, DbError::InvalidSetting { .. }), "{e}");
+        }
+        // …and the good value above survived every rejection.
+        assert_eq!(db.external_origins().len(), 2);
+
+        // The switch is a bool and nothing else.
+        assert!(
+            db.patch_settings(&patch(&[("terminal.openUrlsInApp", Value::from("yes"))]))
+                .is_err()
+        );
+        db.patch_settings(&patch(&[("terminal.openUrlsInApp", Value::from(false))]))
+            .unwrap();
+        assert!(!db.terminal_open_urls_in_app());
     }
 
     #[test]

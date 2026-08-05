@@ -168,7 +168,7 @@ impl Finding {
             message: format!(
                 "unknown top-level key \"{key}\". Expected one of: {}. (`hooks` is reserved and \
                  parsed but not executed; so is every key under `ide` except \
-                 `quicklinks` and `permissions`.){hint}",
+                 `quicklinks`, `permissions` and `externalOrigins`.){hint}",
                 KNOWN_TOP_LEVEL_KEYS.join(", ")
             ),
             rule: "unknown-top-level-key".to_owned(),
@@ -2769,8 +2769,8 @@ fn check_reserved_namespaces(config: &VeldConfig, out: &mut Vec<Finding>) {
                 format!(
                     "`ide` declares {count} key(s) this version does not render ({names}); they \
                      are parsed and stored so the shape does not change when they are \
-                     implemented. `ide.quicklinks` is rendered wherever `/ide` runs, and \
-                     `ide.permissions` by Veld Desktop"
+                     implemented. `ide.quicklinks` and `ide.externalOrigins` are \
+                     rendered wherever `/ide` runs, and `ide.permissions` by Veld Desktop"
                 ),
             ));
         }
@@ -5245,7 +5245,7 @@ mod tests {
     /// F8 narrowed: the parts of `ide` veld now renders must stop reporting as inert.
     ///
     /// The whole value of the notice is that it is true. A config whose `ide` holds
-    /// only quicklinks and permissions is fully interpreted, so saying "parsed but
+    /// only interpreted keys is fully interpreted, so saying "parsed but
     /// not rendered" about it would send an author looking for a bug in the one
     /// place there isn't one.
     #[test]
@@ -5255,7 +5255,8 @@ mod tests {
                 "schemaVersion": "3", "name": "t",
                 "ide": {
                     "quicklinks": [ { "label": "Staging", "url": "https://staging.example.com" } ],
-                    "permissions": [ { "origin": "http://localhost:*", "allow": ["camera"] } ]
+                    "permissions": [ { "origin": "http://localhost:*", "allow": ["camera"] } ],
+                    "externalOrigins": ["https://accounts.google.com"]
                 },
                 "nodes": {}
             }"#,
@@ -5265,6 +5266,7 @@ mod tests {
         let section = cfg.ide_section();
         assert_eq!(section.quicklinks.len(), 1);
         assert_eq!(section.permissions.len(), 1);
+        assert_eq!(section.external_origins.len(), 1);
 
         let findings = validate(&cfg);
         assert!(

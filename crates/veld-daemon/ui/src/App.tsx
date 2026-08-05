@@ -128,6 +128,7 @@ import {
 } from "./panes/model";
 import {
   applyTerminalTheme,
+  onTerminalOpenUrl,
   pruneTerminals,
   releaseTerminal,
   restartTerminal,
@@ -1431,6 +1432,31 @@ function AppInner(props: {
             const dock = dockOf(l, viewId);
             if (dock === null) continue;
             return { ...prev, [Number(key)]: addTab(l, dock, browserTab({ url, profile })) };
+          }
+          return prev;
+        });
+      }),
+    [],
+  );
+
+  // A URL a terminal produced — clicked in its output, or handed to `$BROWSER` by
+  // something running in it. It becomes a tab in the dock holding that terminal,
+  // for the same reason a `target=_blank` does above: the layout is the only thing
+  // that knows where the pane is, and the terminal's session id *is* its tab id.
+  //
+  // Keyed off the layouts rather than the selected worktree, so a shell in a
+  // worktree the user has since switched away from still opens its page in the
+  // right place. A session this window does not hold is not ours to answer — the
+  // daemon sends the frame only to the socket that is attached, so that case means
+  // the tab was released between the request and the frame.
+  useEffect(
+    () =>
+      onTerminalOpenUrl(({ sessionId, url }) => {
+        setLayouts((prev) => {
+          for (const [key, l] of Object.entries(prev)) {
+            const dock = dockOf(l, sessionId);
+            if (dock === null) continue;
+            return { ...prev, [Number(key)]: addTab(l, dock, browserTab({ url })) };
           }
           return prev;
         });

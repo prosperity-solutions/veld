@@ -172,6 +172,18 @@ pub struct HolderConfig {
     /// compiled in so the two sides cannot disagree about it, and so a test can
     /// shorten it.
     pub orphan_grace_secs: u64,
+    /// Extra environment for the shell, on top of what the holder inherits.
+    ///
+    /// The daemon computes it (`pty::shims::session_env`) because it is the side
+    /// that knows about instances, ports and where the `veld` CLI lives; the holder
+    /// only applies it.
+    ///
+    /// `#[serde(default)]`, which is what keeps this off [`PROTOCOL`]: a holder
+    /// spawned by an older daemon simply has no entry, and its shell has no
+    /// `$BROWSER` — the pre-feature behaviour, for that one already-running shell.
+    /// See the note on [`PROTOCOL`] about additive fields.
+    #[serde(default)]
+    pub env: std::collections::BTreeMap<String, String>,
 }
 
 /// Write one frame.

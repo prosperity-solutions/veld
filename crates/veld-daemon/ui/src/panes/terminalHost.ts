@@ -14,10 +14,12 @@
  */
 
 import { FitAddon } from "@xterm/addon-fit";
+import { WebLinksAddon } from "@xterm/addon-web-links";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { api } from "../api";
 import { ANSI_DARK, ANSI_LIGHT } from "../shared/ansi";
+import { notifyError } from "../shared/notify";
 import { terminalPrefs, type TerminalPrefs } from "../shared/settings";
 import { chromeless, layoutSlot, windowSeed } from "../shell";
 import { parseLayouts, storedTerminalIds, terminalIds } from "./model";
@@ -300,6 +302,16 @@ function ensure(id: string, worktreeId: number): Session {
   });
   const fit = new FitAddon();
   term.loadAddon(fit);
+  // URLs in the output become links. The addon is worth the dependency for one
+  // reason: it stitches a URL back together across the rows a terminal *wrapped*
+  // it onto (`isWrapped`), and a login URL is always long enough to wrap. Its
+  // regex is http(s)-only and it re-validates with `new URL()`, which is the same
+  // gate a browser pane applies on the way in.
+  term.loadAddon(
+    new WebLinksAddon((event, uri) => {
+      void activateLink(id, uri, event);
+    }),
+  );
 
   // Attached below, once the session object the handler sends through exists.
 
@@ -455,8 +467,66 @@ async function connect(s: Session): Promise<void> {
   };
 }
 
+/**
+ * A click on a link in the terminal.
+ *
+ * The **daemon** decides where it opens (see `api.ptyOpenUrl`), which is what
+ * makes a click and a `$BROWSER` invocation from a process in the same shell
+ * behave identically. A modifier held down is the local override: it goes to the
+ * real browser without asking, because "this one, in my logged-in browser" is a
+ * per-click intention and not something to add to an exempt list.
+ */
+async function activateLink(sessionId: string, url: string, event: MouseEvent): Promise<void> {
+  if (event.metaKey || event.ctrlKey || event.shiftKey) {
+    openExternally(url);
+    return;
+  }
+  try {
+    const answer = await api.ptyOpenUrl(sessionId, url);
+    // `pane` is already done: the daemon pushed an `open_url` frame down this
+    // session's socket, and the app's frame handler owns the placement.
+    if (answer.target === "system") openExternally(url);
+  } catch (e) {
+    // The link still has to work. Report it once and open it the way the user's
+    // machine would have anyway.
+    notifyError("Could not ask Veld where to open that link", e);
+    openExternally(url);
+  }
+}
+
+/**
+ * Open a URL outside Veld.
+ *
+ * `window.open` in both builds: a browser tab makes it a tab, and the desktop
+ * shell's `setWindowOpenHandler` denies the native popup and hands the URL to
+ * `shell.openExternal`. `noopener` because the opened page must not be able to
+ * reach back into `/ide` through `window.opener`.
+ */
+function openExternally(url: string): void {
+  window.open(url, "_blank", "noopener,noreferrer");
+}
+
+/** Subscribers to `open_url` frames — see `onTerminalOpenUrl`. */
+const openUrlListeners = new Set<(event: { sessionId: string; url: string }) => void>();
+
+/**
+ * A URL the daemon routed to this page, and which terminal it came from.
+ *
+ * The session id *is* the terminal tab's id, so the subscriber can find the dock
+ * the terminal sits in and open the page beside it — the same shape the
+ * `target=_blank`-in-a-browser-pane path uses (`onBrowserOpenRequest`). Handled
+ * here rather than in the React component because a terminal's socket outlives
+ * every mount of its pane.
+ */
+export function onTerminalOpenUrl(
+  fn: (event: { sessionId: string; url: string }) => void,
+): () => void {
+  openUrlListeners.add(fn);
+  return () => openUrlListeners.delete(fn);
+}
+
 function handleControl(s: Session, raw: string): void {
-  let msg: { type?: string; code?: number; resumed?: boolean };
+  let msg: { type?: string; code?: number; resumed?: boolean; url?: string };
   try {
     msg = JSON.parse(raw);
   } catch {
@@ -493,6 +563,14 @@ function handleControl(s: Session, raw: string): void {
       // reporting the close as a lost connection.
       setState(s, "ended", "opened in another window");
       writeNotice(s, "this terminal was opened in another window");
+      break;
+    case "open_url":
+      // The one control frame that is not about this terminal's display. Ignored
+      // rather than trusted blindly if it arrives without a URL — the daemon
+      // validated it, and this is the cheap re-check at the edge that consumes it.
+      if (typeof msg.url === "string" && msg.url !== "") {
+        for (const fn of openUrlListeners) fn({ sessionId: s.id, url: msg.url });
+      }
       break;
     case "lagged":
       // The daemon dropped output we were too slow to take, so the screen is

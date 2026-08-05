@@ -120,6 +120,30 @@ pub fn socket_path_too_long(path: &std::path::Path) -> Option<String> {
 /// which has to stop them all.
 pub const PTY_DIR_PREFIX: &str = "pty-";
 
+/// Where this instance keeps the little executables it puts in a terminal's
+/// environment — today `veld-open`, plus `open`/`xdg-open` wrappers (see
+/// `veld-daemon/src/pty/shims.rs`).
+///
+/// Keyed by daemon **port** for the same reason [`pty_dir`] is: the script points a
+/// URL at *this* daemon's session registry, and a dev instance handing the
+/// installed instance's daemon a session id it has never heard of would silently
+/// route nothing. Deliberately **not** inside [`pty_dir`], whose entries the
+/// holder-recovery scan walks looking for sockets.
+///
+/// `VELD_SHIM_DIR` is the variable a terminal sees, and it is an *output* of this
+/// function rather than an input — a client-supplied directory here would be a
+/// client-supplied executable on a developer's PATH.
+pub fn shim_dir() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".veld")
+        .join(format!("{SHIM_DIR_PREFIX}{}", daemon_port()))
+}
+
+/// The prefix every [`shim_dir`] shares, so `veld uninstall` can sweep the
+/// directories of every instance.
+pub const SHIM_DIR_PREFIX: &str = "shim-";
+
 /// Management hostname this daemon should self-register with the helper
 /// (e.g. `veld-dev.localhost`). `None` for the installed instance — its
 /// `veld.localhost` route is part of the helper's base Caddy config.

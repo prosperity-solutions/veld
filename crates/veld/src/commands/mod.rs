@@ -9,6 +9,7 @@ pub mod lint;
 pub mod list;
 pub mod logs;
 pub mod nodes;
+pub mod open_url;
 pub mod presets;
 pub mod restart;
 pub mod runs;

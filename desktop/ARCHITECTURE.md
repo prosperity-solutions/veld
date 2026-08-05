@@ -263,6 +263,35 @@ requests at runtime — branding rule.
   textarea and the shell gets a bare `CR` as well — a newline *and* a submit.
   Alt+Enter is left alone, and other modifier combinations pass through, because
   swallowing them would be eating someone else's keybinding.
+- **A URL a terminal produces is routed by the daemon, not by the renderer**
+  (`veld_core::ide::route_url`, `POST /api/pty/sessions/{id}/open-url`). Two
+  entry points reach it — a click on a link in the output
+  (`@xterm/addon-web-links`, which is worth the dependency because it stitches a
+  URL back together across the rows a terminal wrapped it onto) and `$BROWSER` in
+  the session's environment, which a process in the shell invokes and which lands
+  in `veld open-url`. Both ask the same question, and half the answer is
+  `ide.externalOrigins` in the project's `veld.json`, which the renderer does not
+  read: a policy copy on this side would be a second implementation of it.
+  Delivery is a new `open_url` control frame on **that session's socket**, so the
+  socket *is* the routing decision — the page attached to a session is the window
+  whose dock holds that terminal, and no window id has to be invented, stored, or
+  kept correct across a detach. Placement then follows `onBrowserOpenRequest`'s
+  shape exactly: find the dock holding the tab whose id is the session id, and add
+  a browser tab to it.
+- **`$BROWSER` is the automatic interception and `PATH` cannot be**, which is
+  measured rather than assumed. macOS `/etc/zprofile` runs `path_helper`, which
+  rebuilds `PATH` with the system directories first and appends what was there —
+  so a directory prepended before spawning `$SHELL -l` lands behind `/usr/bin` and
+  `open` still resolves to `/usr/bin/open`; Debian's `/etc/profile` overwrites
+  `PATH` outright. The shell is a login shell by design, so it is entitled to do
+  that, and veld does not wrap anybody's rc files to win the argument (the
+  VS Code-style `ZDOTDIR` injection is zsh-only in practice and puts veld in the
+  path of every terminal's startup). What survives is the environment. The
+  `open`/`xdg-open` shims still exist in `$VELD_SHIM_DIR` for a user who opts in
+  by putting it on `PATH`, and every branch that is not "one http(s) URL, in a
+  Veld terminal, that the daemon routed" ends in `exec`ing the real tool with the
+  original argv — `open .` and `open -a Safari …` must behave exactly as they did
+  before veld was in the picture.
 - **Never write into a live shell.** A `[veld] …` notice injected into a running
   terminal lands in the middle of whatever full-screen program is redrawing
   (Claude Code, vim, top) and corrupts it. Notices are for shells that have
@@ -964,6 +993,7 @@ handshake can carry neither a custom header nor a CORS preflight.
 |---|---|
 | `POST /api/pty/tickets` `{worktree_id, session_id}` | CSRF-gated, and the only place a worktree id is resolved to a directory — so the socket below never accepts a path from the client. Returns a single-use ticket (122 bits from the OS CSPRNG, 30s TTL) plus `resumed`, true when a live session already answers to `session_id`. The client names the session (`crypto.randomUUID()`), which is what lets a reload ask for the same shell; the name is an identifier, not a credential. `409` if that session belongs to a different worktree. |
 | `GET /api/pty/attach?ticket=&cols=&rows=` | The WebSocket. Requires an allowlisted `Origin`, failing closed when absent, **and** an unredeemed ticket; a rejected origin does not burn the ticket. Binary frames are terminal bytes in both directions, text frames are JSON control (`resize` up; `replay_begin`/`replay_end`/`ready`/`exit`/`taken_over`/`lagged` down). A second attach takes the session over and tells the displaced socket why. Note that a browser can read neither the status nor the body of a *failed* handshake, so anything a legitimate client can trip over (capacity, a missing directory) is pre-checked at ticket time instead; the client distinguishes a refused upgrade from a dropped connection by whether `ready` ever arrived. |
+| `POST /api/pty/sessions/{id}/open-url` `{url}` | CSRF-gated. Answers `{target: "pane" \| "system", reason?}` for a URL that terminal produced, and for `pane` has already pushed the `open_url` frame down that session's socket by the time it returns. `system` means the *caller* opens it (the CLI `exec`s the real opener; the renderer `window.open`s), which is also the answer when no socket is attached — a frame is deliberately not queued for a future attach, because a login page that arrives ten minutes late is worse than one that opened in the wrong browser. A non-`http(s)` URL is a `400` rather than a `system`: the one caller for which that is expected (`veld open-url` standing in for `open report.pdf`) never asks. |
 | `DELETE /api/pty/sessions/{id}` | CSRF-gated. Ends the shell now — the distinction the detach model rests on, since a socket closing means "come back later". `204` even when the session is already gone. |
 
 The shell is the user's `$SHELL -l`, which is this module's stated exception to

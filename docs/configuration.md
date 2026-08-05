@@ -1483,10 +1483,10 @@ already lost its leading zero, so it is refused rather than guessed at.
 
 ---
 
-## `ide`: quicklinks and permissions
+## `ide`: quicklinks, permissions and external origins
 
 `ide` is where a project configures Veld's own IDE surfaces — Veld Desktop and
-the `/ide` view in a browser. Two keys under it are interpreted; the rest of
+the `/ide` view in a browser. Three keys under it are interpreted; the rest of
 `ide` stays reserved and opaque (see
 [below](#reserved-hooks-and-the-rest-of-ide)), so a JSON-defined IDE extension is
 free to use whatever shape it likes.
@@ -1521,6 +1521,50 @@ a repo-controlled string that a click hands to the OS, and `vscode://` or
 `file://` would make a config file a launcher for whatever the machine has
 registered. Literal only — `${...}` is **not** interpolated here, because the
 start page is rendered with no run to resolve against.
+
+### `ide.externalOrigins`
+
+Origins that must open in the user's **system** browser rather than in a Veld
+browser pane.
+
+A URL a terminal produces normally becomes a pane beside that terminal — whether
+you clicked it in the output or a program running in the shell opened it (Veld
+points `$BROWSER` at itself, so `gh`, `git`, Claude Code, vite and next all reach
+it). This list is the exception:
+
+```jsonc
+"ide": {
+  "externalOrigins": [
+    "https://accounts.google.com",
+    "https://*.okta.com"
+  ]
+}
+```
+
+The reason it exists is cookies. A pane has its own jar, so an SSO or bank flow
+started in one begins from scratch — which for a login is not a preview, it is a
+dead end. The project is the place that knows which hosts *its app's* sign-in goes
+through, so those belong in the repo alongside everything else about running it.
+
+**Unioned with the user's own list, never replacing it.** Each user has a
+`browser.externalOrigins` setting (Settings → Terminal) for the sign-ins *they*
+use; this key adds the project's. Neither can remove the other's — an exemption
+only ever sends a URL to the real browser, which is where it would have gone
+before any of this existed. Turning the whole behaviour off is also the user's
+call (`terminal.openUrlsInApp`), not a project's.
+
+The grammar is exactly [`ide.permissions[].origin`](#idepermissions)'s, checked by
+the same parser: `scheme://host[:port]`, `http` or `https`, no path, a leading
+`*.` for any depth of subdomain (label-wise, so `evilokta.com` does not match
+`*.okta.com`), `*` in the port position for any port, and an **omitted port
+meaning the scheme's default port exactly**. A malformed entry is dropped and
+reported by `veld lint` as a warning, like every other `ide` problem.
+
+Two limits worth knowing, both of which end with the URL in a *pane* rather than
+somewhere unexpected: an origin is matched, not a path — you cannot exempt
+`https://example.com/login` and keep the rest of that host in panes — and an
+internationalised host must be written in its `xn--…` form, because that is what a
+browser compares.
 
 ### `ide.permissions`
 
@@ -1647,8 +1691,8 @@ the embedding document's business, not veld's.
 ### Splitting `ide` across files
 
 `ide` may appear in any file an `include` glob picks up — `veld.d/ide.jsonc` is
-the obvious home for it — and the two interpreted lists **concatenate in file
-order** rather than the later file replacing the earlier one:
+the obvious home for it — and the interpreted lists **concatenate in file order**
+rather than the later file replacing the earlier one:
 
 ```jsonc
 // veld.json          → "include": ["veld.d/*.jsonc"]
@@ -1667,7 +1711,7 @@ because veld does not interpret it and has no idea how to combine two of them.
 Both are **reserved**: they parse, are stored, and are **not executed by this
 version**. `veld lint` says so, so a hook that does nothing is distinguishable
 from a config mistake. For `ide` the notice now names the specific keys that are
-inert, since `quicklinks` and `permissions` are not.
+inert, since `quicklinks`, `permissions` and `externalOrigins` are not.
 
 ```jsonc
 // veld.d/hooks.jsonc

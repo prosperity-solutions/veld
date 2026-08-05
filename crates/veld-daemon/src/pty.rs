@@ -78,6 +78,9 @@
 #[path = "pty/holder.rs"]
 pub mod holder;
 
+#[path = "pty/shims.rs"]
+mod shims;
+
 #[path = "pty/wire.rs"]
 mod wire;
 
@@ -209,6 +212,13 @@ const SCROLLBACK_BYTES: usize = 256 * 1024;
 /// stalling the shell for a client that cannot keep pace.
 const OUTPUT_CHANNEL: usize = 512;
 
+/// Out-of-band control frames buffered for the attached socket.
+///
+/// Small on purpose: these are user-initiated (a click, or a process opening a
+/// URL), so a backlog of sixteen means sixteen browser panes are already opening
+/// and the seventeenth is not the problem to solve.
+const CONTROL_CHANNEL: usize = 16;
+
 /// Grace between the shell exiting and the socket closing, so the last of its
 /// output is forwarded instead of truncated.
 const EXIT_DRAIN: Duration = Duration::from_millis(250);
@@ -270,6 +280,7 @@ pub fn routes() -> Router {
         .route("/api/pty/tickets", post(mint_ticket))
         .route("/api/pty/attach", get(attach))
         .route("/api/pty/sessions/{id}", delete(close_session))
+        .route("/api/pty/sessions/{id}/open-url", post(open_url))
 }
 
 /// Start the background task that collects sessions nobody came back for.
@@ -351,6 +362,16 @@ struct Session {
     to_holder: mpsc::Sender<(u8, Vec<u8>)>,
     /// Live output to the attached socket, if any.
     output: broadcast::Sender<Bytes>,
+    /// Out-of-band control frames for the attached socket — today only
+    /// [`ServerControl::OpenUrl`].
+    ///
+    /// A `broadcast` rather than a `watch` for the reason the `exit` field's comment
+    /// spells out from the other side: `watch` keeps one *current value*, and two
+    /// URLs opened in quick succession would collapse into one. It also gives the
+    /// sender a receiver count, which is how the endpoint answers "is anyone
+    /// looking?" — the caller needs that to fall back to the system browser instead
+    /// of dropping the URL on the floor.
+    control: broadcast::Sender<ServerControl>,
     scrollback: Mutex<Scrollback>,
     /// `Some(code)` once the shell has exited.
     ///
@@ -1050,6 +1071,155 @@ async fn close_session(headers: HeaderMap, Path(id): Path<String>) -> Result<Sta
 }
 
 // ---------------------------------------------------------------------------
+// Opening a URL from a terminal
+// ---------------------------------------------------------------------------
+
+/// Longest URL this endpoint accepts.
+///
+/// Well past any real login or preview link (8 KB is the de-facto limit browsers
+/// and servers agree on for a request line) and short of putting a megabyte into a
+/// WebSocket frame because a shell printed a file.
+const MAX_URL_LEN: usize = 8 * 1024;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OpenUrlRequest {
+    url: String,
+}
+
+#[derive(Serialize)]
+struct OpenUrlResponse {
+    target: veld_core::ide::UrlTarget,
+    /// Why, when the answer is [`UrlTarget::System`] for a reason the caller could
+    /// not have worked out itself — no window attached, or the preference off. The
+    /// CLI prints it, so "it opened in Safari again" has an answer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+}
+
+/// Route a URL produced by a terminal session: a Veld browser pane, or the system
+/// browser.
+///
+/// **Both entry points come here.** A click on a link in the terminal and a process
+/// in the shell invoking `$BROWSER` are the same question, and the answer depends on
+/// the project's `veld.json` — which the renderer does not read — so the decision
+/// lives on this side. See `veld_core::ide::route_url`.
+///
+/// The reply says what *will* happen, not what happened: for a pane, the frame is
+/// already on the socket by the time this returns. A caller that gets
+/// [`UrlTarget::System`] is expected to open the URL itself, which is why the answer
+/// is a body rather than a status.
+///
+/// CSRF-gated. Without the gate, any page in a browser could push a URL of its
+/// choosing into a Veld browser pane on the developer's machine.
+async fn open_url(
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<OpenUrlRequest>,
+) -> Result<Json<OpenUrlResponse>, ApiError> {
+    check_csrf(&headers)
+        .map_err(|_| err(StatusCode::FORBIDDEN, "missing X-Veld-Request header"))?;
+    if !valid_session_id(&id) {
+        return Err(err(StatusCode::BAD_REQUEST, "invalid session id"));
+    }
+    if body.url.len() > MAX_URL_LEN {
+        return Err(err(StatusCode::PAYLOAD_TOO_LARGE, "url is too long"));
+    }
+    // Refused rather than answered with `system`: a caller sending this has a bug,
+    // and reporting "opened in the system browser" would hide it. The one place a
+    // non-web URL is *expected* — a shim invoked as `open report.pdf` — never gets
+    // this far, because `veld open-url` execs the real tool without asking.
+    if veld_core::ide::parse_url_origin(&body.url).is_none() {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "not an http(s) URL with a host",
+        ));
+    }
+
+    let session = SESSIONS
+        .lock()
+        .await
+        .get(&id)
+        .cloned()
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "no such terminal session"))?;
+
+    // One `Db::open` per URL a human (or an agent) opens. Not a hot path in the
+    // sense AGENTS.md warns about — this is user-initiated and rare — and the
+    // alternative is caching a preference that must then be invalidated when the
+    // settings screen writes it.
+    let db = open_db().map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "database error"))?;
+    let mut external = db.external_origins();
+    external.extend(project_external_origins(&db, session.worktree_id));
+    let open_in_app = db.terminal_open_urls_in_app();
+
+    match veld_core::ide::route_url(&body.url, open_in_app, &external) {
+        veld_core::ide::UrlTarget::System => Ok(Json(OpenUrlResponse {
+            target: veld_core::ide::UrlTarget::System,
+            reason: Some(
+                if open_in_app {
+                    "this origin is on the exempt list (browser.externalOrigins, or \
+                     ide.externalOrigins in the project's config)"
+                } else {
+                    "terminal.openUrlsInApp is off"
+                }
+                .to_owned(),
+            ),
+        })),
+        veld_core::ide::UrlTarget::Pane => {
+            // Nobody is looking at this terminal — the page was closed, or the
+            // session is between attaches. Answering `pane` would drop the URL: the
+            // frame is not queued for a future attach, deliberately, because a login
+            // page that arrives ten minutes late is worse than one that opened in the
+            // wrong browser.
+            if session.control.receiver_count() == 0 {
+                return Ok(Json(OpenUrlResponse {
+                    target: veld_core::ide::UrlTarget::System,
+                    reason: Some(
+                        "no Veld window is attached to this terminal right now".to_owned(),
+                    ),
+                }));
+            }
+            let _ = session.control.send(ServerControl::OpenUrl {
+                url: body.url.clone(),
+            });
+            debug!(session = %id, "routed a URL to a browser pane");
+            Ok(Json(OpenUrlResponse {
+                target: veld_core::ide::UrlTarget::Pane,
+                reason: None,
+            }))
+        }
+    }
+}
+
+/// The project half of the exempt list, for the worktree a session belongs to.
+///
+/// Read from the config on every call rather than cached, which is what makes
+/// editing `ide.externalOrigins` take effect on the next URL instead of on the next
+/// daemon restart. A worktree that has been removed, or has no config, contributes
+/// nothing — an unreadable config must not turn into "everything is exempt" or into
+/// a failed request.
+fn project_external_origins(
+    db: &veld_core::db::Db,
+    worktree_id: i64,
+) -> Vec<veld_core::ide::OriginPattern> {
+    let Ok(Some(wt)) = db.get_worktree(worktree_id) else {
+        return Vec::new();
+    };
+    // `root_config_in`, never a hardcoded root filename — a `veld.jsonc` project
+    // is a project (AGENTS.md).
+    let Some(path) = veld_core::config::root_config_in(FsPath::new(&wt.path)) else {
+        return Vec::new();
+    };
+    match veld_core::config::parse_config(&path) {
+        Ok(cfg) => cfg.ide_section().external_origins,
+        Err(e) => {
+            debug!("ignoring unreadable config at {}: {e}", path.display());
+            Vec::new()
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Origin allowlist
 // ---------------------------------------------------------------------------
 
@@ -1295,6 +1465,11 @@ async fn obtain_session(
         cols: size.cols,
         rows: size.rows,
         socket: socket_for(&ticket.session_id),
+        // What lets a process inside the shell open a URL in Veld: `$BROWSER`
+        // pointing at a generated shim, and the session id it names when it does.
+        // Computed here rather than in the holder because the holder is a dumb PTY
+        // owner — it knows nothing about instances, ports or the CLI's location.
+        env: shims::session_env(&ticket.session_id),
         // The holder's own self-destruct grace, used when the *daemon* is gone and
         // nothing is left to reap it. Read at spawn, so a holder keeps the value
         // that was configured when its shell started: changing the setting affects
@@ -1337,6 +1512,7 @@ fn register(
     let (reader, writer) = stream.into_split();
 
     let (output, _) = broadcast::channel(OUTPUT_CHANNEL);
+    let (control, _) = broadcast::channel(CONTROL_CHANNEL);
     // Seeded with the holder's answer, so a session adopted after its shell
     // already finished reports the exit instead of presenting a dead prompt as a
     // live one.
@@ -1357,6 +1533,7 @@ fn register(
         label: hello.label.clone(),
         to_holder,
         output,
+        control,
         scrollback: Mutex::new(mirror),
         exit,
         attach_seq: std::sync::atomic::AtomicU64::new(0),
@@ -1620,7 +1797,7 @@ enum ClientControl {
 }
 
 /// Server → client control frames. PTY output travels as binary frames.
-#[derive(Serialize)]
+#[derive(Serialize, Clone, Debug)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ServerControl {
     /// Replayed scrollback follows, until [`ServerControl::ReplayEnd`].
@@ -1648,6 +1825,14 @@ enum ServerControl {
     /// Output was produced faster than this socket could take it, so the
     /// display is missing bytes.
     Lagged,
+    /// Open `url` in a browser pane beside this terminal.
+    ///
+    /// Pushed from an HTTP handler rather than derived from the PTY stream, which
+    /// makes it the one server→client frame that is not about terminal bytes. It
+    /// travels on this socket because the socket *is* the routing decision: the page
+    /// attached to a session is the window whose dock holds that terminal, so no
+    /// window id has to be invented, stored or kept correct across a detach.
+    OpenUrl { url: String },
 }
 
 impl ServerControl {
@@ -1684,6 +1869,11 @@ async fn serve_socket(socket: WebSocket, session: Arc<Session>, size: PtySize, r
         let sb = session.scrollback.lock().expect("scrollback poisoned");
         (session.output.subscribe(), sb.snapshot())
     };
+
+    // Subscribed before the epoch is claimed, for the same reason the output
+    // subscription is: a URL routed in the window between the two would otherwise
+    // be sent to nobody.
+    let mut control = session.control.subscribe();
 
     // Claim the session: any socket already attached sees this and leaves.
     // Subscribe first, so a takeover that lands between the claim and the
@@ -1791,6 +1981,27 @@ async fn serve_socket(socket: WebSocket, session: Arc<Session>, size: PtySize, r
                     let _ = ws_tx.send(ServerControl::Exit { code }.frame()).await;
                     break;
                 }
+            },
+
+            frame = control.recv() => match frame {
+                Ok(frame) => {
+                    // Only the socket that currently owns the session forwards. A
+                    // displaced one is still in this loop until it notices the
+                    // takeover, and two windows opening the same URL is a pane in a
+                    // window the user is not looking at.
+                    if *session.attach_epoch.borrow() == epoch
+                        && ws_tx.send(frame.frame()).await.is_err()
+                    {
+                        break;
+                    }
+                }
+                // Dropped control frames are not worth telling the client about:
+                // there is nothing to redraw, and `Lagged` means "your screen is
+                // missing bytes", which would be a lie here.
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    warn!(session = %session.id, dropped = n, "control frames dropped");
+                }
+                Err(broadcast::error::RecvError::Closed) => {}
             },
 
             Ok(()) = epoch_rx.changed() => {
@@ -2240,6 +2451,11 @@ mod tests {
                 r#"{"worktree_id":1,"session_id":"a"}"#,
             ),
             ("DELETE", "/api/pty/sessions/a", ""),
+            (
+                "POST",
+                "/api/pty/sessions/a/open-url",
+                r#"{"url":"https://example.com"}"#,
+            ),
         ] {
             let res = routes()
                 .oneshot(
@@ -2260,6 +2476,61 @@ mod tests {
                 "{method} {uri} must require the CSRF header"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn open_url_refuses_what_a_pane_could_never_show() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        // Checked before the session is looked up and before the database is
+        // touched, so these need neither. A caller sending one of these has a bug,
+        // and answering "opened in the system browser" would hide it — the one place
+        // a non-web argument is expected is `veld open-url` standing in for `open`,
+        // which execs the real tool without asking the daemon at all.
+        for body in [
+            r#"{"url":"file:///etc/passwd"}"#,
+            r#"{"url":"javascript:alert(1)"}"#,
+            r#"{"url":"vscode://file/tmp/x"}"#,
+            r#"{"url":"https://"}"#,
+            r#"{"url":""}"#,
+            // An unknown field is a client typo, not something to ignore.
+            r#"{"url":"https://example.com","target":"pane"}"#,
+        ] {
+            let res = routes()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri("/api/pty/sessions/abc/open-url")
+                        .header("content-type", "application/json")
+                        .header("x-veld-request", "1")
+                        .body(Body::from(body.to_owned()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert!(
+                res.status().is_client_error(),
+                "{body} must be a client error, got {}",
+                res.status()
+            );
+        }
+
+        // A well-formed URL for a session that does not exist is a 404 — again
+        // without reaching the database, so this test cannot depend on one.
+        let res = routes()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/pty/sessions/nosuchsession/open-url")
+                    .header("content-type", "application/json")
+                    .header("x-veld-request", "1")
+                    .body(Body::from(r#"{"url":"https://example.com"}"#.to_owned()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
     }
 
     /// End-to-end over a real socket: a real listener, a real handshake, a
@@ -2667,6 +2938,80 @@ mod tests {
                 .await
                 .unwrap();
             read_until(&mut again, "mark=kept").await;
+            end_session(&sid, "test cleanup").await;
+        }
+
+        /// The daemon's environment additions actually reach the shell.
+        ///
+        /// `VELD_PTY_SESSION` rather than `$BROWSER`, because it is the one that is
+        /// always set: the shim directory needs a `veld` binary beside the running
+        /// executable, and a test binary lives in `target/debug/deps`. What this pins
+        /// is the wiring — `HolderConfig.env` being applied to the spawned shell —
+        /// which is the part a reader would otherwise have to take on trust.
+        #[tokio::test]
+        async fn the_session_id_reaches_the_shell_environment() {
+            let addr = serve().await;
+            let dir = tempfile::tempdir().unwrap();
+            let sid = session_id();
+
+            let mut ws = open(addr, &sid, dir.path(), "").await;
+            read_control(&mut ws, "ready").await;
+            ws.send(WsMessage::Binary(
+                b"printf 'sess=%s\n' \"$VELD_PTY_SESSION\"
+"
+                .to_vec()
+                .into(),
+            ))
+            .await
+            .unwrap();
+            read_until(&mut ws, &format!("sess={sid}")).await;
+            end_session(&sid, "test cleanup").await;
+        }
+
+        /// A routed URL reaches the attached socket, and "nobody is attached" is
+        /// observable.
+        ///
+        /// Drives the control channel directly rather than through
+        /// `POST /open-url`: the handler's guards are unit-tested above without a
+        /// database, and the part with real risk is here — the `select!` arm that
+        /// forwards the frame, and the receiver count the handler uses to decide
+        /// whether a pane is even reachable. That count is what turns a closed window
+        /// into "opened in the system browser" instead of a URL dropped on the floor.
+        #[tokio::test]
+        async fn a_routed_url_reaches_the_attached_socket() {
+            let addr = serve().await;
+            let dir = tempfile::tempdir().unwrap();
+            let sid = session_id();
+
+            let mut ws = open(addr, &sid, dir.path(), "").await;
+            read_control(&mut ws, "ready").await;
+
+            let session = SESSIONS.lock().await.get(&sid).cloned().expect("session");
+            // The socket has subscribed by the time it reports `ready`, which is what
+            // the endpoint's "is anyone looking?" check relies on.
+            assert_eq!(session.control.receiver_count(), 1);
+            session
+                .control
+                .send(ServerControl::OpenUrl {
+                    url: "https://web.dev.app.localhost/x?y=1".to_owned(),
+                })
+                .expect("a subscribed socket");
+
+            let frame = read_control(&mut ws, "open_url").await;
+            assert_eq!(frame["url"], "https://web.dev.app.localhost/x?y=1");
+
+            // With the page gone there is nothing to route to, and the endpoint can
+            // tell — otherwise it would answer "opened in a pane" and drop the URL.
+            drop(ws);
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while session.control.receiver_count() != 0 && Instant::now() < deadline {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            assert_eq!(
+                session.control.receiver_count(),
+                0,
+                "a detached session must report no listeners"
+            );
             end_session(&sid, "test cleanup").await;
         }
 
