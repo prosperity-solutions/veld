@@ -632,86 +632,89 @@ pub struct UrlOrigin {
     pub port: u16,
 }
 
-/// Reduce an `http(s)` URL to its origin, or `None` if it has none.
+/// An `http(s)` URL, parsed the way the thing that will *load* it parses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebUrl {
+    /// What the exempt list is matched against.
+    pub origin: UrlOrigin,
+    /// The **canonical serialisation**, and the only string that should travel
+    /// onward. See [`parse_web_url`] for why routing on one string and opening a
+    /// different one was a real defect rather than a tidiness point.
+    pub canonical: String,
+}
+
+/// Parse an `http(s)` URL, or `None` if it is not one.
 ///
-/// Hand-rolled for the same reason [`parse_origin`] is, plus one this direction
-/// adds: the authority is taken from **after the last `@`**, because that is the
-/// host a browser navigates to. `http://accounts.google.com@evil.com/` is a page
-/// on `evil.com`, and a matcher that read the userinfo as the host would answer
-/// the exempt list's question about the wrong name.
+/// # Why this uses a real URL parser and returns a canonical string
 ///
-/// Two known narrownesses, both of which end in [`UrlTarget::Pane`] rather than in
-/// a wrong exemption:
+/// This was hand-rolled once, scanning for the authority up to `/`, `?` or `#` and
+/// taking what followed the last `@`. That is not what a browser does, and the gap
+/// was **exploitable against the one control this feature offers**: a WHATWG parser
+/// also ends the authority at `\` and strips ASCII tab/CR/LF anywhere in the URL, so
 ///
-/// - **No IDNA.** A Unicode host is not punycoded here, and [`parse_origin`]
-///   refuses a non-ASCII pattern, so an internationalised host can never match an
-///   exempt entry. Write the `xn--…` form in the URL if that matters.
-/// - **No IPv4 normalisation.** `http://127.1` is `127.0.0.1` to a browser and a
-///   host called `127.1` here; `parse_origin` refuses to store such a pattern for
-///   the same reason, so neither side can express it.
+/// - `https://accounts.google.com\@evil.com` scanned as host `evil.com` — not on the
+///   exempt list, so routed to a *pane* — while the pane loaded
+///   `accounts.google.com`; and
+/// - a tab inside the host (`accounts.goo<TAB>gle.com`) scanned as a different host
+///   for the same result.
+///
+/// Either one silently sidesteps an `externalOrigins` entry, which is exactly how an
+/// SSO or banking host the user pinned to their real browser ends up rendering in a
+/// pane on the shared cookie jar.
+///
+/// Two rules follow, and both are load-bearing:
+///
+/// 1. **Parse with the same standard the loader implements.** `url::Url` (via
+///    `reqwest`, already a dependency) implements the WHATWG URL Standard, which is
+///    what Chromium and `new URL()` in the renderer implement. Do not reintroduce
+///    hand scanning here — the narrow custom grammar in [`parse_origin`] is for
+///    *patterns*, which are veld's own syntax and deliberately not URLs.
+/// 2. **Route and open the same string.** [`WebUrl::canonical`] is what goes into the
+///    `open_url` frame, so "what was checked" and "what will be loaded" cannot
+///    disagree no matter how the input was spelled.
+///
+/// Parsing here also removes two limitations the hand-rolled version documented: an
+/// internationalised host is punycoded (so it can match an `xn--…` pattern) and
+/// `http://127.1` normalises to `127.0.0.1` the way every URL parser resolves it.
 #[must_use]
-pub fn parse_url_origin(url: &str) -> Option<UrlOrigin> {
-    let trimmed = url.trim();
-    // The scheme is compared case-insensitively (`HTTPS://` is a legal spelling)
-    // but the rest is sliced out of the original, so the host keeps its own case
-    // until it is lowercased below.
-    let lower = trimmed.to_ascii_lowercase();
-    let (scheme, rest) = if lower.starts_with("https://") {
-        ("https", &trimmed["https://".len()..])
-    } else if lower.starts_with("http://") {
-        ("http", &trimmed["http://".len()..])
-    } else {
-        return None;
-    };
-    // Everything up to the first path, query or fragment delimiter. `?` and `#`
-    // matter as much as `/` does: `https://example.com?x=/y` has no path at all,
-    // and splitting on `/` alone would take `example.com?x=` as the authority.
-    let authority = rest
-        .split(['/', '?', '#'])
-        .next()
-        .unwrap_or(rest)
-        // The host is what follows the *last* `@` — see the note above.
-        .rsplit('@')
-        .next()
-        .unwrap_or("");
-    if authority.is_empty() {
+pub fn parse_web_url(url: &str) -> Option<WebUrl> {
+    let parsed = reqwest::Url::parse(url.trim()).ok()?;
+    // A pane accepts nothing else, and neither does `normalizeBrowserUrl` in the
+    // renderer or `safeUrl` in the desktop shell.
+    let scheme = parsed.scheme();
+    if scheme != "http" && scheme != "https" {
         return None;
     }
-
-    let (host, port_part) = if let Some(after) = authority.strip_prefix('[') {
-        let (inside, tail) = after.split_once(']')?;
-        let port = match tail {
-            "" => None,
-            other => Some(other.strip_prefix(':')?),
-        };
-        (format!("[{}]", inside.to_ascii_lowercase()), port)
-    } else {
-        match authority.split_once(':') {
-            Some((host, port)) => (host.to_ascii_lowercase(), Some(port)),
-            None => (authority.to_ascii_lowercase(), None),
-        }
-    };
+    // Already lowercased, punycoded and IP-normalised by the parser. IPv6 keeps its
+    // brackets, which is the form `parse_origin` stores.
+    let host = parsed.host_str()?;
+    if host.is_empty() {
+        return None;
+    }
     // A single trailing dot is the fully-qualified spelling of the same name, and
     // `parse_origin` strips it from patterns — so it has to come off here too or a
-    // link to the dotted form would slip past every exempt entry.
-    let host = host.strip_suffix('.').map(str::to_owned).unwrap_or(host);
-    if host.is_empty() || host == "[]" {
+    // link to the dotted form would slip past every exempt entry. (The URL Standard
+    // keeps it, which is why the parser leaves it in.)
+    let host = host.strip_suffix('.').unwrap_or(host);
+    if host.is_empty() {
         return None;
     }
-    let port = match port_part {
-        None => default_port(scheme),
-        Some("") => default_port(scheme),
-        Some(text) => text.parse::<u16>().ok()?,
-    };
-    Some(UrlOrigin {
-        scheme: scheme.to_owned(),
-        host,
-        port,
+    Some(WebUrl {
+        origin: UrlOrigin {
+            scheme: scheme.to_owned(),
+            host: host.to_owned(),
+            port: parsed.port_or_known_default()?,
+        },
+        canonical: parsed.as_str().to_owned(),
     })
 }
 
-fn default_port(scheme: &str) -> u16 {
-    if scheme == "https" { 443 } else { 80 }
+/// Reduce an `http(s)` URL to its origin, or `None` if it has none.
+///
+/// A thin wrapper over [`parse_web_url`] for callers that only need the origin.
+#[must_use]
+pub fn parse_url_origin(url: &str) -> Option<UrlOrigin> {
+    parse_web_url(url).map(|u| u.origin)
 }
 
 /// Whether a URL's origin matches one pattern.
@@ -864,7 +867,9 @@ mod tests {
             "[::1]"
         );
 
-        // Nothing without an http(s) scheme and a host has an origin.
+        // Nothing without an http(s) scheme and a host has an origin. Each of these
+        // is also rejected (or has no host) in a browser — checked with `new URL()`,
+        // because agreeing with the loader is the whole contract of this function.
         for url in [
             "",
             "example.com",
@@ -872,11 +877,63 @@ mod tests {
             "javascript:alert(1)",
             "vscode://open",
             "https://",
-            "https:///path",
             "http://:8080/",
             "https://example.com:notaport/",
         ] {
             assert_eq!(parse_url_origin(url), None, "{url:?} must have no origin");
+        }
+        // …and where a browser *does* find a host in something odd, so does this:
+        // `new URL("https:///path").hostname` is `path`. The hand-rolled version
+        // this replaced answered `None` here, which is the shape of the bug below.
+        assert_eq!(parse_url_origin("https:///path").unwrap().host, "path");
+    }
+
+    /// The exempt list must not be sidesteppable by spelling the URL differently.
+    ///
+    /// Both of these routed on the wrong host before `parse_web_url` used a real URL
+    /// parser: a WHATWG parser ends the authority at `\` as well as `/?#`, and strips
+    /// ASCII tab/CR/LF anywhere — so the daemon checked one host while the pane
+    /// loaded another, and an `externalOrigins` entry for an SSO host silently did
+    /// not apply. The canonical string is what travels onward for the same reason.
+    #[test]
+    fn a_url_cannot_be_spelled_to_route_on_one_host_and_load_another() {
+        let external = vec![pattern("https://accounts.google.com")];
+
+        for spelling in [
+            // Verified against `new URL()`: every one of these loads
+            // accounts.google.com.
+            "https://accounts.google.com\\@evil.com",
+            "https://accounts.goo\tgle.com/x",
+            "https://accounts.google.com\r\n/x",
+            "https://ACCOUNTS.Google.COM/x",
+            "https://accounts.google.com./x",
+            "  https://accounts.google.com/x  ",
+        ] {
+            let parsed = parse_web_url(spelling).unwrap_or_else(|| panic!("{spelling:?}"));
+            assert_eq!(
+                parsed.origin.host, "accounts.google.com",
+                "{spelling:?} routed on the wrong host"
+            );
+            assert_eq!(
+                route_url(spelling, true, &external),
+                UrlTarget::System,
+                "{spelling:?} escaped the exempt list"
+            );
+            // The invariant that makes "route one string, open another" impossible:
+            // what will be opened is the canonical form, and re-routing *that*
+            // reaches the same decision. (A trailing dot survives canonicalisation,
+            // as it does in a browser, which is why this is idempotence rather than
+            // a literal prefix check.)
+            let again = parse_web_url(&parsed.canonical).expect("canonical re-parses");
+            assert_eq!(
+                again.origin, parsed.origin,
+                "{spelling:?} is not idempotent"
+            );
+            assert_eq!(
+                route_url(&parsed.canonical, true, &external),
+                UrlTarget::System,
+                "{spelling:?} canonicalised into something that escapes the list"
+            );
         }
     }
 

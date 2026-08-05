@@ -7,9 +7,10 @@
 //! 2. Anything honouring **`$BROWSER`**, which a Veld terminal points at the
 //!    generated `veld-open` shim: Claude Code, `gh`, `git web--browse`, Python's
 //!    `webbrowser`, vite, next.
-//! 3. The **`open` / `xdg-open` shims**, for a user who has put `$VELD_SHIM_DIR`
-//!    on `PATH` (see `veld_core::opener` for why that is opt-in rather than
-//!    automatic).
+//! 3. The **`open` / `xdg-open` shims**, which for zsh are on `PATH`
+//!    automatically — the daemon arranges that from a `.zshenv` of its own (see
+//!    `veld-daemon/src/pty/shims.rs`) — and which a user of another shell reaches by
+//!    putting `$VELD_SHIM_DIR` on `PATH` themselves.
 //!
 //! # Falling through is the default, not the error path
 //!
@@ -30,10 +31,40 @@ use veld_core::opener::{Decision, Tool, real_opener};
 /// Guard against a shim that ends up finding itself.
 ///
 /// `veld_core::opener::real_opener` already excludes the shim directory when it
-/// resolves the real tool, so this is the second layer — and it is worth having,
-/// because the failure mode of the first layer being wrong is not a wrong answer
-/// but a fork bomb on a developer's machine.
+/// resolves the real tool — but only the directory named by `$VELD_SHIM_DIR`, so a
+/// shim reachable on `PATH` while that variable is unset or stale (a snapshotted
+/// `PATH`, `env -u VELD_SHIM_DIR`, a hand-written entry) resolves *itself*.
+///
+/// This is the second layer, and it has to be a **counter**: the first version set
+/// the variable and then took the passthrough branch, which re-resolves the opener
+/// and `exec`s it — with the variable already set, so the guard could not fire
+/// again. A review measured that at ~3,800 `exec`s in five seconds, stopped only by
+/// an rlimit. A guard whose failure mode is a fork bomb has to count.
 const DEPTH_VAR: &str = "VELD_OPEN_URL_DEPTH";
+
+/// How many nested `veld open-url` invocations to tolerate before refusing.
+///
+/// One: a shim that reaches this command, whose passthrough reaches it again, is
+/// already a loop. Anything legitimate is depth zero.
+const MAX_DEPTH: u32 = 1;
+
+/// This invocation's nesting depth, from the environment. Unparseable or absent is
+/// zero — a broken value must not read as "infinitely deep" and refuse a legitimate
+/// open, nor as "reset" and license another lap.
+fn depth_from_env(raw: Option<String>) -> u32 {
+    raw.and_then(|v| v.parse::<u32>().ok()).unwrap_or(0)
+}
+
+/// Whether this invocation has to stop rather than pass through again.
+fn too_deep(depth: u32) -> bool {
+    depth > MAX_DEPTH
+}
+
+/// What the child gets. **Incremented, never set:** a flat value is what let the
+/// first version's guard latch on and then never fire again.
+fn child_depth(depth: u32) -> u32 {
+    depth.saturating_add(1)
+}
 
 /// `veld open-url [--tool <t>] [--session <id>] -- <args>...`
 pub async fn run(tool: Option<String>, session: Option<String>, args: Vec<String>) -> i32 {
@@ -48,10 +79,20 @@ pub async fn run(tool: Option<String>, session: Option<String>, args: Vec<String
         },
     };
 
-    // Already inside one of these: hand the arguments straight to the real tool
-    // and do not look at them again.
-    if std::env::var_os(DEPTH_VAR).is_some() {
-        return passthrough(tool, &args, Some("recursion guard"));
+    // Already inside one of these. One level is handed straight to the real tool
+    // without looking at the arguments again; a second means the passthrough came
+    // back here, which is a loop rather than a fallback, so it stops.
+    let depth = depth_from_env(std::env::var(DEPTH_VAR).ok());
+    if too_deep(depth) {
+        eprintln!(
+            "veld: refusing to open a URL {depth} levels deep — the shim directory is \
+             on PATH but $VELD_SHIM_DIR does not name it, so the shim is resolving \
+             itself. Unset the stale PATH entry or restart the terminal."
+        );
+        return 127;
+    }
+    if depth > 0 {
+        return passthrough(tool, &args, depth, Some("recursion guard"));
     }
 
     let url = match veld_core::opener::decide(tool, &args) {
@@ -59,7 +100,7 @@ pub async fn run(tool: Option<String>, session: Option<String>, args: Vec<String
         // Not a web page. This is the common case for the `open` shim and it must
         // be silent — a note on stderr for every `open .` would be noise in
         // somebody's shell.
-        Decision::Passthrough => return passthrough(tool, &args, None),
+        Decision::Passthrough => return passthrough(tool, &args, depth, None),
     };
 
     let Some(session) = session.or_else(|| {
@@ -70,13 +111,13 @@ pub async fn run(tool: Option<String>, session: Option<String>, args: Vec<String
         // Run outside a Veld terminal — a plain shell, or a tool that scrubbed its
         // children's environment. There is no window to attribute the URL to, so
         // the system browser is the only honest answer.
-        return passthrough(tool, &args, Some("not inside a Veld terminal"));
+        return passthrough(tool, &args, depth, Some("not inside a Veld terminal"));
     };
 
     match ask_daemon(&session, &url).await {
         Ok(Answer::Pane) => 0,
-        Ok(Answer::System(reason)) => passthrough(tool, &args, Some(&reason)),
-        Err(e) => passthrough(tool, &args, Some(&e)),
+        Ok(Answer::System(reason)) => passthrough(tool, &args, depth, Some(&reason)),
+        Err(e) => passthrough(tool, &args, depth, Some(&e)),
     }
 }
 
@@ -129,15 +170,43 @@ async fn ask_daemon(session: &str, url: &str) -> Result<Answer, String> {
     }
 }
 
+/// The argv the real tool should receive: the original, minus the shims' separator.
+///
+/// A lone leading `--` is how the generated scripts pass an argument list that may
+/// begin with a dash; it is not an argument. Split out of [`passthrough`] so it can
+/// be tested — the version inside `exec` could only be checked by running it.
+fn real_argv(args: &[String]) -> &[String] {
+    match args.split_first() {
+        Some((first, rest)) if first == "--" => rest,
+        _ => args,
+    }
+}
+
+/// What the child's `$BROWSER` must be.
+///
+/// Never the shim: a fall-through opener that consults `$BROWSER` (Python's
+/// `webbrowser`, a desktop helper) would come straight back here, which is a loop
+/// rather than a fallback. The user's own value is restored when a terminal captured
+/// one — at spawn from the daemon's environment, or by the `veld_browser` hook when
+/// their rc file set it.
+#[derive(Debug, PartialEq, Eq)]
+enum ChildBrowser {
+    Restore(std::ffi::OsString),
+    Remove,
+}
+
+fn child_browser(original: Option<std::ffi::OsString>) -> ChildBrowser {
+    match original.filter(|v| !v.is_empty()) {
+        Some(v) => ChildBrowser::Restore(v),
+        None => ChildBrowser::Remove,
+    }
+}
+
 /// Hand the original arguments to the real tool, replacing this process.
 ///
 /// Returns only on failure — on success this process *is* the real tool.
-fn passthrough(tool: Tool, args: &[String], reason: Option<&str>) -> i32 {
-    // A lone `--` is the shims' separator, not an argument.
-    let args: &[String] = match args.split_first() {
-        Some((first, rest)) if first == "--" => rest,
-        _ => args,
-    };
+fn passthrough(tool: Tool, args: &[String], depth: u32, reason: Option<&str>) -> i32 {
+    let args = real_argv(args);
     let shim_dir = std::env::var_os("VELD_SHIM_DIR").map(std::path::PathBuf::from);
     let Some(real) = real_opener(tool, shim_dir.as_deref()) else {
         eprintln!(
@@ -155,14 +224,16 @@ fn passthrough(tool: Tool, args: &[String], reason: Option<&str>) -> i32 {
 
     let mut cmd = std::process::Command::new(&real);
     cmd.args(args);
-    cmd.env(DEPTH_VAR, "1");
+    // Incremented, not set: see `DEPTH_VAR`. A flat "1" made the guard unable to
+    // fire on the invocation it was guarding against.
+    cmd.env(DEPTH_VAR, child_depth(depth).to_string());
     // The child must not inherit a `$BROWSER` pointing back at the shim: a
     // fall-through opener that consults it (Python's `webbrowser`, `gio`) would
     // come straight back here. The user's own value is restored when the terminal
     // saved one.
-    match std::env::var_os("VELD_BROWSER_ORIGINAL") {
-        Some(original) => cmd.env("BROWSER", original),
-        None => cmd.env_remove("BROWSER"),
+    match child_browser(std::env::var_os("VELD_BROWSER_ORIGINAL")) {
+        ChildBrowser::Restore(original) => cmd.env("BROWSER", original),
+        ChildBrowser::Remove => cmd.env_remove("BROWSER"),
     };
 
     #[cfg(unix)]
@@ -182,5 +253,83 @@ fn passthrough(tool: Tool, args: &[String], reason: Option<&str>) -> i32 {
                 127
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn argv(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    #[test]
+    fn the_shims_separator_is_not_an_argument() {
+        // The real tool must receive exactly what it was called with. A `--` that
+        // reached `/usr/bin/open` would make `open -- .` fail on an argument the user
+        // never typed.
+        assert_eq!(
+            real_argv(&argv(&["--", "-a", "Safari"])),
+            argv(&["-a", "Safari"])
+        );
+        assert_eq!(real_argv(&argv(&["."])), argv(&["."]));
+        assert_eq!(real_argv(&argv(&[])), Vec::<String>::new());
+        // Only a *leading* one, and only one: `open -- --` passes the second through,
+        // and a `--` in the middle belongs to the tool.
+        assert_eq!(real_argv(&argv(&["--", "--"])), argv(&["--"]));
+        assert_eq!(real_argv(&argv(&["-a", "--"])), argv(&["-a", "--"]));
+    }
+
+    #[test]
+    fn the_child_never_inherits_a_browser_pointing_back_here() {
+        use std::ffi::OsString;
+        // Restored when a terminal captured the user's own browser…
+        assert_eq!(
+            child_browser(Some(OsString::from("firefox"))),
+            ChildBrowser::Restore(OsString::from("firefox"))
+        );
+        // …removed otherwise, rather than left pointing at the shim. An empty value
+        // counts as none: exporting `BROWSER=` is not a browser, and `Restore("")`
+        // would hand a child an empty command.
+        assert_eq!(child_browser(None), ChildBrowser::Remove);
+        assert_eq!(child_browser(Some(OsString::new())), ChildBrowser::Remove);
+    }
+
+    #[test]
+    fn the_depth_guard_terminates_a_shim_that_resolves_itself() {
+        // The bound this protects: a shim reachable on PATH while `$VELD_SHIM_DIR`
+        // does not name it resolves *itself*. The first version set the variable to a
+        // flat "1" and then took a branch that re-resolved and re-exec'd, so the guard
+        // could never fire again — measured at ~3,800 execs in five seconds, stopped
+        // only by an rlimit.
+        //
+        // Walk the loop it could not stop, and assert it now terminates: each lap
+        // hands the child `child_depth`, and the child re-reads it as its own depth.
+        let mut depth = depth_from_env(None);
+        let mut laps = 0;
+        while !too_deep(depth) {
+            depth = depth_from_env(Some(child_depth(depth).to_string()));
+            laps += 1;
+            assert!(
+                laps < 10,
+                "the guard does not terminate: depth stuck at {depth}"
+            );
+        }
+        assert_eq!(
+            laps, 2,
+            "one passthrough is allowed; the one after it is a loop"
+        );
+
+        // A garbled value is zero, not "infinitely deep" (which would refuse a
+        // legitimate open) — and not a licence for another lap either, since the
+        // child's value is derived from it by increment.
+        assert_eq!(depth_from_env(Some("banana".into())), 0);
+        assert_eq!(depth_from_env(Some(String::new())), 0);
+        assert!(!too_deep(0) && !too_deep(1) && too_deep(2));
+        // No wrap at the ceiling of the type: saturating, so a hostile value cannot
+        // roll the counter back to zero and reopen the loop.
+        assert_eq!(child_depth(u32::MAX), u32::MAX);
+        assert!(too_deep(u32::MAX));
     }
 }

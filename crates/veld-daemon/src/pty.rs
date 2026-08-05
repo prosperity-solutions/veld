@@ -914,6 +914,10 @@ struct Ticket {
     cwd: PathBuf,
     /// Worktree alias, for log lines only.
     label: String,
+    /// `terminal.openUrlsInApp`, read at the same moment and for the same reason as
+    /// the field below. It gates the session's whole environment: with the feature
+    /// off, veld puts nothing in the shell.
+    open_urls_in_app: bool,
     /// `terminal.interceptSystemOpen`, read while [`mint_ticket`] already had the
     /// database open. It rides the ticket rather than being read at spawn time so
     /// that nothing puts a `Db::open()` on the session-spawn path — see the comment
@@ -1020,6 +1024,7 @@ async fn mint_ticket(
     // database open. A `Db::open()` on the session-spawn path is the thing AGENTS.md
     // warns about — one reached that path before and twelve unrelated tests migrated
     // a real user database as a side effect.
+    let open_urls_in_app = db.terminal_open_urls_in_app();
     let intercept_system_open = db.terminal_intercept_system_open();
 
     let cwd = PathBuf::from(&wt.path);
@@ -1049,6 +1054,7 @@ async fn mint_ticket(
                 worktree_id: body.worktree_id,
                 cwd,
                 label: wt.alias.clone(),
+                open_urls_in_app,
                 intercept_system_open,
                 expires_at: now + TICKET_TTL,
             },
@@ -1150,16 +1156,23 @@ async fn open_url(
     if body.url.len() > MAX_URL_LEN {
         return Err(err(StatusCode::PAYLOAD_TOO_LARGE, "url is too long"));
     }
-    // Refused rather than answered with `system`: a caller sending this has a bug,
-    // and reporting "opened in the system browser" would hide it. The one place a
-    // non-web URL is *expected* — a shim invoked as `open report.pdf` — never gets
-    // this far, because `veld open-url` execs the real tool without asking.
-    if veld_core::ide::parse_url_origin(&body.url).is_none() {
+    // Parsed **once**, here, with the same standard the thing that will load it
+    // implements — and it is the canonical serialisation that travels onward, never
+    // the caller's spelling. Routing on one string and opening another is not a
+    // tidiness point: `https://accounts.google.com\@evil.com` scans as `evil.com`
+    // by eye and loads `accounts.google.com` in a browser, which silently sidesteps
+    // the exempt list. See `veld_core::ide::parse_web_url`.
+    //
+    // Refused rather than answered with `system`: a caller sending a non-web URL has
+    // a bug, and reporting "opened in the system browser" would hide it. The one
+    // place a non-web argument is *expected* — a shim invoked as `open report.pdf` —
+    // never gets this far, because `veld open-url` execs the real tool without asking.
+    let Some(web) = veld_core::ide::parse_web_url(&body.url) else {
         return Err(err(
             StatusCode::BAD_REQUEST,
             "not an http(s) URL with a host",
         ));
-    }
+    };
 
     let session = SESSIONS
         .lock()
@@ -1177,7 +1190,7 @@ async fn open_url(
     external.extend(project_external_origins(&db, session.worktree_id));
     let open_in_app = db.terminal_open_urls_in_app();
 
-    match veld_core::ide::route_url(&body.url, open_in_app, &external) {
+    match veld_core::ide::route_url(&web.canonical, open_in_app, &external) {
         veld_core::ide::UrlTarget::System => Ok(Json(OpenUrlResponse {
             target: veld_core::ide::UrlTarget::System,
             reason: Some(
@@ -1196,7 +1209,21 @@ async fn open_url(
             // frame is not queued for a future attach, deliberately, because a login
             // page that arrives ten minutes late is worse than one that opened in the
             // wrong browser.
-            if session.control.receiver_count() == 0 {
+            //
+            // The **detach clock**, not `control.receiver_count()`. A displaced socket
+            // is still a subscriber until it notices the takeover, so the count can be
+            // non-zero while every subscriber will discard the frame on the epoch check
+            // in `serve_socket` — answering `pane` there drops the URL silently, which
+            // is the exact failure this branch exists to prevent. `detached_since` is
+            // `None` only while a socket owns the session, and `serve_socket`
+            // subscribes before it claims the epoch, so `None` implies a live
+            // subscriber.
+            let attached = session
+                .detached_since
+                .lock()
+                .expect("detach clock poisoned")
+                .is_none();
+            if !attached {
                 return Ok(Json(OpenUrlResponse {
                     target: veld_core::ide::UrlTarget::System,
                     reason: Some(
@@ -1205,7 +1232,7 @@ async fn open_url(
                 }));
             }
             let _ = session.control.send(ServerControl::OpenUrl {
-                url: body.url.clone(),
+                url: web.canonical.clone(),
             });
             debug!(session = %id, "routed a URL to a browser pane");
             Ok(Json(OpenUrlResponse {
@@ -1508,6 +1535,7 @@ async fn obtain_session(
         env: shims::session_env(
             &ticket.session_id,
             &holder::login_shell(),
+            ticket.open_urls_in_app,
             ticket.intercept_system_open,
         ),
         // The holder's own self-destruct grace, used when the *daemon* is gone and
@@ -2361,6 +2389,7 @@ mod tests {
                 worktree_id: 1,
                 cwd: std::env::temp_dir(),
                 label: "t".to_owned(),
+                open_urls_in_app: true,
                 intercept_system_open: true,
                 expires_at: Instant::now() + ttl,
             },
@@ -2384,6 +2413,7 @@ mod tests {
                 worktree_id: 1,
                 cwd: std::env::temp_dir(),
                 label: "t".to_owned(),
+                open_urls_in_app: true,
                 intercept_system_open: true,
                 expires_at: Instant::now() - Duration::from_secs(1),
             },
@@ -2620,6 +2650,7 @@ mod tests {
                     worktree_id: 1,
                     cwd: cwd.to_path_buf(),
                     label: "test".to_owned(),
+                    open_urls_in_app: true,
                     intercept_system_open: true,
                     expires_at: Instant::now() + TICKET_TTL,
                 },
@@ -2705,6 +2736,7 @@ mod tests {
                     worktree_id: 1,
                     cwd: std::env::temp_dir(),
                     label: "test".to_owned(),
+                    open_urls_in_app: true,
                     intercept_system_open: true,
                     expires_at: Instant::now() - Duration::from_secs(1),
                 },

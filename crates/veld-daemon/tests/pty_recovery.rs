@@ -162,12 +162,29 @@ async fn wait_for_health(instance: &Instance) {
 /// directory did before it moved under `VELD_PTY_DIR`. Asserted rather than
 /// documented, because the symptom is silent.
 fn assert_state_is_confined(instance: &Instance) {
+    // The daemon writes no shims without a `veld` binary beside it, and nothing in
+    // this crate's test build produces one — so its absence is a missing artifact,
+    // not a misplaced directory. Which of the two it is matters: the first version of
+    // this assert reported "the shim directory is in the wrong place" on a clean
+    // tree, sending the reader to look somewhere nothing is wrong.
+    let sibling_cli = std::path::Path::new(env!("CARGO_BIN_EXE_veld-daemon"))
+        .parent()
+        .map(|d| d.join("veld"))
+        .is_some_and(|p| p.is_file());
     let shims = instance.pty_dir().join("shims");
-    assert!(
-        shims.join("veld-open").is_file(),
-        "the daemon's shim directory is not under VELD_PTY_DIR — check where it          actually wrote ({})",
-        shims.display()
-    );
+    if sibling_cli {
+        assert!(
+            shims.join("veld-open").is_file(),
+            "the daemon's shim directory is not under VELD_PTY_DIR — check where it \
+             actually wrote ({})",
+            shims.display()
+        );
+    } else {
+        eprintln!(
+            "no `veld` beside the test daemon, so no shims were written — the \
+             confinement half of this check needs `cargo build -p veld`"
+        );
+    }
     let home_shims = dirs::home_dir().unwrap().join(".veld");
     for entry in std::fs::read_dir(&home_shims)
         .into_iter()

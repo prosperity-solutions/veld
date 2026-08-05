@@ -272,6 +272,14 @@ requests at runtime — branding rule.
   in `veld open-url`. Both ask the same question, and half the answer is
   `ide.externalOrigins` in the project's `veld.json`, which the renderer does not
   read: a policy copy on this side would be a second implementation of it.
+  The URL is parsed **once**, in the daemon, with `url::Url` — the same standard the
+  renderer's `new URL()` and Chromium implement — and the **canonical serialisation**
+  is what travels onward. Routing on the caller's spelling and opening something else
+  was a real hole rather than untidiness: a hand-rolled parser ended the authority at
+  `/?#` only, so `https://accounts.google.com\@evil.com` routed on `evil.com` (not
+  exempt → a pane) while a browser loads `accounts.google.com`, and a tab character in
+  the host did the same — either one silently sidesteps an `externalOrigins` entry,
+  which is the one control the feature offers for SSO hosts.
   Delivery is a new `open_url` control frame on **that session's socket**, so the
   socket *is* the routing decision — the page attached to a session is the window
   whose dock holds that terminal, and no window id has to be invented, stored, or
@@ -312,6 +320,25 @@ requests at runtime — branding rule.
   runs inside a shell's startup gets a switch; it is read at **ticket** time, where
   the database is already open, so nothing puts a `Db::open()` on the
   session-spawn path.
+- **A shim may shadow a real tool; it may never invent one.** `xdg-open` does not
+  exist on macOS, and generating a shim for it put a command on `PATH` whose only
+  answer is "no system opener" — so the portable idiom
+  `command -v xdg-open >/dev/null && xdg-open "$f"` stopped finding nothing and
+  started finding something broken, for every file type rather than just URLs. A shim
+  is written only where `real_opener` finds something behind it, and a stale one is
+  removed when the tool disappears. `veld-open` is the exception: `$BROWSER` is a
+  variable veld sets itself, so it shadows no name.
+- **The `$BROWSER` half is re-asserted once, after the rc files.** A user whose
+  `.zshrc` exports its own `BROWSER` would otherwise switch that half off silently;
+  the `veld_browser` hook takes it back on the first prompt and keeps their value in
+  `VELD_BROWSER_ORIGINAL` so a fall-through opens the browser they chose. **Once**,
+  not every prompt: an rc file is startup, but `export BROWSER=lynx` typed at a prompt
+  is a deliberate act and veld does not argue with it.
+- **`veld doctor` reports it**, because the failure mode is silence: the shims are
+  written once at daemon start and a `OnceLock` means a failure is never retried, so a
+  daemon with no sibling `veld` (a moved install, an interrupted update) leaves the
+  feature off with only one line in a log. The row checks the script exists *and* that
+  the CLI path baked into it is still there.
 - **Every branch that is not "one http(s) URL, in a Veld terminal, that the daemon
   routed" ends in `exec`ing the real tool with the original argv** — `open .`,
   `open report.pdf` and `open -a Safari …` must behave exactly as they did before
@@ -1018,7 +1045,7 @@ handshake can carry neither a custom header nor a CORS preflight.
 |---|---|
 | `POST /api/pty/tickets` `{worktree_id, session_id}` | CSRF-gated, and the only place a worktree id is resolved to a directory — so the socket below never accepts a path from the client. Returns a single-use ticket (122 bits from the OS CSPRNG, 30s TTL) plus `resumed`, true when a live session already answers to `session_id`. The client names the session (`crypto.randomUUID()`), which is what lets a reload ask for the same shell; the name is an identifier, not a credential. `409` if that session belongs to a different worktree. |
 | `GET /api/pty/attach?ticket=&cols=&rows=` | The WebSocket. Requires an allowlisted `Origin`, failing closed when absent, **and** an unredeemed ticket; a rejected origin does not burn the ticket. Binary frames are terminal bytes in both directions, text frames are JSON control (`resize` up; `replay_begin`/`replay_end`/`ready`/`exit`/`taken_over`/`lagged` down). A second attach takes the session over and tells the displaced socket why. Note that a browser can read neither the status nor the body of a *failed* handshake, so anything a legitimate client can trip over (capacity, a missing directory) is pre-checked at ticket time instead; the client distinguishes a refused upgrade from a dropped connection by whether `ready` ever arrived. |
-| `POST /api/pty/sessions/{id}/open-url` `{url}` | CSRF-gated. Answers `{target: "pane" \| "system", reason?}` for a URL that terminal produced, and for `pane` has already pushed the `open_url` frame down that session's socket by the time it returns. `system` means the *caller* opens it (the CLI `exec`s the real opener; the renderer `window.open`s), which is also the answer when no socket is attached — a frame is deliberately not queued for a future attach, because a login page that arrives ten minutes late is worse than one that opened in the wrong browser. A non-`http(s)` URL is a `400` rather than a `system`: the one caller for which that is expected (`veld open-url` standing in for `open report.pdf`) never asks. |
+| `POST /api/pty/sessions/{id}/open-url` `{url}` | CSRF-gated. Parses the URL once and routes on — and sends — its **canonical** form, so what was checked against the exempt list is what gets loaded. Answers `{target: "pane" \| "system", reason?}` for a URL that terminal produced, and for `pane` has already pushed the `open_url` frame down that session's socket by the time it returns. `system` means the *caller* opens it (the CLI `exec`s the real opener; the renderer `window.open`s), which is also the answer when no socket is attached — a frame is deliberately not queued for a future attach, because a login page that arrives ten minutes late is worse than one that opened in the wrong browser. A non-`http(s)` URL is a `400` rather than a `system`: the one caller for which that is expected (`veld open-url` standing in for `open report.pdf`) never asks. |
 | `DELETE /api/pty/sessions/{id}` | CSRF-gated. Ends the shell now — the distinction the detach model rests on, since a socket closing means "come back later". `204` even when the session is already gone. |
 
 The shell is the user's `$SHELL -l`, which is this module's stated exception to

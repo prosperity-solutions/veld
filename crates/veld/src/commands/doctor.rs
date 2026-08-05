@@ -504,6 +504,72 @@ impl Diagnostics {
         // counts what is in it; a socket nobody answers is a holder that is gone
         // and gets swept at the next daemon start.
         self.checks.push(self.terminal_holders_check());
+
+        // 10. The terminal-URL shims.
+        //
+        // Same reason as the row above: this is a feature whose failure mode is
+        // *silence*. The daemon writes these once at startup and logs a single
+        // warning if it cannot, and a `OnceLock` means it never tries again — so a
+        // machine with no `veld` beside the daemon, or a `~/.veld` it cannot write,
+        // has terminal URL opening switched off with nothing anywhere to say so.
+        self.checks.push(self.terminal_shims_check());
+    }
+
+    /// Whether a terminal can route a URL into a Veld browser pane.
+    ///
+    /// Reports the directory, and passes only if the `veld-open` script the session's
+    /// `$BROWSER` points at exists *and* names an executable CLI. Both halves matter
+    /// and neither is visible from anywhere else: the script is generated from the
+    /// binary sitting beside the running daemon, so an install that moved, an
+    /// interrupted update, or a daemon started from a directory with no sibling `veld`
+    /// all end with a `$BROWSER` that cannot work — and the only other signal is one
+    /// `warn!` in the daemon log at boot.
+    ///
+    /// A note rather than a failure: every other part of a terminal still works, and
+    /// clicking a URL in the output still opens it in the system browser.
+    fn terminal_shims_check(&self) -> Check {
+        let dir = veld_core::instance::shim_dir();
+        let shown = tilde_path(&dir);
+        let browser = dir.join("veld-open");
+        if !browser.is_file() {
+            return Check {
+                pass: false,
+                label: format!(
+                    "Terminal URL opening is off: {shown}/veld-open is missing. The \
+                     daemon writes it at startup — check the daemon log for a \
+                     warning, and that a `veld` binary sits beside the running \
+                     veld-daemon"
+                ),
+            };
+        }
+        // The baked path is the load-bearing half: the script tests it with `-x` at
+        // run time precisely because it can go away under an upgrade.
+        let baked = std::fs::read_to_string(&browser).unwrap_or_default();
+        let cli = baked
+            .lines()
+            .find_map(|l| l.split('\'').nth(1))
+            .map(std::path::PathBuf::from);
+        match cli {
+            Some(cli) if cli.is_file() => Check {
+                pass: true,
+                label: format!("Terminal URLs open in Veld ({shown} → {})", cli.display()),
+            },
+            Some(cli) => Check {
+                pass: false,
+                label: format!(
+                    "Terminal URL opening is off: {shown}/veld-open points at {}, \
+                     which is not there. Restart the daemon to rewrite it",
+                    cli.display()
+                ),
+            },
+            None => Check {
+                pass: false,
+                label: format!(
+                    "Terminal URL opening is off: {shown}/veld-open names no veld \
+                     binary. Restart the daemon to rewrite it"
+                ),
+            },
+        }
     }
 
     /// Count holder sockets, and how many of them answer.

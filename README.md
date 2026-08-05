@@ -374,7 +374,9 @@ The shims route a single http(s) URL and hand **anything else** to the real tool
 [ -n "$VELD_SHIM_DIR" ] && PATH="$VELD_SHIM_DIR:$PATH"
 ```
 
-Anything that runs inside your shell's startup gets an off switch: *Also catch programs that call open / xdg-open* (Settings → Terminal). Turn it off and Veld sets no `ZDOTDIR` at all.
+Anything that runs inside your shell's startup gets an off switch: *Also catch programs that call open / xdg-open* (Settings → Terminal). Turn it off and Veld sets no `ZDOTDIR` at all; turn off *Open links from the terminal in Veld* and Veld puts **nothing** in the shell — no `$BROWSER`, no `ZDOTDIR`, no round trip. Both take effect for new terminals; a shell already open keeps the environment it started with.
+
+`veld doctor` reports whether this is actually working, because its failure mode is otherwise silent: the little scripts are written once when the daemon starts, and a daemon with no `veld` binary beside it (a moved install, an interrupted update) leaves the feature off with nothing but a line in a log.
 
 **Settings** (`⌘,`, or the gear in the top bar) covers terminal font, cursor, scrollback, the Shift+Enter behaviour, whether terminal links open in a pane, whether `open`/`xdg-open` are caught as well, and which origins are exempt, how long detached shells are kept, how worktrees are marked in the rail, how long trashed worktrees are kept before they are deleted for good, how far back the run history views reach, and which quick switches a browser pane's toolbar carries. They are stored by the daemon rather than the browser, so Veld Desktop and a browser tab against the same daemon agree, and every window sees a change. There is no Save button — each control writes as you change it.
 

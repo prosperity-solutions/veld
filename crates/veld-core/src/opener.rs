@@ -157,7 +157,12 @@ pub fn real_opener(tool: Tool, exclude: Option<&Path>) -> Option<PathBuf> {
             if cfg!(target_os = "macos") {
                 &["open"]
             } else {
-                &["xdg-open", "gio", "sensible-browser", "x-www-browser"]
+                // Deliberately no `gio`: it takes a subcommand (`gio open <uri>`),
+                // so `exec gio <url>` prints its usage and opens nothing — verified.
+                // Everything in this list must accept a URL as its single argument,
+                // because that is the whole contract the shims and the passthrough
+                // are built on.
+                &["xdg-open", "sensible-browser", "x-www-browser"]
             }
         }
     };

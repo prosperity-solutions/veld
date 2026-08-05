@@ -502,7 +502,7 @@ async function activateLink(sessionId: string, url: string, event: MouseEvent): 
  * `shell.openExternal`. `noopener` because the opened page must not be able to
  * reach back into `/ide` through `window.opener`.
  */
-function openExternally(url: string): void {
+export function openExternally(url: string): void {
   window.open(url, "_blank", "noopener,noreferrer");
 }
 

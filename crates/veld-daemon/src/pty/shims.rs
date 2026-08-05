@@ -11,7 +11,11 @@
 //! | `VELD_PTY_SESSION` | Which terminal asked, which is how the daemon knows *which window* the pane belongs in. |
 //! | `VELD_SHIM_DIR` | The directory holding the `open`/`xdg-open` wrappers. Exported for every shell, so a non-zsh user can put it on `PATH` themselves. |
 //! | `ZDOTDIR` / `VELD_USER_ZDOTDIR` | zsh only, and only while `terminal.interceptSystemOpen` is on: the handoff that gets that directory onto `PATH` after the user's own startup files. See [`zshenv`]. |
+//! | `VELD_SHIM_BROWSER` | The same path as `BROWSER`, kept under its own name so the `veld_browser` hook can re-assert it after an rc file exports a `$BROWSER` of its own. |
 //! | `VELD_BROWSER_ORIGINAL` | Whatever `$BROWSER` was before veld took it over, so the fall-through path can restore it instead of handing a child the shim again. |
+//!
+//! **`terminal.openUrlsInApp` gates every one of them** except the session id. Off
+//! means veld is not in the shell at all — see [`session_env`].
 //!
 //! # Why `$BROWSER` alone is not enough
 //!
@@ -50,16 +54,35 @@ use veld_core::opener::Tool;
 
 /// The variables a terminal session gets.
 ///
-/// `shell` is the login shell about to be spawned and `intercept` is the
-/// `terminal.interceptSystemOpen` setting; together they decide whether the
-/// `ZDOTDIR` handoff below is set up.
+/// `shell` is the login shell about to be spawned; `open_in_app` is
+/// `terminal.openUrlsInApp` and `intercept` is `terminal.interceptSystemOpen`.
+///
+/// **`open_in_app` gates everything**, and that is the point of it rather than a
+/// detail. It is documented as turning the whole behaviour off, so with it off veld
+/// must not be in the path at all: no `$BROWSER`, no `ZDOTDIR`, nothing in the
+/// shell's startup. The first version gated only the `ZDOTDIR` block, which left the
+/// off switch still routing every browser launch through `veld open-url` to the
+/// daemon — a round trip, a stderr line per open, and a login URL (one-time tokens
+/// included) leaving the process — while the settings UI greyed the *other* switch
+/// out and so could not turn off the thing that was still running.
+///
+/// Only `VELD_PTY_SESSION` survives an off switch, and it is not part of the
+/// behaviour: `veld open-url` run deliberately, by a person or an agent, still needs
+/// to know which terminal it is in.
 ///
 /// Empty except for `VELD_PTY_SESSION` when the shim directory could not be
-/// prepared — the session id alone is still worth having, because `veld open-url`
-/// run by hand (or by an agent) uses it.
-pub fn session_env(session_id: &str, shell: &str, intercept: bool) -> BTreeMap<String, String> {
+/// prepared, for the same reason.
+pub fn session_env(
+    session_id: &str,
+    shell: &str,
+    open_in_app: bool,
+    intercept: bool,
+) -> BTreeMap<String, String> {
     let mut env = BTreeMap::new();
     env.insert("VELD_PTY_SESSION".to_owned(), session_id.to_owned());
+    if !open_in_app {
+        return env;
+    }
     let Some(dir) = dir() else {
         return env;
     };
@@ -85,20 +108,27 @@ pub fn session_env(session_id: &str, shell: &str, intercept: bool) -> BTreeMap<S
             env.insert("VELD_USER_ZDOTDIR".to_owned(), theirs);
         }
     }
-    // Saved before it is replaced, so the fall-through in `veld open-url` can give
-    // a child the browser the user actually configured. Without this, a tool that
-    // reads `$BROWSER` on the far side of a passthrough would be handed the shim
+    // Saved before it is replaced, so the fall-through in `veld open-url` can give a
+    // child the browser the user actually configured, rather than handing it the shim
     // again — which is a loop, not a fallback.
+    //
+    // Read from the **daemon's** environment, which under launchd or systemd almost
+    // never carries the user's `$BROWSER`: theirs lives in an rc file, and the
+    // `veld_browser` hook in `zshenv` is what captures that one. This covers the case
+    // where the daemon really was started with a `$BROWSER` in scope.
     if let Some(previous) = std::env::var_os("BROWSER")
         .and_then(|v| v.into_string().ok())
         .filter(|v| !v.is_empty())
     {
         env.insert("VELD_BROWSER_ORIGINAL".to_owned(), previous);
     }
-    env.insert(
-        "BROWSER".to_owned(),
-        dir.join(Tool::Browser.shim_name()).display().to_string(),
-    );
+    let shim_browser = dir.join(Tool::Browser.shim_name()).display().to_string();
+    // Named separately so the `precmd` companion in `zshenv` can re-assert it: a
+    // user's rc doing `export BROWSER=firefox` runs *after* this environment is
+    // handed over and would otherwise switch the `$BROWSER` half of the feature off
+    // with nothing said anywhere.
+    env.insert("VELD_SHIM_BROWSER".to_owned(), shim_browser.clone());
+    env.insert("BROWSER".to_owned(), shim_browser);
     env
 }
 
@@ -181,6 +211,23 @@ if [ -n "${VELD_SHIM_DIR-}" ]; then
     precmd_functions+=(veld_shim_path)
   fi
 fi
+
+# An rc file that exports its own BROWSER runs after veld set one, so re-point it
+# once — and keep the user's value, so a fall-through opens the browser they chose.
+# Once only, not every prompt: an rc file is startup, but `export BROWSER=lynx` typed
+# at the prompt later is a deliberate act and veld does not argue with it.
+if [ -n "${VELD_SHIM_BROWSER-}" ]; then
+  veld_browser() {
+    if [ "$BROWSER" != "$VELD_SHIM_BROWSER" ]; then
+      [ -n "$BROWSER" ] && export VELD_BROWSER_ORIGINAL="$BROWSER"
+      export BROWSER="$VELD_SHIM_BROWSER"
+    fi
+    precmd_functions=(${precmd_functions:#veld_browser})
+    unfunction veld_browser 2>/dev/null
+  }
+  typeset -ga precmd_functions
+  precmd_functions+=(veld_browser)
+fi
 "#,
     )
 }
@@ -226,8 +273,21 @@ fn prepare_in(dir: &Path, cli: &Path) -> std::io::Result<()> {
     // group-writable directory on a machine with a lax one.
     set_mode(dir, 0o700)?;
     for tool in [Tool::Browser, Tool::Open, Tool::XdgOpen] {
+        // **Never introduce a command the platform does not have.** `xdg-open` does
+        // not exist on macOS, and writing a shim for it puts one on `PATH` whose only
+        // possible answer is "no system opener" — so the portable idiom
+        // `command -v xdg-open >/dev/null && xdg-open "$f"` stops finding nothing and
+        // starts finding something that cannot work, for *every* file type, not just
+        // URLs. A shim may shadow a real tool; it may not invent one.
+        let real = veld_core::opener::real_opener(tool, Some(dir));
         let path = dir.join(tool.shim_name());
-        let body = script(tool, cli, dir);
+        if real.is_none() && tool != Tool::Browser {
+            // Remove a stale one, so a machine that loses its `xdg-open` between
+            // daemon starts does not keep a shim standing in front of nothing.
+            let _ = std::fs::remove_file(&path);
+            continue;
+        }
+        let body = script(tool, cli, real.as_deref());
         // Written to a temporary name and renamed, because these files may be
         // *executing* — a shim invoked by a long-running process while the daemon
         // restarts. Writing in place truncates the script mid-read and the shell
@@ -273,7 +333,7 @@ fn set_mode(_path: &Path, _mode: u32) -> std::io::Result<()> {
 ///   unexamined. Deciding what is and is not a URL is `veld open-url`'s job, in
 ///   Rust, where it is tested; a shell script that tried would be a second
 ///   implementation of it.
-fn script(tool: Tool, cli: &Path, shim_dir: &Path) -> String {
+fn script(tool: Tool, cli: &Path, real: Option<&Path>) -> String {
     let mut out = String::new();
     out.push_str("#!/bin/sh\n");
     out.push_str("# Generated by veld — rewritten on every daemon start; edits are lost.\n");
@@ -285,8 +345,8 @@ fn script(tool: Tool, cli: &Path, shim_dir: &Path) -> String {
         cli = quote(cli),
         flag = tool.flag(),
     ));
-    match veld_core::opener::real_opener(tool, Some(shim_dir)) {
-        Some(real) => out.push_str(&format!("exec {} \"$@\"\n", quote(&real))),
+    match real {
+        Some(real) => out.push_str(&format!("exec {} \"$@\"\n", quote(real))),
         // Nothing to fall through to. Said out loud rather than exiting 0, which
         // would look to the caller like the URL had been opened.
         None => {
@@ -324,8 +384,11 @@ mod tests {
 
     #[test]
     fn a_script_tries_veld_first_and_then_the_real_tool() {
-        let dir = PathBuf::from("/home/dev/.veld/shim-19899");
-        let body = script(Tool::Open, Path::new("/usr/local/bin/veld"), &dir);
+        let body = script(
+            Tool::Open,
+            Path::new("/usr/local/bin/veld"),
+            Some(Path::new("/usr/bin/open")),
+        );
         let lines: Vec<&str> = body.lines().collect();
         assert_eq!(lines[0], "#!/bin/sh");
         // The guard is `-x`, evaluated when the shim runs: an uninstall while a
@@ -358,16 +421,51 @@ mod tests {
         let shims = dir.path().join("shim-19899");
         prepare_in(&shims, Path::new("/opt/veld/bin/veld")).unwrap();
 
-        for name in ["veld-open", "open", "xdg-open"] {
-            let path = shims.join(name);
+        // `veld-open` always exists — it is only ever reached through `$BROWSER`,
+        // which veld sets itself, so it shadows no command name and invents none.
+        // The other two exist only where there is a real tool behind them: a shim
+        // may stand in front of `open`, but writing an `xdg-open` on macOS would put
+        // a command on `PATH` that the platform does not have and that cannot work.
+        for tool in [Tool::Browser, Tool::Open, Tool::XdgOpen] {
+            let path = shims.join(tool.shim_name());
+            let expected = tool == Tool::Browser
+                || veld_core::opener::real_opener(tool, Some(&shims)).is_some();
+            assert_eq!(
+                path.is_file(),
+                expected,
+                "{}: exists={} but a real tool behind it is {}",
+                tool.shim_name(),
+                path.is_file(),
+                expected
+            );
+            if !expected {
+                continue;
+            }
             let body = std::fs::read_to_string(&path).unwrap();
-            assert!(body.contains("/opt/veld/bin/veld"), "{name}: {body}");
+            assert!(
+                body.contains("/opt/veld/bin/veld"),
+                "{}: {body}",
+                tool.shim_name()
+            );
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
                 let mode = std::fs::metadata(&path).unwrap().permissions().mode();
-                assert_eq!(mode & 0o777, 0o755, "{name} must be executable");
+                assert_eq!(
+                    mode & 0o777,
+                    0o755,
+                    "{} must be executable",
+                    tool.shim_name()
+                );
             }
+        }
+        // A tool that disappears between daemon starts loses its shim rather than
+        // keeping one that stands in front of nothing.
+        let orphan = shims.join(Tool::XdgOpen.shim_name());
+        if veld_core::opener::real_opener(Tool::XdgOpen, Some(&shims)).is_none() {
+            std::fs::write(&orphan, "#!/bin/sh\nexit 0\n").unwrap();
+            prepare_in(&shims, Path::new("/opt/veld/bin/veld")).unwrap();
+            assert!(!orphan.exists(), "a stale shim must be removed");
         }
         #[cfg(unix)]
         {
@@ -380,7 +478,7 @@ mod tests {
         // A second daemon start rewrites them — an upgrade has to move the baked
         // path — and leaves no temporary file behind.
         prepare_in(&shims, Path::new("/usr/local/bin/veld")).unwrap();
-        let body = std::fs::read_to_string(shims.join("open")).unwrap();
+        let body = std::fs::read_to_string(shims.join(Tool::Browser.shim_name())).unwrap();
         assert!(body.contains("/usr/local/bin/veld"), "{body}");
         let leftovers: Vec<_> = std::fs::read_dir(&shims)
             .unwrap()
@@ -397,11 +495,18 @@ mod tests {
         // this on, and reimplementing bash's startup order is not something to do to
         // somebody's shell.
         for shell in ["/bin/bash", "/usr/bin/fish", "/opt/homebrew/bin/nu", ""] {
-            let env = session_env("s", shell, true);
+            let env = session_env("s", shell, true, true);
             assert!(!env.contains_key("ZDOTDIR"), "{shell} must not be wrapped");
         }
         // And the setting is a real off switch, not a preference the daemon ignores.
-        assert!(!session_env("s", "/bin/zsh", false).contains_key("ZDOTDIR"));
+        assert!(!session_env("s", "/bin/zsh", true, false).contains_key("ZDOTDIR"));
+
+        // The master switch gates the WHOLE environment. Off means veld is not in the
+        // shell at all — no `$BROWSER` round trip, nothing in the startup — which is
+        // what its own documentation promises. Only the session id survives, and that
+        // is for `veld open-url` invoked deliberately.
+        let off = session_env("s", "/bin/zsh", false, true);
+        assert_eq!(off.keys().collect::<Vec<_>>(), vec!["VELD_PTY_SESSION"]);
         assert!(is_zsh("/bin/zsh") && is_zsh("/opt/homebrew/bin/zsh"));
         assert!(!is_zsh("/bin/zsh-beta") && !is_zsh("/bin/bash"));
     }
@@ -423,6 +528,16 @@ mod tests {
             .map(PathBuf::from)
             .find(|p| p.is_file())
         else {
+            // A skip is fine on a contributor's machine and unacceptable in CI: this
+            // is the only test that proves the `precmd` mechanism works at all, and
+            // `cargo test` swallows this line on a pass — so an image without zsh
+            // would silently leave the feature unprotected. CI installs zsh; if that
+            // ever stops being true, this fails instead of going quiet.
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "zsh is missing in CI — install it in the workflow; this test is the \
+                 only thing pinning the PATH mechanism"
+            );
             eprintln!("no zsh on this machine — skipping");
             return;
         };
@@ -440,9 +555,11 @@ mod tests {
         // handoff can be shown to have sourced it) and `.zshrc` *rebuilds* PATH from
         // scratch, which is what defeats every simpler approach.
         std::fs::write(home.join(".zshenv"), "export VELD_TEST_USER_ZSHENV=ran\n").unwrap();
+        // …and it exports its own BROWSER, which is the case that silently switched
+        // the `$BROWSER` half of the feature off before the `veld_browser` hook.
         std::fs::write(
             home.join(".zshrc"),
-            "export VELD_TEST_USER_ZSHRC=ran\nPATH=/usr/bin:/bin\n",
+            "export VELD_TEST_USER_ZSHRC=ran\nPATH=/usr/bin:/bin\nexport BROWSER=firefox\n",
         )
         .unwrap();
 
@@ -464,6 +581,8 @@ mod tests {
             .env("TERM", "dumb")
             .env("ZDOTDIR", &zdir)
             .env("VELD_SHIM_DIR", &shim)
+            .env("VELD_SHIM_BROWSER", shim.join("veld-open"))
+            .env("BROWSER", shim.join("veld-open"))
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -474,7 +593,11 @@ mod tests {
             let stdin = child.stdin.as_mut().unwrap();
             stdin
                 .write_all(
-                    b"command -v open\n                      echo $VELD_TEST_USER_ZSHENV $VELD_TEST_USER_ZSHRC\n                      echo zdotdir=${ZDOTDIR-unset}\n                      exit\n",
+                    b"command -v open\n\
+                      echo $VELD_TEST_USER_ZSHENV $VELD_TEST_USER_ZSHRC\n\
+                      echo zdotdir=${ZDOTDIR-unset}\n\
+                      echo browser=$BROWSER original=$VELD_BROWSER_ORIGINAL\n\
+                      exit\n",
                 )
                 .unwrap();
         }
@@ -494,13 +617,24 @@ mod tests {
             stdout.contains("zdotdir=unset"),
             "ZDOTDIR must be returned to the user's value: {stdout:?}"
         );
+        // The rc file's own `export BROWSER=firefox` ran after veld's environment was
+        // handed over; the hook takes `$BROWSER` back and keeps their value for the
+        // fall-through, so neither half of the feature is silently switched off.
+        assert!(
+            stdout.contains(&format!("browser={}", shim.join("veld-open").display())),
+            "the rc file's BROWSER must be re-pointed at the shim: {stdout:?}"
+        );
+        assert!(
+            stdout.contains("original=firefox"),
+            "the user's own browser must be kept for the passthrough: {stdout:?}"
+        );
     }
 
     #[test]
     fn the_session_id_is_always_exported() {
         // Even when no shim directory could be prepared: `veld open-url` run by
         // hand still needs to know which terminal it is in.
-        let env = session_env("abc-123", "/bin/zsh", true);
+        let env = session_env("abc-123", "/bin/zsh", true, true);
         assert_eq!(
             env.get("VELD_PTY_SESSION").map(String::as_str),
             Some("abc-123")

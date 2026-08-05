@@ -129,6 +129,7 @@ import {
 import {
   applyTerminalTheme,
   onTerminalOpenUrl,
+  openExternally,
   pruneTerminals,
   releaseTerminal,
   restartTerminal,
@@ -1452,14 +1453,21 @@ function AppInner(props: {
   useEffect(
     () =>
       onTerminalOpenUrl(({ sessionId, url }) => {
+        let placed = false;
         setLayouts((prev) => {
           for (const [key, l] of Object.entries(prev)) {
             const dock = dockOf(l, sessionId);
             if (dock === null) continue;
+            placed = true;
             return { ...prev, [Number(key)]: addTab(l, dock, browserTab({ url })) };
           }
           return prev;
         });
+        // The daemon has already told the caller "this is opening in a pane", so
+        // there is nobody left to fall back for — a tab released between the request
+        // and the frame must not turn into a URL that silently went nowhere. Same
+        // answer `activateLink` gives on every other failure.
+        if (!placed) openExternally(url);
       }),
     [],
   );
