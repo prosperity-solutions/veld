@@ -227,6 +227,48 @@ function othersHolding(holders, worktreeId, keeper) {
   return [...(holders.get(worktreeId) ?? [])].filter((id) => id !== keeper);
 }
 
+/**
+ * Whether `record` is a window this worktree's panes belong in.
+ *
+ * Two ways to qualify, and the second one is not a special case. A **main**
+ * window qualifies by holding the claim, i.e. by *showing* the worktree — its
+ * own `worktreeId` records what it was opened for, which is not what it shows
+ * now, so that field must never be read for one. A **detached** window never
+ * claims at all (it is a satellite of its origin's claim), so the field is the
+ * only thing that says which worktree its dock is for — and matching on the
+ * claim alone made a detached dock impossible to drop onto.
+ *
+ * Liveness and "is this the window the drag started in" are the caller's, since
+ * neither is set arithmetic.
+ */
+function ownsWorktree(record, worktreeId, claims) {
+  if (claims.get(worktreeId) === record.id) return true;
+  return record.kind === "detached" && record.worktreeId === worktreeId;
+}
+
+/**
+ * Whether a cross-window drop may be pushed at a window's drop listener, or has
+ * to be queued for it.
+ *
+ * A window holds its claim from the moment it *asks* for a worktree, while the
+ * listener that answers a drop does not exist until `/ide` has mounted and
+ * `PaneArea` has registered its handler — so a claim is routable for a window
+ * that cannot answer: during a reload, while the first `/api/repos` is in
+ * flight (a failed one retries five seconds later), and on the waiting page
+ * while the daemon restarts. Pushing there means `webContents.send` goes
+ * nowhere, the ack times out, and the gesture reports `refused` after two
+ * seconds of looking like a hang.
+ *
+ * `"unknown"` sends, deliberately. It is what a UI that never reports leaves
+ * behind — an older `/ide` bundle against a newer shell, which version skew
+ * makes reachable — and there the send-and-time-out path is exactly the
+ * behaviour that build already had. Only a window that *has* reported, and has
+ * since said its listener is gone, is queued for.
+ */
+function dropDelivery(dropListener) {
+  return dropListener === "gone" ? "queue" : "send";
+}
+
 /** Record `recordId` as holding exactly `worktreeIds`, dropping whatever it held
  *  before. Emptied sets are deleted rather than left as debris. */
 function setHolds(holders, recordId, worktreeIds) {
@@ -355,9 +397,11 @@ module.exports = {
   slotFor,
   nextSuffix,
   canOpenAnother,
+  dropDelivery,
   forgetWorktrees,
   handBackTarget,
   othersHolding,
+  ownsWorktree,
   releaseClaims,
   releaseHolds,
   restoreBudget,

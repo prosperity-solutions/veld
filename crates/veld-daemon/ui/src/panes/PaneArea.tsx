@@ -433,11 +433,17 @@ export function PaneArea(props: {
    * Split reuses `splitWithTab` by inserting first and moving second, so the
    * one-dock case (where "make this the left pane" has no dock index) stays in
    * one place.
+   *
+   * **The shell is told when this listener exists**, because its own answer to
+   * "which window owns this worktree" is a claim, and a claim is recorded the
+   * moment a window *asks* for a worktree — long before `/ide` has mounted, and
+   * again through every reload. Told, it queues a drop for the gap instead of
+   * pushing into it and reporting a refusal two seconds later.
    */
   useEffect(() => {
     const shell = desktopWindow;
     if (!shell) return;
-    return shell.onDropHere(({ dropId, tabs }) => {
+    const off = shell.onDropHere(({ dropId, tabs }) => {
       const parsed = parseTransferTabs(tabs);
       if (parsed.length === 0) {
         void shell.dropApplied(dropId, []).catch(() => {});
@@ -457,6 +463,15 @@ export function PaneArea(props: {
         applyDrop(parsed);
       })();
     });
+    // After the listener, never before: the window between saying "ready" and
+    // being ready is one where the shell pushes at nothing, which is the state
+    // this exists to remove.
+    void shell.dropsReady?.(true).catch(() => {});
+    return () => {
+      // …and withdrawn before it goes, for the same reason in reverse.
+      void shell.dropsReady?.(false).catch(() => {});
+      off();
+    };
 
     function applyDrop(parsed: PaneTab[]) {
       const where = lastRemoteRef.current;

@@ -103,8 +103,14 @@ export interface DesktopWindowApi {
    *  worktree id is a database rowid and gets **reused**, so a claim left on a
    *  removed worktree greys out whichever one is created next. */
   worktreesGone(worktreeIds: number[]): Promise<boolean>;
-  /** Let go of one worktree's panes — another window is taking it. */
-  onYieldWorktree(fn: (payload: { worktreeId: number }) => void): () => void;
+  /** Let go of one worktree's panes — another window is taking it. Answer with
+   *  `yielded` once the release has actually happened: the window that asked does
+   *  not attach to those terminals until it hears back, and a second attach takes
+   *  a session over rather than mirroring it. `yieldId` is absent on an older
+   *  shell, which waits for nothing. */
+  onYieldWorktree(fn: (payload: { worktreeId: number; yieldId?: number }) => void): () => void;
+  /** That release is on screen. Optional: an older shell has no such channel. */
+  yielded?(yieldId: number): Promise<boolean>;
   detach(payload: {
     worktreeId: number;
     repoRoot: string;
@@ -126,6 +132,11 @@ export interface DesktopWindowApi {
   /** Tabs dropped here — place them where the preview said, then acknowledge.
    *  The source window does not release them until you do. */
   onDropHere(fn: (p: TabTransfer & { dropId: number }) => void): () => void;
+  /** Whether that listener is registered right now. The shell's claim map says
+   *  which worktree this window shows, not whether the page showing it has
+   *  mounted — so without this a drop is pushed at a window mid-reload and goes
+   *  nowhere. Optional: an older shell has no such channel. */
+  dropsReady?(ready: boolean): Promise<boolean>;
   /** Which of a `drop-here`'s tabs were placed. Omitting one leaves it in the
    *  window it came from, which is the safe direction: a tab that stayed put is
    *  a visible non-event, a vanished one is unrecoverable. */

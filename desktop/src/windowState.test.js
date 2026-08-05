@@ -5,11 +5,13 @@ const assert = require("node:assert/strict");
 const {
   MAX_WINDOWS,
   canOpenAnother,
+  dropDelivery,
   forgetWorktrees,
   handBackTarget,
   isSuffix,
   nextSuffix,
   othersHolding,
+  ownsWorktree,
   parseWindowList,
   parseWindowRecord,
   releaseClaims,
@@ -377,6 +379,38 @@ test("forgetWorktrees drops a deleted worktree from both maps, whoever held it",
   assert.deepEqual([...claims], [[7, 1]], "an unknown worktree changes nothing");
   forgetWorktrees(claims, holders, []);
   assert.deepEqual([...claims], [[7, 1]], "and neither does an empty list");
+});
+
+test("ownsWorktree reads the claim for a main window and the field for a detached one", () => {
+  const claims = new Map([[7, 1]]);
+  const main = { id: 1, kind: "main", worktreeId: 42 };
+  const other = { id: 2, kind: "main", worktreeId: 7 };
+  const dock = { id: 3, kind: "detached", worktreeId: 8 };
+
+  assert.equal(ownsWorktree(main, 7, claims), true, "the window showing it");
+  // The trap: `worktreeId` on a *main* window is what it was opened for, not
+  // what it shows now. Reading it there routes a drop at a window that moved on.
+  assert.equal(ownsWorktree(main, 42, claims), false);
+  assert.equal(ownsWorktree(other, 7, claims), false, "wanting it is not holding it");
+  // A detached window never claims — it is a satellite of its origin's claim —
+  // so the field is the only thing that says which dock it is. Matching on the
+  // claim alone made a detached window impossible to drop onto.
+  assert.equal(ownsWorktree(dock, 8, claims), true);
+  assert.equal(ownsWorktree(dock, 7, claims), false);
+});
+
+test("dropDelivery queues only for a window that said its listener is gone", () => {
+  // A claim is recorded when a window *asks* for a worktree; the listener that
+  // answers a drop arrives once `/ide` has mounted. Pushing into that gap went
+  // nowhere and reported a refusal two seconds later.
+  assert.equal(dropDelivery("gone"), "queue");
+  assert.equal(dropDelivery("ready"), "send");
+  // "Never reported" is not "gone": an older /ide bundle against a newer shell
+  // never reports at all, and there send-and-time-out is the behaviour that build
+  // already had. Queueing it instead would silently drop every cross-window drop
+  // onto the append path, losing the caret the pointer resolved.
+  assert.equal(dropDelivery("unknown"), "send");
+  assert.equal(dropDelivery(undefined), "send");
 });
 
 test("releaseClaims drops every claim a window held", () => {

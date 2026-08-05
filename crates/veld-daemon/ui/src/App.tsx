@@ -1364,6 +1364,10 @@ function AppInner(props: {
   /** Every worktree is shown by another window, so this one has nothing to
    *  display that is its own. */
   const [claimBlocked, setClaimBlocked] = useState(false);
+  /** Yields whose release has been scheduled but not yet committed. State rather
+   *  than a ref, because the point is to have something an effect can run after —
+   *  see the yield handler below. */
+  const [yieldAcks, setYieldAcks] = useState<number[]>([]);
 
   // Mirrored into a ref, the same idiom `dialogRef` uses above: an effect with `[]`
   // deps closes over the first render's `layouts` forever, and a decision that has to
@@ -1451,10 +1455,16 @@ function AppInner(props: {
    * that claimed the worktree picks up both. Same distinction detach relies on,
    * and the release must happen *before* the layout leaves state, because
    * `pruneTerminals` ends whatever the layouts no longer name.
+   *
+   * **And the window that asked is waiting.** It does not attach to these
+   * terminals until this window acknowledges, so the ack has to mean the release
+   * has happened — not that the message arrived. The release runs inside the
+   * `setLayouts` updater, i.e. during the render React schedules from here, so
+   * the ack is queued for the effect below and sent after that commit.
    */
   useEffect(() => {
     if (chromeless || !desktopWindow) return;
-    return desktopWindow.onYieldWorktree(({ worktreeId }) => {
+    return desktopWindow.onYieldWorktree(({ worktreeId, yieldId }) => {
       // A pending "reveal node health" request for this worktree can never be
       // satisfied now, and its own guard cannot see that: a yield deletes the
       // layout without touching the *selection*, so `worktree?.id` still equals
@@ -1473,8 +1483,29 @@ function AppInner(props: {
         delete next[worktreeId];
         return next;
       });
+      // Batched with the update above into one commit, which is what makes the
+      // effect below run *after* the release rather than beside it. Queued even
+      // when there was no layout to give up: the claimer is waiting either way,
+      // and the answer is "nothing to let go of".
+      if (typeof yieldId === "number") setYieldAcks((q) => [...q, yieldId]);
     });
   }, [chromeless]);
+
+  /**
+   * Answer the yields whose release is now on screen.
+   *
+   * A passive effect, because that is the first moment the `setLayouts` updater
+   * above has actually run: acknowledging from inside the listener would promise a
+   * release that React has not performed yet, and the claiming window attaches on
+   * the strength of that promise.
+   */
+  useEffect(() => {
+    if (yieldAcks.length === 0) return;
+    for (const yieldId of yieldAcks) {
+      void desktopWindow?.yielded?.(yieldId).catch(() => {});
+    }
+    setYieldAcks([]);
+  }, [yieldAcks]);
 
   /**
    * Tell the shell what this window is holding, so it knows who to ask.
