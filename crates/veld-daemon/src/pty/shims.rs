@@ -89,6 +89,19 @@ pub fn session_env(
     let Some(dir) = dir() else {
         return env;
     };
+    // Everything below points at a file in that directory, so the directory having
+    // been *swept since boot* has to be checked here rather than assumed from `dir()`
+    // succeeding at startup: `dir()` memoises in a `OnceLock` and nothing rewrites the
+    // files, and the very trigger the handoff check below describes — a `VELD_PTY_DIR`
+    // under `/tmp` meeting the periodic sweep — takes `veld-open` with it. Handing a
+    // shell `BROWSER=<gone>/veld-open` would make `gh`, Claude Code's login, vite and
+    // Python's `webbrowser` all exec a nonexistent file and open *nothing*, where with
+    // no `$BROWSER` at all they would have worked. This module's own header calls that
+    // out as worse than not setting it; a half-configured environment is not a
+    // degradation, it is a break.
+    if !dir.join(Tool::Browser.shim_name()).is_file() {
+        return env;
+    }
     env.insert("VELD_SHIM_DIR".to_owned(), dir.display().to_string());
     // The handoff is only safe while the file that performs it exists. `ZDOTDIR`
     // redirects *every* zsh startup file, so if `zdotdir/.zshenv` is missing zsh finds
@@ -363,17 +376,28 @@ fn script(tool: Tool, cli: &Path, real: Option<&Path>) -> String {
     out.push_str(
         "# Routes a single http(s) URL to a Veld browser pane. See `veld open-url --help`.\n",
     );
-    // Not `exec`: the binary is tested for executability at run time (an upgrade or an
-    // uninstall can remove it while a shell is open), but "executable" is not the same
-    // as "knows this subcommand". A `veld` that predates `open-url` — a manual
-    // rollback, or the window between the two binaries during an update — parses the
-    // argv, refuses the unknown subcommand, and exits **2**, which is clap's usage
-    // status and also the only status this command returns for "I cannot handle this".
-    // `exec`ing would end the shim there and `open <url>` would open nothing at all,
-    // with no system opener behind it. So: run it, and fall through on exactly that.
+    // **Capability is probed, never inferred from an exit status**, and both halves of
+    // that matter:
+    //
+    // - `-x` alone is not enough. A `veld` that predates `open-url` (a rollback, or the
+    //   window mid-`veld update`, which installs with a plain `cp` in place so the file
+    //   is briefly a truncated executable) is executable and cannot serve the request.
+    // - The status cannot tell us which happened. Inferring "did not understand" from
+    //   clap's usage status 2 was wrong in both directions: `veld open-url` **`exec`s**
+    //   the real opener on every fall-through, so the *opener's* status becomes this
+    //   command's status — and `xdg-open` documents 2 as "a file did not exist", which
+    //   would make the shim run the real opener a second time. A double invocation is
+    //   fatal for the login URLs this feature exists to route, since a one-time token
+    //   does not survive being opened twice. Meanwhile a truncated binary exits 126 and
+    //   a killed one 137, neither of which is 2, so the shim would have exited and
+    //   `open <url>` would have opened nothing.
+    //
+    // `--help` answers exactly the question ("does this binary know this subcommand")
+    // and costs one extra spawn on a path a human just triggered. `exec` is restored,
+    // so nothing downstream can run twice.
     out.push_str(&format!(
-        "if [ -x {cli} ]; then\n  {cli} open-url --tool {flag} -- \"$@\"\n  rc=$?\n  \
-         [ \"$rc\" -ne 2 ] && exit \"$rc\"\nfi\n",
+        "if [ -x {cli} ] && {cli} open-url --help >/dev/null 2>&1; then\n  \
+         exec {cli} open-url --tool {flag} -- \"$@\"\nfi\n",
         cli = quote(cli),
         flag = tool.flag(),
     ));
@@ -426,17 +450,23 @@ mod tests {
         // The guard is `-x`, evaluated when the shim runs: an uninstall while a shell
         // is open must not break `open`.
         assert!(body.contains("[ -x '/usr/local/bin/veld' ]"), "{body}");
-        // …and it is NOT an `exec`, because a `veld` that predates this subcommand
-        // exits 2 and the shim has to fall through to the real tool rather than end
-        // there. That is the difference between "the feature is off" and "`open` is
-        // broken".
+        // Capability is **probed**, not inferred from an exit status: a `veld` that
+        // cannot serve `open-url` must fall through, and a status-based rule got that
+        // wrong in both directions (see `script`).
         assert!(
-            body.contains("open-url --tool open -- \"$@\"") && body.contains("-ne 2"),
-            "the shim must fall through on clap's usage status: {body}"
+            body.contains("open-url --help >/dev/null 2>&1"),
+            "the shim must probe the subcommand rather than guess from a status: {body}"
         );
         assert!(
-            !body.contains("&& exec '/usr/local/bin/veld' open-url"),
-            "an exec here strands the caller when veld cannot handle the subcommand: {body}"
+            !body.contains("-ne 2"),
+            "an exit status cannot distinguish 'veld cannot do this' from the real \
+             opener's own failure: {body}"
+        );
+        // And with the probe in place the call is an `exec` again, so nothing
+        // downstream can be invoked twice.
+        assert!(
+            body.contains("exec '/usr/local/bin/veld' open-url --tool open -- \"$@\""),
+            "{body}"
         );
         // The original argv reaches the real tool unexamined.
         assert!(body.contains("\"$@\"\n"), "{body}");

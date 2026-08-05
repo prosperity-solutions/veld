@@ -723,24 +723,24 @@ impl Diagnostics {
         // Installation
         println!("  {}", output::bold("Installation"));
         println!(
-            " {:<14}{} (v{})",
+            "    {:<14}{} (v{})",
             "Binary:", self.binary_path, self.binary_version
         );
         println!(
-            " {:<14}{} ({})",
+            "    {:<14}{} ({})",
             "Helper:", self.helper_path, self.helper_version
         );
         println!(
-            " {:<14}{} ({})",
+            "    {:<14}{} ({})",
             "Daemon:", self.daemon_path, self.daemon_version
         );
         if self.caddy_exists {
-            println!(" {:<14}{}", "Caddy:", self.caddy_path);
+            println!("    {:<14}{}", "Caddy:", self.caddy_path);
         } else {
-            println!(" {:<14}{} (not found)", "Caddy:", self.caddy_path);
+            println!("    {:<14}{} (not found)", "Caddy:", self.caddy_path);
         }
-        println!(" {:<14}{}", "Lib dir:", self.lib_dir);
-        println!(" {:<14}{}", "Config:", self.config_path);
+        println!("    {:<14}{}", "Lib dir:", self.lib_dir);
+        println!("    {:<14}{}", "Config:", self.config_path);
         println!();
 
         // Mode (prominent)
@@ -748,31 +748,34 @@ impl Diagnostics {
         match self.config_mode.as_str() {
             "privileged" => {
                 println!(
-                    " {} {}",
+                    "    {} {}",
                     output::checkmark(),
                     output::green("Privileged — clean URLs on ports 80/443")
                 );
             }
             "unprivileged" => {
-                println!(" {} Unprivileged — HTTPS on port 18443", output::cyan("●"));
                 println!(
-                    " {}",
+                    "    {} Unprivileged — HTTPS on port 18443",
+                    output::cyan("●")
+                );
+                println!(
+                    "      {}",
                     output::dim("Run `veld setup privileged` for clean URLs without :18443")
                 );
             }
             "auto" => {
                 println!(
-                    " {} Auto-bootstrapped — HTTPS on port 18443",
+                    "    {} Auto-bootstrapped — HTTPS on port 18443",
                     output::cyan("●")
                 );
                 println!(
-                    " {}",
+                    "      {}",
                     output::dim("Run `veld setup privileged` for clean URLs without :18443")
                 );
             }
             _ => {
                 println!(
-                    " {} {}",
+                    "    {} {}",
                     output::cross(),
                     output::red(
                         "Not configured — run `veld setup unprivileged` or `veld setup privileged`"
@@ -784,19 +787,31 @@ impl Diagnostics {
 
         // Services
         println!("  {}", output::bold("Services"));
-        println!(" {:<14}{}", "Helper:", colorize_status(&self.helper_status));
-        println!(" {:<14}{}", "Daemon:", colorize_status(&self.daemon_status));
-        println!(" {:<14}{}", "Caddy:", colorize_status(&self.caddy_status));
-        println!(" {:<14}{}", "CA:", colorize_status(&self.ca_status));
+        println!(
+            "    {:<14}{}",
+            "Helper:",
+            colorize_status(&self.helper_status)
+        );
+        println!(
+            "    {:<14}{}",
+            "Daemon:",
+            colorize_status(&self.daemon_status)
+        );
+        println!(
+            "    {:<14}{}",
+            "Caddy:",
+            colorize_status(&self.caddy_status)
+        );
+        println!("    {:<14}{}", "CA:", colorize_status(&self.ca_status));
         println!();
 
         // Checks
         println!("  {}", output::bold("Checks"));
         for check in &self.checks {
             if check.pass {
-                println!(" {} {}", output::checkmark(), check.label);
+                println!("    {} {}", output::checkmark(), check.label);
             } else {
-                println!(" {} {}", output::cross(), output::red(&check.label));
+                println!("    {} {}", output::cross(), output::red(&check.label));
             }
         }
         println!();
