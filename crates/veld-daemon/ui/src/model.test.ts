@@ -6,11 +6,13 @@ import {
   diagnosticsRun,
   fuzzyMatch,
   moveWorktree,
+  needsAttention,
   prunePending,
   railGroups,
   runSignature,
   runsForWorktree,
   sortedUrls,
+  spinnerAction,
   transitionAction,
   worktreeStatus,
   TRASH_LANE,
@@ -120,6 +122,50 @@ describe("activeRun / worktreeStatus", () => {
     expect(transitionAction(run("a", "starting"))).toBe("start");
     expect(transitionAction(run("a", "stopping"))).toBe("stop");
     expect(transitionAction(null)).toBeNull();
+  });
+
+  it("spinnerAction prefers the local marker over the observed transition", () => {
+    // The ordering is the only thing that knows a restart was ONE action rather
+    // than a stop followed by a start — which is what keeps the top bar's spinner
+    // on the button that was pressed.
+    expect(spinnerAction("restart", run("a", "stopping"))).toBe("restart");
+    expect(spinnerAction("stop", run("a", "starting"))).toBe("stop");
+    // No local marker: the observed transition drives it. This is the case every
+    // run control missed before — a run started from the CLI or another window.
+    expect(spinnerAction(null, run("a", "starting"))).toBe("start");
+    expect(spinnerAction(null, run("a", "stopping"))).toBe("stop");
+    // Nothing moving, and nothing to spin for.
+    expect(spinnerAction(null, run("a", "running"))).toBeNull();
+    expect(spinnerAction(null, run("a", "recovering"))).toBeNull();
+    expect(spinnerAction(null, null)).toBeNull();
+  });
+
+  it("needsAttention covers exactly the states no spinner can represent", () => {
+    // The complement matters as much as the set: anything `needsAttention`
+    // rejects has to be representable by a run control on its own, or the state
+    // has no surface at all.
+    const all: RunStatus[] = [
+      "starting",
+      "running",
+      "recovering",
+      "stopping",
+      "stopped",
+      "failed",
+    ];
+    for (const status of all) {
+      const s = worktreeStatus([run("a", status, true)]);
+      const attention = needsAttention(s);
+      expect(attention, `${status} -> ${s}`).toBe(
+        s === "failed" || s === "recovering",
+      );
+      // No state is both: a spinner and an alert on one row would be the two
+      // channels this change removed, reintroduced.
+      expect(
+        attention && spinnerAction(null, run("a", status, true)) !== null,
+        `${status} is both spinning and alerting`,
+      ).toBe(false);
+    }
+    expect(needsAttention(worktreeStatus([]))).toBe(false);
   });
 
   it("ignores non-live history runs", () => {

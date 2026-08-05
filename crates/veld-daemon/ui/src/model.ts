@@ -67,12 +67,18 @@ export function diagnosticsRun(runs: RunInfo[]): RunInfo | null {
  * A worktree's run state, reduced to what a surface has to render.
  *
  * `partial` means **exactly** `starting` or `stopping` — a transition that is
- * expected to end on its own, which is what the rail draws a spinner for.
+ * expected to end on its own, which is what a run control draws a spinner for.
  * `recovering` is deliberately *not* folded into it: that is the health monitor
  * restarting a node which keeps failing its liveness probe, so it has no
  * expected end and a spinner would read as "perpetually starting". It routes to
  * the same attention affordance `failed` does — "something is wrong, look at the
- * nodes" — which is also strictly more than the nothing it used to get.
+ * nodes".
+ *
+ * What it got before was **not** nothing, and issue #214's own text is wrong
+ * about this: folded into `partial` it rendered `.dot.partial`, a static amber
+ * dot identical to an ordinary `starting`/`stopping` row. So the defect was that
+ * an unbounded restart loop was *indistinguishable from progress*, which is worse
+ * than an absent signal — a wrong signal is acted on.
  *
  * The pairing is load-bearing: [`transitionAction`] answers *which way* a
  * `partial` run is moving, and the two must stay in agreement, so
@@ -91,7 +97,7 @@ export function worktreeStatus(runs: RunInfo[]): WorktreeStatus {
  * Which direction an observed transition is moving in, or `null` if there is no
  * transition to report.
  *
- * The rail's spinner used to appear only for an action *this window* fired
+ * A run control's spinner used to appear only for an action *this window* fired
  * (`PendingMarker`), which meant a run started from the CLI, from another
  * window, or one already coming up when the window opened showed a plain ▶ or ■
  * while it was mid-transition. This is what lets the spinner be driven by
@@ -109,6 +115,42 @@ export function transitionAction(run: RunInfo | null): PendingAction | null {
   if (run?.status === "starting") return "start";
   if (run?.status === "stopping") return "stop";
   return null;
+}
+
+/**
+ * Which spinner a run control shows, and in which action's colour. `null` means
+ * a plain ▶/■.
+ *
+ * **One function for every run control**, which is the point: while only the rail
+ * row combined these two sources, the same worktree could spin in the rail and
+ * show a static glyph in the top bar for the whole of an externally-started
+ * transition. Two surfaces deriving "is this moving?" from different inputs is
+ * the defect, not the styling.
+ *
+ * The local marker wins over the observed status, and that ordering is
+ * load-bearing: it is the only thing that knows a **restart** was one action
+ * rather than a stop followed by a start, and the top bar puts the spinner on
+ * the button that was pressed. An *externally* fired restart is indistinguishable
+ * from a stop-then-start over the wire, so it legitimately reads as one.
+ */
+export function spinnerAction(
+  pending: PendingAction | null,
+  run: RunInfo | null,
+): PendingAction | null {
+  return pending ?? transitionAction(run);
+}
+
+/**
+ * Whether a worktree's run state is asking to be looked at rather than waited on.
+ *
+ * `failed` has given up; `recovering` is the health monitor restarting a node
+ * that keeps failing its liveness probe, which has no expected end. Both mean
+ * "open the nodes view", which is why one predicate serves both — and why
+ * `recovering` must not reach the spinner, where an unbounded loop reads as
+ * progress.
+ */
+export function needsAttention(status: WorktreeStatus): boolean {
+  return status === "failed" || status === "recovering";
 }
 
 /**

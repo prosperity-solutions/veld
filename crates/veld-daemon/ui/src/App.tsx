@@ -30,12 +30,13 @@ import {
   diagnosticsRun,
   fuzzyMatch,
   moveWorktree,
+  needsAttention,
   prunePending,
   railGroups,
   runSignature,
   runsForWorktree,
   sortedUrls,
-  transitionAction,
+  spinnerAction,
   worktreeStatus,
   TRASH_LANE,
   type PendingAction,
@@ -1241,6 +1242,45 @@ function AppInner(props: {
   );
   const layout = worktree ? layouts[worktree.id] : undefined;
 
+  /**
+   * The rail's attention affordance: go to this worktree's node health.
+   *
+   * Two steps that cannot be collapsed into one. The selection has to land first
+   * — a claim can be refused, and `selectWorktree` reports that — and the pane
+   * write has to wait for `layouts[id]` to exist, because the effect that seeds a
+   * newly selected worktree's layout reads the **shared store** and only when it
+   * finds no entry of its own. Writing a layout here would therefore make that
+   * effect skip the read and grow a second set of panes for a worktree another
+   * window has, which is the failure the shared store exists to prevent.
+   *
+   * So the request is recorded and drained once the layout is there. Declared
+   * above the yield handler because that handler has to be able to abandon it:
+   * see the comment there for the interleaving that made it necessary.
+   */
+  const [diagnoseFor, setDiagnoseFor] = useState<number | null>(null);
+  const diagnoseWorktree = async (w: Worktree) => {
+    if (!(await selectWorktree(w))) return;
+    setDiagnoseFor(w.id);
+  };
+  useEffect(() => {
+    if (diagnoseFor === null) return;
+    // The selection went somewhere else (another click, the worktree was
+    // forgotten). A request that waits for a layout it will never see would
+    // otherwise fire on some later visit instead.
+    if (worktree?.id !== diagnoseFor) {
+      setDiagnoseFor(null);
+      return;
+    }
+    const l = layouts[diagnoseFor];
+    if (!l) return;
+    const next = revealDiagPane(l, "nodes");
+    setDiagnoseFor(null);
+    if (next === l) return;
+    setLayouts((prev) =>
+      prev[diagnoseFor] === l ? { ...prev, [diagnoseFor]: next } : prev,
+    );
+  }, [diagnoseFor, worktree?.id, layouts]);
+
   useEffect(() => {
     saveLayouts(layoutSlot, layouts, chromeless);
   }, [layouts]);
@@ -1282,6 +1322,14 @@ function AppInner(props: {
   useEffect(() => {
     if (chromeless || !desktopWindow) return;
     return desktopWindow.onYieldWorktree(({ worktreeId }) => {
+      // A pending "reveal node health" request for this worktree can never be
+      // satisfied now, and its own guard cannot see that: a yield deletes the
+      // layout without touching the *selection*, so `worktree?.id` still equals
+      // `diagnoseFor` while the layout it is waiting for is gone for good —
+      // nothing re-seeds it, because the seeding effect is keyed on the selection
+      // too. Left set, the request would fire on some later visit and open a
+      // Nodes pane nobody asked for then.
+      setDiagnoseFor((cur) => (cur === worktreeId ? null : cur));
       setLayouts((prev) => {
         const giving = prev[worktreeId];
         if (!giving) return prev;
@@ -1368,45 +1416,6 @@ function AppInner(props: {
     },
     [worktree?.id],
   );
-
-  /**
-   * The rail's attention affordance: go to this worktree's node health.
-   *
-   * Two steps that cannot be collapsed into one. The selection has to land first
-   * — a claim can be refused, and `selectWorktree` reports that — and the pane
-   * write has to wait for `layouts[id]` to exist, because the effect that seeds a
-   * newly selected worktree's layout reads the **shared store** and only when it
-   * finds no entry of its own. Writing a layout here would therefore make that
-   * effect skip the read and grow a second set of panes for a worktree another
-   * window has, which is the failure the shared store exists to prevent.
-   *
-   * So the request is recorded and drained once the layout is there. Nothing is
-   * lost if it never arrives: the request is dropped as soon as the selection is
-   * somewhere else.
-   */
-  const [diagnoseFor, setDiagnoseFor] = useState<number | null>(null);
-  const diagnoseWorktree = async (w: Worktree) => {
-    if (!(await selectWorktree(w))) return;
-    setDiagnoseFor(w.id);
-  };
-  useEffect(() => {
-    if (diagnoseFor === null) return;
-    // The selection went somewhere else (another click, a yield, the worktree
-    // was forgotten). A request that waits for a layout it will never see would
-    // fire on some later visit instead.
-    if (worktree?.id !== diagnoseFor) {
-      setDiagnoseFor(null);
-      return;
-    }
-    const l = layouts[diagnoseFor];
-    if (!l) return;
-    const next = revealDiagPane(l, "nodes");
-    setDiagnoseFor(null);
-    if (next === l) return;
-    setLayouts((prev) =>
-      prev[diagnoseFor] === l ? { ...prev, [diagnoseFor]: next } : prev,
-    );
-  }, [diagnoseFor, worktree?.id, layouts]);
 
   // A `target=_blank` inside a browser pane. It becomes a tab in the *same*
   // dock, carrying the pane's profile so the popup keeps the session it was
@@ -1858,10 +1867,14 @@ function AppInner(props: {
         // marker — the palette has no run control to move the state onto, and the
         // dot was the same two-circles-read-as-one collision the rail had.
         //
-        // Only `failed` and `recovering` are carried, which does drop `running`
-        // from this surface: ⌘K is how you *go* somewhere, the rail is on screen
-        // while it is open, and a badge on every started worktree is noise around
-        // the two states worth interrupting a search for.
+        // Only `failed` and `recovering` are carried. That drops two states this
+        // surface used to render — `running` (a pulsing green dot) and `partial`
+        // (amber) — and both deletions are deliberate: ⌘K is how you *go*
+        // somewhere, the rail is on screen while it is open, and a badge on every
+        // started or transitioning worktree is noise around the two states worth
+        // interrupting a search for. Naming `partial` explicitly because the same
+        // argument is weaker for it: a transition is short-lived, so an omission
+        // there costs a reader nothing they will not see resolve anyway.
         hint: PALETTE_STATUS[wtStatus]
           ? `${w.branch} · ${PALETTE_STATUS[wtStatus]}`
           : w.branch,
@@ -2336,6 +2349,7 @@ function AppInner(props: {
         canStart={worktree ? canStartWorktree(worktree) : false}
         running={status !== "stopped"}
         pending={pendingFor(worktree)}
+        spinner={spinnerAction(pendingFor(worktree), run)}
         run={run}
         urls={urls}
         sharing={sharingSurface}
@@ -2620,6 +2634,11 @@ function TopBar(props: {
   canStart: boolean;
   running: boolean;
   pending: PendingAction | null;
+  /** What the play/stop control spins for — `pending` widened by the observed
+   *  transition, so this button and the rail's row control cannot disagree.
+   *  `pending` stays separate because `disabled` and the restart button key on it:
+   *  only an action *this* window fired may lock the controls. */
+  spinner: PendingAction | null;
   run: { name: string; status: string } | null;
   urls: Array<[string, string]>;
   /** The Sharing surface, built by the app (it owns the shares poll). */
@@ -2700,7 +2719,18 @@ function TopBar(props: {
                   size="md"
                   variant="light"
                   color={props.running ? "red" : "green"}
-                  loading={props.pending === "start" || props.pending === "stop"}
+                  // `spinner`, not `pending`: the rail's row control spins for a
+                  // transition it merely *observed* (one started from the CLI or
+                  // another window), and this button showing a static glyph for
+                  // the same worktree at the same moment is two surfaces
+                  // disagreeing about whether anything is happening.
+                  //
+                  // Still filtered to start/stop rather than truthiness, which is
+                  // what keeps the comment above true: a locally-fired restart
+                  // spins the restart button alone. An externally-fired one is
+                  // indistinguishable from a stop-then-start on the wire, so it
+                  // legitimately lands here instead.
+                  loading={props.spinner === "start" || props.spinner === "stop"}
                   disabled={
                     props.pending !== null ||
                     (!props.running && !props.canStart)
@@ -3145,16 +3175,13 @@ function Rail(props: {
               const running = status !== "stopped";
               const pending = props.pendingFor(w);
               const live = activeRun(runs);
-              // The spinner's direction, and the whole reason the run status dot
-              // could be deleted: `pending` is only set by a click in THIS window,
-              // so a run coming up from the CLI, from another window, or already
-              // starting when the window opened had no transition signal on the
-              // control at all. The observed status covers those; the marker stays
-              // as the latency optimisation for the gap before the daemon reports.
-              const spinner = pending ?? transitionAction(live);
-              // `failed` and `recovering` both mean "look at the nodes". Nothing
-              // else on the row says so now, and `recovering` never had a signal.
-              const attention = status === "failed" || status === "recovering";
+              // The whole reason the run status dot could be deleted: `pending` is
+              // only set by a click in THIS window, so a run coming up from the
+              // CLI, from another window, or already starting when the window
+              // opened had no transition signal on the *control* at all. Shared
+              // with the top bar, which had the same gap.
+              const spinner = spinnerAction(pending, live);
+              const attention = needsAttention(status);
               // The run's own status, verbatim rather than through a table, so
               // this cannot drift from what the daemon reports. `activeRun` never
               // returns a stopped run, so a worktree with nothing up says nothing
