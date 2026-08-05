@@ -19,7 +19,7 @@ import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { api } from "../api";
 import { ANSI_DARK, ANSI_LIGHT } from "../shared/ansi";
-import { notifyError } from "../shared/notify";
+import { notifyError, notifyRedirect } from "../shared/notify";
 import { terminalPrefs, type TerminalPrefs } from "../shared/settings";
 import { chromeless, layoutSlot, windowSeed } from "../shell";
 import { parseLayouts, storedTerminalIds, terminalIds } from "./model";
@@ -485,7 +485,14 @@ async function activateLink(sessionId: string, url: string, event: MouseEvent): 
     const answer = await api.ptyOpenUrl(sessionId, url);
     // `pane` is already done: the daemon pushed an `open_url` frame down this
     // session's socket, and the app's frame handler owns the placement.
-    if (answer.target === "system") openExternally(url);
+    if (answer.target === "system") {
+      // The daemon knows *which* of several reasons applied — an exempt origin (which
+      // may come from a project's veld.json the user has never read), the preference,
+      // or no attached window — and this is the one path that can show it. Without
+      // this the click just opens somewhere else and the answer lives in a Rust file.
+      if (answer.reason) notifyRedirect(`Opened in your browser — ${answer.reason}`);
+      openExternally(url);
+    }
   } catch (e) {
     // The link still has to work. Report it once and open it the way the user's
     // machine would have anyway.

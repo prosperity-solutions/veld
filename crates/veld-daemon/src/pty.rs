@@ -1190,7 +1190,7 @@ async fn open_url(
     external.extend(project_external_origins(&db, session.worktree_id));
     let open_in_app = db.terminal_open_urls_in_app();
 
-    match veld_core::ide::route_url(&web.canonical, open_in_app, &external) {
+    match veld_core::ide::route_url(web.canonical.as_str(), open_in_app, &external) {
         veld_core::ide::UrlTarget::System => Ok(Json(OpenUrlResponse {
             target: veld_core::ide::UrlTarget::System,
             reason: Some(
@@ -1231,9 +1231,9 @@ async fn open_url(
                     ),
                 }));
             }
-            let _ = session.control.send(ServerControl::OpenUrl {
-                url: web.canonical.clone(),
-            });
+            let _ = session
+                .control
+                .send(ServerControl::OpenUrl { url: web.canonical });
             debug!(session = %id, "routed a URL to a browser pane");
             Ok(Json(OpenUrlResponse {
                 target: veld_core::ide::UrlTarget::Pane,
@@ -1895,12 +1895,15 @@ enum ServerControl {
     Lagged,
     /// Open `url` in a browser pane beside this terminal.
     ///
+    /// The field is a [`veld_core::ide::CanonicalUrl`] rather than a `String` so that
+    /// the caller's spelling cannot be forwarded here by accident — see that type.
+    ///
     /// Pushed from an HTTP handler rather than derived from the PTY stream, which
     /// makes it the one server→client frame that is not about terminal bytes. It
     /// travels on this socket because the socket *is* the routing decision: the page
     /// attached to a session is the window whose dock holds that terminal, so no
     /// window id has to be invented, stored or kept correct across a detach.
-    OpenUrl { url: String },
+    OpenUrl { url: veld_core::ide::CanonicalUrl },
 }
 
 impl ServerControl {
@@ -2304,9 +2307,46 @@ mod tests {
         assert!(is_unanswered(&connect_err(&plain).await));
 
         // A socket file whose listener is gone.
+        //
+        // Asserted through a bounded retry, and the reason is the same one
+        // [`is_unanswered`] documents from the other side: under real resource
+        // pressure a `connect` can fail with an errno that says nothing about the
+        // peer (`EMFILE`, `ENFILE`, `EINTR`, `EAGAIN`), and those are deliberately
+        // *not* "unanswered" — treating a busy machine as a dead holder would unlink
+        // the socket of a live shell. So the classification this test is about
+        // (`ECONNREFUSED` ⇒ stale) is only decidable on an answer that carries peer
+        // information; anything else is the machine talking, not the code under test.
+        // This flaked under a saturated CPU while the whole workspace was compiling.
         let dead = dir.path().join("dead.sock");
         drop(std::os::unix::net::UnixListener::bind(&dead).unwrap());
-        assert!(is_unanswered(&connect_err(&dead).await));
+        let mut classified = false;
+        let mut seen = Vec::new();
+        for _ in 0..5 {
+            let e = connect_err(&dead).await;
+            if is_unanswered(&e) {
+                classified = true;
+                break;
+            }
+            let errno = e
+                .downcast_ref::<std::io::Error>()
+                .and_then(|io| io.raw_os_error());
+            seen.push(errno);
+            // Only a pressure errno earns another go; a genuinely wrong
+            // classification must still fail the test rather than be retried away.
+            let pressure = matches!(
+                errno,
+                Some(libc::EMFILE | libc::ENFILE | libc::EINTR | libc::EAGAIN)
+            );
+            assert!(
+                pressure,
+                "dead socket misclassified: errno={errno:?} err={e}"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(
+            classified,
+            "never got a decidable answer for a dead socket; saw {seen:?}"
+        );
 
         // A listener that accepts and then says nothing: alive, and its socket
         // must NOT be removed — unlinking it would strand a live shell forever.
@@ -3069,7 +3109,11 @@ mod tests {
             session
                 .control
                 .send(ServerControl::OpenUrl {
-                    url: "https://web.dev.app.localhost/x?y=1".to_owned(),
+                    // Built through the parser, because the type has no other
+                    // constructor — which is the point of it.
+                    url: veld_core::ide::parse_web_url("https://web.dev.app.localhost/x?y=1")
+                        .expect("a web url")
+                        .canonical,
                 })
                 .expect("a subscribed socket");
 

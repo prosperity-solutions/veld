@@ -54,6 +54,16 @@ pub enum Tool {
 }
 
 impl Tool {
+    /// Every tool a shim is generated for.
+    ///
+    /// Exists so the generator and its tests iterate the *enum* rather than a
+    /// hand-written array. `shim_name`, `flag` and `real_opener` are exhaustive
+    /// matches, so a new variant forces those to be updated and looks safe — while the
+    /// generation loop and its regression test both walked a literal array, so a fourth
+    /// tool would compile, pass, and simply never get a shim written. Same reason
+    /// `SettingKey::ALL` exists in `veld_core::db::settings`.
+    pub const ALL: &'static [Tool] = &[Self::Browser, Self::Open, Self::XdgOpen];
+
     /// The name the shim is written under, which is also how the CLI is told which
     /// one ran.
     #[must_use]
@@ -215,7 +225,7 @@ mod tests {
 
     #[test]
     fn only_a_lone_web_url_is_routed() {
-        for tool in [Tool::Browser, Tool::Open, Tool::XdgOpen] {
+        for tool in Tool::ALL.iter().copied() {
             assert_eq!(
                 decide(tool, &["https://example.com/x"]),
                 Decision::Url("https://example.com/x".to_owned()),
@@ -257,7 +267,7 @@ mod tests {
 
     #[test]
     fn tool_flags_round_trip() {
-        for tool in [Tool::Browser, Tool::Open, Tool::XdgOpen] {
+        for tool in Tool::ALL.iter().copied() {
             assert_eq!(Tool::parse(tool.flag()), Some(tool));
         }
         assert_eq!(Tool::parse("firefox"), None);

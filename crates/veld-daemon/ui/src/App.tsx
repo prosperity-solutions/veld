@@ -123,8 +123,10 @@ import {
   saveLayouts,
   serializeSessionSets,
   sessionSetFor,
+  normalizeBrowserUrl,
   terminalIds,
   updateTab,
+  urlLabel,
 } from "./panes/model";
 import {
   applyTerminalTheme,
@@ -1239,6 +1241,11 @@ function AppInner(props: {
    *  display that is its own. */
   const [claimBlocked, setClaimBlocked] = useState(false);
 
+  // Mirrored into a ref, the same idiom `dialogRef` uses above: an effect with `[]`
+  // deps closes over the first render's `layouts` forever, and a decision that has to
+  // be made *before* a `setLayouts` call cannot come from inside the updater — see the
+  // terminal `open_url` handler.
+  const layoutsRef = useRef<Record<number, PaneLayout>>({});
   const [layouts, setLayouts] = useState<Record<number, PaneLayout>>(() =>
     loadLayouts(layoutSlot, windowSeed, windowRestored, chromeless),
   );
@@ -1406,6 +1413,11 @@ function AppInner(props: {
   // Accepts an updater as well as a value: two panes can report a change in the
   // same commit (two browser panes both finishing a navigation), and a value
   // computed from the render's `layout` would silently discard the other write.
+  // Kept current on every render, like `dialogRef`. Assigned during render rather
+  // than in an effect so a frame arriving between a render and its effects still reads
+  // the layouts that render was built from.
+  layoutsRef.current = layouts;
+
   const setLayout = useCallback(
     (next: PaneLayoutUpdate) => {
       if (!worktree) return;
@@ -1453,21 +1465,43 @@ function AppInner(props: {
   useEffect(
     () =>
       onTerminalOpenUrl(({ sessionId, url }) => {
-        let placed = false;
+        // Decided from the ref **before** touching state, not from a flag set inside
+        // the updater. React 19 runs an updater eagerly only when the fiber has no
+        // pending work (`dispatchSetStateInternal`); with any update already queued in
+        // the same tick — routine here, since terminal status and toasts drive this
+        // component — the updater runs during a later render, so the flag would still
+        // be false and the URL would open in a pane *and* externally. A double open is
+        // the mirror of the dropped-URL defect this fallback exists for.
+        const owner = Object.entries(layoutsRef.current).find(
+          ([, l]) => dockOf(l, sessionId) !== null,
+        );
+        if (!owner) {
+          // The daemon has already told the caller "this is opening in a pane", so
+          // nobody downstream is going to fall back — a tab released between the
+          // request and the frame must not become a URL that silently went nowhere.
+          // Reported as well as opened: this runs from a socket frame, with no user
+          // activation, so a browser tab may block the popup and the toast is then the
+          // only way the URL is recoverable.
+          notifyRedirect(`Opened ${urlLabel(url)} outside Veld — its terminal pane is gone`);
+          openExternally(url);
+          return;
+        }
+        // A URL the daemon accepted that this build's own parser rejects would become a
+        // tab with no page and no error (`browserTab` drops it), so it goes out instead.
+        if (!normalizeBrowserUrl(url)) {
+          notifyRedirect(`Opened ${urlLabel(url)} outside Veld — it is not a page a pane can show`);
+          openExternally(url);
+          return;
+        }
+        const [key, layout] = owner;
+        const dock = dockOf(layout, sessionId)!;
         setLayouts((prev) => {
-          for (const [key, l] of Object.entries(prev)) {
-            const dock = dockOf(l, sessionId);
-            if (dock === null) continue;
-            placed = true;
-            return { ...prev, [Number(key)]: addTab(l, dock, browserTab({ url })) };
-          }
-          return prev;
+          const current = prev[Number(key)];
+          // Re-checked against the state React is actually applying to, since the ref
+          // was read a tick earlier.
+          if (!current || dockOf(current, sessionId) === null) return prev;
+          return { ...prev, [Number(key)]: addTab(current, dock, browserTab({ url })) };
         });
-        // The daemon has already told the caller "this is opening in a pane", so
-        // there is nobody left to fall back for — a tab released between the request
-        // and the frame must not turn into a URL that silently went nowhere. Same
-        // answer `activateLink` gives on every other failure.
-        if (!placed) openExternally(url);
       }),
     [],
   );

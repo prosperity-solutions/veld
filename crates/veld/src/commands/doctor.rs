@@ -530,6 +530,23 @@ impl Diagnostics {
     fn terminal_shims_check(&self) -> Check {
         let dir = veld_core::instance::shim_dir();
         let shown = tilde_path(&dir);
+        // The scripts are written at every daemon start regardless of the settings, so
+        // their presence says nothing about whether the feature is *on*. Reporting
+        // "Terminal URLs open in Veld" while the user has switched it off is a green
+        // answer to the exact question someone runs this to ask.
+        let settings = veld_core::db::Db::open().ok().map(|db| {
+            (
+                db.terminal_open_urls_in_app(),
+                db.terminal_intercept_system_open(),
+            )
+        });
+        if let Some((false, _)) = settings {
+            return Check {
+                pass: true,
+                label: "Terminal URLs open in your system browser (terminal.openUrlsInApp is off)"
+                    .to_owned(),
+            };
+        }
         let browser = dir.join("veld-open");
         if !browser.is_file() {
             return Check {
@@ -550,10 +567,35 @@ impl Diagnostics {
             .find_map(|l| l.split('\'').nth(1))
             .map(std::path::PathBuf::from);
         match cli {
-            Some(cli) if cli.is_file() => Check {
-                pass: true,
-                label: format!("Terminal URLs open in Veld ({shown} → {})", cli.display()),
-            },
+            Some(cli) if cli.is_file() => {
+                // The `ZDOTDIR` handoff is the half that catches `open`/`xdg-open`, and
+                // it is worse than useless if its file has gone: `ZDOTDIR` redirects
+                // every zsh startup file, so a missing `.zshenv` there means none of
+                // the user's own zsh config runs. The daemon checks this per session
+                // too; this row makes the state visible before a terminal is opened.
+                let handoff = dir.join("zdotdir").join(".zshenv");
+                let intercept = settings.map(|(_, i)| i).unwrap_or(true);
+                if intercept && !handoff.is_file() {
+                    return Check {
+                        pass: false,
+                        label: format!(
+                            "Terminal URLs open in Veld, but {shown}/zdotdir/.zshenv is missing, so open/xdg-open are not caught. Restart the daemon to rewrite it"
+                        ),
+                    };
+                }
+                Check {
+                    pass: true,
+                    label: format!(
+                        "Terminal URLs open in Veld ({shown} → {}{})",
+                        cli.display(),
+                        if intercept {
+                            ""
+                        } else {
+                            ", open/xdg-open not caught"
+                        }
+                    ),
+                }
+            }
             Some(cli) => Check {
                 pass: false,
                 label: format!(
@@ -665,24 +707,24 @@ impl Diagnostics {
         // Installation
         println!("  {}", output::bold("Installation"));
         println!(
-            "    {:<14}{} (v{})",
+            " {:<14}{} (v{})",
             "Binary:", self.binary_path, self.binary_version
         );
         println!(
-            "    {:<14}{} ({})",
+            " {:<14}{} ({})",
             "Helper:", self.helper_path, self.helper_version
         );
         println!(
-            "    {:<14}{} ({})",
+            " {:<14}{} ({})",
             "Daemon:", self.daemon_path, self.daemon_version
         );
         if self.caddy_exists {
-            println!("    {:<14}{}", "Caddy:", self.caddy_path);
+            println!(" {:<14}{}", "Caddy:", self.caddy_path);
         } else {
-            println!("    {:<14}{} (not found)", "Caddy:", self.caddy_path);
+            println!(" {:<14}{} (not found)", "Caddy:", self.caddy_path);
         }
-        println!("    {:<14}{}", "Lib dir:", self.lib_dir);
-        println!("    {:<14}{}", "Config:", self.config_path);
+        println!(" {:<14}{}", "Lib dir:", self.lib_dir);
+        println!(" {:<14}{}", "Config:", self.config_path);
         println!();
 
         // Mode (prominent)
@@ -690,34 +732,31 @@ impl Diagnostics {
         match self.config_mode.as_str() {
             "privileged" => {
                 println!(
-                    "    {} {}",
+                    " {} {}",
                     output::checkmark(),
                     output::green("Privileged — clean URLs on ports 80/443")
                 );
             }
             "unprivileged" => {
+                println!(" {} Unprivileged — HTTPS on port 18443", output::cyan("●"));
                 println!(
-                    "    {} Unprivileged — HTTPS on port 18443",
-                    output::cyan("●")
-                );
-                println!(
-                    "      {}",
+                    " {}",
                     output::dim("Run `veld setup privileged` for clean URLs without :18443")
                 );
             }
             "auto" => {
                 println!(
-                    "    {} Auto-bootstrapped — HTTPS on port 18443",
+                    " {} Auto-bootstrapped — HTTPS on port 18443",
                     output::cyan("●")
                 );
                 println!(
-                    "      {}",
+                    " {}",
                     output::dim("Run `veld setup privileged` for clean URLs without :18443")
                 );
             }
             _ => {
                 println!(
-                    "    {} {}",
+                    " {} {}",
                     output::cross(),
                     output::red(
                         "Not configured — run `veld setup unprivileged` or `veld setup privileged`"
@@ -729,31 +768,19 @@ impl Diagnostics {
 
         // Services
         println!("  {}", output::bold("Services"));
-        println!(
-            "    {:<14}{}",
-            "Helper:",
-            colorize_status(&self.helper_status)
-        );
-        println!(
-            "    {:<14}{}",
-            "Daemon:",
-            colorize_status(&self.daemon_status)
-        );
-        println!(
-            "    {:<14}{}",
-            "Caddy:",
-            colorize_status(&self.caddy_status)
-        );
-        println!("    {:<14}{}", "CA:", colorize_status(&self.ca_status));
+        println!(" {:<14}{}", "Helper:", colorize_status(&self.helper_status));
+        println!(" {:<14}{}", "Daemon:", colorize_status(&self.daemon_status));
+        println!(" {:<14}{}", "Caddy:", colorize_status(&self.caddy_status));
+        println!(" {:<14}{}", "CA:", colorize_status(&self.ca_status));
         println!();
 
         // Checks
         println!("  {}", output::bold("Checks"));
         for check in &self.checks {
             if check.pass {
-                println!("    {} {}", output::checkmark(), check.label);
+                println!(" {} {}", output::checkmark(), check.label);
             } else {
-                println!("    {} {}", output::cross(), output::red(&check.label));
+                println!(" {} {}", output::cross(), output::red(&check.label));
             }
         }
         println!();

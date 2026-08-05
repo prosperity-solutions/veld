@@ -632,6 +632,32 @@ pub struct UrlOrigin {
     pub port: u16,
 }
 
+/// A URL that has been through [`parse_web_url`], and therefore the only kind that
+/// may be handed onward to something that will *load* it.
+///
+/// A newtype with no public constructor, deliberately: "route the parsed URL but
+/// forward the string the caller sent" is a one-word edit that compiles, passes every
+/// test that checks the parser in isolation, and silently reopens the exempt-list
+/// bypass described on [`parse_web_url`]. Making the frame's field this type means
+/// that edit does not compile. A comment there would have been the fifth guard in this
+/// module defended only by prose.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct CanonicalUrl(String);
+
+impl CanonicalUrl {
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for CanonicalUrl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// An `http(s)` URL, parsed the way the thing that will *load* it parses.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WebUrl {
@@ -640,7 +666,7 @@ pub struct WebUrl {
     /// The **canonical serialisation**, and the only string that should travel
     /// onward. See [`parse_web_url`] for why routing on one string and opening a
     /// different one was a real defect rather than a tidiness point.
-    pub canonical: String,
+    pub canonical: CanonicalUrl,
 }
 
 /// Parse an `http(s)` URL, or `None` if it is not one.
@@ -705,7 +731,7 @@ pub fn parse_web_url(url: &str) -> Option<WebUrl> {
             host: host.to_owned(),
             port: parsed.port_or_known_default()?,
         },
-        canonical: parsed.as_str().to_owned(),
+        canonical: CanonicalUrl(parsed.as_str().to_owned()),
     })
 }
 
@@ -924,13 +950,13 @@ mod tests {
             // reaches the same decision. (A trailing dot survives canonicalisation,
             // as it does in a browser, which is why this is idempotence rather than
             // a literal prefix check.)
-            let again = parse_web_url(&parsed.canonical).expect("canonical re-parses");
+            let again = parse_web_url(parsed.canonical.as_str()).expect("canonical re-parses");
             assert_eq!(
                 again.origin, parsed.origin,
                 "{spelling:?} is not idempotent"
             );
             assert_eq!(
-                route_url(&parsed.canonical, true, &external),
+                route_url(parsed.canonical.as_str(), true, &external),
                 UrlTarget::System,
                 "{spelling:?} canonicalised into something that escapes the list"
             );

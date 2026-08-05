@@ -460,7 +460,7 @@ export function SettingsDialog(props: {
           </Row>
           <Row
             label="Open links from the terminal in Veld"
-            help="A URL you click in the terminal output, and a URL a program in it opens (Veld points $BROWSER at itself, which is what Claude Code, gh, git, vite and next all use), become a browser pane beside that terminal. Off sends both to your system browser. Hold ⌘/Ctrl while clicking a link to go to the system browser once."
+            help="A URL you click in the terminal output, and a URL a program in it opens (Veld points $BROWSER at itself, which is what Claude Code, gh, git, vite and next all use), become a browser pane beside that terminal. Off sends both to your system browser and puts nothing in the shell at all. Clicking a link responds immediately; the rest takes effect for new terminals, since a running shell keeps the environment it started with. Hold ⌘/Ctrl while clicking a link to go to your browser just once."
           >
             <Checkbox
               size="xs"
