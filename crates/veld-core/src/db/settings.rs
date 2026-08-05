@@ -93,6 +93,30 @@ pub const MIN_TRASH_RETENTION_DAYS: i64 = 1;
 /// full of checkouts nobody remembers binning.
 pub const MAX_TRASH_RETENTION_DAYS: i64 = 365;
 
+/// Days of ended runs the history views show, or `0` for "show all".
+///
+/// A **view** horizon, not a retention policy: nothing is deleted by it, and it is
+/// deliberately not wired to the GC. Someone who starts forty runs a day wants a
+/// shorter list, not a shorter history.
+///
+/// **Defaults to three days rather than to "show all"**, which is the one place this
+/// key differs in spirit from [`DEFAULT_TRASH_RETENTION_DAYS`] above: hiding a run
+/// costs a settings change to undo, while deleting a checkout costs the checkout, so
+/// the cautious default is only mandatory for the destructive setting. Three days
+/// covers "what did I run yesterday" and keeps the History tab short for someone who
+/// starts dozens of runs a day, and the runs are still there — the horizon says what
+/// is *shown*, and the view says how many it hid.
+pub const DEFAULT_RUN_HISTORY_DAYS: i64 = 3;
+
+/// Longest run-history horizon that can show anything, in days.
+///
+/// **Bounded by the GC, not by taste.** The housekeeping pass already deletes ended
+/// runs older than `MAX_LOG_AGE_HOURS` (`veld-daemon/src/gc.rs`, 168h), so a horizon
+/// past that filters against runs that no longer exist and would read as broken —
+/// "show me 30 days" then showing 7. `run_history_horizon_matches_the_gc_window` in
+/// that module fails if the two ever drift.
+pub const MAX_RUN_HISTORY_DAYS: i64 = 7;
+
 /// Longest accepted `terminal.fontFamily`. A CSS font-family list that needs more
 /// than this is not a font list.
 const MAX_FONT_FAMILY_LEN: usize = 200;
@@ -122,6 +146,7 @@ pub enum SettingKey {
     TerminalDetachGrace,
     WorktreeMarkerStyle,
     WorktreeTrashRetention,
+    RunsHistoryDays,
     BrowserQuickSwitchResponsive,
     BrowserQuickSwitchColorScheme,
     Unknown(String),
@@ -148,6 +173,7 @@ impl SettingKey {
         Self::TerminalDetachGrace,
         Self::WorktreeMarkerStyle,
         Self::WorktreeTrashRetention,
+        Self::RunsHistoryDays,
         Self::BrowserQuickSwitchResponsive,
         Self::BrowserQuickSwitchColorScheme,
     ];
@@ -163,6 +189,7 @@ impl SettingKey {
             Self::TerminalDetachGrace => "terminal.detachGraceMinutes",
             Self::WorktreeMarkerStyle => "worktree.markerStyle",
             Self::WorktreeTrashRetention => "worktree.trashRetentionDays",
+            Self::RunsHistoryDays => "runs.historyDays",
             Self::BrowserQuickSwitchResponsive => "browser.quickSwitch.responsive",
             Self::BrowserQuickSwitchColorScheme => "browser.quickSwitch.colorScheme",
             Self::Unknown(k) => k,
@@ -180,6 +207,7 @@ impl SettingKey {
             "terminal.detachGraceMinutes" => Self::TerminalDetachGrace,
             "worktree.markerStyle" => Self::WorktreeMarkerStyle,
             "worktree.trashRetentionDays" => Self::WorktreeTrashRetention,
+            "runs.historyDays" => Self::RunsHistoryDays,
             "browser.quickSwitch.responsive" => Self::BrowserQuickSwitchResponsive,
             "browser.quickSwitch.colorScheme" => Self::BrowserQuickSwitchColorScheme,
             other => Self::Unknown(other.to_string()),
@@ -221,6 +249,12 @@ impl SettingKey {
                 } else {
                     n.max(MIN_TRASH_RETENTION_DAYS)
                 })
+            }
+            // Zero is "show everything" — the same off-switch shape as the trash
+            // retention above, and for the same reason: the value a user picks to
+            // turn a filter off must not be clamped into turning it on.
+            Self::RunsHistoryDays => {
+                Value::from(clamp_i64(value, 0, MAX_RUN_HISTORY_DAYS).ok_or_else(bad)?)
             }
             Self::TerminalCursorBlink
             | Self::TerminalShiftEnterNewline
@@ -332,6 +366,12 @@ pub fn defaults() -> BTreeMap<String, Value> {
         (
             SettingKey::WorktreeTrashRetention,
             Value::from(DEFAULT_TRASH_RETENTION_DAYS),
+        ),
+        // Three days — see the constant. The view reports how many it hid, so a
+        // default that hides something cannot be mistaken for a run having vanished.
+        (
+            SettingKey::RunsHistoryDays,
+            Value::from(DEFAULT_RUN_HISTORY_DAYS),
         ),
     ]
     .into_iter()
@@ -703,6 +743,44 @@ mod tests {
     }
 
     #[test]
+    fn run_history_days_defaults_to_all_and_clamps_to_the_gc_window() {
+        let (_dir, db) = test_db();
+        assert_eq!(
+            db.settings().unwrap().get("runs.historyDays"),
+            Some(&Value::from(DEFAULT_RUN_HISTORY_DAYS)),
+            "a fresh install shows the last few days of history"
+        );
+
+        // Zero is "show everything", so it must survive the clamp for the same reason
+        // the trash retention's does: it is the off switch, not the minimum.
+        db.patch_settings(&patch(&[("runs.historyDays", Value::from(0))]))
+            .unwrap();
+        assert_eq!(
+            db.settings().unwrap().get("runs.historyDays"),
+            Some(&Value::from(0))
+        );
+
+        // Past the ceiling clamps down to it. A horizon longer than the GC window
+        // would promise days of history that has already been deleted.
+        db.patch_settings(&patch(&[(
+            "runs.historyDays",
+            Value::from(MAX_RUN_HISTORY_DAYS + 30),
+        )]))
+        .unwrap();
+        assert_eq!(
+            db.settings().unwrap().get("runs.historyDays"),
+            Some(&Value::from(MAX_RUN_HISTORY_DAYS))
+        );
+
+        db.patch_settings(&patch(&[("runs.historyDays", Value::from(2))]))
+            .unwrap();
+        assert_eq!(
+            db.settings().unwrap().get("runs.historyDays"),
+            Some(&Value::from(2))
+        );
+    }
+
+    #[test]
     fn documented_detach_grace_matches_the_default() {
         // The grace is quoted in prose in two tracked files. This is the drift
         // gate: change the constant and this test names the files to update,
@@ -721,6 +799,40 @@ mod tests {
                 text.contains(&expected),
                 "{rel} does not mention the detach grace as {expected:?} — update it \
                  alongside DEFAULT_DETACH_GRACE_MINUTES"
+            );
+        }
+    }
+
+    #[test]
+    fn documented_run_history_horizon_matches_the_constants() {
+        // Same drift gate as the detach grace above, for the same reason: both numbers
+        // are quoted as *prose* in tracked files, and prose is the one place a constant
+        // can change without anything failing. `README.md` explains the 7-day ceiling by
+        // naming the housekeeping window it comes from, so a future bump to either
+        // constant has to update the sentence that justifies it.
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap();
+        // The needle is the *number with its unit*, not a whole sentence: pinning
+        // phrasing would make every copy-edit a test failure, which is how a drift gate
+        // gets deleted instead of maintained.
+        let max = format!("{MAX_RUN_HISTORY_DAYS} days");
+        let default = format!("{DEFAULT_RUN_HISTORY_DAYS} days");
+        for (rel, needle) in [
+            ("README.md", &max),
+            ("README.md", &default),
+            ("website/llms-full.txt", &max),
+            ("website/llms-full.txt", &default),
+        ] {
+            let path = root.join(rel);
+            let text = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+            assert!(
+                text.contains(needle.as_str()),
+                "{rel} does not contain {needle:?} — update it alongside \
+                 DEFAULT_RUN_HISTORY_DAYS / MAX_RUN_HISTORY_DAYS"
             );
         }
     }

@@ -196,8 +196,12 @@ export function EnvCard(props: {
       </Group>
 
       {peerShare && <PeerShareStrip share={peerShare} onChanged={props.onChanged} />}
+      {/* Collapsed by default here, unlike in the sharing modal: this card sits in a
+          list of every run, and a QR per service made one share taller than the card
+          it hangs under — pushing the node list, which is what runs mode is for, off
+          the screen. */}
       {webShares.map((w) => (
-        <WebShareStrip key={w.id} share={w} onChanged={props.onChanged} />
+        <WebShareStrip key={w.id} share={w} collapsible onChanged={props.onChanged} />
       ))}
 
       <SegmentedControl

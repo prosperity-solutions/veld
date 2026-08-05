@@ -13,10 +13,18 @@
  * filter hangs the other project's share on this run.
  */
 
-import { Badge, Button, Checkbox, Group, Text, Tooltip } from "@mantine/core";
+import { Badge, Button, Checkbox, Group, Stack, Text, Tooltip } from "@mantine/core";
+import {
+  IconChevronDown,
+  IconChevronRight,
+  IconEye,
+  IconEyeOff,
+} from "@tabler/icons-react";
 import { useEffect, useRef, useState } from "react";
 import { api, type PendingInfo, type RunRef, type ShareInfo } from "../api";
 import { useCopyFlash } from "./copy";
+import { QrCode } from "./QrCode";
+import { copyLinkWithQr, copyQrImage } from "./qrClipboard";
 import { notifyDone, notifyError } from "./notify";
 
 /**
@@ -152,6 +160,7 @@ export function ShareControls(props: {
         <Button
           size="compact-xs"
           variant="light"
+          title="A direct encrypted tunnel to someone else's Veld — no gateway, no public URL, and they need Veld installed"
           loading={busy === "share"}
           onClick={() =>
             void act("share", "Start sharing", async () => {
@@ -173,7 +182,7 @@ export function ShareControls(props: {
             })
           }
         >
-          Share
+          Share privately
         </Button>
       )}
       {props.peer && (
@@ -184,7 +193,7 @@ export function ShareControls(props: {
           loading={busy === "stop-share"}
           onClick={() => void act("stop-share", "Stop sharing", () => api.stopShare(props.peer!.id))}
         >
-          Stop sharing
+          Stop private share
         </Button>
       )}
       {props.running && props.web.length === 0 && (
@@ -192,9 +201,10 @@ export function ShareControls(props: {
           size="compact-xs"
           variant="light"
           loading={busy === "web-share"}
+          title="A public URL anyone can open in a browser, no Veld needed — routed through the veld gateway"
           onClick={() => void act("web-share", "Share to the web", () => api.startShare(props.run, { web: true }))}
         >
-          Share to web
+          Share to the web
         </Button>
       )}
     </>
@@ -212,7 +222,9 @@ export function PeerShareStrip(props: {
   return (
     <Group gap={6} px={12} pb={6} wrap="wrap" className="share-strip">
       <span className="dot running" style={{ animation: "none" }} />
-      <Text size="xs">Sharing</Text>
+      <Text size="xs" fw={600}>
+        Private (peer to peer)
+      </Text>
       {share.joiners > 0 && (
         <Text size="xs" c="dimmed">
           · <b>{share.joiners}</b> connected
@@ -247,49 +259,229 @@ export function PeerShareStrip(props: {
   );
 }
 
-/** One public web share: its URLs (password-bearing where there is one), transports. */
+/**
+ * The link for one public URL of a web share: password-bearing where there is one.
+ *
+ * One function because the copy button and the QR must encode the *same* string —
+ * a QR that dropped the password fragment would send someone to a login page they
+ * cannot get past on the device they just scanned with.
+ */
+function webShareLink(
+  share: ShareInfo,
+  url: { public_url: string; access?: string | null },
+): string {
+  const withPassword = !!share.web_password && url.access !== "link";
+  return withPassword
+    ? `${url.public_url}/#veld-key=${encodeURIComponent(share.web_password!)}`
+    : url.public_url;
+}
+
+/**
+ * One public web share: a header with what applies to the whole share, then a row
+ * per service.
+ *
+ * Rows rather than a wrapping bag of buttons — a share of three services produced six
+ * buttons whose labels were the only thing telling them apart.
+ *
+ * **The URL itself is not rendered.** It is a 26-character random subdomain: nobody
+ * reads it, nobody retypes it, and truncated to fit a row it says nothing at all. The
+ * service name identifies the row, the QR is the thing you point a phone at, and the
+ * buttons are how the URL leaves this panel. It is still in every button's payload and
+ * in the QR — this is a display decision, not a data one.
+ *
+ * **Each code is blurred until its row is hovered.** Two problems, one mechanism: with
+ * three services on screen it was genuinely unclear which code your phone was pointed
+ * at, and a code that carries the share password is a credential sitting on screen.
+ * Hover reveals exactly one, and *Show all* reveals every one at once — which is also
+ * the reveal that works without a pointer, so the blur is never a hover-only trap.
+ */
 export function WebShareStrip(props: {
   share: ShareInfo;
   onChanged: () => void;
+  /**
+   * Start collapsed behind a one-line summary, expandable.
+   *
+   * For runs mode, where the premise is *seeing every run*: three services with a code
+   * each is taller than the card it hangs under, and pushed the node list off the
+   * screen. In the sharing modal — a surface opened to do exactly this — it stays
+   * expanded, because collapsing the only thing the dialog contains is furniture.
+   */
+  collapsible?: boolean;
 }) {
   const { act } = useShareAction(props.onChanged);
   const { flash, copy } = useCopyFlash();
   const w = props.share;
+  const [expanded, setExpanded] = useState(!props.collapsible);
+  /**
+   * Reveal every code at once.
+   *
+   * One switch rather than a per-code pin: pinning meant tracking which of three codes
+   * was deliberately visible, for the sake of a case — "I want *this* one unblurred
+   * while the mouse is elsewhere" — that Show all already covers.
+   */
+  const [revealAll, setRevealAll] = useState(false);
+
+  /** Copy the link and a picture of it; report which flavours actually landed. */
+  const copyBoth = async (link: string) => {
+    try {
+      const result = await copyLinkWithQr(link);
+      notifyDone(
+        result === "both"
+          ? "Link and QR code copied — paste into a chat"
+          : "Link copied (this browser would not take the image)",
+      );
+    } catch (e) {
+      notifyError("Copy the link and QR code", e);
+    }
+  };
+
+  /** Copy only the picture — the way to send the code *after* the link. */
+  const copyImage = async (link: string) => {
+    try {
+      await copyQrImage(link);
+      notifyDone("QR code copied as an image");
+    } catch (e) {
+      notifyError("Copy the QR code", e);
+    }
+  };
+
   return (
-    <Group gap={6} px={12} pb={6} wrap="wrap" className="share-strip">
-      <span className="dot running" style={{ animation: "none" }} />
-      <Text size="xs">Public web</Text>
-      {w.public_urls.map((u) => {
-        const withPassword = !!w.web_password && u.access !== "link";
-        const link = withPassword
-          ? `${u.public_url}/#veld-key=${encodeURIComponent(w.web_password!)}`
-          : u.public_url;
-        const tag = `web-${w.id}-${u.node}`;
-        return (
-          <Button key={u.node} size="compact-xs" variant="default" onClick={() => copy(link, tag)}>
-            {flash === tag ? "Copied" : `${u.node} ${withPassword ? "link (with password)" : "URL"}`}
+    <Stack gap={8} px={12} pb={8} className="share-strip">
+      <Group gap={6} wrap="wrap">
+        <span className="dot running" style={{ animation: "none" }} />
+        {props.collapsible ? (
+          <Button
+            size="compact-xs"
+            variant="subtle"
+            px={4}
+            leftSection={
+              expanded ? <IconChevronDown size={13} /> : <IconChevronRight size={13} />
+            }
+            onClick={() => setExpanded((v) => !v)}
+          >
+            Public web · {w.public_urls.length}{" "}
+            {w.public_urls.length === 1 ? "service" : "services"}
           </Button>
-        );
-      })}
-      {w.web_password && (
+        ) : (
+          <Text size="xs" fw={600}>
+            Public web
+          </Text>
+        )}
+        {w.web_password && (
+          <Button
+            size="compact-xs"
+            variant="default"
+            onClick={() => copy(w.web_password!, `pw-${w.id}`)}
+          >
+            {flash === `pw-${w.id}` ? "Copied" : "Copy password"}
+          </Button>
+        )}
+        {expanded && (
+          <>
+            <Button
+              size="compact-xs"
+              variant={revealAll ? "light" : "default"}
+              leftSection={
+                revealAll ? <IconEyeOff size={13} /> : <IconEye size={13} />
+              }
+              onClick={() => setRevealAll((v) => !v)}
+            >
+              {revealAll ? "Hide all" : "Show all"}
+            </Button>
+            {/* The hint belongs beside the control it is an alternative to. Without it
+                the blur reads as a rendering fault rather than as something with an
+                obvious way through it. */}
+            <Text size="xs" c="dimmed">
+              or hover a code to reveal it
+            </Text>
+          </>
+        )}
+        <div style={{ flex: 1 }} />
         <Button
           size="compact-xs"
-          variant="default"
-          onClick={() => copy(w.web_password!, `pw-${w.id}`)}
+          color="red"
+          variant="light"
+          onClick={() => void act("stop-share", "Stop the web share", () => api.stopShare(w.id))}
         >
-          {flash === `pw-${w.id}` ? "Copied" : "Copy password"}
+          Stop web
         </Button>
-      )}
-      <Button
-        size="compact-xs"
-        color="red"
-        variant="light"
-        onClick={() => void act("stop-share", "Stop the web share", () => api.stopShare(w.id))}
+      </Group>
+      {/* Scrolls past four services rather than growing without limit: a run can share
+          as many services as the config declares, and this panel lives inside a modal
+          and inside a card, neither of which can absorb ten rows. */}
+      {expanded && (
+      <Stack
+        gap={8}
+        style={{ maxHeight: "min(46vh, 420px)", overflowY: "auto" }}
       >
-        Stop web
-      </Button>
-      <ConnBadges share={w} />
-    </Group>
+      {w.public_urls.map((u) => {
+        const withPassword = !!w.web_password && u.access !== "link";
+        const link = webShareLink(w, u);
+        const tag = `web-${w.id}-${u.node}`;
+        return (
+          <Group key={u.node} gap={12} p={10} wrap="nowrap" align="start" className="share-row">
+            {/* The QR's own white card sits inside the row's padding rather than
+                against its rounded corner, where the square white corner of the code
+                poked out past the radius. */}
+            {/* The blur, the hover reveal and the `revealed` escape hatch all live in
+                `.qr-shield` in styles.css — this wrapper exists for that rule and for
+                nothing else, so deleting it silently un-hides every code. */}
+            <div
+              className={`qr-shield${revealAll ? " revealed" : ""}`}
+              title="Hover to reveal — or Show all"
+            >
+              <QrCode value={link} label={`QR code for the ${u.node} public URL`} />
+            </div>
+            {/* `minWidth: 0` is what lets the button row wrap instead of pushing the QR
+                out of a narrow panel — a flex child's default min-width is its
+                content. */}
+            <Stack gap={6} style={{ flex: 1, minWidth: 0 }}>
+              <Text size="sm" fw={700}>
+                {u.node}
+                {withPassword && (
+                  <Text span size="xs" c="dimmed" fw={400}>
+                    {" "}
+                    · link includes the password
+                  </Text>
+                )}
+              </Text>
+              <Group gap={6} wrap="wrap">
+                <Button size="compact-xs" variant="default" onClick={() => copy(link, tag)}>
+                  {flash === tag ? "Copied" : "Copy link"}
+                </Button>
+                <Button
+                  size="compact-xs"
+                  variant="default"
+                  onClick={() => void copyBoth(link)}
+                  title="Puts the link and a picture of the QR code on the clipboard — a chat app will paste one of them"
+                >
+                  Copy link + QR
+                </Button>
+                <Button
+                  size="compact-xs"
+                  variant="default"
+                  onClick={() => void copyImage(link)}
+                  title="Just the picture — for pasting the code after the link"
+                >
+                  Copy QR
+                </Button>
+              </Group>
+            </Stack>
+          </Group>
+        );
+      })}
+      </Stack>
+      )}
+      {expanded && (
+        <Text size="xs" c="dimmed">
+          Scan a revealed code with a phone camera to open that service.
+          {w.web_password ? " The codes carry the password — treat them like one." : ""}
+        </Text>
+      )}
+      <Group gap={6} wrap="wrap">
+        <ConnBadges share={w} />
+      </Group>
+    </Stack>
   );
 }
 
@@ -327,6 +519,14 @@ export function RunSharePanel(props: {
    * here" is the wrong sentence under a Sharing control.
    */
   emptyHint: string;
+  /**
+   * Collapse each web share behind a summary line.
+   *
+   * Set by runs mode, where this panel hangs on a card in a list of every run and a
+   * code per service pushes the node list off the screen. The sharing modal leaves it
+   * off: collapsing the only thing that dialog contains would be furniture.
+   */
+  collapsibleShares?: boolean;
   onChanged: () => void;
 }) {
   if (!props.run || !props.runId) {
@@ -365,7 +565,12 @@ export function RunSharePanel(props: {
         <PeerShareStrip share={peer} onChanged={props.onChanged} />
       )}
       {web.map((w) => (
-        <WebShareStrip key={w.id} share={w} onChanged={props.onChanged} />
+        <WebShareStrip
+          key={w.id}
+          share={w}
+          collapsible={props.collapsibleShares}
+          onChanged={props.onChanged}
+        />
       ))}
       {(props.otherRuns ?? []).map((s) => (
         <OtherRunShare key={s.id} share={s} onChanged={props.onChanged} />
