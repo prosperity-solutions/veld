@@ -221,6 +221,13 @@ file is not ignored.
   overlapping sets do not repeat every selection and then drift.
 - Selections are **de-duplicated**: a node reached through two presets starts once.
 - A **cycle is an error** naming the path (`@a → @b → @a`), not a hang.
+- Expansion is **bounded**: at most 256 levels of `@preset` nesting and 4096
+  expansion steps, else the preset is refused ("cannot be expanded"). A preset
+  referenced from several places is expanded once per reference, so a *tree* that
+  doubles at each level costs 2^depth even though every path through it is acyclic —
+  and expansion runs in the daemon, on an endpoint the desktop app polls. Both
+  limits are far above any hand-written preset; hitting one means a generated config
+  is fanning out, and the fix is to flatten the tree.
 - Presets are additive — they select end nodes, and veld resolves the dependency
   graph from there, so upstream nodes start automatically.
 - **Both forms are fully supported.** The array form is right when the name says

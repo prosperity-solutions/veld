@@ -2141,7 +2141,7 @@ rather than at `veld start`:
 
 | Rule | Fires when |
 |---|---|
-| `preset-unresolvable` | an `@ref` names a preset that does not exist, or the references form a cycle |
+| `preset-unresolvable` | an `@ref` names a preset that does not exist, the references form a cycle, or expansion exceeds its bounds (below) |
 | `preset-unknown-node` | a selection names a node that is not defined. With `include` globs this can also mean no glob matched its file — `veld config --files` prints the glob → file → node chain |
 | `preset-unknown-variant` | a selection names a real node but a variant it does not have; the message lists the variants it does have |
 | `preset-missing-node-ref` | a node in this preset's plan references `${nodes.X.…}` and `X` is not in that plan — the message names both the preset and the reference |
@@ -2158,6 +2158,15 @@ given `"thin": ["web:dev"]` and a `web` whose `env` reads `${nodes.api.url}`, li
 can already tell that `api` is not in `thin`'s plan. In a config with many
 overlapping presets that combination is the one thing you cannot check by reading a
 single node file. A node pulled in only by `depends_on` counts as present.
+
+**Expansion is bounded**: at most **256** levels of `@preset` nesting and **4096**
+expansion steps. A preset referenced from two places is expanded once per reference,
+so a tree that doubles at each level costs 2^depth while every individual path
+through it stays acyclic — and expansion runs inside the daemon, on the endpoint the
+desktop app polls, so an unbounded one is a config that can hang the daemon rather
+than just a slow `veld start`. Both numbers are far above any hand-written preset
+(real trees are 2-3 levels and a few dozen steps). Exceeding either is reported as
+"cannot be expanded" wherever a preset is named; flatten the tree.
 
 ---
 
