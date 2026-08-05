@@ -2,11 +2,13 @@ import { describe, expect, it } from "vitest";
 import type { Preset, StartOrigin } from "../api";
 import { originIsStale, presetState, startOriginLabel } from "./startOrigin";
 
-const preset = (name: string, expanded: string[]): Preset => ({
+const preset = (name: string, expanded: string[] | null): Preset => ({
   name,
   key: 1,
   pinned: false,
-  selections: expanded,
+  // Raw config entries. Kept non-null even when the expansion failed: the config
+  // still says what the preset lists, it just cannot be resolved today.
+  selections: expanded ?? [],
   expanded,
   is_default: false,
 });
@@ -28,14 +30,29 @@ describe("presetState", () => {
     expect(presetState(origin("gone", ["web:local"]), presets)).toBe("removed");
   });
 
-  it("treats a preset that no longer expands as redefined, not current", () => {
-    // The daemon sends an empty expansion when the preset exists but its
-    // `@ref` or node is gone. Whatever the name means now, it is not what ran.
-    const presets = [preset("web", [])];
-    expect(presetState(origin("web", ["web:local"]), presets)).toBe("redefined");
-    // And an empty-vs-empty comparison must not read as agreement about a
-    // preset that cannot start anything.
-    expect(presetState(origin("web", []), presets)).toBe("current");
+  it("separates 'cannot expand' from 'redefined'", () => {
+    // `null` is what the daemon sends when the preset exists but does not expand
+    // (dangling `@ref`, removed node, over the expansion budget). Calling that
+    // `redefined` claims the name means something else now, which is a different —
+    // and false — statement, and it is the one `veld status` does NOT make.
+    const broken = [preset("web", null)];
+    expect(presetState(origin("web", ["web:local"]), broken)).toBe("unexpandable");
+    expect(presetState(origin("web", []), broken)).toBe("unexpandable");
+
+    // An empty *array* is a real expansion: a preset whose selections are empty
+    // compares like any other.
+    const empty = [preset("web", [])];
+    expect(presetState(origin("web", ["web:local"]), empty)).toBe("redefined");
+    expect(presetState(origin("web", []), empty)).toBe("current");
+  });
+
+  it("labels an unexpandable preset in the CLI's exact words", () => {
+    // One config state, one description. `veld status` prints
+    // "(cannot be expanded — see `veld lint`)" for this, and two surfaces wording
+    // it differently is how a reader ends up trusting the wrong one.
+    expect(startOriginLabel(origin("web", ["a:x"]), [preset("web", null)])).toBe(
+      "preset web (cannot be expanded — see `veld lint`)",
+    );
   });
 
   it("compares element-wise on the sorted lists both sides ship", () => {

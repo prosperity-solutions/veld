@@ -211,9 +211,23 @@ export function LogsPanel(props: {
       style={props.visible ? undefined : { display: "none" }}
     >
       <Group gap="xs" px={10} py={6} wrap="wrap">
+        {/* Which environment these lines belong to — pane mode only, since a
+            card already has the name in its header.
+
+            `NodesView` carries this and `LogsView` did not, which was survivable
+            while a worktree had one environment and is not now: the control beside
+            it is a *history* picker ("Latest run", "All runs") for the environment
+            already bound, so a reader with two live runs would take that dropdown
+            for the answer to "which run is this?" and be wrong. The title below
+            says `Run history` for the same reason. */}
+        {props.fill && (
+          <Text size="xs" ff="monospace" fw={700} title="The environment these logs belong to">
+            {props.run.name}
+          </Text>
+        )}
         <NativeSelect
           size="xs"
-          title="Run"
+          title="Run history"
           value={runFilter}
           onChange={(e) => {
             setRunFilter(e.currentTarget.value);

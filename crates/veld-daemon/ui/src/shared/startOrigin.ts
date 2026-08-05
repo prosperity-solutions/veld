@@ -24,7 +24,18 @@ export type PresetState =
   /** Still defined, but expands to a different node set now. */
   | "redefined"
   /** No longer in the config (renamed or deleted). */
-  | "removed";
+  | "removed"
+  /**
+   * Defined, but the config cannot say what it means today — a dangling `@ref`, a
+   * since-removed node, or a tree over the daemon's expansion budget.
+   *
+   * Its own case rather than folded into `redefined`, because they are different
+   * claims: "this name means something else now" versus "this name means nothing
+   * resolvable". `veld status` says `cannot be expanded — see \`veld lint\``, and
+   * two surfaces describing one config state differently is how a reader ends up
+   * trusting the wrong one.
+   */
+  | "unexpandable";
 
 /**
  * Compare a run's recorded expansion with the preset's expansion today.
@@ -33,15 +44,19 @@ export type PresetState =
  * records (`StartOrigin::new`) and what it ships per preset (`Preset.expanded`),
  * so this is a plain element-wise compare and not a set operation.
  *
- * An empty `expanded` means the preset exists but does not expand today (a
- * dangling `@ref`, a node that was removed). That compares as `redefined`, which
- * is the honest reading: whatever the name means now, it is not what ran.
+ * `expanded: null` means the preset exists but the daemon could not expand it — a
+ * dangling `@ref`, a since-removed node, or a tree over its expansion budget. That
+ * is `unexpandable`, deliberately not `redefined`: "means something else now" and
+ * "means nothing resolvable" are different claims, and the CLI makes the second one
+ * too. An empty *array* is a real expansion of a preset whose selections are empty,
+ * and compares normally.
  */
 export function presetState(origin: StartOrigin, presets: Preset[]): PresetState {
-  // Callers pass `null` when they cannot know — see `startOriginLabel`.
+  // Callers pass `null` for `presets` when they cannot know — see `startOriginLabel`.
   const preset = presets.find((p) => p.name === origin.preset);
   if (!preset) return "removed";
-  const now = preset.expanded ?? [];
+  const now = preset.expanded;
+  if (now == null) return "unexpandable";
   const then = origin.selections;
   if (now.length === then.length && now.every((t, i) => t === then[i])) {
     return "current";
@@ -90,6 +105,10 @@ export function startOriginLabel(
       return `preset ${origin.preset} (redefined since start)`;
     case "removed":
       return `preset ${origin.preset} (no longer defined)`;
+    // Same wording as `veld status`'s `start_origin_label`, on purpose: one config
+    // state must not be described two ways by two surfaces.
+    case "unexpandable":
+      return `preset ${origin.preset} (cannot be expanded — see \`veld lint\`)`;
   }
 }
 

@@ -828,6 +828,21 @@ function AppInner(props: {
     window.history.replaceState(null, "", next || window.location.pathname);
   }, [repoList, repo, worktree]);
 
+  // Optimistic pending markers while 202'd start/stop/restarts take effect,
+  // keyed by worktree AND environment name: the rail can fire actions on several
+  // rows at once, and a single global slot would let the second overwrite the
+  // first's marker and strand its spinner. The environment half matters for the
+  // same reason one directory apart — stopping one run while another starts in
+  // the same worktree used to collapse into one slot. Each entry clears when
+  // THAT environment's run signature moves off the value it had when the action
+  // was fired.
+  //
+  // Declared **above** the derived run state, not beside its helpers below,
+  // because the binding depends on it: a chosen environment that does not exist
+  // *yet* is only distinguishable from one that is gone by whether this window has
+  // a start in flight against that name.
+  const [pending, setPending] = useState<PendingMap>({});
+
   // ---- derived run state --------------------------------------------------
   const runs = worktree ? runsForWorktree(envs, worktree) : [];
   const [selectedRunName, setSelectedRunName] = useSelectedRun(worktree?.path);
@@ -842,7 +857,29 @@ function AppInner(props: {
    * invisible: no dot, no logs, no way to stop it.
    */
   const pick = pickRun(runs, selectedRunName || null);
-  const run = pick.run;
+  /**
+   * A chosen environment this window has just asked for and the daemon has not
+   * listed yet.
+   *
+   * It makes the binding **empty rather than fallen-back**, which is the whole
+   * point. `pickRun` falls back so a surface always has something to render, but
+   * during a start the selector names the new environment while the fallback is a
+   * *different, live* run — so the bar read `dev-2` next to a ■ whose tooltip said
+   * `Stop dev`, and clicking it stopped a run the user was not looking at. That is
+   * the exact defect this whole change exists to remove, reintroduced in the gap
+   * between a click and a poll.
+   */
+  const awaitingStart =
+    pick.missing !== null &&
+    worktree !== null &&
+    pending[pendingKey(worktree.id, pick.missing)]?.label === "start";
+  // The selection as of *this* render, readable from a callback that fires later.
+  // A start's failure handler needs to know whether the user has since chosen
+  // something else, and its closure captured the value at click time. Same pattern
+  // `layoutsRef` uses below, for the same reason.
+  const selectedRunRef = useRef(selectedRunName);
+  selectedRunRef.current = selectedRunName;
+  const run = awaitingStart ? null : pick.run;
   const urls = sortedUrls(run);
   const status = runStatus(run);
   /** The worktree's other environments — what the run selector offers. */
@@ -889,9 +926,15 @@ function AppInner(props: {
   // differs between responses. The joined string below is an effect dependency, so
   // an unsorted list republishes every pane's permission policy on every poll —
   // the exact thing the comment under it says must not happen.
+  //
+  // Byte order, not `localeCompare`: that returns 0 for canonically-equivalent but
+  // *unequal* strings (an NFC and an NFD hostname), and `Array.sort` is stable, so
+  // those two would keep the HashMap's arbitrary order and the dependency string
+  // would still flip between polls. A total order is the requirement here, not a
+  // human-readable one — nothing renders this list.
   const trustedOrigins = runs
     .flatMap((r) => Object.values(r.urls))
-    .sort((a, b) => a.localeCompare(b));
+    .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
   useEffect(() => {
     // The daemon's own origin is in the set because veld's UI is served from it,
     // and a pane pointed at a veld surface is still veld's own page.
@@ -933,15 +976,6 @@ function AppInner(props: {
       defaultStartSelection(worktree))
     : null;
 
-  // Optimistic pending markers while 202'd start/stop/restarts take effect,
-  // keyed by worktree AND environment name: the rail can fire actions on several
-  // rows at once, and a single global slot would let the second overwrite the
-  // first's marker and strand its spinner. The environment half matters for the
-  // same reason one directory apart — stopping one run while another starts in
-  // the same worktree used to collapse into one slot. Each entry clears when
-  // THAT environment's run signature moves off the value it had when the action
-  // was fired.
-  const [pending, setPending] = useState<PendingMap>({});
   // Every loaded worktree, not just the selected repo's: switching projects
   // mid-action must not look like the worktree vanished, or the marker is
   // dropped and the re-enabled control invites a double fire.
@@ -1147,9 +1181,14 @@ function AppInner(props: {
       "start",
       () => api.startRun(w.id, { ...startBody(sel), run_name: target }),
       // The start never happened, so leave the window bound to what it was
-      // looking at rather than to a name nothing created.
+      // looking at rather than to a name nothing created — but only if the user has
+      // not picked something else in the meantime. A failure can arrive seconds
+      // later, and restoring unconditionally would then yank a selection they made
+      // deliberately.
       () => {
-        if (previous !== null) setSelectedRunName(previous);
+        if (previous !== null && selectedRunRef.current === target) {
+          setSelectedRunName(previous);
+        }
       },
     );
   };
@@ -2818,10 +2857,10 @@ function AppInner(props: {
               // start this window just fired.
               pending={pendingForRun(worktree, selectedRunName || run?.name)}
               siblingStatus={siblingStatus}
-              // `null` when the config did not parse: the empty preset list that
-              // comes back then would otherwise read as "the preset was deleted"
-              // for every healthy run in the worktree.
-              presets={worktree.config_parsed ? worktree.presets : null}
+              // Straight through, `null` included: `null` means the config could
+              // not be read, which `startOriginLabel` renders as "cannot compare"
+              // rather than as "the preset was deleted".
+              presets={worktree.presets}
               startName={anotherNameFor(worktree)}
               startLabel={startSelectionLabel(effectiveStart, worktree)}
               canStartAnother={canStartAnother(worktree)}
@@ -3208,7 +3247,10 @@ function RunSelect(props: {
           }
         >
           {label}
-          {runs.length > 1 && (
+          {/* Hidden while awaiting: `position` indexes the listed runs, and the
+              environment being started is not among them yet, so the counter would
+              read `dev-2  1/2` with the `1` pointing at a different run. */}
+          {runs.length > 1 && !awaiting && (
             <span className={`run-count${siblingAlert ? " alert" : ""}`}>
               {position}/{runs.length}
             </span>

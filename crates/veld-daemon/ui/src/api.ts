@@ -156,18 +156,18 @@ export interface Worktree {
   trash_error: string;
   has_veld_config: boolean;
   /**
-   * Whether that config parsed on this poll.
+   * Presets in display order, as resolved by the daemon.
    *
-   * `has_veld_config` means the file is there; this means it could be read. A
-   * broken or mid-edit config yields empty `presets`/`nodes`, which reads exactly
-   * like "declares none" — and comparing a run's recorded preset against an empty
-   * list concludes it was deleted. Anything deriving preset provenance must treat
-   * `false` as "cannot compare" (pass `null` to `startOriginLabel`), never as an
-   * answer.
+   * **`null` = the config could not be read; `[]` = it declares no presets.**
+   * `has_veld_config` says only that the file exists. The nullability is the
+   * enforcement: comparing a run's recorded preset against an empty list concludes
+   * the preset was *deleted*, so a mid-edit `veld.json` made every healthy run in
+   * that worktree read "preset dev (no longer defined)" — which shipped once. A
+   * boolean beside an always-present array let a caller not notice; a nullable type
+   * makes the compiler ask. Pass it straight to `startOriginLabel`, which takes
+   * `null` to mean "cannot compare".
    */
-  config_parsed: boolean;
-  /** Presets in display order, as resolved by the daemon. */
-  presets: Preset[];
+  presets: Preset[] | null;
   /** Startable nodes (hidden excluded) for custom selections. */
   nodes: NodeOption[];
   /**
@@ -317,12 +317,16 @@ export interface Preset {
    * The sorted `node:variant` set this preset expands to *right now*, directly
    * comparable to `RunInfo.started_from.selections`.
    *
-   * Not the same as `selections`, which is the raw config entries with
-   * `@preset` refs unexpanded and default variants unfilled. Empty when the
-   * expansion fails today (a dangling `@ref`, an unknown node) — which compares
-   * as "differs", the honest answer.
+   * Not the same as `selections`, which is the raw config entries with `@preset`
+   * refs unexpanded and default variants unfilled.
+   *
+   * **`null` = the expansion failed** (a dangling `@ref`, a since-removed node, a
+   * tree over the daemon's expansion budget); `[]` = it legitimately expands to
+   * nothing. Treating a failure as `[]` claims the preset was *redefined*, which is
+   * a different — and false — statement about the config, and one the CLI does not
+   * make.
    */
-  expanded: string[];
+  expanded: string[] | null;
   /** Whether this is the project's `default_preset`. */
   is_default: boolean;
 }

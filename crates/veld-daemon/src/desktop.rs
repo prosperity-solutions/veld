@@ -614,22 +614,24 @@ struct WorktreeView {
     /// Whether the checkout has a root config — drives whether the UI shows run
     /// controls for it.
     has_veld_config: bool,
-    /// Whether that config actually **parsed** on this poll.
+    /// Presets from the checkout's root config, in display order, with their keys
+    /// and labels. The UI shows the label a human can read; `name` is what it sends
+    /// back to start the run.
     ///
-    /// `has_veld_config` says the file exists; this says it could be read. The
-    /// difference is load-bearing rather than pedantic: a config that is mid-edit or
-    /// broken yields `presets: []` and `nodes: []`, which is indistinguishable from
-    /// "this project declares no presets" — and a client comparing a run's recorded
-    /// preset against an empty list concludes the preset was *deleted*, so every
-    /// healthy run in a worktree with a typo'd config reads
-    /// "preset dev (no longer defined)". A confident falsehood produced by missing
-    /// data is exactly what `startOrigin.ts`'s `null` sentinel exists to prevent,
-    /// and this flag is what lets the client reach for it.
-    config_parsed: bool,
-    /// Presets from the checkout's root config, in display order, with their
-    /// keys and labels (empty without a config). The UI shows the label a human
-    /// can read; `name` is what it sends back to start the run.
-    presets: Vec<PresetView>,
+    /// **`null` means the config could not be read; `[]` means it declares no
+    /// presets.** The distinction is the field's whole reason for being nullable,
+    /// and it is deliberately carried by the *type* rather than by a sibling
+    /// boolean: a client that compares a run's recorded preset against an empty
+    /// list concludes the preset was deleted, so a mid-edit or broken `veld.json`
+    /// made every healthy run in that worktree read "preset dev (no longer
+    /// defined)". That shipped once already. `null` forces the consumer to decide,
+    /// where a flag next to an always-present array let it not notice — see
+    /// `startOrigin.ts`, whose `presets: null` case exists for exactly this.
+    ///
+    /// (This is the reverse of the `ide` block's rule, which is always present with
+    /// possibly-empty arrays. There, empty and absent mean the same thing; here they
+    /// do not.)
+    presets: Option<Vec<PresetView>>,
     /// Startable nodes with their variants — the UI's custom-selection
     /// source when no preset fits (hidden nodes excluded).
     nodes: Vec<NodeOptionView>,
@@ -650,17 +652,25 @@ struct WorktreeView {
 /// has since been edited". `ResolvedPreset::selections` cannot answer it — those
 /// are the raw entries, `@preset` refs unexpanded.
 ///
-/// An expansion that fails (a ref to a preset that no longer exists, an unknown
-/// node) yields an empty vector rather than dropping the preset: a preset the UI
-/// can still name and start is more useful than a hole in the list, and a
-/// comparison against an empty expansion reads as "differs", which is true.
+/// **`null` when the expansion failed, never an empty list.** A ref to a preset
+/// that no longer exists, a since-removed node, or a tree over the expansion
+/// budget are all "we cannot say what this name means today" — and an empty vector
+/// says something quite different, because a client comparing it against a run's
+/// recorded selections concludes the preset was *redefined*. That is a false claim
+/// about a config the CLI describes as "cannot be expanded", and this pair of
+/// surfaces contradicting each other over one config state is the bug that made the
+/// CLI's own error handling a review finding. An empty expansion remains legal and
+/// distinct: a preset whose `selections` are `[]` really does expand to nothing.
+///
+/// The preset is still listed either way — one the UI can name and start beats a
+/// hole in the list.
 #[derive(Serialize)]
 struct PresetView {
     #[serde(flatten)]
     preset: veld_core::presets::ResolvedPreset,
     /// Sorted `node:variant` tokens, directly comparable to
-    /// `RunInfo.started_from.selections`.
-    expanded: Vec<String>,
+    /// `RunInfo.started_from.selections`. `null` = could not be expanded.
+    expanded: Option<Vec<String>>,
 }
 
 /// The `ide` config as the UI consumes it.
@@ -731,32 +741,34 @@ fn worktree_view(wt: WorktreeRecord) -> WorktreeView {
     let cfg = config_path
         .as_deref()
         .and_then(|p| veld_core::config::parse_config(p).ok());
-    // A file that exists but did not parse. Reported rather than inferred from an
-    // empty `presets`, which a project with no presets also produces.
-    let config_parsed = cfg.is_some();
     // Display order comes from the resolver, not a sort here — the UI list and
     // the CLI picker must agree, or the key printed next to a preset in one
     // surface means something else in the other.
-    let presets: Vec<PresetView> = cfg
-        .as_ref()
-        .map(|c| {
-            veld_core::presets::resolve(c)
-                .into_iter()
-                .map(|preset| {
-                    // Expand AND resolve, in that order — the same two steps
-                    // `veld start --preset` takes. `expand_preset` alone leaves a
-                    // bare `node` without its default variant, so its tokens
-                    // would differ from a run's recorded ones for every selection
-                    // written without an explicit variant.
-                    let expanded = veld_core::graph::expand_preset(&preset.name, c)
-                        .and_then(|sels| veld_core::graph::resolve_selections(&sels, c))
-                        .map(|sels| veld_core::state::StartOrigin::new(None, &sels).selections)
-                        .unwrap_or_default();
-                    PresetView { preset, expanded }
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+    // `None` when the config did not parse — never an empty list, which means
+    // "declares no presets". See `WorktreeView::presets`.
+    let presets: Option<Vec<PresetView>> = cfg.as_ref().map(|c| {
+        // ONE budget for the whole listing, not one per preset. Expansion is
+        // config-controlled recursion on an ungated `GET` that every IDE window
+        // polls, so a per-call budget left the endpoint's worst case linear in a
+        // number the config chooses. Presets past the budget report `null`
+        // (= "cannot say"), which is honest and cheap.
+        let mut steps = 0usize;
+        veld_core::presets::resolve(c)
+            .into_iter()
+            .map(|preset| {
+                // Expand AND resolve, in that order — the same two steps
+                // `veld start --preset` takes. `expand_preset` alone leaves a
+                // bare `node` without its default variant, so its tokens
+                // would differ from a run's recorded ones for every selection
+                // written without an explicit variant.
+                let expanded = veld_core::graph::expand_preset_within(&preset.name, c, &mut steps)
+                    .and_then(|sels| veld_core::graph::resolve_selections(&sels, c))
+                    .map(|sels| veld_core::state::StartOrigin::new(None, &sels).selections)
+                    .ok();
+                PresetView { preset, expanded }
+            })
+            .collect()
+    });
     let mut nodes: Vec<NodeOptionView> = cfg
         .as_ref()
         .map(|c| {
@@ -813,7 +825,6 @@ fn worktree_view(wt: WorktreeRecord) -> WorktreeView {
     WorktreeView {
         worktree: wt,
         has_veld_config,
-        config_parsed,
         presets,
         nodes,
         ide,
@@ -1562,6 +1573,30 @@ async fn start_worktree_run(
 
     let run_name = body.run_name.clone().unwrap_or_else(|| wt.alias.clone());
     validate_run_name(&run_name).map_err(|c| err(c, "invalid run name"))?;
+    // Refuse a start whose environment is already live, rather than taking it over.
+    //
+    // `veld start` replaces a live same-named run on purpose — that is the CLI's
+    // documented behaviour and stays. Through this endpoint it is never what anyone
+    // asked for, because the caller is a UI that computed the name from a run list
+    // it polled up to `POLL_MS` ago. Two ways that goes wrong, both real: ▶ on an
+    // environment the UI believes has ended, restarted by an agent in the gap, and
+    // two windows (or the top bar and the rail's context menu) independently
+    // computing the same next-free name and both posting it. Either way the loser
+    // is killed silently, mid-session, with no prompt — and the client cannot close
+    // the race itself, because it is holding stale data by construction.
+    //
+    // 409, so the caller can say "that name is taken" instead of the generic
+    // failure toast.
+    let live = db.live_run_names(FsPath::new(&wt.path)).map_err(db_err)?;
+    if live.iter().any(|n| n == &run_name) {
+        return Err(err(
+            StatusCode::CONFLICT,
+            &format!(
+                "environment '{run_name}' is already running here — stop or restart it, \
+                 or start another under a different name"
+            ),
+        ));
+    }
     let mut args = vec!["start".to_owned()];
     for sel in &body.selections {
         // `node:variant` — both halves identifier-safe.

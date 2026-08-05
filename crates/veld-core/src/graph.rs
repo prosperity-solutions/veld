@@ -201,10 +201,14 @@ pub fn resolve_selections(
 /// arrives with a checked-out branch, so "the config is trusted" is not an
 /// assumption this can rest on.
 ///
-/// The limits are far above anything a human writes: 16 levels of nesting and
-/// 4096 steps, against a hand-written preset tree that is realistically 2-3 deep
-/// and a few dozen steps wide.
-const PRESET_DEPTH_LIMIT: usize = 16;
+/// **The step budget is the cost bound; the depth cap only keeps the stack
+/// finite.** They are deliberately far apart. Depth was 16 for one revision and
+/// that was wrong: a *linear* 17-level chain costs 17 steps and microseconds —
+/// something a generated per-layer config plausibly produces — and refusing it
+/// narrowed the accepted config contract for no benefit, since cost was already
+/// bounded. 256 frames of this function is nothing next to even a 2 MB thread
+/// stack, while no hand-written tree comes near it.
+const PRESET_DEPTH_LIMIT: usize = 256;
 const PRESET_STEP_LIMIT: usize = 4096;
 
 /// Expand a preset name into its selections, following `@other-preset`
@@ -223,9 +227,30 @@ pub fn expand_preset(
     preset_name: &str,
     config: &VeldConfig,
 ) -> Result<Vec<NodeSelection>, GraphError> {
-    let mut visiting = Vec::new();
     let mut steps = 0usize;
-    expand_preset_inner(preset_name, config, &mut visiting, &mut steps)
+    expand_preset_within(preset_name, config, &mut steps)
+}
+
+/// [`expand_preset`] against a budget the **caller** owns, so a loop over many
+/// presets is bounded as a whole.
+///
+/// A per-call budget bounds one expansion; it does not bound a caller that runs one
+/// per preset. The desktop repo listing does exactly that, on an ungated `GET` that
+/// every IDE window polls, so its worst case was worktrees × presets × the whole
+/// budget — linear in a number the config controls. Sharing one counter turns that
+/// back into a constant: once it is spent, the remaining presets report
+/// [`GraphError::PresetTooLarge`], which such a caller renders as "cannot expand"
+/// rather than as an answer.
+///
+/// `steps` is never reset by this function. Pass a fresh `0` for an independent
+/// budget (that is what [`expand_preset`] does).
+pub fn expand_preset_within(
+    preset_name: &str,
+    config: &VeldConfig,
+    steps: &mut usize,
+) -> Result<Vec<NodeSelection>, GraphError> {
+    let mut visiting = Vec::new();
+    expand_preset_inner(preset_name, config, &mut visiting, steps)
 }
 
 fn expand_preset_inner(
@@ -234,14 +259,11 @@ fn expand_preset_inner(
     visiting: &mut Vec<String>,
     steps: &mut usize,
 ) -> Result<Vec<NodeSelection>, GraphError> {
-    // Counted per *expansion*, not per unique preset: the same preset reached
-    // twice is two units of work, which is exactly the cost being bounded.
-    *steps += 1;
-    if *steps > PRESET_STEP_LIMIT || visiting.len() >= PRESET_DEPTH_LIMIT {
-        return Err(GraphError::PresetTooLarge {
-            name: preset_name.to_owned(),
-        });
-    }
+    // The cycle check comes FIRST, and that ordering is a finding, not a style
+    // choice: a cycle entered below the depth limit would otherwise be reported as
+    // `PresetTooLarge` and lose the `@a → @b → @a` path, which is the entire value
+    // of that error. A cycle is a config mistake with a precise diagnosis; being
+    // over budget is not.
     if visiting.iter().any(|p| p == preset_name) {
         let mut path = visiting.clone();
         path.push(preset_name.to_owned());
@@ -251,6 +273,14 @@ fn expand_preset_inner(
                 .collect::<Vec<_>>()
                 .join(" → "),
         ));
+    }
+    // Counted per *expansion*, not per unique preset: the same preset reached
+    // twice is two units of work, which is exactly the cost being bounded.
+    *steps += 1;
+    if *steps > PRESET_STEP_LIMIT || visiting.len() >= PRESET_DEPTH_LIMIT {
+        return Err(GraphError::PresetTooLarge {
+            name: preset_name.to_owned(),
+        });
     }
     let presets = config
         .presets
@@ -889,27 +919,83 @@ mod tests {
         let err = expand_preset("p24", &config).unwrap_err();
         assert!(matches!(err, GraphError::PresetTooLarge { .. }), "{err:?}");
 
-        // Just inside the depth limit, the *step* budget is what has to catch it:
-        // 2^15 expansions from a 15-level doubling chain.
-        let mut shallow: IndexMap<String, PresetDef> = IndexMap::new();
-        shallow.insert(
+        // Deep enough to be the depth cap's business too, but the *step* budget is
+        // what has to catch a doubling tree: 24 levels is nowhere near 256 frames.
+        assert!(
+            PRESET_DEPTH_LIMIT > 24,
+            "this test asserts the STEP budget; raise the tree if depth ever drops below it"
+        );
+    }
+
+    /// A cycle must keep its own diagnosis. The budget check used to run first, so a
+    /// cycle reported `PresetTooLarge` and lost the `@a → @b → @a` path — the one
+    /// thing that error exists to print.
+    #[test]
+    fn a_cycle_is_still_a_cycle_and_not_a_budget_refusal() {
+        let mut config = make_config();
+        let mut entries: IndexMap<String, PresetDef> = IndexMap::new();
+        for i in 0..40 {
+            entries.insert(
+                format!("p{i}"),
+                PresetDef::Selections(vec![format!("@p{}", (i + 1) % 40)]),
+            );
+        }
+        config.presets = Some(entries);
+        let err = expand_preset("p0", &config).unwrap_err();
+        assert!(matches!(err, GraphError::PresetCycle(_)), "{err:?}");
+        assert!(err.to_string().contains("@p0"), "{err}");
+    }
+
+    /// A linear chain costs one step per level, so the depth cap must not be what
+    /// refuses it. Depth 16 did — 17 generated layers, microseconds of work, hard
+    /// failure — which narrowed the config contract for nothing.
+    #[test]
+    fn a_long_linear_chain_is_cheap_and_stays_legal() {
+        let mut config = make_config();
+        let mut entries: IndexMap<String, PresetDef> = IndexMap::new();
+        entries.insert(
             "p0".to_owned(),
             PresetDef::Selections(vec!["db:local".to_owned()]),
         );
-        for i in 1..=15 {
-            shallow.insert(
+        for i in 1..64 {
+            entries.insert(
                 format!("p{i}"),
-                PresetDef::Selections(vec![format!("@p{}", i - 1), format!("@p{}", i - 1)]),
+                PresetDef::Selections(vec![format!("@p{}", i - 1)]),
             );
         }
-        config.presets = Some(shallow);
-        assert!(
-            matches!(
-                expand_preset("p15", &config),
-                Err(GraphError::PresetTooLarge { .. })
-            ),
-            "the step budget must catch a doubling tree that stays inside the depth limit"
-        );
+        config.presets = Some(entries);
+        let sels = expand_preset("p63", &config).expect("a 64-level chain is legal");
+        assert_eq!(sels.len(), 1);
+    }
+
+    /// One budget across many presets, which is what bounds a caller that expands
+    /// every preset of every worktree on a polled endpoint.
+    #[test]
+    fn a_shared_budget_bounds_a_whole_loop_not_one_call() {
+        let mut config = make_config();
+        let mut entries: IndexMap<String, PresetDef> = IndexMap::new();
+        for i in 0..50 {
+            entries.insert(
+                format!("p{i}"),
+                PresetDef::Selections(vec!["db:local".to_owned(), "api:local".to_owned()]),
+            );
+        }
+        config.presets = Some(entries);
+        // Each preset costs 1 step, so a shared budget of this size runs out part
+        // way through and every later preset is refused rather than served.
+        let mut steps = PRESET_STEP_LIMIT - 10;
+        let mut refused = 0;
+        for i in 0..50 {
+            if expand_preset_within(&format!("p{i}"), &config, &mut steps).is_err() {
+                refused += 1;
+            }
+        }
+        assert!(refused > 0, "a shared budget must eventually refuse");
+        // And an independent budget serves all of them, so the sharing is the only
+        // thing that changed.
+        for i in 0..50 {
+            assert!(expand_preset(&format!("p{i}"), &config).is_ok());
+        }
     }
 
     /// The limits must not refuse a config a person would actually write. Bump

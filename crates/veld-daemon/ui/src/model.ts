@@ -178,7 +178,10 @@ export function proposeRunName(alias: string, runs: RunInfo[]): string {
     if (!taken.has(candidate)) return candidate;
   }
   // 98 live environments in one directory is not a state worth a branch of its
-  // own; the daemon rejects the duplicate and the toast says so.
+  // own. Nor is losing the race: this name is computed from a run list that is up
+  // to one poll stale, so two windows can propose the same one — the daemon 409s a
+  // start whose environment is already live (`start_worktree_run`) and the loser
+  // gets a toast, rather than silently taking the other's run over.
   return `${alias}-${runs.length + 1}`;
 }
 

@@ -506,10 +506,17 @@ fn diff_snapshots(
     }
 
     let origin_changed = {
+        // The expansion is part of the description, not just the name. Two runs from
+        // the same `--preset stack` with different recorded selections is exactly
+        // "the preset was redefined between these runs" — the case the expansion is
+        // stored for — and comparing names alone reported them as identical.
         let describe = |s: &veld_core::state::GraphSnapshot| {
-            s.started_from.as_ref().map(|o| match &o.preset {
-                Some(p) => format!("preset {p}"),
-                None => format!("selections {}", o.selections.join(", ")),
+            s.started_from.as_ref().map(|o| {
+                let tokens = o.selections.join(", ");
+                match &o.preset {
+                    Some(p) => format!("preset {p} ({tokens})"),
+                    None => format!("selections {tokens}"),
+                }
             })
         };
         let (from, to) = (describe(old), describe(new));
@@ -580,8 +587,34 @@ mod tests {
         let origin = d
             .origin_changed
             .expect("origin difference must be reported");
-        assert_eq!(origin.from.as_deref(), Some("preset stack"));
+        assert_eq!(origin.from.as_deref(), Some("preset stack (api:local)"));
         assert_eq!(origin.to.as_deref(), Some("selections api:local"));
+    }
+
+    #[test]
+    fn a_preset_redefined_between_two_runs_is_reported() {
+        // Same preset name, different recorded expansion — the preset was edited
+        // between the two runs. Comparing names alone called this identical, which
+        // is the one case the stored expansion exists to catch.
+        let same = [("api:local", node("npm run dev", &[]))];
+        let mut old = snap("aaa", &same);
+        let mut new = snap("bbb", &same);
+        old.started_from = Some(veld_core::state::StartOrigin {
+            preset: Some("stack".into()),
+            selections: vec!["api:local".into()],
+        });
+        new.started_from = Some(veld_core::state::StartOrigin {
+            preset: Some("stack".into()),
+            selections: vec!["api:local".into(), "web:local".into()],
+        });
+        let origin = diff_snapshots(&old, &new)
+            .origin_changed
+            .expect("a redefined preset must be reported");
+        assert_eq!(origin.from.as_deref(), Some("preset stack (api:local)"));
+        assert_eq!(
+            origin.to.as_deref(),
+            Some("preset stack (api:local, web:local)")
+        );
     }
 
     #[test]
