@@ -914,16 +914,16 @@ mod tests {
             );
         }
         config.presets = Some(entries);
-        // Depth 24 trips the depth limit first; either budget is a correct refusal,
-        // and what matters is that it returns rather than running 2^24 steps.
+        // The STEP budget is what refuses this, and only it can: 24 levels of nesting
+        // is nowhere near the 256-frame depth cap, while the tree's 2^24 expansions
+        // blow a 4096-step budget almost immediately. The assert below keeps that
+        // attribution true if either constant ever moves.
         let err = expand_preset("p24", &config).unwrap_err();
         assert!(matches!(err, GraphError::PresetTooLarge { .. }), "{err:?}");
-
-        // Deep enough to be the depth cap's business too, but the *step* budget is
-        // what has to catch a doubling tree: 24 levels is nowhere near 256 frames.
         assert!(
             PRESET_DEPTH_LIMIT > 24,
-            "this test asserts the STEP budget; raise the tree if depth ever drops below it"
+            "this test asserts the STEP budget; deepen the tree if the depth cap ever \
+             drops below it, or it will pass for the wrong reason"
         );
     }
 
