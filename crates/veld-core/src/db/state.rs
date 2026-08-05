@@ -1037,6 +1037,7 @@ mod tests {
         let mut run = sample_run("dev");
         run.graph_snapshot = Some(crate::state::GraphSnapshot {
             config_hash: "abc123".into(),
+            started_from: None,
             nodes: [(
                 "web:local".to_string(),
                 crate::state::NodeSnapshot {
@@ -1077,6 +1078,48 @@ mod tests {
                 .graph_snapshot
                 .is_some()
         );
+    }
+
+    #[test]
+    fn start_origin_round_trips_inside_the_snapshot() {
+        // Provenance rides in the existing `graph_snapshot` JSON column rather
+        // than in a column of its own: no migration, and therefore no
+        // `DbError::NewerSchema` cliff for an older installed binary, which
+        // simply ignores the extra key.
+        let (_dir, db) = test_db();
+        let root = Path::new("/tmp/projOrigin");
+        let mut run = sample_run("dev");
+        run.graph_snapshot = Some(crate::state::GraphSnapshot {
+            config_hash: "abc123".into(),
+            started_from: Some(crate::state::StartOrigin {
+                preset: Some("web-only".into()),
+                selections: vec!["api:local".into(), "web:local".into()],
+            }),
+            nodes: std::collections::BTreeMap::new(),
+        });
+        db.save_run(root, "proj", &run).unwrap();
+
+        let origin = db
+            .get_run(root, "dev")
+            .unwrap()
+            .unwrap()
+            .graph_snapshot
+            .unwrap()
+            .started_from
+            .unwrap();
+        assert_eq!(origin.preset.as_deref(), Some("web-only"));
+        assert_eq!(origin.selections, ["api:local", "web:local"]);
+    }
+
+    #[test]
+    fn a_pre_origin_snapshot_still_loads() {
+        // Rows written before provenance existed hold a snapshot with no
+        // `started_from` key. Reading one must yield `None`, not an error — a
+        // `veld runs` listing that fails on last week's run is worse than a
+        // missing line.
+        let json = r#"{"config_hash":"abc","nodes":{}}"#;
+        let snap: crate::state::GraphSnapshot = serde_json::from_str(json).unwrap();
+        assert!(snap.started_from.is_none());
     }
 
     #[test]

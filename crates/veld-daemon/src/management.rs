@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use tracing::warn;
 use veld_core::config;
 use veld_core::db::{Db, LogFilter, LogStream};
-use veld_core::state::{GlobalRegistry, NodeState, NodeStatus, RunStatus};
+use veld_core::state::{GlobalRegistry, NodeState, NodeStatus, RunStatus, StartOrigin};
 use veld_core::user_path::cached_user_path;
 
 const DASHBOARD_HTML: &str = include_str!("../assets/management-ui.html");
@@ -131,6 +131,14 @@ struct RunInfo {
     ended_at: Option<String>,
     urls: HashMap<String, String>,
     nodes: Vec<NodeInfo>,
+    /// What the latest run was started from — a preset name plus the expansion
+    /// that name meant at start time. `None` for runs recorded before this
+    /// existed. A client that wants to know whether the named preset still means
+    /// the same thing compares `selections` against a fresh expansion (the
+    /// desktop repo listing ships one per preset); this endpoint deliberately
+    /// does not, because it never parses the project's config.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    started_from: Option<StartOrigin>,
     /// Ended runs, newest first (retention-bounded) — the log run picker and
     /// the history view feed from this.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -152,6 +160,9 @@ struct HistoryEntry {
     created_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     ended_at: Option<String>,
+    /// What that run was started from (see [`RunInfo::started_from`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    started_from: Option<StartOrigin>,
     /// Final node states (no URLs/PIDs — the run is over).
     nodes: Vec<HistoryNode>,
 }
@@ -296,6 +307,10 @@ async fn list_environments() -> Result<Json<EnvironmentList>, StatusCode> {
                                 outcome: Some(run.outcome_label()),
                                 created_at: run.created_at.to_rfc3339(),
                                 ended_at: run.ended_at.map(|t| t.to_rfc3339()),
+                                started_from: run
+                                    .graph_snapshot
+                                    .as_ref()
+                                    .and_then(|s| s.started_from.clone()),
                                 nodes: hnodes,
                             }
                         })
@@ -315,6 +330,9 @@ async fn list_environments() -> Result<Json<EnvironmentList>, StatusCode> {
                         ended_at: latest.and_then(|l| l.ended_at).map(|t| t.to_rfc3339()),
                         urls: if live { r.urls.clone() } else { HashMap::new() },
                         nodes,
+                        started_from: latest
+                            .and_then(|l| l.graph_snapshot.as_ref())
+                            .and_then(|s| s.started_from.clone()),
                         history,
                     }
                 })

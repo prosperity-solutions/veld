@@ -55,12 +55,176 @@ export function activeRun(runs: RunInfo[]): RunInfo | null {
  * states are exactly what you want **after** a crash, and `/api/logs/{run}`
  * serves an ended run's output. So this falls back to the environment holding the
  * live slot even when its latest run is stopped, and then to the first one
- * listed. A worktree normally has one environment; when it has several the
- * ordering is the daemon's, which is the honest answer to "which one" without
- * inventing a rule the user cannot see.
+ * listed.
+ *
+ * **Now the default only, not the answer.** When a worktree holds several
+ * environments the user picks one ([`pickRun`]), and this is what a window with no
+ * stored choice starts from. It is deliberately still ordering-based: the first
+ * frame after opening a directory has nothing else to go on, and the selector
+ * shows which run it landed on.
  */
 export function diagnosticsRun(runs: RunInfo[]): RunInfo | null {
   return activeRun(runs) ?? runs.find((r) => r.live) ?? runs[0] ?? null;
+}
+
+/**
+ * Which run the worktree's surfaces are bound to, and whether the user's stored
+ * choice still resolves.
+ *
+ * A worktree can hold several environments at once — routinely, now that a
+ * coding agent may start one while a human starts another — and every surface
+ * before this bound to whichever one [`activeRun`] sorted first. That rule was
+ * invisible: two `running` runs meant the alphabetically-first name won, silently,
+ * with the other having no row, no logs and no stop button. So the choice becomes
+ * a value the user owns, and this is the one place that resolves it.
+ *
+ * **`missing` is data, not an error to fix by writing back.** When the stored
+ * name no longer resolves, the pick falls back but the caller still renders
+ * "`foo` ended" — it must not silently jump to a sibling and present it as the
+ * thing you were looking at. Clearing the stored name here (or in an effect) is
+ * what makes a run vanish from under a reader mid-glance; let them choose.
+ */
+export interface RunPick {
+  /** The bound run, or `null` when the worktree has no runs at all. */
+  run: RunInfo | null;
+  /**
+   * The stored name that no longer resolves, or `null`. Non-null means `run` is
+   * a fallback, so a surface naming the run has to say so.
+   */
+  missing: string | null;
+}
+
+export function pickRun(runs: RunInfo[], stored: string | null): RunPick {
+  if (stored) {
+    // Matches an ENDED run too, on purpose: `/api/logs` serves an ended run's
+    // output, and "what happened to the run I was watching" is the question
+    // right after it dies. Only a name with no environment at all is missing.
+    const chosen = runs.find((r) => r.name === stored);
+    if (chosen) return { run: chosen, missing: null };
+    return { run: diagnosticsRun(runs), missing: stored };
+  }
+  return { run: diagnosticsRun(runs), missing: null };
+}
+
+/** Every run of a worktree that occupies its environment's live slot. */
+export function liveRuns(runs: RunInfo[]): RunInfo[] {
+  return runs.filter((r) => r.live);
+}
+
+/**
+ * The runs a selector must show as alternatives to `name` — everything else in
+ * the worktree, name-ordered as the daemon sent them.
+ */
+export function siblingRuns(runs: RunInfo[], name: string | undefined): RunInfo[] {
+  return runs.filter((r) => r.name !== name);
+}
+
+/**
+ * What the run selector lists, and how much it is hiding.
+ *
+ * An entry is an *environment*, not a run — one per name, carrying its latest
+ * run's state. So an "ended" entry is an environment whose last run finished, and
+ * a directory accumulates those: four names started last week are four rows of
+ * noise in a control whose job is "which of the things happening here am I looking
+ * at". Run *history* belongs to Runs mode and to the logs/nodes views' own run
+ * picker; this is the live picture.
+ *
+ * Two exceptions keep it from becoming a dead end, and both earn themselves:
+ *
+ * - **Nothing live → show everything.** The run crashed overnight and its logs
+ *   and last node states are exactly why the app is open. An empty selector, or
+ *   one that hides the only thing there is, would strand that.
+ * - **The bound entry is always listed.** Hiding the environment the control is
+ *   *naming* is the vanishing behaviour this whole change exists to remove.
+ *
+ * `hidden` is the count the caller offers to reveal — a disclosure rather than a
+ * setting, so nothing is configured and nothing persists.
+ */
+export interface SelectorRuns {
+  runs: RunInfo[];
+  hidden: number;
+}
+
+export function selectorRuns(
+  runs: RunInfo[],
+  boundName: string | undefined,
+  showEnded = false,
+): SelectorRuns {
+  const live = liveRuns(runs);
+  if (showEnded || live.length === 0) return { runs, hidden: 0 };
+  const shown = runs.filter((r) => r.live || r.name === boundName);
+  return { runs: shown, hidden: runs.length - shown.length };
+}
+
+/**
+ * The environment name a fresh start should use, given what is already live.
+ *
+ * `▶` used to send no name at all, leaving the daemon to default to the
+ * worktree's alias — so pressing it while an agent's `foo` was live minted a
+ * *third* environment named after the alias, and pressing it while the alias
+ * itself was live replaced that run (a start takes over its own name). Neither
+ * was asked for. This suffixes instead, and the caller shows the name **before**
+ * the start, because a run appearing under a name nobody typed is the confusion
+ * this whole change exists to remove.
+ *
+ * Only *live* names are avoided. A stopped environment is the same environment
+ * started again, which is what its history is for.
+ */
+export function proposeRunName(alias: string, runs: RunInfo[]): string {
+  const taken = new Set(liveRuns(runs).map((r) => r.name));
+  if (!taken.has(alias)) return alias;
+  for (let n = 2; n < 100; n += 1) {
+    const candidate = `${alias}-${n}`;
+    if (!taken.has(candidate)) return candidate;
+  }
+  // 98 live environments in one directory is not a state worth a branch of its
+  // own; the daemon rejects the duplicate and the toast says so.
+  return `${alias}-${runs.length + 1}`;
+}
+
+/**
+ * A name **no environment in this worktree has ever used** — what an explicit
+ * "start another run" must create.
+ *
+ * Distinct from [`proposeRunName`], which avoids only *live* names because ▶ means
+ * "run this environment again" and reusing a stopped environment's name is the
+ * normal way to do that. An action labelled *another* cannot do the same: offering
+ * "Start another run named `dev`" while a stopped `dev` sits in the list above it
+ * is naming an environment that already exists, so the label is simply false.
+ *
+ * History counts as used. Two environments cannot share a name — `veld start`
+ * would take over the existing one — so a name in the list, live or ended, is not
+ * available for a new one.
+ */
+export function freshRunName(alias: string, runs: RunInfo[]): string {
+  const taken = new Set(runs.map((r) => r.name));
+  if (!taken.has(alias)) return alias;
+  for (let n = 2; n < 100; n += 1) {
+    const candidate = `${alias}-${n}`;
+    if (!taken.has(candidate)) return candidate;
+  }
+  return `${alias}-${runs.length + 1}`;
+}
+
+/**
+ * The environment name ▶ starts, given what the user is currently looking at.
+ *
+ * Two different intents share one button. With an **ended** run selected, ▶ means
+ * "run that environment again" — its name, so the run lands in the history the
+ * user is reading and its logs continue the same environment. Otherwise ▶ means
+ * "another environment alongside the live ones", which is [`proposeRunName`].
+ *
+ * Without this the first case took the suffixed name too, and selecting last
+ * night's crashed `dev` and pressing ▶ produced `dev-2` — a new environment with
+ * none of the history the user was looking at.
+ */
+export function startRunName(
+  alias: string,
+  runs: RunInfo[],
+  selected: RunInfo | null,
+): string {
+  if (selected && !selected.live) return selected.name;
+  return proposeRunName(alias, runs);
 }
 
 /**
@@ -85,12 +249,51 @@ export function diagnosticsRun(runs: RunInfo[]): RunInfo | null {
  * `partial` ⇔ `transitionAction() !== null` is asserted in the tests.
  */
 export function worktreeStatus(runs: RunInfo[]): WorktreeStatus {
-  const run = activeRun(runs);
+  return runStatus(activeRun(runs));
+}
+
+/**
+ * One run's status in the render vocabulary — the reduction
+ * [`worktreeStatus`] applies, extracted so a surface bound to a *chosen* run
+ * (the run selector) reduces it the same way rather than growing a second
+ * mapping that can disagree about `recovering`.
+ *
+ * `null` reduces to `stopped`: no run and a stopped run render identically, and
+ * every caller here has "nothing to stop" as the same state.
+ */
+export function runStatus(run: RunInfo | null): WorktreeStatus {
   if (!run) return "stopped";
   if (run.status === "running") return "running";
   if (run.status === "failed") return "failed";
   if (run.status === "recovering") return "recovering";
   return "partial";
+}
+
+/**
+ * Attention-first severity: which of several runs a single glyph must report.
+ *
+ * Deliberately not the same order as [`activeRun`]'s. That one answers "which
+ * run do the controls act on", where a `running` run outranks a `failed` one;
+ * this one answers "does anything here need looking at", where the opposite is
+ * true. A sibling badge that reported the healthiest run would hide exactly the
+ * case it exists for — an agent's run that died while the selected one is fine.
+ */
+const STATUS_SEVERITY: Record<WorktreeStatus, number> = {
+  failed: 0,
+  recovering: 1,
+  partial: 2,
+  running: 3,
+  stopped: 4,
+};
+
+/** The most attention-worthy status among `runs` (`stopped` when empty). */
+export function worstStatus(runs: RunInfo[]): WorktreeStatus {
+  return runs
+    .map((r) => runStatus(r))
+    .reduce(
+      (worst, s) => (STATUS_SEVERITY[s] < STATUS_SEVERITY[worst] ? s : worst),
+      "stopped" as WorktreeStatus,
+    );
 }
 
 /**
@@ -319,6 +522,24 @@ export function runSignature(runs: RunInfo[]): string {
   return run ? `${run.status}:${run.run_id}` : "none";
 }
 
+/**
+ * [`runSignature`] for **one named environment** of a worktree.
+ *
+ * The per-worktree signature cannot serve a per-run marker: it reports whichever
+ * run `activeRun` picks, so stopping `foo` while `bar` was still starting had the
+ * marker cleared by `bar`'s transition — the spinner vanished with the stop still
+ * in flight — and an action on a run `activeRun` doesn't pick could never observe
+ * its own landing at all.
+ *
+ * `"none"` for a name with no environment: a start fires before the run exists,
+ * so this is the legitimate starting value, and the marker clears when the name
+ * appears.
+ */
+export function runSignatureFor(runs: RunInfo[], name: string): string {
+  const run = runs.find((r) => r.name === name);
+  return run ? `${run.status}:${run.run_id}` : "none";
+}
+
 /** URL list of a run, service-name-sorted, as [name, url] pairs. */
 export function sortedUrls(run: RunInfo | null): Array<[string, string]> {
   if (!run) return [];
@@ -351,8 +572,40 @@ export interface PendingMarker {
   expiresAt: number;
 }
 
-/** Markers keyed by worktree id. */
-export type PendingMap = Record<number, PendingMarker>;
+/**
+ * Markers keyed by [`pendingKey`] — worktree **and** environment name.
+ *
+ * One slot per worktree was wrong once a directory could hold two live runs:
+ * stopping one and starting the other overwrote each other's marker, so one of
+ * the two controls lost its spinner immediately.
+ */
+export type PendingMap = Record<string, PendingMarker>;
+
+/**
+ * Identity of a pending action: the worktree it was fired from and the
+ * environment it targets.
+ *
+ * A space separator, split at the FIRST one, which is what makes the key
+ * unambiguous for any environment name at all: the left side is a decimal id,
+ * so it can never contain the separator, and the name keeps whatever it holds.
+ *
+ * Deliberately NOT a NUL byte, which is the obvious "can't collide" choice: a
+ * source file containing one is classified as binary and SILENTLY skipped by
+ * ripgrep and grep, which is why `App.tsx` needs `rg -a` (AGENTS.md). A key
+ * separator is not worth making this file unsearchable.
+ */
+export function pendingKey(worktreeId: number, runName: string): string {
+  return `${worktreeId} ${runName}`;
+}
+
+/** Split a [`pendingKey`] back into its parts. */
+export function parsePendingKey(key: string): { worktreeId: number; runName: string } | null {
+  const at = key.indexOf(" ");
+  if (at < 0) return null;
+  const worktreeId = Number(key.slice(0, at));
+  if (!Number.isSafeInteger(worktreeId)) return null;
+  return { worktreeId, runName: key.slice(at + 1) };
+}
 
 /**
  * Drop markers whose signature has moved, or whose deadline has passed.
@@ -363,9 +616,11 @@ export type PendingMap = Record<number, PendingMarker>;
  * reaches `running` on its own, while the stop is still in flight. Correlating
  * properly would need the daemon to hand back an action token.
  *
- * `sigFor` returns the worktree's current [`runSignature`], or `null` when the
- * worktree can't be found at all — a worktree that no longer exists can never
- * report a transition, so its marker is dropped rather than left spinning.
+ * `sigFor` returns the marked environment's current [`runSignatureFor`], or
+ * `null` when the worktree can't be found at all — a worktree that no longer
+ * exists can never report a transition, so its marker is dropped rather than
+ * left spinning. A worktree that exists but has no run under that name yet is
+ * `"none"`, not `null`: that is a start still in flight.
  *
  * Returns the SAME object when nothing changed. That identity is load-bearing:
  * the caller runs this from a `useState` updater inside an effect, and a fresh
@@ -374,22 +629,21 @@ export type PendingMap = Record<number, PendingMarker>;
 export function prunePending(
   cur: PendingMap,
   now: number,
-  sigFor: (worktreeId: number) => string | null,
+  sigFor: (key: string) => string | null,
 ): PendingMap {
-  const ids = Object.keys(cur);
-  if (ids.length === 0) return cur;
+  const keys = Object.keys(cur);
+  if (keys.length === 0) return cur;
   const next: PendingMap = {};
-  for (const key of ids) {
-    const id = Number(key);
-    const sig = sigFor(id);
+  for (const key of keys) {
+    const sig = sigFor(key);
     // An action that 202'd but never produced a transition (the CLI died on
     // startup, say) would otherwise leave the control disabled for the rest
     // of the session. Expiring beats a permanently dead button.
-    if (sig !== null && sig === cur[id].sigAtSet && now < cur[id].expiresAt) {
-      next[id] = cur[id];
+    if (sig !== null && sig === cur[key].sigAtSet && now < cur[key].expiresAt) {
+      next[key] = cur[key];
     }
   }
-  return Object.keys(next).length === ids.length ? cur : next;
+  return Object.keys(next).length === keys.length ? cur : next;
 }
 
 // ---------------------------------------------------------------------------

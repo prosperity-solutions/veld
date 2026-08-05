@@ -5,6 +5,7 @@ import {
   type EmojiHolder,
   type EnvironmentList,
   type Lane,
+  type Preset,
   type Repo,
   type RepoList,
   type RunInfo,
@@ -27,23 +28,33 @@ import { useSettings } from "./shared/useSettings";
 import {
   activeRun,
   bestFuzzyMatch,
-  diagnosticsRun,
+  freshRunName,
   fuzzyMatch,
+  liveRuns,
   moveWorktree,
   needsAttention,
+  parsePendingKey,
+  pendingKey,
+  pickRun,
   prunePending,
   railGroups,
-  runSignature,
+  runSignatureFor,
+  runStatus,
   runsForWorktree,
+  selectorRuns,
+  siblingRuns,
   sortedUrls,
   spinnerAction,
+  startRunName,
   worktreeStatus,
+  worstStatus,
   TRASH_LANE,
   type PendingAction,
   type RailGroup,
   type PendingMap,
   type WorktreeStatus,
 } from "./model";
+import { startOriginLabel } from "./shared/startOrigin";
 import { Wordmark } from "./components/Wordmark";
 import {
   ActionIcon,
@@ -64,6 +75,7 @@ import {
   IconDots,
   IconDotsVertical,
   IconFolderPlus,
+  IconHistory,
   IconMoon,
   IconPlayerPlayFilled,
   IconPlayerStopFilled,
@@ -154,6 +166,7 @@ import {
   pruneStartSelection,
   resolveStartSelection,
   startBody,
+  startSelectionLabel,
   startStorageKey,
 } from "./components/StartConfig";
 import {
@@ -285,6 +298,57 @@ function usePersistedPerWindow(name: string): [string, (v: string) => void] {
       } catch {
         // Storage unavailable: the selection lives in the URL for this session
         // anyway, and losing it costs a default worktree on the next launch.
+      }
+    },
+    [scoped, global],
+  );
+  return [value, set];
+}
+
+/**
+ * Which of a worktree's runs this window is bound to.
+ *
+ * Per worktree **and** per window slot, for the same reason the worktree
+ * selection is: layouts are per slot, so two windows open on one directory must
+ * be able to watch different runs — otherwise picking a run in one window moves
+ * the other window's logs pane out from under its reader. The unscoped key is the
+ * seed for a brand-new slot, exactly as `usePersistedPerWindow` uses it.
+ *
+ * Deliberately **not** in the URL. A run in the query string would make it a
+ * navigation coordinate, and then every worktree-keyed surface — pane layouts,
+ * browser sessions, terminal PTY sessions — would have to declare whether it sits
+ * inside run scope; for terminals and browsers the answer is no (a shell is a
+ * shell in a directory). `""` means "no explicit choice", which resolves through
+ * `pickRun`, not to an error.
+ */
+function useSelectedRun(
+  worktreePath: string | undefined,
+): [string, (v: string) => void] {
+  const name = `veld.run.${worktreePath ?? "_"}`;
+  const [scoped, global] = selectionKeys(name);
+  const read = useCallback(
+    () =>
+      window.localStorage.getItem(scoped) ??
+      window.localStorage.getItem(global) ??
+      "",
+    [scoped, global],
+  );
+  const [value, setValue] = useState(read);
+  // The key changes when the worktree changes — `useState`'s initializer runs
+  // once per component, so without this the previous worktree's chosen run
+  // silently carries over and (worse) gets written back under the new key.
+  useEffect(() => {
+    setValue(read());
+  }, [read]);
+  const set = useCallback(
+    (v: string) => {
+      setValue(v);
+      try {
+        window.localStorage.setItem(scoped, v);
+        window.localStorage.setItem(global, v);
+      } catch {
+        // Storage unavailable: the choice holds for this session and is
+        // re-resolved on the next launch. Nothing else depends on it.
       }
     },
     [scoped, global],
@@ -757,9 +821,31 @@ function AppInner(props: {
 
   // ---- derived run state --------------------------------------------------
   const runs = worktree ? runsForWorktree(envs, worktree) : [];
-  const run = activeRun(runs);
+  const [selectedRunName, setSelectedRunName] = useSelectedRun(worktree?.path);
+  /**
+   * The run every surface in this window is bound to, and whether the stored
+   * choice still resolves.
+   *
+   * One resolution point, used by the top bar, the URL launcher, the diagnostics
+   * panes, the resource graphs and the Sharing surface. Before this each of them
+   * called `activeRun`/`diagnosticsRun` and got whichever run sorted first, so a
+   * second environment in the same directory — a coding agent's, typically — was
+   * invisible: no dot, no logs, no way to stop it.
+   */
+  const pick = pickRun(runs, selectedRunName || null);
+  const run = pick.run;
   const urls = sortedUrls(run);
-  const status = worktreeStatus(runs);
+  const status = runStatus(run);
+  /** The worktree's other environments — what the run selector offers. */
+  const siblings = siblingRuns(runs, run?.name);
+  /**
+   * The worst status among the runs the top bar is NOT showing.
+   *
+   * The selector's counter carries this, so a hidden run that failed or is stuck
+   * recovering colours the control the user is already looking at. Reporting the
+   * healthiest sibling instead would hide precisely the case this exists for.
+   */
+  const siblingStatus = worstStatus(siblings);
 
   // The permission policy every browser pane in this window is answered against.
   //
@@ -770,7 +856,18 @@ function AppInner(props: {
   // work inside a pane. Re-sent whenever either changes; a no-op in the browser
   // build, which has no panes to govern.
   const permissionRules = worktree?.ide.permissions ?? [];
-  const trustedOrigins = urls.map(([, url]) => url);
+  /**
+   * Every URL this worktree serves, across ALL its runs — not just the selected
+   * one.
+   *
+   * Scoping this to the selected run would mean switching the run selector
+   * silently revokes an already-open browser pane's self-capture permission: the
+   * pane keeps rendering, its screenshots stop working, and nothing on screen
+   * says why. A pane is worktree-scoped, so the trust set is too. The launcher
+   * below still lists only the selected run's URLs — that one is a question about
+   * a run, this is a property of the directory.
+   */
+  const trustedOrigins = runs.flatMap((r) => Object.values(r.urls));
   useEffect(() => {
     // The daemon's own origin is in the set because veld's UI is served from it,
     // and a pane pointed at a veld surface is still veld's own page.
@@ -780,10 +877,11 @@ function AppInner(props: {
     // second and republish every pane's panel with it.
   }, [JSON.stringify(permissionRules), trustedOrigins.join(" ")]);
 
-  // What the diagnostics panes and the Sharing surface read. Wider than `run` on
-  // purpose: an ended run still has logs, last node states and possibly a share
-  // left to stop — see `diagnosticsRun`.
-  const diagRun: RunInfo | null = diagnosticsRun(runs);
+  // What the diagnostics panes and the Sharing surface read: the bound run,
+  // which may be an ended one — logs, last node states and a share left to stop
+  // all outlive the run itself, and "what happened to the one I was watching" is
+  // the question right after it dies.
+  const diagRun: RunInfo | null = run;
   const diagRef = worktree && diagRun ? runRef(worktree.path, diagRun) : null;
   const diagStats =
     worktree && diagRun
@@ -812,10 +910,13 @@ function AppInner(props: {
     : null;
 
   // Optimistic pending markers while 202'd start/stop/restarts take effect,
-  // keyed by worktree: the rail can fire actions on several rows at once, and
-  // a single global slot would let the second overwrite the first's marker
-  // and strand its spinner. Each entry clears when THAT worktree's run
-  // signature moves off the value it had when the action was fired.
+  // keyed by worktree AND environment name: the rail can fire actions on several
+  // rows at once, and a single global slot would let the second overwrite the
+  // first's marker and strand its spinner. The environment half matters for the
+  // same reason one directory apart — stopping one run while another starts in
+  // the same worktree used to collapse into one slot. Each entry clears when
+  // THAT environment's run signature moves off the value it had when the action
+  // was fired.
   const [pending, setPending] = useState<PendingMap>({});
   // Every loaded worktree, not just the selected repo's: switching projects
   // mid-action must not look like the worktree vanished, or the marker is
@@ -826,17 +927,40 @@ function AppInner(props: {
   );
   useEffect(() => {
     setPending((cur) =>
-      prunePending(cur, Date.now(), (id) => {
-        const wt = allWorktrees.find((w) => w.id === id);
-        return wt ? runSignature(runsForWorktree(envs, wt)) : null;
+      prunePending(cur, Date.now(), (key) => {
+        const parsed = parsePendingKey(key);
+        if (!parsed) return null;
+        const wt = allWorktrees.find((w) => w.id === parsed.worktreeId);
+        return wt
+          ? runSignatureFor(runsForWorktree(envs, wt), parsed.runName)
+          : null;
       }),
     );
     // `poll` is a dependency so the TTL is re-checked on every tick, not only
     // when the payload changes: a failed refresh leaves `envs` identical, and
     // without this a marker could never expire while the daemon is down.
   }, [envs, allWorktrees, poll]);
-  const pendingFor = (w: Worktree | null): PendingAction | null =>
-    w ? (pending[w.id]?.label ?? null) : null;
+  /**
+   * Whether ANY action is in flight on this worktree.
+   *
+   * The rail row and the ⌘K entries act on one worktree without naming a run, so
+   * this is the predicate that gates them; the top bar, which is bound to a
+   * specific environment, uses `pendingForRun` instead. Keeping both means the
+   * rail cannot double-fire while the top bar still reports per-run state
+   * correctly.
+   */
+  const pendingFor = (w: Worktree | null): PendingAction | null => {
+    if (!w) return null;
+    for (const [key, marker] of Object.entries(pending)) {
+      if (parsePendingKey(key)?.worktreeId === w.id) return marker.label;
+    }
+    return null;
+  };
+  const pendingForRun = (
+    w: Worktree | null,
+    runName: string | undefined,
+  ): PendingAction | null =>
+    w && runName ? (pending[pendingKey(w.id, runName)]?.label ?? null) : null;
 
   /** Run actions make sense only for a worktree of an on-disk repo. */
   const canRunWorktreeNow = (w: Worktree) =>
@@ -856,24 +980,38 @@ function AppInner(props: {
     pendingFor(w) === null &&
     resolveStartSelection(w) !== null;
 
+
+  /**
+   * Fire a run action, marked against the environment it targets.
+   *
+   * `runName` is required rather than derived: a start's target does not exist
+   * yet, so only the caller knows which name the action is about, and marking it
+   * under a name the daemon has not created is exactly right — the marker clears
+   * when that name appears.
+   */
   const act = async (
     w: Worktree,
+    runName: string,
     label: PendingAction,
     fn: () => Promise<void>,
+    /** Undo whatever the caller changed optimistically alongside the marker. */
+    onFailure?: () => void,
   ) => {
-    const sigAtSet = runSignature(runsForWorktree(envs, w));
+    const key = pendingKey(w.id, runName);
+    const sigAtSet = runSignatureFor(runsForWorktree(envs, w), runName);
     setPending((cur) => ({
       ...cur,
-      [w.id]: { label, sigAtSet, expiresAt: Date.now() + PENDING_TTL_MS },
+      [key]: { label, sigAtSet, expiresAt: Date.now() + PENDING_TTL_MS },
     }));
     try {
       await fn();
     } catch (e) {
       setPending((cur) => {
         const next = { ...cur };
-        delete next[w.id];
+        delete next[key];
         return next;
       });
+      onFailure?.();
       // Name the worktree: actions fire from the rail, the context menu and the
       // palette on ANY row, so an unattributed message leaves the user guessing
       // which one failed.
@@ -881,9 +1019,75 @@ function AppInner(props: {
     }
   };
 
+  /**
+   * Which run a **worktree-level** surface acts on: the rail row, the context
+   * menu, the palette.
+   *
+   * Still `activeRun`, deliberately. Those surfaces name a worktree and never a
+   * run — a rail row cannot ask "which one" — and their ■ appears exactly when
+   * `worktreeStatus` says something is live. Binding them to the window's *chosen*
+   * run instead would silently break that pairing: with an ended run selected and
+   * a sibling live, the row would show ■ (a run IS up) and clicking it would do
+   * nothing at all.
+   *
+   * The top bar is the run-level surface and passes its bound run explicitly.
+   */
+  const targetRun = (w: Worktree): RunInfo | null =>
+    activeRun(runsForWorktree(envs, w));
+  /** The environment name ▶ will start for a worktree — see `startRunName`. */
+  const startNameFor = (w: Worktree): string =>
+    worktree && w.id === worktree.id
+      ? startRunName(w.alias, runs, run)
+      : startRunName(w.alias, runsForWorktree(envs, w), null);
+
+  /**
+   * The name an explicit "start **another** run" creates — always a fresh
+   * environment.
+   *
+   * Not `startNameFor`, and the difference is not cosmetic: that one re-runs a
+   * *bound ended* environment under its own name, which is right for ▶ ("run that
+   * again") and wrong for a command that says "another". With a crashed `dev`
+   * selected next to a live `api`, the two answers are `dev` and `dev-2`.
+   *
+   * `freshRunName`, so history is avoided too — a stopped `dev` in the list makes
+   * "another run named `dev`" a false label, not a new environment.
+   */
+  const anotherNameFor = (w: Worktree): string =>
+    freshRunName(w.alias, runsForWorktree(envs, w));
+
+  /**
+   * Whether a **second** environment can be started here while another is live.
+   *
+   * The ▶/■ control is a toggle: once anything is live it shows ■, so all four run
+   * surfaces offered "start" only while the worktree was idle. That left a state
+   * the product now treats as ordinary — two environments in one directory —
+   * reachable from the CLI alone, and made the run selector's "▶ starts a run named
+   * `dev-2`" a promise nothing could keep.
+   *
+   * Gated on `pendingForRun`, deliberately not on `pendingFor`: the point is
+   * starting one environment while another is mid-transition, which a
+   * worktree-wide "is anything in flight" check forbids outright. The name checked
+   * is the one `anotherNameFor` will use, so a double click is still blocked by that
+   * name's own marker.
+   *
+   * Requires something to be **live**, because that is the only state in which
+   * "another" means anything: with the whole directory stopped, ▶ is the start
+   * affordance and it re-runs the environment you are looking at. Offering both
+   * there put two start actions side by side, one of which quietly created a
+   * *different* environment than the one on screen.
+   */
+  const canStartAnother = (w: Worktree) =>
+    canRunWorktreeNow(w) &&
+    resolveStartSelection(w) !== null &&
+    liveRuns(runsForWorktree(envs, w)).length > 0 &&
+    pendingForRun(w, anotherNameFor(w)) === null;
+
   // Run actions for ANY worktree, not just the selected one — the rail rows,
   // the context menu and the palette all drive these.
-  const startWorktree = (w: Worktree) => {
+  //
+  // `name` overrides the default target, which is how "start another run" asks for
+  // a fresh environment rather than for whatever ▶ would have started.
+  const startWorktree = (w: Worktree, name?: string) => {
     const sel = resolveStartSelection(w);
     if (!sel) {
       // Defence in depth: all four ▶ surfaces gate on `canStartWorktree`,
@@ -895,18 +1099,50 @@ function AppInner(props: {
       );
       return;
     }
-    void act(w, "start", () => api.startRun(w.id, startBody(sel)));
+    // The name is computed here and sent explicitly. Leaving it to the daemon's
+    // default (the worktree alias) is what minted a *third* environment when an
+    // agent already had one live, and it also meant this window could not mark
+    // the action against the run it was about.
+    const target = name ?? startNameFor(w);
+    /**
+     * Bind this window to what it just started.
+     *
+     * Written at the moment of the action, not repaired afterwards by an effect:
+     * the intent ("I started this, I am looking at it") exists only here, and a
+     * poll-time rule like "select the newest run" would also hijack the selection
+     * when the *other* thing in this directory — a coding agent — starts one.
+     *
+     * Only for the selected worktree: a rail row's ▶ deliberately does not move
+     * the selection, and another worktree's choice is stored under its own key.
+     */
+    const previous = worktree && w.id === worktree.id ? selectedRunName : null;
+    if (previous !== null) setSelectedRunName(target);
+    void act(
+      w,
+      target,
+      "start",
+      () => api.startRun(w.id, { ...startBody(sel), run_name: target }),
+      // The start never happened, so leave the window bound to what it was
+      // looking at rather than to a name nothing created.
+      () => {
+        if (previous !== null) setSelectedRunName(previous);
+      },
+    );
   };
   // `w.path` is the run's project root — every worktree with a veld.json is
   // its own project (see `runsForWorktree`), and the run name alone would be
   // ambiguous across repos.
-  const stopWorktree = (w: Worktree) => {
-    const r = activeRun(runsForWorktree(envs, w));
-    if (r) void act(w, "stop", () => api.stopRun(runRef(w.path, r)));
+  //
+  // `target` is how the top bar names the run it is bound to; without it these
+  // fall back to the worktree-level answer (see `targetRun`).
+  const stopWorktree = (w: Worktree, target?: RunInfo | null) => {
+    const r = target ?? targetRun(w);
+    if (r) void act(w, r.name, "stop", () => api.stopRun(runRef(w.path, r)));
   };
-  const restartWorktree = (w: Worktree) => {
-    const r = activeRun(runsForWorktree(envs, w));
-    if (r) void act(w, "restart", () => api.restartRun(runRef(w.path, r)));
+  const restartWorktree = (w: Worktree, target?: RunInfo | null) => {
+    const r = target ?? targetRun(w);
+    if (r)
+      void act(w, r.name, "restart", () => api.restartRun(runRef(w.path, r)));
   };
 
   // ---- run diagnostics ----------------------------------------------------
@@ -1094,6 +1330,20 @@ function AppInner(props: {
             disabled: busy || !running,
             onClick: () => restartWorktree(w),
           },
+          // Only while something is live: idle, the entry above already says
+          // "Start run" and there is no *another* to distinguish it from. This is
+          // the collapsed rail's only route to a second environment, since it has
+          // no inline controls and no run selector.
+          ...(running
+            ? [
+                {
+                  key: "start-another",
+                  title: `Start another run (${anotherNameFor(w)})`,
+                  disabled: !canStartAnother(w),
+                  onClick: () => startWorktree(w, anotherNameFor(w)),
+                },
+              ]
+            : []),
           { key: "run-divider" },
         ]
       : [];
@@ -2061,6 +2311,17 @@ function AppInner(props: {
           run: () => startWorktree(w),
         });
       }
+      // Reachable while a run is live, which "Start" is not — ▶ is a toggle. The
+      // name is in the label because that is what the command will create.
+      if (running && canStartAnother(w)) {
+        items.push({
+          id: "run:start-another",
+          group: "Run",
+          label: `Start another run in ${w.alias} (${anotherNameFor(w)})`,
+          alt: ["second", "parallel", "new environment"],
+          run: () => startWorktree(w, anotherNameFor(w)),
+        });
+      }
       for (const [name, url] of urls) {
         items.push({
           id: `url:${name}`,
@@ -2510,10 +2771,34 @@ function AppInner(props: {
           ) : null
         }
         canStart={worktree ? canStartWorktree(worktree) : false}
-        running={status !== "stopped"}
-        pending={pendingFor(worktree)}
-        spinner={spinnerAction(pendingFor(worktree), run)}
+        // A bound run that has ended is not "running": ■ would have nothing to
+        // stop, and ▶ starts that same environment again (`startRunName`).
+        running={!!run?.live && status !== "stopped"}
+        pending={pendingForRun(worktree, run?.name)}
+        spinner={spinnerAction(pendingForRun(worktree, run?.name), run)}
         run={run}
+        runSelect={
+          worktree && runs.length > 0 ? (
+            <RunSelect
+              runs={runs}
+              selected={run}
+              missing={pick.missing}
+              // Keyed on the *chosen* name, which is the one that may not exist
+              // yet — `run` is the fallback, and its marker says nothing about the
+              // start this window just fired.
+              pending={pendingForRun(worktree, selectedRunName || run?.name)}
+              siblingStatus={siblingStatus}
+              presets={worktree.presets}
+              startName={anotherNameFor(worktree)}
+              startLabel={startSelectionLabel(effectiveStart, worktree)}
+              canStartAnother={canStartAnother(worktree)}
+              onStartAnother={() =>
+                startWorktree(worktree, anotherNameFor(worktree))
+              }
+              onSelect={setSelectedRunName}
+            />
+          ) : null
+        }
         urls={urls}
         sharing={sharingSurface}
         onShowVeldLinks={layout && showVeldLinks}
@@ -2523,9 +2808,12 @@ function AppInner(props: {
         }}
         onImport={() => setDialog({ kind: "import" })}
         onRemoveRepo={() => repo && setDialog({ kind: "remove-repo", repo })}
+        // The bound run, named explicitly: the top bar is the run-level surface,
+        // and ■ here must end the run whose name the selector is showing — never
+        // whichever one `activeRun` would have picked.
         onStart={() => worktree && startWorktree(worktree)}
-        onStop={() => worktree && stopWorktree(worktree)}
-        onRestart={() => worktree && restartWorktree(worktree)}
+        onStop={() => worktree && stopWorktree(worktree, run)}
+        onRestart={() => worktree && restartWorktree(worktree, run)}
         onSearch={() => setDialog({ kind: "search" })}
         themeButton={themeButton}
         settingsButton={settingsButton}
@@ -2790,6 +3078,203 @@ function runStatusClass(status: string): WorktreeStatus {
   return "partial";
 }
 
+/**
+ * Which run the top bar — and every surface bound to it — is showing.
+ *
+ * This replaces the bare status dot rather than sitting next to it, because the
+ * two answer one question: *which* run, and how is it. The dot alone was the
+ * defect's other half — it reported a run the app had picked by sort order while
+ * the start control beside it named a preset from local storage, and the pair read
+ * as "preset X is running".
+ *
+ * Three properties are deliberate, not decoration:
+ *
+ * - **The closed control shows that siblings exist and whether one is sick.** A
+ *   dropdown is a mode, and a mode is invisible while you are not looking at it;
+ *   a selector that hid the second run behind a click would be a tidier version
+ *   of the bug it fixes. So the counter is always rendered when there is more than
+ *   one run, and it takes the worst sibling's colour.
+ * - **A vanished choice is stated, never silently replaced.** `missing` means the
+ *   stored name has no environment any more; the control says so instead of
+ *   presenting a fallback under the name the user last chose.
+ * - **The name ▶ will create is shown before it is pressed.** A run appearing
+ *   under a name nobody typed is what made two runs in one directory confusing in
+ *   the first place.
+ */
+function RunSelect(props: {
+  runs: RunInfo[];
+  selected: RunInfo | null;
+  missing: string | null;
+  /**
+   * The action this window has in flight against the *bound name*.
+   *
+   * Only `"start"` changes what is rendered, and only together with `missing`: it
+   * separates "the environment you chose is gone" from "the environment you just
+   * asked for has not been listed yet".
+   */
+  pending: PendingAction | null;
+  siblingStatus: WorktreeStatus;
+  presets: Preset[];
+  /** The environment name a fresh start would create — shown before it happens. */
+  startName: string;
+  /** What that start would run (the stored preset/selection label). */
+  startLabel: string;
+  canStartAnother: boolean;
+  onStartAnother: () => void;
+  onSelect: (name: string) => void;
+}) {
+  const { selected, missing } = props;
+  /**
+   * A chosen name with no environment *yet*, because this window just started it.
+   *
+   * Without this the honest-but-wrong reading wins for a poll or two: the click
+   * binds the window to `dev-2`, the daemon has not listed it, and the control
+   * announces "no environment named dev-2 here" about a run it is in the middle of
+   * creating. A pending **start** against that exact name is the difference between
+   * "gone" and "not there yet".
+   */
+  const awaiting = missing !== null && props.pending === "start" ? missing : null;
+  // Ended environments are hidden behind a disclosure rather than listed: the
+  // control answers "which of the things happening here", and history is Runs
+  // mode's job. `showEnded` is local and per-opening — a preference for this
+  // would be a persisted answer to a question that has a right one.
+  const [showEnded, setShowEnded] = useState(false);
+  const { runs, hidden } = selectorRuns(props.runs, selected?.name, showEnded);
+  const position = selected ? runs.findIndex((r) => r.name === selected.name) + 1 : 0;
+  // Counted over what is *listed*, so the counter and the dropdown cannot
+  // disagree — "1/4" above a two-row list is worse than no counter.
+  const siblingAlert = runs.length > 1 && needsAttention(props.siblingStatus);
+  const origin = startOriginLabel(selected?.started_from, props.presets);
+  const label = awaiting ?? selected?.name ?? missing ?? "no run";
+  const tooltip = [
+    awaiting
+      ? `Run ${awaiting}: starting…`
+      : selected
+        ? `Run ${selected.name}: ${selected.status}`
+        : "No run selected",
+    origin && !awaiting ? `Started from ${origin}` : null,
+    // Neutral about *why* there is no such environment: it may have been removed,
+    // or a start fired against that name may never have produced one (the CLI died
+    // on startup). Both are "there is nothing here called that".
+    missing && !awaiting ? `No environment named ${missing} here` : null,
+    runs.length > 1
+      ? `${runs.length} runs in this worktree${siblingAlert ? " — another needs attention" : ""}`
+      : null,
+    hidden > 0 ? `${hidden} ended, hidden` : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  return (
+    <Menu position="bottom-start" width={300}>
+      <Menu.Target>
+        <Button
+          size="compact-sm"
+          variant="default"
+          className="mono-field run-select"
+          title={tooltip}
+          leftSection={
+            <span
+              // `partial` while awaiting: the same amber a `starting` run gets,
+              // because that is exactly what this is — the daemon simply has not
+              // listed it yet.
+              className={`dot ${awaiting ? "partial" : runStatus(selected)}`}
+              role="img"
+              aria-label={
+                awaiting
+                  ? `Run ${awaiting}: starting`
+                  : selected
+                    ? `Run ${selected.name}: ${selected.status}`
+                    : "No run selected"
+              }
+            />
+          }
+        >
+          {label}
+          {runs.length > 1 && (
+            <span className={`run-count${siblingAlert ? " alert" : ""}`}>
+              {position}/{runs.length}
+            </span>
+          )}
+        </Button>
+      </Menu.Target>
+      {/* `closeOnItemClick={false}` would swallow a selection; the disclosure
+          instead stops propagation itself, so revealing the ended entries does
+          not close the menu you wanted to read. */}
+      <Menu.Dropdown>
+        {/* "Live" only when something is actually being held back. A header
+            reading "Live runs" above three stopped ones — the state when the whole
+            directory is down and the filter has nothing to do — describes the rule
+            rather than the list. */}
+        <Menu.Label>
+          {hidden > 0 ? "Live runs in this worktree" : "Runs in this worktree"}
+        </Menu.Label>
+        {awaiting && <Menu.Label>{awaiting} · starting…</Menu.Label>}
+        {missing && !awaiting && (
+          <Menu.Label c="var(--warn)">
+            no environment named {missing} here — showing {selected?.name ?? "nothing"}
+          </Menu.Label>
+        )}
+        {runs.map((r) => {
+          const from = startOriginLabel(r.started_from, props.presets);
+          return (
+            <Menu.Item
+              key={r.name}
+              onClick={() => props.onSelect(r.name)}
+              leftSection={<span className={`dot ${runStatus(r)}`} />}
+            >
+              <div className="run-item-name">
+                {r.name}
+                {r.name === selected?.name ? " ·" : ""}
+              </div>
+              <div className="run-item-meta">
+                {r.status}
+                {from ? ` · from ${from}` : ""}
+              </div>
+            </Menu.Item>
+          );
+        })}
+        {hidden > 0 && (
+          <Menu.Item
+            leftSection={<IconHistory size={13} />}
+            closeMenuOnClick={false}
+            onClick={(e) => {
+              e.stopPropagation();
+              setShowEnded(true);
+            }}
+          >
+            <div className="run-item-meta">
+              Show {hidden} ended environment{hidden === 1 ? "" : "s"}
+            </div>
+          </Menu.Item>
+        )}
+        {/* The only surface that can start a SECOND environment: ▶ is a toggle, so
+            it shows ■ whenever the bound run is live. It names the environment it
+            will create before creating it — a run appearing under a name nobody
+            typed is the confusion this whole control exists to remove.
+
+            Absent rather than disabled when it does not apply (nothing live, or
+            nothing startable): with the directory stopped, ▶ *is* the start
+            affordance, and a greyed second one only invites the question of how it
+            differs. */}
+        {props.canStartAnother && (
+          <>
+            <Menu.Divider />
+            <Menu.Item
+              leftSection={<IconPlayerPlayFilled size={12} />}
+              onClick={props.onStartAnother}
+            >
+              <div className="run-item-name">Start another run</div>
+              <div className="run-item-meta">
+                named {props.startName} · {props.startLabel}
+              </div>
+            </Menu.Item>
+          </>
+        )}
+      </Menu.Dropdown>
+    </Menu>
+  );
+}
+
 function TopBar(props: {
   modeSwitch: React.ReactNode;
   repos: Repo[];
@@ -2805,6 +3290,14 @@ function TopBar(props: {
    *  only an action *this* window fired may lock the controls. */
   spinner: PendingAction | null;
   run: { name: string; status: string } | null;
+  /**
+   * The run selector, or `null` when the worktree has no runs at all.
+   *
+   * Built by the app because it needs the worktree's presets and the whole run
+   * list. It *replaces* the old status dot — it carries one — so exactly one
+   * control in the bar answers "which run, and how is it".
+   */
+  runSelect: React.ReactNode;
   urls: Array<[string, string]>;
   /** The Sharing surface, built by the app (it owns the shares poll). */
   sharing: React.ReactNode;
@@ -2879,7 +3372,16 @@ function TopBar(props: {
               {/* The spinner belongs on the button that was pressed. Putting
                   it on play/stop for every action made a restart look like a
                   stop in progress. */}
-              <Tooltip label={props.running ? "Stop run" : "Start run"}>
+              {/* The run's name is in the label, not only in a tooltip on the
+                  selector: ■ ends processes, and which run it ends has to be
+                  unmistakable at the instant it is clicked, not one hover away. */}
+              <Tooltip
+                label={
+                  props.running
+                    ? `Stop ${props.run?.name ?? "run"}`
+                    : "Start run"
+                }
+              >
                 <ActionIcon
                   size="md"
                   variant="light"
@@ -2909,7 +3411,9 @@ function TopBar(props: {
                   )}
                 </ActionIcon>
               </Tooltip>
-              <Tooltip label="Restart">
+              <Tooltip
+                label={`Restart ${props.run?.name ?? "run"}`}
+              >
                 <ActionIcon
                   size="md"
                   variant="default"
@@ -2922,22 +3426,26 @@ function TopBar(props: {
               </Tooltip>
               {/* Status is a dot, not a word: the text was long enough to be
                   clipped in a crowded bar, and it duplicated what the
-                  start/stop icon already says. */}
-              {run && (
-                <Tooltip
-                  label={
-                    props.pending
-                      ? `Run ${run.name}: ${props.pending}…`
-                      : `Run ${run.name}: ${run.status}`
-                  }
-                >
-                  <span
-                    className={`dot ${runStatusClass(run.status)}`}
-                    role="img"
-                    aria-label={`Run ${run.name}: ${props.pending ?? run.status}`}
-                  />
-                </Tooltip>
-              )}
+                  start/stop icon already says. The dot now rides on the run
+                  selector, so the same glyph also says *which* run it describes —
+                  a worktree can hold several, and a dot with no name attached was
+                  read as belonging to whatever the control beside it named. */}
+              {props.runSelect ??
+                (run && (
+                  <Tooltip
+                    label={
+                      props.pending
+                        ? `Run ${run.name}: ${props.pending}…`
+                        : `Run ${run.name}: ${run.status}`
+                    }
+                  >
+                    <span
+                      className={`dot ${runStatusClass(run.status)}`}
+                      role="img"
+                      aria-label={`Run ${run.name}: ${props.pending ?? run.status}`}
+                    />
+                  </Tooltip>
+                ))}
               {run && (
                 // Opens a browser pane on the run's URLs, not an overlay of its
                 // own: the URLs live in whichever pane is about to need them, and
@@ -3346,7 +3854,17 @@ function Rail(props: {
               // opened had no transition signal on the *control* at all. Shared
               // with the top bar, which had the same gap.
               const spinner = spinnerAction(pending, live);
-              const attention = needsAttention(status);
+              // Every live run of the worktree, not only the one `activeRun`
+              // picks. A directory can hold several environments at once — an
+              // agent's alongside a human's — and `status` reports the healthiest
+              // of them, so a sibling that failed or is stuck recovering had no
+              // affordance here at all while the picked run stayed green.
+              const liveAll = liveRuns(runs);
+              const worst = worstStatus(liveAll);
+              const attention = needsAttention(status) || needsAttention(worst);
+              // Which status the alert affordance describes: the thing that
+              // actually needs looking at, which may not be the picked run.
+              const alertStatus = needsAttention(status) ? status : worst;
               // The run's own status, verbatim rather than through a table, so
               // this cannot drift from what the daemon reports. `activeRun` never
               // returns a stopped run, so a worktree with nothing up says nothing
@@ -3356,11 +3874,18 @@ function Rail(props: {
               // rows have no run control to carry it. In wide mode it is redundant
               // with the control, deliberately: a tooltip that says something
               // different depending on the rail's width is the worse surprise.
+              //
+              // With more than one live run it names them all, because "which of
+              // the two is that dot about" is the question this row could not
+              // answer before — and a single status here would have to pick one
+              // silently, which is the defect, not the layout.
               const stateNote = pending
                 ? ` · ${pending}…`
-                : live
-                  ? ` · ${live.status}`
-                  : "";
+                : liveAll.length > 1
+                  ? ` · ${liveAll.map((r) => `${r.name}: ${r.status}`).join(", ")}`
+                  : live
+                    ? ` · ${live.status}`
+                    : "";
               const trashed = w.trashed_at !== "";
               // Inline controls are wide-only — a 64px collapsed row has no space
               // for them. Right-click reaches the same actions in either mode.
@@ -3484,12 +4009,28 @@ function Rail(props: {
                       first, it would announce "Node health for chk" ahead of the
                       alias. Same reason the away icon beside the alias is
                       `aria-hidden`. */}
+                  {/* More than one live run in one directory: the count is
+                      rendered, not implied. The rail's dot and control can only
+                      speak for one of them, so a row that showed nothing here left
+                      the second environment with no representation anywhere in the
+                      rail — which is how an agent-started run stayed invisible
+                      until it broke something. */}
+                  {props.wide && !trashed && liveAll.length > 1 && (
+                    <span
+                      className={`run-count${needsAttention(worst) ? " alert" : ""}`}
+                      title={`${liveAll.length} runs live here: ${liveAll
+                        .map((r) => `${r.name} (${r.status})`)
+                        .join(", ")}`}
+                    >
+                      {liveAll.length}
+                    </span>
+                  )}
                   {!trashed && attention && (
                     <button
                       type="button"
-                      className={`wt-alert ${status}`}
+                      className={`wt-alert ${alertStatus}`}
                       title={
-                        status === "recovering"
+                        alertStatus === "recovering"
                           ? `${w.alias} — veld is restarting a node that keeps failing its liveness probe. Open node health.`
                           : `${w.alias} — the run failed. Open node health.`
                       }

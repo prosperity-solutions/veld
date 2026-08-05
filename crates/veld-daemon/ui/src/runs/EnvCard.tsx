@@ -23,6 +23,7 @@ import {
 import { LogsView, NodesView, badgeColor, type RunViewTarget } from "../shared/RunViews";
 import { PeerShareStrip, ShareControls, WebShareStrip, sharesForRun } from "../shared/Sharing";
 import { useCopyFlash } from "../shared/copy";
+import { startOriginLabel } from "../shared/startOrigin";
 import { notifyError } from "../shared/notify";
 import { fmtWhen, statusBucket } from "../shared/util";
 
@@ -166,6 +167,25 @@ export function EnvCard(props: {
           {shownStatus}
         </Badge>
       </Group>
+
+      {/* What this run was started from — the answer to "is this the one I
+          asked for, or the one something else started". `presets: null` because
+          Runs mode polls /api/environments only and has no config to compare
+          against: the line then states the preset in the past tense with the
+          tokens that actually ran, instead of claiming the name still means
+          this. The history selection deliberately carries its own origin, since
+          an earlier run of the same environment may have come from elsewhere. */}
+      {(() => {
+        const from = startOriginLabel(
+          selected ? selected.started_from : run.started_from,
+          null,
+        );
+        return from ? (
+          <Text size="xs" px={12} pt={4} c="dimmed">
+            started from {from}
+          </Text>
+        ) : null;
+      })()}
 
       {!run.live && shownOutcome && (
         <Text

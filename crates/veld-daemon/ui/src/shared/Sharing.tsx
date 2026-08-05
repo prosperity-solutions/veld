@@ -506,8 +506,8 @@ export function RunSharePanel(props: {
    * Live shares belonging to *another* run of the same worktree.
    *
    * They exist for two reasons the panel cannot fix by itself: a worktree can hold
-   * more than one environment (`diagnosticsRun` picks one), and a crashed run's
-   * shares outlive it until the GC pass releases them. Either way a public URL may
+   * more than one environment (the run selector binds this panel to one of them),
+   * and a crashed run's shares outlive it until the GC pass releases them. Either way a public URL may
    * still be serving, so the panel shows them rather than offering to start a
    * second share of the same thing — the same problem runs mode solves with
    * `unattachedShareIds`.

@@ -4,17 +4,29 @@ import {
   activeRun,
   bestFuzzyMatch,
   diagnosticsRun,
+  freshRunName,
   fuzzyMatch,
+  liveRuns,
   moveWorktree,
   needsAttention,
+  parsePendingKey,
+  pendingKey,
+  pickRun,
+  proposeRunName,
   prunePending,
   railGroups,
   runSignature,
+  runSignatureFor,
+  runStatus,
   runsForWorktree,
+  selectorRuns,
+  siblingRuns,
   sortedUrls,
   spinnerAction,
+  startRunName,
   transitionAction,
   worktreeStatus,
+  worstStatus,
   TRASH_LANE,
 } from "./model";
 
@@ -261,6 +273,181 @@ describe("runSignature", () => {
   });
 });
 
+describe("pickRun", () => {
+  it("binds to the stored name, not to the daemon's ordering", () => {
+    // The defect this exists for: two `running` runs meant the alphabetically
+    // first name won silently, and the other had no dot, no logs, no stop.
+    const runs = [run("api", "running"), run("web", "running")];
+    expect(activeRun(runs)?.name).toBe("api");
+    expect(pickRun(runs, "web").run?.name).toBe("web");
+    expect(pickRun(runs, "web").missing).toBeNull();
+  });
+
+  it("binds to an ENDED run when that is what was chosen", () => {
+    // Logs and last node states outlive the run, and "what happened to the one
+    // I was watching" is the question right after it dies.
+    const runs = [run("api", "running"), run("web", "failed")];
+    expect(pickRun(runs, "web").run?.name).toBe("web");
+  });
+
+  it("reports a vanished choice instead of silently swapping it", () => {
+    const runs = [run("api", "running")];
+    const pick = pickRun(runs, "gone");
+    expect(pick.run?.name).toBe("api");
+    // `missing` is what the caller renders — a fallback presented under the old
+    // name is how a run vanishes from under a reader mid-glance.
+    expect(pick.missing).toBe("gone");
+  });
+
+  it("falls back to the diagnostics run with no stored choice", () => {
+    const runs = [run("api", "running")];
+    expect(pickRun(runs, null).run).toBe(diagnosticsRun(runs));
+    expect(pickRun(runs, null).missing).toBeNull();
+    expect(pickRun([], null).run).toBeNull();
+  });
+});
+
+describe("selectorRuns", () => {
+  it("hides ended environments while something is live", () => {
+    // An entry is an environment, not a run, so a directory accumulates the
+    // names you started last week. Those are Runs mode's business.
+    const runs = [run("api", "running"), run("old", "stopped"), run("dead", "failed")];
+    const { runs: shown, hidden } = selectorRuns(runs, "api");
+    expect(shown.map((r) => r.name)).toEqual(["api"]);
+    expect(hidden).toBe(2);
+  });
+
+  it("shows everything when nothing is live", () => {
+    // "The run crashed overnight" is the case the app is opened for; hiding the
+    // only entry there is would strand its logs and last node states.
+    const runs = [run("api", "failed"), run("old", "stopped")];
+    const { runs: shown, hidden } = selectorRuns(runs, undefined);
+    expect(shown).toHaveLength(2);
+    expect(hidden).toBe(0);
+  });
+
+  it("always lists the bound environment, even ended", () => {
+    // Hiding the entry the control is NAMING is the vanishing behaviour this
+    // change exists to remove.
+    const runs = [run("api", "running"), run("old", "stopped")];
+    const { runs: shown, hidden } = selectorRuns(runs, "old");
+    expect(shown.map((r) => r.name)).toEqual(["api", "old"]);
+    expect(hidden).toBe(0);
+  });
+
+  it("reveals everything on request, keeping the daemon's order", () => {
+    const runs = [run("api", "running"), run("old", "stopped")];
+    const { runs: shown, hidden } = selectorRuns(runs, "api", true);
+    expect(shown).toBe(runs);
+    expect(hidden).toBe(0);
+  });
+
+  it("hides nothing when there is nothing to hide", () => {
+    expect(selectorRuns([], undefined)).toEqual({ runs: [], hidden: 0 });
+    const live = [run("api", "starting")];
+    expect(selectorRuns(live, "api").hidden).toBe(0);
+  });
+});
+
+describe("worstStatus", () => {
+  it("reports the run that needs attention, not the healthiest one", () => {
+    // The inverse of `activeRun`'s order, on purpose: this answers "does
+    // anything here need looking at", so a failed sibling must outrank a
+    // running one or the badge hides the case it exists for.
+    expect(worstStatus([run("a", "running"), run("b", "failed")])).toBe("failed");
+    expect(worstStatus([run("a", "running"), run("b", "recovering")])).toBe(
+      "recovering",
+    );
+    expect(worstStatus([run("a", "running"), run("b", "starting")])).toBe(
+      "partial",
+    );
+    expect(worstStatus([])).toBe("stopped");
+  });
+
+  it("agrees with runStatus for a single run", () => {
+    for (const s of ["running", "starting", "stopping", "failed", "recovering"] as const) {
+      expect(worstStatus([run("a", s)])).toBe(runStatus(run("a", s)));
+    }
+  });
+});
+
+describe("liveRuns / siblingRuns", () => {
+  it("separates live runs from history and the bound run from its siblings", () => {
+    const runs = [run("api", "running"), run("web", "stopped"), run("db", "starting")];
+    expect(liveRuns(runs).map((r) => r.name)).toEqual(["api", "db"]);
+    expect(siblingRuns(runs, "api").map((r) => r.name)).toEqual(["web", "db"]);
+    // No bound run: everything is an alternative.
+    expect(siblingRuns(runs, undefined)).toHaveLength(3);
+  });
+});
+
+describe("freshRunName", () => {
+  it("avoids history as well as live names", () => {
+    // `proposeRunName` may return a stopped environment's name, which is right for
+    // ▶ ("run that again") and wrong for an action labelled *another* — it would
+    // name an environment already sitting in the list.
+    const runs = [run("chk", "stopped"), run("chk-2", "failed")];
+    expect(proposeRunName("chk", runs)).toBe("chk");
+    expect(freshRunName("chk", runs)).toBe("chk-3");
+  });
+
+  it("returns the alias when the worktree has no runs at all", () => {
+    expect(freshRunName("chk", [])).toBe("chk");
+  });
+});
+
+describe("startRunName", () => {
+  it("suffixes rather than colliding with a live environment", () => {
+    // ▶ used to send no name, so the daemon defaulted to the alias: with an
+    // agent's run live that minted a third environment, and with the alias
+    // itself live it replaced that run.
+    expect(startRunName("chk", [], null)).toBe("chk");
+    expect(startRunName("chk", [run("chk", "running")], null)).toBe("chk-2");
+    expect(
+      startRunName("chk", [run("chk", "running"), run("chk-2", "starting")], null),
+    ).toBe("chk-3");
+  });
+
+  it("ignores stopped environments — starting one again is the point", () => {
+    expect(startRunName("chk", [run("chk", "stopped")], null)).toBe("chk");
+    expect(proposeRunName("chk", [run("chk", "failed")])).toBe("chk");
+  });
+
+  it("is NOT the same question as 'start another one'", () => {
+    // ▶ means "run that again" and the explicit *another* action means "a fresh
+    // environment". With a crashed `dev` bound next to a live `api` the two
+    // answers differ, and sharing one helper made the menu entry labelled
+    // "Start another run" re-run `dev` instead.
+    const dev = run("dev", "failed");
+    const runs = [run("api", "running"), dev];
+    expect(startRunName("chk", runs, dev)).toBe("dev");
+    expect(proposeRunName("chk", runs)).toBe("chk");
+  });
+
+  it("re-runs the SELECTED environment when it has ended", () => {
+    // Selecting last night's crashed `dev` and pressing ▶ must continue that
+    // environment's history, not open `dev-2` next to it.
+    const dev = run("dev", "failed");
+    expect(startRunName("chk", [dev], dev)).toBe("dev");
+    // A live selection is not re-run: that is what ■ and restart are for.
+    const live = run("dev", "running");
+    expect(startRunName("chk", [live], live)).toBe("chk");
+  });
+});
+
+describe("runSignatureFor", () => {
+  it("watches ONE environment, so a sibling's transition cannot clear it", () => {
+    const before = [run("api", "starting"), run("web", "running")];
+    const after = [run("api", "starting"), run("web", "stopping")];
+    expect(runSignatureFor(before, "api")).toBe(runSignatureFor(after, "api"));
+    expect(runSignatureFor(before, "web")).not.toBe(runSignatureFor(after, "web"));
+  });
+
+  it("is 'none' for a name with no environment yet — a start in flight", () => {
+    expect(runSignatureFor([], "api")).toBe("none");
+  });
+});
+
 describe("prunePending", () => {
   const marker = (sig: string, expiresAt = 10_000) => ({
     label: "start" as const,
@@ -289,12 +476,26 @@ describe("prunePending", () => {
     expect(prunePending(cur, 5_000, () => "stopped")).toEqual({});
   });
 
-  it("prunes per worktree, leaving the others alone", () => {
+  it("prunes per marker, leaving the others alone", () => {
     const cur = { 1: marker("stopped"), 2: marker("running:x") };
-    const next = prunePending(cur, 0, (id) =>
-      id === 1 ? "running:new" : "running:x",
+    const next = prunePending(cur, 0, (key) =>
+      key === "1" ? "running:new" : "running:x",
     );
     expect(Object.keys(next)).toEqual(["2"]);
+  });
+
+  it("tracks two runs of ONE worktree independently", () => {
+    // The reason the key gained the environment name: with one slot per
+    // worktree, stopping `api` while `web` was starting in the same directory
+    // overwrote the first marker and stranded its spinner.
+    const cur = {
+      [pendingKey(7, "api")]: marker("running:a"),
+      [pendingKey(7, "web")]: marker("starting:b"),
+    };
+    const next = prunePending(cur, 0, (key) =>
+      parsePendingKey(key)?.runName === "api" ? "stopping:a" : "starting:b",
+    );
+    expect(Object.keys(next)).toEqual([pendingKey(7, "web")]);
   });
 
   it("returns the SAME object when nothing changed", () => {

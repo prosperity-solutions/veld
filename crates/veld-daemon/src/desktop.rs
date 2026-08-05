@@ -617,7 +617,7 @@ struct WorktreeView {
     /// Presets from the checkout's root config, in display order, with their
     /// keys and labels (empty without a config). The UI shows the label a human
     /// can read; `name` is what it sends back to start the run.
-    presets: Vec<veld_core::presets::ResolvedPreset>,
+    presets: Vec<PresetView>,
     /// Startable nodes with their variants — the UI's custom-selection
     /// source when no preset fits (hidden nodes excluded).
     nodes: Vec<NodeOptionView>,
@@ -627,6 +627,28 @@ struct WorktreeView {
     /// is what the client types would then have to lie about — the exact defect
     /// #190 shipped with `public_urls`/`connections`.
     ide: IdeView,
+}
+
+/// A preset plus the `node:variant` set it expands to **right now**.
+///
+/// The expansion travels with the listing because it is the other half of a
+/// comparison the client cannot otherwise make: a run records the expansion its
+/// preset meant at start time (`RunInfo.started_from`), and the two together are
+/// what distinguish "this run is preset X" from "this run *was* preset X, which
+/// has since been edited". `ResolvedPreset::selections` cannot answer it — those
+/// are the raw entries, `@preset` refs unexpanded.
+///
+/// An expansion that fails (a ref to a preset that no longer exists, an unknown
+/// node) yields an empty vector rather than dropping the preset: a preset the UI
+/// can still name and start is more useful than a hole in the list, and a
+/// comparison against an empty expansion reads as "differs", which is true.
+#[derive(Serialize)]
+struct PresetView {
+    #[serde(flatten)]
+    preset: veld_core::presets::ResolvedPreset,
+    /// Sorted `node:variant` tokens, directly comparable to
+    /// `RunInfo.started_from.selections`.
+    expanded: Vec<String>,
 }
 
 /// The `ide` config as the UI consumes it.
@@ -700,9 +722,25 @@ fn worktree_view(wt: WorktreeRecord) -> WorktreeView {
     // Display order comes from the resolver, not a sort here — the UI list and
     // the CLI picker must agree, or the key printed next to a preset in one
     // surface means something else in the other.
-    let presets = cfg
+    let presets: Vec<PresetView> = cfg
         .as_ref()
-        .map(veld_core::presets::resolve)
+        .map(|c| {
+            veld_core::presets::resolve(c)
+                .into_iter()
+                .map(|preset| {
+                    // Expand AND resolve, in that order — the same two steps
+                    // `veld start --preset` takes. `expand_preset` alone leaves a
+                    // bare `node` without its default variant, so its tokens
+                    // would differ from a run's recorded ones for every selection
+                    // written without an explicit variant.
+                    let expanded = veld_core::graph::expand_preset(&preset.name, c)
+                        .and_then(|sels| veld_core::graph::resolve_selections(&sels, c))
+                        .map(|sels| veld_core::state::StartOrigin::new(None, &sels).selections)
+                        .unwrap_or_default();
+                    PresetView { preset, expanded }
+                })
+                .collect()
+        })
         .unwrap_or_default();
     let mut nodes: Vec<NodeOptionView> = cfg
         .as_ref()

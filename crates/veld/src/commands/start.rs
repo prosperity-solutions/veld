@@ -22,8 +22,11 @@ pub async fn run(
         return 1;
     };
 
-    // Determine what to start.
-    let parsed_selections = if let Some(ref token) = preset {
+    // Determine what to start. The second half of the pair is the preset's
+    // config name when one was involved — recorded on the run so a later reader
+    // can say what it was started *from*, not only what it resolved to. `--preset`
+    // may name a key, so this is `chosen.name`, never the token as typed.
+    let (parsed_selections, origin_preset) = if let Some(ref token) = preset {
         // `--preset` takes a name or the key `veld presets` printed, resolved here
         // rather than passed straight to `expand_preset`.
         //
@@ -37,12 +40,12 @@ pub async fn run(
             return 1;
         };
         match expand_and_resolve(&chosen.name, &config) {
-            Some(sels) => sels,
+            Some(sels) => (sels, Some(chosen.name.clone())),
             None => return 1,
         }
     } else if selections.is_empty() {
         match handle_no_selections(&config) {
-            Some(sels) => sels,
+            Some(pair) => pair,
             None => return 1,
         }
     } else {
@@ -52,7 +55,9 @@ pub async fn run(
             .collect();
         match raw {
             Ok(parsed) => match graph::resolve_selections(&parsed, &config) {
-                Ok(resolved) => resolved,
+                // Explicit tokens: `preset: None` is the honest record, and the
+                // absence is meaningful — this run did not come from a preset.
+                Ok(resolved) => (resolved, None),
                 Err(e) => {
                     output::print_error(&format!("{e}"), false);
                     return 1;
@@ -166,7 +171,11 @@ pub async fn run(
 
     // Run start with Ctrl+C interception so we can clean up on interrupt.
     let start_result = tokio::select! {
-        result = orchestrator.start(&parsed_selections, run_name_str) => result,
+        result = orchestrator.start(
+            &parsed_selections,
+            run_name_str,
+            veld_core::state::StartOrigin::new(origin_preset.clone(), &parsed_selections),
+        ) => result,
         _ = tokio::signal::ctrl_c() => {
             orchestrator.close_progress_sender();
             let _ = progress_handle.await;
@@ -940,7 +949,12 @@ fn unknown_preset_message(config: &VeldConfig, token: &str) -> String {
 }
 
 /// Handle the case where no selections or preset were given.
-fn handle_no_selections(config: &VeldConfig) -> Option<Vec<NodeSelection>> {
+///
+/// Returns the selections and, when the answer came from a preset, that
+/// preset's config name — a bare `veld start` that lands on `default_preset` or
+/// on the interactive picker *did* start from a preset, and the run's record has
+/// to say so or the two paths would look like explicit-token starts.
+fn handle_no_selections(config: &VeldConfig) -> Option<(Vec<NodeSelection>, Option<String>)> {
     let presets = veld_core::presets::resolve(config);
     let default = veld_core::presets::default_preset(config);
 
@@ -963,7 +977,8 @@ fn handle_no_selections(config: &VeldConfig) -> Option<Vec<NodeSelection>> {
                 "Starting default preset `{}`{label}.",
                 output::one_line(&default.name)
             );
-            return expand_and_resolve(&default.name, config);
+            let sels = expand_and_resolve(&default.name, config)?;
+            return Some((sels, Some(default.name.clone())));
         }
         let node_names: Vec<String> = config.nodes.keys().cloned().collect();
         let payload = serde_json::json!({
@@ -979,11 +994,12 @@ fn handle_no_selections(config: &VeldConfig) -> Option<Vec<NodeSelection>> {
     }
 
     if presets.is_empty() {
-        return interactive_node_variant_picker(config);
+        return interactive_node_variant_picker(config).map(|sels| (sels, None));
     }
 
     let selected = interactive_preset_selector(config, &presets, default.as_ref())?;
-    expand_and_resolve(&selected, config)
+    let sels = expand_and_resolve(&selected, config)?;
+    Some((sels, Some(selected)))
 }
 
 /// Interactive preset selector.

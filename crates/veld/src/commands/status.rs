@@ -6,7 +6,7 @@ use crate::output;
 
 /// `veld status [--name <n>] [--outputs] [--json]`
 pub async fn run(name: Option<String>, show_outputs: bool, json: bool) -> i32 {
-    let Some((config_path, _cfg)) = super::parse_config(json) else {
+    let Some((config_path, cfg)) = super::parse_config(json) else {
         return 1;
     };
     let project_root = config::project_root(&config_path);
@@ -121,6 +121,15 @@ pub async fn run(name: Option<String>, show_outputs: bool, json: bool) -> i32 {
             output::dim(&run_state.short_id()),
         );
         println!("{} {}", output::bold("State:"), run_status_display,);
+        if let Some(label) = super::start_origin_label(
+            run_state
+                .graph_snapshot
+                .as_ref()
+                .and_then(|s| s.started_from.as_ref()),
+            &cfg,
+        ) {
+            println!("{} {}", output::bold("Started from:"), label);
+        }
         let live = run_state.is_live();
         if !live {
             // Last run's outcome — the "why did it die" line.

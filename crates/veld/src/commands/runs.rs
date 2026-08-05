@@ -125,7 +125,7 @@ fn colorize_outcome(run: &RunState) -> String {
 /// `veld runs show <id-prefix> [--json]` — one run in full: identity,
 /// outcome, node results, and the graph snapshot it was started with.
 pub async fn show(id_prefix: &str, json: bool) -> i32 {
-    let Some((config_path, _cfg)) = super::parse_config(json) else {
+    let Some((config_path, cfg)) = super::parse_config(json) else {
         return 1;
     };
     let project_root = config::project_root(&config_path);
@@ -172,6 +172,14 @@ pub async fn show(id_prefix: &str, json: bool) -> i32 {
         output::dim(&run.run_id.to_string()),
     );
     println!("{} {}", output::bold("Outcome:"), colorize_outcome(&run));
+    if let Some(label) = super::start_origin_label(
+        run.graph_snapshot
+            .as_ref()
+            .and_then(|s| s.started_from.as_ref()),
+        &cfg,
+    ) {
+        println!("{} {}", output::bold("Started from:"), label);
+    }
     println!(
         "{} {}",
         output::bold("Started:"),
@@ -503,6 +511,7 @@ mod tests {
     fn snap(hash: &str, nodes: &[(&str, NodeSnapshot)]) -> GraphSnapshot {
         GraphSnapshot {
             config_hash: hash.into(),
+            started_from: None,
             nodes: nodes
                 .iter()
                 .map(|(k, n)| (k.to_string(), n.clone()))

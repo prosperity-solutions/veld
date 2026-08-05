@@ -219,9 +219,61 @@ pub struct GraphSnapshot {
     /// SHA-256 of the veld.json bytes at start time — equal hashes mean the
     /// whole config file was identical, before any per-node diffing.
     pub config_hash: String,
+    /// How the run was asked for. `None` on rows written before this existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_from: Option<StartOrigin>,
     /// Node keys (`"node:variant"`) → what the config said about them.
     /// BTreeMap for stable serialization (diff-friendly).
     pub nodes: std::collections::BTreeMap<String, NodeSnapshot>,
+}
+
+/// The invocation that started a run, recorded so a surface can say *what it
+/// was started from* rather than only what it resolved to.
+///
+/// **Both halves are required, and that is the whole design.** A preset name on
+/// its own is true for one instant: presets are re-read from disk on every use,
+/// so the name can be renamed, deleted, or have its selections edited while the
+/// run is live, and a bare stored name would then be a durable, authoritative-
+/// looking falsehood in run history and in `--json`. Keeping the expansion the
+/// name meant *at start time* is what lets a reader re-expand the preset today
+/// and report `redefined since start` instead of asserting something false.
+///
+/// A run started from explicit tokens has `preset: None` — the absence is
+/// meaningful ("this did not come from a preset"), not missing data.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StartOrigin {
+    /// The preset's config name (never its `key` — a key is a display
+    /// convenience that can move when presets are added).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset: Option<String>,
+    /// The `node:variant` tokens the invocation resolved to, sorted. Compare
+    /// against a fresh expansion of `preset` to detect a redefined preset.
+    #[serde(default)]
+    pub selections: Vec<String>,
+}
+
+impl StartOrigin {
+    /// Record an invocation: the preset's config name (or `None`) plus the
+    /// selections it resolved to.
+    ///
+    /// `selections` must be what the caller *asked for*, not the
+    /// dependency-closed start plan. A preset expands to the selections it
+    /// names, so recording the closure would make a run look `redefined` the
+    /// moment any selected node had a dependency — a false alarm on the most
+    /// ordinary config there is.
+    #[must_use]
+    pub fn new(preset: Option<String>, selections: &[crate::graph::NodeSelection]) -> Self {
+        let mut tokens: Vec<String> = selections
+            .iter()
+            .map(|s| RunState::node_key(&s.node, &s.variant))
+            .collect();
+        tokens.sort();
+        tokens.dedup();
+        Self {
+            preset,
+            selections: tokens,
+        }
+    }
 }
 
 /// How a run's node command was expressed, preserved **structurally**.

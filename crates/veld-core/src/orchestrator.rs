@@ -392,6 +392,7 @@ fn build_graph_snapshot(
     config: &VeldConfig,
     config_hash: String,
     plan: &[Vec<NodeSelection>],
+    started_from: crate::state::StartOrigin,
 ) -> crate::state::GraphSnapshot {
     let mut nodes = std::collections::BTreeMap::new();
     // The FULL resolved graph, deliberately including the oneshot terminal
@@ -439,7 +440,11 @@ fn build_graph_snapshot(
             },
         );
     }
-    crate::state::GraphSnapshot { config_hash, nodes }
+    crate::state::GraphSnapshot {
+        config_hash,
+        started_from: Some(started_from),
+        nodes,
+    }
 }
 
 /// The inputs every `veld.*` builtin is derived from.
@@ -759,10 +764,18 @@ impl Orchestrator {
 
     /// Start a run: resolve graph, allocate ports, configure DNS/Caddy,
     /// launch processes in dependency order, run health checks.
+    /// `origin` is what the caller was asked for — a preset name plus the
+    /// expansion it produced (see [`crate::state::StartOrigin`]). It is recorded
+    /// verbatim: the orchestrator never re-reads the preset and never validates
+    /// it against the config, because a preset can be edited while the run is
+    /// live and the point of the record is to make that detectable later.
+    /// `veld restart` passes the previous run's origin through unchanged rather
+    /// than rebuilding it from node rows, which are the dependency closure.
     pub async fn start(
         &mut self,
         selections: &[NodeSelection],
         run_name: &str,
+        origin: crate::state::StartOrigin,
     ) -> Result<RunState, OrchestratorError> {
         // Semantic validation runs HERE, not in `parse_config`: a typo must not
         // strand `veld stop` against a running environment (its `on_stop` hooks
@@ -878,6 +891,7 @@ impl Orchestrator {
             &self.config,
             self.config_hash.clone(),
             &plan,
+            origin,
         ));
         // Scope the run-level log streams to this instance (the writers were
         // created before the run existed).

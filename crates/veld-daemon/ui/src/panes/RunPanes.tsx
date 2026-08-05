@@ -5,11 +5,16 @@
  * renders too. All these add is the pane's contract — resolve the *selected*
  * worktree's run, or say honestly why there isn't one.
  *
- * Neither pane holds a run identity: they render whatever run the selected
- * worktree has, so switching worktrees re-points every open diagnostics pane — the
- * same rule the top bar's run controls follow. Capturing the run into the tab
- * instead would leave a pane showing a run whose worktree is off screen, with
- * nothing in the tab strip to say so.
+ * Neither pane holds a run identity: they render the run the window is *bound* to
+ * — the top bar's run selector, resolved once in `App` — so switching worktrees or
+ * picking another run re-points every open diagnostics pane at the same time.
+ * Capturing the run into the tab instead would leave a pane showing a run whose
+ * worktree is off screen, with nothing in the tab strip to say so.
+ *
+ * That the selector moves *all* of them together is the deliberate limit of this
+ * design: a directory with two live runs is watched one at a time, not
+ * side-by-side. Per-tab pinning would be the next increment, and it belongs in the
+ * tab (a value the layout carries) rather than in a second selector.
  *
  * History *is* reachable from a pane: the logs view has its own run picker and the
  * nodes view grows one when no host owns the choice (`selected` omitted below).

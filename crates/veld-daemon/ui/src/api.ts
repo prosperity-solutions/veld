@@ -40,6 +40,12 @@ export interface HistoryEntry {
   outcome?: string | null;
   created_at: string;
   ended_at?: string | null;
+  /**
+   * What that run was started from. Carried per history entry, not inherited
+   * from the environment: an earlier run of the same name may well have come
+   * from a different preset or from explicit tokens.
+   */
+  started_from?: StartOrigin | null;
   nodes: HistoryNode[];
 }
 
@@ -60,7 +66,28 @@ export interface RunInfo {
   ended_at?: string | null;
   urls: Record<string, string>;
   nodes: NodeInfo[];
+  /**
+   * What this run was started from. Absent for runs recorded before the daemon
+   * kept the record — absent means "not known", never "started from nothing".
+   */
+  started_from?: StartOrigin | null;
   history?: HistoryEntry[];
+}
+
+/**
+ * The invocation a run came from: a preset name, plus the `node:variant`
+ * expansion that name meant **at start time**.
+ *
+ * Both halves matter. Presets are re-read from disk on every use, so the name
+ * alone can become false while the run is live; comparing `selections` against
+ * the current expansion (`Preset.expanded`) is what lets a surface say
+ * `redefined since start` instead of asserting something stale. `preset: null`
+ * with tokens present is an explicit-selection start, which is a fact about the
+ * run rather than missing data.
+ */
+export interface StartOrigin {
+  preset?: string | null;
+  selections: string[];
 }
 
 export interface ProjectInfo {
@@ -275,6 +302,16 @@ export interface Preset {
   when_to_use?: string | null;
   group?: string | null;
   selections: string[];
+  /**
+   * The sorted `node:variant` set this preset expands to *right now*, directly
+   * comparable to `RunInfo.started_from.selections`.
+   *
+   * Not the same as `selections`, which is the raw config entries with
+   * `@preset` refs unexpanded and default variants unfilled. Empty when the
+   * expansion fails today (a dangling `@ref`, an unknown node) — which compares
+   * as "differs", the honest answer.
+   */
+  expanded: string[];
   /** Whether this is the project's `default_preset`. */
   is_default: boolean;
 }
@@ -822,9 +859,15 @@ export const api = {
     if (!res.ok) throw new Error(await errorMessage(res));
     return ((await res.json()) as { path: string }).path;
   },
+  /**
+   * Start a run in a worktree. `run_name` names the environment: the daemon
+   * defaults it to the worktree alias when omitted, which is a *silent* choice —
+   * every caller here sends it so the name can be shown before the start (see
+   * `startRunName`).
+   */
   startRun: (
     worktreeId: number,
-    start: { preset?: string; selections?: string[] },
+    start: { preset?: string; selections?: string[]; run_name?: string },
   ) =>
     request<void>(`/api/worktrees/${worktreeId}/start`, {
       method: "POST",

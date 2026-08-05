@@ -52,15 +52,29 @@ pub async fn run(name: Option<String>, debug: bool) -> i32 {
 
     // Take the selections from the latest run — live or ended history (the
     // "dev crashed overnight → veld restart" case reads the crashed run).
-    let selections: Vec<graph::NodeSelection> = match project_state.get_run(run_name) {
-        Some(run_state) => run_state
-            .nodes
-            .values()
-            .map(|ns| graph::NodeSelection {
-                node: ns.node_name.clone(),
-                variant: ns.variant.clone(),
-            })
-            .collect(),
+    //
+    // The origin travels with them, **verbatim**. Node rows are the dependency
+    // closure, so rebuilding an origin from them would record a wider selection
+    // set than the preset that produced it and every restarted run would then
+    // read as `redefined since start`. A pre-origin run has none to carry, and
+    // then the node rows are the only honest answer (`preset: None`).
+    let (selections, origin) = match project_state.get_run(run_name) {
+        Some(run_state) => {
+            let selections: Vec<graph::NodeSelection> = run_state
+                .nodes
+                .values()
+                .map(|ns| graph::NodeSelection {
+                    node: ns.node_name.clone(),
+                    variant: ns.variant.clone(),
+                })
+                .collect();
+            let origin = run_state
+                .graph_snapshot
+                .as_ref()
+                .and_then(|s| s.started_from.clone())
+                .unwrap_or_else(|| veld_core::state::StartOrigin::new(None, &selections));
+            (selections, origin)
+        }
         None => {
             output::print_error(&format!("Run '{run_name}' not found."), false);
             return 1;
@@ -133,7 +147,7 @@ pub async fn run(name: Option<String>, debug: bool) -> i32 {
     };
     orchestrator.set_debug(debug);
 
-    match orchestrator.start(&selections, run_name).await {
+    match orchestrator.start(&selections, run_name, origin).await {
         Ok(new_run) => {
             output::print_success(&format!("Environment '{run_name}' restarted."));
 

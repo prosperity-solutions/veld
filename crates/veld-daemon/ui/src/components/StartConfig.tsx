@@ -250,16 +250,26 @@ export function StartConfig(props: {
 
   return (
     <>
+      {/* The `Start:` prefix is the whole fix for a real confusion, not
+          decoration. This label is a *client-side* choice — what ▶ will start
+          next, remembered per worktree — and it sits beside the run selector,
+          which reports what the daemon says is actually running. Unprefixed, the
+          two read as one statement: a stale preset name next to a green dot was
+          taken to mean "that preset is running", when the live run had come from
+          the CLI or an agent. The run's own origin now renders in the selector
+          (`startOriginLabel`), so these are two labelled answers to two
+          questions rather than one ambiguous pair. */}
       <Button
         size="compact-sm"
         variant="default"
         rightSection={<IconChevronDown size={12} />}
         onClick={() => setOpened(true)}
+        title="What ▶ will start next — not what is running now"
         styles={{
           label: { fontFamily: "var(--mantine-font-family-monospace)" },
         }}
       >
-        {startSelectionLabel(sel, w)}
+        Start: {startSelectionLabel(sel, w)}
       </Button>
       <Modal
         opened={opened}
