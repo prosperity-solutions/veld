@@ -301,9 +301,11 @@ test:
     cargo test --workspace
     cd crates/veld-daemon/frontend && npm test
     cd crates/veld-daemon/ui && npm test
+    cd desktop && npm test
 
 lint:
     cargo clippy --workspace --all-targets
+    cargo fmt --all --check
     cd crates/veld-daemon/frontend && npx tsc --noEmit
     cd crates/veld-daemon/ui && npm run typecheck
     # JS/TS surfaces — a new linter is its own guard (see `.github/workflows/ci.yml`);

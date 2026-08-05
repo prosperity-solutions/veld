@@ -139,9 +139,17 @@ just dev-restore    # runs veld update
 | `just dev-restore` | Restore to released version | No |
 | `just build` | Build Rust + frontend | No |
 | `just test` | Run all tests | No |
-| `just lint` | Clippy + TypeScript type check + JS/TS Biome lint | No |
+| `just lint` | Clippy + rustfmt + TypeScript type check + JS/TS Biome lint | No |
 | `just workflow-gates` | Assert no CI job can run on a draft PR. Needs PyYAML: `python3 -m pip install --user pyyaml` | No |
 | `just commit-subjects` | Check your commit subjects against the conventional-commits pattern CI enforces | No |
+
+> **Git hooks (optional, recommended):** the repo ships `lefthook.yml`, a
+> [`lefthook`](https://github.com/evilmartians/lefthook) `pre-push` hook that runs
+> `just lint` so a red diff can't reach a draft PR. Install the `lefthook` binary
+> (`brew install lefthook`, `cargo install lefthook`, or `npm i -g lefthook`) and run
+> `lefthook install` once per clone to activate. It is intentionally skippable —
+> `git push --no-verify` (or `LEFTHOOK=0`) bypasses it when you deliberately want a
+> red draft.
 
 ## Guidelines
 

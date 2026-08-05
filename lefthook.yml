@@ -1,0 +1,21 @@
+# Lefthook (git hooks).
+#
+# Rather than a per-commit hook, the gate lives on *push*: CI does not run on a
+# draft PR (AGENTS.md → CI cost convention), so the local static pass is the
+# only signal a draft gets before it is marked ready. `just lint` already runs
+# cargo clippy + fmt, tsc, and Biome over every JS/TS surface; this hook makes
+# that pass happen automatically instead of relying on the author to remember.
+#
+# It is deliberately skippable — there are legitimate reasons to push red mid-flow,
+# and the point of the hook is that skipping is a *choice* (git push --no-verify,
+# or LEFTHOOK=0), not something you do by forgetting.
+pre-push:
+  commands:
+    lint:
+      run: just lint
+      fail_text: |
+        just lint is red — clippy/fmt/typecheck/Biome must pass before a push,
+        because CI skips every job on a draft PR and the local pass is a draft's
+        only signal. Fix the reported issues, or push with --no-verify if you
+        deliberately want a red draft (e.g. hand to the maintainer mid-flow). See
+        docs/agentic-review.md §1.1 pre-pass.

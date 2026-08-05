@@ -150,8 +150,10 @@ git diff --stat <diff-target>
 git log --oneline -- <touched paths>
 ```
 
-Plus, when the diff touches them: `npm run typecheck` / `npm run lint` in
-`crates/veld-daemon/ui`, and any schema or license drift gate the change is near.
+Plus, when the diff touches them: `npm run typecheck` / `npm run lint` / `npm test`
+in the affected JS surface (`desktop/`, `crates/veld-daemon/ui`, `crates/veld-daemon/frontend`),
+and any schema or license drift gate the change is near. `just lint` / `just test`
+run the whole static + test pass for both Rust and JS.
 Capture output verbatim.
 
 - **Pre-pass red → fix that first**, then start. Reviewing a diff that doesn't
