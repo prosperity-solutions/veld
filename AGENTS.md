@@ -200,10 +200,17 @@ and several were paid for in this codebase already.
     --jq '[.[] | select(.workflow == "CI" and .bucket == "skipping")]'   # must be []
   ```
 
-  Where a name appears twice — a draft run and a ready run can both attach check
-  runs to the same head SHA — take the newest per name, or list the run directly:
-  `gh run list --workflow CI --commit "$(git rev-parse HEAD)"` and read only the
-  latest run id.
+  **This is a terminal test, not a progress test.** The ready run's check for a
+  job name replaces the draft run's, so names do not duplicate — but until the
+  ready run's job for a name has *started*, the draft's `skipping` entry is still
+  the one showing. Measured on #209: four CI names still read `skipping` while
+  `check` was in progress, because their jobs `needs:` it. So apply the assertion
+  only once no CI check is `pending`, or bypass the rollup and read the run:
+
+  ```sh
+  gh run list --workflow CI --commit "$(git rev-parse HEAD)" --json databaseId
+  gh run view <id> --json jobs      # authoritative per-job status/conclusion
+  ```
 
   The other consequence: **the local pre-pass is the only correctness signal a
   draft gets**, so never push-and-mark-ready on a red pre-pass hoping CI will

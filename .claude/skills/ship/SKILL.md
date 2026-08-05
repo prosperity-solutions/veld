@@ -260,10 +260,17 @@ PR is ready, so waiting on a draft's checks is an infinite wait, not patience.
      --jq '[.[] | select(.workflow == "CI" and .bucket == "skipping")]'   # must be []
    ```
 
-   A draft run and a ready run can both attach check runs to the same head SHA, so
-   if a name appears twice, take the newest — or read the run directly with
-   `gh run list --workflow CI --commit "$(git rev-parse HEAD)"` and inspect only
-   the latest id.
+   Apply that assertion **only when no CI check is `pending`** — it is a terminal
+   test. The ready run's check replaces the draft's for a given job name (names do
+   not duplicate), but a name whose ready-run job has not started yet still shows
+   the draft's `skipping` entry; measured on #209, four CI names read `skipping`
+   while `check` was in progress because their jobs `needs:` it. Read the run
+   itself if you want an unambiguous answer at any moment:
+
+   ```sh
+   gh run list --workflow CI --commit "$(git rev-parse HEAD)" --json databaseId
+   gh run view <id> --json jobs
+   ```
 
    This is the failure mode to fear under autonomy: forget step 2, poll, read
    "All checks were successful", and report a green CI on a diff nothing ran.
