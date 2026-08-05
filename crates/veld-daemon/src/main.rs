@@ -127,6 +127,31 @@ async fn main() -> Result<()> {
     // (the "another instance is already running" abort) unreachable. Stale
     // files are removed only after a connect() probe proves nobody answers.
 
+    // Warned about before binding, because `bind`'s own error for an over-long path is
+    // "path must be shorter than SUN_LEN" — true, and it names neither the path nor
+    // the way out. It reaches the user as a daemon that will not start. The holder
+    // sockets already get this treatment (`veld_core::instance::pty_dir`); the
+    // control socket is reachable the same way, since `VELD_DAEMON_SOCK` can point
+    // anywhere and a checkout under `~/git/_worktrees/<long-branch-name>/` is over
+    // the bound on its own.
+    //
+    // **A warning, not a refusal**, and the difference is a real one: `MAX_SOCKET_PATH`
+    // is 104 because that is the *safe floor* across platforms (macOS `sun_path` is
+    // 104, Linux's is 108), so refusing here would stop a Linux daemon that has always
+    // bound a 104..=107-byte path perfectly well — a regression handed to someone who
+    // would then read nothing, since under systemd this goes to a journal. Let the
+    // kernel be the authority on its own limit; this only makes its verdict legible.
+    if let Some(len) = veld_core::instance::socket_path_over_limit(&args.socket_path) {
+        warn!(
+            "the daemon socket path is {len} bytes, at or over the {}-byte floor a unix \
+             socket allows on the strictest supported platform ({}). If the bind below \
+             fails, set VELD_DAEMON_SOCK to a shorter path — somewhere under $HOME \
+             rather than inside a deep checkout.",
+            veld_core::instance::MAX_SOCKET_PATH,
+            args.socket_path.display()
+        );
+    }
+
     // Bind the Unix socket listener. A leftover socket FILE from a crashed
     // daemon must not block startup — but a LIVE socket means another
     // instance of this daemon is already running, which must be a loud,

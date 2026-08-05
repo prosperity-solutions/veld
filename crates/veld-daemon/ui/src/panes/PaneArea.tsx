@@ -241,7 +241,10 @@ function releaseForTransfer(tab: PaneTab): void {
       // Pure React; they own nothing outside the layout.
       return;
     default:
-      return unhandledKind(tab.kind);
+      // `unhandledKind` returns `never`, so the missing `return` is deliberate:
+      // this branch never completes normally, and a bare call keeps the final
+      // statement's value from tripping `noVoidTypeReturn` on a `void` function.
+      unhandledKind(tab.kind);
   }
 }
 

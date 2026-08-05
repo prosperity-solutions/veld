@@ -1015,6 +1015,23 @@ export function diagTab(kind: DiagKind): PaneTab {
 }
 
 /**
+ * Bring a diagnostics pane to the front, adding one only if none is open.
+ *
+ * For a surface that means "take me to the diagnosis" rather than "give me
+ * another pane" — the rail's attention affordance. Clicking it twice must not
+ * grow a second Nodes tab, and a Nodes tab that is already open in the *other*
+ * dock is the one to focus rather than duplicate, which `activateTab` handles by
+ * moving `focused` to whichever dock holds it.
+ *
+ * Deliberately not used by the ⌘K "… in a pane" commands: those are explicitly
+ * about opening a pane, and someone who asks for one twice wants two.
+ */
+export function revealDiagPane(layout: PaneLayout, kind: DiagKind): PaneLayout {
+  const open = allTabs(layout).find((t) => t.kind === kind);
+  return open ? activateTab(layout, open.id) : addTabToFocused(layout, diagTab(kind));
+}
+
+/**
  * Swap a tab's content, keeping its position and its active/focused state.
  *
  * The replacement carries a **new id**, which is the point: a terminal's id is

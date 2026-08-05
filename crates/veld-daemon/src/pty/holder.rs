@@ -803,7 +803,7 @@ fn spawn_shell(
     cwd: &std::path::Path,
     size: PtySize,
     argv: Option<&[String]>,
-    env: &[(String, String)],
+    env: &std::collections::BTreeMap<String, String>,
 ) -> anyhow::Result<Spawned> {
     let PtyPair { master, slave } = native_pty_system().openpty(size)?;
 
@@ -836,8 +836,18 @@ fn spawn_shell(
     // and disables colour and line editing.
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
-    // After TERM/COLORTERM so a pane could in principle override them, and never
-    // before `cwd`, which is the daemon's to decide either way.
+    // The daemon's additions (`$BROWSER` and friends — see `pty::shims`, plus the
+    // resolved `PATH` a pane command needs). Set last, after TERM/COLORTERM so a
+    // pane can override them, and never before `cwd`, which is the daemon's to
+    // decide either way.
+    //
+    // Note what this deliberately does **not** try to be for the *shell* path: a
+    // login shell is free to overwrite any of these in its rc files, and `PATH` in
+    // particular is rewritten by `path_helper` on macOS and by `/etc/profile` on
+    // Debian. That is why nothing here relies on `PATH` order; see
+    // `veld_core::opener`. For the `argv` path there is no rc file in the way, so
+    // the injected `PATH` is the one the command actually gets — which is the
+    // whole point of injecting it.
     for (key, value) in env {
         cmd.env(key, value);
     }
@@ -872,7 +882,12 @@ fn spawn_shell(
 /// The user's shell, falling back to a POSIX shell that is present on every
 /// supported platform. `SHELL` comes from this process's environment, inherited
 /// from the daemon (launchd/systemd propagate the user's), never from a client.
-fn login_shell() -> String {
+///
+/// `pub` because the daemon needs the same answer *before* it spawns a holder: which
+/// shell this is decides whether the session's environment carries the `ZDOTDIR`
+/// handoff (`pty::shims`). One function, so the two cannot disagree about which
+/// shell is about to run.
+pub fn login_shell() -> String {
     std::env::var("SHELL")
         .ok()
         .filter(|s| !s.is_empty())
@@ -1022,7 +1037,7 @@ mod tests {
             socket: socket.clone(),
             orphan_grace_secs: grace,
             argv: None,
-            env: Vec::new(),
+            env: std::collections::BTreeMap::new(),
             pane_label: None,
         };
         tokio::spawn(run(cfg));
@@ -1093,10 +1108,10 @@ mod tests {
                 "-c".to_owned(),
                 "printf 'PANE[%s][%s]' \"$PATH\" \"$VELD_PANE_TOKEN\"".to_owned(),
             ]),
-            env: vec![
+            env: std::collections::BTreeMap::from([
                 ("PATH".to_owned(), "/injected/bin:/usr/bin:/bin".to_owned()),
                 ("VELD_PANE_TOKEN".to_owned(), "tok-123".to_owned()),
-            ],
+            ]),
             pane_label: Some("Probe".to_owned()),
         };
         tokio::spawn(run(cfg));
@@ -1166,7 +1181,7 @@ mod tests {
             // Long, so nothing but the hangup can be what ends this shell.
             orphan_grace_secs: 3600,
             argv: None,
-            env: Vec::new(),
+            env: std::collections::BTreeMap::new(),
             pane_label: None,
         };
         tokio::spawn(run(cfg));

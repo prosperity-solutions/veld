@@ -152,6 +152,54 @@ async fn wait_for_health(instance: &Instance) {
     }
 }
 
+/// Every path a spawned daemon writes has to land inside this instance's temp
+/// directory.
+///
+/// This test redirects the database, the socket, the port and the holder directory —
+/// so a *new* piece of per-instance state keyed off something else (the port, say)
+/// is invisible here and shows up as files accumulating in the developer's real
+/// `~/.veld` on every `cargo test`. That is exactly what the `$BROWSER` shim
+/// directory did before it moved under `VELD_PTY_DIR`. Asserted rather than
+/// documented, because the symptom is silent.
+fn assert_state_is_confined(instance: &Instance) {
+    // The daemon writes no shims without a `veld` binary beside it, and nothing in
+    // this crate's test build produces one — so its absence is a missing artifact,
+    // not a misplaced directory. Which of the two it is matters: the first version of
+    // this assert reported "the shim directory is in the wrong place" on a clean
+    // tree, sending the reader to look somewhere nothing is wrong.
+    let sibling_cli = std::path::Path::new(env!("CARGO_BIN_EXE_veld-daemon"))
+        .parent()
+        .map(|d| d.join("veld"))
+        .is_some_and(|p| p.is_file());
+    let shims = instance.pty_dir().join("shims");
+    if sibling_cli {
+        assert!(
+            shims.join("veld-open").is_file(),
+            "the daemon's shim directory is not under VELD_PTY_DIR — check where it \
+             actually wrote ({})",
+            shims.display()
+        );
+    } else {
+        eprintln!(
+            "no `veld` beside the test daemon, so no shims were written — the \
+             confinement half of this check needs `cargo build -p veld`"
+        );
+    }
+    let home_shims = dirs::home_dir().unwrap().join(".veld");
+    for entry in std::fs::read_dir(&home_shims)
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        assert!(
+            !name.starts_with("shim-"),
+            "a test wrote {name} into the real {}",
+            home_shims.display()
+        );
+    }
+}
+
 /// Mint a ticket, returning it together with whether the daemon reports the
 /// session as resumed — which is the daemon's own answer to "is that shell still
 /// there", and therefore the assertion this whole test is about.
@@ -260,6 +308,9 @@ async fn a_shell_survives_the_daemon_being_killed() {
 
     let mut daemon = instance.start_daemon();
     wait_for_health(&instance).await;
+    // Checked once, in the first test to have a live daemon: the daemon writes its
+    // per-instance state only where this harness pointed it.
+    assert_state_is_confined(&instance);
 
     let (ticket, resumed) = mint(&instance, worktree_id, &session_id).await;
     assert!(

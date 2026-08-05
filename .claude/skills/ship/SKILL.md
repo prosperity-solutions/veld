@@ -155,7 +155,9 @@ Three rules that make it worth the spend rather than theatre:
   surface, `{var}` vs `${var}`, `command` vs `start_server` semantics).
 - Build, then `rustup update stable` (CI uses floating stable — drift blocks it),
   `cargo clippy --workspace --all-targets`, `cargo fmt --all`, and run the tests
-  as you go.
+  as you go. For a JS/TS change, run the Biome `lint` + `typecheck`/`test` in the
+  affected surface too (`desktop/`, `crates/veld-daemon/ui`, `crates/veld-daemon/frontend`)
+  — `just lint` and `just test` cover all of it in one command each.
 - If Step 0 chose two checkpoints: this is **checkpoint one**. Finish the whole
   feature (including the docs audit in Step 3), leave it building and runnable,
   then hand over per **Checkpointed autonomy** and wait.

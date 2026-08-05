@@ -6,11 +6,13 @@
     "build": "node build.mjs",
     "build:dev": "node build.mjs --dev",
     "typecheck": "tsc --noEmit",
+    "lint": "biome lint src tests",
     "test": "vitest run",
     "test:watch": "vitest",
     "preview": "node build.mjs && echo 'Open http://localhost:3456/frontend/dev/' && python3 -m http.server 3456 -d .."
   },
   "devDependencies": {
+    "@biomejs/biome": "^2.5.7",
     "esbuild": "^0.25.0",
     "jsdom": "^29.0.1",
     "typescript": "^5.7.0",

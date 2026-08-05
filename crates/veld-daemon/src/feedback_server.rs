@@ -133,6 +133,10 @@ pub async fn run_feedback_server(share_manager: Arc<crate::share::manager::Share
     // before the listener binds, so no attach can race a half-adopted registry.
     pty::adopt_existing_sessions().await;
     pty::spawn_session_reaper();
+    // The `$BROWSER` shims every new session's environment points at. Here rather
+    // than on the first terminal so a machine that cannot have them says so in the
+    // startup log, and so `$VELD_SHIM_DIR` is usable from the first shell.
+    pty::prepare_shims();
     // Worktree removals recorded but not finished by a previous daemon resume
     // here — `worktrees.trashed_at` is the durable record, so a crash mid-removal
     // costs a restart, not a stuck row. Started for the same reason the reaper is

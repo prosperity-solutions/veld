@@ -504,6 +504,130 @@ impl Diagnostics {
         // counts what is in it; a socket nobody answers is a holder that is gone
         // and gets swept at the next daemon start.
         self.checks.push(self.terminal_holders_check());
+
+        // 10. The terminal-URL shims.
+        //
+        // Same reason as the row above: this is a feature whose failure mode is
+        // *silence*. The daemon writes these once at startup and logs a single
+        // warning if it cannot, and a `OnceLock` means it never tries again — so a
+        // machine with no `veld` beside the daemon, or a `~/.veld` it cannot write,
+        // has terminal URL opening switched off with nothing anywhere to say so.
+        self.checks.push(self.terminal_shims_check());
+    }
+
+    /// Whether a terminal can route a URL into a Veld browser pane.
+    ///
+    /// Reports the directory, and passes only if the `veld-open` script the session's
+    /// `$BROWSER` points at exists *and* names an executable CLI. Both halves matter
+    /// and neither is visible from anywhere else: the script is generated from the
+    /// binary sitting beside the running daemon, so an install that moved, an
+    /// interrupted update, or a daemon started from a directory with no sibling `veld`
+    /// all end with a `$BROWSER` that cannot work — and the only other signal is one
+    /// `warn!` in the daemon log at boot.
+    ///
+    /// A note rather than a failure: every other part of a terminal still works, and
+    /// clicking a URL in the output still opens it in the system browser.
+    fn terminal_shims_check(&self) -> Check {
+        // **Skipped whole under sudo**, exactly as check 0 skips itself, and for both
+        // of its reasons rather than one. `Db::open()` creates the file, so as root it
+        // leaves root-owned `veld.db`/`-wal`/`-shm` that break every later non-sudo
+        // `veld` command — and `shim_dir()` is `HOME`-derived and no more
+        // `SUDO_USER`-aware than the database path is, so the row would then report on
+        // *root's* `~/.veld`, find nothing there, and turn a passing `veld doctor` into
+        // a failing one. Guarding only the database left the second half live; this is
+        // one condition covering both, because two guards for one hazard is how the
+        // first version of this got it half right.
+        if std::env::var("SUDO_UID").is_ok_and(|u| !u.is_empty()) {
+            return Check {
+                pass: true,
+                label: "Terminal URL check skipped under sudo (run `veld doctor` without sudo)"
+                    .to_owned(),
+            };
+        }
+        let dir = veld_core::instance::shim_dir();
+        let shown = tilde_path(&dir);
+        // The scripts are written at every daemon start regardless of the settings, so
+        // their presence says nothing about whether the feature is *on*. Reporting
+        // "Terminal URLs open in Veld" while the user has switched it off is a green
+        // answer to the exact question someone runs this to ask.
+        let settings = veld_core::db::Db::open().ok().map(|db| {
+            (
+                db.terminal_open_urls_in_app(),
+                db.terminal_intercept_system_open(),
+            )
+        });
+        if let Some((false, _)) = settings {
+            return Check {
+                pass: true,
+                label: "Terminal URLs open in your system browser (terminal.openUrlsInApp is off)"
+                    .to_owned(),
+            };
+        }
+        let browser = dir.join("veld-open");
+        if !browser.is_file() {
+            return Check {
+                pass: false,
+                label: format!(
+                    "Terminal URL opening is off: {shown}/veld-open is missing. The \
+                     daemon writes it at startup — check the daemon log for a \
+                     warning, and that a `veld` binary sits beside the running \
+                     veld-daemon"
+                ),
+            };
+        }
+        // The baked path is the load-bearing half: the script tests it with `-x` at
+        // run time precisely because it can go away under an upgrade.
+        let baked = std::fs::read_to_string(&browser).unwrap_or_default();
+        let cli = baked
+            .lines()
+            .find_map(|l| l.split('\'').nth(1))
+            .map(std::path::PathBuf::from);
+        match cli {
+            Some(cli) if cli.is_file() => {
+                // The `ZDOTDIR` handoff is the half that catches `open`/`xdg-open`, and
+                // it is worse than useless if its file has gone: `ZDOTDIR` redirects
+                // every zsh startup file, so a missing `.zshenv` there means none of
+                // the user's own zsh config runs. The daemon checks this per session
+                // too; this row makes the state visible before a terminal is opened.
+                let handoff = dir.join("zdotdir").join(".zshenv");
+                let intercept = settings.map(|(_, i)| i).unwrap_or(true);
+                if intercept && !handoff.is_file() {
+                    return Check {
+                        pass: false,
+                        label: format!(
+                            "Terminal URLs open in Veld, but {shown}/zdotdir/.zshenv is missing, so open/xdg-open are not caught. Restart the daemon to rewrite it"
+                        ),
+                    };
+                }
+                Check {
+                    pass: true,
+                    label: format!(
+                        "Terminal URLs open in Veld ({shown} → {}{})",
+                        cli.display(),
+                        if intercept {
+                            ""
+                        } else {
+                            ", open/xdg-open not caught"
+                        }
+                    ),
+                }
+            }
+            Some(cli) => Check {
+                pass: false,
+                label: format!(
+                    "Terminal URL opening is off: {shown}/veld-open points at {}, \
+                     which is not there. Restart the daemon to rewrite it",
+                    cli.display()
+                ),
+            },
+            None => Check {
+                pass: false,
+                label: format!(
+                    "Terminal URL opening is off: {shown}/veld-open names no veld \
+                     binary. Restart the daemon to rewrite it"
+                ),
+            },
+        }
     }
 
     /// Count holder sockets, and how many of them answer.

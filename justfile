@@ -17,6 +17,17 @@ cargo_db := justfile_directory() + "/.veld-dev/veld-cargo.db"
 # The dev instance's daemon port — installed daemon keeps 19899; both run
 # side by side. Dev CLI and dev daemon must agree on this.
 dev_daemon_port := "19898"
+# The dev daemon's control socket — under $HOME, NOT inside the checkout, and
+# that is a length bound rather than tidiness. A unix socket path is capped by
+# `sockaddr_un::sun_path` (104 bytes on macOS), and a worktree under
+# `~/git/_worktrees/<branch-name>/` blows through it: the failure is `bind`
+# reporting "path must be shorter than SUN_LEN", which reaches you as a dev
+# daemon that will not start and names nothing you can act on. This is the same
+# bound `veld_core::instance::pty_dir` already moved the *holder* sockets out of
+# the checkout for; the control socket was simply missed. Keyed by port, so it
+# separates instances exactly as much as the port and the dashboard hostname
+# already do — two worktrees cannot both be the dev instance either way.
+dev_daemon_sock := env("HOME") + "/.veld/dev-" + dev_daemon_port + ".sock"
 
 # ============================================================================
 # Veld Development Workflow
@@ -48,7 +59,7 @@ dev *ARGS:
     mkdir -p "{{justfile_directory()}}/.veld-dev"
     VELD_DB_PATH="{{dev_db}}" \
     VELD_DAEMON_PORT="{{dev_daemon_port}}" \
-    VELD_DAEMON_SOCK="{{justfile_directory()}}/.veld-dev/daemon.sock" \
+    VELD_DAEMON_SOCK="{{dev_daemon_sock}}" \
         ./target/debug/veld {{ARGS}}
 
 # Run the daemon from source, foreground, ALONGSIDE the installed one — own
@@ -69,13 +80,13 @@ dev-daemon:
     # deleted) worktree targets the wrong dev instance — or nothing at all.
     # Whichever worktree runs the dev daemon is the dev instance.
     mkdir -p "$HOME/.local/bin"
-    printf '#!/usr/bin/env bash\nexport VELD_DB_PATH="{{dev_db}}"\nexport VELD_DAEMON_PORT="{{dev_daemon_port}}"\nexport VELD_DAEMON_SOCK="{{justfile_directory()}}/.veld-dev/daemon.sock"\nexec "{{justfile_directory()}}/target/debug/veld" "$@"\n' > "$HOME/.local/bin/veld-dev"
+    printf '#!/usr/bin/env bash\nexport VELD_DB_PATH="{{dev_db}}"\nexport VELD_DAEMON_PORT="{{dev_daemon_port}}"\nexport VELD_DAEMON_SOCK="{{dev_daemon_sock}}"\nexec "{{justfile_directory()}}/target/debug/veld" "$@"\n' > "$HOME/.local/bin/veld-dev"
     chmod +x "$HOME/.local/bin/veld-dev"
     echo "✓ veld-dev wrapper → this worktree"
     echo "Dev daemon: port {{dev_daemon_port}}, DB {{dev_db}}, dashboard https://veld-dev.localhost"
     VELD_DB_PATH="{{dev_db}}" \
     VELD_DAEMON_PORT="{{dev_daemon_port}}" \
-    VELD_DAEMON_SOCK="{{justfile_directory()}}/.veld-dev/daemon.sock" \
+    VELD_DAEMON_SOCK="{{dev_daemon_sock}}" \
     VELD_MANAGEMENT_HOST="veld-dev.localhost" \
         ./target/debug/veld-daemon
 
@@ -143,7 +154,7 @@ dev-link:
     cargo build
     mkdir -p "$HOME/.local/bin" .veld-dev
     wrapper="$HOME/.local/bin/veld-dev"
-    printf '#!/usr/bin/env bash\nexport VELD_DB_PATH="{{dev_db}}"\nexport VELD_DAEMON_PORT="{{dev_daemon_port}}"\nexport VELD_DAEMON_SOCK="{{justfile_directory()}}/.veld-dev/daemon.sock"\nexec "{{justfile_directory()}}/target/debug/veld" "$@"\n' > "$wrapper"
+    printf '#!/usr/bin/env bash\nexport VELD_DB_PATH="{{dev_db}}"\nexport VELD_DAEMON_PORT="{{dev_daemon_port}}"\nexport VELD_DAEMON_SOCK="{{dev_daemon_sock}}"\nexec "{{justfile_directory()}}/target/debug/veld" "$@"\n' > "$wrapper"
     chmod +x "$wrapper"
     echo "Created $wrapper — use 'veld-dev' from any directory."
     echo "Remove with: rm $wrapper"
@@ -301,11 +312,18 @@ test:
     cargo test --workspace
     cd crates/veld-daemon/frontend && npm test
     cd crates/veld-daemon/ui && npm test
+    cd desktop && npm test
 
 lint:
     cargo clippy --workspace --all-targets
+    cargo fmt --all --check
     cd crates/veld-daemon/frontend && npx tsc --noEmit
     cd crates/veld-daemon/ui && npm run typecheck
+    # JS/TS surfaces — a new linter is its own guard (see `.github/workflows/ci.yml`);
+    # keeping it in `just lint` means a local run is as strict as a CI job.
+    cd crates/veld-daemon/frontend && npm run lint
+    cd crates/veld-daemon/ui && npm run lint
+    cd desktop && npm run lint
 
 # Assert no CI job can run on a draft PR (AGENTS.md → CI cost convention).
 # Deliberately not folded into `lint`: this needs PyYAML, and `lint` is the
@@ -365,6 +383,7 @@ test-frontend:
 
 lint-frontend:
     cd crates/veld-daemon/frontend && npx tsc --noEmit
+    cd crates/veld-daemon/frontend && npm run lint
 
 setup-frontend:
     cd crates/veld-daemon/frontend && npm install
@@ -422,6 +441,7 @@ test-ui: ui-deps
 
 lint-ui: ui-deps
     cd crates/veld-daemon/ui && npm run typecheck
+    cd crates/veld-daemon/ui && npm run lint
 
 # Install/refresh every npm dep the UI and the desktop shell need. Unlike the
 # guarded checks above this always runs npm, so it also picks up a bump.

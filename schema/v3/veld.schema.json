@@ -129,7 +129,7 @@
     },
     "ide": {
       "type": "object",
-      "description": "Per-project settings for Veld's own IDE surfaces — Veld Desktop and the /ide view in a browser. `quicklinks` and `permissions` are rendered; every other key here is RESERVED — parsed and stored, but not rendered by this version, and `veld lint` says so. Spelled `ui` while the whole key was reserved; renamed in the release that first gave it a meaning, so a config carrying the old spelling gets an unknown-top-level-key error naming the rename.",
+      "description": "Per-project settings for Veld's own IDE surfaces — Veld Desktop and the /ide view in a browser. `quicklinks`, `permissions` and `externalOrigins` are rendered; every other key here is RESERVED — parsed and stored, but not rendered by this version, and `veld lint` says so. Spelled `ui` while the whole key was reserved; renamed in the release that first gave it a meaning, so a config carrying the old spelling gets an unknown-top-level-key error naming the rename.",
       "additionalProperties": true,
       "properties": {
         "quicklinks": {
@@ -157,6 +157,19 @@
               { "label": "Staging", "url": "https://staging.example.com" },
               { "label": "Grafana", "url": "https://grafana.internal" }
             ]
+          ]
+        },
+        "externalOrigins": {
+          "type": "array",
+          "description": "Origins that must open in the user's SYSTEM browser rather than in a Veld browser pane. A URL a terminal produces — clicked in its output, or opened by a program running in it — normally becomes a pane beside that terminal; an origin listed here goes to the real browser instead. That matters for sign-ins: a pane has its own cookie jar, so an SSO or bank flow started in one begins from scratch. This list is UNIONED with the user's own `browser.externalOrigins` setting rather than replacing it — the project names the hosts its app's login goes through, and the user names theirs. Turning the whole feature off is the user's `terminal.openUrlsInApp` setting, not this key.",
+          "items": {
+            "type": "string",
+            "pattern": "^https?://(\\*\\.)?[^/?#@*]+(:([0-9]+|\\*))?$",
+            "description": "A bare origin, with exactly the grammar `ide.permissions[].origin` uses: scheme://host[:port], http or https, no path, a leading `*.` for any depth of subdomain (label-wise, so `evilokta.com` does not match `*.okta.com`, and `*.x` does not match `x` itself), `*` in the port position for any port, and an omitted port meaning the scheme's default port exactly. A wildcard over a single label (`*.com`) is refused.",
+            "examples": ["https://accounts.google.com", "https://*.okta.com", "https://login.microsoftonline.com"]
+          },
+          "examples": [
+            ["https://accounts.google.com", "https://*.okta.com"]
           ]
         },
         "permissions": {

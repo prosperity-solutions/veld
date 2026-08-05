@@ -1,16 +1,19 @@
 import { describe, expect, it } from "vitest";
-import type { EnvironmentList, Lane, RunInfo, Worktree } from "./api";
+import type { EnvironmentList, Lane, RunInfo, RunStatus, Worktree } from "./api";
 import {
   activeRun,
   bestFuzzyMatch,
   diagnosticsRun,
   fuzzyMatch,
   moveWorktree,
+  needsAttention,
   prunePending,
   railGroups,
   runSignature,
   runsForWorktree,
   sortedUrls,
+  spinnerAction,
+  transitionAction,
   worktreeStatus,
   TRASH_LANE,
 } from "./model";
@@ -78,12 +81,112 @@ describe("activeRun / worktreeStatus", () => {
     expect(activeRun([])).toBeNull();
   });
 
-  it("maps to the rail dot states", () => {
+  it("reduces a run status to what a surface renders", () => {
     expect(worktreeStatus([run("a", "running")])).toBe("running");
     expect(worktreeStatus([run("a", "starting")])).toBe("partial");
+    expect(worktreeStatus([run("a", "stopping")])).toBe("partial");
     expect(worktreeStatus([run("a", "failed", true)])).toBe("failed");
     expect(worktreeStatus([run("a", "stopped")])).toBe("stopped");
     expect(worktreeStatus([])).toBe("stopped");
+  });
+
+  it("keeps recovering out of partial", () => {
+    // Folded into `partial` it rendered as a spinner, which reads as
+    // "perpetually starting" for a node the monitor is restarting on a loop.
+    // It routes to the attention affordance instead, like `failed`.
+    expect(worktreeStatus([run("a", "recovering")])).toBe("recovering");
+    expect(transitionAction(run("a", "recovering"))).toBeNull();
+  });
+
+  it("agrees with transitionAction on exactly which statuses are partial", () => {
+    // The rail draws a spinner when `transitionAction` names a direction, and
+    // `partial` is what that state used to be called. If the two ever disagree
+    // one of them is rendering a state the other does not believe in — a
+    // spinner with no colour, or a transition with no spinner.
+    const all: RunStatus[] = [
+      "starting",
+      "running",
+      "recovering",
+      "stopping",
+      "stopped",
+      "failed",
+    ];
+    for (const status of all) {
+      const r = run("a", status, true);
+      expect(
+        transitionAction(r) !== null,
+        `${status}: partial=${worktreeStatus([r])} action=${transitionAction(r)}`,
+      ).toBe(worktreeStatus([r]) === "partial");
+    }
+    // And the direction is the one the spinner's colour is keyed on.
+    expect(transitionAction(run("a", "starting"))).toBe("start");
+    expect(transitionAction(run("a", "stopping"))).toBe("stop");
+    expect(transitionAction(null)).toBeNull();
+  });
+
+  it("spinnerAction prefers the local marker over the observed transition", () => {
+    // The ordering is the only thing that knows a restart was ONE action rather
+    // than a stop followed by a start — which is what keeps the top bar's spinner
+    // on the button that was pressed.
+    expect(spinnerAction("restart", run("a", "stopping"))).toBe("restart");
+    expect(spinnerAction("stop", run("a", "starting"))).toBe("stop");
+    // No local marker: the observed transition drives it. This is the case every
+    // run control missed before — a run started from the CLI or another window.
+    expect(spinnerAction(null, run("a", "starting"))).toBe("start");
+    expect(spinnerAction(null, run("a", "stopping"))).toBe("stop");
+    // Nothing moving, and nothing to spin for.
+    expect(spinnerAction(null, run("a", "running"))).toBeNull();
+    expect(spinnerAction(null, run("a", "recovering"))).toBeNull();
+    expect(spinnerAction(null, null)).toBeNull();
+  });
+
+  it("no OBSERVED state both spins and asks for attention", () => {
+    // The complement matters as much as the set: anything `needsAttention`
+    // rejects has to be representable by a run control on its own, or the state
+    // has no surface at all.
+    //
+    // Scoped to the *observed* status on purpose — `spinnerAction(null, …)`. What
+    // the daemon reports is one state, so it may light one channel; a row showing
+    // both would mean the two-signal collision this change removed had come back
+    // through the status itself. The local-marker case is deliberately different
+    // and is pinned separately below.
+    const all: RunStatus[] = [
+      "starting",
+      "running",
+      "recovering",
+      "stopping",
+      "stopped",
+      "failed",
+    ];
+    for (const status of all) {
+      const s = worktreeStatus([run("a", status, true)]);
+      const attention = needsAttention(s);
+      expect(attention, `${status} -> ${s}`).toBe(
+        s === "failed" || s === "recovering",
+      );
+      expect(
+        attention && spinnerAction(null, run("a", status, true)) !== null,
+        `${status} is both spinning and alerting`,
+      ).toBe(false);
+    }
+    expect(needsAttention(worktreeStatus([]))).toBe(false);
+  });
+
+  it("but a local marker DOES coexist with attention, and must", () => {
+    // Stopping a failed run has always been offered (`running` is
+    // `status !== "stopped"`, unchanged), so a row can carry the alert and a
+    // spinner at once between the click and the next poll. That is not the
+    // collision this change removed: the alert reports the *run's* state and the
+    // spinner reports *my action on it*, they are different shapes in different
+    // columns, and only one of them is transient. Asserted rather than assumed,
+    // because the test above reads as forbidding it — and a guard that claims more
+    // than the code holds is worse than no guard.
+    const failed = run("a", "failed", true);
+    expect(needsAttention(worktreeStatus([failed]))).toBe(true);
+    expect(spinnerAction("stop", failed)).toBe("stop");
+    const recovering = run("a", "recovering");
+    expect(needsAttention(worktreeStatus([recovering]))).toBe(true);
+    expect(spinnerAction("restart", recovering)).toBe("restart");
   });
 
   it("ignores non-live history runs", () => {

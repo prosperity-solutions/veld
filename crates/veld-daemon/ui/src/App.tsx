@@ -30,11 +30,13 @@ import {
   diagnosticsRun,
   fuzzyMatch,
   moveWorktree,
+  needsAttention,
   prunePending,
   railGroups,
   runSignature,
   runsForWorktree,
   sortedUrls,
+  spinnerAction,
   worktreeStatus,
   TRASH_LANE,
   type PendingAction,
@@ -54,6 +56,7 @@ import {
   TextInput,
 } from "@mantine/core";
 import {
+  IconAlertTriangleFilled,
   IconArrowBackUp,
   IconArrowsExchange,
   IconChevronLeft,
@@ -117,14 +120,19 @@ import {
   parseSessionSets,
   parseTransferTabs,
   readWorktreeLayout,
+  revealDiagPane,
   saveLayouts,
   serializeSessionSets,
   sessionSetFor,
+  normalizeBrowserUrl,
   terminalIds,
   updateTab,
+  urlLabel,
 } from "./panes/model";
 import {
   applyTerminalTheme,
+  onTerminalOpenUrl,
+  openExternally,
   pruneTerminals,
   releaseTerminal,
   restartTerminal,
@@ -689,13 +697,21 @@ function AppInner(props: {
    * keep track of. In a plain browser there is no shell to ask and no second
    * window to collide with, so the claim is a no-op.
    */
-  const selectWorktree = (w: Worktree) => {
+  /**
+   * Select a worktree, and report whether the selection actually landed.
+   *
+   * The boolean exists for callers that do something *to* the worktree they are
+   * switching to — today the rail's attention affordance, which opens a Nodes
+   * pane. A claim can be refused, and a refusal that still wrote into that
+   * worktree's layout would open a pane in a set of panes another window owns.
+   */
+  const selectWorktree = async (w: Worktree): Promise<boolean> => {
     if (!desktopWindow) {
       setActiveRepoRoot(w.repo_root);
       setActiveWtKey(String(w.id));
-      return;
+      return true;
     }
-    void desktopWindow
+    return desktopWindow
       .claimWorktree(w.id)
       .then((result) => {
         if (!result?.ok) {
@@ -707,15 +723,17 @@ function AppInner(props: {
           if (result?.reason === "shown-elsewhere") {
             notifyRedirect(`${w.alias} is open in another window — switched to it`);
           }
-          return;
+          return false;
         }
         setActiveRepoRoot(w.repo_root);
         setActiveWtKey(String(w.id));
+        return true;
       })
       .catch(() => {
         // An older shell without the channel: behave as it did before.
         setActiveRepoRoot(w.repo_root);
         setActiveWtKey(String(w.id));
+        return true;
       });
   };
 
@@ -1300,10 +1318,54 @@ function AppInner(props: {
    *  display that is its own. */
   const [claimBlocked, setClaimBlocked] = useState(false);
 
+  // Mirrored into a ref, the same idiom `dialogRef` uses above: an effect with `[]`
+  // deps closes over the first render's `layouts` forever, and a decision that has to
+  // be made *before* a `setLayouts` call cannot come from inside the updater — see the
+  // terminal `open_url` handler.
+  const layoutsRef = useRef<Record<number, PaneLayout>>({});
   const [layouts, setLayouts] = useState<Record<number, PaneLayout>>(() =>
     loadLayouts(layoutSlot, windowSeed, windowRestored, chromeless),
   );
   const layout = worktree ? layouts[worktree.id] : undefined;
+
+  /**
+   * The rail's attention affordance: go to this worktree's node health.
+   *
+   * Two steps that cannot be collapsed into one. The selection has to land first
+   * — a claim can be refused, and `selectWorktree` reports that — and the pane
+   * write has to wait for `layouts[id]` to exist, because the effect that seeds a
+   * newly selected worktree's layout reads the **shared store** and only when it
+   * finds no entry of its own. Writing a layout here would therefore make that
+   * effect skip the read and grow a second set of panes for a worktree another
+   * window has, which is the failure the shared store exists to prevent.
+   *
+   * So the request is recorded and drained once the layout is there. Declared
+   * above the yield handler because that handler has to be able to abandon it:
+   * see the comment there for the interleaving that made it necessary.
+   */
+  const [diagnoseFor, setDiagnoseFor] = useState<number | null>(null);
+  const diagnoseWorktree = async (w: Worktree) => {
+    if (!(await selectWorktree(w))) return;
+    setDiagnoseFor(w.id);
+  };
+  useEffect(() => {
+    if (diagnoseFor === null) return;
+    // The selection went somewhere else (another click, the worktree was
+    // forgotten). A request that waits for a layout it will never see would
+    // otherwise fire on some later visit instead.
+    if (worktree?.id !== diagnoseFor) {
+      setDiagnoseFor(null);
+      return;
+    }
+    const l = layouts[diagnoseFor];
+    if (!l) return;
+    const next = revealDiagPane(l, "nodes");
+    setDiagnoseFor(null);
+    if (next === l) return;
+    setLayouts((prev) =>
+      prev[diagnoseFor] === l ? { ...prev, [diagnoseFor]: next } : prev,
+    );
+  }, [diagnoseFor, worktree?.id, layouts]);
 
   useEffect(() => {
     saveLayouts(layoutSlot, layouts, chromeless);
@@ -1346,6 +1408,14 @@ function AppInner(props: {
   useEffect(() => {
     if (chromeless || !desktopWindow) return;
     return desktopWindow.onYieldWorktree(({ worktreeId }) => {
+      // A pending "reveal node health" request for this worktree can never be
+      // satisfied now, and its own guard cannot see that: a yield deletes the
+      // layout without touching the *selection*, so `worktree?.id` still equals
+      // `diagnoseFor` while the layout it is waiting for is gone for good —
+      // nothing re-seeds it, because the seeding effect is keyed on the selection
+      // too. Left set, the request would fire on some later visit and open a
+      // Nodes pane nobody asked for then.
+      setDiagnoseFor((cur) => (cur === worktreeId ? null : cur));
       setLayouts((prev) => {
         const giving = prev[worktreeId];
         if (!giving) return prev;
@@ -1420,6 +1490,11 @@ function AppInner(props: {
   // Accepts an updater as well as a value: two panes can report a change in the
   // same commit (two browser panes both finishing a navigation), and a value
   // computed from the render's `layout` would silently discard the other write.
+  // Kept current on every render, like `dialogRef`. Assigned during render rather
+  // than in an effect so a frame arriving between a render and its effects still reads
+  // the layouts that render was built from.
+  layoutsRef.current = layouts;
+
   const setLayout = useCallback(
     (next: PaneLayoutUpdate) => {
       if (!worktree) return;
@@ -1449,6 +1524,65 @@ function AppInner(props: {
             return { ...prev, [Number(key)]: addTab(l, dock, browserTab({ url, profile })) };
           }
           return prev;
+        });
+      }),
+    [],
+  );
+
+  // A URL a terminal produced — clicked in its output, or handed to `$BROWSER` by
+  // something running in it. It becomes a tab in the dock holding that terminal,
+  // for the same reason a `target=_blank` does above: the layout is the only thing
+  // that knows where the pane is, and the terminal's session id *is* its tab id.
+  //
+  // Keyed off the layouts rather than the selected worktree, so a shell in a
+  // worktree the user has since switched away from still opens its page in the
+  // right place. A session this window does not hold is not ours to answer — the
+  // daemon sends the frame only to the socket that is attached, so that case means
+  // the tab was released between the request and the frame.
+  useEffect(
+    () =>
+      onTerminalOpenUrl(({ sessionId, url }) => {
+        // Decided from the ref **before** touching state, not from a flag set inside
+        // the updater. React 19 runs an updater eagerly only when the fiber has no
+        // pending work (`dispatchSetStateInternal`); with any update already queued in
+        // the same tick — routine here, since terminal status and toasts drive this
+        // component — the updater runs during a later render, so the flag would still
+        // be false and the URL would open in a pane *and* externally. A double open is
+        // the mirror of the dropped-URL defect this fallback exists for.
+        const owner = Object.entries(layoutsRef.current).find(
+          ([, l]) => dockOf(l, sessionId) !== null,
+        );
+        if (!owner) {
+          // The daemon has already told the caller "this is opening in a pane", so
+          // nobody downstream is going to fall back — a tab released between the
+          // request and the frame must not become a URL that silently went nowhere.
+          // Reported as well as opened: this runs from a socket frame, with no user
+          // activation, so a browser tab may block the popup and the toast is then the
+          // only way the URL is recoverable.
+          notifyRedirect(`Opened ${urlLabel(url)} outside Veld — its terminal pane is gone`);
+          openExternally(url);
+          return;
+        }
+        // A URL the daemon accepted that this build's own parser rejects would become a
+        // tab with no page and no error (`browserTab` drops it), so it goes out instead.
+        if (!normalizeBrowserUrl(url)) {
+          notifyRedirect(`Opened ${urlLabel(url)} outside Veld — it is not a page a pane can show`);
+          openExternally(url);
+          return;
+        }
+        const [key, layout] = owner;
+        const dock = dockOf(layout, sessionId)!;
+        setLayouts((prev) => {
+          const current = prev[Number(key)];
+          // Deliberately **not** re-checking that the dock still holds the terminal.
+          // The ref was read a tick earlier, so it could have gone — but a bail here
+          // returns `prev` and the URL is lost, which is the very defect this handler's
+          // fallback exists to prevent, reintroduced in a narrower window. An updater
+          // must stay pure, so it cannot open the URL itself; adding the tab to the dock
+          // the terminal was in is both harmless and what the user expects. Only a
+          // worktree that has vanished entirely has nowhere to put it.
+          if (!current) return prev;
+          return { ...prev, [Number(key)]: addTab(current, dock, browserTab({ url })) };
         });
       }),
     [],
@@ -1874,15 +2008,29 @@ function AppInner(props: {
       // Pending removals are omitted: ⌘K exists to *go* somewhere, and there is
       // nowhere to go in a checkout that is being deleted.
       if (w.trashed_at) continue;
+      const wtStatus = worktreeStatus(runsForWorktree(envs, w));
       items.push({
         id: `wt:${w.id}`,
         group: "Worktrees",
         label: w.alias,
-        hint: w.branch,
+        // The status rides the hint as *text* rather than as a dot beside the
+        // marker — the palette has no run control to move the state onto, and the
+        // dot was the same two-circles-read-as-one collision the rail had.
+        //
+        // Only `failed` and `recovering` are carried. That drops two states this
+        // surface used to render — `running` (a pulsing green dot) and `partial`
+        // (amber) — and both deletions are deliberate: ⌘K is how you *go*
+        // somewhere, the rail is on screen while it is open, and a badge on every
+        // started or transitioning worktree is noise around the two states worth
+        // interrupting a search for. Naming `partial` explicitly because the same
+        // argument is weaker for it: a transition is short-lived, so an omission
+        // there costs a reader nothing they will not see resolve anyway.
+        hint: PALETTE_STATUS[wtStatus]
+          ? `${w.branch} · ${PALETTE_STATUS[wtStatus]}`
+          : w.branch,
         alt: [w.branch],
         mark: { emoji: w.emoji, marker_color: w.marker_color },
-        status: worktreeStatus(runsForWorktree(envs, w)),
-        run: () => selectWorktree(w),
+        run: () => void selectWorktree(w),
       });
     }
 
@@ -2364,6 +2512,7 @@ function AppInner(props: {
         canStart={worktree ? canStartWorktree(worktree) : false}
         running={status !== "stopped"}
         pending={pendingFor(worktree)}
+        spinner={spinnerAction(pendingFor(worktree), run)}
         run={run}
         urls={urls}
         sharing={sharingSurface}
@@ -2449,11 +2598,12 @@ function AppInner(props: {
             elsewhere={elsewhere}
             onToggle={() => setRailWide((v) => !v)}
             onWidth={(w) => setRailWidthRaw(String(w))}
-            onSelect={selectWorktree}
+            onSelect={(w) => void selectWorktree(w)}
             onAdd={() => setDialog({ kind: "new-worktree" })}
             onMenu={(e, w) => worktreeMenu(w)(e)}
             onStart={startWorktree}
             onStop={stopWorktree}
+            onDiagnose={diagnoseWorktree}
             onAddLane={() => setDialog({ kind: "new-lane" })}
             onLaneMenu={(e, lane) => laneMenu(lane)(e)}
             onMove={moveWorktreeTo}
@@ -2624,7 +2774,15 @@ function AppInner(props: {
 // Top bar
 // ---------------------------------------------------------------------------
 
-/** A single run's status as one of the rail's `.dot` classes. */
+/**
+ * A single run's status as one of the `.dot` classes the top bar renders.
+ *
+ * Deliberately still folds `recovering` into `partial`, where [`worktreeStatus`]
+ * no longer does: the rail had nothing but the dot's colour to go on, while this
+ * dot sits beside the run's name in a tooltip that spells the status out. There
+ * is no `.dot.recovering`, and inventing one to distinguish a state the hover
+ * text already names would be the third channel this change removes.
+ */
 function runStatusClass(status: string): WorktreeStatus {
   if (status === "running") return "running";
   if (status === "failed") return "failed";
@@ -2641,6 +2799,11 @@ function TopBar(props: {
   canStart: boolean;
   running: boolean;
   pending: PendingAction | null;
+  /** What the play/stop control spins for — `pending` widened by the observed
+   *  transition, so this button and the rail's row control cannot disagree.
+   *  `pending` stays separate because `disabled` and the restart button key on it:
+   *  only an action *this* window fired may lock the controls. */
+  spinner: PendingAction | null;
   run: { name: string; status: string } | null;
   urls: Array<[string, string]>;
   /** The Sharing surface, built by the app (it owns the shares poll). */
@@ -2721,7 +2884,18 @@ function TopBar(props: {
                   size="md"
                   variant="light"
                   color={props.running ? "red" : "green"}
-                  loading={props.pending === "start" || props.pending === "stop"}
+                  // `spinner`, not `pending`: the rail's row control spins for a
+                  // transition it merely *observed* (one started from the CLI or
+                  // another window), and this button showing a static glyph for
+                  // the same worktree at the same moment is two surfaces
+                  // disagreeing about whether anything is happening.
+                  //
+                  // Still filtered to start/stop rather than truthiness, which is
+                  // what keeps the comment above true: a locally-fired restart
+                  // spins the restart button alone. An externally-fired one is
+                  // indistinguishable from a stop-then-start on the wire, so it
+                  // legitimately lands here instead.
+                  loading={props.spinner === "start" || props.spinner === "stop"}
                   disabled={
                     props.pending !== null ||
                     (!props.running && !props.canStart)
@@ -2978,6 +3152,10 @@ function Rail(props: {
   onMenu: (e: React.MouseEvent, w: Worktree) => void;
   onStart: (w: Worktree) => void;
   onStop: (w: Worktree) => void;
+  /** Go to this worktree and show its node health — the attention affordance on a
+   *  failed or recovering row. Selects first, so it can be refused like any other
+   *  switch when another window holds the worktree. */
+  onDiagnose: (w: Worktree) => Promise<void>;
   onAddLane: () => void;
   onLaneMenu: (e: React.MouseEvent, lane: string) => void;
   onMove: (path: string, toLane: string, toIndex: number) => void;
@@ -3157,9 +3335,32 @@ function Rail(props: {
                 dropAt.key === group.key &&
                 index === group.worktrees.length - 1 &&
                 dropAt.index >= group.worktrees.length;
-              const status = worktreeStatus(runsForWorktree(props.envs, w));
+              const runs = runsForWorktree(props.envs, w);
+              const status = worktreeStatus(runs);
               const running = status !== "stopped";
               const pending = props.pendingFor(w);
+              const live = activeRun(runs);
+              // The whole reason the run status dot could be deleted: `pending` is
+              // only set by a click in THIS window, so a run coming up from the
+              // CLI, from another window, or already starting when the window
+              // opened had no transition signal on the *control* at all. Shared
+              // with the top bar, which had the same gap.
+              const spinner = spinnerAction(pending, live);
+              const attention = needsAttention(status);
+              // The run's own status, verbatim rather than through a table, so
+              // this cannot drift from what the daemon reports. `activeRun` never
+              // returns a stopped run, so a worktree with nothing up says nothing
+              // — which is the state the deleted dot spent a grey circle on.
+              //
+              // This is where run state lives for the **collapsed** rail, whose
+              // rows have no run control to carry it. In wide mode it is redundant
+              // with the control, deliberately: a tooltip that says something
+              // different depending on the rail's width is the worse surprise.
+              const stateNote = pending
+                ? ` · ${pending}…`
+                : live
+                  ? ` · ${live.status}`
+                  : "";
               const trashed = w.trashed_at !== "";
               // Inline controls are wide-only — a 64px collapsed row has no space
               // for them. Right-click reaches the same actions in either mode.
@@ -3195,8 +3396,8 @@ function Rail(props: {
                       : w.trash_error
                         ? `${w.alias} — could not be deleted: ${w.trash_error}`
                         : away
-                          ? `${w.alias} — ${w.branch} (open in another window)`
-                          : `${w.alias} — ${w.branch}`
+                          ? `${w.alias} — ${w.branch}${stateNote} (open in another window)`
+                          : `${w.alias} — ${w.branch}${stateNote}`
                   }
                   /* Pending removals are not draggable: they are leaving, so a
                      position for them means nothing. */
@@ -3235,10 +3436,10 @@ function Rail(props: {
                   }}
                   onContextMenu={(e) => props.onMenu(e, w)}
                 >
-                  <span className={`dot ${status}`} />
-                  {/* Before the alias, where the eye already is for the dot — and
-                      rendered in the collapsed rail too, which is exactly where a
-                      greyed row alone would be too subtle to read. */}
+                  {/* Leads the row, and rendered in the collapsed rail too — which
+                      is exactly where a greyed row alone would be too subtle to
+                      read. It used to sit beside the run-status dot; with that dot
+                      gone this is the row's first glyph. */}
                   {away && (
                     <IconExternalLink
                       size={11}
@@ -3267,6 +3468,42 @@ function Rail(props: {
                           : w.branch}
                     </span>
                   )}
+                  {/* Beside the run control, and not on the marker. The marker is
+                      the row's identity — #204 made its *colour* the identifier —
+                      so tinting it for a failure overwrites the one channel that
+                      answers "which worktree is this", which is the collision this
+                      change exists to remove. An icon of its own is also what makes
+                      the state reachable rather than merely reported: it opens the
+                      nodes view. Rendered in the collapsed rail too, where the run
+                      control cannot go, so the signal that asks to be acted on
+                      survives the mode.
+
+                      After the alias, not before it: the row is a `role=button`
+                      whose accessible name comes from its content, and a nested
+                      control's `aria-label` is folded into that name — placed
+                      first, it would announce "Node health for chk" ahead of the
+                      alias. Same reason the away icon beside the alias is
+                      `aria-hidden`. */}
+                  {!trashed && attention && (
+                    <button
+                      type="button"
+                      className={`wt-alert ${status}`}
+                      title={
+                        status === "recovering"
+                          ? `${w.alias} — veld is restarting a node that keeps failing its liveness probe. Open node health.`
+                          : `${w.alias} — the run failed. Open node health.`
+                      }
+                      aria-label={`Node health for ${w.alias}`}
+                      onClick={(e) => {
+                        // The row selects on click; without this the affordance
+                        // would fire the row's plain selection as well.
+                        e.stopPropagation();
+                        void props.onDiagnose(w);
+                      }}
+                    >
+                      <IconAlertTriangleFilled size={11} />
+                    </button>
+                  )}
                   {showRunControl && (
                     <button
                       type="button"
@@ -3282,6 +3519,13 @@ function Rail(props: {
                       // Mirrors the context menu and the palette. Without the
                       // start guard the button looked live but its click hit a
                       // no-op for a worktree with no presets and no nodes.
+                      //
+                      // Deliberately keyed on `pending`, not on `spinner`: a
+                      // spinner is a state *display*, and a run that some other
+                      // surface started is still legitimately stoppable while it
+                      // comes up. Only an action this window fired and has not
+                      // seen land disables the control, which is what stops a
+                      // double fire.
                       disabled={
                         pending !== null || (!running && !props.canStart(w))
                       }
@@ -3293,10 +3537,12 @@ function Rail(props: {
                         else props.onStart(w);
                       }}
                     >
-                      {pending ? (
+                      {spinner ? (
                         // The spinner carries the action's colour, so a row that
-                        // is stopping reads as stopping and not as starting.
-                        <Loader size={10} color={actionColor(pending)} />
+                        // is stopping reads as stopping and not as starting. That
+                        // held only for locally-fired actions before `spinner`
+                        // took the observed transition into account too.
+                        <Loader size={10} color={actionColor(spinner)} />
                       ) : running ? (
                         <IconPlayerStopFilled size={10} />
                       ) : (
@@ -3357,6 +3603,21 @@ function Rail(props: {
 // Command palette
 // ---------------------------------------------------------------------------
 
+/**
+ * The worktree statuses ⌘K spells out beside a branch, and the wording.
+ *
+ * A total map rather than a conditional so adding a [`WorktreeStatus`] member
+ * fails the build here instead of silently rendering nothing — the empty string
+ * is how a state opts out, which is a decision someone has to write down.
+ */
+const PALETTE_STATUS: Record<WorktreeStatus, string> = {
+  running: "",
+  partial: "",
+  recovering: "recovering",
+  failed: "failed",
+  stopped: "",
+};
+
 /** Header order for the idle (no-query) list. Also the grouping key. */
 const PALETTE_GROUPS = ["Worktrees", "Run", "Panes", "Worktree", "Projects", "View"] as const;
 type PaletteGroup = (typeof PALETTE_GROUPS)[number];
@@ -3375,7 +3636,6 @@ interface PaletteItem {
   /** The worktree this row stands for, when it stands for one — so the row can
    *  render the same marker face the rail does rather than hardcoding a glyph. */
   mark?: { emoji: string; marker_color: string };
-  status?: WorktreeStatus;
   run: () => void;
 }
 
@@ -3527,7 +3787,6 @@ function CommandPalette(props: {
                      item, not matches[active]. Hover is :hover in CSS. */
                   onClick={() => choose(item)}
                 >
-                  {item.status && <span className={`dot ${item.status}`} />}
                   {item.mark && (
                     <WorktreeMark settings={props.settings} worktree={item.mark} />
                   )}

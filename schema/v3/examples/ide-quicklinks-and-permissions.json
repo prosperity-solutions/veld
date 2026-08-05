@@ -2,13 +2,17 @@
   "$schema": "https://veld.oss.life.li/schema/v3/veld.schema.json",
   "schemaVersion": "3",
   "name": "ide-section",
-  // The two interpreted parts of `ide`. Everything else under `ide` stays
+  // The interpreted parts of `ide`. Everything else under `ide` stays
   // reserved and opaque — see reserved-namespaces.json for that half.
   "ide": {
     "quicklinks": [
       { "label": "Staging", "url": "https://staging.example.com" },
       { "label": "Grafana", "url": "https://grafana.internal" }
     ],
+    // URLs a terminal produces open in a Veld browser pane. These do not: a
+    // pane has its own cookie jar, so an SSO flow started in one begins from
+    // scratch. Unioned with the user's `browser.externalOrigins` setting.
+    "externalOrigins": ["https://accounts.google.com", "https://*.okta.com"],
     "permissions": [
       // Veld's own URLs carry the RUN NAME in the hostname, and run names change
       // with the worktree, the branch or --name — so a leading `*.` is how a

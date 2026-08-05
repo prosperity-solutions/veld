@@ -2,7 +2,8 @@
 //!
 //! The key was reserved in schemaVersion 3 — parsed, stored and deliberately not
 //! interpreted ([`crate::config::VeldConfig::ide`]). This module gives it its
-//! first real meaning — `ide.quicklinks` and `ide.permissions` — while everything
+//! first real meaning — `ide.quicklinks`, `ide.permissions` and
+//! `ide.externalOrigins` — while everything
 //! else under `ide` stays opaque, so a JSON-defined IDE extension is still free
 //! to use whatever key shape it likes. Lint finding F8 narrows accordingly: it
 //! now reports the *rest* of `ide` as not-yet-rendered instead of all of it.
@@ -26,10 +27,15 @@
 //!   wrong-typed field is dropped rather than partially applied — the failure mode
 //!   of guessing is a capability handed to web content nobody meant to give it.
 //!
-//! Matching itself lives in the desktop app (`desktop/src/permissions.js`),
-//! because that is where a request arrives. What crosses the wire is therefore
-//! *already normalised*: the origin is split into scheme/host/port here, once, so
-//! the matcher cannot disagree with what `veld lint` accepted.
+//! Matching a *permission* request lives in the desktop app
+//! (`desktop/src/permissions.js`), because that is where the request arrives. What
+//! crosses the wire is therefore *already normalised*: the origin is split into
+//! scheme/host/port here, once, so the matcher cannot disagree with what
+//! `veld lint` accepted. Matching a *URL being opened* is the other consumer of the
+//! same normalised shape and it runs in the daemon ([`route_url`]) — two consumers
+//! of one pattern rather than one implementation that could be shared, which is why
+//! [`origin_matches`] restates that matcher's rules and is tested on the same
+//! cases.
 
 use serde::{Deserialize, Serialize};
 
@@ -165,6 +171,16 @@ pub struct IdeSection {
     /// Extra pane types this project offers in the desktop app's pane menu.
     #[serde(default)]
     pub panes: Vec<PaneDef>,
+    /// Origins that must open in the **system** browser rather than in a Veld
+    /// browser pane — the project's half of the exempt list (the other half is the
+    /// `browser.externalOrigins` setting, and the two are unioned).
+    ///
+    /// It exists because a pane is not the browser the user is logged into. An SSO
+    /// or bank flow in a fresh partition is a second login at best and a dead end
+    /// at worst, and the project is the only place that knows which hosts those
+    /// are for the app being worked on.
+    #[serde(default)]
+    pub external_origins: Vec<OriginPattern>,
     /// Top-level keys under `ide` that this version still does not interpret, in
     /// sorted order. F8 names them so an author can tell "reserved" from "typo".
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -179,7 +195,10 @@ impl IdeSection {
     /// True when nothing here is worth sending to a UI.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.quicklinks.is_empty() && self.permissions.is_empty() && self.panes.is_empty()
+        self.quicklinks.is_empty()
+            && self.permissions.is_empty()
+            && self.external_origins.is_empty()
+            && self.panes.is_empty()
     }
 
     /// The pane this id names, if the project declares one.
@@ -379,6 +398,7 @@ pub fn parse(value: Option<&serde_json::Value>) -> IdeSection {
             "quicklinks" => parse_quicklinks(child, &mut section),
             "permissions" => parse_permissions(child, &mut section),
             "panes" => parse_panes(child, &mut section),
+            "externalOrigins" => parse_external_origins(child, &mut section),
             other => section.uninterpreted.push(other.to_owned()),
         }
     }
@@ -867,6 +887,35 @@ fn parse_quicklinks(value: &serde_json::Value, out: &mut IdeSection) {
     }
 }
 
+fn parse_external_origins(value: &serde_json::Value, out: &mut IdeSection) {
+    let Some(items) = value.as_array() else {
+        out.problems.push(IdeProblem {
+            location: "ide.externalOrigins".to_owned(),
+            message: "must be an array of origin strings such as \
+                      [\"https://accounts.google.com\"]; it was ignored"
+                .to_owned(),
+        });
+        return;
+    };
+    for (index, item) in items.iter().enumerate() {
+        let at = format!("ide.externalOrigins[{index}]");
+        let Some(raw) = item.as_str() else {
+            out.problems.push(IdeProblem {
+                location: at,
+                message: "must be a string such as \"https://*.okta.com\"".to_owned(),
+            });
+            continue;
+        };
+        match parse_origin(raw) {
+            Ok(origin) => out.external_origins.push(origin),
+            Err(message) => out.problems.push(IdeProblem {
+                location: at,
+                message,
+            }),
+        }
+    }
+}
+
 fn parse_permissions(value: &serde_json::Value, out: &mut IdeSection) {
     let Some(items) = value.as_array() else {
         out.problems.push(IdeProblem {
@@ -989,12 +1038,17 @@ fn parse_permission_list(
 
 /// Split `scheme://host[:port]` into its parts, or say what is wrong with it.
 ///
+/// Public because the same grammar has a second producer: the
+/// `browser.externalOrigins` **setting** holds the same pattern strings as
+/// [`IdeSection::external_origins`], and a settings list validated by a second,
+/// looser parser would accept a pattern that then matched nothing.
+///
 /// Hand-rolled rather than routed through a URL crate because the accepted grammar
 /// is deliberately *narrower* than a URL: no path, no credentials, no query, and a
 /// `*` in the port position that no parser would accept. A permissive parser here
 /// would quietly accept `http://evil.com@localhost` and match it against the wrong
 /// host, which is the classic version of this bug.
-fn parse_origin(raw: &str) -> Result<OriginPattern, String> {
+pub fn parse_origin(raw: &str) -> Result<OriginPattern, String> {
     let trimmed = raw.trim();
     let (scheme, rest) = trimmed.split_once("://").ok_or_else(|| {
         format!("must be a full origin such as \"http://localhost:*\" (got {raw:?})")
@@ -1162,6 +1216,208 @@ fn parse_origin(raw: &str) -> Result<OriginPattern, String> {
     })
 }
 
+// ---------------------------------------------------------------------------
+// Where a URL opens
+// ---------------------------------------------------------------------------
+
+/// Where a URL a terminal produced should be opened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UrlTarget {
+    /// A Veld browser pane, in the window showing that terminal.
+    Pane,
+    /// The user's real browser, via the OS.
+    System,
+}
+
+/// A URL reduced to what an [`OriginPattern`] compares against.
+///
+/// Deliberately the same three fields, derived the same way, as `parseOrigin` in
+/// `desktop/src/permissions.js`: lowercased host with a single trailing dot
+/// stripped, and an absent port resolved to the scheme's default so
+/// `https://example.com` and `https://example.com:443` compare equal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UrlOrigin {
+    pub scheme: String,
+    pub host: String,
+    pub port: u16,
+}
+
+/// A URL that has been through [`parse_web_url`], and therefore the only kind that
+/// may be handed onward to something that will *load* it.
+///
+/// A newtype with no public constructor, deliberately: "route the parsed URL but
+/// forward the string the caller sent" is a one-word edit that compiles, passes every
+/// test that checks the parser in isolation, and silently reopens the exempt-list
+/// bypass described on [`parse_web_url`]. Making the frame's field this type means
+/// that edit does not compile. A comment there would have been the fifth guard in this
+/// module defended only by prose.
+/// `Serialize` only, and that is part of the guard rather than an omission: a derived
+/// `Deserialize` is expanded with access to the private field, so
+/// `serde_json::from_str::<CanonicalUrl>("anything")` — or any future struct that
+/// derives `Deserialize` with a field of this type — would construct one from
+/// arbitrary text without ever passing through [`parse_web_url`]. That is the same
+/// bypass reached through serde instead of through a literal constructor, and it would
+/// have made the claim above ("that edit does not compile") false. Nothing needs to
+/// deserialize this: the frame travels daemon → renderer, and the renderer parses JSON.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct CanonicalUrl(String);
+
+impl CanonicalUrl {
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for CanonicalUrl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// An `http(s)` URL, parsed the way the thing that will *load* it parses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebUrl {
+    /// What the exempt list is matched against.
+    pub origin: UrlOrigin,
+    /// The **canonical serialisation**, and the only string that should travel
+    /// onward. See [`parse_web_url`] for why routing on one string and opening a
+    /// different one was a real defect rather than a tidiness point.
+    pub canonical: CanonicalUrl,
+}
+
+/// Parse an `http(s)` URL, or `None` if it is not one.
+///
+/// # Why this uses a real URL parser and returns a canonical string
+///
+/// This was hand-rolled once, scanning for the authority up to `/`, `?` or `#` and
+/// taking what followed the last `@`. That is not what a browser does, and the gap
+/// was **exploitable against the one control this feature offers**: a WHATWG parser
+/// also ends the authority at `\` and strips ASCII tab/CR/LF anywhere in the URL, so
+///
+/// - `https://accounts.google.com\@evil.com` scanned as host `evil.com` — not on the
+///   exempt list, so routed to a *pane* — while the pane loaded
+///   `accounts.google.com`; and
+/// - a tab inside the host (`accounts.goo<TAB>gle.com`) scanned as a different host
+///   for the same result.
+///
+/// Either one silently sidesteps an `externalOrigins` entry, which is exactly how an
+/// SSO or banking host the user pinned to their real browser ends up rendering in a
+/// pane on the shared cookie jar.
+///
+/// Two rules follow, and both are load-bearing:
+///
+/// 1. **Parse with the same standard the loader implements.** `url::Url` (via
+///    `reqwest`, already a dependency) implements the WHATWG URL Standard, which is
+///    what Chromium and `new URL()` in the renderer implement. Do not reintroduce
+///    hand scanning here — the narrow custom grammar in [`parse_origin`] is for
+///    *patterns*, which are veld's own syntax and deliberately not URLs.
+/// 2. **Route and open the same string.** [`WebUrl::canonical`] is what goes into the
+///    `open_url` frame, so "what was checked" and "what will be loaded" cannot
+///    disagree no matter how the input was spelled.
+///
+/// Parsing here also removes two limitations the hand-rolled version documented: an
+/// internationalised host is punycoded (so it can match an `xn--…` pattern) and
+/// `http://127.1` normalises to `127.0.0.1` the way every URL parser resolves it.
+#[must_use]
+pub fn parse_web_url(url: &str) -> Option<WebUrl> {
+    let parsed = reqwest::Url::parse(url.trim()).ok()?;
+    // A pane accepts nothing else, and neither does `normalizeBrowserUrl` in the
+    // renderer or `safeUrl` in the desktop shell.
+    let scheme = parsed.scheme();
+    if scheme != "http" && scheme != "https" {
+        return None;
+    }
+    // Already lowercased, punycoded and IP-normalised by the parser. IPv6 keeps its
+    // brackets, which is the form `parse_origin` stores.
+    let host = parsed.host_str()?;
+    if host.is_empty() {
+        return None;
+    }
+    // A single trailing dot is the fully-qualified spelling of the same name, and
+    // `parse_origin` strips it from patterns — so it has to come off here too or a
+    // link to the dotted form would slip past every exempt entry. (The URL Standard
+    // keeps it, which is why the parser leaves it in.)
+    let host = host.strip_suffix('.').unwrap_or(host);
+    if host.is_empty() {
+        return None;
+    }
+    Some(WebUrl {
+        origin: UrlOrigin {
+            scheme: scheme.to_owned(),
+            host: host.to_owned(),
+            port: parsed.port_or_known_default()?,
+        },
+        canonical: CanonicalUrl(parsed.as_str().to_owned()),
+    })
+}
+
+/// Reduce an `http(s)` URL to its origin, or `None` if it has none.
+///
+/// A thin wrapper over [`parse_web_url`] for callers that only need the origin.
+#[must_use]
+pub fn parse_url_origin(url: &str) -> Option<UrlOrigin> {
+    parse_web_url(url).map(|u| u.origin)
+}
+
+/// Whether a URL's origin matches one pattern.
+///
+/// The comparison rules are `matchesPattern`'s in `desktop/src/permissions.js`,
+/// restated here because that matcher answers permission requests in the Electron
+/// main process and this one answers a routing question in the daemon — two
+/// consumers of one normalised pattern, not one implementation that could be
+/// shared. Both are pinned by tests using the same cases, in particular the one
+/// that matters: a wildcard is **label-wise**, so `*.veld.localhost` does not
+/// match `evilveld.localhost`, and does not match the bare suffix either.
+#[must_use]
+pub fn origin_matches(origin: &UrlOrigin, pattern: &OriginPattern) -> bool {
+    if origin.scheme != pattern.scheme {
+        return false;
+    }
+    let host_matches = if pattern.wildcard {
+        origin.host.ends_with(&format!(".{}", pattern.host))
+    } else {
+        origin.host == pattern.host
+    };
+    if !host_matches {
+        return false;
+    }
+    // `None` is the pattern's `*`.
+    pattern.port.is_none_or(|port| port == origin.port)
+}
+
+/// Decide where a URL produced by a terminal session opens.
+///
+/// The **one** owner of that decision, and the reason both entry points (a click
+/// on a link in the terminal, and a process in the shell invoking `$BROWSER`) go
+/// through the daemon rather than deciding locally: the project's exempt list
+/// lives in its `veld.json`, which the renderer does not read, and two
+/// implementations of one policy drift.
+///
+/// `external` is the union of the `browser.externalOrigins` setting and the
+/// project's `ide.externalOrigins` — unioned rather than overridden, because both
+/// answer the same question ("this host needs my real browser") from different
+/// distances and neither is a correction of the other.
+///
+/// Anything that is not an `http(s)` URL is [`UrlTarget::System`]: a pane refuses
+/// it anyway (`normalizeBrowserUrl`, and again in the shell), so the honest answer
+/// is that Veld is not where it opens.
+#[must_use]
+pub fn route_url(url: &str, open_in_app: bool, external: &[OriginPattern]) -> UrlTarget {
+    if !open_in_app {
+        return UrlTarget::System;
+    }
+    let Some(origin) = parse_url_origin(url) else {
+        return UrlTarget::System;
+    };
+    if external.iter().any(|p| origin_matches(&origin, p)) {
+        return UrlTarget::System;
+    }
+    UrlTarget::Pane
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1169,6 +1425,229 @@ mod tests {
 
     fn section(value: serde_json::Value) -> IdeSection {
         parse(Some(&value))
+    }
+
+    fn pattern(raw: &str) -> OriginPattern {
+        parse_origin(raw).expect(raw)
+    }
+
+    #[test]
+    fn external_origins_parse_and_report_bad_entries() {
+        let parsed = section(json!({
+            "externalOrigins": ["https://accounts.google.com", "https://*.okta.com"],
+        }));
+        assert_eq!(parsed.external_origins.len(), 2);
+        assert_eq!(parsed.external_origins[0].host, "accounts.google.com");
+        assert_eq!(parsed.external_origins[0].port, Some(443));
+        assert!(parsed.external_origins[1].wildcard);
+        assert!(parsed.problems.is_empty(), "{:?}", parsed.problems);
+        assert!(!parsed.is_empty(), "a list of origins is worth sending");
+
+        // The same parser `ide.permissions` uses, so the same refusals reach the
+        // author as lint findings rather than as a rule that matches nothing.
+        let bad = section(json!({
+            "externalOrigins": ["accounts.google.com", "https://*.com", 7, "https://a.com/path"],
+        }));
+        assert!(bad.external_origins.is_empty());
+        assert_eq!(bad.problems.len(), 4);
+        assert_eq!(bad.problems[0].location, "ide.externalOrigins[0]");
+        assert!(bad.problems[1].message.contains("top-level domain"));
+
+        // A non-array is one finding, not a panic, and drops only this key.
+        let wrong = section(json!({ "externalOrigins": "https://a.com" }));
+        assert_eq!(wrong.problems.len(), 1);
+        assert_eq!(wrong.problems[0].location, "ide.externalOrigins");
+    }
+
+    #[test]
+    fn a_url_reduces_to_the_origin_a_browser_would_navigate_to() {
+        let o = parse_url_origin("https://Example.COM/a/b?c=1#d").expect("origin");
+        assert_eq!(o.scheme, "https");
+        assert_eq!(o.host, "example.com");
+        // An absent port is the scheme's default, so a pattern written either way
+        // compares equal.
+        assert_eq!(o.port, 443);
+        assert_eq!(parse_url_origin("http://example.com").unwrap().port, 80);
+        assert_eq!(
+            parse_url_origin("http://example.com:3000/x").unwrap().port,
+            3000
+        );
+
+        // The authority ends at the first `/`, `?` **or** `#`.
+        for url in [
+            "https://example.com?next=/login",
+            "https://example.com#/route",
+            "https://example.com/",
+        ] {
+            assert_eq!(parse_url_origin(url).unwrap().host, "example.com", "{url}");
+        }
+
+        // The host is what follows the LAST `@`. Reading the userinfo as the host
+        // would answer the exempt list's question about a name the browser never
+        // visits.
+        assert_eq!(
+            parse_url_origin("http://accounts.google.com@evil.com/x")
+                .unwrap()
+                .host,
+            "evil.com"
+        );
+        assert_eq!(
+            parse_url_origin("http://user:pw@example.com:8080/x").unwrap(),
+            UrlOrigin {
+                scheme: "http".to_owned(),
+                host: "example.com".to_owned(),
+                port: 8080,
+            }
+        );
+
+        // A trailing dot is the same name, and patterns never carry one.
+        assert_eq!(
+            parse_url_origin("https://example.com./x").unwrap().host,
+            "example.com"
+        );
+
+        // IPv6 keeps its brackets, the way `parse_origin` stores them.
+        assert_eq!(
+            parse_url_origin("http://[::1]:8080/").unwrap().host,
+            "[::1]"
+        );
+
+        // Nothing without an http(s) scheme and a host has an origin. Each of these
+        // is also rejected (or has no host) in a browser — checked with `new URL()`,
+        // because agreeing with the loader is the whole contract of this function.
+        for url in [
+            "",
+            "example.com",
+            "file:///etc/passwd",
+            "javascript:alert(1)",
+            "vscode://open",
+            "https://",
+            "http://:8080/",
+            "https://example.com:notaport/",
+        ] {
+            assert_eq!(parse_url_origin(url), None, "{url:?} must have no origin");
+        }
+        // …and where a browser *does* find a host in something odd, so does this:
+        // `new URL("https:///path").hostname` is `path`. The hand-rolled version
+        // this replaced answered `None` here, which is the shape of the bug below.
+        assert_eq!(parse_url_origin("https:///path").unwrap().host, "path");
+    }
+
+    /// The exempt list must not be sidesteppable by spelling the URL differently.
+    ///
+    /// Both of these routed on the wrong host before `parse_web_url` used a real URL
+    /// parser: a WHATWG parser ends the authority at `\` as well as `/?#`, and strips
+    /// ASCII tab/CR/LF anywhere — so the daemon checked one host while the pane
+    /// loaded another, and an `externalOrigins` entry for an SSO host silently did
+    /// not apply. The canonical string is what travels onward for the same reason.
+    #[test]
+    fn a_url_cannot_be_spelled_to_route_on_one_host_and_load_another() {
+        let external = vec![pattern("https://accounts.google.com")];
+
+        for spelling in [
+            // Verified against `new URL()`: every one of these loads
+            // accounts.google.com.
+            "https://accounts.google.com\\@evil.com",
+            "https://accounts.goo\tgle.com/x",
+            "https://accounts.google.com\r\n/x",
+            "https://ACCOUNTS.Google.COM/x",
+            "https://accounts.google.com./x",
+            "  https://accounts.google.com/x  ",
+        ] {
+            let parsed = parse_web_url(spelling).unwrap_or_else(|| panic!("{spelling:?}"));
+            assert_eq!(
+                parsed.origin.host, "accounts.google.com",
+                "{spelling:?} routed on the wrong host"
+            );
+            assert_eq!(
+                route_url(spelling, true, &external),
+                UrlTarget::System,
+                "{spelling:?} escaped the exempt list"
+            );
+            // The invariant that makes "route one string, open another" impossible:
+            // what will be opened is the canonical form, and re-routing *that*
+            // reaches the same decision. (A trailing dot survives canonicalisation,
+            // as it does in a browser, which is why this is idempotence rather than
+            // a literal prefix check.)
+            let again = parse_web_url(parsed.canonical.as_str()).expect("canonical re-parses");
+            assert_eq!(
+                again.origin, parsed.origin,
+                "{spelling:?} is not idempotent"
+            );
+            assert_eq!(
+                route_url(parsed.canonical.as_str(), true, &external),
+                UrlTarget::System,
+                "{spelling:?} canonicalised into something that escapes the list"
+            );
+        }
+    }
+
+    #[test]
+    fn matching_is_label_wise_and_scheme_and_port_exact() {
+        let url = |u: &str| parse_url_origin(u).expect(u);
+
+        let exact = pattern("https://accounts.google.com");
+        assert!(origin_matches(
+            &url("https://accounts.google.com/o/oauth2"),
+            &exact
+        ));
+        // Scheme is part of the origin.
+        assert!(!origin_matches(&url("http://accounts.google.com/"), &exact));
+        // An omitted port means the default port, not any port.
+        assert!(!origin_matches(
+            &url("https://accounts.google.com:8443/"),
+            &exact
+        ));
+        // A subdomain is a different host unless a wildcard says otherwise.
+        assert!(!origin_matches(
+            &url("https://mail.accounts.google.com/"),
+            &exact
+        ));
+
+        let wild = pattern("https://*.okta.com");
+        assert!(origin_matches(
+            &url("https://dev-123.okta.com/login"),
+            &wild
+        ));
+        // Label-wise: this is the check that a bare `ends_with` gets wrong.
+        assert!(!origin_matches(&url("https://evilokta.com/"), &wild));
+        // …and a wildcard is subdomains, not the suffix itself.
+        assert!(!origin_matches(&url("https://okta.com/"), &wild));
+
+        // `*` in the port position is the only "any port".
+        let any_port = pattern("http://localhost:*");
+        for u in ["http://localhost/", "http://localhost:3000/x"] {
+            assert!(origin_matches(&url(u), &any_port), "{u}");
+        }
+        assert!(!origin_matches(&url("https://localhost:3000/"), &any_port));
+    }
+
+    #[test]
+    fn routing_is_pane_unless_something_says_otherwise() {
+        let external = vec![pattern("https://*.okta.com")];
+
+        assert_eq!(
+            route_url("https://web.dev.app.localhost/", true, &external),
+            UrlTarget::Pane
+        );
+        assert_eq!(
+            route_url("https://dev-1.okta.com/login", true, &external),
+            UrlTarget::System
+        );
+        // The master switch wins over an empty list…
+        assert_eq!(
+            route_url("https://web.dev.app.localhost/", false, &[]),
+            UrlTarget::System
+        );
+        // …and an empty list with the switch on is the whole point of the feature.
+        assert_eq!(
+            route_url("https://anything.example.com/", true, &[]),
+            UrlTarget::Pane
+        );
+        // A pane cannot show these at all, so Veld is not where they open.
+        for url in ["file:///etc/passwd", "vscode://open", "not a url"] {
+            assert_eq!(route_url(url, true, &external), UrlTarget::System, "{url}");
+        }
     }
 
     #[test]

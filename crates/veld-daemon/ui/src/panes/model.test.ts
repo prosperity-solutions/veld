@@ -50,6 +50,7 @@ import {
   parseSessionSets,
   parseTransferTabs,
   replaceTab,
+  revealDiagPane,
   readLayouts,
   serializeLayouts,
   splitWithTab,
@@ -1770,5 +1771,45 @@ describe("startPlanFor", () => {
     // Idle stranded a *live* tool behind two buttons that both DELETE its
     // session — so the pane killed the thing it was restored to show.
     expect(startPlanFor("restored-2", pane)).toBe("reattach");
+  });
+});
+
+describe("revealDiagPane", () => {
+  it("adds a pane when none is open", () => {
+    const l = defaultLayout();
+    const next = revealDiagPane(l, "nodes");
+    const added = allTabs(next).filter((t) => t.kind === "nodes");
+    expect(added.length).toBe(1);
+    expect(next.docks[next.focused].activeId).toBe(added[0].id);
+  });
+
+  it("focuses the one already open instead of adding a second", () => {
+    const existing = diagTab("nodes");
+    const l = addTabToFocused(defaultLayout(), existing);
+    // Something else on top, so "already open" is not the same as "already
+    // visible" — the affordance has to bring it forward.
+    const covered = addTabToFocused(l, newPaneTab());
+    expect(covered.docks[covered.focused].activeId).not.toBe(existing.id);
+
+    const next = revealDiagPane(covered, "nodes");
+    expect(allTabs(next).filter((t) => t.kind === "nodes").length).toBe(1);
+    expect(next.docks[next.focused].activeId).toBe(existing.id);
+  });
+
+  it("crosses docks rather than duplicating", () => {
+    const existing = diagTab("nodes");
+    const split = splitWithTab(addTabToFocused(defaultLayout(), existing), existing.id, 1);
+    const other = addTab(split, 0, newPaneTab());
+    const next = revealDiagPane(other, "nodes");
+    expect(allTabs(next).filter((t) => t.kind === "nodes").length).toBe(1);
+    // Focus follows the tab into the dock that holds it.
+    expect(next.docks[next.focused].activeId).toBe(existing.id);
+  });
+
+  it("keeps logs and nodes independent", () => {
+    const withLogs = revealDiagPane(defaultLayout(), "logs");
+    const both = revealDiagPane(withLogs, "nodes");
+    expect(allTabs(both).filter((t) => t.kind === "logs").length).toBe(1);
+    expect(allTabs(both).filter((t) => t.kind === "nodes").length).toBe(1);
   });
 });
