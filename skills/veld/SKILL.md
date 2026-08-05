@@ -486,6 +486,26 @@ occupies the live run slot), `end_reason`/`end_detail` (populated once the run
 has ended), and `ended_at` (also emitted as the deprecated alias `stopped_at`,
 for scripts written against the old shape).
 
+**What a run was started from** lives at
+`graph_snapshot.started_from = {preset, selections}` in `veld status --json` and
+`veld runs show --json`. `preset` is the config name (absent for an
+explicit-selection start), and `selections` is the sorted `node:variant` set that
+name expanded to *at start time*. The expansion is stored beside the name because
+presets are re-read from disk on every use, so the name alone can be stale.
+
+**Which surface answers "is the live run still what this preset means?"**: the
+human `veld status` and `veld runs show` do — they re-expand the preset and print
+`Started from: preset \`x\` (redefined since start)`, `(no longer defined)`, or
+`(cannot be expanded — see \`veld lint\`)`. The `--json` shapes carry the *record*
+(`started_from`) but not that verdict, and `veld presets --json` gives raw
+`selections` with `@preset` refs unexpanded — so an agent that wants the
+comparison should read the human line, or diff two runs with
+`veld runs diff <old> <new> --json`, which reports `origin_changed`. Do not
+compare `started_from.selections` against `veld presets --json` output directly:
+they are different shapes and will disagree for every preset written without
+explicit variants. `started_from` is absent on runs started by a veld older than
+this feature.
+
 To debug liveness probe failures and recovery decisions:
 ```sh
 veld logs --source internal --name my-feature     # shows probe stderr, recovery attempts
@@ -545,6 +565,7 @@ step's stdin is `/dev/null` — one that prompts fails on EOF instead of hanging
 - **Ports are dynamic** (19000–29999) — never hardcode a port in veld.json or dependent config
 - **Commands run from veld.json directory**, not your CWD — use `cwd` field if a node needs a different working directory
 - **Name resolution** — if `--name` omitted: one run → auto-selects, multiple → prompts, none → errors
+- **One directory can hold several live environments, and that is a supported state** — `veld start --preset api --name api` beside `veld start --name web` in the same project root gives two independent runs with their own nodes, ports, hostnames (the run name is in the hostname), logs and stats. This is the shape an agent creates by starting a preset in a project the human is also running, so pass `--name` explicitly rather than relying on resolution, and say which environment you started. Veld Desktop shows a **run selector** in its top bar: one control per window naming the bound environment, with `1/2` when there are live siblings. ▶ is a toggle bound to that run (it re-runs an ended one under its own name); the dropdown's **Start another run** entry is what creates a *second* environment while one is live, and it shows the name it will use (`dev-2`) first. The list holds **live** environments only — ended ones sit behind a "Show N ended" disclosure, or appear outright when nothing is live, since run history is Runs mode's job
 - **`veld logs` defaults to the latest run** — after a restart, `veld logs` no longer reaches into the previous generation's lines. Use `--run <id-prefix>` for a specific past run, `-p`/`--previous` for the run before the latest, or `--all-runs` to restore the old interleaved-across-runs behavior
 - **`veld logs -f` exits 0 when the run ends** — it no longer hangs forever on a run that crashed or was stopped; it prints history then a stderr note and returns
 - **`veld status`/`veld urls` on a stopped environment** — `status` still works and shows the last run's outcome, but hides the URL column (routes are torn down); `urls` errors outright instead of printing dead links

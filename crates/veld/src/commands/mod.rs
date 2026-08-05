@@ -80,6 +80,54 @@ pub fn read_setup_mode() -> Option<String> {
     veld_core::setup::read_setup_mode()
 }
 
+/// One line describing what a run was started from, checked against the config
+/// as it reads *now*.
+///
+/// The check is the reason this exists rather than printing the stored name: a
+/// preset can be renamed, deleted or re-pointed at different nodes while the run
+/// is live, so a bare `preset web-only` would state something that stopped being
+/// true. Comparing the recorded expansion with a fresh one turns that into a
+/// visible qualifier instead of a silent lie.
+///
+/// `None` when the run predates the record — callers omit the line entirely
+/// rather than printing "unknown", which would read as a property of the run.
+pub fn start_origin_label(
+    origin: Option<&veld_core::state::StartOrigin>,
+    config: &veld_core::config::VeldConfig,
+) -> Option<String> {
+    let origin = origin?;
+    let selections = origin.selections.join(", ");
+    let Some(preset) = origin.preset.as_deref() else {
+        // An explicit-token start. Naming the tokens is the whole answer, and
+        // saying "no preset" would imply a preset was expected.
+        return Some(if selections.is_empty() {
+            "selections (none recorded)".to_owned()
+        } else {
+            format!("selections {selections}")
+        });
+    };
+    let current = veld_core::graph::expand_preset(preset, config)
+        .and_then(|sels| veld_core::graph::resolve_selections(&sels, config))
+        .map(|sels| veld_core::state::StartOrigin::new(None, &sels).selections);
+    let qualifier = match current {
+        Ok(now) if now == origin.selections => "",
+        // Expanded, but to something else: the name still resolves, so the run
+        // is not "preset web-only" any more in any useful sense.
+        Ok(_) => " (redefined since start)",
+        // Only *this* name being absent means the preset is gone. Every other
+        // failure — a dangling `@ref`, a cycle, a since-removed node, a tree over
+        // the expansion budget — is a preset that still exists and cannot be
+        // expanded, and reporting those as "no longer defined" asserts something
+        // false about the config the reader is looking at. It also contradicted the
+        // UI, which calls the same state "redefined".
+        Err(veld_core::graph::GraphError::UnknownPreset(ref missing)) if missing == preset => {
+            " (no longer defined)"
+        }
+        Err(_) => " (cannot be expanded — see `veld lint`)",
+    };
+    Some(format!("preset `{preset}`{qualifier} — {selections}"))
+}
+
 /// Resolve the environment name to use. If `name` is given, use it directly.
 /// Otherwise look at the project state, two-tiered: if exactly one environment
 /// has a *live* run (starting/running/stopping), use that; only when zero are
@@ -172,5 +220,99 @@ pub fn parse_config(json: bool) -> Option<(std::path::PathBuf, veld_core::config
             output::print_error(&format!("Failed to load config: {e}"), json);
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use veld_core::state::StartOrigin;
+
+    /// A config with one preset naming `api:local`, plus a second node so a
+    /// "redefined" case has somewhere to move to.
+    fn config(preset_selections: &[&str]) -> veld_core::config::VeldConfig {
+        let sels = preset_selections
+            .iter()
+            .map(|s| format!("\"{s}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let json = format!(
+            r#"{{
+              "schemaVersion": "3",
+              "name": "proj",
+              "nodes": {{
+                "api": {{ "variants": {{ "local": {{ "command": "true" }} }} }},
+                "web": {{ "variants": {{ "local": {{ "command": "true" }} }} }}
+              }},
+              "presets": {{ "stack": [{sels}] }}
+            }}"#
+        );
+        serde_json::from_str(&json).expect("test config parses")
+    }
+
+    fn origin(preset: Option<&str>, selections: &[&str]) -> StartOrigin {
+        StartOrigin {
+            preset: preset.map(str::to_owned),
+            selections: selections.iter().map(|s| (*s).to_owned()).collect(),
+        }
+    }
+
+    #[test]
+    fn a_matching_preset_is_named_without_a_qualifier() {
+        let cfg = config(&["api:local"]);
+        let label = super::start_origin_label(Some(&origin(Some("stack"), &["api:local"])), &cfg);
+        assert_eq!(label.as_deref(), Some("preset `stack` — api:local"));
+    }
+
+    #[test]
+    fn an_edited_preset_is_reported_as_redefined() {
+        // The whole reason the expansion is recorded next to the name: the name
+        // still resolves, so printing it bare would state something that stopped
+        // being true while the run was live.
+        let cfg = config(&["api:local", "web:local"]);
+        let label = super::start_origin_label(Some(&origin(Some("stack"), &["api:local"])), &cfg);
+        assert_eq!(
+            label.as_deref(),
+            Some("preset `stack` (redefined since start) — api:local")
+        );
+    }
+
+    #[test]
+    fn a_deleted_preset_says_so_rather_than_naming_it_plainly() {
+        let cfg = config(&["api:local"]);
+        let label = super::start_origin_label(Some(&origin(Some("gone"), &["api:local"])), &cfg);
+        assert_eq!(
+            label.as_deref(),
+            Some("preset `gone` (no longer defined) — api:local")
+        );
+    }
+
+    #[test]
+    fn a_preset_that_exists_but_cannot_expand_is_not_called_undefined() {
+        // A dangling `@ref` leaves `stack` defined and unexpandable. Saying "no
+        // longer defined" about it is a false claim about the config on disk — and
+        // the UI calls this same state "redefined", so the two surfaces would
+        // contradict each other over one config.
+        let cfg = config(&["@missing"]);
+        let label = super::start_origin_label(Some(&origin(Some("stack"), &["api:local"])), &cfg);
+        assert_eq!(
+            label.as_deref(),
+            Some("preset `stack` (cannot be expanded — see `veld lint`) — api:local")
+        );
+    }
+
+    #[test]
+    fn an_explicit_start_names_its_tokens_and_no_preset() {
+        let cfg = config(&["api:local"]);
+        let label =
+            super::start_origin_label(Some(&origin(None, &["api:local", "web:local"])), &cfg);
+        assert_eq!(label.as_deref(), Some("selections api:local, web:local"));
+    }
+
+    #[test]
+    fn a_run_with_no_record_produces_no_line() {
+        // Not "unknown": that reads as a property of the run rather than of the
+        // recording, so every caller omits the line entirely.
+        let cfg = config(&["api:local"]);
+        assert!(super::start_origin_label(None, &cfg).is_none());
     }
 }

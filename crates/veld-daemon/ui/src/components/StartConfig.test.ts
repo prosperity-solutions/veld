@@ -17,6 +17,10 @@ const preset = (name: string, over: Partial<Preset> = {}): Preset => ({
   key: 1,
   pinned: false,
   selections: [`${name}:dev`],
+  // The expansion the daemon ships alongside the raw selections — for a
+  // single-token preset they agree, which is why the default repeats it. This
+  // surface never reads it (picking is not provenance), but the type requires it.
+  expansion: { state: "ok", tokens: [`${name}:dev`] },
   is_default: false,
   ...over,
 });

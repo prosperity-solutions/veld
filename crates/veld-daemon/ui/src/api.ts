@@ -40,6 +40,12 @@ export interface HistoryEntry {
   outcome?: string | null;
   created_at: string;
   ended_at?: string | null;
+  /**
+   * What that run was started from. Carried per history entry, not inherited
+   * from the environment: an earlier run of the same name may well have come
+   * from a different preset or from explicit tokens.
+   */
+  started_from?: StartOrigin | null;
   nodes: HistoryNode[];
 }
 
@@ -60,7 +66,28 @@ export interface RunInfo {
   ended_at?: string | null;
   urls: Record<string, string>;
   nodes: NodeInfo[];
+  /**
+   * What this run was started from. Absent for runs recorded before the daemon
+   * kept the record — absent means "not known", never "started from nothing".
+   */
+  started_from?: StartOrigin | null;
   history?: HistoryEntry[];
+}
+
+/**
+ * The invocation a run came from: a preset name, plus the `node:variant`
+ * expansion that name meant **at start time**.
+ *
+ * Both halves matter. Presets are re-read from disk on every use, so the name
+ * alone can become false while the run is live; comparing `selections` against
+ * the current expansion (`Preset.expanded`) is what lets a surface say
+ * `redefined since start` instead of asserting something stale. `preset: null`
+ * with tokens present is an explicit-selection start, which is a fact about the
+ * run rather than missing data.
+ */
+export interface StartOrigin {
+  preset?: string | null;
+  selections: string[];
 }
 
 export interface ProjectInfo {
@@ -138,8 +165,19 @@ export interface Worktree {
    */
   deleting: boolean;
   has_veld_config: boolean;
-  /** Presets in display order, as resolved by the daemon. */
-  presets: Preset[];
+  /**
+   * Presets in display order, as resolved by the daemon.
+   *
+   * **`null` = the config could not be read; `[]` = it declares no presets.**
+   * `has_veld_config` says only that the file exists. The nullability is the
+   * enforcement: comparing a run's recorded preset against an empty list concludes
+   * the preset was *deleted*, so a mid-edit `veld.json` made every healthy run in
+   * that worktree read "preset dev (no longer defined)" — which shipped once. A
+   * boolean beside an always-present array let a caller not notice; a nullable type
+   * makes the compiler ask. Pass it straight to `startOriginLabel`, which takes
+   * `null` to mean "cannot compare".
+   */
+  presets: Preset[] | null;
   /** Startable nodes (hidden excluded) for custom selections. */
   nodes: NodeOption[];
   /**
@@ -285,6 +323,28 @@ export interface Preset {
   when_to_use?: string | null;
   group?: string | null;
   selections: string[];
+  /**
+   * What the daemon can say about what this preset expands to *right now* — three
+   * states, because collapsing any two of them makes a surface state something
+   * false.
+   *
+   * `ok` carries the sorted `node:variant` set, directly comparable to
+   * `RunInfo.started_from.selections` (and **not** the same as `selections`, which
+   * is the raw config entries with `@preset` refs unexpanded and default variants
+   * unfilled). An empty `tokens` is a real `ok`: a preset whose selections are `[]`
+   * expands to nothing.
+   *
+   * `failed` is a preset that exists and does not expand — the state `veld status`
+   * calls "cannot be expanded — see `veld lint`", and lint does report it.
+   *
+   * `skipped` is a preset this *listing* did not expand (past its per-poll cap).
+   * Nothing is wrong with it, so a surface must not send the reader to `veld lint`;
+   * treat it exactly like an unreadable config — cannot compare.
+   */
+  expansion:
+    | { state: "ok"; tokens: string[] }
+    | { state: "failed" }
+    | { state: "skipped" };
   /** Whether this is the project's `default_preset`. */
   is_default: boolean;
 }
@@ -832,9 +892,15 @@ export const api = {
     if (!res.ok) throw new Error(await errorMessage(res));
     return ((await res.json()) as { path: string }).path;
   },
+  /**
+   * Start a run in a worktree. `run_name` names the environment: the daemon
+   * defaults it to the worktree alias when omitted, which is a *silent* choice —
+   * every caller here sends it so the name can be shown before the start (see
+   * `startRunName`).
+   */
   startRun: (
     worktreeId: number,
-    start: { preset?: string; selections?: string[] },
+    start: { preset?: string; selections?: string[]; run_name?: string },
   ) =>
     request<void>(`/api/worktrees/${worktreeId}/start`, {
       method: "POST",

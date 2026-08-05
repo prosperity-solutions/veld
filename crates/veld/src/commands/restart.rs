@@ -52,15 +52,33 @@ pub async fn run(name: Option<String>, debug: bool) -> i32 {
 
     // Take the selections from the latest run — live or ended history (the
     // "dev crashed overnight → veld restart" case reads the crashed run).
-    let selections: Vec<graph::NodeSelection> = match project_state.get_run(run_name) {
-        Some(run_state) => run_state
-            .nodes
-            .values()
-            .map(|ns| graph::NodeSelection {
-                node: ns.node_name.clone(),
-                variant: ns.variant.clone(),
-            })
-            .collect(),
+    //
+    // The origin travels with them, **verbatim**, or not at all. Node rows are the
+    // dependency closure, so rebuilding an origin from them would record a wider
+    // selection set than the invocation asked for — which is what
+    // `StartOrigin::new` explicitly forbids, and it would make every restarted run
+    // read as `redefined since start`.
+    //
+    // A run recorded before provenance existed therefore carries `None` forward.
+    // Synthesising `selections: <the whole closure>` for it would put a claim the
+    // user never made into the database permanently, and print it — worse than the
+    // blank line `start_origin_label(None, …)` already produces.
+    let (selections, origin) = match project_state.get_run(run_name) {
+        Some(run_state) => {
+            let selections: Vec<graph::NodeSelection> = run_state
+                .nodes
+                .values()
+                .map(|ns| graph::NodeSelection {
+                    node: ns.node_name.clone(),
+                    variant: ns.variant.clone(),
+                })
+                .collect();
+            let origin = run_state
+                .graph_snapshot
+                .as_ref()
+                .and_then(|s| s.started_from.clone());
+            (selections, origin)
+        }
         None => {
             output::print_error(&format!("Run '{run_name}' not found."), false);
             return 1;
@@ -133,7 +151,7 @@ pub async fn run(name: Option<String>, debug: bool) -> i32 {
     };
     orchestrator.set_debug(debug);
 
-    match orchestrator.start(&selections, run_name).await {
+    match orchestrator.start(&selections, run_name, origin).await {
         Ok(new_run) => {
             output::print_success(&format!("Environment '{run_name}' restarted."));
 

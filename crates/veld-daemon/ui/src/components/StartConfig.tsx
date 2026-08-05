@@ -25,11 +25,26 @@ export type StartSelection =
   | { kind: "preset"; name: string }
   | { kind: "nodes"; selections: string[] };
 
+/**
+ * The presets this surface can offer.
+ *
+ * `Worktree.presets` is `null` when the config could not be read and `[]` when it
+ * declares none — a distinction that matters for *provenance* (an empty list means
+ * a run's recorded preset was deleted; unreadable means nobody knows) and does not
+ * matter here: either way there is nothing to pick, and the fallback is node
+ * selections. Collapsed once, in one named place, so the difference is not silently
+ * flattened at seven call sites.
+ */
+function offered(w: Worktree): Preset[] {
+  return w.presets ?? [];
+}
+
 export function defaultStartSelection(w: Worktree): StartSelection | null {
-  if (w.presets.length > 0) {
+  if (offered(w).length > 0) {
     // `default_preset` first — the config author said which one this is, and
     // "the first preset in the file" is a guess by comparison.
-    const preferred = w.presets.find((p) => p.is_default) ?? w.presets[0];
+    const list = offered(w);
+    const preferred = list.find((p) => p.is_default) ?? list[0];
     return { kind: "preset", name: preferred.name };
   }
   if (w.nodes.length > 0) {
@@ -72,7 +87,7 @@ export function pruneStartSelection(
 ): StartSelection | null {
   if (!sel) return null;
   if (sel.kind === "preset") {
-    return w.presets.some((p) => p.name === sel.name) ? sel : null;
+    return offered(w).some((p) => p.name === sel.name) ? sel : null;
   }
   const valid = new Set(
     w.nodes.flatMap((n) => n.variants.map((v) => `${n.name}:${v}`)),
@@ -146,7 +161,7 @@ export function startSelectionLabel(
 ): string {
   if (!sel) return "nothing to start";
   if (sel.kind === "preset") {
-    const hit = w?.presets.find((p) => p.name === sel.name);
+    const hit = w && offered(w).find((p) => p.name === sel.name);
     return hit?.label ?? sel.name;
   }
   const n = sel.selections.length;
@@ -166,7 +181,7 @@ export function StartConfig(props: {
   const [opened, setOpened] = useState(false);
   const w = props.worktree;
   const sel = props.value ?? defaultStartSelection(w);
-  const hasPresets = w.presets.length > 0;
+  const hasPresets = offered(w).length > 0;
 
   const selectedVariant = (node: string): string | null => {
     if (sel?.kind !== "nodes") return null;
@@ -250,16 +265,26 @@ export function StartConfig(props: {
 
   return (
     <>
+      {/* The `Start:` prefix is the whole fix for a real confusion, not
+          decoration. This label is a *client-side* choice — what ▶ will start
+          next, remembered per worktree — and it sits beside the run selector,
+          which reports what the daemon says is actually running. Unprefixed, the
+          two read as one statement: a stale preset name next to a green dot was
+          taken to mean "that preset is running", when the live run had come from
+          the CLI or an agent. The run's own origin now renders in the selector
+          (`startOriginLabel`), so these are two labelled answers to two
+          questions rather than one ambiguous pair. */}
       <Button
         size="compact-sm"
         variant="default"
         rightSection={<IconChevronDown size={12} />}
         onClick={() => setOpened(true)}
+        title="What ▶ will start next — not what is running now"
         styles={{
           label: { fontFamily: "var(--mantine-font-family-monospace)" },
         }}
       >
-        {startSelectionLabel(sel, w)}
+        Start: {startSelectionLabel(sel, w)}
       </Button>
       <Modal
         opened={opened}
@@ -290,8 +315,8 @@ export function StartConfig(props: {
                     }}
                   >
                     <Stack gap={7} pr={8}>
-                      {w.presets.map((p, i) => {
-                        const heading = presetHeading(w.presets, i);
+                      {offered(w).map((p, i) => {
+                        const heading = presetHeading(offered(w), i);
                         return (
                           <div key={p.name}>
                             {heading != null && (

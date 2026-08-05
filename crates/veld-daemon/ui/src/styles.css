@@ -676,8 +676,55 @@ select:focus {
 .dot.failed {
   background: var(--danger);
 }
+/* Amber and pulsing, like `.wt-alert.recovering`: veld is restarting a node that
+   keeps failing its liveness probe. It needs a rule of its own because the run
+   selector renders `runStatus`, which reports `recovering` verbatim — without this
+   the dot would have no background at all and the state would render as an empty
+   circle. The top bar used to fold `recovering` into `partial`, where an unbounded
+   restart loop is indistinguishable from progress; that mapping is gone. */
+.dot.recovering {
+  background: var(--warn);
+  animation: pulse 1.6s infinite;
+}
 .dot.stopped {
   background: var(--faint);
+}
+
+/* ---- run selector (top bar) ---------------------------------------------- */
+
+/* Which run the window is bound to. Sized to the run name, so a long
+   environment name is not truncated into ambiguity with its siblings. */
+.run-select {
+  max-width: 240px;
+}
+/* "1/2" — how many runs the worktree holds and which one is showing. Always
+   rendered when there is more than one, because a selector that hid the second
+   run behind a click would be a tidier version of the bug it fixes. Also used on
+   a rail row, where it is the second environment's only representation. */
+.run-count {
+  margin-left: 6px;
+  padding: 0 4px;
+  border-radius: 4px;
+  background: var(--elev);
+  color: var(--muted);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  flex: none;
+}
+/* A sibling that failed or is stuck recovering. The colour is the point: the
+   control the user is already looking at carries the state of the run they are
+   not. */
+.run-count.alert {
+  background: var(--warn-bg);
+  color: var(--warn);
+}
+.run-item-name {
+  font-family: "JetBrains Mono Variable", ui-monospace, monospace;
+  font-size: 12px;
+}
+.run-item-meta {
+  color: var(--muted);
+  font-size: 10.5px;
 }
 
 .wt-alias {

@@ -125,7 +125,7 @@ fn colorize_outcome(run: &RunState) -> String {
 /// `veld runs show <id-prefix> [--json]` — one run in full: identity,
 /// outcome, node results, and the graph snapshot it was started with.
 pub async fn show(id_prefix: &str, json: bool) -> i32 {
-    let Some((config_path, _cfg)) = super::parse_config(json) else {
+    let Some((config_path, cfg)) = super::parse_config(json) else {
         return 1;
     };
     let project_root = config::project_root(&config_path);
@@ -172,6 +172,14 @@ pub async fn show(id_prefix: &str, json: bool) -> i32 {
         output::dim(&run.run_id.to_string()),
     );
     println!("{} {}", output::bold("Outcome:"), colorize_outcome(&run));
+    if let Some(label) = super::start_origin_label(
+        run.graph_snapshot
+            .as_ref()
+            .and_then(|s| s.started_from.as_ref()),
+        &cfg,
+    ) {
+        println!("{} {}", output::bold("Started from:"), label);
+    }
     println!(
         "{} {}",
         output::bold("Started:"),
@@ -327,6 +335,7 @@ pub async fn diff(a: &str, b: Option<&str>, json: bool) -> i32 {
                 "old": { "run_id": old.run_id, "short_id": old.short_id(), "outcome": old.outcome_label() },
                 "new": { "run_id": new.run_id, "short_id": new.short_id(), "outcome": new.outcome_label() },
                 "config_changed": d.config_changed,
+                "origin_changed": d.origin_changed,
                 "added": d.added,
                 "removed": d.removed,
                 "changed": d.changed,
@@ -353,6 +362,17 @@ pub async fn diff(a: &str, b: Option<&str>, json: bool) -> i32 {
             None => output::dim("unknown (hash unavailable)"),
         },
     );
+    // Before the graph, because it answers a different question: two runs can
+    // resolve to the same nodes and still have been *asked for* differently, and
+    // "Resolved graph is identical" would otherwise be the whole report.
+    if let Some(origin) = &d.origin_changed {
+        println!(
+            "{} {} → {}",
+            output::bold("Started from:"),
+            output::red(origin.from.as_deref().unwrap_or("not recorded")),
+            output::green(origin.to.as_deref().unwrap_or("not recorded")),
+        );
+    }
     if old.created_at > new.created_at {
         println!(
             "{}",
@@ -389,6 +409,15 @@ struct SnapshotDiff {
     /// `None` when either hash is unavailable (a config read failed at start
     /// time) — unknown, not "identical".
     config_changed: Option<bool>,
+    /// How each run was *asked for*, when the two differ (`"preset stack"` vs
+    /// `"selections api:local"`).
+    ///
+    /// Two runs can resolve to the same graph and still answer "what did I run"
+    /// differently — one from `--preset stack`, one from the same tokens typed by
+    /// hand. Without this the command prints "Resolved graph is identical" and
+    /// omits the only thing that was not.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    origin_changed: Option<FieldChange>,
     added: Vec<String>,
     removed: Vec<String>,
     changed: Vec<NodeChange>,
@@ -476,9 +505,35 @@ fn diff_snapshots(
         }
     }
 
+    let origin_changed = {
+        // The expansion is part of the description, not just the name. Two runs from
+        // the same `--preset stack` with different recorded selections is exactly
+        // "the preset was redefined between these runs" — the case the expansion is
+        // stored for — and comparing names alone reported them as identical.
+        let describe = |s: &veld_core::state::GraphSnapshot| {
+            s.started_from.as_ref().map(|o| {
+                let tokens = o.selections.join(", ");
+                match &o.preset {
+                    Some(p) => format!("preset {p} ({tokens})"),
+                    None => format!("selections {tokens}"),
+                }
+            })
+        };
+        let (from, to) = (describe(old), describe(new));
+        // Absent on both sides is not a change: pre-provenance runs know nothing
+        // about how they were asked for, and reporting that as a difference would
+        // make every old pair look edited.
+        (from != to).then_some(FieldChange {
+            field: "started from".to_owned(),
+            from,
+            to,
+        })
+    };
+
     SnapshotDiff {
         config_changed: (!old.config_hash.is_empty() && !new.config_hash.is_empty())
             .then(|| old.config_hash != new.config_hash),
+        origin_changed,
         added,
         removed,
         changed,
@@ -503,11 +558,72 @@ mod tests {
     fn snap(hash: &str, nodes: &[(&str, NodeSnapshot)]) -> GraphSnapshot {
         GraphSnapshot {
             config_hash: hash.into(),
+            started_from: None,
             nodes: nodes
                 .iter()
                 .map(|(k, n)| (k.to_string(), n.clone()))
                 .collect(),
         }
+    }
+
+    #[test]
+    fn diff_reports_a_changed_origin_even_when_the_graph_matches() {
+        // The case that made this necessary: `--preset stack` and the same tokens
+        // typed by hand resolve to one graph, so every other line of the report
+        // says "identical" while the one thing that differs is invisible.
+        let same = [("api:local", node("npm run dev", &["PORT"]))];
+        let mut old = snap("aaa", &same);
+        let mut new = snap("aaa", &same);
+        old.started_from = Some(veld_core::state::StartOrigin {
+            preset: Some("stack".into()),
+            selections: vec!["api:local".into()],
+        });
+        new.started_from = Some(veld_core::state::StartOrigin {
+            preset: None,
+            selections: vec!["api:local".into()],
+        });
+        let d = diff_snapshots(&old, &new);
+        assert!(d.added.is_empty() && d.removed.is_empty() && d.changed.is_empty());
+        let origin = d
+            .origin_changed
+            .expect("origin difference must be reported");
+        assert_eq!(origin.from.as_deref(), Some("preset stack (api:local)"));
+        assert_eq!(origin.to.as_deref(), Some("selections api:local"));
+    }
+
+    #[test]
+    fn a_preset_redefined_between_two_runs_is_reported() {
+        // Same preset name, different recorded expansion — the preset was edited
+        // between the two runs. Comparing names alone called this identical, which
+        // is the one case the stored expansion exists to catch.
+        let same = [("api:local", node("npm run dev", &[]))];
+        let mut old = snap("aaa", &same);
+        let mut new = snap("bbb", &same);
+        old.started_from = Some(veld_core::state::StartOrigin {
+            preset: Some("stack".into()),
+            selections: vec!["api:local".into()],
+        });
+        new.started_from = Some(veld_core::state::StartOrigin {
+            preset: Some("stack".into()),
+            selections: vec!["api:local".into(), "web:local".into()],
+        });
+        let origin = diff_snapshots(&old, &new)
+            .origin_changed
+            .expect("a redefined preset must be reported");
+        assert_eq!(origin.from.as_deref(), Some("preset stack (api:local)"));
+        assert_eq!(
+            origin.to.as_deref(),
+            Some("preset stack (api:local, web:local)")
+        );
+    }
+
+    #[test]
+    fn two_pre_provenance_runs_do_not_read_as_an_origin_change() {
+        // Both sides absent is not a difference — otherwise every pair of runs
+        // recorded before provenance existed would report one.
+        let same = [("api:local", node("npm run dev", &[]))];
+        let d = diff_snapshots(&snap("aaa", &same), &snap("aaa", &same));
+        assert!(d.origin_changed.is_none());
     }
 
     #[test]

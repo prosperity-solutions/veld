@@ -147,7 +147,7 @@ veld stop --name dev
 | `veld start <NODE:VARIANT> --oneshot [--all-logs]` | Run a command node as a one-off: start its dependencies, run it to completion (streaming its output), tear everything down in reverse order, and exit with its exit code. The e2e-test / CI pattern (like `docker compose run --rm --abort-on-container-exit`). Only the terminal node's output goes to stdout unless `--all-logs`. |
 | `veld stop [--name <n>] [--all]` | Stop a running environment |
 | `veld restart [--name <n>]` | Restart an environment |
-| `veld status [--name <n>] [--json]` | Show run status, including per-node CPU and memory footprint |
+| `veld status [--name <n>] [--json]` | Show run status, including what the run was started from (the preset, flagged if that preset has been edited since) and per-node CPU and memory footprint |
 | `veld stats [--name <n>] [--node <n>] [--processes] [--history] [--cpu] [--window <d>] [--memory <m>] [--all-metrics] [--json]` | Detailed resource usage: the memory breakdown by page class, the split across a node's subprocesses, and bucketed history of memory or CPU over a window |
 | `veld urls [--name <n>] [--json]` | Show URLs for a run |
 | `veld action <name> [--name <n>] [--node <n>] [--print] [--json]` | Run a node-defined action (e.g. open the database in a GUI client); `--print` emits the resolved command |
@@ -157,7 +157,7 @@ veld stop --name dev
 | `veld nodes` | List all nodes and variants |
 | `veld presets [--json] [--pin]` | List presets with their keys, labels, and `when_to_use`. `--pin` prints the current numbering as a paste-ready block that freezes auto-assigned keys |
 | `veld runs [--name <n>] [--json]` | Run history: one row per execution instance (short id, started/ended, duration, outcome) |
-| `veld runs show <id> [--json]` | One run in full: outcome, node exit codes, and the graph snapshot it was started with |
+| `veld runs show <id> [--json]` | One run in full: outcome, what it was started from (preset or explicit selections), node exit codes, and the graph snapshot it was started with |
 | `veld runs diff <old> <new> [--json]` | Config diff between two runs (nodes added/removed, command/cwd/env/url changes); one id diffs against its predecessor |
 | `veld feedback [--name <n>]` | Open feedback UI for a run |
 | `veld feedback next --wait [--name <n>]` | Block until feedback is submitted (for agent tool-use loops) |
