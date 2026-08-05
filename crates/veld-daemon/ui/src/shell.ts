@@ -118,6 +118,10 @@ export interface DesktopWindowApi {
   onYieldWorktree(fn: (payload: { worktreeId: number; yieldId?: number }) => void): () => void;
   /** That release is on screen. Optional: an older shell has no such channel. */
   yielded?(yieldId: number): Promise<boolean>;
+  /** Whether this page can send that acknowledgement at all — reported by the very
+   *  effect that sends it, so the shell never waits on a window whose acknowledging
+   *  half is absent. Optional: an older shell has no such channel. */
+  yieldsReady?(ready: boolean): Promise<boolean>;
   detach(payload: {
     worktreeId: number;
     repoRoot: string;

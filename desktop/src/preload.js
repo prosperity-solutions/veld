@@ -114,6 +114,11 @@ contextBridge.exposeInMainWorld("veldDesktop", {
     onYieldWorktree: (fn) => on("veld:window:yield", fn),
     /** …that release has happened. */
     yielded: (yieldId) => ipcRenderer.invoke("veld:window:yielded", { yieldId }),
+    /** Whether the page is in a position to send that acknowledgement at all.
+     *  Reported by the effect that sends it, so a claim never waits on a window
+     *  whose acknowledging half is not there — an older bundle, or a page mid-load.
+     *  Without it the wait falls back to a timeout every single handover. */
+    yieldsReady: (ready) => ipcRenderer.invoke("veld:window:yields-ready", { ready }),
     /** A tab drag started here. Every window freezes its embedded browser views
      *  (they paint over all DOM, so an overlay under one is invisible) and the
      *  shell starts carrying the cursor to whichever window it is over. */

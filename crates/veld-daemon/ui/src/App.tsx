@@ -1463,8 +1463,9 @@ function AppInner(props: {
    * the ack is queued for the effect below and sent after that commit.
    */
   useEffect(() => {
-    if (chromeless || !desktopWindow) return;
-    return desktopWindow.onYieldWorktree(({ worktreeId, yieldId }) => {
+    const shell = desktopWindow;
+    if (chromeless || !shell) return;
+    const off = shell.onYieldWorktree(({ worktreeId, yieldId }) => {
       // A pending "reveal node health" request for this worktree can never be
       // satisfied now, and its own guard cannot see that: a yield deletes the
       // layout without touching the *selection*, so `worktree?.id` still equals
@@ -1489,6 +1490,16 @@ function AppInner(props: {
       // and the answer is "nothing to let go of".
       if (typeof yieldId === "number") setYieldAcks((q) => [...q, yieldId]);
     });
+    // **The shell waits for a release only if this is here**, and it learns that
+    // from here rather than from a neighbouring signal — so removing or moving this
+    // effect withdraws the promise with it, and a claim goes back to not waiting
+    // instead of waiting for an acknowledgement nothing will send. Reported after
+    // the listener, withdrawn before it: the safe order in both directions.
+    void shell.yieldsReady?.(true).catch(() => {});
+    return () => {
+      void shell.yieldsReady?.(false).catch(() => {});
+      off();
+    };
   }, [chromeless]);
 
   /**

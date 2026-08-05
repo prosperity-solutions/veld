@@ -295,22 +295,43 @@ function dropDelivery(dropListener) {
 }
 
 /**
- * What a window's drop-listener state becomes when its page navigates.
+ * What one of a window's listener states becomes when its page navigates.
+ *
+ * Shared by both — the drop listener and the yield listener — because the question
+ * is the same one and the trap in it is the same one.
  *
  * Only a main-frame, cross-document navigation counts. `did-start-loading` is the
  * tab spinner and an iframe's load turns it too; a same-document navigation
- * (`pushState`, a fragment) does not replace the listener at all. Demoting on
- * either would route every later drop into the queue with nothing able to undo it,
- * since the renderer only reports `ready` when `PaneArea` mounts and it is already
- * mounted.
+ * (`pushState`, a fragment) does not replace a listener at all. Demoting on either
+ * would strand the window in `"gone"` with nothing able to undo it, since the
+ * renderer reports `ready` when its effect mounts and it is already mounted.
  *
  * `"unknown"` is left alone rather than demoted: it means "has never reported",
- * which a reload does not change, and turning it into `"gone"` would make an older
- * bundle's every drop take the append path for the rest of the session.
+ * which a reload does not change, and turning it into `"gone"` would hold an older
+ * bundle in the degraded path for the rest of the session.
  */
-function nextDropListener(current, { isMainFrame, isSameDocument }) {
+function nextListenerState(current, { isMainFrame, isSameDocument }) {
   if (!isMainFrame || isSameDocument) return current;
   return current === "ready" ? "gone" : current;
+}
+
+/**
+ * Whether a holder's release is worth waiting for.
+ *
+ * Only `"ready"`, and the asymmetry with `dropDelivery` is the point. A drop can be
+ * *pushed* at a window that has never reported, because an older `/ide` bundle
+ * still answers `drop-here` perfectly well — the reporting is only about latency
+ * there. A yield is different: an older bundle has no `yielded` channel at all, so
+ * waiting for one would make every handover on a daemon-older-than-shell install
+ * cost the full timeout. Not waiting is exactly what that build did.
+ *
+ * The state is reported by the effect that *sends* the acknowledgement, not
+ * inferred from some other signal that happens to correlate with it. That is what
+ * keeps this honest: remove the ack and the report goes with it, so the shell stops
+ * waiting rather than waiting for something that will never come.
+ */
+function answersYields(yieldListener) {
+  return yieldListener === "ready";
 }
 
 /** Record `recordId` as holding exactly `worktreeIds`, dropping whatever it held
@@ -441,11 +462,12 @@ module.exports = {
   slotFor,
   nextSuffix,
   canOpenAnother,
+  answersYields,
   dropDelivery,
   forgetWorktrees,
   handBackTarget,
   handBackTransfers,
-  nextDropListener,
+  nextListenerState,
   othersHolding,
   ownsWorktree,
   releaseClaims,

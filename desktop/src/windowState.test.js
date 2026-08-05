@@ -4,13 +4,14 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
   MAX_WINDOWS,
+  answersYields,
   canOpenAnother,
   dropDelivery,
   forgetWorktrees,
   handBackTarget,
   handBackTransfers,
   isSuffix,
-  nextDropListener,
+  nextListenerState,
   nextSuffix,
   othersHolding,
   ownsWorktree,
@@ -419,20 +420,34 @@ test("dropDelivery queues only for a window that said its listener is gone", () 
   assert.equal(dropDelivery(undefined), "send");
 });
 
-test("nextDropListener demotes a live listener only on a real document swap", () => {
+test("nextListenerState demotes a live listener only on a real document swap", () => {
   const swap = { isMainFrame: true, isSameDocument: false };
-  assert.equal(nextDropListener("ready", swap), "gone");
+  assert.equal(nextListenerState("ready", swap), "gone");
   // An iframe's load turns the tab spinner and a `pushState` is not a new
-  // document; demoting on either would route every later drop into the queue with
-  // nothing able to undo it, since the renderer reports `ready` on mount and it is
-  // already mounted.
-  assert.equal(nextDropListener("ready", { isMainFrame: false, isSameDocument: false }), "ready");
-  assert.equal(nextDropListener("ready", { isMainFrame: true, isSameDocument: true }), "ready");
+  // document; demoting on either would strand the window in "gone" with nothing
+  // able to undo it, since the renderer reports `ready` on mount and it is already
+  // mounted.
+  assert.equal(nextListenerState("ready", { isMainFrame: false, isSameDocument: false }), "ready");
+  assert.equal(nextListenerState("ready", { isMainFrame: true, isSameDocument: true }), "ready");
   // `unknown` means "has never reported", which a reload does not change. Demoting
-  // it would make an older bundle's every drop take the append path for the rest
-  // of the session — the trap this function exists to hold.
-  assert.equal(nextDropListener("unknown", swap), "unknown");
-  assert.equal(nextDropListener("gone", swap), "gone");
+  // it would hold an older bundle in the degraded path for the rest of the session
+  // — the trap this function exists to hold.
+  assert.equal(nextListenerState("unknown", swap), "unknown");
+  assert.equal(nextListenerState("gone", swap), "gone");
+});
+
+test("answersYields waits only on a reported listener, unlike dropDelivery", () => {
+  assert.equal(answersYields("ready"), true);
+  assert.equal(answersYields("gone"), false);
+  // The asymmetry is the point, and it is deliberate. A drop may be *pushed* at a
+  // window that never reported, because an older /ide bundle answers `drop-here`
+  // perfectly well — there the report only buys latency. A yield cannot: an older
+  // bundle has no `yielded` channel at all, so waiting on one would make every
+  // handover on a daemon-older-than-shell install cost the full timeout. Not
+  // waiting is exactly what that build did.
+  assert.equal(answersYields("unknown"), false);
+  assert.equal(dropDelivery("unknown"), "send");
+  assert.equal(answersYields(undefined), false);
 });
 
 test("handBackTransfers carries a queue on from any window, its own tabs only from a dock", () => {
