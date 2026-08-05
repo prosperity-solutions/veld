@@ -528,28 +528,34 @@ impl Diagnostics {
     /// A note rather than a failure: every other part of a terminal still works, and
     /// clicking a URL in the output still opens it in the system browser.
     fn terminal_shims_check(&self) -> Check {
+        // **Skipped whole under sudo**, exactly as check 0 skips itself, and for both
+        // of its reasons rather than one. `Db::open()` creates the file, so as root it
+        // leaves root-owned `veld.db`/`-wal`/`-shm` that break every later non-sudo
+        // `veld` command — and `shim_dir()` is `HOME`-derived and no more
+        // `SUDO_USER`-aware than the database path is, so the row would then report on
+        // *root's* `~/.veld`, find nothing there, and turn a passing `veld doctor` into
+        // a failing one. Guarding only the database left the second half live; this is
+        // one condition covering both, because two guards for one hazard is how the
+        // first version of this got it half right.
+        if std::env::var("SUDO_UID").is_ok_and(|u| !u.is_empty()) {
+            return Check {
+                pass: true,
+                label: "Terminal URL check skipped under sudo (run `veld doctor` without sudo)"
+                    .to_owned(),
+            };
+        }
         let dir = veld_core::instance::shim_dir();
         let shown = tilde_path(&dir);
         // The scripts are written at every daemon start regardless of the settings, so
         // their presence says nothing about whether the feature is *on*. Reporting
         // "Terminal URLs open in Veld" while the user has switched it off is a green
         // answer to the exact question someone runs this to ask.
-        //
-        // **The database is not opened under sudo**, for the reason check 0 states and
-        // skips itself for: `Db::open()` creates the file, so as root it either checks
-        // the wrong database or leaves root-owned `veld.db`/`-wal`/`-shm` behind and
-        // breaks every later non-sudo `veld` command. The file half of this row needs
-        // no database, so it still runs and only the settings go unread.
-        let under_sudo = std::env::var("SUDO_UID").is_ok_and(|u| !u.is_empty());
-        let settings = (!under_sudo)
-            .then(veld_core::db::Db::open)
-            .and_then(Result::ok)
-            .map(|db| {
-                (
-                    db.terminal_open_urls_in_app(),
-                    db.terminal_intercept_system_open(),
-                )
-            });
+        let settings = veld_core::db::Db::open().ok().map(|db| {
+            (
+                db.terminal_open_urls_in_app(),
+                db.terminal_intercept_system_open(),
+            )
+        });
         if let Some((false, _)) = settings {
             return Check {
                 pass: true,

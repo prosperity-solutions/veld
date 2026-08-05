@@ -363,8 +363,17 @@ fn script(tool: Tool, cli: &Path, real: Option<&Path>) -> String {
     out.push_str(
         "# Routes a single http(s) URL to a Veld browser pane. See `veld open-url --help`.\n",
     );
+    // Not `exec`: the binary is tested for executability at run time (an upgrade or an
+    // uninstall can remove it while a shell is open), but "executable" is not the same
+    // as "knows this subcommand". A `veld` that predates `open-url` — a manual
+    // rollback, or the window between the two binaries during an update — parses the
+    // argv, refuses the unknown subcommand, and exits **2**, which is clap's usage
+    // status and also the only status this command returns for "I cannot handle this".
+    // `exec`ing would end the shim there and `open <url>` would open nothing at all,
+    // with no system opener behind it. So: run it, and fall through on exactly that.
     out.push_str(&format!(
-        "[ -x {cli} ] && exec {cli} open-url --tool {flag} -- \"$@\"\n",
+        "if [ -x {cli} ]; then\n  {cli} open-url --tool {flag} -- \"$@\"\n  rc=$?\n  \
+         [ \"$rc\" -ne 2 ] && exit \"$rc\"\nfi\n",
         cli = quote(cli),
         flag = tool.flag(),
     ));
@@ -416,9 +425,20 @@ mod tests {
         assert_eq!(lines[0], "#!/bin/sh");
         // The guard is `-x`, evaluated when the shim runs: an uninstall while a
         // shell is open must not break `open`.
+        // The guard is `-x`, evaluated when the shim runs: an uninstall while a shell
+        // is open must not break `open`.
+        assert!(body.contains("[ -x '/usr/local/bin/veld' ]"), "{body}");
+        // …and it is NOT an `exec`, because a `veld` that predates this subcommand
+        // exits 2 and the shim has to fall through to the real tool rather than end
+        // there. That is the difference between "the feature is off" and "`open` is
+        // broken".
         assert!(
-            lines[3].starts_with("[ -x '/usr/local/bin/veld' ] && exec '/usr/local/bin/veld' open-url --tool open -- \"$@\""),
-            "{body}"
+            body.contains("open-url --tool open -- \"$@\"") && body.contains("-ne 2"),
+            "the shim must fall through on clap's usage status: {body}"
+        );
+        assert!(
+            !body.contains("&& exec '/usr/local/bin/veld' open-url"),
+            "an exec here strands the caller when veld cannot handle the subcommand: {body}"
         );
         // The original argv reaches the real tool unexamined.
         assert!(body.contains("\"$@\"\n"), "{body}");
