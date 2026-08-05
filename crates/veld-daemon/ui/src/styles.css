@@ -536,7 +536,9 @@ select:focus {
   color: var(--danger);
 }
 
-/* Collapsed rows: status dot + emoji only, centered. Height comes from
+/* Collapsed rows: the worktree marker only, centered — plus the state glyphs that
+   survive the collapse (`.wt-away`, `.wt-alert`), which are the reason those two
+   are sized to their glyph rather than to a control box. Height comes from
    .wt-row's min-height, so rows don't resize when the rail expands. */
 .wt-row.slim {
   justify-content: center;
@@ -599,8 +601,11 @@ select:focus {
 
 /* Shown in another window. Dimmed, not disabled: the row still does something
    — it takes you to the window that has it — and a disabled-looking row would
-   say the opposite. The status dot keeps its full colour, because whether a
-   run is up is true wherever it is being shown from. */
+   say the opposite. Only the identity columns dim; `.wt-alert` keeps its full
+   colour, because whether a run has failed is true wherever it is being shown
+   from, and it is the one thing on the row you would want to chase into the other
+   window. (The run-status dot used to hold that exemption, by being absent from
+   this list; the exemption outlived it.) */
 .wt-row.away .wt-alias,
 .wt-row.away .wt-branch,
 .wt-row.away .wt-emoji {
@@ -611,6 +616,12 @@ select:focus {
   color: var(--muted);
 }
 
+/* A run's status as one circle. The top bar's only — the rail's rows had one too
+   and it sat immediately beside the worktree marker, where two circles read as a
+   single visual group and neither channel could be told from the other. The rail
+   now puts run state on its run control and failures on `.wt-alert`. Here the dot
+   is unambiguous: it is beside the run's own name and controls, with no identity
+   glyph anywhere near it. */
 .dot {
   width: 7px;
   height: 7px;
@@ -786,10 +797,45 @@ body[data-theme="light"] .swatch-cell > span {
   background: none;
 }
 
+/* Attention affordance on a failed or recovering row: an icon that takes you to
+   the nodes view rather than a dot that only reports. Same 17px control box as
+   its neighbours, so a row with two controls has two of the same shape. */
+.wt-alert {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 17px;
+  height: 17px;
+  border: none;
+  border-radius: 5px;
+  background: none;
+  padding: 0;
+  cursor: pointer;
+  color: var(--danger);
+}
+/* Amber, not red: veld is actively restarting the node, which is a different
+   thing from a run that has given up. Both lead to the same view. */
+.wt-alert.recovering {
+  color: var(--warn);
+  animation: pulse 1.6s infinite;
+}
+.wt-alert:hover {
+  background: var(--elev);
+}
+/* Collapsed, it shrinks to its glyph. This is the only control that renders in a
+   64px centred row — the run control and the menu are wide-only — and a 17px box
+   beside the marker there spends 6px of padding pushing both off centre. */
+.wt-row.slim .wt-alert {
+  width: auto;
+  height: auto;
+}
+
 /* The row is a role=button div, so its nested controls can be real buttons
    without invalid nesting — but they need their own visible focus ring. */
 .wt-row:focus-visible,
 .wt-run:focus-visible,
+.wt-alert:focus-visible,
 .wt-edit:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: -1px;

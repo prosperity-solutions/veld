@@ -4,7 +4,12 @@
 
 import type { EnvironmentList, Lane, RunInfo, Worktree } from "./api";
 
-export type WorktreeStatus = "running" | "partial" | "failed" | "stopped";
+export type WorktreeStatus =
+  | "running"
+  | "partial"
+  | "recovering"
+  | "failed"
+  | "stopped";
 
 /** The veld runs living in a worktree (its path is the project root). */
 export function runsForWorktree(
@@ -59,15 +64,51 @@ export function diagnosticsRun(runs: RunInfo[]): RunInfo | null {
 }
 
 /**
- * Rail status dot: running (green, pulsing), partial (amber, in transition),
- * failed (red), stopped (gray).
+ * A worktree's run state, reduced to what a surface has to render.
+ *
+ * `partial` means **exactly** `starting` or `stopping` — a transition that is
+ * expected to end on its own, which is what the rail draws a spinner for.
+ * `recovering` is deliberately *not* folded into it: that is the health monitor
+ * restarting a node which keeps failing its liveness probe, so it has no
+ * expected end and a spinner would read as "perpetually starting". It routes to
+ * the same attention affordance `failed` does — "something is wrong, look at the
+ * nodes" — which is also strictly more than the nothing it used to get.
+ *
+ * The pairing is load-bearing: [`transitionAction`] answers *which way* a
+ * `partial` run is moving, and the two must stay in agreement, so
+ * `partial` ⇔ `transitionAction() !== null` is asserted in the tests.
  */
 export function worktreeStatus(runs: RunInfo[]): WorktreeStatus {
   const run = activeRun(runs);
   if (!run) return "stopped";
   if (run.status === "running") return "running";
   if (run.status === "failed") return "failed";
+  if (run.status === "recovering") return "recovering";
   return "partial";
+}
+
+/**
+ * Which direction an observed transition is moving in, or `null` if there is no
+ * transition to report.
+ *
+ * The rail's spinner used to appear only for an action *this window* fired
+ * (`PendingMarker`), which meant a run started from the CLI, from another
+ * window, or one already coming up when the window opened showed a plain ▶ or ■
+ * while it was mid-transition. This is what lets the spinner be driven by
+ * observed state, demoting the optimistic marker to a latency optimisation
+ * rather than the only source of truth.
+ *
+ * A [`PendingAction`] rather than a direction of its own so the caller can hand
+ * it straight to `actionColor`: a row that is stopping has to read as stopping
+ * and not as starting, and that property was previously only available for a
+ * locally-fired action. `restart` is never returned — a restart is observed as
+ * `stopping` then `starting`, and only the local marker knows the two were one
+ * action.
+ */
+export function transitionAction(run: RunInfo | null): PendingAction | null {
+  if (run?.status === "starting") return "start";
+  if (run?.status === "stopping") return "stop";
+  return null;
 }
 
 /**

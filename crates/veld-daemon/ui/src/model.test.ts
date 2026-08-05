@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { EnvironmentList, Lane, RunInfo, Worktree } from "./api";
+import type { EnvironmentList, Lane, RunInfo, RunStatus, Worktree } from "./api";
 import {
   activeRun,
   bestFuzzyMatch,
@@ -11,6 +11,7 @@ import {
   runSignature,
   runsForWorktree,
   sortedUrls,
+  transitionAction,
   worktreeStatus,
   TRASH_LANE,
 } from "./model";
@@ -78,12 +79,47 @@ describe("activeRun / worktreeStatus", () => {
     expect(activeRun([])).toBeNull();
   });
 
-  it("maps to the rail dot states", () => {
+  it("reduces a run status to what a surface renders", () => {
     expect(worktreeStatus([run("a", "running")])).toBe("running");
     expect(worktreeStatus([run("a", "starting")])).toBe("partial");
+    expect(worktreeStatus([run("a", "stopping")])).toBe("partial");
     expect(worktreeStatus([run("a", "failed", true)])).toBe("failed");
     expect(worktreeStatus([run("a", "stopped")])).toBe("stopped");
     expect(worktreeStatus([])).toBe("stopped");
+  });
+
+  it("keeps recovering out of partial", () => {
+    // Folded into `partial` it rendered as a spinner, which reads as
+    // "perpetually starting" for a node the monitor is restarting on a loop.
+    // It routes to the attention affordance instead, like `failed`.
+    expect(worktreeStatus([run("a", "recovering")])).toBe("recovering");
+    expect(transitionAction(run("a", "recovering"))).toBeNull();
+  });
+
+  it("agrees with transitionAction on exactly which statuses are partial", () => {
+    // The rail draws a spinner when `transitionAction` names a direction, and
+    // `partial` is what that state used to be called. If the two ever disagree
+    // one of them is rendering a state the other does not believe in — a
+    // spinner with no colour, or a transition with no spinner.
+    const all: RunStatus[] = [
+      "starting",
+      "running",
+      "recovering",
+      "stopping",
+      "stopped",
+      "failed",
+    ];
+    for (const status of all) {
+      const r = run("a", status, true);
+      expect(
+        transitionAction(r) !== null,
+        `${status}: partial=${worktreeStatus([r])} action=${transitionAction(r)}`,
+      ).toBe(worktreeStatus([r]) === "partial");
+    }
+    // And the direction is the one the spinner's colour is keyed on.
+    expect(transitionAction(run("a", "starting"))).toBe("start");
+    expect(transitionAction(run("a", "stopping"))).toBe("stop");
+    expect(transitionAction(null)).toBeNull();
   });
 
   it("ignores non-live history runs", () => {
