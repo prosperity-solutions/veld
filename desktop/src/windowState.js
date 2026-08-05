@@ -196,6 +196,24 @@ function handBackTarget(closing, others) {
 }
 
 /**
+ * Everything a closing window has to hand on, queue first.
+ *
+ * Two sources and they are not the same thing. `carried` is what was handed *to*
+ * this window and never collected — a drop routed here while it was loading, whose
+ * source has already let go on the strength of the shell taking custody — and it
+ * travels on whatever kind of window this is: **a queue is a resting place, never a
+ * grave.** `own` is the window's own tabs, which only a detached window hands back,
+ * because a main window's tabs are its own and closing it is not a transfer.
+ *
+ * Queue first so the order tabs arrive in is the order they were sent, and an
+ * `own` with no tabs is dropped rather than travelling as an empty transfer.
+ */
+function handBackTransfers(kind, carried, own) {
+  const mine = kind === "detached" && own && own.tabs.length > 0 ? [own] : [];
+  return [...carried, ...mine];
+}
+
+/**
  * How many stored windows may be reopened.
  *
  * One short of the ceiling **only when the stored set has no main window**, in
@@ -225,6 +243,95 @@ function restoreBudget(stored) {
  *  have to let go before `keeper` may attach to its terminals. */
 function othersHolding(holders, worktreeId, keeper) {
   return [...(holders.get(worktreeId) ?? [])].filter((id) => id !== keeper);
+}
+
+/**
+ * Whether `record` is a window this worktree's panes belong in.
+ *
+ * Two ways to qualify, and the second one is not a special case. A **main**
+ * window qualifies by holding the claim, i.e. by *showing* the worktree — its
+ * own `worktreeId` records what it was opened for, which is not what it shows
+ * now, so that field must never be read for one. A **detached** window never
+ * claims at all (it is a satellite of its origin's claim), so the field is the
+ * only thing that says which worktree its dock is for — and matching on the
+ * claim alone made a detached dock impossible to drop onto.
+ *
+ * Liveness and "is this the window the drag started in" are the caller's, since
+ * neither is set arithmetic.
+ */
+function ownsWorktree(record, worktreeId, claims) {
+  if (claims.get(worktreeId) === record.id) return true;
+  return record.kind === "detached" && record.worktreeId === worktreeId;
+}
+
+/**
+ * Whether a cross-window drop may be pushed at a window's drop listener, or has
+ * to be queued for it.
+ *
+ * A window holds its claim from the moment it *asks* for a worktree, while the
+ * listener that answers a drop does not exist until `/ide` has mounted and
+ * `PaneArea` has registered its handler — so a claim is routable for a window
+ * that cannot answer, and pushing there means `webContents.send` goes nowhere,
+ * the ack times out, and the gesture reports `refused` after two seconds of
+ * looking like a hang.
+ *
+ * **This is only half the question, and the smaller half.** A page that has not
+ * finished *loading* has no listener either, and that is the longer gap — the
+ * waiting page through a daemon restart, the bundle load, a reload. The caller
+ * asks the window itself about that (`webContents.isLoading()`), because it is the
+ * shell's own knowledge and does not depend on the UI's version. What is left for
+ * this function is a page that has loaded and still has no handler.
+ *
+ * `"unknown"` therefore means *loaded, and has not reported* — either an older
+ * `/ide` bundle that never will (version skew makes that reachable) or a current
+ * one in the window between its load and `PaneArea` mounting, which is `/api/repos`
+ * resolving. It **sends**, because for the older bundle send-and-answer is the only
+ * thing that works at all, and for the newer one the drop ack's own timeout is the
+ * safety net — a queue, not a refusal. Only a window that has reported, and has
+ * since said its listener is gone, is queued for outright.
+ */
+function dropDelivery(dropListener) {
+  return dropListener === "gone" ? "queue" : "send";
+}
+
+/**
+ * What one of a window's listener states becomes when its page navigates.
+ *
+ * Shared by both — the drop listener and the yield listener — because the question
+ * is the same one and the trap in it is the same one.
+ *
+ * Only a main-frame, cross-document navigation counts. `did-start-loading` is the
+ * tab spinner and an iframe's load turns it too; a same-document navigation
+ * (`pushState`, a fragment) does not replace a listener at all. Demoting on either
+ * would strand the window in `"gone"` with nothing able to undo it, since the
+ * renderer reports `ready` when its effect mounts and it is already mounted.
+ *
+ * `"unknown"` is left alone rather than demoted: it means "has never reported",
+ * which a reload does not change, and turning it into `"gone"` would hold an older
+ * bundle in the degraded path for the rest of the session.
+ */
+function nextListenerState(current, { isMainFrame, isSameDocument }) {
+  if (!isMainFrame || isSameDocument) return current;
+  return current === "ready" ? "gone" : current;
+}
+
+/**
+ * Whether a holder's release is worth waiting for.
+ *
+ * Only `"ready"`, and the asymmetry with `dropDelivery` is the point. A drop can be
+ * *pushed* at a window that has never reported, because an older `/ide` bundle
+ * still answers `drop-here` perfectly well — the reporting is only about latency
+ * there. A yield is different: an older bundle has no `yielded` channel at all, so
+ * waiting for one would make every handover on a daemon-older-than-shell install
+ * cost the full timeout. Not waiting is exactly what that build did.
+ *
+ * The state is reported by the effect that *sends* the acknowledgement, not
+ * inferred from some other signal that happens to correlate with it. That is what
+ * keeps this honest: remove the ack and the report goes with it, so the shell stops
+ * waiting rather than waiting for something that will never come.
+ */
+function answersYields(yieldListener) {
+  return yieldListener === "ready";
 }
 
 /** Record `recordId` as holding exactly `worktreeIds`, dropping whatever it held
@@ -355,9 +462,14 @@ module.exports = {
   slotFor,
   nextSuffix,
   canOpenAnother,
+  answersYields,
+  dropDelivery,
   forgetWorktrees,
   handBackTarget,
+  handBackTransfers,
+  nextListenerState,
   othersHolding,
+  ownsWorktree,
   releaseClaims,
   releaseHolds,
   restoreBudget,

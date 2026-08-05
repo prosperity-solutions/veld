@@ -84,7 +84,14 @@ export interface DesktopWindowApi {
   }): Promise<{ opened: boolean; reason?: string | null }>;
   /** Ask to show a worktree. `ok: false` with `reason: "shown-elsewhere"` means
    *  the shell focused the window that already has it, and this one should not
-   *  switch — a worktree has one set of panes and one window showing them. */
+   *  switch — a worktree has one set of panes and one window showing them.
+   *
+   *  It resolves only once every other window holding that worktree's panes has
+   *  let go, so it can take up to the shell's yield timeout: the caller attaches
+   *  to live PTY sessions on the strength of this answer. Which is also why
+   *  answers do not arrive in call order, and why a later claim from this window
+   *  supersedes an earlier one — `reason: "superseded"`, which every caller
+   *  already handles correctly by treating a non-`ok` answer as "stay put". */
   claimWorktree(
     worktreeId: number,
     /** Whether a refusal should raise the window that has it. False while a
@@ -103,8 +110,18 @@ export interface DesktopWindowApi {
    *  worktree id is a database rowid and gets **reused**, so a claim left on a
    *  removed worktree greys out whichever one is created next. */
   worktreesGone(worktreeIds: number[]): Promise<boolean>;
-  /** Let go of one worktree's panes — another window is taking it. */
-  onYieldWorktree(fn: (payload: { worktreeId: number }) => void): () => void;
+  /** Let go of one worktree's panes — another window is taking it. Answer with
+   *  `yielded` once the release has actually happened: the window that asked does
+   *  not attach to those terminals until it hears back, and a second attach takes
+   *  a session over rather than mirroring it. `yieldId` is absent on an older
+   *  shell, which waits for nothing. */
+  onYieldWorktree(fn: (payload: { worktreeId: number; yieldId?: number }) => void): () => void;
+  /** That release is on screen. Optional: an older shell has no such channel. */
+  yielded?(yieldId: number): Promise<boolean>;
+  /** Whether this page can send that acknowledgement at all — reported by the very
+   *  effect that sends it, so the shell never waits on a window whose acknowledging
+   *  half is absent. Optional: an older shell has no such channel. */
+  yieldsReady?(ready: boolean): Promise<boolean>;
   detach(payload: {
     worktreeId: number;
     repoRoot: string;
@@ -126,6 +143,11 @@ export interface DesktopWindowApi {
   /** Tabs dropped here — place them where the preview said, then acknowledge.
    *  The source window does not release them until you do. */
   onDropHere(fn: (p: TabTransfer & { dropId: number }) => void): () => void;
+  /** Whether that listener is registered right now. The shell's claim map says
+   *  which worktree this window shows, not whether the page showing it has
+   *  mounted — so without this a drop is pushed at a window mid-reload and goes
+   *  nowhere. Optional: an older shell has no such channel. */
+  dropsReady?(ready: boolean): Promise<boolean>;
   /** Which of a `drop-here`'s tabs were placed. Omitting one leaves it in the
    *  window it came from, which is the safe direction: a tab that stayed put is
    *  a visible non-event, a vanished one is unrecoverable. */

@@ -108,8 +108,17 @@ contextBridge.exposeInMainWorld("veldDesktop", {
     worktreesGone: (worktreeIds) =>
       ipcRenderer.invoke("veld:window:worktrees-gone", { worktreeIds }),
     /** Let go of one worktree's panes — another window is taking it. Release,
-     *  never close: the shells keep running for whoever attaches next. */
+     *  never close: the shells keep running for whoever attaches next. Answer
+     *  with `yielded` once the release is on screen: the window that asked does
+     *  not attach until it hears back. */
     onYieldWorktree: (fn) => on("veld:window:yield", fn),
+    /** …that release has happened. */
+    yielded: (yieldId) => ipcRenderer.invoke("veld:window:yielded", { yieldId }),
+    /** Whether the page is in a position to send that acknowledgement at all.
+     *  Reported by the effect that sends it, so a claim never waits on a window
+     *  whose acknowledging half is not there — an older bundle, or a page mid-load.
+     *  Without it the wait falls back to a timeout every single handover. */
+    yieldsReady: (ready) => ipcRenderer.invoke("veld:window:yields-ready", { ready }),
     /** A tab drag started here. Every window freezes its embedded browser views
      *  (they paint over all DOM, so an overlay under one is invisible) and the
      *  shell starts carrying the cursor to whichever window it is over. */
@@ -129,6 +138,11 @@ contextBridge.exposeInMainWorld("veldDesktop", {
      *  page must answer with `dropApplied` — the window they came from does not
      *  let go until it does. */
     onDropHere: (fn) => on("veld:window:drop-here", fn),
+    /** Whether that listener exists right now. A claim outlives the pane area
+     *  that answers for it — through a reload, and while the first `/api/repos`
+     *  is in flight — and a drop pushed into that gap goes nowhere. Told, the
+     *  shell queues instead. */
+    dropsReady: (ready) => ipcRenderer.invoke("veld:window:drops-ready", { ready }),
     /** Which of them were actually placed. Anything omitted stays where it was. */
     dropApplied: (dropId, accepted) =>
       ipcRenderer.invoke("veld:window:drop-applied", { dropId, accepted }),

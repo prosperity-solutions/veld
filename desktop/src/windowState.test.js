@@ -4,12 +4,17 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
   MAX_WINDOWS,
+  answersYields,
   canOpenAnother,
+  dropDelivery,
   forgetWorktrees,
   handBackTarget,
+  handBackTransfers,
   isSuffix,
+  nextListenerState,
   nextSuffix,
   othersHolding,
+  ownsWorktree,
   parseWindowList,
   parseWindowRecord,
   releaseClaims,
@@ -377,6 +382,92 @@ test("forgetWorktrees drops a deleted worktree from both maps, whoever held it",
   assert.deepEqual([...claims], [[7, 1]], "an unknown worktree changes nothing");
   forgetWorktrees(claims, holders, []);
   assert.deepEqual([...claims], [[7, 1]], "and neither does an empty list");
+});
+
+test("ownsWorktree reads the claim for a main window and the field for a detached one", () => {
+  const claims = new Map([[7, 1]]);
+  const main = { id: 1, kind: "main", worktreeId: 42 };
+  const other = { id: 2, kind: "main", worktreeId: 7 };
+  const dock = { id: 3, kind: "detached", worktreeId: 8 };
+
+  assert.equal(ownsWorktree(main, 7, claims), true, "the window showing it");
+  // The trap: `worktreeId` on a *main* window is what it was opened for, not
+  // what it shows now. Reading it there routes a drop at a window that moved on.
+  assert.equal(ownsWorktree(main, 42, claims), false);
+  assert.equal(ownsWorktree(other, 7, claims), false, "wanting it is not holding it");
+  // A detached window never claims — it is a satellite of its origin's claim —
+  // so the field is the only thing that says which dock it is. Matching on the
+  // claim alone made a detached window impossible to drop onto.
+  assert.equal(ownsWorktree(dock, 8, claims), true);
+  assert.equal(ownsWorktree(dock, 7, claims), false);
+});
+
+test("dropDelivery queues only for a window that said its listener is gone", () => {
+  // A claim is recorded when a window *asks* for a worktree; the listener that
+  // answers a drop arrives once `/ide` has mounted. Pushing into that gap went
+  // nowhere and reported a refusal two seconds later.
+  assert.equal(dropDelivery("gone"), "queue");
+  assert.equal(dropDelivery("ready"), "send");
+  // "Never reported" is not "gone". It means *loaded and has not reported* — an
+  // older /ide bundle that never will, or a current one between its load and
+  // `PaneArea` mounting. Sending is right for both: the older bundle answers a
+  // `drop-here` perfectly well, and for the newer one the drop ack's own timeout
+  // falls back to the queue. Note what this case is NOT: a page that has not
+  // finished loading is queued for by the *caller*, which asks the window itself
+  // (`webContents.isLoading()`) rather than waiting for the page to report — that
+  // is the longer gap and it is the shell's own knowledge.
+  assert.equal(dropDelivery("unknown"), "send");
+  assert.equal(dropDelivery(undefined), "send");
+});
+
+test("nextListenerState demotes a live listener only on a real document swap", () => {
+  const swap = { isMainFrame: true, isSameDocument: false };
+  assert.equal(nextListenerState("ready", swap), "gone");
+  // An iframe's load turns the tab spinner and a `pushState` is not a new
+  // document; demoting on either would strand the window in "gone" with nothing
+  // able to undo it, since the renderer reports `ready` on mount and it is already
+  // mounted.
+  assert.equal(nextListenerState("ready", { isMainFrame: false, isSameDocument: false }), "ready");
+  assert.equal(nextListenerState("ready", { isMainFrame: true, isSameDocument: true }), "ready");
+  // `unknown` means "has never reported", which a reload does not change. Demoting
+  // it would hold an older bundle in the degraded path for the rest of the session
+  // — the trap this function exists to hold.
+  assert.equal(nextListenerState("unknown", swap), "unknown");
+  assert.equal(nextListenerState("gone", swap), "gone");
+});
+
+test("answersYields waits only on a reported listener, unlike dropDelivery", () => {
+  assert.equal(answersYields("ready"), true);
+  assert.equal(answersYields("gone"), false);
+  // The asymmetry is the point, and it is deliberate. A drop may be *pushed* at a
+  // window that never reported, because an older /ide bundle answers `drop-here`
+  // perfectly well — there the report only buys latency. A yield cannot: an older
+  // bundle has no `yielded` channel at all, so waiting on one would make every
+  // handover on a daemon-older-than-shell install cost the full timeout. Not
+  // waiting is exactly what that build did.
+  assert.equal(answersYields("unknown"), false);
+  assert.equal(dropDelivery("unknown"), "send");
+  assert.equal(answersYields(undefined), false);
+});
+
+test("handBackTransfers carries a queue on from any window, its own tabs only from a dock", () => {
+  const carried = [{ worktreeId: 7, tabs: [{ id: "t1" }] }];
+  const own = { worktreeId: 8, tabs: [{ id: "t2" }] };
+
+  // The branch this change added. A drop routed at a loading window parks in its
+  // queue and the *source has already let go* on the strength of that, so closing
+  // the window before it drained would end exactly the shells the ack protocol
+  // protects. A queue is a resting place, never a grave.
+  assert.deepEqual(handBackTransfers("main", carried, own), carried, "no snapshot from a main window");
+  assert.deepEqual(handBackTransfers("main", [], own), []);
+
+  // A detached window hands both on, queue first, so tabs arrive in the order they
+  // were sent.
+  assert.deepEqual(handBackTransfers("detached", carried, own), [...carried, own]);
+  assert.deepEqual(handBackTransfers("detached", [], own), [own]);
+  // An empty snapshot travels as nothing rather than as an empty transfer.
+  assert.deepEqual(handBackTransfers("detached", [], { worktreeId: 8, tabs: [] }), []);
+  assert.deepEqual(handBackTransfers("detached", [], null), []);
 });
 
 test("releaseClaims drops every claim a window held", () => {

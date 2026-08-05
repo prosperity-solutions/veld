@@ -589,6 +589,12 @@ function AppInner(props: {
   const repo: Repo | null =
     repos.find((r) => r.root === activeRepoRoot) ?? repos[0] ?? null;
   const worktrees = useMemo(() => repo?.worktrees ?? [], [repo]);
+  // Mirrored, like `layoutsRef` below, so an effect can read the current list
+  // without being *keyed* on it: this list is replaced on every 5s poll, and the
+  // claim effect that reads it must not re-run on that cadence. Assigned during
+  // render rather than in an effect, for the reason given there.
+  const worktreesRef = useRef(worktrees);
+  worktreesRef.current = worktrees;
   const lanes = useMemo(() => repo?.lanes ?? [], [repo]);
   // The fallbacks skip pending removals: when the worktree you were looking at is
   // being deleted, the app has to land somewhere that still exists rather than
@@ -1364,6 +1370,10 @@ function AppInner(props: {
   /** Every worktree is shown by another window, so this one has nothing to
    *  display that is its own. */
   const [claimBlocked, setClaimBlocked] = useState(false);
+  /** Yields whose release has been scheduled but not yet committed. State rather
+   *  than a ref, because the point is to have something an effect can run after —
+   *  see the yield handler below. */
+  const [yieldAcks, setYieldAcks] = useState<number[]>([]);
 
   // Mirrored into a ref, the same idiom `dialogRef` uses above: an effect with `[]`
   // deps closes over the first render's `layouts` forever, and a decision that has to
@@ -1451,10 +1461,17 @@ function AppInner(props: {
    * that claimed the worktree picks up both. Same distinction detach relies on,
    * and the release must happen *before* the layout leaves state, because
    * `pruneTerminals` ends whatever the layouts no longer name.
+   *
+   * **And the window that asked is waiting.** It does not attach to these
+   * terminals until this window acknowledges, so the ack has to mean the release
+   * has happened — not that the message arrived. The release runs inside the
+   * `setLayouts` updater, i.e. during the render React schedules from here, so
+   * the ack is queued for the effect below and sent after that commit.
    */
   useEffect(() => {
-    if (chromeless || !desktopWindow) return;
-    return desktopWindow.onYieldWorktree(({ worktreeId }) => {
+    const shell = desktopWindow;
+    if (chromeless || !shell) return;
+    const off = shell.onYieldWorktree(({ worktreeId, yieldId }) => {
       // A pending "reveal node health" request for this worktree can never be
       // satisfied now, and its own guard cannot see that: a yield deletes the
       // layout without touching the *selection*, so `worktree?.id` still equals
@@ -1473,8 +1490,46 @@ function AppInner(props: {
         delete next[worktreeId];
         return next;
       });
+      // Batched with the update above into one commit, which is what makes the
+      // effect below run *after* the release rather than beside it. Queued even
+      // when there was no layout to give up: the claimer is waiting either way,
+      // and the answer is "nothing to let go of".
+      if (typeof yieldId === "number") setYieldAcks((q) => [...q, yieldId]);
     });
+    // **The shell waits for a release only if this is here**, and it learns that
+    // from here rather than from a neighbouring signal — so removing or moving this
+    // effect withdraws the promise with it, and a claim goes back to not waiting
+    // instead of waiting for an acknowledgement nothing will send. Reported after
+    // the listener, withdrawn before it: the safe order in both directions.
+    void shell.yieldsReady?.(true).catch(() => {});
+    return () => {
+      void shell.yieldsReady?.(false).catch(() => {});
+      off();
+    };
   }, [chromeless]);
+
+  /**
+   * Answer the yields whose release is now on screen.
+   *
+   * A passive effect, because that is the first moment the `setLayouts` updater
+   * above has actually run: acknowledging from inside the listener would promise a
+   * release that React has not performed yet, and the claiming window attaches on
+   * the strength of that promise.
+   */
+  useEffect(() => {
+    if (yieldAcks.length === 0) return;
+    const sent = new Set(yieldAcks);
+    for (const yieldId of sent) {
+      void desktopWindow?.yielded?.(yieldId).catch(() => {});
+    }
+    // **Filtered, never cleared.** React flushes a passive effect in a later task
+    // than the commit it belongs to, so an IPC callback can append a yield in
+    // between — and `setYieldAcks([])` would discard it. That yield is then never
+    // acknowledged at all and its claimer waits out the full `YIELD_ACK_MS` for a
+    // release that has already happened, which is the one thing this channel
+    // exists to avoid. Two review angles found this line independently.
+    setYieldAcks((q) => q.filter((id) => !sent.has(id)));
+  }, [yieldAcks]);
 
   /**
    * Tell the shell what this window is holding, so it knows who to ask.
@@ -1495,6 +1550,15 @@ function AppInner(props: {
    * the fallback that lands on the first repo — all of which put a worktree on
    * screen without anyone choosing it. Without it the first window to open
    * claims nothing, and the second one is free to show the same worktree.
+   *
+   * **Keyed on the selection, never on the worktree list.** `worktrees` gets a new
+   * identity on every 5s poll (`repoList` is replaced, so `repos` → `repo` →
+   * `worktrees` are all new), so having it in the deps re-claimed the same worktree
+   * every five seconds for the life of the window. That was invisible churn while a
+   * claim was synchronous; it stopped being invisible once a claim could be
+   * *superseded*, because the poll's claim then overtook a rail click that was
+   * waiting on a holder and the click was silently dropped. The hunt below reads
+   * the list through a ref, where a five-second-old candidate list is harmless.
    */
   useEffect(() => {
     const shell = desktopWindow;
@@ -1502,7 +1566,13 @@ function AppInner(props: {
     let cancelled = false;
     void (async () => {
       const mine = await shell.claimWorktree(worktree.id, false).catch(() => null);
-      if (cancelled || mine?.ok !== false) return;
+      // `superseded` is not a refusal to act on: it means a *later* claim from
+      // this window overtook this one while it waited for the previous holders to
+      // let go, and that claim owns the outcome. Reacting to it would hunt for a
+      // free worktree and move the window off one it had just been granted —
+      // `cancelled` does not cover it, because clicking the row that is already
+      // selected supersedes the claim without changing `worktree?.id`.
+      if (cancelled || mine?.ok !== false || mine.reason === "superseded") return;
       // **Refused, so this window must show something else.** Ignoring the
       // answer here was the hole that made the whole ownership model a
       // suggestion: `⌘N` opens on the last-selected worktree by design, which
@@ -1510,10 +1580,11 @@ function AppInner(props: {
       // always refused, always ignored, and the new window rendered the same
       // panes and took their shells. `selectWorktree` honoured the refusal
       // because a click has somewhere to stay; a window opening has not.
-      for (const candidate of worktrees) {
+      for (const candidate of worktreesRef.current) {
         if (candidate.id === worktree.id) continue;
         const free = await shell.claimWorktree(candidate.id, false).catch(() => null);
-        if (cancelled) return;
+        // Same rule inside the hunt: overtaken means stop, not try the next one.
+        if (cancelled || free?.reason === "superseded") return;
         if (free?.ok) {
           setActiveRepoRoot(candidate.repo_root);
           setActiveWtKey(String(candidate.id));
@@ -1527,7 +1598,7 @@ function AppInner(props: {
     return () => {
       cancelled = true;
     };
-  }, [chromeless, worktree?.id, worktrees]);
+  }, [chromeless, worktree?.id]);
 
   // Cleared as soon as this window is showing something it owns.
   useEffect(() => {
