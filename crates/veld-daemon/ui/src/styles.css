@@ -1966,13 +1966,52 @@ body[data-theme="light"] .swatch-cell > span {
 
 .share-strip {
   border-top: 1px dashed var(--border);
-  padding-top: 6px;
+  /* Generous on purpose: this rule separates two *kinds* of share (a private peer
+     tunnel from a public URL), which is a bigger distinction than the 6px it used to
+     get made it look. */
+  margin-top: 10px;
+  padding-top: 12px;
 }
 
 .share-row {
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 9px;
+}
+
+/* A QR code, held back until its own row is hovered or *Show all* is on. Two problems,
+   one mechanism: with several services on screen it was genuinely unclear which code
+   the phone was aimed at, and a code carrying the share password is a credential that
+   should not sit on screen while nobody is using it.
+
+   Blur *and* half opacity, deliberately: a light blur alone still reads as a scannable
+   code — some phone cameras will lock onto it — while dimming makes "not this one"
+   legible at a glance and keeps the revealed row the only thing with contrast. Kept
+   gentle (3px) so the shape stays recognisable as a QR rather than as a grey smear.
+
+   On a wrapper rather than on the `<svg>`: `filter` applied to an SVG root is handled
+   inconsistently across engines. There is no click affordance — *Show all* is the
+   pointer-free way through, so this is not a hover-only trap. */
+.qr-shield {
+  line-height: 0;
+  border-radius: 4px;
+  filter: blur(3px);
+  opacity: 0.5;
+  transition:
+    filter 120ms ease-out,
+    opacity 120ms ease-out;
+}
+.qr-shield.revealed,
+.share-row:hover .qr-shield {
+  filter: none;
+  opacity: 1;
+}
+/* Reduced-motion users get the same behaviour without the fade — the blur is
+   information here, not decoration, so it is never disabled outright. */
+@media (prefers-reduced-motion: reduce) {
+  .qr-shield {
+    transition: none;
+  }
 }
 .share-row.pending {
   border-color: var(--warn);

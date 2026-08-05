@@ -68,6 +68,12 @@ const FALLBACK = {
   // Keep until emptied. Matches the Rust default, and the direction to err in if it
   // ever drifts: the value that cannot delete anybody's checkout.
   trashRetentionDays: 0,
+  // Three days, matching the Rust default rather than the previous release's
+  // behaviour — this is the `quickSwitch*` exception above, for the same reason: the
+  // History tab says how many runs the horizon hid, so a client talking to an older
+  // daemon that shows the shipped default is coherent, where one showing everything
+  // would silently disagree with every other window.
+  runHistoryDays: 3,
 } as const;
 
 function num(doc: SettingsDoc, key: string, fallback: number): number {
@@ -240,4 +246,17 @@ export function detachGraceMinutes(doc: SettingsDoc): number {
  */
 export function trashRetentionDays(doc: SettingsDoc): number {
   return num(doc, "worktree.trashRetentionDays", FALLBACK.trashRetentionDays);
+}
+
+/**
+ * Days of ended runs the history views show. **Defaults to 3**; `0` means "show all".
+ *
+ * A view filter and nothing else: no run is deleted by it, and hiding one never costs
+ * anything but a scroll. That is why this one can default to a number that hides
+ * something, where [`trashRetentionDays`] above must default to the value that cannot
+ * delete anybody's checkout — the two docblocks look alike and their defaults are
+ * opposite for that reason.
+ */
+export function runHistoryDays(doc: SettingsDoc): number {
+  return num(doc, "runs.historyDays", FALLBACK.runHistoryDays);
 }

@@ -403,6 +403,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn run_history_horizon_matches_the_gc_window() {
+        // The `runs.historyDays` setting hides ended runs older than N days, and its
+        // upper bound is this pass's own deletion window — a horizon past it would
+        // filter against runs that no longer exist, so the control would offer days
+        // that show nothing. Nothing in the type system ties a `veld-core` constant to
+        // this one, so this assertion is the tie.
+        assert_eq!(
+            MAX_LOG_AGE_HOURS,
+            veld_core::db::MAX_RUN_HISTORY_DAYS * 24,
+            "the run-history view horizon must stop where this pass starts deleting"
+        );
+    }
+
+    #[test]
     fn retention_cutoffs_map_each_horizon_to_its_own_table() {
         let now = chrono::DateTime::<chrono::Utc>::UNIX_EPOCH + chrono::Duration::days(10);
         let (stats, proc_) = retention_cutoffs(now);

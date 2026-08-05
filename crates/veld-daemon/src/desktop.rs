@@ -856,6 +856,12 @@ struct CreateWorktreeBody {
     /// Custom checkout path; defaults to `<repo parent>/_worktrees/<alias>`.
     #[serde(default)]
     path: Option<String>,
+    /// Marker glyph chosen in the create dialog; the daemon assigns one when absent.
+    #[serde(default)]
+    emoji: Option<String>,
+    /// Marker colour chosen in the create dialog; assigned when absent.
+    #[serde(default)]
+    marker_color: Option<String>,
 }
 
 async fn create_worktree(
@@ -864,6 +870,14 @@ async fn create_worktree(
     validate_branch(&body.branch)?;
     if let Some(ref alias) = body.alias {
         validate_alias(alias)?;
+    }
+    // Both marker faces are validated up front, next to the alias, so a rejected
+    // glyph cannot leave a checkout on disk that the request then reports as failed.
+    if let Some(ref emoji) = body.emoji {
+        validate_emoji(emoji)?;
+    }
+    if let Some(ref color) = body.marker_color {
+        validate_marker_color(color)?;
     }
 
     let db = open_desktop_db()?;
@@ -966,6 +980,21 @@ async fn create_worktree(
             )
         })
         .ok_or_else(|| db_err("created worktree missing after sync"))?;
+    // The sync assigns a marker; apply the one the dialog picked. Before the alias
+    // rename below rather than after, because that rename is the step that can lose a
+    // race and return early — and a checkout that ends up under its branch-derived
+    // alias should still be wearing the marker the user chose.
+    if body.emoji.is_some() || body.marker_color.is_some() {
+        db.patch_worktree(
+            created.id,
+            None,
+            body.emoji.as_deref(),
+            body.marker_color.as_deref(),
+            None,
+        )
+        .map_err(write_err)?;
+    }
+
     // The sync derives the alias from the branch; apply an explicit custom one.
     let created = match &body.alias {
         Some(alias) if *alias != created.alias => {

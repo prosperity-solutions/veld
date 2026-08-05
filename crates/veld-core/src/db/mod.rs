@@ -25,7 +25,7 @@ mod stats;
 mod worktrees;
 
 pub use logs::{LogFilter, LogRow, LogStream, stream_is_per_node};
-pub use settings::DEFAULT_DETACH_GRACE_MINUTES;
+pub use settings::{DEFAULT_DETACH_GRACE_MINUTES, MAX_RUN_HISTORY_DAYS};
 pub use worktrees::{
     DiscoveredWorktree, LaneRecord, MAX_LANE_NAME_LEN, MAX_ORDER_LEN, RepoRecord, WORKTREE_COLORS,
     WORKTREE_EMOJI, WorktreeRecord, default_alias, is_worktree_color, is_worktree_emoji,

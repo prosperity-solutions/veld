@@ -17,8 +17,10 @@ import {
   markerFace,
   markerStyle,
   quickSwitchPrefs,
+  runHistoryDays,
   terminalPrefs,
 } from "./shared/settings";
+import { pruneRunHistory } from "./shared/runHistory";
 import { applyTerminalPrefs } from "./panes/terminalHost";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { useSettings } from "./shared/useSettings";
@@ -47,7 +49,6 @@ import {
   Loader,
   MantineProvider,
   Menu,
-  Popover,
   Select,
   Tooltip,
   TextInput,
@@ -67,6 +68,7 @@ import {
   IconRefresh,
   IconSearch,
   IconSettings,
+  IconBroadcast,
   IconShare2,
   IconTrash,
   IconSun,
@@ -448,6 +450,11 @@ function AppInner(props: {
     applyTerminalPrefs(terminalPrefs(settings));
   }, [settings]);
 
+  // How much run history the pickers offer. Read here and applied to the polled
+  // payload once (see `pruneRunHistory`), so every surface that renders history
+  // agrees without each one filtering for itself.
+  const historyDays = runHistoryDays(settings ?? {});
+
   // Which quick switches a browser pane's chrome shows. Read here and threaded,
   // rather than each pane calling `useSettings` — that would be a fetch and a
   // focus listener per pane for one document the app already holds.
@@ -486,6 +493,8 @@ function AppInner(props: {
   // settling. Fixing it needs a monotonic request counter guarding the
   // setters; not worth it while every mutation is followed by its own
   // `refresh()`.
+  // `historyDays` is a dependency: a change to the horizon must reach the next poll,
+  // and re-creating `refresh` is what restarts the interval effect below with it.
   const refresh = useCallback(async () => {
     // Shares and stats ride the same tick, but they are `allSettled` and must not
     // decide the offline banner: the view is built on repos + environments, while
@@ -503,7 +512,7 @@ function AppInner(props: {
         api.environments(),
       ]);
       setRepoList(repos);
-      setEnvs(environments);
+      setEnvs(pruneRunHistory(environments, historyDays, new Date()));
       setOffline(false);
     } catch {
       setOffline(true);
@@ -516,7 +525,7 @@ function AppInner(props: {
     // start a second share of a run that already has one.
     setSharesStale(sharesResult.status !== "fulfilled");
     if (statsResult.status === "fulfilled") setStats(statsResult.value);
-  }, [wantRunState]);
+  }, [wantRunState, historyDays]);
 
   // Tick counter, bumped per poll. Effects that must re-evaluate on a
   // schedule (not only when the payload changes) depend on it — a failed
@@ -867,6 +876,7 @@ function AppInner(props: {
     | { kind: "none" }
     | { kind: "import" }
     | { kind: "new-worktree" }
+    | { kind: "sharing" }
     | { kind: "rename"; worktree: Worktree; deleteFocus?: boolean }
     | { kind: "marker"; worktree: Worktree }
     /** `worktree` set means "create it, then move this one into it". */
@@ -1867,9 +1877,9 @@ function AppInner(props: {
           items.push({
             id: "share:start",
             group: "Run",
-            label: `Share ${w.alias}`,
-            hint: "copies the join link",
-            alt: ["share", "invite", "join"],
+            label: `Share ${w.alias} privately`,
+            hint: "peer to peer — copies the join link",
+            alt: ["share", "invite", "join", "peer", "private"],
             run: () =>
               shareAction("share", async () => {
                 const r = await api.startShare(ref);
@@ -1888,7 +1898,7 @@ function AppInner(props: {
           items.push({
             id: "share:stop",
             group: "Run",
-            label: `Stop sharing ${w.alias}`,
+            label: `Stop the private share of ${w.alias}`,
             run: () => shareAction("stop sharing", () => api.stopShare(share.id)),
           });
         }
@@ -2116,6 +2126,25 @@ function AppInner(props: {
     </Tooltip>
   );
 
+  /**
+   * Settings, as an element rather than inline in the dialog list.
+   *
+   * Both modes render it. Runs mode returns early below — before the dialog list —
+   * so an inline `dialog.kind === "settings"` there was unreachable: the gear and
+   * ⌘, both set the state and nothing appeared. Every other dialog in the list
+   * belongs to worktree mode's own surfaces; this is the one that is reachable from
+   * both, so this is the one that has to be hoisted.
+   */
+  const settingsDialog = dialog.kind === "settings" && (
+    <SettingsDialog
+      settings={settings}
+      saving={savingSettings}
+      error={settingsError}
+      onSave={saveSettings}
+      onClose={closeDialog}
+    />
+  );
+
   if (mode === "runs") {
     return (
       <div className="frame">
@@ -2123,7 +2152,9 @@ function AppInner(props: {
           modeSwitch={modeSwitch}
           themeButton={themeButton}
           settingsButton={settingsButton}
+          historyDays={historyDays}
         />
+        {settingsDialog}
       </div>
     );
   }
@@ -2131,10 +2162,12 @@ function AppInner(props: {
   /**
    * The top-level Sharing surface (#152: one surface, not a relay-details dump).
    *
-   * A popover rather than a `Menu`, because its content is interactive — the
-   * auto-accept checkbox and the copy buttons must not close it on click. It is
-   * portalled, so `overlayGuard` hides the embedded browser panes while it is
-   * open without this having to say so.
+   * A **modal**, not the popover this started as. The popover was 430px of wrapping
+   * buttons: a share of three services put six identically-shaped controls in a bag
+   * and the QR had nowhere to go but underneath everything. The panel's content is a
+   * table — controls, then a row per service — and a table needs width. Being a
+   * modal also means `overlayGuard` hides the embedded browser panes while it is
+   * open, which the popover only got by being portalled.
    */
   const shareEmptyHint = !worktree
     ? "Select a worktree."
@@ -2148,36 +2181,43 @@ function AppInner(props: {
   // gating on startability was the one path that hid the only control that ends it.
   const sharingSurface =
     worktree && (canRunWorktreeNow(worktree) || sharingActive) ? (
-      <Popover position="bottom-end" width={430} shadow="md" withinPortal>
-        <Popover.Target>
-          <Button
-            size="compact-sm"
-            variant={sharingActive ? "light" : "default"}
-            color={sharingActive ? "green" : undefined}
-            leftSection={<IconShare2 size={14} />}
-            title={
-              sharingActive
-                ? "This run is shared — open for links and connections"
-                : "Share this run"
-            }
-          >
-            {sharingActive ? "Sharing" : "Share"}
-          </Button>
-        </Popover.Target>
-        <Popover.Dropdown p={0}>
-          <RunSharePanel
-            run={diagRef}
-            runId={diagRun?.run_id ?? null}
-            running={diagRun?.status === "running"}
-            shares={shares?.shares ?? []}
-            unknown={shares === null || sharesStale}
-            otherRuns={otherRunShares}
-            emptyHint={shareEmptyHint}
-            onChanged={() => void refresh()}
-          />
-        </Popover.Dropdown>
-      </Popover>
+      <Button
+        size="compact-sm"
+        /* Active is a *filled* green button with a broadcast icon, not the same
+           outline with a different word in it. "Sharing" vs "Share" is one character
+           of difference in a bar full of controls, and this is the one state in the
+           app where something of yours is reachable from outside the machine — it
+           should be legible without reading. */
+        variant={sharingActive ? "filled" : "default"}
+        color={sharingActive ? "green" : undefined}
+        leftSection={
+          sharingActive ? <IconBroadcast size={14} /> : <IconShare2 size={14} />
+        }
+        onClick={() => setDialog({ kind: "sharing" })}
+        title={
+          sharingActive
+            ? "This run is shared right now — open for links, QR codes and connections"
+            : "Share this run privately with a peer, or publish it to the web"
+        }
+      >
+        {sharingActive ? "Sharing live" : "Share"}
+      </Button>
     ) : null;
+
+  const sharingDialog = dialog.kind === "sharing" && (
+    <Modal title="Sharing" onClose={closeDialog}>
+      <RunSharePanel
+        run={diagRef}
+        runId={diagRun?.run_id ?? null}
+        running={diagRun?.status === "running"}
+        shares={shares?.shares ?? []}
+        unknown={shares === null || sharesStale}
+        otherRuns={otherRunShares}
+        emptyHint={shareEmptyHint}
+        onChanged={() => void refresh()}
+      />
+    </Modal>
+  );
 
   /**
    * A detached window: the dock and nothing else.
@@ -2368,6 +2408,10 @@ function AppInner(props: {
       {dialog.kind === "new-worktree" && repo && (
         <NewWorktreeDialog
           onClose={closeDialog}
+          takenAliases={worktrees.map((w) => w.alias)}
+          usedBy={markerUsedBy.emoji}
+          colorUsedBy={markerUsedBy.color}
+          markerStyle={markerStyle(settings ?? {})}
           onCreate={async (body) => {
             const created = await api.createWorktree({
               repo_root: repo.root,
@@ -2470,15 +2514,8 @@ function AppInner(props: {
           }}
         />
       )}
-      {dialog.kind === "settings" && (
-        <SettingsDialog
-          settings={settings}
-          saving={savingSettings}
-          error={settingsError}
-          onSave={saveSettings}
-          onClose={closeDialog}
-        />
-      )}
+      {settingsDialog}
+      {sharingDialog}
       {dialog.kind === "search" && (
         <CommandPalette
           project={repo?.name ?? ""}

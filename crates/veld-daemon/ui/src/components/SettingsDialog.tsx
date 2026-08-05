@@ -39,6 +39,7 @@ import {
 } from "../shared/terminalFonts";
 import {
   detachGraceMinutes,
+  runHistoryDays,
   trashRetentionDays,
   markerStyle,
   quickSwitchPrefs,
@@ -100,6 +101,8 @@ export function SettingsDialog(props: {
   const [grace, setGrace] = useState<number | string>(graceValue);
   const retentionValue = trashRetentionDays(settings ?? {});
   const [retention, setRetention] = useState<number | string>(retentionValue);
+  const historyValue = runHistoryDays(settings ?? {});
+  const [history, setHistory] = useState<number | string>(historyValue);
   const [fontFamily, setFontFamily] = useState(term.fontFamily);
   // Availability is probed against the DOM, so compute it once per open rather
   // than on every render — the list cannot change while the dialog is up.
@@ -121,6 +124,7 @@ export function SettingsDialog(props: {
     setFontFamily(term.fontFamily);
     setGrace(graceValue);
     setRetention(retentionValue);
+    setHistory(historyValue);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [settings]);
 
@@ -221,6 +225,41 @@ export function SettingsDialog(props: {
                   retentionValue,
                   setRetention,
                 )
+              }
+              onKeyDown={(e) => {
+                if (e.key === "Enter") e.currentTarget.blur();
+              }}
+            />
+          </Row>
+        </Stack>
+
+        <Stack gap="xs">
+          <SectionTitle>Runs</SectionTitle>
+          <Row
+            label="Show run history from the last"
+            /* The GC sentence is not padding: without it, a 7-day maximum on a
+               setting about "old runs" reads as an arbitrary cap, and someone who
+               wants a month asks for a bigger number instead of a longer
+               retention. It also says plainly that this hides rather than
+               deletes — the opposite of the trash setting above. */
+            help="Hides ended runs older than this from the History tab and the past-run pickers. Nothing is deleted — and nothing is kept longer either: veld's housekeeping already removes ended runs after 7 days, which is why that is the maximum. Leave it empty to show everything the daemon still has."
+          >
+            <NumberInput
+              size="xs"
+              w={140}
+              min={0}
+              /* Mirrors MAX_RUN_HISTORY_DAYS in veld-core's settings.rs, itself tied
+                 to the GC's MAX_LOG_AGE_HOURS by a test. */
+              max={7}
+              value={history}
+              disabled={locked}
+              /* Zero means "show everything", so it has to be reachable, and an
+                 empty box is how that reads. */
+              placeholder="all"
+              suffix={typeof history === "number" && history > 0 ? " days" : ""}
+              onChange={setHistory}
+              onBlur={() =>
+                commitNumber("runs.historyDays", history, historyValue, setHistory)
               }
               onKeyDown={(e) => {
                 if (e.key === "Enter") e.currentTarget.blur();

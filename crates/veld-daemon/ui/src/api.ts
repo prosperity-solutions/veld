@@ -615,11 +615,21 @@ export const api = {
       method: "DELETE",
       body: JSON.stringify({ root }),
     }),
+  /**
+   * Create a worktree.
+   *
+   * `emoji`/`marker_color` are the create dialog's marker pick. Sent with the create
+   * rather than patched after it so the checkout never appears in the rail carrying
+   * the daemon's assigned marker for a poll before changing to the chosen one; omit
+   * them and the daemon assigns.
+   */
   createWorktree: (body: {
     repo_root: string;
     branch: string;
     create_branch: boolean;
     alias?: string;
+    emoji?: string;
+    marker_color?: string;
   }) =>
     request<Worktree>("/api/worktrees", {
       method: "POST",

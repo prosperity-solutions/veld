@@ -15,6 +15,7 @@ import {
 } from "../api";
 import { EnvCard } from "./EnvCard";
 import { JoinRequestRow, runOfShare } from "../shared/Sharing";
+import { countHidden, hiddenByHorizon, pruneRunHistory } from "../shared/runHistory";
 import { notifyError } from "../shared/notify";
 import { confirmedUnattached, unattachedShareIds } from "../shared/util";
 import { topbarClass } from "../shell";
@@ -28,6 +29,14 @@ import type { ReactNode } from "react";
  */
 export function RunsMode(props: { modeSwitch: ReactNode; themeButton: ReactNode;
   settingsButton: ReactNode;
+  /**
+   * The `runs.historyDays` horizon, or 0 for "show everything".
+   *
+   * Passed in rather than read here: the app already holds the settings document,
+   * and a second `useSettings` would be another fetch and another focus listener
+   * for the same document.
+   */
+  historyDays: number;
 }) {
   const [envs, setEnvs] = useState<EnvironmentList | null>(null);
   const [shares, setShares] = useState<SharesList | null>(null);
@@ -43,7 +52,10 @@ export function RunsMode(props: { modeSwitch: ReactNode; themeButton: ReactNode;
 
   const refresh = useCallback(async () => {
     try {
-      const [e, s] = await Promise.all([api.environments(), api.shares()]);
+      const [rawEnvs, s] = await Promise.all([api.environments(), api.shares()]);
+      // The horizon is applied to the payload, so the card pickers below and the
+      // History tab filter agree by construction rather than by review.
+      const e = pruneRunHistory(rawEnvs, props.historyDays, new Date());
       // Advance the orphan-share gate here, once per poll — see
       // `confirmedUnattached`. Doing it in a render effect instead would let an
       // unrelated re-render (the 5s stats tick) confirm one poll against itself.
@@ -59,7 +71,7 @@ export function RunsMode(props: { modeSwitch: ReactNode; themeButton: ReactNode;
     } catch {
       setOffline(true);
     }
-  }, []);
+  }, [props.historyDays]);
 
   useEffect(() => {
     void refresh();
@@ -99,7 +111,6 @@ export function RunsMode(props: { modeSwitch: ReactNode; themeButton: ReactNode;
   const projects = useMemo(() => envs?.projects ?? [], [envs]);
   const allRuns = projects.flatMap((p) => p.runs.map((r) => ({ p, r })));
   const liveCount = allRuns.filter(({ r }) => r.live).length;
-  const endedCount = allRuns.length - liveCount;
   const joinCount = shares?.joins.length ?? 0;
   const pending = shares?.pending ?? [];
   const joins = shares?.joins ?? [];
@@ -109,8 +120,23 @@ export function RunsMode(props: { modeSwitch: ReactNode; themeButton: ReactNode;
   // is every known run and not the filtered `shown` list).
   const orphanShares = (shares?.shares ?? []).filter((s) => orphanIds.has(s.id));
 
+  // Ended runs past the horizon: counted for the line below, then dropped from the
+  // History tab. Never from Active — a live run is not history (see `runHistory.ts`).
+  const now = new Date();
+  const hiddenCount = countHidden(
+    allRuns.map(({ r }) => r),
+    props.historyDays,
+    now,
+  );
+
+  // The tab's own count, after the horizon: a badge that counts rows the tab then
+  // declines to show is how "History (7)" ends up on an empty page.
+  const endedCount =
+    allRuns.length - liveCount - hiddenCount;
+
   const shown = allRuns
     .filter(({ r }) => (view === "active" ? r.live : !r.live))
+    .filter(({ r }) => !hiddenByHorizon(r, props.historyDays, now))
     .sort(
       (a, b) =>
         Number(b.r.status === "running") - Number(a.r.status === "running") ||
@@ -257,12 +283,23 @@ export function RunsMode(props: { modeSwitch: ReactNode; themeButton: ReactNode;
             <Text size="sm" c="dimmed">
               {view === "active"
                 ? `${endedCount} ended environment(s) in History.`
-                : "Stopped and crashed environments land here (kept for 7 days)."}
+                : hiddenCount > 0
+                  ? `${hiddenCount} older than ${props.historyDays} day(s) — hidden by your run-history setting.`
+                  : "Stopped and crashed environments land here (kept for 7 days)."}
             </Text>
           </div>
         )}
         {shown.length > 0 && (
         <Stack gap={10} p={14} pt={14}>
+          {view === "history" && hiddenCount > 0 && (
+            /* Never silent: a list that omits rows without saying so is
+               indistinguishable from runs having been deleted, which is exactly what
+               the housekeeping pass does do. */
+            <Text size="xs" c="dimmed">
+              {hiddenCount} older environment(s) hidden — showing the last{" "}
+              {props.historyDays} day(s) (Settings → Runs).
+            </Text>
+          )}
           {shown.map(({ p, r }) => (
             <EnvCard
               key={`${p.project_root}::${r.name}`}
