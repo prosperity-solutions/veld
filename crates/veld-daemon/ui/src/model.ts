@@ -163,10 +163,11 @@ export function needsAttention(status: WorktreeStatus): boolean {
 /**
  * One rendered section of the rail.
  *
- * `lane` is `""` for the ungrouped section and the sentinel [`TRASH_LANE`] for
- * pending removals — neither is a real lane, and both are deliberately not
- * absences: the rail has to render a header for trash and none for ungrouped, so
- * the distinction lives in the group rather than in a caller's conditional.
+ * `lane` is `""` for the ungrouped section and the sentinel [`TRASH_LANE`] /
+ * [`DELETING_LANE`] for the two pending-removal states — neither is a real lane,
+ * and both are deliberately not absences: the rail has to render a header for
+ * trash and none for ungrouped, so the distinction lives in the group rather
+ * than in a caller's conditional.
  */
 export interface RailGroup {
   /**
@@ -203,19 +204,36 @@ export interface RailGroup {
 export const TRASH_LANE = "\u0000trash";
 
 /**
+ * Group key for the terminal "Deleting" lane — removals past the point of no
+ * return.
+ *
+ * Like [`TRASH_LANE`], not a lane name: a leading NUL cannot occur in a lane
+ * name, so a repo lane can never collide with it.
+ */
+export const DELETING_LANE = "\u0000deleting";
+
+/**
  * Split a repo's worktrees into rail sections: ungrouped first, then each lane in
- * its own order, then the trash.
+ * its own order, then the terminal "Deleting" lane, then the trash.
  *
  * The daemon already sorts the worktrees into this order (`WT_ORDER`), so this
  * only *segments* the list — it must not re-sort, or the manual order the user
  * dragged would be silently re-derived here from a different rule.
  *
  * Empty lanes are kept, because a lane you just created and have not filled yet
- * still needs somewhere to drop a worktree.
+ * still needs somewhere to drop a worktree. The **trash is always kept too** — it
+ * is the rail's permanent bottom anchor, rendered as an empty lane rather than
+ * hidden — so the user always has a place that means "trash exists". The
+ * Deleting lane is conditional: it is a transient state, so an empty one would be
+ * permanent clutter.
  */
 export function railGroups(worktrees: Worktree[], lanes: Lane[]): RailGroup[] {
   const live = worktrees.filter((w) => !w.trashed_at);
-  const trashed = worktrees.filter((w) => w.trashed_at);
+  // A worktree whose removal is actively running leaves the trash for the
+  // terminal deleting lane: it is still a trashed row until the worker drops it,
+  // but the two states are not the same thing and must not share a lane.
+  const deleting = worktrees.filter((w) => w.deleting);
+  const trashed = worktrees.filter((w) => w.trashed_at && !w.deleting);
   const known = new Set(lanes.map((l) => l.name));
   // A worktree whose lane no longer exists counts as ungrouped rather than
   // vanishing. `delete_lane` clears assignments in the same transaction, so this
@@ -247,15 +265,24 @@ export function railGroups(worktrees: Worktree[], lanes: Lane[]): RailGroup[] {
       worktrees: live.filter((w) => w.lane === l.name),
     });
   }
-  if (trashed.length > 0) {
+  if (deleting.length > 0) {
     groups.push({
-      key: TRASH_LANE,
-      lane: TRASH_LANE,
-      label: "Trash",
+      key: DELETING_LANE,
+      lane: DELETING_LANE,
+      label: "Deleting",
       pinned: true,
-      worktrees: trashed,
+      worktrees: deleting,
     });
   }
+  // Always present — empty means empty, not absent:
+  // `w.trashed_at && !w.deleting` keeps the trash and deleting lanes disjoint.
+  groups.push({
+    key: TRASH_LANE,
+    lane: TRASH_LANE,
+    label: "Trash",
+    pinned: true,
+    worktrees: trashed,
+  });
   return groups;
 }
 

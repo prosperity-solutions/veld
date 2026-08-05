@@ -469,6 +469,35 @@ select:focus {
   color: var(--danger);
 }
 
+/* The terminal deletion lane is still destructive but *in progress* — green like
+   the accent on a run control rather than the trash's "waiting to be emptied"
+   red, so the two lanes never read as the same state. The rows carry the motion
+   (spinner) and the red left edge; the header says which lane you are in. */
+.rail-group.deleting .lane-head {
+  color: var(--accent);
+}
+
+/* The pinned bottom of the rail: the trash lane (always present) and the
+   terminal Deleting lane sit here and never scroll away with the rows above
+   them — however many worktrees there are, the exit is always in sight. The top
+   border marks where scrolling ends and the dock begins. */
+.rail-dock {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 8px;
+  border-top: 1px solid var(--border);
+}
+
+/* An empty *pinned* lane (the trash): a plain "Empty" marker, not the "drag a
+   worktree in" target — the trash is not a drop destination, so offering a drop
+   there would advertise an action that does nothing. */
+.lane-empty.is-empty {
+  border-style: none;
+  color: var(--faint);
+}
+
 /* Dragging. The source row fades rather than disappearing: a list that reflows
    under the pointer makes the drop target move as you aim at it. */
 .wt-row.dragging {
@@ -526,6 +555,23 @@ select:focus {
 }
 .wt-row.trashed .wt-alias {
   text-decoration: line-through;
+}
+/* A removal past the point of no return. Full opacity (this is not something to
+   recover, but it is not "done" either — it is happening) with a red left edge
+   like a failure and motion from the spinner, so the row reads as an active
+   teardown rather than a greying-out. The alias stays struck through: the
+   checkout really is going away. */
+.wt-row.deleting {
+  opacity: 1;
+  cursor: default;
+  border-left-color: var(--danger);
+}
+.wt-row.deleting .wt-branch {
+  color: var(--danger);
+}
+.wt-deleting-spinner {
+  flex: none;
+  color: var(--danger);
 }
 /* Came *back* out of trash because the removal failed. Full opacity — it is a
    live worktree again — with the branch column carrying the reason. */
