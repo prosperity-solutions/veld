@@ -147,8 +147,9 @@ just dev-restore    # runs veld update
 - Keep PRs focused — one feature or fix per PR.
 - Don't break existing behavior without discussion.
 - Add tests where it makes sense, but don't over-test trivial code.
-- If CI fails, fix it before requesting review.
-- **Draft PRs don't run CI.** Every job in `ci.yml` skips while a PR is a draft, and marking it ready for review is what starts them. Two of those jobs run on macOS runners (billed at 10× a Linux minute) alongside a four-target release build matrix, so a branch that gets 20 intermediate pushes while it's being written used to cost 20 full runs. Keep the work in draft, run `just lint`/`just test` locally as you go, and flip to ready when it's genuinely ready. If your PR shows no checks at all, it's almost certainly still a draft.
+- If CI fails after you've marked the PR ready, fix it before asking for a human review.
+- **Draft PRs don't run CI.** Every job in `ci.yml` skips while a PR is a draft, and marking it ready for review is what starts them. A run reaches five macOS jobs (billed at 10× a Linux minute) alongside a four-target release build matrix, so a branch that gets 20 intermediate pushes while it's being written used to cost 20 full runs. Keep the work in draft, run `just lint`/`just test` locally as you go, and flip to ready when it's genuinely ready.
+- **A skipped check shows up as a passing one.** So a draft PR looks green even though nothing ran — don't read that tick as a pass. `gh pr checks --json name,bucket` puts them in the `skipping` bucket; that's the only thing that distinguishes them.
 
 ## License
 

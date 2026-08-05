@@ -156,13 +156,20 @@ Capture output verbatim.
 
 - **Pre-pass red → fix that first**, then start. Reviewing a diff that doesn't
   compile or whose tests fail is a category error.
-- **The pre-pass is not a warm-up for CI — it is the only signal this diff gets
-  until the PR is marked ready.** CI skips every job while a PR is a draft
-  (AGENTS.md → CI cost convention), and this loop runs entirely on a draft. So
-  there is no second opinion coming: a check you skip here is a check nobody runs.
-  Run the full list, including the UI checks when the diff touches
+- **The pre-pass is not a warm-up for CI — it is the only signal this diff gets.**
+  CI skips every job while a PR is a draft (AGENTS.md → CI cost convention), and
+  this loop runs before the PR exists at all, or at most on a draft. So there is
+  no second opinion coming: a check you skip here is a check nobody runs. Run the
+  full list, including the UI checks when the diff touches
   `crates/veld-daemon/ui`, and re-run it after every fix (§8.4) rather than
   batching one run at the end.
+- **Two CI checks have no default local equivalent — add them when the diff
+  reaches them.** `just workflow-gates` when the change touches
+  `.github/workflows/` (the `schema` job's draft-PR gate), and a read of your own
+  commit subjects against the conventional-commits pattern in the `commits` job
+  (`ci.yml`, a regex over `git rev-list BASE..HEAD`). Both used to fail on the
+  first draft push; now they first run *after* the spending decision, so a
+  malformed commit subject costs a full five-macOS-leg run to discover.
 - **Everything the pre-pass reports is out of scope for every subagent.** Put
   this line in every brief: *"The typechecker, linter and tests already ran;
   their output is in the context pack. Do not re-report it. Findings that

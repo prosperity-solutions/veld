@@ -312,6 +312,7 @@ lint:
 # recipe every contributor runs constantly — it must not grow a Python dep.
 # The `schema` job in ci.yml is the enforcing copy.
 workflow-gates:
+    python3 tests/validate-workflow-gates.py --selftest
     python3 tests/validate-workflow-gates.py
 
 build-frontend:

@@ -13,6 +13,13 @@ on:
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
+# Only a PR's runs are cancellable. A push to main is a release: it tags,
+# publishes artifacts and pushes a container image, and cancelling that midway
+# leaves a tag with no artifacts behind it.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions: {}
 
 jobs:

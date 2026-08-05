@@ -221,9 +221,11 @@ opening the PR.
   `ci.yml` and `release.yml` skips while `draft == true`, so pushing here buys you
   a workflow run in which nothing executes. Don't poll it, don't push extra
   commits to "kick" it, and don't read the absence of checks as a problem — this
-  is the design. Two macOS legs at 10× billing, a four-target release matrix and
-  macOS Electron packaging are what a draft run used to cost per intermediate
-  commit.
+  is the design. Five macOS legs at 10× billing plus a four-target release matrix
+  are what a draft run used to cost per intermediate commit.
+- **Those skipped jobs report as passing checks.** The draft PR you just opened
+  will show a green tick. It means nothing ran. See step 6.3 before you ever
+  report a CI result.
 
 ## Step 6 — Ready, CI, and merge
 
@@ -236,12 +238,23 @@ PR is ready, so waiting on a draft's checks is an infinite wait, not patience.
    — fix it locally first. If Step 0 chose *review: None*, say in the PR body that
    the only pre-merge signal is CI.
 2. `gh pr ready` — this is the step that fires `ready_for_review` and starts CI.
-3. **Wait for CI to actually go green.** Never assume checks are missing because
-   they haven't started — poll until they report. A red or pending check is not a
-   pass. If *no* checks appear a minute or two after marking ready, don't keep
-   waiting: confirm with `gh pr view --json isDraft,mergeable` that the PR really
-   is out of draft and is not `CONFLICTING` — a conflicted PR stops firing
-   `pull_request` events entirely.
+3. **Wait for CI to actually go green — and do not trust a green summary.**
+   Never assume checks are missing because they haven't started; poll until they
+   report. A red or pending check is not a pass. **A *skipped* check is also not a
+   pass, and it looks exactly like one:** a draft's jobs all skip, `gh pr checks`
+   files those under the `skipping` bucket, exits 0, and prints "All checks were
+   successful". So the exit code cannot tell you whether anything ran. Assert on
+   the buckets:
+
+   ```sh
+   gh pr view --json isDraft,mergeable          # isDraft must be false
+   gh pr checks --json name,bucket,event        # zero buckets may be "skipping"
+   ```
+
+   This is the failure mode to fear under autonomy: forget step 2, poll, read
+   "All checks were successful", and report a green CI on a diff nothing ran.
+   If *no* checks appear at all a minute or two after marking ready, the PR is
+   probably `CONFLICTING` — that stops `pull_request` events firing entirely.
 4. When a check fails, read the failing job's log and fix the real cause; don't
    retry blind (a rerun re-runs the same commit). Pushing the fix fires
    `synchronize`, and since the PR is now ready, that re-runs CI normally.
