@@ -72,19 +72,26 @@ static QUEUE: OnceLock<mpsc::UnboundedSender<i64>> = OnceLock::new();
 static DELETING: Mutex<Option<std::collections::HashSet<i64>>> = Mutex::new(None);
 
 /// Whether a deletion for this worktree has passed the point where restoring can
-/// still work.
+/// still work — a **read-only status** for the UI's terminal "Deleting" lane.
 ///
-/// **Test-only, and deliberately not public.** Reading this and then writing is the
-/// racy pattern [`try_restore`] exists to replace — a caller can lose the window
-/// between the two — so exposing it would invite exactly the defect three rounds of
-/// review kept finding. Production code holds the lock across both halves instead.
-#[cfg(test)]
-fn is_deleting(worktree_id: i64) -> bool {
+/// The comment on [`try_restore`] — that reading and then writing is the racy
+/// pattern the lock exists to replace — is about a *production* caller that could
+/// lose the window between the two halves. Rendering is not that caller: it only
+/// displays the flag and never writes on the strength of it, so exposing the read
+/// is safe. It is `pub(crate)` (not part of the public API surface) and deliberately
+/// segregated from any path that could follow it with a write.
+pub(crate) fn now_deleting(worktree_id: i64) -> bool {
     DELETING
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .as_ref()
         .is_some_and(|set| set.contains(&worktree_id))
+}
+
+/// Test-only alias so the assertion reads as the predicate. See [`now_deleting`].
+#[cfg(test)]
+fn is_deleting(worktree_id: i64) -> bool {
+    now_deleting(worktree_id)
 }
 
 /// Marks a worktree as being deleted, and un-marks it on drop.

@@ -39,6 +39,7 @@ const wt = (over: Partial<Worktree> = {}): Worktree => ({
   sort_position: null,
   trashed_at: "",
   trash_error: "",
+  deleting: false,
   has_veld_config: true,
   presets: [],
   nodes: [],

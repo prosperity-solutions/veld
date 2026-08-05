@@ -899,11 +899,16 @@ mod tests {
         // attribution true if either constant ever moves.
         let err = expand_preset("p24", &config).unwrap_err();
         assert!(matches!(err, GraphError::PresetTooLarge { .. }), "{err:?}");
-        assert!(
-            PRESET_DEPTH_LIMIT > 24,
-            "this test asserts the STEP budget; deepen the tree if the depth cap ever \
-             drops below it, or it will pass for the wrong reason"
-        );
+        // A `const` block, so this is checked when the crate compiles rather than
+        // when the test runs: if the depth cap ever drops to 24 or below, the build
+        // stops here instead of this test quietly passing for the wrong reason.
+        const {
+            assert!(
+                PRESET_DEPTH_LIMIT > 24,
+                "deepen the doubling tree above: at this depth cap the DEPTH limit \
+                 would refuse it, and this test exists to pin the STEP budget"
+            )
+        };
     }
 
     /// A cycle must keep its own diagnosis. The budget check used to run first, so a

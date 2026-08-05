@@ -27,6 +27,7 @@ import {
   transitionAction,
   worktreeStatus,
   worstStatus,
+  DELETING_LANE,
   TRASH_LANE,
 } from "./model";
 
@@ -44,6 +45,7 @@ const wt = (path: string): Worktree => ({
   sort_position: null,
   trashed_at: "",
   trash_error: "",
+  deleting: false,
   has_veld_config: true,
   presets: [],
   nodes: [],
@@ -669,11 +671,14 @@ describe("railGroups", () => {
       [rw("/repo", { is_main: true }), rw("/wts/a")],
       [],
     );
-    expect(groups.map((g) => g.key)).toEqual(["main", ""]);
-    expect(groups[0].pinned).toBe(true);
-    expect(groups[0].worktrees.map((w) => w.path)).toEqual(["/repo"]);
-    expect(groups[1].pinned).toBe(false);
-    expect(groups[1].worktrees.map((w) => w.path)).toEqual(["/wts/a"]);
+    // The trash lane is always present and pinned last; these assertions are
+    // about the live rail, so the always-on trash is filtered out.
+    const live = groups.filter((g) => g.key !== TRASH_LANE && g.key !== DELETING_LANE);
+    expect(live.map((g) => g.key)).toEqual(["main", ""]);
+    expect(live[0].pinned).toBe(true);
+    expect(live[0].worktrees.map((w) => w.path)).toEqual(["/repo"]);
+    expect(live[1].pinned).toBe(false);
+    expect(live[1].worktrees.map((w) => w.path)).toEqual(["/wts/a"]);
   });
 
   it("keeps main inside a lane the user assigned it to", () => {
@@ -683,7 +688,8 @@ describe("railGroups", () => {
       [rw("/repo", { is_main: true, lane: "review" })],
       [lane("review", 0)],
     );
-    expect(groups.map((g) => g.key)).toEqual(["", "review"]);
+    const live = groups.filter((g) => g.key !== TRASH_LANE && g.key !== DELETING_LANE);
+    expect(live.map((g) => g.key)).toEqual(["", "review"]);
     expect(groups[1].worktrees.map((w) => w.path)).toEqual(["/repo"]);
   });
 
@@ -691,8 +697,9 @@ describe("railGroups", () => {
     // Both write `lane: ""`. Keying drop targets on `lane` made them the same
     // target, so a drop meant for the ungrouped list also lit main's section.
     const groups = railGroups([rw("/repo", { is_main: true }), rw("/wts/a")], []);
-    expect(groups.map((g) => g.lane)).toEqual(["", ""]);
-    expect(new Set(groups.map((g) => g.key)).size).toBe(2);
+    const live = groups.filter((g) => g.key !== TRASH_LANE && g.key !== DELETING_LANE);
+    expect(live.map((g) => g.lane)).toEqual(["", ""]);
+    expect(new Set(live.map((g) => g.key)).size).toBe(2);
   });
 
   it("puts ungrouped worktrees first and keeps empty lanes", () => {
@@ -700,12 +707,15 @@ describe("railGroups", () => {
       [rw("/wts/a"), rw("/wts/b", { lane: "review" })],
       [lane("review", 0), lane("spikes", 1)],
     );
-    expect(groups.map((g) => g.lane)).toEqual(["", "review", "spikes"]);
+    const live = groups.filter((g) => g.key !== TRASH_LANE && g.key !== DELETING_LANE);
+    expect(live.map((g) => g.lane)).toEqual(["", "review", "spikes"]);
     expect(groups[0].label).toBeNull();
     expect(groups[0].worktrees.map((w) => w.path)).toEqual(["/wts/a"]);
     expect(groups[1].worktrees.map((w) => w.path)).toEqual(["/wts/b"]);
     // An empty lane is kept: it is where you drop the first worktree into it.
     expect(groups[2].worktrees).toEqual([]);
+    // The always-on trash sits last, after the lanes.
+    expect(groups[groups.length - 1].key).toBe(TRASH_LANE);
   });
 
   it("preserves the daemon's order rather than re-sorting", () => {
@@ -746,9 +756,41 @@ describe("railGroups", () => {
     expect(groups[2].label).toBe("Trash");
   });
 
-  it("omits the trash group entirely when the trash is empty", () => {
+  it("keeps the trash group even when it is empty", () => {
+    // Trash is the rail's permanent bottom anchor, so it is rendered as an empty
+    // lane rather than hidden — always a place that means "trash exists".
     const groups = railGroups([rw("/wts/a")], []);
-    expect(groups.map((g) => g.lane)).toEqual([""]);
+    const trash = groups.find((g) => g.key === TRASH_LANE);
+    expect(trash).toBeDefined();
+    expect(trash?.label).toBe("Trash");
+    expect(trash?.pinned).toBe(true);
+    expect(trash?.worktrees).toEqual([]);
+    // ...and it is still last.
+    expect(groups[groups.length - 1].key).toBe(TRASH_LANE);
+  });
+
+  it("pulls actively-deleting worktrees into their own terminal lane", () => {
+    const deleting = rw("/wts/going", {
+      trashed_at: "2026-01-01T00:00:00Z",
+      deleting: true,
+    });
+    const stillTrashed = rw("/wts/still", {
+      trashed_at: "2026-01-01T00:00:00Z",
+    });
+    const groups = railGroups([rw("/wts/a"), deleting, stillTrashed], []);
+    expect(groups.map((g) => g.key)).toEqual(["", DELETING_LANE, TRASH_LANE]);
+    const del = groups.find((g) => g.key === DELETING_LANE)!;
+    expect(del.label).toBe("Deleting");
+    expect(del.pinned).toBe(true);
+    expect(del.worktrees.map((w) => w.path)).toEqual(["/wts/going"]);
+    // The deleting row is out of the trash while its removal runs.
+    const trash = groups.find((g) => g.key === TRASH_LANE)!;
+    expect(trash.worktrees.map((w) => w.path)).toEqual(["/wts/still"]);
+  });
+
+  it("omits the deleting lane when nothing is being deleted", () => {
+    const groups = railGroups([rw("/wts/a")], []);
+    expect(groups.some((g) => g.key === DELETING_LANE)).toBe(false);
   });
 });
 

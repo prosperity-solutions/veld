@@ -154,6 +154,16 @@ export interface Worktree {
    * rail — the failure is neither silent nor still pending.
    */
   trash_error: string;
+  /**
+   * Whether this checkout's removal is past the point of no return — it is not
+   * in the trash any more, it is actively being deleted and cannot be restored.
+   *
+   * Backed by the daemon's in-memory deletion guard, not a column: it is only
+   * true while `git worktree remove` is actually running. A row that has merely
+   * been *queued* for removal still reports `trashed_at` (and no `deleting`), so
+   * that the user can undo it up to the moment the removal starts.
+   */
+  deleting: boolean;
   has_veld_config: boolean;
   /**
    * Presets in display order, as resolved by the daemon.
