@@ -41,6 +41,7 @@ import {
 import {
   detachGraceMinutes,
   externalOrigins,
+  terminalInterceptSystemOpen,
   runHistoryDays,
   terminalOpenUrlsInApp,
   trashRetentionDays,
@@ -95,6 +96,7 @@ export function SettingsDialog(props: {
   const marker = markerStyle(settings ?? {});
   const quick = quickSwitchPrefs(settings ?? {});
   const openInApp = terminalOpenUrlsInApp(settings ?? {});
+  const intercept = terminalInterceptSystemOpen(settings ?? {});
 
   // Number inputs are held locally while being typed and committed on blur —
   // see the file header. Re-seeded whenever the daemon's value changes so a
@@ -466,6 +468,19 @@ export function SettingsDialog(props: {
               disabled={locked}
               onChange={(e) =>
                 set({ "terminal.openUrlsInApp": e.currentTarget.checked })
+              }
+            />
+          </Row>
+          <Row
+            label="Also catch programs that call open / xdg-open"
+            help="Most tools read $BROWSER, but some call the system opener directly — including an agent's shell tool (Bash(open “https://…”)). For those, Veld puts a small shim directory on the PATH of each terminal. It needs the last word after your shell's startup files, so Veld points ZDOTDIR at a directory of its own holding one .zshenv: that file hands ZDOTDIR straight back, sources your real .zshenv, and registers a hook. Your .zprofile, .zshrc and .zlogin are read normally, in order, and nothing of yours is edited. zsh only; other shells keep $BROWSER and can add $VELD_SHIM_DIR to PATH by hand. Takes effect for new terminals."
+          >
+            <Checkbox
+              size="xs"
+              checked={intercept}
+              disabled={locked || !openInApp}
+              onChange={(e) =>
+                set({ "terminal.interceptSystemOpen": e.currentTarget.checked })
               }
             />
           </Row>

@@ -19,21 +19,23 @@
 //! [`Decision::Passthrough`], and the caller `exec`s the real tool with the
 //! original argv untouched.
 //!
-//! # Why the PATH shims are opt-in
+//! # Two mechanisms, because one is not enough
 //!
-//! Measured, not assumed: macOS `/etc/zprofile` runs `path_helper`, which rebuilds
-//! `PATH` with the system directories **first** and appends what was there before —
-//! so a directory prepended before spawning `$SHELL -l` ends up behind `/usr/bin`
-//! and `open` still resolves to `/usr/bin/open`. Debian's `/etc/profile` overwrites
-//! `PATH` outright (the same asymmetry AGENTS.md records for daemon-spawned
-//! commands). A login shell is therefore free to undo any `PATH` veld sets, and it
-//! does.
+//! `$BROWSER` covers the well-behaved majority — Claude Code's own login flow (it
+//! spawns `$BROWSER <url>` directly), `gh`, `git`, Python's `webbrowser`, vite,
+//! next. It cannot cover a program that calls the system opener itself, which is
+//! exactly what an agent's shell tool does (`Bash(open "https://…")`), so the shims
+//! also have to be reachable on `PATH`.
 //!
-//! What survives a login shell is the **environment**, which is why `$BROWSER` is
-//! the automatic mechanism and the `open`/`xdg-open` shims are reached only when a
-//! user opts in by putting `$VELD_SHIM_DIR` on `PATH` themselves. `$BROWSER` is
-//! honoured by Claude Code (it spawns `$BROWSER <url>` directly), `gh`, `git`,
-//! Python's `webbrowser`, vite and next.
+//! Getting them there is the daemon's problem rather than this module's, and it is
+//! not the obvious one: measured, not assumed, macOS `/etc/zprofile` runs
+//! `path_helper`, which rebuilds `PATH` with the system directories **first** and
+//! appends what was there before — so a directory prepended before spawning
+//! `$SHELL -l` ends up behind `/usr/bin` and `open` still resolves to
+//! `/usr/bin/open`. Debian's `/etc/profile` overwrites `PATH` outright (the same
+//! asymmetry AGENTS.md records for daemon-spawned commands). The fix is a `precmd`
+//! hook installed from a `.zshenv` veld owns, which runs after every rc file —
+//! see `veld-daemon/src/pty/shims.rs`.
 
 use std::path::{Path, PathBuf};
 

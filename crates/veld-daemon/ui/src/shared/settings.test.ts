@@ -7,6 +7,7 @@ import {
   externalOrigins,
   markerStyle,
   quickSwitchPrefs,
+  terminalInterceptSystemOpen,
   terminalOpenUrlsInApp,
   terminalPrefs,
 } from "./settings";
@@ -170,6 +171,13 @@ describe("terminal URL routing", () => {
         "terminal.openUrlsInApp": 0 as unknown as boolean,
       }),
     ).toBe(true);
+  });
+
+  it("defaults to catching open/xdg-open as well", () => {
+    expect(terminalInterceptSystemOpen({})).toBe(true);
+    expect(
+      terminalInterceptSystemOpen({ "terminal.interceptSystemOpen": false }),
+    ).toBe(false);
   });
 
   it("reads the exempt list and degrades to no exemptions", () => {

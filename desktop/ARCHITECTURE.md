@@ -278,20 +278,45 @@ requests at runtime — branding rule.
   kept correct across a detach. Placement then follows `onBrowserOpenRequest`'s
   shape exactly: find the dock holding the tab whose id is the session id, and add
   a browser tab to it.
-- **`$BROWSER` is the automatic interception and `PATH` cannot be**, which is
-  measured rather than assumed. macOS `/etc/zprofile` runs `path_helper`, which
-  rebuilds `PATH` with the system directories first and appends what was there —
-  so a directory prepended before spawning `$SHELL -l` lands behind `/usr/bin` and
-  `open` still resolves to `/usr/bin/open`; Debian's `/etc/profile` overwrites
-  `PATH` outright. The shell is a login shell by design, so it is entitled to do
-  that, and veld does not wrap anybody's rc files to win the argument (the
-  VS Code-style `ZDOTDIR` injection is zsh-only in practice and puts veld in the
-  path of every terminal's startup). What survives is the environment. The
-  `open`/`xdg-open` shims still exist in `$VELD_SHIM_DIR` for a user who opts in
-  by putting it on `PATH`, and every branch that is not "one http(s) URL, in a
-  Veld terminal, that the daemon routed" ends in `exec`ing the real tool with the
-  original argv — `open .` and `open -a Safari …` must behave exactly as they did
-  before veld was in the picture.
+- **`$BROWSER` is not enough, because the case that matters does not read it.**
+  An agent's shell tool runs `open <url>` directly (`Bash(open "https://…")`), and
+  Claude Code sets `BROWSER=true` for its children on top of that. So the shim
+  directory has to be on `PATH` — and `PATH` set in the spawn environment does not
+  survive a login shell, which is measured rather than assumed: macOS
+  `/etc/zprofile` runs `path_helper`, which rebuilds `PATH` with the system
+  directories first, so a prepended entry lands behind `/usr/bin` and `open` still
+  resolves to `/usr/bin/open`; Debian's `/etc/profile` overwrites `PATH` outright.
+- **So veld owns exactly one file in a shell's startup, and hands control back
+  immediately** (`pty/shims.rs`, `zshenv`). `ZDOTDIR` points at a veld directory
+  holding a single `.zshenv`, which (1) restores `ZDOTDIR` to the user's value —
+  unsetting it when they had none, since `ZDOTDIR` is conventionally set *in*
+  `~/.zshenv` — (2) sources the user's `.zshenv`, whose place in the order it took,
+  and (3) registers a `precmd` hook that prepends the shim directory. Everything
+  after that stage is the user's own file, read in the normal order, with their own
+  `$ZDOTDIR` visible to it. Nothing of the user's is edited or wrapped.
+  **A hook, not an assignment**, and that is the whole point: an assignment in
+  `.zshenv` is what `path_helper` undoes two steps later, while `precmd` runs
+  before the first prompt — after every rc file. It stays registered and is
+  idempotent, so a later `PATH` rebuild (a venv, a version manager) cannot silently
+  drop the shim. Pinned by a test that drives a real `zsh -l -i` whose `.zshrc`
+  rebuilds `PATH` from scratch; note that the test has to feed **stdin** rather than
+  use `-c`, because `zsh -i -c` prints no prompt and therefore runs no `precmd` —
+  a `-c` version of that test passes while the mechanism does nothing.
+- **zsh only, and the reason is structural**: it is the one shell with a startup
+  file that runs *before* `$ZDOTDIR` matters and a hook array that runs *after*
+  every rc file. bash has no env-only interactive hook (`BASH_ENV` is
+  non-interactive shells only) and reaching one through `--rcfile` means veld
+  reimplementing the user's login-startup order. bash, fish and the rest get
+  `$BROWSER` plus the documented `$VELD_SHIM_DIR` line.
+  `terminal.interceptSystemOpen` turns the whole thing off, because anything that
+  runs inside a shell's startup gets a switch; it is read at **ticket** time, where
+  the database is already open, so nothing puts a `Db::open()` on the
+  session-spawn path.
+- **Every branch that is not "one http(s) URL, in a Veld terminal, that the daemon
+  routed" ends in `exec`ing the real tool with the original argv** — `open .`,
+  `open report.pdf` and `open -a Safari …` must behave exactly as they did before
+  veld was in the picture, and a wrapper around a command people use dozens of
+  times a day has no other acceptable failure mode.
 - **Never write into a live shell.** A `[veld] …` notice injected into a running
   terminal lands in the middle of whatever full-screen program is redrawing
   (Claude Code, vim, top) and corrupts it. Notices are for shells that have

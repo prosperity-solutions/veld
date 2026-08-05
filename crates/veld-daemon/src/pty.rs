@@ -914,6 +914,11 @@ struct Ticket {
     cwd: PathBuf,
     /// Worktree alias, for log lines only.
     label: String,
+    /// `terminal.interceptSystemOpen`, read while [`mint_ticket`] already had the
+    /// database open. It rides the ticket rather than being read at spawn time so
+    /// that nothing puts a `Db::open()` on the session-spawn path — see the comment
+    /// where it is read, and the AGENTS.md note it points at.
+    intercept_system_open: bool,
     expires_at: Instant,
 }
 
@@ -1011,6 +1016,12 @@ async fn mint_ticket(
         ));
     }
 
+    // Read here rather than at spawn time, because this handler already has the
+    // database open. A `Db::open()` on the session-spawn path is the thing AGENTS.md
+    // warns about — one reached that path before and twelve unrelated tests migrated
+    // a real user database as a side effect.
+    let intercept_system_open = db.terminal_intercept_system_open();
+
     let cwd = PathBuf::from(&wt.path);
     // Only a new session needs the directory to exist. A resumed one already has
     // its shell running there, and re-checking would refuse an attach to a live
@@ -1038,6 +1049,7 @@ async fn mint_ticket(
                 worktree_id: body.worktree_id,
                 cwd,
                 label: wt.alias.clone(),
+                intercept_system_open,
                 expires_at: now + TICKET_TTL,
             },
         );
@@ -1488,10 +1500,16 @@ async fn obtain_session(
         rows: size.rows,
         socket: socket_for(&ticket.session_id),
         // What lets a process inside the shell open a URL in Veld: `$BROWSER`
-        // pointing at a generated shim, and the session id it names when it does.
+        // pointing at a generated shim, the session id it names when it does, and —
+        // for zsh, unless the setting is off — the `ZDOTDIR` handoff that gets the
+        // shim directory onto `PATH` after the user's own startup files have run.
         // Computed here rather than in the holder because the holder is a dumb PTY
         // owner — it knows nothing about instances, ports or the CLI's location.
-        env: shims::session_env(&ticket.session_id),
+        env: shims::session_env(
+            &ticket.session_id,
+            &holder::login_shell(),
+            ticket.intercept_system_open,
+        ),
         // The holder's own self-destruct grace, used when the *daemon* is gone and
         // nothing is left to reap it. Read at spawn, so a holder keeps the value
         // that was configured when its shell started: changing the setting affects
@@ -2343,6 +2361,7 @@ mod tests {
                 worktree_id: 1,
                 cwd: std::env::temp_dir(),
                 label: "t".to_owned(),
+                intercept_system_open: true,
                 expires_at: Instant::now() + ttl,
             },
         );
@@ -2365,6 +2384,7 @@ mod tests {
                 worktree_id: 1,
                 cwd: std::env::temp_dir(),
                 label: "t".to_owned(),
+                intercept_system_open: true,
                 expires_at: Instant::now() - Duration::from_secs(1),
             },
         );
@@ -2600,6 +2620,7 @@ mod tests {
                     worktree_id: 1,
                     cwd: cwd.to_path_buf(),
                     label: "test".to_owned(),
+                    intercept_system_open: true,
                     expires_at: Instant::now() + TICKET_TTL,
                 },
             );
@@ -2684,6 +2705,7 @@ mod tests {
                     worktree_id: 1,
                     cwd: std::env::temp_dir(),
                     label: "test".to_owned(),
+                    intercept_system_open: true,
                     expires_at: Instant::now() - Duration::from_secs(1),
                 },
             );

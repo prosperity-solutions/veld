@@ -78,6 +78,7 @@ const FALLBACK = {
   // announces "terminal links open here" must not silently behave like the release
   // before it because the daemon has not heard of the key.
   terminalOpenUrlsInApp: true,
+  terminalInterceptSystemOpen: true,
 } as const;
 
 function strings(doc: SettingsDoc, key: string): string[] {
@@ -284,6 +285,22 @@ export function runHistoryDays(doc: SettingsDoc): number {
  */
 export function terminalOpenUrlsInApp(doc: SettingsDoc): boolean {
   return bool(doc, "terminal.openUrlsInApp", FALLBACK.terminalOpenUrlsInApp);
+}
+
+/**
+ * Whether a terminal session gets Veld's shim directory on its `PATH`, so a program
+ * that calls `open`/`xdg-open` instead of reading `$BROWSER` is routed too.
+ * **Defaults on.**
+ *
+ * Display only, like the switch above: the daemon builds the session environment and
+ * is the only thing that acts on this.
+ */
+export function terminalInterceptSystemOpen(doc: SettingsDoc): boolean {
+  return bool(
+    doc,
+    "terminal.interceptSystemOpen",
+    FALLBACK.terminalInterceptSystemOpen,
+  );
 }
 
 /**

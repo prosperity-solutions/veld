@@ -847,7 +847,12 @@ fn spawn_shell(
 /// The user's shell, falling back to a POSIX shell that is present on every
 /// supported platform. `SHELL` comes from this process's environment, inherited
 /// from the daemon (launchd/systemd propagate the user's), never from a client.
-fn login_shell() -> String {
+///
+/// `pub` because the daemon needs the same answer *before* it spawns a holder: which
+/// shell this is decides whether the session's environment carries the `ZDOTDIR`
+/// handoff (`pty::shims`). One function, so the two cannot disagree about which
+/// shell is about to run.
+pub fn login_shell() -> String {
     std::env::var("SHELL")
         .ok()
         .filter(|s| !s.is_empty())

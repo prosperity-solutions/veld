@@ -159,6 +159,7 @@ pub enum SettingKey {
     TerminalShiftEnterNewline,
     TerminalDetachGrace,
     TerminalOpenUrlsInApp,
+    TerminalInterceptSystemOpen,
     WorktreeMarkerStyle,
     WorktreeTrashRetention,
     RunsHistoryDays,
@@ -188,6 +189,7 @@ impl SettingKey {
         Self::TerminalShiftEnterNewline,
         Self::TerminalDetachGrace,
         Self::TerminalOpenUrlsInApp,
+        Self::TerminalInterceptSystemOpen,
         Self::WorktreeMarkerStyle,
         Self::WorktreeTrashRetention,
         Self::RunsHistoryDays,
@@ -206,6 +208,7 @@ impl SettingKey {
             Self::TerminalShiftEnterNewline => "terminal.shiftEnterNewline",
             Self::TerminalDetachGrace => "terminal.detachGraceMinutes",
             Self::TerminalOpenUrlsInApp => "terminal.openUrlsInApp",
+            Self::TerminalInterceptSystemOpen => "terminal.interceptSystemOpen",
             Self::WorktreeMarkerStyle => "worktree.markerStyle",
             Self::WorktreeTrashRetention => "worktree.trashRetentionDays",
             Self::RunsHistoryDays => "runs.historyDays",
@@ -226,6 +229,7 @@ impl SettingKey {
             "terminal.shiftEnterNewline" => Self::TerminalShiftEnterNewline,
             "terminal.detachGraceMinutes" => Self::TerminalDetachGrace,
             "terminal.openUrlsInApp" => Self::TerminalOpenUrlsInApp,
+            "terminal.interceptSystemOpen" => Self::TerminalInterceptSystemOpen,
             "worktree.markerStyle" => Self::WorktreeMarkerStyle,
             "worktree.trashRetentionDays" => Self::WorktreeTrashRetention,
             "runs.historyDays" => Self::RunsHistoryDays,
@@ -281,6 +285,7 @@ impl SettingKey {
             Self::TerminalCursorBlink
             | Self::TerminalShiftEnterNewline
             | Self::TerminalOpenUrlsInApp
+            | Self::TerminalInterceptSystemOpen
             | Self::BrowserQuickSwitchResponsive
             | Self::BrowserQuickSwitchColorScheme => Value::from(value.as_bool().ok_or_else(bad)?),
             // The one list-valued setting, and the one whose entries are checked
@@ -420,6 +425,11 @@ pub fn defaults() -> BTreeMap<String, Value> {
         // escape hatches are the exempt list below (per host, and per project) and
         // this switch (all of it, everywhere).
         (SettingKey::TerminalOpenUrlsInApp, Value::from(true)),
+        // On, because the case it exists for is an agent running `open <url>` in a
+        // terminal pane, and that is the one a user cannot work around themselves.
+        // It is the only setting that puts veld in a shell's startup, which is why
+        // it is a setting at all — see the key's own docs.
+        (SettingKey::TerminalInterceptSystemOpen, Value::from(true)),
         // Empty: veld ships no opinion about which hosts need the real browser.
         // A default entry would be a guess about someone else's SSO provider.
         (SettingKey::BrowserExternalOrigins, Value::Array(Vec::new())),
@@ -550,6 +560,25 @@ impl Db {
     /// take, rather than trusting the stored bytes.
     pub fn terminal_open_urls_in_app(&self) -> bool {
         self.setting(&SettingKey::TerminalOpenUrlsInApp)
+            .ok()
+            .flatten()
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true)
+    }
+
+    /// Whether a terminal session gets the shim directory on its `PATH`, so that a
+    /// program calling `open`/`xdg-open` (rather than reading `$BROWSER`) is routed
+    /// too — an agent's `Bash(open "https://…")` being the case that matters.
+    ///
+    /// Read by the daemon, which is what builds the session's environment. Separate
+    /// from [`SettingKey::TerminalOpenUrlsInApp`] because it is a different question:
+    /// that one is *where a URL opens*, this one is *whether veld arranges to see
+    /// the call at all*, and the mechanism (a `.zshenv` of veld's own that hands
+    /// `ZDOTDIR` straight back and registers one hook) is the only place veld runs
+    /// inside a user's shell startup. Anything that touches a shell's startup gets
+    /// an off switch.
+    pub fn terminal_intercept_system_open(&self) -> bool {
+        self.setting(&SettingKey::TerminalInterceptSystemOpen)
             .ok()
             .flatten()
             .and_then(|v| v.as_bool())

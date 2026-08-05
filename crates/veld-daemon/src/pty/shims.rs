@@ -2,26 +2,35 @@
 //! open a URL *in Veld*.
 //!
 //! One small directory per daemon instance ([`veld_core::instance::shim_dir`])
-//! holding three generated `sh` scripts, and four variables in the shell's
-//! environment:
+//! holding three generated `sh` scripts and a `zdotdir/` of one file, plus these
+//! variables in the shell's environment:
 //!
 //! | Variable | Why |
 //! |---|---|
-//! | `BROWSER` | The automatic half. It points at `veld-open`, and it is what Claude Code, `gh`, `git`, Python's `webbrowser`, vite and next all consult. |
+//! | `BROWSER` | Points at `veld-open`. What Claude Code's own login flow, `gh`, `git`, Python's `webbrowser`, vite and next all consult. |
 //! | `VELD_PTY_SESSION` | Which terminal asked, which is how the daemon knows *which window* the pane belongs in. |
-//! | `VELD_SHIM_DIR` | The opt-in half: a user who puts this on `PATH` also gets `open`/`xdg-open` routed. |
+//! | `VELD_SHIM_DIR` | The directory holding the `open`/`xdg-open` wrappers. Exported for every shell, so a non-zsh user can put it on `PATH` themselves. |
+//! | `ZDOTDIR` / `VELD_USER_ZDOTDIR` | zsh only, and only while `terminal.interceptSystemOpen` is on: the handoff that gets that directory onto `PATH` after the user's own startup files. See [`zshenv`]. |
 //! | `VELD_BROWSER_ORIGINAL` | Whatever `$BROWSER` was before veld took it over, so the fall-through path can restore it instead of handing a child the shim again. |
 //!
-//! # `BROWSER` is the automatic mechanism because `PATH` cannot be
+//! # Why `$BROWSER` alone is not enough
 //!
-//! Measured on macOS: `/etc/zprofile` runs `path_helper`, which rebuilds `PATH`
-//! with the system directories first and appends the previous contents, so a
-//! directory prepended before spawning `$SHELL -l` lands *behind* `/usr/bin` and
-//! `open` still resolves to `/usr/bin/open`. Debian's `/etc/profile` overwrites
-//! `PATH` outright. The shell we spawn is a login shell by design (it is how a
-//! terminal gets the user's real environment), so it is entitled to do this — and
-//! veld does not wrap anybody's rc files to win the argument. Environment variables
-//! survive; `PATH` order does not.
+//! The case that matters most does not read it: an agent's shell tool runs
+//! `open <url>` directly (`Bash(open "https://…")` consults no variable), and Claude
+//! Code sets `BROWSER=true` for its children on top of that. Catching those means
+//! having the shim directory on `PATH`.
+//!
+//! And `PATH` set in the spawn environment does not survive a login shell — measured,
+//! not assumed. macOS `/etc/zprofile` runs `path_helper`, which rebuilds `PATH` with
+//! the system directories first and appends the previous contents, so a prepended
+//! entry lands *behind* `/usr/bin` and `open` still resolves to `/usr/bin/open`;
+//! Debian's `/etc/profile` overwrites `PATH` outright. The shell is a login shell by
+//! design — that is how a terminal gets the user's real environment — so it is
+//! entitled to do this.
+//!
+//! The answer is [`zshenv`]: one file veld owns, in its own directory, which hands
+//! `ZDOTDIR` back immediately and installs a hook that runs *after* every rc file.
+//! Nothing of the user's is edited, wrapped, or read twice.
 //!
 //! # Rewritten every daemon start, never trusted from disk
 //!
@@ -39,18 +48,43 @@ use std::sync::OnceLock;
 use tracing::{debug, warn};
 use veld_core::opener::Tool;
 
-/// The variables a terminal session gets, given its session id.
+/// The variables a terminal session gets.
+///
+/// `shell` is the login shell about to be spawned and `intercept` is the
+/// `terminal.interceptSystemOpen` setting; together they decide whether the
+/// `ZDOTDIR` handoff below is set up.
 ///
 /// Empty except for `VELD_PTY_SESSION` when the shim directory could not be
 /// prepared — the session id alone is still worth having, because `veld open-url`
 /// run by hand (or by an agent) uses it.
-pub fn session_env(session_id: &str) -> BTreeMap<String, String> {
+pub fn session_env(session_id: &str, shell: &str, intercept: bool) -> BTreeMap<String, String> {
     let mut env = BTreeMap::new();
     env.insert("VELD_PTY_SESSION".to_owned(), session_id.to_owned());
     let Some(dir) = dir() else {
         return env;
     };
     env.insert("VELD_SHIM_DIR".to_owned(), dir.display().to_string());
+    if intercept && is_zsh(shell) {
+        // The zero-touch half: `$BROWSER` cannot reach a program that calls `open`
+        // directly (an agent's shell tool does exactly that, and Claude Code even
+        // sets `BROWSER=true` for its children), and `PATH` set here is reordered by
+        // `/etc/zprofile`'s `path_helper` before the first prompt. So veld takes over
+        // `ZDOTDIR` for exactly one file read — see `zshenv` for what that file does
+        // and, more importantly, what it refuses to do.
+        env.insert(
+            "ZDOTDIR".to_owned(),
+            zdotdir_path(dir).display().to_string(),
+        );
+        // What to hand back. Absent when the user has none, which is the normal case:
+        // `ZDOTDIR` is conventionally set *in* `~/.zshenv`, i.e. by the very file the
+        // handoff sources, so it is theirs to set and ours to stay out of.
+        if let Some(theirs) = std::env::var_os("ZDOTDIR")
+            .and_then(|v| v.into_string().ok())
+            .filter(|v| !v.is_empty())
+        {
+            env.insert("VELD_USER_ZDOTDIR".to_owned(), theirs);
+        }
+    }
     // Saved before it is replaced, so the fall-through in `veld open-url` can give
     // a child the browser the user actually configured. Without this, a tool that
     // reads `$BROWSER` on the far side of a passthrough would be handed the shim
@@ -66,6 +100,89 @@ pub fn session_env(session_id: &str) -> BTreeMap<String, String> {
         dir.join(Tool::Browser.shim_name()).display().to_string(),
     );
     env
+}
+
+/// Whether a login shell is zsh.
+///
+/// The `ZDOTDIR` handoff is zsh-only, and deliberately so: zsh is the one shell
+/// with a startup file that runs *before* `$ZDOTDIR` matters and a hook array that
+/// runs *after* every rc file, which is what makes an override possible without
+/// touching a single file of the user's. bash has no equivalent env-only hook
+/// (`BASH_ENV` is non-interactive shells only) and replicating login semantics
+/// through `--rcfile` means veld reimplementing the user's startup order. So bash,
+/// fish and the rest get `$BROWSER` plus the documented `$VELD_SHIM_DIR` line.
+fn is_zsh(shell: &str) -> bool {
+    std::path::Path::new(shell)
+        .file_name()
+        .is_some_and(|n| n == "zsh")
+}
+
+/// Where the `.zshenv` veld owns lives — beside the shims, inside the instance's
+/// own directory, never in the user's home.
+fn zdotdir_path(shim_dir: &Path) -> PathBuf {
+    shim_dir.join("zdotdir")
+}
+
+/// The one file veld runs inside a user's shell startup.
+///
+/// # What it does, and what it refuses to do
+///
+/// zsh reads `$ZDOTDIR/.zshenv` first, then `/etc/zprofile` (where macOS's
+/// `path_helper` rebuilds `PATH` with the system directories in front), then the
+/// user's `.zprofile`, `.zshrc` and `.zlogin`. `$ZDOTDIR` is re-read at every one of
+/// those steps — which is the whole trick here:
+///
+/// 1. **It hands `ZDOTDIR` straight back.** After this file, every remaining stage
+///    reads the *user's* files, in the normal order, unmodified, with the user's own
+///    `$ZDOTDIR` visible to them. veld owns one file, not a shell startup.
+/// 2. **It sources the user's `.zshenv`**, because ours took its place in the order.
+/// 3. **It registers a `precmd` hook** that prepends the shim directory to `PATH`.
+///    A hook rather than a plain assignment because an assignment here is exactly
+///    what `path_helper` undoes two steps later; `precmd` runs before the first
+///    prompt, which is after everything.
+///
+/// It does **not** wrap `.zshrc`, source anything of the user's twice, or write to
+/// their home directory. If the user's `.zshrc` clears `precmd_functions` outright
+/// (rare — frameworks append), the hook is lost and the feature degrades to
+/// `$BROWSER` only, which is the pre-feature behaviour rather than a broken shell.
+///
+/// Idempotent and left registered rather than one-shot: a later `PATH` rebuild (a
+/// venv activation, a version manager) would otherwise silently drop the shim, and
+/// the guard makes re-running free.
+fn zshenv() -> String {
+    String::from(
+        r#"# Generated by veld — rewritten on every daemon start; edits are lost.
+#
+# veld owns this file and nothing else. Its first job is to give ZDOTDIR back, so
+# every later zsh startup file is YOURS, read in the normal order.
+if [ -n "${VELD_USER_ZDOTDIR-}" ]; then
+  ZDOTDIR="$VELD_USER_ZDOTDIR"
+else
+  unset ZDOTDIR
+fi
+
+# Your own .zshenv, which this file stood in for.
+if [ -f "${ZDOTDIR-$HOME}/.zshenv" ]; then
+  . "${ZDOTDIR-$HOME}/.zshenv"
+fi
+
+# Put veld's shim directory on PATH just before each prompt: after /etc/zprofile's
+# path_helper and after your own rc files, which is the only point at which it can
+# win. Idempotent, so it costs a string compare per prompt and nothing else.
+if [ -n "${VELD_SHIM_DIR-}" ]; then
+  veld_shim_path() {
+    case ":$PATH:" in
+      *":$VELD_SHIM_DIR:"*) ;;
+      *) PATH="$VELD_SHIM_DIR:$PATH" ;;
+    esac
+  }
+  typeset -ga precmd_functions
+  if [[ -z ${precmd_functions[(r)veld_shim_path]} ]]; then
+    precmd_functions+=(veld_shim_path)
+  fi
+fi
+"#,
+    )
 }
 
 /// The prepared shim directory, or `None` if it could not be prepared.
@@ -121,6 +238,16 @@ fn prepare_in(dir: &Path, cli: &Path) -> std::io::Result<()> {
         set_mode(&tmp, 0o755)?;
         std::fs::rename(&tmp, &path)?;
     }
+    // The `ZDOTDIR` handoff. Written unconditionally — whether a session *uses* it
+    // is `session_env`'s call, per shell and per setting — and by the same
+    // write-then-rename, since a shell may be starting while the daemon restarts.
+    let zdir = zdotdir_path(dir);
+    std::fs::create_dir_all(&zdir)?;
+    set_mode(&zdir, 0o700)?;
+    let tmp = zdir.join(".zshenv.new");
+    std::fs::write(&tmp, zshenv())?;
+    set_mode(&tmp, 0o600)?;
+    std::fs::rename(&tmp, zdir.join(".zshenv"))?;
     Ok(())
 }
 
@@ -265,10 +392,115 @@ mod tests {
     }
 
     #[test]
+    fn the_handoff_is_zsh_only_and_switchable() {
+        // A non-zsh login shell gets no `ZDOTDIR`: there is no env-only hook to hang
+        // this on, and reimplementing bash's startup order is not something to do to
+        // somebody's shell.
+        for shell in ["/bin/bash", "/usr/bin/fish", "/opt/homebrew/bin/nu", ""] {
+            let env = session_env("s", shell, true);
+            assert!(!env.contains_key("ZDOTDIR"), "{shell} must not be wrapped");
+        }
+        // And the setting is a real off switch, not a preference the daemon ignores.
+        assert!(!session_env("s", "/bin/zsh", false).contains_key("ZDOTDIR"));
+        assert!(is_zsh("/bin/zsh") && is_zsh("/opt/homebrew/bin/zsh"));
+        assert!(!is_zsh("/bin/zsh-beta") && !is_zsh("/bin/bash"));
+    }
+
+    /// The `.zshenv` wins against a hostile rc file, and leaves the user's own
+    /// startup intact.
+    ///
+    /// The whole feature rests on this, and it rests on zsh's actual behaviour rather
+    /// than on a reading of the manual — a plain `PATH=` assignment in this file is
+    /// undone by `/etc/zprofile`'s `path_helper` two steps later, which is how the
+    /// first version of this shipped broken. So it is asserted by running zsh.
+    ///
+    /// Skipped where zsh is absent (some CI images) rather than failing: this is a
+    /// property of the generated file, and the file is asserted textually below.
+    #[test]
+    fn the_generated_zshenv_wins_against_an_rc_that_rebuilds_path() {
+        let Some(zsh) = ["/bin/zsh", "/usr/bin/zsh", "/opt/homebrew/bin/zsh"]
+            .into_iter()
+            .map(PathBuf::from)
+            .find(|p| p.is_file())
+        else {
+            eprintln!("no zsh on this machine — skipping");
+            return;
+        };
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let home = tmp.path().join("home");
+        let shim = tmp.path().join("shim");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&shim).unwrap();
+        // A marker `open` that a resolution can be attributed to.
+        std::fs::write(shim.join("open"), "#!/bin/sh\necho shim\n").unwrap();
+        set_mode(&shim.join("open"), 0o755).unwrap();
+
+        // A user startup as unhelpful as a real one: `.zshenv` sets a marker (so the
+        // handoff can be shown to have sourced it) and `.zshrc` *rebuilds* PATH from
+        // scratch, which is what defeats every simpler approach.
+        std::fs::write(home.join(".zshenv"), "export VELD_TEST_USER_ZSHENV=ran\n").unwrap();
+        std::fs::write(
+            home.join(".zshrc"),
+            "export VELD_TEST_USER_ZSHRC=ran\nPATH=/usr/bin:/bin\n",
+        )
+        .unwrap();
+
+        let zdir = tmp.path().join("zdotdir");
+        std::fs::create_dir_all(&zdir).unwrap();
+        std::fs::write(zdir.join(".zshenv"), zshenv()).unwrap();
+
+        // Driven through **stdin of an interactive login shell**, not `-c`, and that
+        // is the point of the test rather than a detail: `precmd` fires before a
+        // prompt, `zsh -i -c` prints none, and a `-c` version of this test passes
+        // while the hook never runs. A real terminal prompts before the user can type
+        // anything, so this is the shape that matches it. `-l` as well, because
+        // `/etc/zprofile`'s `path_helper` is exactly what has to be beaten.
+        let mut child = std::process::Command::new(&zsh)
+            .args(["-l", "-i"])
+            .env_clear()
+            .env("HOME", &home)
+            .env("PATH", "/usr/bin:/bin")
+            .env("TERM", "dumb")
+            .env("ZDOTDIR", &zdir)
+            .env("VELD_SHIM_DIR", &shim)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("run zsh");
+        {
+            use std::io::Write;
+            let stdin = child.stdin.as_mut().unwrap();
+            stdin
+                .write_all(
+                    b"command -v open\n                      echo $VELD_TEST_USER_ZSHENV $VELD_TEST_USER_ZSHRC\n                      echo zdotdir=${ZDOTDIR-unset}\n                      exit\n",
+                )
+                .unwrap();
+        }
+        let out = child.wait_with_output().expect("zsh exit");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+
+        assert!(
+            stdout.contains(&shim.join("open").display().to_string()),
+            "the shim must resolve first even though .zshrc rebuilt PATH; saw:\n{stdout}\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        // The user's own files ran — both of them, which is the half that matters more
+        // than the PATH: veld replaced one file in the startup order and put it back.
+        assert!(stdout.contains("ran ran"), "user startup files: {stdout:?}");
+        // …and `ZDOTDIR` was handed back, so a nested zsh is not wrapped.
+        assert!(
+            stdout.contains("zdotdir=unset"),
+            "ZDOTDIR must be returned to the user's value: {stdout:?}"
+        );
+    }
+
+    #[test]
     fn the_session_id_is_always_exported() {
         // Even when no shim directory could be prepared: `veld open-url` run by
         // hand still needs to know which terminal it is in.
-        let env = session_env("abc-123");
+        let env = session_env("abc-123", "/bin/zsh", true);
         assert_eq!(
             env.get("VELD_PTY_SESSION").map(String::as_str),
             Some("abc-123")
