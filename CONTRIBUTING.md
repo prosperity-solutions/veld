@@ -13,8 +13,8 @@ Why? Because that's how this project was built, and it's how we believe modern s
 1. **Fork the repo** and create a branch from `main`.
 2. **Use an AI coding agent** to implement your changes.
 3. **Follow conventional commits** — we use [Conventional Commits](https://www.conventionalcommits.org/) for semantic versioning. Prefix your commit messages with `feat:`, `fix:`, `docs:`, `chore:`, etc.
-4. **Make sure CI passes** — `cargo fmt`, `cargo clippy`, and `cargo test` must all be green.
-5. **Open a PR** with a clear description of what changed and why.
+4. **Run the checks locally first** — `just lint` and `just test` (`cargo fmt`, `cargo clippy`, `cargo test`) must all be green *before* you ask CI for an opinion. This is not a formality: **CI does not run while a PR is a draft.**
+5. **Open a PR** with a clear description of what changed and why. Open it as a draft while you're still iterating — pushes to a draft are free — and mark it ready for review once your agent has finished reviewing the change and your local checks are green. That's the step that starts CI.
 
 ## Development setup
 
@@ -140,6 +140,7 @@ just dev-restore    # runs veld update
 | `just build` | Build Rust + frontend | No |
 | `just test` | Run all tests | No |
 | `just lint` | Clippy + TypeScript type check | No |
+| `just workflow-gates` | Assert no CI job can run on a draft PR (needs PyYAML) | No |
 
 ## Guidelines
 
@@ -147,6 +148,7 @@ just dev-restore    # runs veld update
 - Don't break existing behavior without discussion.
 - Add tests where it makes sense, but don't over-test trivial code.
 - If CI fails, fix it before requesting review.
+- **Draft PRs don't run CI.** Every job in `ci.yml` skips while a PR is a draft, and marking it ready for review is what starts them. Two of those jobs run on macOS runners (billed at 10× a Linux minute) alongside a four-target release build matrix, so a branch that gets 20 intermediate pushes while it's being written used to cost 20 full runs. Keep the work in draft, run `just lint`/`just test` locally as you go, and flip to ready when it's genuinely ready. If your PR shows no checks at all, it's almost certainly still a draft.
 
 ## License
 

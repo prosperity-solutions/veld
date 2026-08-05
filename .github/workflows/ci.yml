@@ -3,6 +3,11 @@ name: CI
 on:
   pull_request:
     branches: [main]
+    # `ready_for_review` is NOT in the default type set (opened, synchronize,
+    # reopened) and every job below refuses to run while the PR is a draft, so
+    # the two halves are required together: without this line, flipping a draft
+    # to ready fires nothing and the PR sits forever with no checks.
+    types: [opened, synchronize, reopened, ready_for_review]
   push:
     branches: [main]
 
@@ -11,11 +16,33 @@ env:
   RUSTFLAGS: "-D warnings"
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
+# ── Draft PRs do not spend runner minutes ─────────────────────────────
+#
+# Every job below carries:
+#
+#   if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+#
+# A draft PR is where an agent's intermediate commits land, and this workflow is
+# expensive: two macOS legs (billed at 10× a Linux minute), a four-target release
+# build matrix, and macOS Electron packaging. The house workflow (AGENTS.md → PR
+# Workflow) is local review first and ready-for-review second, so a draft has by
+# definition not earned a CI run yet. A push to a draft still creates a workflow
+# run, but every job in it skips — that costs queue time, not runner time.
+#
+# The guard is repeated per job rather than hoisted because Actions has no
+# workflow-level `if` and does not support YAML anchors. Leaning on `needs:` to
+# cascade the skip into dependent jobs would work today and silently stop working
+# the day someone drops a `needs:`, so `tests/validate-workflow-gates.py` asserts
+# the invariant instead: every job is draft-guarded, push-only, or a dependent
+# that cannot outlive a skipped root.
+#
+# Do not add `if: always()` to a job that relies on the cascade — that is exactly
+# the hole the gate looks for.
 jobs:
   commits:
     name: Conventional Commits
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' && github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@v4
         with:
@@ -47,14 +74,16 @@ jobs:
   website:
     name: Website Docker Build
     runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@v4
       - name: Build website container
         run: docker build -t veld-website website/
 
   schema:
-    name: Validate JSON Schema
+    name: Validate JSON Schema & Workflow Gates
     runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -64,10 +93,20 @@ jobs:
         run: |
           chmod +x tests/validate-schema.sh
           ./tests/validate-schema.sh --install
+      # Homed here because this is the one job that already has a managed Python
+      # and does static, checkout-only validation. Nothing in Actions enforces
+      # that a newly added job carries the draft guard, and the symptom of a
+      # missing one is a bill rather than a failure, so it gets a drift gate —
+      # the same reason THIRD-PARTY-LICENSES.md and desktop/assets have one.
+      - name: Workflows do not run on draft PRs
+        run: |
+          pip install pyyaml
+          python3 tests/validate-workflow-gates.py
 
   licenses:
     name: Third-Party Licenses
     runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -96,6 +135,7 @@ jobs:
   go-test:
     name: Go Module Tests
     runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -108,6 +148,7 @@ jobs:
   check:
     name: Check & Lint
     runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -135,6 +176,7 @@ jobs:
   frontend:
     name: Frontend (TypeScript)
     runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     defaults:
       run:
         working-directory: crates/veld-daemon/frontend
@@ -154,6 +196,7 @@ jobs:
   ui:
     name: Management UI v2 (TypeScript)
     runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     defaults:
       run:
         working-directory: crates/veld-daemon/ui
@@ -175,6 +218,7 @@ jobs:
   desktop:
     name: Desktop Shell (Electron)
     runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     defaults:
       run:
         working-directory: desktop
@@ -246,6 +290,7 @@ jobs:
   desktop-package:
     name: Desktop Packaging (${{ matrix.name }})
     needs: desktop
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     # This job downloads and runs third-party build tooling (the Electron dist,
     # app-builder-bin), so it gets the token scope its release-workflow twin has
     # rather than the repo default.
@@ -313,6 +358,7 @@ jobs:
     name: Integration Tests (macOS)
     runs-on: macos-latest
     needs: check
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -705,6 +751,7 @@ jobs:
     name: Release Build (${{ matrix.suffix }})
     runs-on: ${{ matrix.os }}
     needs: check
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     strategy:
       fail-fast: false
       matrix:
@@ -776,6 +823,7 @@ jobs:
     name: Injection E2E (macOS)
     runs-on: macos-latest
     needs: check
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

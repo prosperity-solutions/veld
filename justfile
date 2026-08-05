@@ -307,6 +307,13 @@ lint:
     cd crates/veld-daemon/frontend && npx tsc --noEmit
     cd crates/veld-daemon/ui && npm run typecheck
 
+# Assert no CI job can run on a draft PR (AGENTS.md → CI cost convention).
+# Deliberately not folded into `lint`: this needs PyYAML, and `lint` is the
+# recipe every contributor runs constantly — it must not grow a Python dep.
+# The `schema` job in ci.yml is the enforcing copy.
+workflow-gates:
+    python3 tests/validate-workflow-gates.py
+
 build-frontend:
     cd crates/veld-daemon/frontend && npm run build
 

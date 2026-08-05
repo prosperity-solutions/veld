@@ -57,7 +57,7 @@ This starts a local HTTP server for the `website/` directory with an HTTPS URL l
 
 Veld ships consumer-facing skills in `skills/` for the [npx skills](https://github.com/vercel-labs/skills) ecosystem. Users install with `npx skills add prosperity-solutions/veld`. Skills are auto-discovered from `skills/*/SKILL.md`.
 
-For **contributors** working on this repo with Claude Code, `.claude/skills/ship/` provides a `/ship` workflow skill that wraps the PR Workflow below (kickoff questionnaire → autonomous implement → adversarial review rounds → draft PR → wait for green CI → bypass-merge when authorized). It's a dev tool, not a published consumer skill.
+For **contributors** working on this repo with Claude Code, `.claude/skills/ship/` provides a `/ship` workflow skill that wraps the PR Workflow below (kickoff questionnaire → autonomous implement → adversarial review rounds → draft PR → mark ready for review → wait for green CI → bypass-merge when authorized). It's a dev tool, not a published consumer skill.
 
 **Every skill under `.claude/skills/` must carry `metadata.internal: true` in its
 SKILL.md frontmatter.** The `npx skills` CLI scans `.claude/skills/` alongside
@@ -76,9 +76,10 @@ Follow this workflow for every feature or fix:
 1. **Implement** — Make the code changes.
 2. **Docs audit** — Before considering the work done, check the [documentation checklist](#documentation-checklist) below.
 3. **Review loop (autonomous, multi-angle, staged)** — Run the loop in [docs/agentic-review.md](docs/agentic-review.md) on the diff: pre-pass (clippy/fmt/tests) → context pack → staged angles as parallel background subagents with explicit per-angle model tiering → verify each critical/major yourself → fix → re-review the fix delta. Loop until the doc's exit criteria hold or a cap/hard stop fires. Do not run separate single-reviewer warm-up rounds — the multi-angle pass replaces them. Diffs under ~50 lines with no stakes flag take the doc's trivia clause (§11); the stakes override (§3.3) is never downgradable.
-4. **Push to draft PR** — Push the branch and open a draft PR on GitHub.
-5. **Wait for CI** — All checks must be green. Never assume checks are missing just because they haven't started yet.
-6. **Ask before merging** — Ask the maintainer for explicit approval before merging. Only merge with admin bypass if the maintainer explicitly says so upfront at task start.
+4. **Push to draft PR** — Push the branch and open a draft PR on GitHub. **CI does not run while a PR is a draft** (see the CI cost convention below), so do not push intermediate commits expecting a signal from GitHub — the local pre-pass is your only signal at this stage, which is what makes it load-bearing rather than advisory.
+5. **Mark ready for review — only after the review loop is done.** `gh pr ready` is what actually spends runner minutes, so it is a deliberate step, not a formality. Do not flip a PR ready until step 3's exit criteria hold *and* the local pre-pass (clippy, fmt, tests, plus the UI checks when the diff touches them) is green. A draft that has not been locally reviewed has not earned a CI run.
+6. **Wait for CI** — All checks must be green. Never assume checks are missing just because they haven't started yet. If no checks appear at all after marking ready, the PR is probably still a draft or is `CONFLICTING` — check `gh pr view --json isDraft,mergeable` before waiting any longer.
+7. **Ask before merging** — Ask the maintainer for explicit approval before merging. Only merge with admin bypass if the maintainer explicitly says so upfront at task start.
 
 **Hand the maintainer the running software before the PR.** For any change with a UI or a new CLI surface, the house style is *checkpointed autonomy*: stop after implementing so they can drive it themselves, run the review loop unattended, then stop once more after the review fixes — because fixes that touch rendering, wire shapes, or CLI output regress exactly what was hand-verified the first time. A review subagent cannot see that a graph renders wrong. `/ship` captures this in its kickoff questionnaire; the two stops are planned, not escalations.
 
@@ -161,6 +162,27 @@ and several were paid for in this codebase already.
   Design context that must outlive a working document belongs in the PR
   description, commit messages, or `docs/` — don't cite `notes/` files from
   code comments, since readers of the repo can't see them.
+- **CI runs only on a PR that is ready for review, so marking one ready is a
+  spending decision.** Every job in `ci.yml` and `release.yml` carries
+  `if: github.event_name != 'pull_request' || github.event.pull_request.draft == false`,
+  and both workflows list `ready_for_review` in `on.pull_request.types` — both
+  halves are required, because with the guard and without the type a PR flipped
+  from draft to ready would fire nothing at all and sit with no checks forever.
+  Pushes to a draft still create a workflow run whose jobs all skip: queue time,
+  not runner minutes. The reason is what this workflow costs — two macOS legs
+  (billed at 10× a Linux minute), a four-target release build matrix, and macOS
+  Electron packaging, all of which an agent was previously re-running on every
+  intermediate commit of a branch nobody had reviewed yet. The consequence for
+  how you work: **the local pre-pass is the only correctness signal a draft
+  gets**, so never push-and-mark-ready on a red pre-pass hoping CI will tell you
+  what broke, and never treat "I'll let CI catch it" as a substitute for running
+  clippy/fmt/tests locally. The guard is repeated per job because Actions has no
+  workflow-level `if` and no YAML anchors; a dependent job may instead inherit
+  the skip through `needs:`, but must not carry `always()`/`!cancelled()`, which
+  runs it even when its dependencies skipped.
+  `tests/validate-workflow-gates.py` (run by the `schema` job) asserts all of
+  this, because nothing in Actions does and the symptom of a missing guard is a
+  bill rather than a failing job.
 - **Any user-supplied command executed by a daemon must inherit the user's login-shell `PATH`.** The daemon (launchd), gateway (systemd), and helper run with a bare service `PATH`, so a raw `sh -c` cannot find user-installed CLIs (`op`, `vault`, `pg_isready`, version-manager shims) even though the same command works in the user's terminal. Pass it via `.env("PATH", …)`, resolved by one of the two helpers in `veld_core::user_path`. Anything inside a daemon uses `cached_user_path()` — every request handler (`spawn_veld`, the desktop directory picker and git plumbing, and `SecretSource::Command` token resolution in `veld-share/src/endpoint.rs`, which `POST /api/shares` reaches while the caller waits) and the health monitor's liveness probes; a dedicated `warm_user_path_cache` task keeps that entry warm, deliberately **not** the monitor's scan, whose own cadence stretches to 300s during a recovery restart. `resolve_user_path()` is the uncached primitive, for a one-shot context that resolves once and exits — today only a CLI run's lazy var sources. Resolution spawns a login shell: sub-second normally, up to 10s on a stalled rc file, and the slow rc files belong to exactly the users who need the resolved PATH — which is why a handler must not resolve inline. The cache is one writer (the warm task) publishing into a cell that readers only read, with a single rule doing the work: **a resolution that learned nothing never displaces one that did.** A stall, or a shell that exits zero while answering with nothing better than the process's own `PATH`, leaves the previous value alone — because that value is the bare service PATH, i.e. the bug itself. Resist adding a TTL or a which-resolution-wins rule back: the first version of this cache had both, and each grew its own bug. Never spawn a config-declared command on a daemon without this. **A login shell is not a substitute for the injection.** `$SHELL -l -c` sources `.zprofile` but not `.zshrc`, which is where version managers (nvm, fnm, rbenv) and `brew shellenv` live on most machines; on Debian `/etc/profile` overwrites `PATH` outright, so a login shell wrapped around an injected PATH *discards* it. That mistake shipped in `spawn_veld` and made every UI- or Desktop-initiated `veld start` resolve node commands against the bare launchd PATH (`sh: npx: command not found`). Spawn the binary directly with the injected PATH; don't reach for a shell to get it. Scope: the rule covers daemon/gateway/helper spawns only — commands the `veld` CLI itself spawns (orchestrator `command`/`start_server` steps, setup checks, actions) already inherit the terminal's `PATH` and are exempt. Only `PATH` is inherited, never the rest of the shell environment — and note that this genuinely differs from the CLI path, where a macOS terminal's zsh *is* a login shell, so `.zprofile` exports (`JAVA_HOME`, `LANG`, tool tokens) do reach a terminal-run `veld` and its node commands but not a daemon-spawned one. A node that needs such a variable must declare it in its `env`; "works in my terminal, fails from the UI" for a non-PATH variable is this asymmetry, not a bug.
 - **`rg` needs `-a` on `crates/veld-daemon/ui/src/App.tsx`.** That file contains a
   NUL byte (`trustedOrigins.join("\0")`), so ripgrep and grep classify the largest
