@@ -589,6 +589,12 @@ function AppInner(props: {
   const repo: Repo | null =
     repos.find((r) => r.root === activeRepoRoot) ?? repos[0] ?? null;
   const worktrees = useMemo(() => repo?.worktrees ?? [], [repo]);
+  // Mirrored, like `layoutsRef` below, so an effect can read the current list
+  // without being *keyed* on it: this list is replaced on every 5s poll, and the
+  // claim effect that reads it must not re-run on that cadence. Assigned during
+  // render rather than in an effect, for the reason given there.
+  const worktreesRef = useRef(worktrees);
+  worktreesRef.current = worktrees;
   const lanes = useMemo(() => repo?.lanes ?? [], [repo]);
   // The fallbacks skip pending removals: when the worktree you were looking at is
   // being deleted, the app has to land somewhere that still exists rather than
@@ -1544,6 +1550,15 @@ function AppInner(props: {
    * the fallback that lands on the first repo — all of which put a worktree on
    * screen without anyone choosing it. Without it the first window to open
    * claims nothing, and the second one is free to show the same worktree.
+   *
+   * **Keyed on the selection, never on the worktree list.** `worktrees` gets a new
+   * identity on every 5s poll (`repoList` is replaced, so `repos` → `repo` →
+   * `worktrees` are all new), so having it in the deps re-claimed the same worktree
+   * every five seconds for the life of the window. That was invisible churn while a
+   * claim was synchronous; it stopped being invisible once a claim could be
+   * *superseded*, because the poll's claim then overtook a rail click that was
+   * waiting on a holder and the click was silently dropped. The hunt below reads
+   * the list through a ref, where a five-second-old candidate list is harmless.
    */
   useEffect(() => {
     const shell = desktopWindow;
@@ -1565,7 +1580,7 @@ function AppInner(props: {
       // always refused, always ignored, and the new window rendered the same
       // panes and took their shells. `selectWorktree` honoured the refusal
       // because a click has somewhere to stay; a window opening has not.
-      for (const candidate of worktrees) {
+      for (const candidate of worktreesRef.current) {
         if (candidate.id === worktree.id) continue;
         const free = await shell.claimWorktree(candidate.id, false).catch(() => null);
         // Same rule inside the hunt: overtaken means stop, not try the next one.
@@ -1583,7 +1598,7 @@ function AppInner(props: {
     return () => {
       cancelled = true;
     };
-  }, [chromeless, worktree?.id, worktrees]);
+  }, [chromeless, worktree?.id]);
 
   // Cleared as soon as this window is showing something it owns.
   useEffect(() => {

@@ -77,7 +77,10 @@ const {
  *   tabs handed to this window that its renderer has not collected yet
  * @property {boolean} closing  set on `close`, which is *before* `closed`: the
  *   record is still alive and matchable in that gap, and its adopt queue has
- *   already been handed on, so nothing may be given to it any more.
+ *   already been handed on, so nothing may be given to it any more. Read by
+ *   `queueDrop`, the drop target test, `handBack`'s target filter and
+ *   `claimHolder`; `openSettings` and `focusPrimary` still match on
+ *   `isDestroyed()` alone, which is pre-existing and outside this change.
  * @property {number} claimSeq  which claim this window is currently making, so a
  *   claim that has finished waiting for its yields can tell that another has
  *   overtaken it. Absent until the window's first claim.
@@ -296,6 +299,27 @@ const DROP_ACK_MS = 2000;
  *  better off staying where they are than piling up somewhere nothing reads. */
 const MAX_PENDING_ADOPT = 8;
 
+/**
+ * Whether a window currently has the app on screen at all — as opposed to nothing
+ * yet, the `data:` waiting page, or an error page.
+ *
+ * **Compared as parsed origins, not as a string prefix.** `deps.baseUrl` comes
+ * straight from `VELD_DESKTOP_URL` and is never normalised, while `getURL()` is
+ * always Chromium's normalised form: `http://LOCALHOST:19899` lower-cases,
+ * `http://127.0.0.1:80` drops its default port, and a trailing slash or a stray
+ * `?`/`#` moves too. A prefix test fails on every one of those, and it fails
+ * *silently* in the safe direction — every cross-window drop would be queued and
+ * appended instead of placed at the caret, with nothing to indicate why. An
+ * unparseable URL (`''` before the first load) is simply not the app.
+ */
+function showsApp(win) {
+  try {
+    return new URL(win.webContents.getURL()).origin === new URL(deps.baseUrl).origin;
+  } catch {
+    return false;
+  }
+}
+
 /** Stop waiting on a window that is gone — `null`, the same answer the timeout
  *  gives, so the drop takes the same fallback without the two-second wait. */
 function settleDropsFor(recordId) {
@@ -369,11 +393,18 @@ function endDrag() {
   }
 }
 
-/** The live record showing `worktreeId`, or `null`. */
+/** The live record showing `worktreeId`, or `null`.
+ *
+ *  `closing` counts as gone: between `close` and `closed` the record is still here,
+ *  and treating it as the holder refuses the asking window with `shown-elsewhere`
+ *  and raises a window that is disappearing — while `closed` is about to release the
+ *  claim anyway. Dropping it here just gets to the same answer without the detour.
+ *  (`openSettings` and `focusPrimary` still match on `isDestroyed()` alone; that is
+ *  pre-existing and outside this change.) */
 function claimHolder(worktreeId) {
   const id = claims.get(worktreeId);
   if (id === undefined) return null;
-  const holder = allRecords().find((r) => r.id === id && !r.win.isDestroyed());
+  const holder = allRecords().find((r) => r.id === id && !r.win.isDestroyed() && !r.closing);
   if (!holder) {
     claims.delete(worktreeId);
     return null;
@@ -772,6 +803,14 @@ function openWindow(options = {}) {
     // reports, so a reload left a claim asking a document that no longer exists
     // to let go and then waiting out `YIELD_ACK_MS` for an answer nobody could
     // give. The new page reports its own holds at mount.
+    //
+    // This removes the *wait*, not the takeover behind it. The reloading page's
+    // layouts survive in the shared store, so when it remounts it renders that
+    // worktree and attaches its sessions before its own claim is answered — and a
+    // window granted the worktree during the reload has its session taken over.
+    // That is the pre-existing boot-ordering hole (a claim answered after the panes
+    // are already mounted), which no ack can close and which is tracked separately;
+    // do not read this line as fixing it.
     //
     // Assumption, stated because it is one: a *started* main-frame navigation here
     // replaces the document. A navigation that never commits (a 204, a download)
@@ -1472,7 +1511,7 @@ function registerWindowIpc(ipcMain) {
       // window is a valid drop target from the instant the main process opens it
       // (its `worktreeId` is set there, with no renderer involved), while the
       // renderer cannot report a listener until `PaneArea` has mounted.
-      const showingApp = target.win.webContents.getURL().startsWith(deps.baseUrl);
+      const showingApp = showsApp(target.win);
       if (
         !showingApp ||
         target.win.webContents.isLoading() ||
