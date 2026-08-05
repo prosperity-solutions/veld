@@ -84,7 +84,14 @@ export interface DesktopWindowApi {
   }): Promise<{ opened: boolean; reason?: string | null }>;
   /** Ask to show a worktree. `ok: false` with `reason: "shown-elsewhere"` means
    *  the shell focused the window that already has it, and this one should not
-   *  switch — a worktree has one set of panes and one window showing them. */
+   *  switch — a worktree has one set of panes and one window showing them.
+   *
+   *  It resolves only once every other window holding that worktree's panes has
+   *  let go, so it can take up to the shell's yield timeout: the caller attaches
+   *  to live PTY sessions on the strength of this answer. Which is also why
+   *  answers do not arrive in call order, and why a later claim from this window
+   *  supersedes an earlier one — `reason: "superseded"`, which every caller
+   *  already handles correctly by treating a non-`ok` answer as "stay put". */
   claimWorktree(
     worktreeId: number,
     /** Whether a refusal should raise the window that has it. False while a

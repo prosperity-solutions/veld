@@ -1501,10 +1501,17 @@ function AppInner(props: {
    */
   useEffect(() => {
     if (yieldAcks.length === 0) return;
-    for (const yieldId of yieldAcks) {
+    const sent = new Set(yieldAcks);
+    for (const yieldId of sent) {
       void desktopWindow?.yielded?.(yieldId).catch(() => {});
     }
-    setYieldAcks([]);
+    // **Filtered, never cleared.** React flushes a passive effect in a later task
+    // than the commit it belongs to, so an IPC callback can append a yield in
+    // between — and `setYieldAcks([])` would discard it. That yield is then never
+    // acknowledged at all and its claimer waits out the full `YIELD_ACK_MS` for a
+    // release that has already happened, which is the one thing this channel
+    // exists to avoid. Two review angles found this line independently.
+    setYieldAcks((q) => q.filter((id) => !sent.has(id)));
   }, [yieldAcks]);
 
   /**
@@ -1533,7 +1540,13 @@ function AppInner(props: {
     let cancelled = false;
     void (async () => {
       const mine = await shell.claimWorktree(worktree.id, false).catch(() => null);
-      if (cancelled || mine?.ok !== false) return;
+      // `superseded` is not a refusal to act on: it means a *later* claim from
+      // this window overtook this one while it waited for the previous holders to
+      // let go, and that claim owns the outcome. Reacting to it would hunt for a
+      // free worktree and move the window off one it had just been granted —
+      // `cancelled` does not cover it, because clicking the row that is already
+      // selected supersedes the claim without changing `worktree?.id`.
+      if (cancelled || mine?.ok !== false || mine.reason === "superseded") return;
       // **Refused, so this window must show something else.** Ignoring the
       // answer here was the hole that made the whole ownership model a
       // suggestion: `⌘N` opens on the last-selected worktree by design, which
@@ -1544,7 +1557,8 @@ function AppInner(props: {
       for (const candidate of worktrees) {
         if (candidate.id === worktree.id) continue;
         const free = await shell.claimWorktree(candidate.id, false).catch(() => null);
-        if (cancelled) return;
+        // Same rule inside the hunt: overtaken means stop, not try the next one.
+        if (cancelled || free?.reason === "superseded") return;
         if (free?.ok) {
           setActiveRepoRoot(candidate.repo_root);
           setActiveWtKey(String(candidate.id));

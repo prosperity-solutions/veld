@@ -196,6 +196,24 @@ function handBackTarget(closing, others) {
 }
 
 /**
+ * Everything a closing window has to hand on, queue first.
+ *
+ * Two sources and they are not the same thing. `carried` is what was handed *to*
+ * this window and never collected — a drop routed here while it was loading, whose
+ * source has already let go on the strength of the shell taking custody — and it
+ * travels on whatever kind of window this is: **a queue is a resting place, never a
+ * grave.** `own` is the window's own tabs, which only a detached window hands back,
+ * because a main window's tabs are its own and closing it is not a transfer.
+ *
+ * Queue first so the order tabs arrive in is the order they were sent, and an
+ * `own` with no tabs is dropped rather than travelling as an empty transfer.
+ */
+function handBackTransfers(kind, carried, own) {
+  const mine = kind === "detached" && own && own.tabs.length > 0 ? [own] : [];
+  return [...carried, ...mine];
+}
+
+/**
  * How many stored windows may be reopened.
  *
  * One short of the ceiling **only when the stored set has no main window**, in
@@ -253,20 +271,46 @@ function ownsWorktree(record, worktreeId, claims) {
  * A window holds its claim from the moment it *asks* for a worktree, while the
  * listener that answers a drop does not exist until `/ide` has mounted and
  * `PaneArea` has registered its handler — so a claim is routable for a window
- * that cannot answer: during a reload, while the first `/api/repos` is in
- * flight (a failed one retries five seconds later), and on the waiting page
- * while the daemon restarts. Pushing there means `webContents.send` goes
- * nowhere, the ack times out, and the gesture reports `refused` after two
- * seconds of looking like a hang.
+ * that cannot answer, and pushing there means `webContents.send` goes nowhere,
+ * the ack times out, and the gesture reports `refused` after two seconds of
+ * looking like a hang.
  *
- * `"unknown"` sends, deliberately. It is what a UI that never reports leaves
- * behind — an older `/ide` bundle against a newer shell, which version skew
- * makes reachable — and there the send-and-time-out path is exactly the
- * behaviour that build already had. Only a window that *has* reported, and has
- * since said its listener is gone, is queued for.
+ * **This is only half the question, and the smaller half.** A page that has not
+ * finished *loading* has no listener either, and that is the longer gap — the
+ * waiting page through a daemon restart, the bundle load, a reload. The caller
+ * asks the window itself about that (`webContents.isLoading()`), because it is the
+ * shell's own knowledge and does not depend on the UI's version. What is left for
+ * this function is a page that has loaded and still has no handler.
+ *
+ * `"unknown"` therefore means *loaded, and has not reported* — either an older
+ * `/ide` bundle that never will (version skew makes that reachable) or a current
+ * one in the window between its load and `PaneArea` mounting, which is `/api/repos`
+ * resolving. It **sends**, because for the older bundle send-and-answer is the only
+ * thing that works at all, and for the newer one the drop ack's own timeout is the
+ * safety net — a queue, not a refusal. Only a window that has reported, and has
+ * since said its listener is gone, is queued for outright.
  */
 function dropDelivery(dropListener) {
   return dropListener === "gone" ? "queue" : "send";
+}
+
+/**
+ * What a window's drop-listener state becomes when its page navigates.
+ *
+ * Only a main-frame, cross-document navigation counts. `did-start-loading` is the
+ * tab spinner and an iframe's load turns it too; a same-document navigation
+ * (`pushState`, a fragment) does not replace the listener at all. Demoting on
+ * either would route every later drop into the queue with nothing able to undo it,
+ * since the renderer only reports `ready` when `PaneArea` mounts and it is already
+ * mounted.
+ *
+ * `"unknown"` is left alone rather than demoted: it means "has never reported",
+ * which a reload does not change, and turning it into `"gone"` would make an older
+ * bundle's every drop take the append path for the rest of the session.
+ */
+function nextDropListener(current, { isMainFrame, isSameDocument }) {
+  if (!isMainFrame || isSameDocument) return current;
+  return current === "ready" ? "gone" : current;
 }
 
 /** Record `recordId` as holding exactly `worktreeIds`, dropping whatever it held
@@ -400,6 +444,8 @@ module.exports = {
   dropDelivery,
   forgetWorktrees,
   handBackTarget,
+  handBackTransfers,
+  nextDropListener,
   othersHolding,
   ownsWorktree,
   releaseClaims,

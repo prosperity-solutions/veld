@@ -35,6 +35,8 @@ const {
   dropDelivery,
   forgetWorktrees,
   handBackTarget,
+  handBackTransfers,
+  nextDropListener,
   nextSuffix,
   othersHolding,
   ownsWorktree,
@@ -72,6 +74,9 @@ const {
  *   being alive when `close` fires.
  * @property {{worktreeId: number, tabs: object[]}[]} pendingAdopt
  *   tabs handed to this window that its renderer has not collected yet
+ * @property {number} claimSeq  which claim this window is currently making, so a
+ *   claim that has finished waiting for its yields can tell that another has
+ *   overtaken it. Absent until the window's first claim.
  * @property {"unknown" | "ready" | "gone"} dropListener
  *   whether this window has a live listener for a cross-window drop. `unknown`
  *   until the renderer says — which an older `/ide` bundle never does, and which
@@ -147,6 +152,9 @@ const holders = new Map();
  */
 const pendingYields = new Map();
 let nextYieldId = 1;
+/** Monotonic, so a claim that finished waiting can tell whether it is still the
+ *  one its window is making. See the `veld:window:claim` handler. */
+let nextClaimSeq = 0;
 /** Long enough for a renderer to drop a layout and release its terminals — this
  *  is a React commit, not a network round trip — and short enough that a wedged
  *  holder is not felt as a broken click. */
@@ -171,7 +179,16 @@ function yieldWorktree(worktreeId, keeper) {
           const yieldId = nextYieldId++;
           pendingYields.set(yieldId, { targetId: record.id, settle: resolve });
           setTimeout(() => {
-            if (pendingYields.delete(yieldId)) resolve();
+            if (!pendingYields.delete(yieldId)) return;
+            // Proceeding anyway is the documented fallback, but it is also the one
+            // path that can still reinstate the race — so it says so. Without this
+            // line a dead-but-visible terminal has nothing behind it to look at,
+            // and the condition (a wedged or very slow renderer) is exactly the
+            // kind that is only ever reported second-hand.
+            console.warn(
+              `[veld] window ${record.id} did not acknowledge yielding worktree ${worktreeId} in ${YIELD_ACK_MS}ms; proceeding`,
+            );
+            resolve();
           }, YIELD_ACK_MS);
           record.win.webContents.send("veld:window:yield", { worktreeId, yieldId });
         }),
@@ -255,10 +272,10 @@ const pendingDrops = new Map();
 let nextDropId = 1;
 const DROP_ACK_MS = 2000;
 
-/** How many un-drained transfers may be parked on one window. A drop is only
- *  queued for a window that is loading, so a queue this deep means the renderer
- *  is not coming back — and the tabs are better off staying where they are than
- *  piling up somewhere nothing reads. */
+/** How many un-drained transfers may be parked on one window. A drop is queued
+ *  only for a window whose renderer is not answering — loading, reloading, or
+ *  wedged — so a queue this deep means it is not coming back, and the tabs are
+ *  better off staying where they are than piling up somewhere nothing reads. */
 const MAX_PENDING_ADOPT = 8;
 
 /** Stop waiting on a window that is gone — `null`, the same answer the timeout
@@ -722,20 +739,18 @@ function openWindow(options = {}) {
 
   // A page navigating away takes its listeners with it, and the renderer gets no
   // chance to say so — an unload handler is not a place to await an IPC round
-  // trip. So the shell notices instead: a reload is the longest window in which a
-  // claim is routable with nothing behind it (this fires before the new document
-  // commits, which errs towards queueing and is the safe direction).
-  //
-  // `ready → gone`, and `unknown` left alone: a UI that never reports must not be
-  // demoted to "gone" by its first reload, or every later cross-window drop into
-  // it would be queued instead of placed where the pointer was.
-  //
-  // Main frame and a real document swap, not `did-start-loading`: that one is the
-  // tab spinner, which an iframe's load also turns, and demoting on one would
-  // route every later drop to the queue with nothing to undo it.
+  // trip. So the shell notices instead. Which navigations count, and why `unknown`
+  // is not demoted, is `nextDropListener` in `windowState.js`, where it is a
+  // decision over plain values and therefore has tests.
   win.webContents.on("did-start-navigation", (details) => {
+    record.dropListener = nextDropListener(record.dropListener, details);
     if (!details.isMainFrame || details.isSameDocument) return;
-    if (record.dropListener === "ready") record.dropListener = "gone";
+    // And it holds no panes either, which matters now that a claim *waits* for
+    // its holders: what a page reported stays in `holders` until the next page
+    // reports, so a reload left a claim asking a document that no longer exists
+    // to let go and then waiting out `YIELD_ACK_MS` for an answer nobody could
+    // give. The new page reports its own holds at mount.
+    releaseHoldsIn(holders, record.id);
   });
 
   // Run URLs open in the user's real browser, never inside the shell.
@@ -843,7 +858,9 @@ function handBack(record) {
   // Its tabs were released by the origin the moment the detach was accepted, so
   // without this they exist in no layout anywhere and die at the grace.
   const own = record.kind === "detached" ? (record.snapshot ?? transferFromSeed(record.seed)) : null;
-  const transfers = own && own.tabs.length > 0 ? [...carried, own] : carried;
+  // Composition — queue first, and which sources a *main* window contributes — is
+  // `handBackTransfers` in `windowState.js`, where it has tests.
+  const transfers = handBackTransfers(record.kind, carried, own);
   if (transfers.length === 0) return;
 
   // The precedence — record id, then persisted suffix, then any main window —
@@ -861,6 +878,11 @@ function handBack(record) {
   // and the tabs would be gone despite the docs promising they come back. The
   // renderer collects this queue at mount *and* on the nudge, so neither
   // ordering loses it.
+  // **Past `MAX_PENDING_ADOPT` on purpose, unlike `queueDrop`.** That cap can
+  // refuse because refusing leaves the tabs where they are; here there is no
+  // "where they are" — this window is closing and these tabs are in no layout
+  // anywhere. Dropping them to respect a bound would end the shells the cap was
+  // protecting, so the queue is allowed to overshoot on the way out.
   target.pendingAdopt.push(...transfers);
   target.win.webContents.send("veld:window:adopt");
 }
@@ -1117,7 +1139,9 @@ function registerWindowIpc(ipcMain) {
    * names — on the strength of this answer. The claim itself is recorded first
    * and synchronously: it is what makes a third window's claim arriving during
    * the wait get refused rather than granted alongside this one, and the greyed
-   * rail row in every other window is true from that moment on.
+   * rail row in every other window is true from that moment on. A claim from
+   * *this* window during the wait supersedes rather than refuses — see `claimSeq`
+   * at the bottom of the handler.
    */
   ipcMain.handle("veld:window:claim", async (event, payload) => {
     const record = recordFor(senderWindow(event));
@@ -1151,10 +1175,21 @@ function registerWindowIpc(ipcMain) {
     // Which is now. Any other window still holding this worktree's panes has to
     // let go before this one attaches, or the two would trade its shells — so
     // this is awaited, and the caller learns it may proceed only afterwards.
+    const seq = ++nextClaimSeq;
+    record.claimSeq = seq;
     // Nothing is re-read after the await, so a claimer that closed during it
     // needs no guard here: `closed` has already dropped its claim, and this
     // answer goes to a renderer that is gone.
     await yieldWorktree(worktreeId, record.id);
+    // **But a claim from the same window during the wait supersedes this one**,
+    // and the wait is now long enough for that to be a click rather than a
+    // coincidence. The later claim released this reservation on its way in
+    // (`releaseClaimsIn` above), so answering `ok` here would tell the renderer to
+    // display a worktree the shell no longer records it as showing — and another
+    // window asking for that one would then be granted it. Answers do not even
+    // come back in call order: a claim with a silent holder waits out
+    // `YIELD_ACK_MS` while one with no holder returns at once.
+    if (record.claimSeq !== seq) return { ok: false, reason: "superseded" };
     return { ok: true };
   });
 
@@ -1348,7 +1383,20 @@ function registerWindowIpc(ipcMain) {
       // nowhere, timed out after `DROP_ACK_MS`, and reported `refused`, which the
       // source turns into "The desktop shell refused the request" two seconds
       // after a gesture that looked like it worked.
-      if (dropDelivery(target.dropListener) === "queue") return queueDrop(target, worktreeId, tabs);
+      // Still loading is the shell's *own* knowledge and covers the longest gap
+      // whatever the UI's version: the waiting page through a daemon restart, the
+      // bundle load, and a reload. It also covers the case this issue is actually
+      // about — a detached window is a valid drop target from the instant the main
+      // process opens it (its `worktreeId` is set there, with no renderer
+      // involved), while the renderer cannot report a listener until `PaneArea` has
+      // mounted. Asking the window's state rather than waiting for the page to
+      // report is what makes that gap fast rather than two seconds long.
+      if (
+        target.win.webContents.isLoading() ||
+        dropDelivery(target.dropListener) === "queue"
+      ) {
+        return queueDrop(target, worktreeId, tabs);
+      }
       // `drop-here`, not the hand-back queue: the target has been previewing a
       // *position* — an edge to split at, or a place in its tab strip — and
       // that is where these belong. The queue exists for a closing window's
