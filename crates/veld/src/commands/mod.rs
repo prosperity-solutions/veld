@@ -26,6 +26,41 @@ pub mod version;
 
 use crate::output;
 
+/// Clean up the Spoon left behind by the Hammerspoon menu bar integration veld
+/// used to ship, and report what it did.
+///
+/// Shared by `veld update` and `veld uninstall`. It lives in the CLI rather than
+/// in `veld_core::setup::uninstall()` because the useful half is the *report*: a
+/// `hs.loadSpoon("Veld")` line left in the user's `init.lua` errors on every
+/// Hammerspoon reload, and veld never edits a user's config, so saying so is the
+/// only remedy available. `uninstall()` returns `Result<()>`, so a call from
+/// there could not surface it — and uninstall is the last moment veld will ever
+/// be able to.
+///
+/// One-shot with an expiry, but **do not delete it after one release**. See
+/// `veld_core::setup::remove_legacy_hammerspoon`.
+pub async fn remove_legacy_hammerspoon() {
+    let result = veld_core::setup::remove_legacy_hammerspoon().await;
+    if !result.removed {
+        return;
+    }
+
+    output::print_info(
+        "Removed the retired Hammerspoon widget (~/.hammerspoon/Spoons/Veld.spoon).",
+    );
+    if result.needs_hammerspoon_reload {
+        // The files are gone but the Spoon is still loaded, so the icon is still
+        // in the menu bar. Saying "removed" and leaving it there reads as a bug.
+        output::print_info("Reload Hammerspoon to drop its menu bar icon.");
+    }
+    if let Some(init_lua) = result.stale_init_lua {
+        output::print_info(&format!(
+            "Remove the `hs.loadSpoon(\"Veld\")` line from {} — it now points at nothing.",
+            init_lua.display()
+        ));
+    }
+}
+
 /// Open the central veld database. On failure prints an error and returns
 /// `None`.
 pub fn open_db(json: bool) -> Option<veld_core::db::Db> {
