@@ -55,7 +55,7 @@ unreadable.
   // "default_preset": "<preset-name>",  // root file only
   "nodes": { },
   "hooks": { },   // reserved: parsed, stored, NOT executed by this version
-  "ide": { }      // quicklinks + permissions are rendered; every other key is reserved
+  "ide": { }      // quicklinks + permissions + externalOrigins are rendered; every other key is reserved
 }
 ```
 
@@ -458,7 +458,7 @@ Note: `${VAR}` (braces) is parsed by Veld, so use `$VAR` (no braces) for plain s
 | `ports` | node, variant | Named ports: `{"http": "auto", "debug": "auto"}`. `${veld.ports.<name>}`, `VELD_PORT_<NAME>`. `${veld.port}` = primary. |
 | `files` | node, variant | Values delivered to disk: `{"<path>": {source, secret?, mode?}}`. Mode defaults `0600`. |
 | `hooks` | project (any file) | **Reserved.** Parsed and stored, NOT executed by this version. `veld lint` emits a notice. |
-| `ide` | project (any file) | Veld's own IDE surfaces (Veld Desktop, `/ide`). `ide.quicklinks` and `ide.permissions` are rendered; **every other key under `ide` is reserved** — parsed, stored, NOT rendered. See the section below. |
+| `ide` | project (any file) | Veld's own IDE surfaces (Veld Desktop, `/ide`). `ide.quicklinks`, `ide.permissions` and `ide.externalOrigins` are rendered; **every other key under `ide` is reserved** — parsed, stored, NOT rendered. See the section below. |
 
 Any **other** top-level key is an error reported by `veld lint` and `veld start`
 (rule `unknown-top-level-key`) — deliberately not a load failure, so a typo cannot
@@ -524,11 +524,11 @@ Reverse-proxy header rules applied by the **local Caddy proxy** (local dev) and 
 - `remove`: header names to strip. `set`: name → value map (replaces any existing value). Header names matched case-insensitively.
 - **Default change:** Veld no longer strips `Origin` by default (it used to, so dev-server WS HMR worked). `Origin` now passes through the local proxy; the gateway rewrites it *coherently* to the origin host on all requests (incl. WS upgrades) rather than dropping it. If a Next.js dev server rejects WS HMR on `Origin`, set `allowedDevOrigins` in `next.config.js` (recommended — https://nextjs.org/docs/app/api-reference/config/next-config-js/allowedDevOrigins). Escape hatch for frameworks with no allow-list: `"proxy": { "request": { "remove": ["Origin"] } }`.
 
-## `ide` — quicklinks and permissions
+## `ide` — quicklinks, permissions and external origins
 
 Per-project settings for Veld's own IDE surfaces (Veld Desktop, and `/ide` in a
 browser). Absent from most configs, and never affects a run. Every key under `ide`
-other than the two below is **reserved**: parsed, stored, not rendered, and
+other than the three below is **reserved**: parsed, stored, not rendered, and
 `veld lint` emits a notice naming it.
 
 > Spelled `ui` before it was interpreted. A config still using `ui` fails
@@ -540,6 +540,7 @@ other than the two below is **reserved**: parsed, stored, not rendered, and
   "quicklinks": [
     { "label": "Staging", "url": "https://staging.example.com" }
   ],
+  "externalOrigins": ["https://accounts.google.com", "https://*.okta.com"],
   "permissions": [
     { "origin": "https://*.veld.localhost:*", "allow": ["notifications"] },
     { "origin": "http://localhost:*", "allow": ["geolocation"] },
@@ -547,6 +548,27 @@ other than the two below is **reserved**: parsed, stored, not rendered, and
   ]
 }
 ```
+
+### `ide.externalOrigins`
+
+Origins that must open in the user's **system** browser rather than in a Veld
+browser pane. A URL a terminal produces — clicked in its output, or opened by a
+program running in the shell (Veld points `$BROWSER` at itself, which `gh`, `git`,
+Claude Code, vite and next all consult) — otherwise becomes a pane beside that
+terminal.
+
+The reason is cookies: a pane has its own jar, so an SSO or bank flow started in
+one begins from scratch. List the hosts *this app's* sign-in goes through.
+
+Same grammar as `ide.permissions[].origin` (same parser, same lint treatment):
+`scheme://host[:port]`, http(s) only, no path, leading `*.` for any depth of
+subdomain, `*` port for any port, omitted port = the scheme's default exactly.
+Matching is on the **origin**, so a path cannot be exempted on its own, and an
+internationalised host must be written punycoded.
+
+**Unioned** with the user's `browser.externalOrigins` setting rather than
+replacing it. A project cannot remove a user's entry, and cannot switch the
+feature off — that is the user's `terminal.openUrlsInApp`.
 
 ### `ide.quicklinks`
 

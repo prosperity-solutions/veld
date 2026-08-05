@@ -51,14 +51,22 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 /// `MIN_SUPPORTED` and keep the old decode path rather than widening the
 /// comparison.
 ///
-/// **The exception, and the reason this diff added a [`Hello`] field without
-/// bumping:** a new JSON field carrying `#[serde(default)]` costs nothing in
+/// **The exception:** a new JSON field carrying `#[serde(default)]` costs nothing in
 /// either direction, because serde ignores unknown fields and defaults missing
 /// ones. So *optional additive* fields are free; renames, removals and any field
 /// without a default are not — a missing required field fails deserialization,
 /// which is not even reported as a version problem (the daemon cannot read the
 /// greeting at all, so it cannot tell what version sent it). Either add the
-/// default or bump this.
+/// default or bump this. Both [`Hello`]'s `detached_secs` and [`HolderConfig`]'s
+/// `env` were added under that exception.
+///
+/// **[`HolderConfig`] is not governed by this constant at all**, which is worth
+/// knowing before adding a field to it: the daemon writes that struct to the
+/// holder's stdin *before* any [`Hello`] exists to carry a version, and it writes it
+/// with the binary it spawned from `current_exe()`. There is no negotiation to
+/// bump — its compatibility rests on `#[serde(default)]` alone, for the one case
+/// that can still bite: a holder from an older release, adopted by this daemon,
+/// whose config was written by that older binary.
 pub const PROTOCOL: u32 = 1;
 
 // Holder → daemon.
@@ -172,6 +180,18 @@ pub struct HolderConfig {
     /// compiled in so the two sides cannot disagree about it, and so a test can
     /// shorten it.
     pub orphan_grace_secs: u64,
+    /// Extra environment for the shell, on top of what the holder inherits.
+    ///
+    /// The daemon computes it (`pty::shims::session_env`) because it is the side
+    /// that knows about instances, ports and where the `veld` CLI lives; the holder
+    /// only applies it.
+    ///
+    /// `#[serde(default)]`, which is what keeps this off [`PROTOCOL`]: a holder
+    /// spawned by an older daemon simply has no entry, and its shell has no
+    /// `$BROWSER` — the pre-feature behaviour, for that one already-running shell.
+    /// See the note on [`PROTOCOL`] about additive fields.
+    #[serde(default)]
+    pub env: std::collections::BTreeMap<String, String>,
 }
 
 /// Write one frame.

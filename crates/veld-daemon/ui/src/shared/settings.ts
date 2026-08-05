@@ -74,7 +74,21 @@ const FALLBACK = {
   // daemon that shows the shipped default is coherent, where one showing everything
   // would silently disagree with every other window.
   runHistoryDays: 3,
+  // The `quickSwitch*` exception above, for the same reason: a build whose UI
+  // announces "terminal links open here" must not silently behave like the release
+  // before it because the daemon has not heard of the key.
+  terminalOpenUrlsInApp: true,
+  terminalInterceptSystemOpen: true,
 } as const;
+
+function strings(doc: SettingsDoc, key: string): string[] {
+  const v = doc[key];
+  // A non-array, or an array with anything but strings in it, means a value this
+  // client did not write — degrade to "no exemptions", which is the direction that
+  // shows a URL in a pane rather than silently sending it somewhere else.
+  if (!Array.isArray(v)) return [];
+  return v.filter((entry): entry is string => typeof entry === "string");
+}
 
 function num(doc: SettingsDoc, key: string, fallback: number): number {
   const v = doc[key];
@@ -259,4 +273,45 @@ export function trashRetentionDays(doc: SettingsDoc): number {
  */
 export function runHistoryDays(doc: SettingsDoc): number {
   return num(doc, "runs.historyDays", FALLBACK.runHistoryDays);
+}
+
+/**
+ * Whether a URL a terminal produces opens in a Veld browser pane. **Defaults on.**
+ *
+ * Read here for display only — the *decision* is the daemon's
+ * (`veld_core::ide::route_url`), because the other half of it lives in the
+ * project's `veld.json` and the renderer never sees that. A copy of the policy on
+ * this side would be a second implementation that drifts.
+ */
+export function terminalOpenUrlsInApp(doc: SettingsDoc): boolean {
+  return bool(doc, "terminal.openUrlsInApp", FALLBACK.terminalOpenUrlsInApp);
+}
+
+/**
+ * Whether a terminal session gets Veld's shim directory on its `PATH`, so a program
+ * that calls `open`/`xdg-open` instead of reading `$BROWSER` is routed too.
+ * **Defaults on.**
+ *
+ * Display only, like the switch above: the daemon builds the session environment and
+ * is the only thing that acts on this.
+ */
+export function terminalInterceptSystemOpen(doc: SettingsDoc): boolean {
+  return bool(
+    doc,
+    "terminal.interceptSystemOpen",
+    FALLBACK.terminalInterceptSystemOpen,
+  );
+}
+
+/**
+ * Origins that open in the system browser instead of a pane — the global half of
+ * the exempt list, unioned with the project's `ide.externalOrigins`.
+ *
+ * Origins, not URLs: `https://accounts.google.com`, `https://*.okta.com`,
+ * `http://localhost:*`. The daemon validates each one with the same parser a
+ * project config goes through and refuses the write if any entry fails, so this
+ * list is only ever the accepted spelling.
+ */
+export function externalOrigins(doc: SettingsDoc): string[] {
+  return strings(doc, "browser.externalOrigins");
 }

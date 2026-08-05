@@ -218,6 +218,13 @@ jobs:
         run: |
           cd crates/veld-daemon/frontend && npm ci
           cd ../ui && npm ci
+      # zsh is what `the_generated_zshenv_wins_against_an_rc_that_rebuilds_path`
+      # drives. That test asserts the mechanism the terminal-URL feature rests on, and
+      # it *skips* when zsh is missing — so without this the runner image silently
+      # decides whether the feature has any CI protection. The test also fails hard on
+      # a skip when $CI is set, so a future image change cannot quietly re-open this.
+      - name: Install zsh
+        run: sudo apt-get update && sudo apt-get install -y zsh
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
       - name: cargo clippy

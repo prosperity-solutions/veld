@@ -63,7 +63,8 @@ pub fn daemon_socket() -> PathBuf {
         .join("daemon.sock")
 }
 
-/// Where this instance's terminal holder sockets live.
+/// Where this instance's terminal runtime state lives: the holder sockets, and the
+/// [`shim_dir`] subdirectory of executables a terminal's environment points at.
 ///
 /// One owner for the name, because three crates need it: the daemon binds and
 /// scans it, `veld doctor` reports it, and `veld uninstall` sweeps it.
@@ -101,13 +102,21 @@ pub fn pty_dir() -> PathBuf {
 /// true, unhelpful, and surfaces as a terminal that will not open.
 pub const MAX_SOCKET_PATH: usize = 104;
 
+/// The length of `path`, if it does not fit in a `sockaddr_un`.
+///
+/// The one owner of the *bound*. Each caller phrases its own diagnostic, because
+/// the useful half of the message is the escape hatch and there is a different one
+/// per socket — `VELD_PTY_DIR` for a holder, `VELD_DAEMON_SOCK` for the daemon's
+/// control socket.
+pub fn socket_path_over_limit(path: &std::path::Path) -> Option<usize> {
+    let len = path.as_os_str().as_encoded_bytes().len();
+    (len >= MAX_SOCKET_PATH).then_some(len)
+}
+
 /// Whether `path` fits in a `sockaddr_un`, with the message to show when it
 /// does not.
 pub fn socket_path_too_long(path: &std::path::Path) -> Option<String> {
-    let len = path.as_os_str().as_encoded_bytes().len();
-    if len < MAX_SOCKET_PATH {
-        return None;
-    }
+    let len = socket_path_over_limit(path)?;
     Some(format!(
         "the terminal holder's socket path is {len} bytes, over the {MAX_SOCKET_PATH}-byte \
          limit a unix socket allows ({}). Set VELD_PTY_DIR to a shorter directory.",
@@ -119,6 +128,29 @@ pub fn socket_path_too_long(path: &std::path::Path) -> Option<String> {
 /// directories of **every** instance rather than only this one — `veld uninstall`,
 /// which has to stop them all.
 pub const PTY_DIR_PREFIX: &str = "pty-";
+
+/// Where this instance keeps the little executables it puts in a terminal's
+/// environment — today `veld-open`, plus `open`/`xdg-open` wrappers (see
+/// `veld-daemon/src/pty/shims.rs`).
+///
+/// **Inside [`pty_dir`], which is what makes it follow `VELD_PTY_DIR`.** These
+/// scripts point a URL at *this* daemon's session registry, so they are per-instance
+/// exactly like the holder sockets beside them — and being under the same override is
+/// not a detail: keyed off the daemon port under the real `~/.veld` instead, the
+/// integration test that spawns a daemon on an ephemeral port (`pty_recovery.rs`,
+/// which redirects every other piece of state) wrote a directory into the
+/// developer's home on every run.
+///
+/// A subdirectory is invisible to the holder scans, which require a `.sock`
+/// extension *and* a digest-shaped name (`is_holder_socket_name`) — but that is the
+/// contract this relies on, so do not loosen those to "everything in the directory".
+///
+/// `VELD_SHIM_DIR` is the variable a terminal sees, and it is an *output* of this
+/// function rather than an input — a client-supplied directory here would be a
+/// client-supplied executable on a developer's PATH.
+pub fn shim_dir() -> PathBuf {
+    pty_dir().join("shims")
+}
 
 /// Management hostname this daemon should self-register with the helper
 /// (e.g. `veld-dev.localhost`). `None` for the installed instance — its
@@ -202,7 +234,13 @@ mod tests {
             // test points a child at a temp dir.
             std::env::set_var("VELD_PTY_DIR", "/tmp/veld-pty-test");
             assert_eq!(pty_dir(), PathBuf::from("/tmp/veld-pty-test"));
+            // The shims follow it, and that is the point of nesting them here: a
+            // daemon spawned by a test redirects VELD_PTY_DIR and nothing else, so
+            // a shim directory keyed off the port instead wrote into the real
+            // `~/.veld` on every `cargo test` run.
+            assert_eq!(shim_dir(), PathBuf::from("/tmp/veld-pty-test/shims"));
             std::env::remove_var("VELD_PTY_DIR");
+            assert!(shim_dir().starts_with(pty_dir()));
 
             // The real default has to fit with room for the digest filename, or
             // the bound below is theatre. Asserted here rather than in its own

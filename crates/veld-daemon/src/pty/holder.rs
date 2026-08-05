@@ -211,7 +211,7 @@ async fn serve(cfg: &HolderConfig, listener: UnixListener) -> anyhow::Result<()>
         pid,
         read_fd,
         write_fd,
-    } = spawn_shell(&cfg.cwd, size).context("failed to open a pty")?;
+    } = spawn_shell(&cfg.cwd, size, &cfg.env).context("failed to open a pty")?;
     info!(
         session = %cfg.session_id,
         worktree = %cfg.label,
@@ -784,7 +784,11 @@ struct Spawned {
 }
 
 /// Open a PTY and start the user's login shell in `cwd`.
-fn spawn_shell(cwd: &std::path::Path, size: PtySize) -> anyhow::Result<Spawned> {
+fn spawn_shell(
+    cwd: &std::path::Path,
+    size: PtySize,
+    env: &std::collections::BTreeMap<String, String>,
+) -> anyhow::Result<Spawned> {
     let PtyPair { master, slave } = native_pty_system().openpty(size)?;
 
     let shell = login_shell();
@@ -804,6 +808,14 @@ fn spawn_shell(cwd: &std::path::Path, size: PtySize) -> anyhow::Result<Spawned> 
     // and disables colour and line editing.
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
+    // The daemon's additions (`$BROWSER` and friends — see `pty::shims`). Set
+    // last, but note what this deliberately does **not** try to be: a login shell
+    // is free to overwrite any of these in its rc files, and `PATH` in particular
+    // is rewritten by `path_helper` on macOS and by `/etc/profile` on Debian. That
+    // is why nothing here relies on `PATH` order; see `veld_core::opener`.
+    for (key, value) in env {
+        cmd.env(key, value);
+    }
 
     let child = slave.spawn_command(cmd)?;
     // Close our copy of the slave. While this process holds it, the master
@@ -835,7 +847,12 @@ fn spawn_shell(cwd: &std::path::Path, size: PtySize) -> anyhow::Result<Spawned> 
 /// The user's shell, falling back to a POSIX shell that is present on every
 /// supported platform. `SHELL` comes from this process's environment, inherited
 /// from the daemon (launchd/systemd propagate the user's), never from a client.
-fn login_shell() -> String {
+///
+/// `pub` because the daemon needs the same answer *before* it spawns a holder: which
+/// shell this is decides whether the session's environment carries the `ZDOTDIR`
+/// handoff (`pty::shims`). One function, so the two cannot disagree about which
+/// shell is about to run.
+pub fn login_shell() -> String {
     std::env::var("SHELL")
         .ok()
         .filter(|s| !s.is_empty())
@@ -984,6 +1001,7 @@ mod tests {
             rows: 24,
             socket: socket.clone(),
             orphan_grace_secs: grace,
+            env: Default::default(),
         };
         tokio::spawn(run(cfg));
 
@@ -1050,6 +1068,7 @@ mod tests {
             socket: socket.clone(),
             // Long, so nothing but the hangup can be what ends this shell.
             orphan_grace_secs: 3600,
+            env: Default::default(),
         };
         tokio::spawn(run(cfg));
 

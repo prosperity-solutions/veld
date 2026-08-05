@@ -4,8 +4,11 @@ import {
   hasMarkerColor,
   markerFace,
   detachGraceMinutes,
+  externalOrigins,
   markerStyle,
   quickSwitchPrefs,
+  terminalInterceptSystemOpen,
+  terminalOpenUrlsInApp,
   terminalPrefs,
 } from "./settings";
 
@@ -152,5 +155,46 @@ describe("detachGraceMinutes", () => {
     expect(
       detachGraceMinutes({ "terminal.detachGraceMinutes": "soon" as unknown as number }),
     ).toBe(30);
+  });
+});
+
+describe("terminal URL routing", () => {
+  it("defaults to opening links in Veld, including against an older daemon", () => {
+    // The `quickSwitch*` exception: this build's UI says links open here, so a
+    // daemon that has never heard of the key must not make it look broken.
+    expect(terminalOpenUrlsInApp({})).toBe(true);
+    expect(terminalOpenUrlsInApp({ "terminal.openUrlsInApp": false })).toBe(false);
+    // A wrong-typed value falls back rather than being coerced — `0` would read as
+    // "off" under a truthiness test.
+    expect(
+      terminalOpenUrlsInApp({
+        "terminal.openUrlsInApp": 0 as unknown as boolean,
+      }),
+    ).toBe(true);
+  });
+
+  it("defaults to catching open/xdg-open as well", () => {
+    expect(terminalInterceptSystemOpen({})).toBe(true);
+    expect(
+      terminalInterceptSystemOpen({ "terminal.interceptSystemOpen": false }),
+    ).toBe(false);
+  });
+
+  it("reads the exempt list and degrades to no exemptions", () => {
+    expect(
+      externalOrigins({ "browser.externalOrigins": ["https://a.example", "https://*.b.example"] }),
+    ).toEqual(["https://a.example", "https://*.b.example"]);
+    // Absent, wrong-typed, or holding non-strings: an empty list, which means
+    // "nothing is exempt" — the direction that shows a URL in a pane rather than
+    // silently sending it somewhere the user did not choose.
+    expect(externalOrigins({})).toEqual([]);
+    expect(
+      externalOrigins({ "browser.externalOrigins": "https://a.example" }),
+    ).toEqual([]);
+    expect(
+      externalOrigins({
+        "browser.externalOrigins": ["https://a.example", 7 as unknown as string],
+      }),
+    ).toEqual(["https://a.example"]);
   });
 });

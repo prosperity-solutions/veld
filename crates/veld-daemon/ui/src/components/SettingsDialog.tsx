@@ -29,6 +29,7 @@ import {
   Stack,
   Text,
   TextInput,
+  Textarea,
 } from "@mantine/core";
 
 import type { SettingsDoc } from "../api";
@@ -39,7 +40,10 @@ import {
 } from "../shared/terminalFonts";
 import {
   detachGraceMinutes,
+  externalOrigins,
+  terminalInterceptSystemOpen,
   runHistoryDays,
+  terminalOpenUrlsInApp,
   trashRetentionDays,
   markerStyle,
   quickSwitchPrefs,
@@ -91,6 +95,8 @@ export function SettingsDialog(props: {
   const term = terminalPrefs(settings ?? {});
   const marker = markerStyle(settings ?? {});
   const quick = quickSwitchPrefs(settings ?? {});
+  const openInApp = terminalOpenUrlsInApp(settings ?? {});
+  const intercept = terminalInterceptSystemOpen(settings ?? {});
 
   // Number inputs are held locally while being typed and committed on blur —
   // see the file header. Re-seeded whenever the daemon's value changes so a
@@ -104,6 +110,11 @@ export function SettingsDialog(props: {
   const historyValue = runHistoryDays(settings ?? {});
   const [history, setHistory] = useState<number | string>(historyValue);
   const [fontFamily, setFontFamily] = useState(term.fontFamily);
+  // One origin per line, which is what an exempt list reads as. Held locally and
+  // committed on blur like every other text field here — the daemon refuses the
+  // whole list if one entry is not an origin, and its error lands in `props.error`.
+  const exemptValue = externalOrigins(settings ?? {});
+  const [exempt, setExempt] = useState(exemptValue.join("\n"));
   // Availability is probed against the DOM, so compute it once per open rather
   // than on every render — the list cannot change while the dialog is up.
   const fonts = useMemo(() => availableFonts(), []);
@@ -125,6 +136,7 @@ export function SettingsDialog(props: {
     setGrace(graceValue);
     setRetention(retentionValue);
     setHistory(historyValue);
+    setExempt(exemptValue.join("\n"));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [settings]);
 
@@ -446,6 +458,67 @@ export function SettingsDialog(props: {
               }
             />
           </Row>
+          <Row
+            label="Open links from the terminal in Veld"
+            help="A URL you click in the terminal output, and a URL a program in it opens (Veld points $BROWSER at itself, which is what Claude Code, gh, git, vite and next all use), become a browser pane beside that terminal. Off sends both to your system browser and puts nothing in the shell at all. Clicking a link responds immediately; the rest takes effect for new terminals, since a running shell keeps the environment it started with. Hold ⌘/Ctrl while clicking a link to go to your browser just once."
+          >
+            <Checkbox
+              size="xs"
+              checked={openInApp}
+              disabled={locked}
+              onChange={(e) =>
+                set({ "terminal.openUrlsInApp": e.currentTarget.checked })
+              }
+            />
+          </Row>
+          <Row
+            label="Also catch programs that call open / xdg-open"
+            help="Most tools read $BROWSER, but some call the system opener directly — including an agent's shell tool (Bash(open “https://…”)). For those, Veld puts a small shim directory on the PATH of each terminal. It needs the last word after your shell's startup files, so Veld points ZDOTDIR at a directory of its own holding one .zshenv: that file hands ZDOTDIR straight back, sources your real .zshenv, and registers a hook. Your .zprofile, .zshrc and .zlogin are read normally, in order, and nothing of yours is edited. zsh only; other shells keep $BROWSER and can add $VELD_SHIM_DIR to PATH by hand. Takes effect for new terminals."
+          >
+            <Checkbox
+              size="xs"
+              checked={intercept}
+              disabled={locked || !openInApp}
+              onChange={(e) =>
+                set({ "terminal.interceptSystemOpen": e.currentTarget.checked })
+              }
+            />
+          </Row>
+          {/* A full-width field rather than a `Row`, whose label and control sit
+              side by side: a list needs the width, and its explanation is longer
+              than a row's trailing help line. */}
+          <Stack gap={2}>
+            <Text size="sm">Always open these in the system browser</Text>
+            <Text size="xs" c="dimmed">
+              One origin per line — <code>https://accounts.google.com</code>,{" "}
+              <code>https://*.okta.com</code>, <code>http://localhost:*</code> — for
+              the sign-ins that need the browser you are already logged into. A pane
+              has its own cookie jar, so an SSO flow in one starts from scratch. A
+              project can add to this list without touching your settings:{" "}
+              <code>ide.externalOrigins</code> in its veld.json.
+            </Text>
+          </Stack>
+          <Textarea
+            size="xs"
+            autosize
+            minRows={2}
+            maxRows={8}
+            spellCheck={false}
+            placeholder="https://accounts.google.com"
+            value={exempt}
+            disabled={locked || !openInApp}
+            onChange={(e) => setExempt(e.currentTarget.value)}
+            onBlur={() => {
+              const lines = exempt
+                .split("\n")
+                .map((line) => line.trim())
+                .filter((line) => line !== "");
+              // Nothing to say if the list is unchanged — including the common case
+              // of opening the dialog, clicking through the box and leaving.
+              if (lines.join("\n") === exemptValue.join("\n")) return;
+              set({ "browser.externalOrigins": lines });
+            }}
+          />
           <Row
             label="Keep detached shells for"
             help="Minutes a terminal with nobody attached keeps running before it is collected. Takes effect for new shells and for the next collection pass; shells already running keep the value they started with."
