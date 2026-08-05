@@ -330,8 +330,20 @@ commit-subjects base="origin/main":
     #!/usr/bin/env bash
     set -euo pipefail
     pattern='^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\(.+\))?!?: .+'
+    # Command substitution, NOT `while read ... < <(git rev-list ...)`. `set -e`
+    # does not reach into a process substitution, so a stale or unfetched
+    # {{base}} made the loop read zero lines, leave failed=0, and exit 0 —
+    # reporting "clean" for a check that never ran. An assignment carries the
+    # substitution's status, so this form actually fails. (Also avoids `mapfile`,
+    # which macOS's bundled bash 3.2 does not have.)
+    shas=$(git rev-list "{{base}}..HEAD")
+    if [ -z "$shas" ]; then
+        echo "No commits in {{base}}..HEAD — nothing to check." >&2
+        exit 0
+    fi
     failed=0
-    while IFS= read -r sha; do
+    # Unquoted on purpose: SHAs are hex, so word-splitting is safe here.
+    for sha in $shas; do
         msg=$(git log --format='%s' -1 "$sha")
         if echo "$msg" | grep -qE "$pattern"; then
             echo "✅ $msg"
@@ -339,7 +351,7 @@ commit-subjects base="origin/main":
             echo "❌ $msg"
             failed=1
         fi
-    done < <(git rev-list {{base}}..HEAD)
+    done
     if [ "$failed" -eq 1 ]; then
         echo "Expected: type(scope)?: description — see CONTRIBUTING.md" >&2
         exit 1

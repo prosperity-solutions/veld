@@ -175,19 +175,43 @@ def check_doc(doc, name):
             continue
         cond = normalize(job.get("if", ""))
 
-        # An extra clause may be ANDed ONTO a guard: `<guard> && X` is strictly
-        # more restrictive than `<guard>`, so it cannot start running on drafts.
+        # Every accepted shape lives in ONE table, checked by ONE loop. It was
+        # briefly two code paths -- a match against the ANDable forms, then a
+        # separate `cond == ANY_EVENT_GUARD` branch carrying the
+        # pull_request_target check -- and adding the parenthesised form to the
+        # first path silently routed around the second, so
+        # `(A || draft == false)` under pull_request_target passed. The
+        # duplicated path was the defect; don't reintroduce it.
         #
-        # It may not be ANDed onto the bare `||` form, though, because `&&` binds
-        # tighter than `||` in Actions expressions: `A || B && X` parses as
-        # `A || (B && X)`, NOT `(A || B) && X` -- so the `A` branch escapes the
-        # extra condition entirely. Parenthesise it and it is fine.
-        andable = [PR_ONLY_GUARD, BARE_GUARD, "(" + ANY_EVENT_GUARD + ")"]
-        if any(cond == f or cond.startswith(f + " &&") for f in andable):
-            continue
-
-        if cond == ANY_EVENT_GUARD:
-            if has_target:
+        # `andable`: an extra clause may be ANDed ONTO a guard, because
+        # `<guard> && X` is strictly more restrictive than `<guard>` and so cannot
+        # start running on drafts. The unparenthesised `||` form is the exception:
+        # `&&` binds tighter than `||` in Actions expressions, so `A || B && X`
+        # parses as `A || (B && X)`, NOT `(A || B) && X`, and the `A` branch
+        # escapes the extra condition entirely.
+        #
+        # `event_name_half`: relies on `github.event_name != 'pull_request'`, which
+        # is TRUE during a pull_request_target event and therefore guards nothing
+        # in a workflow carrying that trigger.
+        #
+        #                    form                          andable  event_name_half
+        accepted = (
+            (ANY_EVENT_GUARD,                              False,   True),
+            ("(" + ANY_EVENT_GUARD + ")",                   True,    True),
+            (PR_ONLY_GUARD,                                 True,    False),
+            (BARE_GUARD,                                    True,    False),
+        )
+        matched = next(
+            (
+                (form, event_name_half)
+                for form, andable, event_name_half in accepted
+                if cond == form or (andable and cond.startswith(form + " &&"))
+            ),
+            None,
+        )
+        if matched is not None:
+            _, event_name_half = matched
+            if event_name_half and has_target:
                 problems.append(
                     f"{name}: job `{job_name}` guards on "
                     f"`github.event_name != 'pull_request'`, which is TRUE for a "
@@ -316,6 +340,43 @@ SELFTEST = [
             if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
             runs-on: ubuntu-latest
             steps: [{run: echo}]
+        """,
+    ),
+    (
+        "pull_request_target: the PARENTHESISED event_name form is still not guarded",
+        False,
+        """
+        on: {pull_request_target: {types: [opened, synchronize, reopened, ready_for_review]}}
+        jobs:
+          labeler:
+            if: (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
+            runs-on: ubuntu-latest
+            steps: [{run: echo}]
+        """,
+    ),
+    (
+        "pull_request_target: parenthesised event_name form with an ANDed clause",
+        False,
+        """
+        on: {pull_request_target: {types: [opened, synchronize, reopened, ready_for_review]}}
+        jobs:
+          labeler:
+            if: (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && github.ref != 'refs/heads/wip'
+            runs-on: ubuntu-latest
+            steps: [{run: echo}]
+        """,
+    ),
+    (
+        "a dependent rescued by success() escapes the cascade",
+        False,
+        """
+        on: {pull_request: {types: [opened, synchronize, reopened, ready_for_review]}}
+        jobs:
+          root:
+            if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+            runs-on: ubuntu-latest
+            steps: [{run: echo}]
+          dep: {needs: root, if: success() || failure(), runs-on: macos-latest, steps: [{run: echo}]}
         """,
     ),
     (

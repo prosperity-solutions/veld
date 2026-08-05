@@ -70,8 +70,9 @@ concurrency:
 # `tests/validate-workflow-gates.py` asserts the invariant instead: every job is
 # draft-guarded, push-only, or a dependent that cannot outlive a skipped root.
 #
-# Do not add a status function (`always()`, `!cancelled()`, `!failure()`) to a job
-# that relies on the cascade, and do not OR the guard with another condition —
+# Do not add a status function — `always()`, `cancelled()`, `failure()`,
+# `success()`, in any negated spelling — to a job that relies on the cascade
+# rather than on its own guard, and do not OR the guard with another condition —
 # `true || <guard>` gates nothing, and `A || <guard> && X` binds as `A || (guard
 # && X)`. All of these are holes the gate looks for.
 #
