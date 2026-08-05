@@ -14,6 +14,7 @@
  * the React side owns only the state cell and the rendering.
  */
 
+import type { PaneLaunchMode } from "../api";
 import {
   type PaneEmulation,
   type PaneMedia,
@@ -144,6 +145,19 @@ export interface PaneTab {
   id: string;
   kind: PaneKind;
   title: string;
+  /**
+   * `terminal` only: the `ide.panes[].id` this pane was created from, for a
+   * config-declared pane. Absent for an ordinary terminal, which runs a login
+   * shell.
+   *
+   * **A name, and nothing else.** The command and the session token live in the
+   * daemon (`pane_sessions`), which is what makes this field cheap to lose: a
+   * dropped `spec` degrades the pane to a plain terminal, where a dropped token
+   * would have stranded a conversation. The detach path carries it without
+   * knowing about it — `safeTransferTab` passes unknown fields through on
+   * purpose — so this parser is the only gate it has to clear.
+   */
+  spec?: string;
   /** `browser` only: where the pane opens, and where it returns after a
    *  reload. Kept in the layout rather than in `browserHost` because it is the
    *  one piece of a pane worth restoring — the page itself is re-fetchable. */
@@ -236,12 +250,16 @@ export function clampRatio(r: number): number {
 }
 
 /**
- * The layout a worktree starts with: a terminal on the left, an empty browser
- * pane on the right.
+ * The layout a worktree starts with: **one undecided pane**, nothing else.
  *
- * The right-hand pane shows the run's URLs until it is pointed somewhere, so this
- * opens on the same information the old fixed columns did — except the list now
- * lives in the thing that can act on it, one click from being the page itself.
+ * It used to open split, with an empty browser pane on the right showing the
+ * run's URLs. That was inherited from the fixed two-column layout this dock
+ * replaced, and it stopped earning its place once the chooser grew: the *same*
+ * URL list is already on the `new` pane, so the split showed it twice, and it
+ * imposed a two-column arrangement on every worktree the first time it was
+ * opened — including the many that want one full-width terminal. Splitting is a
+ * drag or a menu item away; un-splitting something you never asked for is
+ * busywork on every new checkout.
  */
 export function defaultLayout(ratio = DEFAULT_RATIO): PaneLayout {
   // A `new` pane, not a terminal: selecting a worktree must not start a shell.
@@ -254,12 +272,14 @@ export function defaultLayout(ratio = DEFAULT_RATIO): PaneLayout {
   // one is a single click; nothing is hidden, only deferred to the point where
   // the user actually wants a shell.
   const chooser = newPaneTab();
-  const browser = browserTab({});
   return {
     docks: [
       { tabs: [chooser], activeId: chooser.id },
-      { tabs: [browser], activeId: browser.id },
+      { tabs: [], activeId: null },
     ],
+    // Kept even with nothing in the second dock: it is what a later split opens
+    // at, and inheriting the width from the last worktree is what makes the
+    // ratio feel like a window preference rather than a per-worktree surprise.
     ratio: clampRatio(ratio),
     focused: 0,
   };
@@ -827,6 +847,145 @@ export function browserTab(opts: {
   };
 }
 
+/**
+ * Which of a worktree's config panes the daemon holds a resume token for, and
+ * **which worktree the answer is about**.
+ *
+ * The pairing is the point. See [`paneAnswerFor`].
+ */
+export interface PaneSessionAnswer {
+  worktreeId: number;
+  resumable: Set<string>;
+}
+
+/**
+ * The answer, but only if it is about the worktree being rendered.
+ *
+ * A pane commits its start plan once, at first mount, and needs to know whether
+ * it has a token. That has been got wrong twice, in the same place, for the same
+ * underlying reason — **a React effect cannot fix data that the current commit
+ * already rendered with**:
+ *
+ *  1. A bare `Set` fetched in a parent effect: child effects run first, so the
+ *     set was always empty at decision time and `auto_resume` never fired.
+ *  2. A nullable `Set` cleared by the fetch effect on worktree change: on a
+ *     *switch*, the previous worktree's set is still non-null in the very commit
+ *     that mounts the new worktree's panes, so it read as an answer.
+ *
+ * Carrying the worktree id inside the answer makes staleness a *value* rather
+ * than a timing property: it is checked during render, and there is nothing to
+ * sequence. Returning `null` means "not known yet", which is what a pane waits
+ * on — never "nothing to resume", which is what it would act on.
+ */
+export function paneAnswerFor(
+  answer: PaneSessionAnswer | null,
+  worktreeId: number,
+): PaneSessionAnswer | null {
+  return answer?.worktreeId === worktreeId ? answer : null;
+}
+
+/**
+ * Panes the user has just asked for, awaiting their first mount.
+ *
+ * The materialization edge needs one bit that no amount of inspecting a pane
+ * can recover: did this pane appear because somebody clicked "new Claude pane",
+ * or because a stored layout was restored? The click is the consent for a fresh
+ * launch, so [`configPaneTab`] records it here *before* the tab exists, and the
+ * first mount spends it. Anything not in this set arrived from storage, and a
+ * stored pane only ever starts on its own when `auto_resume` says so.
+ *
+ * It lives here rather than in `terminalHost` only to keep the imports acyclic —
+ * that module already depends on this one.
+ */
+const PENDING_START = new Set<string>();
+
+/** Note that the user just created this pane, so its first mount may launch. */
+export function markPaneCreated(id: string): void {
+  PENDING_START.add(id);
+}
+
+/** Whether this pane was just created by the user, consuming the fact. */
+export function takePendingStart(id: string): boolean {
+  return PENDING_START.delete(id);
+}
+
+/**
+ * A tab for one of the project's own panes.
+ *
+ * The `title` is stored rather than derived, unlike a plain terminal's: a pane
+ * whose spec has since been renamed or removed should keep reading as what the
+ * user opened, not silently become "Terminal 2".
+ */
+export function configPaneTab(spec: { id: string; label: string }): PaneTab {
+  const id = newTabId();
+  // Before the tab exists, so the first mount can tell "the user just asked for
+  // this" from "this came back from storage" — see `startPlanFor`.
+  markPaneCreated(id);
+  return { id, kind: "terminal", title: spec.label, spec: spec.id };
+}
+
+/** How a session should start. */
+export type StartPlan = "shell" | "reattach" | PaneLaunchMode;
+
+/** What a config-declared pane needs the host to remember about it. */
+export interface PaneMount {
+  spec: string;
+  autoResume: boolean;
+  closeOnExit: boolean;
+}
+
+/**
+ * What a pane's *first* mount should do — the materialization edge.
+ *
+ * This runs once per session, because `ensure` is idempotent, and that is the
+ * whole point: a pane only ever decides to launch something at the moment it
+ * comes into being. A shell that dies later, while the user is watching, leaves
+ * the pane in `ended` with buttons — no config flag can make that auto-restart,
+ * because an exit you saw is one you get to answer.
+ *
+ *  - a plain terminal always starts its login shell, as it always has
+ *  - a pane the user just asked for launches fresh; the click was the consent
+ *  - a restored pane resumes only when the project asked for it
+ *  - otherwise it reattaches, because its tool is very often still running
+ */
+export function startPlanFor(id: string, pane?: PaneMount): StartPlan {
+  if (!pane) return "shell";
+  if (takePendingStart(id)) return "fresh";
+  if (pane.autoResume) return "resume";
+  // **Reattach, not idle.** A restored pane's tool is very often still running:
+  // a page reload, or a detach into a second window, gives a fresh renderer with
+  // an empty `PENDING_START` while the holder never noticed. Sitting idle there
+  // stranded a live agent behind two buttons that both `DELETE` its session —
+  // so the pane killed the very thing it was restored to show. Attaching with no
+  // mode asks the daemon "is it still there?"; if it is not, the guard in
+  // `connect` drops to idle without spawning anything.
+  return "reattach";
+}
+
+/**
+ * Whether a config-declared pane should tidy itself away now that its command
+ * has stopped.
+ *
+ * A pure function, and separated out because it is three conditions that each
+ * guard a different real failure — inline in a render they read as one
+ * condition and lose a clause quietly:
+ *
+ * - **`spec`** — a plain terminal has always stayed open when its shell exits,
+ *   and this is not the change that alters that.
+ * - **`closeOnExit`** — the project's own setting.
+ * - **`exitCode === 0`** — a crash prints its reason on the screen it dies on,
+ *   so closing takes the error with it. Note this reads the *code*, not the
+ *   "ended" state: a takeover also ends a session, and a pane vanishing because
+ *   another window claimed it is not tidying up.
+ */
+export function shouldCloseOnExit(pane: {
+  spec: string | undefined;
+  closeOnExit: boolean;
+  exitCode: number | null;
+}): boolean {
+  return pane.spec !== undefined && pane.closeOnExit && pane.exitCode === 0;
+}
+
 /** A pane that has not chosen its content yet. */
 export function newPaneTab(): PaneTab {
   return { id: newTabId(), kind: "new", title: "New pane" };
@@ -916,7 +1075,9 @@ export function updateTab(
 export function paneTabLabel(layout: PaneLayout, tab: PaneTab): string {
   switch (tab.kind) {
     case "terminal":
-      return terminalLabel(layout, tab.id);
+      // A config-declared pane is named by its spec, not numbered among the
+      // shells: "Claude" and "Terminal 2" are different things in one strip.
+      return tab.spec ? tab.title : terminalLabel(layout, tab.id);
     case "new":
       return "New pane";
     case "logs":
@@ -1318,6 +1479,16 @@ function parseTab(value: unknown): PaneTab | null {
     kind: t.kind,
     title: typeof t.title === "string" && t.title !== "" ? t.title : t.kind,
   };
+  if (t.kind === "terminal") {
+    // Same charset as a pane id in the config, so a hand-edited layout cannot
+    // put anything else on the wire. An unrecognised spec is *not* dropped
+    // here: the project's config is not loaded yet at parse time, and a pane
+    // whose spec has since been renamed should say so rather than silently
+    // becoming a login shell.
+    if (typeof t.spec === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(t.spec)) {
+      tab.spec = t.spec;
+    }
+  }
   if (t.kind === "browser") {
     // Re-validated on the way in, not only on the way out: storage is where a
     // stale build's — or a hand-edited — `javascript:` URL would sit waiting to

@@ -19,12 +19,14 @@ pub(crate) mod feedback;
 mod import;
 mod kv;
 mod logs;
+mod panes;
 mod settings;
 pub(crate) mod state;
 mod stats;
 mod worktrees;
 
 pub use logs::{LogFilter, LogRow, LogStream, stream_is_per_node};
+pub use panes::{PaneSession, mint_pane_token};
 pub use settings::{DEFAULT_DETACH_GRACE_MINUTES, MAX_RUN_HISTORY_DAYS};
 pub use worktrees::{
     DiscoveredWorktree, LaneRecord, MAX_LANE_NAME_LEN, MAX_ORDER_LEN, RepoRecord, WORKTREE_COLORS,
@@ -452,6 +454,11 @@ const MIGRATIONS: &[Migration] = &[
         version: 10,
         name: "rail-lanes-and-worktree-trash",
         apply: migrate_v10_rail_lanes_and_trash,
+    },
+    Migration {
+        version: 11,
+        name: "pane-sessions",
+        apply: migrate_v11_pane_sessions,
     },
 ];
 
@@ -987,6 +994,38 @@ fn migrate_v10_rail_lanes_and_trash(conn: &Connection) -> rusqlite::Result<()> {
             created_at TEXT NOT NULL,
             PRIMARY KEY (repo_root, name)
         );
+        "#,
+    )
+}
+
+/// v11: the identity a config-declared terminal pane hands to the tool it runs.
+///
+/// One row per pane that has actually launched something. Three things follow
+/// from that, and each one is the reason a column is or is not here:
+///
+/// - **The row's existence is the "has this ever launched" bit.** It is written
+///   by the daemon after a holder spawns, so there is no `ever_started` column to
+///   get out of step with reality — and no way for a client to claim a launch
+///   that never happened, which is what would make `--resume <unknown-id>` the
+///   pane's permanent state.
+/// - **The token never leaves the daemon.** It is interpolated into the command
+///   here and never serialised to a client, so no browser storage, no IPC
+///   sanitizer and no detach payload can drop or corrupt it.
+/// - **`ON DELETE CASCADE` is the whole GC story.** Worktree ids are rowids and
+///   SQLite reuses them, so a row keyed on one outlives the worktree it named and
+///   would eventually be adopted by an unrelated checkout. The FK deletes these
+///   rows with the worktree rather than leaving that to a sweep nobody runs.
+fn migrate_v11_pane_sessions(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        r#"
+        CREATE TABLE pane_sessions (
+            session_id  TEXT PRIMARY KEY,
+            worktree_id INTEGER NOT NULL REFERENCES worktrees(id) ON DELETE CASCADE,
+            spec_id     TEXT NOT NULL,
+            token       TEXT NOT NULL,
+            created_at  TEXT NOT NULL
+        );
+        CREATE INDEX idx_pane_sessions_worktree ON pane_sessions(worktree_id);
         "#,
     )
 }

@@ -191,11 +191,152 @@
               { "origin": "https://staging.example.com", "deny": ["display-capture"] }
             ]
           ]
+        },
+        "panes": {
+          "type": "array",
+          "description": "Extra pane types this project offers in Veld Desktop's pane menu — the + menu, the pane chooser, and the command palette. Versioned with the repo, so a teammate who clones it gets the same panes. A terminal pane runs its own command instead of a login shell, and may declare a `resume` command so the pane can pick the tool's own session back up after a reboot; see ${veld.pane.token}.",
+          "items": { "$ref": "#/$defs/pane" },
+          "examples": [
+            [
+              {
+                "id": "claude",
+                "type": "terminal",
+                "label": "Claude",
+                "icon": "sparkles",
+                "requires_bin": ["claude"],
+                "argv": ["claude", "--session-id", "${veld.pane.token}"],
+                "resume": { "argv": ["claude", "--resume", "${veld.pane.token}"] }
+              }
+            ]
+          ]
         }
       }
     }
   },
   "$defs": {
+    "paneIconName": {
+      "type": "string",
+      "description": "A Tabler icon name (tabler.io/icons), the icon set every built-in pane tab uses. An allowlist rather than any Tabler name, because the UI imports each icon component statically — a name resolved at runtime would either pull the whole set into the bundle or render nothing. Use an emoji for anything not listed.",
+      "enum": [
+        "atom",
+        "bolt",
+        "book",
+        "brain",
+        "bug",
+        "bulb",
+        "chart-line",
+        "cloud",
+        "code",
+        "compass",
+        "cpu",
+        "database",
+        "flask",
+        "git-branch",
+        "key",
+        "map",
+        "message-chatbot",
+        "notebook",
+        "package",
+        "player-play",
+        "plug",
+        "puzzle",
+        "refresh",
+        "robot",
+        "rocket",
+        "search",
+        "server",
+        "shield",
+        "sparkles",
+        "terminal-2",
+        "tool",
+        "wand"
+      ]
+    },
+    "paneIcon": {
+      "description": "How the pane's tab is illustrated: a name from the Tabler allowlist, or any non-ASCII string (an emoji), rendered as text. ASCII means \"this is a name\", so a misspelled one is a lint problem rather than a tab labelled `sparkle`.",
+      "anyOf": [
+        { "$ref": "#/$defs/paneIconName" },
+        {
+          "type": "string",
+          "pattern": "[^\\u0000-\\u007F]",
+          "description": "An emoji, or any other non-ASCII string."
+        }
+      ]
+    },
+    "pane": {
+      "description": "One pane type this project adds to Veld Desktop's pane menu.",
+      "type": "object",
+      "required": ["id", "type"],
+      "properties": {
+        "argv": { "$ref": "#/$defs/argv" },
+        "shell": {
+          "type": "string",
+          "description": "Run via sh -c; you own the quoting."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": ["type"],
+            "properties": { "type": { "const": "terminal" } }
+          },
+          "then": {
+            "additionalProperties": false,
+            "required": ["id", "type"],
+            "oneOf": [{ "required": ["argv"] }, { "required": ["shell"] }],
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64,
+                "pattern": "^[A-Za-z0-9_-]+$",
+                "description": "Stable id, unique within the project. Names the pane on the wire and in ${veld.pane.id}; never shown to the user — that is `label`."
+              },
+              "type": {
+                "type": "string",
+                "enum": ["terminal"],
+                "description": "What kind of pane this is. Only `terminal` exists today; the discriminator is required so a future type is additive rather than a reshape. A type this veld does not know is skipped with a lint problem, and the rest of `ide.panes` still applies — so a config written for a newer veld costs the pane it names, not the whole block."
+              },
+              "label": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Menu and tab text. Defaults to `id`."
+              },
+              "description": {
+                "type": "string",
+                "minLength": 1,
+                "description": "One line shown in the pane menu and as the tab's tooltip."
+              },
+              "icon": { "$ref": "#/$defs/paneIcon" },
+              "requires_bin": {
+                "type": "array",
+                "items": { "type": "string", "minLength": 1, "pattern": "^[^/\\\\]+$" },
+                "description": "Executable names that must be on the user's PATH for this pane to be offered. Names, never paths — a path would pass or fail on one machine's layout. Absent or empty means always offered. Resolved by a PATH lookup, never by running anything: veld does not execute a config command to decide whether to draw a menu item."
+              },
+              "argv": { "$ref": "#/$defs/argv" },
+              "shell": {
+                "type": "string",
+                "description": "Run via sh -c; you own the quoting."
+              },
+              "resume": {
+                "$ref": "#/$defs/commandObject",
+                "description": "What to run instead of `argv`/`shell` when the pane is restored and its shell is gone — typically the tool's own resume flag with ${veld.pane.token}. Absent means the pane can only ever start fresh. A resume that fails is never silently retried as a fresh launch: that would start a new billable session and present to the user as data loss."
+              },
+              "auto_resume": {
+                "type": "boolean",
+                "default": false,
+                "description": "Run `resume` without asking when the pane is restored with its shell already gone — after a reboot, or after the detach grace reaped it. It never fires while you are watching the pane: an exit you saw always waits for a click. Defaults to false, and is ignored (with a lint problem) without a `resume` command, because these commands launch coding agents and an unattended one spends money and runs tools with nobody watching."
+              },
+              "close_on_exit": {
+                "type": "boolean",
+                "default": true,
+                "description": "Close the pane when its command exits cleanly (status 0) — what a terminal emulator does, and what quitting the tool usually means. Only ever fires on an exit somebody was there to see, so it never competes with `auto_resume`: a reboot, a quit app or a reaped session leave the pane to be restored from the layout instead. A NON-ZERO exit never closes the pane, whatever this says — the reason a tool died is printed on the screen it dies on, and a pane that disappears with it takes the error with it."
+              }
+            }
+          }
+        }
+      ]
+    },
     "permissionId": {
       "type": "string",
       "description": "A browser permission, in veld's spelling. These are veld's own ids rather than Electron's, and differ in one place on purpose: Electron's `media` covers camera and microphone together, while a per-site panel has to show them as the two separate switches every browser shows. Veld Desktop maps them back; a browser tab has no panes, so nothing here applies there.",

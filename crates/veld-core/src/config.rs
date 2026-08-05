@@ -4411,7 +4411,7 @@ fn check_builtin_names(config: &VeldConfig, out: &mut Vec<Finding>) {
 }
 
 /// Every `${veld.<name>}` reference in `s`, in order of appearance.
-fn builtin_refs(s: &str) -> Vec<String> {
+pub(crate) fn builtin_refs(s: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut rest = s;
     while let Some(start) = rest.find("${veld.") {
@@ -5182,6 +5182,30 @@ mod tests {
                 "{label}: reserved keys must survive"
             );
             assert_eq!(round.ide, cfg.ide, "{label}: reserved keys must survive");
+
+            // `ide` problems are *warnings* (F8 is a notice, and every pane
+            // problem is a warning too), and the error filter above cannot see
+            // them — while the round-trip compares the raw `ide` JSON, not the
+            // parsed section. So an example could declare panes the parser drops
+            // whole — a misspelled icon, a `requires_bin` path, an unknown
+            // `type` — and both halves of the drift gate would stay green while
+            // the documented example silently rendered nothing.
+            let section = cfg.ide_section();
+            assert!(
+                section.problems.is_empty(),
+                "{label}: ide section must parse cleanly, got {:#?}",
+                section.problems
+            );
+            let declared = raw
+                .get("ide")
+                .and_then(|i| i.get("panes"))
+                .and_then(|p| p.as_array())
+                .map_or(0, Vec::len);
+            assert_eq!(
+                section.panes.len(),
+                declared,
+                "{label}: every declared pane must survive parsing"
+            );
             assert_eq!(
                 round.vars.as_ref().map(|v| v.len()),
                 cfg.vars.as_ref().map(|v| v.len()),

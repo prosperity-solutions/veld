@@ -55,7 +55,7 @@ unreadable.
   // "default_preset": "<preset-name>",  // root file only
   "nodes": { },
   "hooks": { },   // reserved: parsed, stored, NOT executed by this version
-  "ide": { }      // quicklinks + permissions are rendered; every other key is reserved
+  "ide": { }      // quicklinks + permissions + panes are rendered; every other key is reserved
 }
 ```
 
@@ -458,7 +458,7 @@ Note: `${VAR}` (braces) is parsed by Veld, so use `$VAR` (no braces) for plain s
 | `ports` | node, variant | Named ports: `{"http": "auto", "debug": "auto"}`. `${veld.ports.<name>}`, `VELD_PORT_<NAME>`. `${veld.port}` = primary. |
 | `files` | node, variant | Values delivered to disk: `{"<path>": {source, secret?, mode?}}`. Mode defaults `0600`. |
 | `hooks` | project (any file) | **Reserved.** Parsed and stored, NOT executed by this version. `veld lint` emits a notice. |
-| `ide` | project (any file) | Veld's own IDE surfaces (Veld Desktop, `/ide`). `ide.quicklinks` and `ide.permissions` are rendered; **every other key under `ide` is reserved** — parsed, stored, NOT rendered. See the section below. |
+| `ide` | project (any file) | Veld's own IDE surfaces (Veld Desktop, `/ide`). `ide.quicklinks`, `ide.permissions` and `ide.panes` are rendered; **every other key under `ide` is reserved** — parsed, stored, NOT rendered. See the section below. |
 
 Any **other** top-level key is an error reported by `veld lint` and `veld start`
 (rule `unknown-top-level-key`) — deliberately not a load failure, so a typo cannot
@@ -524,11 +524,11 @@ Reverse-proxy header rules applied by the **local Caddy proxy** (local dev) and 
 - `remove`: header names to strip. `set`: name → value map (replaces any existing value). Header names matched case-insensitively.
 - **Default change:** Veld no longer strips `Origin` by default (it used to, so dev-server WS HMR worked). `Origin` now passes through the local proxy; the gateway rewrites it *coherently* to the origin host on all requests (incl. WS upgrades) rather than dropping it. If a Next.js dev server rejects WS HMR on `Origin`, set `allowedDevOrigins` in `next.config.js` (recommended — https://nextjs.org/docs/app/api-reference/config/next-config-js/allowedDevOrigins). Escape hatch for frameworks with no allow-list: `"proxy": { "request": { "remove": ["Origin"] } }`.
 
-## `ide` — quicklinks and permissions
+## `ide` — quicklinks, permissions and panes
 
 Per-project settings for Veld's own IDE surfaces (Veld Desktop, and `/ide` in a
 browser). Absent from most configs, and never affects a run. Every key under `ide`
-other than the two below is **reserved**: parsed, stored, not rendered, and
+other than the three below is **reserved**: parsed, stored, not rendered, and
 `veld lint` emits a notice naming it.
 
 > Spelled `ui` before it was interpreted. A config still using `ui` fails
@@ -544,6 +544,18 @@ other than the two below is **reserved**: parsed, stored, not rendered, and
     { "origin": "https://*.veld.localhost:*", "allow": ["notifications"] },
     { "origin": "http://localhost:*", "allow": ["geolocation"] },
     { "origin": "https://staging.example.com", "deny": ["display-capture"] }
+  ],
+  "panes": [
+    {
+      "id": "claude",
+      "type": "terminal",
+      "label": "Claude",
+      "icon": "sparkles",
+      "requires_bin": ["claude"],
+      "argv": ["claude", "--session-id", "${veld.pane.token}"],
+      "resume": { "argv": ["claude", "--resume", "${veld.pane.token}"] },
+      "auto_resume": true
+    }
   ]
 }
 ```
@@ -619,3 +631,82 @@ Loopback and veld's own URLs are a different matter — a config that can alread
 run `argv` on the machine is not meaningfully constrained by withholding a camera
 from its own dev server. Every config grant is shown in the pane's per-site panel
 labelled *set by veld.json*, where it can be revoked.
+
+### `ide.panes`
+
+Pane types the project adds to Veld Desktop's dock — the `+` menu, the pane
+chooser and the ⌘K palette. Only `type: "terminal"` exists today: a pane that
+runs the project's command instead of a login shell. A browser tab has no panes,
+so none of this applies there.
+
+| Field | Notes |
+|---|---|
+| `id` | **Required.** `[A-Za-z0-9_-]`, ≤64 chars, unique in the project. |
+| `type` | **Required.** `terminal`. An unknown type is skipped with a lint problem, and the *rest* of `ide.panes` still applies — so a config written for a newer veld costs one pane, not the block. |
+| `label` / `description` | Menu text (defaults to `id`) and tooltip. |
+| `icon` | An emoji, or a Tabler name from the allowlist (`sparkles`, `robot`, `bolt`, `terminal-2`, …). ASCII means "name", so a typo is a lint problem, not a tab labelled `sparkle`. |
+| `requires_bin` | Executable **names** on `PATH`. Never paths, and never a command veld runs — deciding whether to draw a menu item must not execute anything. |
+| `argv` / `shell` | **Required**, exactly one. |
+| `resume` | `{ argv }` or `{ shell }` — what to run when the pane is restored and its shell is gone. |
+| `auto_resume` | Default `false`. Ignored (with a lint problem) without `resume`. |
+| `close_on_exit` | Default `true`. Closes the pane on a **clean** exit only; a non-zero exit always keeps it so the error stays readable. Only fires on an exit someone saw, so it never competes with `auto_resume`. Note it also means a deliberate `/exit` never shows the Resume button — set `false` to stop and choose. |
+
+**`${veld.pane.token}` is the whole trick.** Veld mints a UUID the first time a
+pane launches, remembers it against that pane in its database, and interpolates
+it into the command. Hand it to a tool's session flag and the pane's `resume`
+command reopens that exact conversation after a reboot — the shell died, the
+conversation did not.
+
+- **The token never leaves the daemon.** Not to the browser, not to the app, not
+  into browser storage.
+- **A fresh launch always mints a new token**, because `--session-id` is a
+  *create*. "Start fresh" therefore means a genuinely new conversation.
+- Two panes of the same type in one worktree get **different** tokens. That is
+  the case worth the machinery: plain `--continue` would have the second pane
+  reopen the first one's conversation.
+- **A tool that cannot take an externally-chosen id still works, with no token
+  at all.** `codex` is that shape: no launch-time session-id flag, but
+  `codex resume --last` continues the most recent session and its resume is
+  cwd-filtered unless `--all`, so "most recent" means "in this worktree".
+  `{"argv": ["codex"], "resume": {"argv": ["codex","resume","--last"]}}` gets a
+  Resume button and `auto_resume` like any other pane. The cost is per-pane
+  identity: two such panes in one worktree resume the *same* session, which is
+  precisely what the token prevents for tools that cooperate.
+
+**`auto_resume` is narrower than it sounds.** It fires only when a pane *comes
+into being* with its shell already gone (app start after a reboot, or after the
+detach grace reaped the session). It is never consulted while you are watching
+the pane: an exit you saw always waits for a click. A daemon restart or
+`veld update` is not a trigger at all, because the shell survives those and the
+pane just reattaches. Dragging a pane to another window spawns nothing. The
+default is `false` because these commands launch coding agents, and an
+unattended one spends money and runs tools with nobody watching.
+
+**A failed `resume` is never retried as a fresh launch** — that would start a new
+billable conversation and present as data loss. The pane reports it and offers
+*Start fresh* as a separate button.
+
+**`auto_resume` is trust in the repo, not in the command you clicked.** veld
+remembers that a pane launched; it does not pin what it ran. The `resume`
+command is re-read from `veld.json` at every restore, so a `git pull` that
+rewrites it — or flips the flag on a pane started once by hand — changes what
+runs unattended on the next app start. This is the only place a config command
+runs on app launch rather than on `veld start` or a click.
+
+**Quote your interpolations in a `shell` pane, and prefer `argv`.**
+`${veld.branch}` is the one pane variable an outsider can choose (check out
+someone's PR branch and the name is theirs), so unquoted in a `shell` command a
+branch named `` `curl …` `` executes at pane launch. `argv` interpolates per
+element after the array is fixed and cannot change the argument count.
+
+**Variable scope is small** (a pane has no run, no node, no ports); anything else
+is a lint problem: `${veld.pane.id}`, `${veld.pane.label}`, `${veld.pane.token}`,
+`${veld.worktree}`, `${veld.root}`, `${veld.branch}`, `${veld.project}`,
+`${veld.username}`. `VELD_PANE_ID` and `VELD_PANE_TOKEN` are in the environment
+too, for a `shell` pane. The command runs with your **login shell's `PATH`**, not
+the daemon's.
+
+**There are no pane variants.** Two modes of a tool are two entries. Node
+`variants` exist because a node is a graph vertex a preset selects across; a pane
+is neither, and one token per pane is what keeps "which conversation is this"
+answerable.

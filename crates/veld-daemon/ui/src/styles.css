@@ -1314,6 +1314,107 @@ body[data-theme="light"] .swatch-cell > span {
   box-shadow: var(--shadow);
 }
 
+/* A config pane that is not running takes the whole pane rather than a chip in
+   the corner: it is the only thing the pane is for at that moment, and after a
+   full-screen program exits there is usually nothing else on screen. Sits above
+   the terminal rather than replacing it, so "Show output" is a state change and
+   not a re-render of the shell. */
+.term-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  /* Not fully opaque: a glimpse of what is underneath is the cue that "Show
+     output" has something to show. */
+  background: color-mix(in srgb, var(--panel) 88%, transparent);
+}
+
+.term-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  max-width: 420px;
+  padding: 22px 26px;
+  text-align: center;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+}
+
+.term-card-icon {
+  display: flex;
+  color: var(--muted);
+}
+
+.term-card-title {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.term-card-detail {
+  font-family: "JetBrains Mono Variable", ui-monospace, monospace;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.term-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+/* Text, not a button: revealing the output is an escape hatch from the panel,
+   not a third thing to weigh against Resume and Start fresh. */
+.term-card-link {
+  margin-top: 2px;
+  padding: 2px 4px;
+  border: 0;
+  background: none;
+  color: var(--faint);
+  font: inherit;
+  font-size: 11.5px;
+  cursor: pointer;
+  text-decoration: underline;
+}
+.term-card-link:hover {
+  color: var(--muted);
+}
+
+/* An emoji stands in for a line-drawn glyph, so it is nudged to sit on the same
+   optical baseline as the Tabler icons beside it in a tab strip. */
+.pane-emoji {
+  display: inline-block;
+  line-height: 1;
+  vertical-align: -0.1em;
+}
+
+/* An unavailable project pane reads as disabled but stays interactive, so its
+   tooltip can actually open — a `disabled` button dispatches no pointer events
+   and its `title` never shows (#205). The reason lives only in that tooltip,
+   because the `+` menu omits unavailable panes altogether. */
+.btn[aria-disabled="true"] {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* The project's own panes, kept visually together and below veld's own. */
+.pane-chooser-custom {
+  flex-wrap: wrap;
+}
+
+/* The chooser already centres its children; the heading only needs its
+   left-aligned-list padding taken back off so it sits tight above its row. */
+.pane-chooser .section-label {
+  padding: 0;
+}
+
 /* ---- embedded browser ----------------------------------------------------- */
 
 .browser-pane {

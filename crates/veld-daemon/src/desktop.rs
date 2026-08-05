@@ -641,6 +641,47 @@ struct IdeView {
     /// these — a browser tab has no panes — but they travel here because the
     /// renderer is what relays them to the Electron main process.
     permissions: Vec<veld_core::ide::PermissionRule>,
+    /// Pane types this project adds to the pane menu, with the commands
+    /// stripped out.
+    panes: Vec<PaneView>,
+}
+
+/// A config-declared pane as the UI needs to see it.
+///
+/// **The commands are deliberately absent**, and so is the token. The renderer
+/// names a pane and the daemon resolves what that means from the project's own
+/// config — so nothing here is a command the client could edit and post back,
+/// and there is no identity for browser storage or a detach payload to drop.
+#[derive(Serialize)]
+struct PaneView {
+    id: String,
+    label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    icon: Option<veld_core::ide::PaneIcon>,
+    /// What the pane runs, as one of the runtime pane kinds.
+    ///
+    /// Derived from the body's variant, never written out: the irrefutable
+    /// `let` below turns a second `PaneBody` variant into a compile error, but a
+    /// hand-written `"terminal"` literal would survive being turned into a
+    /// `match` with every arm still reporting the wrong kind to the client.
+    kind: &'static str,
+    /// False when something in `requires_bin` is not installed. The pane is
+    /// still listed, so the menu can explain the absence rather than silently
+    /// omitting an entry the repo declares.
+    available: bool,
+    /// The required executables that were not found, so the menu can name them.
+    /// The pane's own id is not a substitute — `claude-yolo` needs `claude` and
+    /// `git-log` needs `git`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    missing: Vec<String>,
+    /// Whether the pane declares a `resume` command at all.
+    can_resume: bool,
+    /// Whether a restored pane whose shell is gone may resume without a click.
+    auto_resume: bool,
+    /// Whether a clean exit closes the pane.
+    close_on_exit: bool,
 }
 
 #[derive(Serialize)]
@@ -686,9 +727,33 @@ fn worktree_view(wt: WorktreeRecord) -> WorktreeView {
         .as_ref()
         .map(|c| {
             let section = c.ide_section();
+            let panes = section
+                .panes
+                .iter()
+                .map(|p| {
+                    let veld_core::ide::PaneBody::Terminal(terminal) = &p.body;
+                    let kind = match &p.body {
+                        veld_core::ide::PaneBody::Terminal(_) => "terminal",
+                    };
+                    let missing = super::pty::missing_pane_binaries(&p.requires_bin);
+                    PaneView {
+                        id: p.id.clone(),
+                        label: p.label.clone(),
+                        description: p.description.clone(),
+                        icon: p.icon.clone(),
+                        kind,
+                        available: missing.is_empty(),
+                        missing,
+                        can_resume: terminal.resume.is_some(),
+                        auto_resume: terminal.auto_resume,
+                        close_on_exit: terminal.close_on_exit,
+                    }
+                })
+                .collect();
             IdeView {
                 quicklinks: section.quicklinks,
                 permissions: section.permissions,
+                panes,
             }
         })
         .unwrap_or_default();

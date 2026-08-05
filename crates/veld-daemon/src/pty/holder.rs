@@ -211,7 +211,8 @@ async fn serve(cfg: &HolderConfig, listener: UnixListener) -> anyhow::Result<()>
         pid,
         read_fd,
         write_fd,
-    } = spawn_shell(&cfg.cwd, size).context("failed to open a pty")?;
+    } = spawn_shell(&cfg.cwd, size, cfg.argv.as_deref(), &cfg.env)
+        .context("failed to open a pty")?;
     info!(
         session = %cfg.session_id,
         worktree = %cfg.label,
@@ -496,7 +497,7 @@ async fn serve(cfg: &HolderConfig, listener: UnixListener) -> anyhow::Result<()>
     // The notice goes to the scrollback *and* the live stream, before the exit
     // code: a scrollback-only notice is invisible to whoever is watching now,
     // and publishing the code first would race the notice past it.
-    let notice = exit_notice(code);
+    let notice = exit_notice(code, cfg.pane_label.as_deref());
     scrollback.push(&notice);
     debug!(session = %cfg.session_id, pid, code, "terminal shell exited");
 
@@ -527,9 +528,16 @@ async fn serve(cfg: &HolderConfig, listener: UnixListener) -> anyhow::Result<()>
     Ok(())
 }
 
-/// The line a client sees in place of a prompt once the shell is gone.
-fn exit_notice(code: u32) -> Vec<u8> {
-    format!("\r\n\x1b[2m[veld] shell exited ({code})\x1b[0m\r\n").into_bytes()
+/// The line a client sees in place of a prompt once the session's process is
+/// gone.
+///
+/// Named after what actually ran: a config-declared pane never spawned a shell,
+/// and after a full-screen program exits this line is frequently the *only*
+/// thing on the pane, because restoring the primary screen buffer wipes
+/// everything the user was looking at.
+fn exit_notice(code: u32, label: Option<&str>) -> Vec<u8> {
+    let what = label.unwrap_or("shell");
+    format!("\r\n\x1b[2m[veld] {what} exited ({code})\x1b[0m\r\n").into_bytes()
 }
 
 /// Hand the exit code to a daemon, then stop.
@@ -783,27 +791,56 @@ struct Spawned {
     write_fd: AsyncFd<File>,
 }
 
-/// Open a PTY and start the user's login shell in `cwd`.
-fn spawn_shell(cwd: &std::path::Path, size: PtySize) -> anyhow::Result<Spawned> {
+/// Open a PTY and start the session's process in `cwd`.
+///
+/// Two shapes, and the difference decides who computes `PATH`:
+///
+/// - **No `argv`** — the user's login shell, which is the ordinary terminal.
+/// - **An `argv`** — a config-declared pane's command, spawned directly. There is
+///   no login shell in front of it to work `PATH` out, so the daemon resolves one
+///   and passes it in `env`; see [`wire::HolderConfig::env`].
+fn spawn_shell(
+    cwd: &std::path::Path,
+    size: PtySize,
+    argv: Option<&[String]>,
+    env: &[(String, String)],
+) -> anyhow::Result<Spawned> {
     let PtyPair { master, slave } = native_pty_system().openpty(size)?;
 
-    let shell = login_shell();
-    let mut cmd = CommandBuilder::new(&shell);
-    // A *login* shell, which is also what makes this an exception to the
-    // AGENTS.md "resolve the user's PATH with `resolve_user_path()`" rule.
-    // That helper exists because a daemon running `sh -c '<config command>'`
-    // inherits launchd's bare PATH; it gets the real one by spawning
-    // `$SHELL -l -i -c 'command env'` and scraping it. Here the thing being
-    // spawned *is* that login shell, so it computes the same PATH itself —
-    // calling the helper first would spawn a second shell and add its startup
-    // cost (up to its 10s timeout on a wedged rc file) to every terminal, to
-    // arrive at the value this shell is about to compute anyway.
-    cmd.arg("-l");
+    let mut cmd = match argv {
+        Some([program, args @ ..]) => {
+            let mut cmd = CommandBuilder::new(program);
+            cmd.args(args);
+            cmd
+        }
+        // An empty argv cannot reach here (the config parser refuses one and the
+        // daemon re-checks), but falling back to a shell beats panicking in a
+        // process whose whole job is to outlive things.
+        Some([]) | None => {
+            let mut cmd = CommandBuilder::new(login_shell());
+            // A *login* shell, which is also what makes this an exception to the
+            // AGENTS.md "resolve the user's PATH with `resolve_user_path()`" rule.
+            // That helper exists because a daemon running `sh -c '<config command>'`
+            // inherits launchd's bare PATH; it gets the real one by spawning
+            // `$SHELL -l -i -c 'command env'` and scraping it. Here the thing being
+            // spawned *is* that login shell, so it computes the same PATH itself —
+            // calling the helper first would spawn a second shell and add its startup
+            // cost (up to its 10s timeout on a wedged rc file) to every terminal, to
+            // arrive at the value this shell is about to compute anyway.
+            cmd.arg("-l");
+            cmd
+        }
+    };
     cmd.cwd(cwd);
     // xterm.js speaks xterm-256color; without TERM the shell assumes "dumb"
     // and disables colour and line editing.
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
+    // After TERM/COLORTERM so a pane could in principle override them, and never
+    // before `cwd`, which is the daemon's to decide either way.
+    for (key, value) in env {
+        cmd.env(key, value);
+    }
 
     let child = slave.spawn_command(cmd)?;
     // Close our copy of the slave. While this process holds it, the master
@@ -984,6 +1021,9 @@ mod tests {
             rows: 24,
             socket: socket.clone(),
             orphan_grace_secs: grace,
+            argv: None,
+            env: Vec::new(),
+            pane_label: None,
         };
         tokio::spawn(run(cfg));
 
@@ -1024,6 +1064,81 @@ mod tests {
         }
     }
 
+    /// A config-declared pane runs its own command, with the `PATH` the daemon
+    /// resolved rather than the one this process happens to have.
+    ///
+    /// The `PATH` half is the point. Every other terminal in this module gets
+    /// its `PATH` from the login shell it spawns, which is why `spawn_shell`
+    /// documents itself as an exception to the AGENTS.md rule — but a pane's
+    /// `argv` is spawned **directly**, with no shell in front of it, so it would
+    /// otherwise inherit launchd's bare service `PATH` and fail to find the
+    /// user-installed CLI the pane exists to run. The command here prints what it
+    /// actually got, so a regression shows up as the wrong string rather than as
+    /// a pane that works on the developer's machine and not from the app.
+    #[tokio::test]
+    async fn a_pane_command_runs_instead_of_a_shell_and_gets_the_injected_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("p.sock");
+        let cfg = HolderConfig {
+            session_id: "paneprobe".to_owned(),
+            worktree_id: 1,
+            label: "test".to_owned(),
+            cwd: dir.path().to_path_buf(),
+            cols: 80,
+            rows: 24,
+            socket: socket.clone(),
+            orphan_grace_secs: 30,
+            argv: Some(vec![
+                "sh".to_owned(),
+                "-c".to_owned(),
+                "printf 'PANE[%s][%s]' \"$PATH\" \"$VELD_PANE_TOKEN\"".to_owned(),
+            ]),
+            env: vec![
+                ("PATH".to_owned(), "/injected/bin:/usr/bin:/bin".to_owned()),
+                ("VELD_PANE_TOKEN".to_owned(), "tok-123".to_owned()),
+            ],
+            pane_label: Some("Probe".to_owned()),
+        };
+        tokio::spawn(run(cfg));
+
+        let mut stream = loop {
+            match tokio::net::UnixStream::connect(&socket).await {
+                Ok(s) => break s,
+                Err(_) => tokio::time::sleep(Duration::from_millis(20)).await,
+            }
+        };
+        // Collect until the command's own exit frame arrives, so the assertion
+        // never races the pty read loop.
+        let mut seen = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            assert!(Instant::now() < deadline, "no exit frame; saw {seen:?}");
+            let Some(frame) = wire::read_frame(&mut stream).await.unwrap() else {
+                break;
+            };
+            match frame.kind {
+                wire::OUTPUT | wire::SCROLLBACK => {
+                    seen.extend_from_slice(&frame.payload);
+                }
+                wire::EXIT => break,
+                _ => {}
+            }
+        }
+        let text = String::from_utf8_lossy(&seen);
+        assert!(
+            text.contains("PANE[/injected/bin:/usr/bin:/bin][tok-123]"),
+            "the pane command must run with the daemon's PATH and env, got: {text:?}"
+        );
+        // End to end, not just `exit_notice`'s own unit test: the label has to
+        // survive stdin, serde and the frame it is written into, and this line
+        // is often the only thing left on a pane once a full-screen program has
+        // restored the primary buffer on its way out.
+        assert!(
+            text.contains("[veld] Probe exited (0)") && !text.contains("shell exited"),
+            "the exit notice must name the pane, not claim a shell ran: {text:?}"
+        );
+    }
+
     /// A peer may connect, write the five bytes of `HANGUP`, and close
     /// immediately — the contract `veld uninstall`'s sweep, the recovery test's
     /// cleanup guard and the version-refusal path all rely on.
@@ -1050,6 +1165,9 @@ mod tests {
             socket: socket.clone(),
             // Long, so nothing but the hangup can be what ends this shell.
             orphan_grace_secs: 3600,
+            argv: None,
+            env: Vec::new(),
+            pane_label: None,
         };
         tokio::spawn(run(cfg));
 
@@ -1089,13 +1207,21 @@ mod tests {
 
     #[test]
     fn the_exit_notice_is_a_complete_line() {
-        let notice = String::from_utf8(exit_notice(7)).unwrap();
+        let notice = String::from_utf8(exit_notice(7, None)).unwrap();
         // A notice without the leading CRLF lands on top of whatever the shell
         // last printed, and one without the trailing pair leaves the client's
         // cursor mid-line.
         assert!(notice.starts_with("\r\n"));
         assert!(notice.ends_with("\r\n"));
         assert!(notice.contains("shell exited (7)"));
+
+        // A config-declared pane never ran a shell, and after a full-screen
+        // program restores the primary buffer this line is often the only thing
+        // left on the pane — so calling it a shell is the one visible claim the
+        // pane makes about itself, and it would be false.
+        let named = String::from_utf8(exit_notice(0, Some("Claude"))).unwrap();
+        assert!(named.contains("Claude exited (0)"), "{named:?}");
+        assert!(!named.contains("shell"), "{named:?}");
     }
 
     #[tokio::test]
