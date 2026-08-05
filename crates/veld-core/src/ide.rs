@@ -641,7 +641,15 @@ pub struct UrlOrigin {
 /// bypass described on [`parse_web_url`]. Making the frame's field this type means
 /// that edit does not compile. A comment there would have been the fifth guard in this
 /// module defended only by prose.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// `Serialize` only, and that is part of the guard rather than an omission: a derived
+/// `Deserialize` is expanded with access to the private field, so
+/// `serde_json::from_str::<CanonicalUrl>("anything")` — or any future struct that
+/// derives `Deserialize` with a field of this type — would construct one from
+/// arbitrary text without ever passing through [`parse_web_url`]. That is the same
+/// bypass reached through serde instead of through a literal constructor, and it would
+/// have made the claim above ("that edit does not compile") false. Nothing needs to
+/// deserialize this: the frame travels daemon → renderer, and the renderer parses JSON.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
 pub struct CanonicalUrl(String);
 

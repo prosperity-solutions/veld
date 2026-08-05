@@ -1497,9 +1497,14 @@ function AppInner(props: {
         const dock = dockOf(layout, sessionId)!;
         setLayouts((prev) => {
           const current = prev[Number(key)];
-          // Re-checked against the state React is actually applying to, since the ref
-          // was read a tick earlier.
-          if (!current || dockOf(current, sessionId) === null) return prev;
+          // Deliberately **not** re-checking that the dock still holds the terminal.
+          // The ref was read a tick earlier, so it could have gone — but a bail here
+          // returns `prev` and the URL is lost, which is the very defect this handler's
+          // fallback exists to prevent, reintroduced in a narrower window. An updater
+          // must stay pure, so it cannot open the URL itself; adding the tab to the dock
+          // the terminal was in is both harmless and what the user expects. Only a
+          // worktree that has vanished entirely has nowhere to put it.
+          if (!current) return prev;
           return { ...prev, [Number(key)]: addTab(current, dock, browserTab({ url })) };
         });
       }),

@@ -423,8 +423,6 @@ mod tests {
         );
         let lines: Vec<&str> = body.lines().collect();
         assert_eq!(lines[0], "#!/bin/sh");
-        // The guard is `-x`, evaluated when the shim runs: an uninstall while a
-        // shell is open must not break `open`.
         // The guard is `-x`, evaluated when the shim runs: an uninstall while a shell
         // is open must not break `open`.
         assert!(body.contains("[ -x '/usr/local/bin/veld' ]"), "{body}");
