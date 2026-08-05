@@ -1,0 +1,33 @@
+{
+  "$schema": "https://biomejs.dev/schemas/2.5.7/schema.json",
+  // Lint-only for now: formatting (45+ pre-existing files) is a deliberate
+  // follow-up PR, per issue #202 decision #1, so the formatter stays off.
+  "formatter": { "enabled": false },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      // Only the correctness group blocks CI; the rest are surfaced as
+      // non-failing warnings so the first PR is reviewable without a
+      // de-style sweep (issue #202 decision #2).
+      "recommended": true,
+      "correctness": {
+        // The rule this issue exists for — `correctness/noUndeclaredVariables`
+        // is NOT part of Biome's recommended set, so it must be promoted
+        // explicitly. It is the control that catches the `PROMPT_TIMEOUT_MS`
+        // ReferenceError class that `node --check` cannot see.
+        "noUndeclaredVariables": "error",
+        // Deliberately deferred too: React hook-dependency and JSX-key
+        // heuristics that fire only on the project tree (57 pre-existing
+        // findings). Fixing hook deps can change runtime behaviour, so it gets
+        // its own deliberate pass rather than a blind auto-fix in the lint PR.
+        "useExhaustiveDependencies": "warn",
+        "useJsxKeyInIterable": "warn"
+      },
+      "a11y": "warn",
+      "style": "warn",
+      "complexity": "warn",
+      "suspicious": "warn",
+      "nursery": "warn"
+    }
+  }
+}

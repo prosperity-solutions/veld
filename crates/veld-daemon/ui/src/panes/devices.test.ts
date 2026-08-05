@@ -532,6 +532,11 @@ describe("zoom", () => {
     expect(clampZoom(99)).toBe(3);
     expect(clampZoom(0)).toBe(1);
     expect(clampZoom(Number.NaN)).toBe(1);
+    // The literal is a distinct double from 0.67 (verified) — this line exists
+    // to make `zoomStep`/`formatZoom` format a near-duplicate factor the way the
+    // comment above (`Floating-point noise is the same step`) describes. Any spelling of such noise is
+    // unrepresentable, so the rule is suppressed for this one line.
+    // biome-ignore lint/correctness/noPrecisionLoss: deliberate float-noise input
     expect(formatZoom(0.6700000000000001)).toBe("67%");
     // The *fit* scale is not a zoom: a viewport shrunk to 12% of a narrow pane is
     // a real 12%, and clamping it to the zoom floor would report 25%.

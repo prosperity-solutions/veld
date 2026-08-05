@@ -139,7 +139,7 @@ just dev-restore    # runs veld update
 | `just dev-restore` | Restore to released version | No |
 | `just build` | Build Rust + frontend | No |
 | `just test` | Run all tests | No |
-| `just lint` | Clippy + TypeScript type check | No |
+| `just lint` | Clippy + TypeScript type check + JS/TS Biome lint | No |
 | `just workflow-gates` | Assert no CI job can run on a draft PR. Needs PyYAML: `python3 -m pip install --user pyyaml` | No |
 | `just commit-subjects` | Check your commit subjects against the conventional-commits pattern CI enforces | No |
 
