@@ -820,11 +820,20 @@ mod tests {
         // gets deleted instead of maintained.
         let max = format!("{MAX_RUN_HISTORY_DAYS} days");
         let default = format!("{DEFAULT_RUN_HISTORY_DAYS} days");
+        // The settings dialog's `max=` is the same class of copy as the prose: a literal
+        // in another language that silently disagrees once this constant moves. Its own
+        // comment claimed a test tied the two, and none did — a false claim of a gate is
+        // worse than an admitted gap, so here is the gate.
+        let dialog_max = format!("max={{{MAX_RUN_HISTORY_DAYS}}}");
         for (rel, needle) in [
             ("README.md", &max),
             ("README.md", &default),
             ("website/llms-full.txt", &max),
             ("website/llms-full.txt", &default),
+            (
+                "crates/veld-daemon/ui/src/components/SettingsDialog.tsx",
+                &dialog_max,
+            ),
         ] {
             let path = root.join(rel);
             let text = std::fs::read_to_string(&path)

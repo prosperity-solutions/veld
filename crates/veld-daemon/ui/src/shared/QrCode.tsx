@@ -60,12 +60,37 @@ function VeldMark(props: { symbolSize: number; quiet: number }) {
   );
 }
 
+/**
+ * Target side in CSS pixels, before the integer-scale snap.
+ *
+ * A constant rather than a prop, deliberately. It *was* a prop, and a review angle
+ * showed the prop was a lie: `qrRenderSize` floors the scale at `MIN_MODULE_PX` modules,
+ * and for every version a real share link reaches that floor already exceeds this target
+ * — so anything from ~40 to ~108 rendered pixel-identically and a caller "making the
+ * codes smaller" would have watched nothing happen. The size is decided by the
+ * measured-decodable floor, so the floor is where it is documented and this number only
+ * matters for the small symbols where it can still bind.
+ */
+const TARGET_SIDE_PX = 108;
+
 export function QrCode(props: {
   value: string;
-  /** Target side in CSS pixels; the actual side snaps to an integer module scale. */
-  size?: number;
   /** Accessible name — a QR is an image of a URL, so say which one. */
   label: string;
+  /**
+   * Whether the encoded value is a credential.
+   *
+   * **Required, and required on purpose.** A web-share link carries the share password
+   * in its fragment, so a code drawn bare on an always-visible surface is a secret on
+   * permanent display. Making every call site answer the question — rather than
+   * documenting it and hoping — is what stops the next `<QrCode value={link} />` from
+   * being the careless-but-natural thing to write. `true` wraps the code in the
+   * `.qr-shield` blur (hover to reveal, `revealed` to override) **inside this
+   * component**, so there is no wrapper element a caller can forget or delete.
+   */
+  sensitive: boolean;
+  /** Reveal a `sensitive` code without hovering it — the *Show all* switch. */
+  revealed?: boolean;
   /** Draw the veld mark at the centre. On by default; see [`VELD_MARK`]. */
   logo?: boolean;
 }) {
@@ -82,8 +107,8 @@ export function QrCode(props: {
   }
   const quiet = QR_SCREEN_QUIET_ZONE;
   const box = qrViewBox(qr, quiet);
-  const side = qrRenderSize(box, props.size ?? 108);
-  return (
+  const side = qrRenderSize(box, TARGET_SIDE_PX);
+  const code = (
     <svg
       width={side}
       height={side}
@@ -113,5 +138,10 @@ export function QrCode(props: {
         </g>
       )}
     </svg>
+  );
+
+  if (!props.sensitive) return code;
+  return (
+    <div className={`qr-shield${props.revealed ? " revealed" : ""}`}>{code}</div>
   );
 }

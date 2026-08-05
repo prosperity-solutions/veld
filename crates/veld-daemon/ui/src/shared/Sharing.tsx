@@ -423,15 +423,15 @@ export function WebShareStrip(props: {
             {/* The QR's own white card sits inside the row's padding rather than
                 against its rounded corner, where the square white corner of the code
                 poked out past the radius. */}
-            {/* The blur, the hover reveal and the `revealed` escape hatch all live in
-                `.qr-shield` in styles.css — this wrapper exists for that rule and for
-                nothing else, so deleting it silently un-hides every code. */}
-            <div
-              className={`qr-shield${revealAll ? " revealed" : ""}`}
-              title="Hover to reveal — or Show all"
-            >
-              <QrCode value={link} label={`QR code for the ${u.node} public URL`} />
-            </div>
+            {/* `sensitive` is what applies the blur, inside `QrCode` — this link
+                carries the share password, and the shield is not something a call site
+                can forget to wrap. */}
+            <QrCode
+              value={link}
+              label={`QR code for the ${u.node} public URL`}
+              sensitive
+              revealed={revealAll}
+            />
             {/* `minWidth: 0` is what lets the button row wrap instead of pushing the QR
                 out of a narrow panel — a flex child's default min-width is its
                 content. */}
