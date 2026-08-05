@@ -148,11 +148,58 @@ requests at runtime — branding rule.
   there anything to start", so one surface offered an enabled control whose
   click was a silent no-op while another allowed a double-spawned
   `veld start`.
+- **One state channel per row, and the run control is it.** A rail row carries
+  two dots' worth of meaning — *which worktree is this* and *what is its run
+  doing* — and it used to draw them as two adjacent circles. Colour markers
+  (#204) made that unreadable rather than causing it: with an emoji the two were
+  distinguishable by shape, and with a colour swatch they were not. So run state
+  lives on the **run control** (▶ / ■ / spinner) and the row has no status dot.
+  The rule this follows is worth keeping: **an identity channel never carries
+  state.** Tinting the marker on failure was the obvious alternative and is
+  rejected for that reason — the marker's colour *is* the identifier.
+  - Failure gets an affordance rather than a colour: `.wt-alert`, an icon whose
+    click selects the worktree and reveals its Nodes pane (`revealDiagPane`).
+    It renders in the **collapsed** rail too, where the run control cannot go, so
+    it is sized to its glyph rather than to a 17px control box.
+  - `recovering` routes there as well, and is the reason `worktreeStatus` no
+    longer folds it into `partial`: the health monitor restarting a node that
+    keeps failing its probe has no expected end, so a spinner read as
+    "perpetually starting". Note that issue #214 is **wrong** about the prior
+    behaviour, and so was the first draft of this section — folded into `partial`
+    it rendered `.dot.partial`, a static amber dot *identical to an ordinary
+    starting/stopping row*. The defect was therefore not an absent signal but an
+    unbounded restart loop that was indistinguishable from progress, which is the
+    worse of the two: a wrong signal gets acted on.
+  - **Known and deliberate:** the collapsed rail therefore has no *running*
+    signal, only an attention one. It carries the run's status in the row's
+    `title` instead. The collapsed mode already drops the alias and the branch;
+    what it must not drop is anything asking to be acted on.
+  - The ⌘K worktree rows had the identical two-dot collision and have no run
+    control to move state onto, so they spell the state out in the hint
+    (`PALETTE_STATUS`) — and only for `failed`/`recovering`, since ⌘K is how you
+    *go* somewhere and the rail is on screen while it is open.
 - **Pending markers** (`prunePending`, `crates/veld-daemon/ui/src/model.ts`)
   are optimistic per-worktree flags cleared when the worktree's *run signature*
   (`status:run_id`) moves — status alone is not enough, because `veld restart`
   returns to `running` and would never register. A 60s TTL bounds an action
-  that 202s and then never lands.
+  that 202s and then never lands. They are a **latency optimisation, not the
+  source of truth**: every run control spins on `spinnerAction(pending, run)` =
+  `pending ?? transitionAction(run)`, so a run started from the CLI, from another
+  window, or already coming up when the window opened spins too. It did not
+  before, and that was survivable only while the dot covered those cases —
+  deleting the dot without this would have shown ▶ on a run that was starting.
+  - **One function, because two surfaces derived it separately and disagreed.**
+    The rail row got the observed-transition fallback first and the top bar's
+    play/stop did not, so the same worktree spun in the rail and showed a static
+    glyph in the bar for the whole of an externally-started transition. Any new
+    run control uses `spinnerAction`.
+  - `pending` stays a *separate* prop from `spinner`, and only it may disable:
+    a spinner is a state display, and a run some other surface started is still
+    legitimately stoppable while it comes up. Only an action this window fired
+    and has not seen land locks the control. It also keys the restart button,
+    since `transitionAction` cannot know a stop-then-start was one action.
+  - The two halves must keep agreeing about which statuses are in transition,
+    which `model.test.ts` pins as `partial` ⇔ `transitionAction() !== null`.
 - **⌘K** fuzzy-searches worktrees *and* commands. With no query the items are
   grouped in `PALETTE_GROUPS` order; once the user types, grouping gives way to
   a single score-ordered list. The matcher runs two scans — plain leftmost and
