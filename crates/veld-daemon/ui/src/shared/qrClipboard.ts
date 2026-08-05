@@ -57,7 +57,7 @@ async function qrPng(value: string): Promise<Blob | null> {
       x += run - 1;
     }
   }
-  drawVeldMark(ctx, qr.size + 2 * QR_QUIET_ZONE);
+  drawVeldMark(ctx, qr.size);
   return await new Promise((resolve) =>
     canvas.toBlob((b) => resolve(b), "image/png"),
   );
@@ -66,16 +66,19 @@ async function qrPng(value: string): Promise<Blob | null> {
 /**
  * The same centre mark the on-screen SVG draws, in canvas coordinates.
  *
- * Shares [`VELD_MARK`] with the SVG rather than reimplementing the geometry: the
- * picture on the clipboard has to be the picture that was on screen, and "roughly the
- * same logo" would mean the two consume different amounts of the error-correction
- * budget — so one could scan while the other did not.
+ * Shares [`VELD_MARK`] and [`veldMarkBox`] with the SVG rather than reimplementing the
+ * geometry: the picture on the clipboard has to be the picture that was on screen, and
+ * "roughly the same logo" would mean the two damage different numbers of codewords — so
+ * one could scan while the other did not. Sharing the *constant* was not enough to get
+ * that (the two renderers draw different quiet zones, which used to feed the size), so
+ * `veldMarkBox` now takes the symbol size and the quiet zone separately and only the
+ * placement depends on the latter.
  *
  * `Path2D` takes SVG path data directly, which is what lets the logo's own two paths be
  * used verbatim instead of being retraced with canvas primitives.
  */
-function drawVeldMark(ctx: CanvasRenderingContext2D, box: number): void {
-  const { side, origin } = veldMarkBox(box);
+function drawVeldMark(ctx: CanvasRenderingContext2D, symbolSize: number): void {
+  const { side, origin } = veldMarkBox(symbolSize, QR_QUIET_ZONE);
   const scale = ((side - 2 * VELD_MARK.pad) / VELD_MARK.viewBox) * SCALE;
   const plate = side * SCALE;
   const at = origin * SCALE;

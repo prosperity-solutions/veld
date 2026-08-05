@@ -168,8 +168,11 @@ export function RemoveRepoDialog(props: {
  * it, and clearing it hands it back to the derivation.
  *
  * The marker is picked here too, rather than being a second trip through the context
- * menu after the checkout exists. Leaving it untouched keeps the daemon's assignment,
- * which is the common case and must not require a decision.
+ * menu after the checkout exists. A free colour and glyph are drawn at random when the
+ * dialog opens and **sent explicitly**, so the checkout wears what the dialog showed;
+ * the daemon's own assignment is now only the fallback for the frame before the choice
+ * lists resolve. Picking nothing is still a valid way to use this — it just means
+ * accepting the draw rather than reaching a different code path.
  */
 export function NewWorktreeDialog(props: {
   onCreate: (body: {

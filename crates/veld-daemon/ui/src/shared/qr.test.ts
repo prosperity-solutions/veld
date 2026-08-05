@@ -155,10 +155,26 @@ describe("quiet zones", () => {
 });
 
 describe("veldMarkBox", () => {
-  it("centres the mark", () => {
-    const box = qrViewBox(encodeQr("https://veld.oss.life.li")!, QR_SCREEN_QUIET_ZONE);
-    const { side, origin } = veldMarkBox(box);
-    expect(origin + side / 2).toBeCloseTo(box / 2);
+  it("centres the mark inside whichever quiet zone it is given", () => {
+    const qr = encodeQr("https://veld.oss.life.li")!;
+    for (const quiet of [QR_SCREEN_QUIET_ZONE, QR_QUIET_ZONE]) {
+      const { side, origin } = veldMarkBox(qr.size, quiet);
+      expect(origin + side / 2).toBeCloseTo(qrViewBox(qr, quiet) / 2);
+    }
+  });
+
+  it("sizes the mark identically for every quiet zone", () => {
+    // The property the two renderers depend on. The on-screen SVG draws a 2-module quiet
+    // zone and the copied PNG draws 4; when `side` was derived from the padded box, the
+    // two disagreed for 7 of the 10 versions — while the comment beside them claimed
+    // sharing the constant guaranteed they matched. A review angle caught the claim; this
+    // pins the fix.
+    for (const bytes of [10, 40, 80, 120, 213]) {
+      const qr = encodeQr("x".repeat(bytes))!;
+      expect(veldMarkBox(qr.size, QR_SCREEN_QUIET_ZONE).side).toBe(
+        veldMarkBox(qr.size, QR_QUIET_ZONE).side,
+      );
+    }
   });
 
   it("stays inside the error-correction budget at every version", () => {
@@ -168,8 +184,7 @@ describe("veldMarkBox", () => {
     // `fraction` that looks harmless fails here instead of in someone's hand.
     for (const bytes of [10, 100, 213]) {
       const qr = encodeQr("x".repeat(bytes))!;
-      const box = qrViewBox(qr, QR_SCREEN_QUIET_ZONE);
-      const { side } = veldMarkBox(box);
+      const { side } = veldMarkBox(qr.size, QR_SCREEN_QUIET_ZONE);
       const covered = (side * side) / (qr.size * qr.size);
       expect(covered).toBeLessThan(0.07);
     }
@@ -178,8 +193,10 @@ describe("veldMarkBox", () => {
   it("never shrinks below a legible side", () => {
     // A version-1 symbol is 21 modules; 18% of it would be under four, at which point
     // the mark is a smudge rather than a logo.
-    const box = qrViewBox(encodeQr("hi")!, QR_SCREEN_QUIET_ZONE);
-    expect(veldMarkBox(box).side).toBeGreaterThanOrEqual(VELD_MARK.minSide);
+    const qr = encodeQr("hi")!;
+    expect(veldMarkBox(qr.size, QR_SCREEN_QUIET_ZONE).side).toBeGreaterThanOrEqual(
+      VELD_MARK.minSide,
+    );
   });
 });
 

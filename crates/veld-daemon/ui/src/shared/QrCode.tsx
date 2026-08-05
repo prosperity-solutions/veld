@@ -37,8 +37,8 @@ import {
  * cannot make. Geometry and path data come from [`VELD_MARK`], shared with the canvas
  * renderer behind *Copy QR* so the two cannot draw different codes.
  */
-function VeldMark(props: { box: number }) {
-  const { side, origin } = veldMarkBox(props.box);
+function VeldMark(props: { symbolSize: number; quiet: number }) {
+  const { side, origin } = veldMarkBox(props.symbolSize, props.quiet);
   const scale = (side - 2 * VELD_MARK.pad) / VELD_MARK.viewBox;
   return (
     <g>
@@ -109,7 +109,7 @@ export function QrCode(props: {
           the mark is curves, not a grid. */}
       {props.logo !== false && (
         <g style={{ shapeRendering: "auto" }}>
-          <VeldMark box={box} />
+          <VeldMark symbolSize={qr.size} quiet={quiet} />
         </g>
       )}
     </svg>

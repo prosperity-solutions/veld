@@ -249,11 +249,13 @@ export function trashRetentionDays(doc: SettingsDoc): number {
 }
 
 /**
- * Days of ended runs the history views show, or `0` for "show all" — the default.
+ * Days of ended runs the history views show. **Defaults to 3**; `0` means "show all".
  *
- * A view filter and nothing else: no run is deleted by it, and hiding one never
- * costs anything but a scroll. That is why it can default to a plain number with no
- * confirmation, unlike [`trashRetentionDays`] next to it.
+ * A view filter and nothing else: no run is deleted by it, and hiding one never costs
+ * anything but a scroll. That is why this one can default to a number that hides
+ * something, where [`trashRetentionDays`] above must default to the value that cannot
+ * delete anybody's checkout — the two docblocks look alike and their defaults are
+ * opposite for that reason.
  */
 export function runHistoryDays(doc: SettingsDoc): number {
   return num(doc, "runs.historyDays", FALLBACK.runHistoryDays);

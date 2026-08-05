@@ -355,7 +355,7 @@ function maskAt(m: number, x: number, y: number): boolean {
  * The four penalty rules, summed.
  *
  * Implemented straight from the spec rather than cleverly: this runs eight times
- * for a symbol of at most 57×57, once, in a popover.
+ * for a symbol of at most 65×65, once, when a panel opens.
  */
 function penalty(m: boolean[][]): number {
   const size = m.length;
@@ -481,7 +481,7 @@ export function encodeQr(text: string, forceMask?: number): QrMatrix | null {
  * The dark modules as one SVG path, in a viewBox of `size + 2 * quiet` units.
  *
  * One path rather than a rect per module: a version-10 symbol is 2916 modules and
- * roughly half of them are dark, which is 1400 DOM nodes for a popover. A path also
+ * roughly half of them are dark, which is 1400 DOM nodes per code. A path also
  * scales with `width`/`height` alone, so the caller picks a size without the
  * renderer knowing anything about it.
  *
@@ -535,7 +535,16 @@ export const QR_SCREEN_QUIET_ZONE = 2;
  * is why it is written down here rather than looking like an oversight.
  */
 export const VELD_MARK = {
-  /** Mark side as a fraction of the symbol side (quiet zone included). */
+  /**
+   * Mark side as a fraction of the **symbol** side, quiet zone excluded.
+   *
+   * Excluded deliberately, and this was a review finding rather than a first draft:
+   * measuring against the padded box made the mark's size depend on how much quiet zone
+   * the *renderer* happened to draw, so the on-screen code (2 modules) and the copied
+   * PNG (4 modules) disagreed on the mark for 7 of the 10 versions — while the comment
+   * beside them claimed sharing this constant guaranteed they matched. The symbol size
+   * is the only input both renderers agree on.
+   */
   fraction: 0.18,
   /** Inset of the glyph inside its white plate, in modules. */
   pad: 0.6,
@@ -549,10 +558,20 @@ export const VELD_MARK = {
   dotFill: "#000000",
 } as const;
 
-/** The mark's side and origin for a symbol whose viewBox is `box` modules. */
-export function veldMarkBox(box: number): { side: number; origin: number } {
-  const side = Math.max(VELD_MARK.minSide, Math.round(box * VELD_MARK.fraction));
-  return { side, origin: (box - side) / 2 };
+/**
+ * The mark's side, and its origin in viewBox coordinates, for a symbol of `symbolSize`
+ * modules drawn with a `quiet`-module margin.
+ *
+ * `side` depends only on the symbol, so every renderer damages exactly the same
+ * codewords whatever quiet zone it draws; `origin` is the only quiet-zone-dependent
+ * part, because that is a placement question and not a size one.
+ */
+export function veldMarkBox(
+  symbolSize: number,
+  quiet: number,
+): { side: number; origin: number } {
+  const side = Math.max(VELD_MARK.minSide, Math.round(symbolSize * VELD_MARK.fraction));
+  return { side, origin: quiet + (symbolSize - side) / 2 };
 }
 
 export function qrPath(qr: QrMatrix, quiet: number = QR_QUIET_ZONE): string {

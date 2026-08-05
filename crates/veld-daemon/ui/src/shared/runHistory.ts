@@ -2,10 +2,17 @@
  * The run-history horizon: which ended runs the views show.
  *
  * `runs.historyDays` hides ended runs older than N days, with `0` meaning "show
- * everything". Applied here, once, to the payload both modes poll — rather than at
- * each of the four surfaces that render history (runs mode's History tab and its
- * card picker, the IDE nodes-view picker, the logs panel's run picker), which would
- * be four filters to keep in agreement.
+ * everything".
+ *
+ * Two filters, not one, and the split is structural rather than an oversight.
+ * [`pruneRunHistory`] runs once over the polled payload and prunes the nested `history`
+ * arrays, which is what the three *picker* surfaces read (runs mode's card picker, the
+ * IDE nodes-view picker, the logs panel's run picker) — so those three cannot disagree
+ * with each other. Runs mode's **History tab** lists top-level `RunInfo` rows instead,
+ * which `pruneRunHistory` deliberately never drops (see property 2 below), so that tab
+ * applies [`hiddenByHorizon`] itself. A blind cutoff over `RunInfo` is exactly what must
+ * not be centralised: a row can be *live*, and hiding a running environment because it
+ * started last week would be a bug in every other consumer of that payload.
  *
  * Three properties are deliberate:
  *
