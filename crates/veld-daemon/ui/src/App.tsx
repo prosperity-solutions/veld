@@ -38,6 +38,7 @@ import {
   sortedUrls,
   spinnerAction,
   worktreeStatus,
+  DELETING_LANE,
   TRASH_LANE,
   type PendingAction,
   type RailGroup,
@@ -817,6 +818,20 @@ function AppInner(props: {
   // and strand its spinner. Each entry clears when THAT worktree's run
   // signature moves off the value it had when the action was fired.
   const [pending, setPending] = useState<PendingMap>({});
+  // Worktrees this window has asked to delete *permanently* and that have not
+  // yet vanished. The daemon reports the true point of no return as
+  // `worktree.deleting` only once `git worktree remove` is actually running;
+  // for the window the user just confirmed from, the intent matters from the
+  // click — a long run teardown can leave the row looking like recoverable
+  // trash for up to STOP_TIMEOUT, which is exactly the ambiguity this lane
+  // exists to remove. So the confirmed ids ride here too, and rendering treats
+  // either source identically (see `isDeleting`). The daemon's flag keeps the
+  // state honest across windows and for retention sweeps the UI never fired.
+  //
+  // **Local, optimistic, pruned on every poll.** The same discipline as
+  // `pending` — see the effect below.
+  const [deletingIds, setDeletingIds] = useState<Set<number>>(new Set());
+  const isDeleting = (w: Worktree) => w.deleting || deletingIds.has(w.id);
   // Every loaded worktree, not just the selected repo's: switching projects
   // mid-action must not look like the worktree vanished, or the marker is
   // dropped and the re-enabled control invites a double fire.
@@ -835,6 +850,23 @@ function AppInner(props: {
     // when the payload changes: a failed refresh leaves `envs` identical, and
     // without this a marker could never expire while the daemon is down.
   }, [envs, allWorktrees, poll]);
+  // Prune the optimistic deletion set to what is still a trashed worktree. A
+  // successful removal drops the row entirely; a failed one comes back
+  // *untrashed* (with `trash_error`) so it rejoins the rail; a restore un-trashes
+  // it too. In every case `trashed_at` is empty or the id is gone, so keeping
+  // only ids that are still trashed is exactly "still on its way out". Without
+  // this the set would grow forever with every row ever confirmed for deletion.
+  useEffect(() => {
+    setDeletingIds((cur) => {
+      if (cur.size === 0) return cur;
+      const next = new Set<number>();
+      for (const id of cur) {
+        const wt = allWorktrees.find((w) => w.id === id);
+        if (wt && wt.trashed_at) next.add(id);
+      }
+      return next.size === cur.size ? cur : next;
+    });
+  }, [allWorktrees]);
   const pendingFor = (w: Worktree | null): PendingAction | null =>
     w ? (pending[w.id]?.label ?? null) : null;
 
@@ -1052,6 +1084,21 @@ function AppInner(props: {
   };
 
   const worktreeMenu = (w: Worktree) => {
+    // A worktree whose removal has passed the point of no return is not in the
+    // trash and cannot be restored or re-deleted — it is actively coming off the
+    // disk. A menu of actions that would all fail is worse than no menu.
+    if (isDeleting(w)) {
+      return showContextMenu([
+        {
+          key: "deleting",
+          title: "Being deleted — cannot be restored",
+          // Disabled and inert: every action a row usually has (restore, delete,
+          // start) would fail against a directory that is coming off the disk.
+          disabled: true,
+          onClick: () => {},
+        },
+      ]);
+    }
     // A worktree on its way out has exactly one useful action. Offering the full
     // menu would put "Remove worktree…" on a row already being removed, and
     // "Start run" on a directory about to disappear.
@@ -1944,6 +1991,15 @@ function AppInner(props: {
   const deleteTrashedWorktree = async (w: Worktree) => {
     try {
       await api.deleteTrashedWorktree(w.id);
+      // Move it to the terminal "Deleting" lane immediately: the daemon only
+      // reports `deleting` once the removal is actually running, and the run
+      // teardown in between can take a while. From the confirm, the row is
+      // committed and must not read as recoverable trash.
+      setDeletingIds((cur) => {
+        const next = new Set(cur);
+        next.add(w.id);
+        return next;
+      });
       notifyDone(`Deleting ${w.alias}`);
     } catch (e) {
       notifyError(`Could not delete ${w.alias}`, e);
@@ -1955,6 +2011,14 @@ function AppInner(props: {
     if (!repo) return;
     try {
       const { queued } = await api.emptyTrash(repo.root);
+      // Same as a single confirm: every trashed row enters the Deleting lane now.
+      setDeletingIds((cur) => {
+        const next = new Set(cur);
+        for (const w of worktrees) {
+          if (w.trashed_at) next.add(w.id);
+        }
+        return next;
+      });
       notifyDone(
         queued === 1 ? "Deleting 1 worktree" : `Deleting ${queued} worktrees`,
       );
@@ -1980,6 +2044,25 @@ function AppInner(props: {
           : `Could not restore ${w.alias}`,
         e,
       );
+    }
+    await refresh();
+  };
+
+  /** Drop a rail row onto the trash: bin it (revertible), which is what dragging
+   *  a worktree onto the trash intuitively means. Not a lane move — the trash is
+   *  a state, not a destination that orders anything — so it goes straight to
+   *  the bin endpoint rather than `onMove`. */
+  const trashWorktree = async (path: string) => {
+    const w = worktrees.find((x) => x.path === path);
+    if (!w) return;
+    // The main checkout is the repository itself and is never draggable in the
+    // first place (the row gates on `!w.is_main`), so a drop can't reach here;
+    // this is defence in depth so binning main can never be invoked silently.
+    if (w.is_main) return;
+    try {
+      await api.deleteWorktree(w.id, false);
+    } catch (e) {
+      notifyError(`Could not move ${w.alias} to the trash`, e);
     }
     await refresh();
   };
@@ -2609,6 +2692,8 @@ function AppInner(props: {
             onMove={moveWorktreeTo}
             onRestore={restoreWorktree}
             onEmptyTrash={emptyTrash}
+            onTrashDrop={trashWorktree}
+            deleting={deletingIds}
           />
           {worktree && layout && (
             <PaneArea
@@ -3161,8 +3246,32 @@ function Rail(props: {
   onMove: (path: string, toLane: string, toIndex: number) => void;
   onRestore: (w: Worktree) => void;
   onEmptyTrash: () => void;
+  /** Dropping a dragged worktree onto the trash — bins it (revertible), which is
+   *  not a lane move. Receives the dragged worktree's path. */
+  onTrashDrop: (path: string) => void;
+  /** Worktrees this window has optimistically confirmed for permanent deletion
+   *  (see `deletingIds`). Folds into the rendering exactly like the daemon's own
+   *  `worktree.deleting` flag, so the two sources can't disagree visually. */
+  deleting: ReadonlySet<number>;
 }) {
-  const groups = railGroups(props.worktrees, props.lanes);
+  // The daemon's `deleting` flag starts only once `git worktree remove` is
+  // running; a row this window confirmed moments ago is folded in here so it
+  // enters the terminal lane on the click. Kept separate from `props.worktrees`
+  // (which other consumers read) by decorating a copy, not mutating.
+  const worktrees = props.worktrees.map((w) =>
+    props.deleting.has(w.id) ? { ...w, deleting: true } : w,
+  );
+  const groups = railGroups(worktrees, props.lanes);
+  // The trash and the terminal deleting lane are pinned to the bottom of the
+  // rail and never scroll with the rows; everything above them does. Splitting
+  // here keeps one render for both halves — `renderGroup` below.
+  const dockedKeys = new Set([DELETING_LANE, TRASH_LANE]);
+  const scroll = groups.filter((g) => !dockedKeys.has(g.key));
+  const docked = groups.filter((g) => dockedKeys.has(g.key));
+  // The dock always renders in wide mode — the trash header is the point of an
+  // always-visible trash. Collapsed, a group has no header, so an empty dock is a
+  // bare bordered strip; only show it there when it actually holds a row.
+  const dockVisible = props.wide || docked.some((g) => g.worktrees.length > 0);
   // Drag state is local: it is transient pointer feedback, and lifting it would
   // re-render the pane area on every dragover.
   const [dragPath, setDragPath] = useState<string | null>(null);
@@ -3183,6 +3292,12 @@ function Rail(props: {
   // whose result you cannot see is a reorder you did not mean.
   const canDrag = props.wide;
 
+  /** Whether this section accepts a dropped worktree. Pinned sections are
+   *  normally not drop targets (they take no part in ordering) — the **trash is
+   *  the exception**: it is a destination in its own right, where a drop bins the
+   *  dragged worktree rather than positioning it. */
+  const canDropOn = (group: RailGroup) => !group.pinned || group.key === TRASH_LANE;
+
   /**
    * Drop handlers for a section, resolving to an insertion index.
    *
@@ -3190,10 +3305,13 @@ function Rail(props: {
    * row is reachable — without it, appending to a group was impossible: the row's
    * own handler stops propagation before the section's `index = length` handler
    * runs, and a flex column has no blank space under its last child to aim at.
+   *
+   * The trash ignores the insertion index: dropping there is a bin, not a
+   * position.
    */
   const dropZone = (group: RailGroup, index: number, half = false) => ({
     onDragOver: (e: React.DragEvent) => {
-      if (!dragPath || group.pinned) return;
+      if (!dragPath || !canDropOn(group)) return;
       // Both required: preventDefault marks the element a valid drop target, and
       // without stopPropagation the enclosing section's own zone also fires and the
       // indicator flickers between the two.
@@ -3202,59 +3320,32 @@ function Rail(props: {
       setDropAt({ key: group.key, index: index + (half && below(e) ? 1 : 0) });
     },
     onDrop: (e: React.DragEvent) => {
-      if (!dragPath || group.pinned) return;
+      if (!dragPath || !canDropOn(group)) return;
       e.preventDefault();
       e.stopPropagation();
-      props.onMove(dragPath, group.key, index + (half && below(e) ? 1 : 0));
+      if (group.key === TRASH_LANE) {
+        props.onTrashDrop(dragPath);
+      } else {
+        props.onMove(dragPath, group.key, index + (half && below(e) ? 1 : 0));
+      }
       endDrag();
     },
   });
 
-  return (
-    <div
-      className={`rail${props.wide ? " wide" : ""}${resizing ? " resizing" : ""}`}
-      style={props.wide ? { width: props.width } : undefined}
-    >
-      <div className="rail-head">
-        <ActionIcon
-          size="sm"
-          variant="subtle"
-          color="gray"
-          title="Expand / collapse"
-          onClick={props.onToggle}
-        >
-          {props.wide ? <IconChevronLeft size={13} /> : <IconChevronRight size={13} />}
-        </ActionIcon>
-        {props.wide && (
-          <ActionIcon
-            size="sm"
-            variant="subtle"
-            color="gray"
-            title="New lane"
-            onClick={props.onAddLane}
-          >
-            <IconFolderPlus size={14} />
-          </ActionIcon>
-        )}
-        <ActionIcon
-          size="sm"
-          variant="subtle"
-          color="gray"
-          title="New worktree"
-          onClick={props.onAdd}
-        >
-          <IconPlus size={14} />
-        </ActionIcon>
-      </div>
-      <div className="rail-list" onDragEnd={endDrag}>
-        {groups.map((group) => (
+  /**
+   * Render one rail section — a lane, a user lane, or one of the two
+   * pinned bottom lanes (trash / deleting). Shared by the scrollable list
+   * and the bottom dock, so a lane and the trash render identically; they
+   * differ only in where they live, not in how a row looks.
+   */
+  const renderGroup = (group: RailGroup) => (
           <div
             key={group.key}
-            className={`rail-group${group.key === TRASH_LANE ? " trash" : ""}${
+            className={`rail-group${group.key === TRASH_LANE ? " trash" : ""}${group.key === DELETING_LANE ? " deleting" : ""}${
               // Lit while a drag is over this section, so the target reads as a
               // whole area and not only as a caret between two rows. This is the
               // only feedback an EMPTY lane can give.
-              dragPath && !group.pinned && dropAt?.key === group.key
+              dragPath && canDropOn(group) && dropAt?.key === group.key
                 ? " drop-in"
                 : ""
             }`}
@@ -3317,8 +3408,11 @@ function Rail(props: {
             )}
             {/* An empty lane needs a target you can see and hit. Without this the
                 only droppable area was the header's few pixels of margin, so a lane
-                you had just made looked like it refused worktrees. */}
-            {props.wide && !group.pinned && group.worktrees.length === 0 && (
+                you had just made looked like it refused worktrees. The trash is a
+                drop target too — dropping a worktree on it bins it — so an empty
+                trash needs the same affordance, saying plainly that worktrees can
+                be dropped here. */}
+            {props.wide && canDropOn(group) && group.worktrees.length === 0 && (
               <div className="lane-empty">
                 {dragPath ? "Drop here" : "Empty — drag a worktree in"}
               </div>
@@ -3362,6 +3456,9 @@ function Rail(props: {
                   ? ` · ${live.status}`
                   : "";
               const trashed = w.trashed_at !== "";
+              // Terminal removal — distinct from recoverable trash: rendered in the
+              // Deleting lane, not revertible, actively coming off the disk.
+              const deletingRow = group.key === DELETING_LANE;
               // Inline controls are wide-only — a 64px collapsed row has no space
               // for them. Right-click reaches the same actions in either mode.
               // A worktree on its way out gets none: it cannot be started, and a
@@ -3389,15 +3486,17 @@ function Rail(props: {
                   /* Selection is "which one am I looking at", not a toggle that
                      can be un-pressed — aria-current, not aria-pressed. */
                   aria-current={props.active?.id === w.id ? true : undefined}
-                  className={`wt-row${props.active?.id === w.id ? " active" : ""}${props.wide ? "" : " slim"}${away ? " away" : ""}${trashed ? " trashed" : ""}${w.trash_error ? " failed-remove" : ""}${dragPath === w.path ? " dragging" : ""}`}
+                  className={`wt-row${props.active?.id === w.id ? " active" : ""}${props.wide ? "" : " slim"}${away ? " away" : ""}${trashed ? " trashed" : ""}${deletingRow ? " deleting" : ""}${w.trash_error ? " failed-remove" : ""}${dragPath === w.path ? " dragging" : ""}`}
                   title={
-                    trashed
-                      ? `${w.alias} — in the trash, still on disk`
-                      : w.trash_error
-                        ? `${w.alias} — could not be deleted: ${w.trash_error}`
-                        : away
-                          ? `${w.alias} — ${w.branch}${stateNote} (open in another window)`
-                          : `${w.alias} — ${w.branch}${stateNote}`
+                    deletingRow
+                      ? `${w.alias} — being deleted, cannot be restored`
+                      : trashed
+                        ? `${w.alias} — in the trash, still on disk`
+                        : w.trash_error
+                          ? `${w.alias} — could not be deleted: ${w.trash_error}`
+                          : away
+                            ? `${w.alias} — ${w.branch}${stateNote} (open in another window)`
+                            : `${w.alias} — ${w.branch}${stateNote}`
                   }
                   /* Pending removals are not draggable: they are leaving, so a
                      position for them means nothing. */
@@ -3461,11 +3560,13 @@ function Rail(props: {
                           that is the one thing about this row that is not the
                           branch any more. Trashed rows say what is happening to
                           them; the branch is not the news. */}
-                      {trashed
-                        ? "in trash"
-                        : w.trash_error
-                          ? w.trash_error
-                          : w.branch}
+                      {deletingRow
+                        ? "deleting…"
+                        : trashed
+                          ? "in trash"
+                          : w.trash_error
+                            ? w.trash_error
+                            : w.branch}
                     </span>
                   )}
                   {/* Beside the run control, and not on the marker. The marker is
@@ -3564,7 +3665,7 @@ function Rail(props: {
                       <IconDotsVertical size={12} />
                     </button>
                   )}
-                  {props.wide && trashed && (
+                  {props.wide && trashed && !deletingRow && (
                     <button
                       type="button"
                       className="wt-edit"
@@ -3578,14 +3679,63 @@ function Rail(props: {
                       <IconArrowBackUp size={12} />
                     </button>
                   )}
+                  {/* A terminal removal has no restore — it is committed — so the
+                      trailing slot that would hold Restore carries a spinner
+                      instead, making the in-progress state audible as motion. */}
+                  {props.wide && deletingRow && (
+                    <Loader size={12} className="wt-deleting-spinner" />
+                  )}
                   </div>
                   {caretAfter && <RailCaret />}
                 </Fragment>
               );
             })}
           </div>
-        ))}
+  );
+  return (
+    <div
+      className={`rail${props.wide ? " wide" : ""}${resizing ? " resizing" : ""}`}
+      style={props.wide ? { width: props.width } : undefined}
+    >
+      <div className="rail-head">
+        <ActionIcon
+          size="sm"
+          variant="subtle"
+          color="gray"
+          title="Expand / collapse"
+          onClick={props.onToggle}
+        >
+          {props.wide ? <IconChevronLeft size={13} /> : <IconChevronRight size={13} />}
+        </ActionIcon>
+        {props.wide && (
+          <ActionIcon
+            size="sm"
+            variant="subtle"
+            color="gray"
+            title="New lane"
+            onClick={props.onAddLane}
+          >
+            <IconFolderPlus size={14} />
+          </ActionIcon>
+        )}
+        <ActionIcon
+          size="sm"
+          variant="subtle"
+          color="gray"
+          title="New worktree"
+          onClick={props.onAdd}
+        >
+          <IconPlus size={14} />
+        </ActionIcon>
       </div>
+      <div className="rail-list" onDragEnd={endDrag}>
+        {scroll.map((group) => renderGroup(group))}
+      </div>
+      {dockVisible && (
+        <div className="rail-dock" onDragEnd={endDrag}>
+          {docked.map((group) => renderGroup(group))}
+        </div>
+      )}
       {/* Only when expanded: collapsed is a mode with a fixed width, so there is
           nothing to drag. */}
       {props.wide && (
@@ -3811,3 +3961,4 @@ function CommandPalette(props: {
     </Modal>
   );
 }
+

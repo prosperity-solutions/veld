@@ -611,6 +611,16 @@ struct RepoView {
 struct WorktreeView {
     #[serde(flatten)]
     worktree: WorktreeRecord,
+    /// Whether this checkout's removal is past the point of no return — the
+    /// terminal state the rail separates from the trash as its own "Deleting"
+    /// lane.
+    ///
+    /// Not a database column: it is the daemon's in-memory guard (see
+    /// `worktree_trash::now_deleting`), so it reads from there rather than from
+    /// the row. Only true while `git worktree remove` is actually running — a
+    /// worktree that has merely been *queued* for removal still reports
+    /// `trashed_at` to let the user undo it.
+    deleting: bool,
     /// Whether the checkout has a root config — drives whether the UI shows run
     /// controls for it.
     has_veld_config: bool,
@@ -757,8 +767,12 @@ fn worktree_view(wt: WorktreeRecord) -> WorktreeView {
             }
         })
         .unwrap_or_default();
+    // `wt` is moved into the view below, so the guard read happens here — before
+    // the move — rather than in the literal, where `wt.id` would not resolve.
+    let deleting = super::worktree_trash::now_deleting(wt.id);
     WorktreeView {
         worktree: wt,
+        deleting,
         has_veld_config,
         presets,
         nodes,
