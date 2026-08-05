@@ -71,7 +71,7 @@ pub async fn run() -> i32 {
                     cleanup_stale_binaries();
                     output::print_info("Restarting services with new binaries...");
                     restart_services(&new_version, helper_dead_privileged).await;
-                    refresh_hammerspoon().await;
+                    remove_legacy_hammerspoon().await;
                     0
                 }
                 Err(e) => {
@@ -110,31 +110,28 @@ fn find_running_environments() -> Vec<(std::path::PathBuf, String)> {
     running
 }
 
-/// Re-install the Hammerspoon Spoon if it was previously set up.
-/// The Spoon files are embedded in the binary, so they need to be re-extracted
-/// after every CLI update to pick up any changes.
-async fn refresh_hammerspoon() {
-    let spoon_dir = match dirs::home_dir() {
-        Some(h) => h.join(".hammerspoon/Spoons/Veld.spoon"),
-        None => return,
-    };
-    if !spoon_dir.exists() {
+/// Clean up the Spoon left behind by the Hammerspoon menu bar integration veld
+/// used to ship. The widget shells into `veld list --json`, so leaving it in
+/// place means a surface nothing tests against keeps running.
+///
+/// One-shot and idempotent — a machine that never had it says nothing. Delete
+/// this call once the installed base has turned over.
+async fn remove_legacy_hammerspoon() {
+    let result = veld_core::setup::remove_legacy_hammerspoon().await;
+    if !result.removed {
         return;
     }
 
-    output::print_info("Updating Hammerspoon Veld.spoon...");
-    match veld_core::setup::install_hammerspoon().await {
-        Ok(result) => {
-            output::print_success(&result.message);
-        }
-        Err(e) => {
-            output::print_error(
-                &format!(
-                    "Failed to update Hammerspoon Spoon: {e}. Run `veld setup hammerspoon` manually."
-                ),
-                false,
-            );
-        }
+    output::print_info(
+        "Removed the retired Hammerspoon widget (~/.hammerspoon/Spoons/Veld.spoon).",
+    );
+    if let Some(init_lua) = result.stale_init_lua {
+        // veld does not edit a user's config. Left in place, the loadSpoon line
+        // errors on every Hammerspoon reload, so it has to be called out.
+        output::print_info(&format!(
+            "Remove the `hs.loadSpoon(\"Veld\")` line from {} — it now points at nothing.",
+            init_lua.display()
+        ));
     }
 }
 

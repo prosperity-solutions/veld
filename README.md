@@ -425,18 +425,6 @@ Download the `.dmg` (macOS) or `.AppImage` / `.deb` (Linux x64) from the [latest
 
 Updates are checked in the background and offered, never applied behind your back — applying one restarts the app. The Linux AppImage installs the update itself; on macOS and on `.deb` installs the app opens the release page instead, because macOS only lets an app replace itself when the replacement carries the same code signature (and there isn't one yet) and a `.deb`'s files belong to your package manager. *Check for Updates…* is in the menu bar icon (macOS) and the application menu.
 
-### Hammerspoon (macOS)
-
-If you use [Hammerspoon](https://www.hammerspoon.org/), Veld ships a menu bar widget that shows running environments at a glance.
-
-```sh
-veld setup hammerspoon
-```
-
-This installs the `Veld.spoon` into `~/.hammerspoon/Spoons/` and offers to patch your `init.lua` to load it automatically. No sudo required. The menu includes an "Open Management UI" item for quick access to the browser dashboard.
-
-Check extension status with `veld doctor`.
-
 ## Sharing
 
 Share a running environment with a colleague so they open the **same** URLs on their own machine, over an encrypted peer-to-peer tunnel (iroh: QUIC with NAT hole-punching and an n0 relay fallback). No accounts, no Veld-hosted server.

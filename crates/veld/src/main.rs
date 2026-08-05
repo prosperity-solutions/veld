@@ -24,8 +24,6 @@ pub enum SetupCommand {
         #[arg(long, hide = true)]
         caddy_bin: Option<std::path::PathBuf>,
     },
-    /// Install Hammerspoon menu bar widget (macOS only).
-    Hammerspoon,
 }
 
 /// Veld -- local development environment orchestrator.

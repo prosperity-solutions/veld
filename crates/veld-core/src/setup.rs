@@ -282,21 +282,6 @@ impl StepResult {
     }
 }
 
-/// Result from the Hammerspoon install step — carries extra info so the CLI
-/// can interactively offer to patch `init.lua`.
-#[derive(Debug)]
-pub struct HammerspoonResult {
-    pub message: String,
-    /// If `true`, `require("hs.ipc")` is missing from init.lua.
-    pub needs_ipc: bool,
-    /// If `true`, `hs.loadSpoon("Veld")` is missing from init.lua.
-    pub needs_load_spoon: bool,
-    /// Path to the user's init.lua (may not exist yet).
-    pub init_lua_path: PathBuf,
-    /// Real user name (for chown after editing).
-    pub user: String,
-}
-
 // ---------------------------------------------------------------------------
 // Setup steps
 // ---------------------------------------------------------------------------
@@ -1623,8 +1608,9 @@ pub async fn uninstall() -> Result<(), anyhow::Error> {
         }
     }
 
-    // Remove Hammerspoon Spoon (best-effort).
-    uninstall_hammerspoon().await;
+    // Remove the Spoon left over from the old Hammerspoon integration
+    // (best-effort).
+    remove_legacy_hammerspoon().await;
 
     Ok(())
 }
@@ -1779,119 +1765,49 @@ fn resolve_real_user_macos() -> Result<(String, String, PathBuf), anyhow::Error>
 }
 
 // ---------------------------------------------------------------------------
-// Hammerspoon Spoon integration (macOS only, optional)
+// Legacy Hammerspoon Spoon cleanup (macOS only)
 // ---------------------------------------------------------------------------
 
-/// The embedded Spoon init.lua for the Hammerspoon menu bar integration.
-const HAMMERSPOON_SPOON_LUA: &str =
-    include_str!("../../../integrations/hammerspoon/Veld.spoon/init.lua");
-
-/// Embedded menu bar icons for the Hammerspoon Spoon.
-const HAMMERSPOON_ICON_PNG: &[u8] =
-    include_bytes!("../../../integrations/hammerspoon/Veld.spoon/icon.png");
-const HAMMERSPOON_ICON_2X_PNG: &[u8] =
-    include_bytes!("../../../integrations/hammerspoon/Veld.spoon/icon@2x.png");
-
-/// Install the Veld Spoon into ~/.hammerspoon/Spoons/ and load it via `hs` CLI.
-///
-/// Returns a `HammerspoonResult` with details about what the CLI should prompt
-/// the user about (IPC module, loadSpoon line).
-pub async fn install_hammerspoon() -> Result<HammerspoonResult, anyhow::Error> {
-    let (user, uid, home) = resolve_real_user_macos()?;
-    let hs_dir = home.join(".hammerspoon");
-    let user_init_lua = hs_dir.join("init.lua");
-
-    if !hs_dir.exists() {
-        return Ok(HammerspoonResult {
-            message: "Hammerspoon detected but not configured (~/.hammerspoon missing)".into(),
-            needs_ipc: false,
-            needs_load_spoon: false,
-            init_lua_path: user_init_lua,
-            user,
-        });
-    }
-
-    // Write the Spoon to the standard Spoons directory.
-    let spoon_dir = hs_dir.join("Spoons").join("Veld.spoon");
-    std::fs::create_dir_all(&spoon_dir).context("failed to create Veld.spoon directory")?;
-    let init_lua = spoon_dir.join("init.lua");
-    std::fs::write(&init_lua, HAMMERSPOON_SPOON_LUA)
-        .context("failed to write Veld.spoon/init.lua")?;
-    std::fs::write(spoon_dir.join("icon.png"), HAMMERSPOON_ICON_PNG)
-        .context("failed to write Veld.spoon/icon.png")?;
-    std::fs::write(spoon_dir.join("icon@2x.png"), HAMMERSPOON_ICON_2X_PNG)
-        .context("failed to write Veld.spoon/icon@2x.png")?;
-
-    // Fix ownership (setup runs as root via sudo).
-    fix_owner_recursive(&spoon_dir, &user);
-
-    // Check what's in the user's init.lua.
-    let init_contents = std::fs::read_to_string(&user_init_lua).unwrap_or_default();
-    let needs_ipc = !init_contents.contains("hs.ipc");
-    let needs_load_spoon = !init_contents.contains("loadSpoon(\"Veld\")")
-        && !init_contents.contains("loadSpoon('Veld')");
-
-    // Try to load the Spoon via `hs` CLI (IPC).
-    let loaded = load_spoon_via_hs(&uid).await;
-
-    let message = if loaded {
-        "Veld.spoon installed and loaded".into()
-    } else if needs_ipc {
-        "Veld.spoon installed (Hammerspoon IPC not enabled)".into()
-    } else {
-        "Veld.spoon installed".into()
-    };
-
-    Ok(HammerspoonResult {
-        message,
-        needs_ipc,
-        needs_load_spoon,
-        init_lua_path: user_init_lua,
-        user,
-    })
+/// What the legacy Hammerspoon cleanup found and did.
+#[derive(Debug, Default)]
+pub struct LegacyHammerspoonRemoval {
+    /// The `Veld.spoon` directory existed and has been removed.
+    pub removed: bool,
+    /// Path to the user's `init.lua`, when it still loads the Spoon. veld never
+    /// edits a user's config, so the caller has to tell them to drop the line —
+    /// a `loadSpoon("Veld")` left behind errors on every Hammerspoon reload.
+    pub stale_init_lua: Option<PathBuf>,
 }
 
-/// Patch the user's Hammerspoon init.lua to add IPC and/or Veld Spoon loading.
+/// Remove the Veld Spoon left over from the Hammerspoon menu bar integration
+/// veld used to ship (`veld setup hammerspoon`).
 ///
-/// Called by the CLI after the user confirms. Prepends the lines at the top of
-/// the file to ensure they run early.
-pub fn patch_hammerspoon_init_lua(result: &HammerspoonResult) -> Result<(), anyhow::Error> {
-    let path = &result.init_lua_path;
-    let existing = std::fs::read_to_string(path).unwrap_or_default();
+/// Best-effort and idempotent: a machine that never had the Spoon does nothing
+/// and reports nothing. Called from `veld update` and from uninstall.
+///
+/// This is a one-shot cleanup with an expiry, but **do not delete it after one
+/// release**. `veld update` runs the *old* binary — it installs the new one and
+/// then calls its own copy of this step — so the release that carries this code
+/// is not the release that runs it; the cleanup first fires on the update
+/// *after* it lands. Someone who upgrades with `install.sh` (`curl … | sh`)
+/// never runs it at all and removes the Spoon by hand. Give it several releases.
+pub async fn remove_legacy_hammerspoon() -> LegacyHammerspoonRemoval {
+    let mut result = LegacyHammerspoonRemoval::default();
 
-    let mut prepend = String::new();
-    if result.needs_ipc {
-        prepend.push_str("require(\"hs.ipc\")\n");
+    if !cfg!(target_os = "macos") {
+        return result;
     }
-    if result.needs_load_spoon {
-        prepend.push_str("hs.loadSpoon(\"Veld\"):start()\n");
-    }
-
-    if prepend.is_empty() {
-        return Ok(());
-    }
-
-    // Add a blank line between our additions and existing content.
-    let new_contents = if existing.is_empty() {
-        prepend
-    } else {
-        format!("{prepend}\n{existing}")
+    let Ok((_, uid, home)) = resolve_real_user_macos() else {
+        return result;
     };
 
-    std::fs::write(path, &new_contents).context("failed to write Hammerspoon init.lua")?;
-    fix_owner_recursive(path.as_ref(), &result.user);
+    let spoon_dir = home.join(".hammerspoon/Spoons/Veld.spoon");
+    if !spoon_dir.exists() {
+        return result;
+    }
 
-    Ok(())
-}
-
-/// Remove the Veld Spoon (best-effort, called during uninstall).
-async fn uninstall_hammerspoon() {
-    let (_, uid, home) = match resolve_real_user_macos() {
-        Ok(t) => t,
-        Err(_) => return,
-    };
-
-    // Stop the running Spoon so the menu bar icon disappears immediately.
+    // Stop the running Spoon first, so the menu bar icon disappears now instead
+    // of lingering as a widget backed by deleted files.
     let stop_lua = r#"if spoon.Veld then spoon.Veld:stop() end"#;
     let _ = Command::new("launchctl")
         .args(["asuser", &uid, "/usr/local/bin/hs", "-c", stop_lua])
@@ -1901,48 +1817,35 @@ async fn uninstall_hammerspoon() {
         .status()
         .await;
 
-    let spoon_dir = home.join(".hammerspoon/Spoons/Veld.spoon");
-    if spoon_dir.exists() {
-        let _ = std::fs::remove_dir_all(&spoon_dir);
-    }
-}
-
-/// Load the Veld Spoon in the running Hammerspoon instance via `hs -c`.
-async fn load_spoon_via_hs(uid: &str) -> bool {
-    let lua_code = r#"hs.loadSpoon("Veld"); spoon.Veld:start()"#;
-
-    // Try direct `hs` CLI first.
-    let direct = Command::new("hs")
-        .args(["-c", lua_code])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .await;
-
-    if direct.is_ok_and(|s| s.success()) {
-        return true;
+    match std::fs::remove_dir_all(&spoon_dir) {
+        Ok(()) => result.removed = true,
+        Err(e) => {
+            tracing::warn!(path = %spoon_dir.display(), error = %e, "failed to remove Veld.spoon");
+            return result;
+        }
     }
 
-    // Try via launchctl asuser (we're running as root under sudo).
-    let via_launchctl = Command::new("launchctl")
-        .args(["asuser", uid, "/usr/local/bin/hs", "-c", lua_code])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .await;
+    let init_lua = home.join(".hammerspoon/init.lua");
+    let contents = std::fs::read_to_string(&init_lua).unwrap_or_default();
+    if init_lua_loads_veld_spoon(&contents) {
+        result.stale_init_lua = Some(init_lua);
+    }
 
-    via_launchctl.is_ok_and(|s| s.success())
+    result
 }
 
-/// Recursively fix ownership of a path to the real user.
-fn fix_owner_recursive(path: &Path, user: &str) {
-    let _ = std::process::Command::new("chown")
-        .arg("-R")
-        .arg(format!("{user}:staff"))
-        .arg(path)
-        .output();
+/// Whether a Hammerspoon `init.lua` still loads the Veld Spoon.
+///
+/// Deliberately loose — `loadSpoon` and `Veld` anywhere in the file. The old
+/// installer matched the two literal spellings it wrote itself, which was fine
+/// when the answer only decided whether to offer a patch. Here it decides
+/// whether the user is *told* their config now points at nothing, and Lua has
+/// more ways to write the call than those two: `hs.loadSpoon "Veld"` and
+/// `hs.loadSpoon[[Veld]]` are both valid calls without parentheses. A missed
+/// match is the failure this warning exists to prevent; a spurious one costs an
+/// advisory line.
+fn init_lua_loads_veld_spoon(contents: &str) -> bool {
+    contents.contains("loadSpoon") && contents.contains("Veld")
 }
 
 /// Run a command and bail on failure.
@@ -2054,7 +1957,33 @@ fn hang_up_terminal_holders(veld_dir: &Path) {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_launchctl_pid, parse_systemd_main_pid};
+    use super::{init_lua_loads_veld_spoon, parse_launchctl_pid, parse_systemd_main_pid};
+
+    #[test]
+    fn init_lua_veld_spoon_detected_in_every_lua_call_form() {
+        // What the removed installer used to prepend.
+        assert!(init_lua_loads_veld_spoon(
+            "hs.loadSpoon(\"Veld\"):start()\n"
+        ));
+        assert!(init_lua_loads_veld_spoon("hs.loadSpoon('Veld'):start()\n"));
+        // Hand-written variants the old two-literal check missed.
+        assert!(init_lua_loads_veld_spoon("hs.loadSpoon( \"Veld\" )\n"));
+        assert!(init_lua_loads_veld_spoon("hs.loadSpoon \"Veld\"\n"));
+        assert!(init_lua_loads_veld_spoon("hs.loadSpoon[[Veld]]\n"));
+        assert!(init_lua_loads_veld_spoon(
+            "local name = \"Veld\"\nhs.loadSpoon(name)\n"
+        ));
+    }
+
+    #[test]
+    fn init_lua_without_the_veld_spoon_is_not_flagged() {
+        assert!(!init_lua_loads_veld_spoon(""));
+        assert!(!init_lua_loads_veld_spoon("require(\"hs.ipc\")\n"));
+        // Another Spoon, no Veld.
+        assert!(!init_lua_loads_veld_spoon(
+            "hs.loadSpoon(\"Caffeine\"):start()\n"
+        ));
+    }
 
     #[test]
     fn launchctl_pid_running_job() {
