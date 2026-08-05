@@ -9,12 +9,14 @@
   "scripts": {
     "start": "electron .",
     "test": "node --test src/*.test.js",
+    "lint": "biome lint src scripts",
     "package": "electron-builder --publish never",
     "package:mac": "electron-builder --mac --publish never",
     "package:linux": "electron-builder --linux AppImage --x64 --publish never && electron-builder --linux deb --x64 --publish never -c.directories.output=dist-deb && mv dist-deb/*.deb dist/",
     "package:dir": "electron-builder --dir --publish never"
   },
   "devDependencies": {
+    "@biomejs/biome": "^2.5.7",
     "electron": "^43.1.1",
     "electron-builder": "^26.15.3"
   },

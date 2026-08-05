@@ -301,11 +301,18 @@ test:
     cargo test --workspace
     cd crates/veld-daemon/frontend && npm test
     cd crates/veld-daemon/ui && npm test
+    cd desktop && npm test
 
 lint:
     cargo clippy --workspace --all-targets
+    cargo fmt --all --check
     cd crates/veld-daemon/frontend && npx tsc --noEmit
     cd crates/veld-daemon/ui && npm run typecheck
+    # JS/TS surfaces — a new linter is its own guard (see `.github/workflows/ci.yml`);
+    # keeping it in `just lint` means a local run is as strict as a CI job.
+    cd crates/veld-daemon/frontend && npm run lint
+    cd crates/veld-daemon/ui && npm run lint
+    cd desktop && npm run lint
 
 # Assert no CI job can run on a draft PR (AGENTS.md → CI cost convention).
 # Deliberately not folded into `lint`: this needs PyYAML, and `lint` is the
@@ -365,6 +372,7 @@ test-frontend:
 
 lint-frontend:
     cd crates/veld-daemon/frontend && npx tsc --noEmit
+    cd crates/veld-daemon/frontend && npm run lint
 
 setup-frontend:
     cd crates/veld-daemon/frontend && npm install
@@ -422,6 +430,7 @@ test-ui: ui-deps
 
 lint-ui: ui-deps
     cd crates/veld-daemon/ui && npm run typecheck
+    cd crates/veld-daemon/ui && npm run lint
 
 # Install/refresh every npm dep the UI and the desktop shell need. Unlike the
 # guarded checks above this always runs npm, so it also picks up a bump.

@@ -8,6 +8,7 @@
     "dev": "vite",
     "build": "vite build",
     "typecheck": "tsc --noEmit",
+    "lint": "biome lint src",
     "test": "vitest run",
     "test:watch": "vitest"
   },
@@ -26,6 +27,7 @@
     "react-dom": "^19.1.0"
   },
   "devDependencies": {
+    "@biomejs/biome": "^2.5.7",
     "@types/react": "^19.1.0",
     "@types/react-dom": "^19.1.0",
     "@vitejs/plugin-react": "^4.5.0",
