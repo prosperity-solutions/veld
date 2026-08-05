@@ -174,7 +174,12 @@ pub async fn run(
         result = orchestrator.start(
             &parsed_selections,
             run_name_str,
-            veld_core::state::StartOrigin::new(origin_preset.clone(), &parsed_selections),
+            // Always recorded here: a `veld start` always knows what it was asked
+            // for, even when that was explicit tokens (`preset: None`).
+            Some(veld_core::state::StartOrigin::new(
+                origin_preset.clone(),
+                &parsed_selections,
+            )),
         ) => result,
         _ = tokio::signal::ctrl_c() => {
             orchestrator.close_progress_sender();

@@ -944,11 +944,18 @@ function AppInner(props: {
     // second and republish every pane's panel with it.
   }, [JSON.stringify(permissionRules), trustedOrigins.join(" ")]);
 
-  // What the diagnostics panes and the Sharing surface read: the bound run,
-  // which may be an ended one — logs, last node states and a share left to stop
-  // all outlive the run itself, and "what happened to the one I was watching" is
-  // the question right after it dies.
-  const diagRun: RunInfo | null = run;
+  // What the diagnostics panes and the Sharing surface read: the bound run, which
+  // may be an ended one — logs, last node states and a share left to stop all
+  // outlive the run itself, and "what happened to the one I was watching" is the
+  // question right after it dies.
+  //
+  // `pick.run`, deliberately, not the controls' `run`: only the *controls* need the
+  // binding emptied while a start is in flight (they must not act on a run they are
+  // not naming). Emptying it here too made an open logs pane and the Sharing dialog
+  // claim "start the run and its logs appear here" while a run was live in that very
+  // worktree and another was starting. Both panes name the run they are showing, so
+  // the fallback is legible rather than misleading.
+  const diagRun: RunInfo | null = pick.run;
   const diagRef = worktree && diagRun ? runRef(worktree.path, diagRun) : null;
   const diagStats =
     worktree && diagRun
@@ -3207,7 +3214,11 @@ function RunSelect(props: {
     awaiting
       ? `Run ${awaiting}: starting…`
       : selected
-        ? `Run ${selected.name}: ${selected.status}`
+        ? // The pending action, not just the observed status. The status dot this
+          // control replaced announced `Run dev: stop…` while an action was in
+          // flight, and dropping that left a screen reader with nothing but a
+          // spinner on a neighbouring icon button.
+          `Run ${selected.name}: ${props.pending ? `${props.pending}…` : selected.status}`
         : "No run selected",
     origin && !awaiting ? `Started from ${origin}` : null,
     // Neutral about *why* there is no such environment: it may have been removed,
@@ -3240,7 +3251,7 @@ function RunSelect(props: {
                 awaiting
                   ? `Run ${awaiting}: starting`
                   : selected
-                    ? `Run ${selected.name}: ${selected.status}`
+                    ? `Run ${selected.name}: ${props.pending ?? selected.status}`
                     : "No run selected"
               }
             />

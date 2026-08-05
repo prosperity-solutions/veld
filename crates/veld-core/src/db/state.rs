@@ -1112,6 +1112,33 @@ mod tests {
     }
 
     #[test]
+    fn an_absent_origin_stays_absent_through_a_save() {
+        // What `veld restart` carries forward for a run recorded before provenance
+        // existed. Synthesising one from that run's node rows — the dependency
+        // closure — would write a claim the user never made, permanently, and print
+        // it as `Started from: selections <everything>`. `None` is the honest record
+        // and every surface already renders it as no line at all.
+        let (_dir, db) = test_db();
+        let root = Path::new("/tmp/projLegacy");
+        let mut run = sample_run("dev");
+        run.graph_snapshot = Some(crate::state::GraphSnapshot {
+            config_hash: "abc".into(),
+            started_from: None,
+            nodes: std::collections::BTreeMap::new(),
+        });
+        db.save_run(root, "proj", &run).unwrap();
+        assert!(
+            db.get_run(root, "dev")
+                .unwrap()
+                .unwrap()
+                .graph_snapshot
+                .unwrap()
+                .started_from
+                .is_none()
+        );
+    }
+
+    #[test]
     fn a_pre_origin_snapshot_still_loads() {
         // Rows written before provenance existed hold a snapshot with no
         // `started_from` key. Reading one must yield `None`, not an error — a

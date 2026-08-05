@@ -53,11 +53,16 @@ pub async fn run(name: Option<String>, debug: bool) -> i32 {
     // Take the selections from the latest run — live or ended history (the
     // "dev crashed overnight → veld restart" case reads the crashed run).
     //
-    // The origin travels with them, **verbatim**. Node rows are the dependency
-    // closure, so rebuilding an origin from them would record a wider selection
-    // set than the preset that produced it and every restarted run would then
-    // read as `redefined since start`. A pre-origin run has none to carry, and
-    // then the node rows are the only honest answer (`preset: None`).
+    // The origin travels with them, **verbatim**, or not at all. Node rows are the
+    // dependency closure, so rebuilding an origin from them would record a wider
+    // selection set than the invocation asked for — which is what
+    // `StartOrigin::new` explicitly forbids, and it would make every restarted run
+    // read as `redefined since start`.
+    //
+    // A run recorded before provenance existed therefore carries `None` forward.
+    // Synthesising `selections: <the whole closure>` for it would put a claim the
+    // user never made into the database permanently, and print it — worse than the
+    // blank line `start_origin_label(None, …)` already produces.
     let (selections, origin) = match project_state.get_run(run_name) {
         Some(run_state) => {
             let selections: Vec<graph::NodeSelection> = run_state
@@ -71,8 +76,7 @@ pub async fn run(name: Option<String>, debug: bool) -> i32 {
             let origin = run_state
                 .graph_snapshot
                 .as_ref()
-                .and_then(|s| s.started_from.clone())
-                .unwrap_or_else(|| veld_core::state::StartOrigin::new(None, &selections));
+                .and_then(|s| s.started_from.clone());
             (selections, origin)
         }
         None => {

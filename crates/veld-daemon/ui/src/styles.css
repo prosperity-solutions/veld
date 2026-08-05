@@ -640,10 +640,10 @@ select:focus {
 }
 /* Amber and pulsing, like `.wt-alert.recovering`: veld is restarting a node that
    keeps failing its liveness probe. It needs a rule of its own because the run
-   selector renders `runStatus`, which reports `recovering` verbatim — without
-   this the dot would have no background at all and the state would render as an
-   empty circle. (`runStatusClass`, the older mapping, folds it into `partial`,
-   where an unbounded restart loop reads as progress.) */
+   selector renders `runStatus`, which reports `recovering` verbatim — without this
+   the dot would have no background at all and the state would render as an empty
+   circle. The top bar used to fold `recovering` into `partial`, where an unbounded
+   restart loop is indistinguishable from progress; that mapping is gone. */
 .dot.recovering {
   background: var(--warn);
   animation: pulse 1.6s infinite;

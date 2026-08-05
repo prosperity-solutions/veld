@@ -240,6 +240,16 @@ pub struct GraphSnapshot {
 ///
 /// A run started from explicit tokens has `preset: None` — the absence is
 /// meaningful ("this did not come from a preset"), not missing data.
+///
+/// **The cost of riding in the snapshot blob instead of its own column**, stated so
+/// nobody rediscovers it: there is no migration and therefore no `NewerSchema`
+/// downgrade cliff, but an *older* binary that loads and re-saves a run row written
+/// by this one drops this field on deserialize (nothing here is
+/// `deny_unknown_fields`, so it is not even an error) and writes the snapshot back
+/// without it. The monitor and GC both load-then-save, so a downgrade quietly erases
+/// provenance for the runs it touches. Acceptable for an advisory field that every
+/// surface renders as "no line at all" when absent; not acceptable for anything a
+/// decision depends on.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StartOrigin {
     /// The preset's config name (never its `key` — a key is a display

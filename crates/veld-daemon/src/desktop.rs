@@ -652,25 +652,52 @@ struct WorktreeView {
 /// has since been edited". `ResolvedPreset::selections` cannot answer it — those
 /// are the raw entries, `@preset` refs unexpanded.
 ///
-/// **`null` when the expansion failed, never an empty list.** A ref to a preset
-/// that no longer exists, a since-removed node, or a tree over the expansion
-/// budget are all "we cannot say what this name means today" — and an empty vector
-/// says something quite different, because a client comparing it against a run's
-/// recorded selections concludes the preset was *redefined*. That is a false claim
-/// about a config the CLI describes as "cannot be expanded", and this pair of
-/// surfaces contradicting each other over one config state is the bug that made the
-/// CLI's own error handling a review finding. An empty expansion remains legal and
-/// distinct: a preset whose `selections` are `[]` really does expand to nothing.
-///
-/// The preset is still listed either way — one the UI can name and start beats a
-/// hole in the list.
+/// The preset is always listed — one the UI can name and start beats a hole in the
+/// list — and what is *said about its expansion* is a three-state answer, because
+/// collapsing any two of them makes a surface state something false.
 #[derive(Serialize)]
 struct PresetView {
     #[serde(flatten)]
     preset: veld_core::presets::ResolvedPreset,
-    /// Sorted `node:variant` tokens, directly comparable to
-    /// `RunInfo.started_from.selections`. `null` = could not be expanded.
-    expanded: Option<Vec<String>>,
+    expansion: Expansion,
+}
+
+/// How many presets a single repo listing expands, per worktree.
+///
+/// This is the endpoint's cost bound. `GET /api/repos` is CSRF-exempt and polled by
+/// every IDE window, and expansion is recursion over a config that arrives with a
+/// checked-out branch — so the work per poll must not be a number the config
+/// chooses. Presets past this report `skipped`, which is honest and free.
+///
+/// 64 against a hand-written config's handful, and a project that really has more
+/// than 64 presets has a bigger problem than a partial expansion list.
+const PRESETS_EXPANDED_PER_LISTING: usize = 64;
+
+/// What this listing can say about what a preset expands to *right now*.
+///
+/// Three states, none of them foldable into another:
+///
+/// - `ok` — the sorted `node:variant` tokens, directly comparable to
+///   `RunInfo.started_from.selections`. An **empty** vector is a legitimate `ok`: a
+///   preset whose `selections` are `[]` really does expand to nothing.
+/// - `failed` — the preset exists and does not expand: a `@ref` to something gone,
+///   a since-removed node, a cycle. `veld status` says "cannot be expanded — see
+///   `veld lint`" for this, and lint does report it.
+/// - `skipped` — nothing is wrong with the preset; this *listing* ran out of its
+///   shared expansion budget. Distinct from `failed` precisely because the label
+///   `failed` earns ("see `veld lint`") would send the reader to a check that
+///   passes. A client that cannot compare must say so rather than guess, exactly as
+///   it does when the whole config is unreadable.
+///
+/// Collapsing `failed` into `ok` with an empty vector was the first shape here, and
+/// it made the UI report "redefined since start" for a preset the CLI called
+/// unexpandable — one config state, two contradictory claims.
+#[derive(Serialize)]
+#[serde(tag = "state", content = "tokens", rename_all = "snake_case")]
+enum Expansion {
+    Ok(Vec<String>),
+    Failed,
+    Skipped,
 }
 
 /// The `ide` config as the UI consumes it.
@@ -747,25 +774,41 @@ fn worktree_view(wt: WorktreeRecord) -> WorktreeView {
     // `None` when the config did not parse — never an empty list, which means
     // "declares no presets". See `WorktreeView::presets`.
     let presets: Option<Vec<PresetView>> = cfg.as_ref().map(|c| {
-        // ONE budget for the whole listing, not one per preset. Expansion is
-        // config-controlled recursion on an ungated `GET` that every IDE window
-        // polls, so a per-call budget left the endpoint's worst case linear in a
-        // number the config chooses. Presets past the budget report `null`
-        // (= "cannot say"), which is honest and cheap.
-        let mut steps = 0usize;
         veld_core::presets::resolve(c)
             .into_iter()
-            .map(|preset| {
+            .enumerate()
+            .map(|(i, preset)| {
+                // Bounded by *count*, with each preset keeping its own expansion
+                // budget — not by one budget shared across the listing.
+                //
+                // Sharing was the first shape and it could not tell its two failure
+                // modes apart: a preset refused because an earlier one had eaten the
+                // budget looked exactly like a broken preset, so the UI sent the
+                // reader to `veld lint` for a config lint reports nothing about. A
+                // per-preset budget also keeps this endpoint's verdict identical to
+                // `veld lint`'s and `veld status`'s, which is the property that
+                // stopped two surfaces contradicting each other in the first place.
+                //
+                // The endpoint stays bounded because the count is: 64 presets × the
+                // 4096-step budget, per worktree, against a poll every few seconds.
+                if i >= PRESETS_EXPANDED_PER_LISTING {
+                    return PresetView {
+                        preset,
+                        expansion: Expansion::Skipped,
+                    };
+                }
                 // Expand AND resolve, in that order — the same two steps
                 // `veld start --preset` takes. `expand_preset` alone leaves a
                 // bare `node` without its default variant, so its tokens
                 // would differ from a run's recorded ones for every selection
                 // written without an explicit variant.
-                let expanded = veld_core::graph::expand_preset_within(&preset.name, c, &mut steps)
+                let expansion = veld_core::graph::expand_preset(&preset.name, c)
                     .and_then(|sels| veld_core::graph::resolve_selections(&sels, c))
-                    .map(|sels| veld_core::state::StartOrigin::new(None, &sels).selections)
-                    .ok();
-                PresetView { preset, expanded }
+                    .map(|sels| {
+                        Expansion::Ok(veld_core::state::StartOrigin::new(None, &sels).selections)
+                    })
+                    .unwrap_or(Expansion::Failed);
+                PresetView { preset, expansion }
             })
             .collect()
     });

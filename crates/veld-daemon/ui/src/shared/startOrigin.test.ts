@@ -1,15 +1,26 @@
 import { describe, expect, it } from "vitest";
 import type { Preset, StartOrigin } from "../api";
-import { originIsStale, presetState, startOriginLabel } from "./startOrigin";
+import { presetState, startOriginLabel } from "./startOrigin";
 
-const preset = (name: string, expanded: string[] | null): Preset => ({
+/**
+ * `expanded` here is shorthand: a token list means the daemon expanded it, `null`
+ * means the expansion failed, and `"skipped"` means the listing did not try.
+ */
+const preset = (
+  name: string,
+  expanded: string[] | null | "skipped",
+): Preset => ({
   name,
   key: 1,
   pinned: false,
-  // Raw config entries. Kept non-null even when the expansion failed: the config
-  // still says what the preset lists, it just cannot be resolved today.
-  selections: expanded ?? [],
-  expanded,
+  // Raw config entries. Present whatever happened to the expansion — the config
+  // still says what the preset lists, it just may not resolve today.
+  selections: Array.isArray(expanded) ? expanded : [],
+  expansion: Array.isArray(expanded)
+    ? { state: "ok", tokens: expanded }
+    : expanded === null
+      ? { state: "failed" }
+      : { state: "skipped" },
   is_default: false,
 });
 
@@ -44,6 +55,18 @@ describe("presetState", () => {
     const empty = [preset("web", [])];
     expect(presetState(origin("web", ["web:local"]), empty)).toBe("redefined");
     expect(presetState(origin("web", []), empty)).toBe("current");
+  });
+
+  it("does not blame the config for a preset the listing skipped", () => {
+    // `skipped` is our ignorance — the daemon caps how many presets it expands per
+    // poll. Rendering it as `unexpandable` would point the reader at `veld lint`,
+    // and lint reports nothing, so the one actionable thing in the message is
+    // wrong.
+    const skipped = [preset("web", "skipped")];
+    expect(presetState(origin("web", ["web:local"]), skipped)).toBe("unknown");
+    expect(startOriginLabel(origin("web", ["web:local"]), skipped)).toBe(
+      "preset web · web:local",
+    );
   });
 
   it("labels an unexpandable preset in the CLI's exact words", () => {
@@ -100,24 +123,5 @@ describe("startOriginLabel", () => {
     expect(startOriginLabel(origin(null, []), presets)).toBe(
       "no selections recorded",
     );
-  });
-});
-
-describe("originIsStale", () => {
-  it("is false for an explicit-selection start, which cannot drift", () => {
-    expect(originIsStale(origin(null, ["api:local"]), [])).toBe(false);
-  });
-
-  it("is true exactly when the named preset disagrees with the config now", () => {
-    const presets = [preset("web", ["api:local"])];
-    expect(originIsStale(origin("web", ["api:local"]), presets)).toBe(false);
-    expect(originIsStale(origin("web", ["web:local"]), presets)).toBe(true);
-    // An empty list IS knowledge: this project defines no presets, so a run
-    // that named one is naming something gone.
-    expect(originIsStale(origin("web", ["api:local"]), [])).toBe(true);
-  });
-
-  it("marks nothing when the config is not known to the caller", () => {
-    expect(originIsStale(origin("web", ["api:local"]), null)).toBe(false);
   });
 });

@@ -456,32 +456,37 @@ describe("prunePending", () => {
   });
 
   it("keeps a marker whose action has not landed yet", () => {
-    const cur = { 1: marker("stopped") };
+    const cur = { [pendingKey(1, "dev")]: marker("stopped") };
     expect(prunePending(cur, 0, () => "stopped")).toBe(cur);
   });
 
   it("drops a marker once the signature moves", () => {
-    const cur = { 1: marker("stopped") };
+    const cur = { [pendingKey(1, "dev")]: marker("stopped") };
     expect(prunePending(cur, 0, () => "running:abc")).toEqual({});
   });
 
   it("drops a marker for a worktree that no longer exists", () => {
     // It can never report a transition, so it would spin until the TTL.
-    expect(prunePending({ 1: marker("stopped") }, 0, () => null)).toEqual({});
+    expect(
+      prunePending({ [pendingKey(1, "dev")]: marker("stopped") }, 0, () => null),
+    ).toEqual({});
   });
 
   it("expires a marker whose action never produced a transition", () => {
-    const cur = { 1: marker("stopped", 5_000) };
+    const cur = { [pendingKey(1, "dev")]: marker("stopped", 5_000) };
     expect(prunePending(cur, 4_999, () => "stopped")).toBe(cur);
     expect(prunePending(cur, 5_000, () => "stopped")).toEqual({});
   });
 
   it("prunes per marker, leaving the others alone", () => {
-    const cur = { 1: marker("stopped"), 2: marker("running:x") };
+    const cur = {
+      [pendingKey(1, "dev")]: marker("stopped"),
+      [pendingKey(2, "dev")]: marker("running:x"),
+    };
     const next = prunePending(cur, 0, (key) =>
-      key === "1" ? "running:new" : "running:x",
+      parsePendingKey(key)?.worktreeId === 1 ? "running:new" : "running:x",
     );
-    expect(Object.keys(next)).toEqual(["2"]);
+    expect(Object.keys(next)).toEqual([pendingKey(2, "dev")]);
   });
 
   it("tracks two runs of ONE worktree independently", () => {
@@ -501,7 +506,7 @@ describe("prunePending", () => {
   it("returns the SAME object when nothing changed", () => {
     // Load-bearing: the caller runs this from a useState updater inside an
     // effect, so a fresh object every poll would loop forever.
-    const cur = { 1: marker("stopped") };
+    const cur = { [pendingKey(1, "dev")]: marker("stopped") };
     expect(prunePending(cur, 0, () => "stopped")).toBe(cur);
     const empty = {};
     expect(prunePending(empty, 0, () => null)).toBe(empty);

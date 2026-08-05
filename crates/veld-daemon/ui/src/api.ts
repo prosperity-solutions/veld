@@ -314,19 +314,27 @@ export interface Preset {
   group?: string | null;
   selections: string[];
   /**
-   * The sorted `node:variant` set this preset expands to *right now*, directly
-   * comparable to `RunInfo.started_from.selections`.
+   * What the daemon can say about what this preset expands to *right now* — three
+   * states, because collapsing any two of them makes a surface state something
+   * false.
    *
-   * Not the same as `selections`, which is the raw config entries with `@preset`
-   * refs unexpanded and default variants unfilled.
+   * `ok` carries the sorted `node:variant` set, directly comparable to
+   * `RunInfo.started_from.selections` (and **not** the same as `selections`, which
+   * is the raw config entries with `@preset` refs unexpanded and default variants
+   * unfilled). An empty `tokens` is a real `ok`: a preset whose selections are `[]`
+   * expands to nothing.
    *
-   * **`null` = the expansion failed** (a dangling `@ref`, a since-removed node, a
-   * tree over the daemon's expansion budget); `[]` = it legitimately expands to
-   * nothing. Treating a failure as `[]` claims the preset was *redefined*, which is
-   * a different — and false — statement about the config, and one the CLI does not
-   * make.
+   * `failed` is a preset that exists and does not expand — the state `veld status`
+   * calls "cannot be expanded — see `veld lint`", and lint does report it.
+   *
+   * `skipped` is a preset this *listing* did not expand (past its per-poll cap).
+   * Nothing is wrong with it, so a surface must not send the reader to `veld lint`;
+   * treat it exactly like an unreadable config — cannot compare.
    */
-  expanded: string[] | null;
+  expansion:
+    | { state: "ok"; tokens: string[] }
+    | { state: "failed" }
+    | { state: "skipped" };
   /** Whether this is the project's `default_preset`. */
   is_default: boolean;
 }

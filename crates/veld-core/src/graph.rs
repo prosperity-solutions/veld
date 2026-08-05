@@ -227,30 +227,9 @@ pub fn expand_preset(
     preset_name: &str,
     config: &VeldConfig,
 ) -> Result<Vec<NodeSelection>, GraphError> {
-    let mut steps = 0usize;
-    expand_preset_within(preset_name, config, &mut steps)
-}
-
-/// [`expand_preset`] against a budget the **caller** owns, so a loop over many
-/// presets is bounded as a whole.
-///
-/// A per-call budget bounds one expansion; it does not bound a caller that runs one
-/// per preset. The desktop repo listing does exactly that, on an ungated `GET` that
-/// every IDE window polls, so its worst case was worktrees × presets × the whole
-/// budget — linear in a number the config controls. Sharing one counter turns that
-/// back into a constant: once it is spent, the remaining presets report
-/// [`GraphError::PresetTooLarge`], which such a caller renders as "cannot expand"
-/// rather than as an answer.
-///
-/// `steps` is never reset by this function. Pass a fresh `0` for an independent
-/// budget (that is what [`expand_preset`] does).
-pub fn expand_preset_within(
-    preset_name: &str,
-    config: &VeldConfig,
-    steps: &mut usize,
-) -> Result<Vec<NodeSelection>, GraphError> {
     let mut visiting = Vec::new();
-    expand_preset_inner(preset_name, config, &mut visiting, steps)
+    let mut steps = 0usize;
+    expand_preset_inner(preset_name, config, &mut visiting, &mut steps)
 }
 
 fn expand_preset_inner(
@@ -966,36 +945,6 @@ mod tests {
         config.presets = Some(entries);
         let sels = expand_preset("p63", &config).expect("a 64-level chain is legal");
         assert_eq!(sels.len(), 1);
-    }
-
-    /// One budget across many presets, which is what bounds a caller that expands
-    /// every preset of every worktree on a polled endpoint.
-    #[test]
-    fn a_shared_budget_bounds_a_whole_loop_not_one_call() {
-        let mut config = make_config();
-        let mut entries: IndexMap<String, PresetDef> = IndexMap::new();
-        for i in 0..50 {
-            entries.insert(
-                format!("p{i}"),
-                PresetDef::Selections(vec!["db:local".to_owned(), "api:local".to_owned()]),
-            );
-        }
-        config.presets = Some(entries);
-        // Each preset costs 1 step, so a shared budget of this size runs out part
-        // way through and every later preset is refused rather than served.
-        let mut steps = PRESET_STEP_LIMIT - 10;
-        let mut refused = 0;
-        for i in 0..50 {
-            if expand_preset_within(&format!("p{i}"), &config, &mut steps).is_err() {
-                refused += 1;
-            }
-        }
-        assert!(refused > 0, "a shared budget must eventually refuse");
-        // And an independent budget serves all of them, so the sharing is the only
-        // thing that changed.
-        for i in 0..50 {
-            assert!(expand_preset(&format!("p{i}"), &config).is_ok());
-        }
     }
 
     /// The limits must not refuse a config a person would actually write. Bump

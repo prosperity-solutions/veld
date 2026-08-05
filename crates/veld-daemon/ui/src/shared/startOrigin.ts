@@ -26,8 +26,8 @@ export type PresetState =
   /** No longer in the config (renamed or deleted). */
   | "removed"
   /**
-   * Defined, but the config cannot say what it means today — a dangling `@ref`, a
-   * since-removed node, or a tree over the daemon's expansion budget.
+   * Defined, but it does not expand — a dangling `@ref`, a since-removed node, a
+   * cycle, or a tree over the expansion budget.
    *
    * Its own case rather than folded into `redefined`, because they are different
    * claims: "this name means something else now" versus "this name means nothing
@@ -35,7 +35,16 @@ export type PresetState =
    * two surfaces describing one config state differently is how a reader ends up
    * trusting the wrong one.
    */
-  | "unexpandable";
+  | "unexpandable"
+  /**
+   * Nothing is known: the caller has no config to compare against, or the daemon
+   * did not expand this preset on this poll.
+   *
+   * Deliberately *not* `unexpandable`. That label points at `veld lint`, and
+   * sending a reader to a check that passes is worse than saying nothing — missing
+   * data must never be rendered as a finding about their config.
+   */
+  | "unknown";
 
 /**
  * Compare a run's recorded expansion with the preset's expansion today.
@@ -55,8 +64,11 @@ export function presetState(origin: StartOrigin, presets: Preset[]): PresetState
   // Callers pass `null` for `presets` when they cannot know — see `startOriginLabel`.
   const preset = presets.find((p) => p.name === origin.preset);
   if (!preset) return "removed";
-  const now = preset.expanded;
-  if (now == null) return "unexpandable";
+  if (preset.expansion.state === "failed") return "unexpandable";
+  // The listing declined to expand it this poll; that is our ignorance, not a
+  // property of their config.
+  if (preset.expansion.state !== "ok") return "unknown";
+  const now = preset.expansion.tokens;
   const then = origin.selections;
   if (now.length === then.length && now.every((t, i) => t === then[i])) {
     return "current";
@@ -92,12 +104,15 @@ export function startOriginLabel(
       ? origin.selections.join(", ")
       : "no selections recorded";
   }
-  if (presets === null) {
+  // Nothing to compare against, so the line states the invocation in the past tense
+  // and lets the tokens carry the truth.
+  const unknown = () => {
     const tokens = origin.selections.join(", ");
     return tokens
       ? `preset ${origin.preset} · ${tokens}`
       : `preset ${origin.preset}`;
-  }
+  };
+  if (presets === null) return unknown();
   switch (presetState(origin, presets)) {
     case "current":
       return `preset ${origin.preset}`;
@@ -109,23 +124,11 @@ export function startOriginLabel(
     // state must not be described two ways by two surfaces.
     case "unexpandable":
       return `preset ${origin.preset} (cannot be expanded — see \`veld lint\`)`;
+    // Reached when the listing skipped this preset. Rendered exactly as an
+    // unreadable config is, because it is the same thing from the reader's side:
+    // we do not know.
+    case "unknown":
+      return unknown();
   }
 }
 
-/**
- * Whether a run's origin disagrees with the config as it reads now — the
- * condition a surface may want to mark rather than only spell out.
- *
- * False for an origin with no preset: an explicit-token start cannot drift,
- * because there is no name whose meaning could have moved.
- */
-export function originIsStale(
-  origin: StartOrigin | null | undefined,
-  presets: Preset[] | null,
-): boolean {
-  // Unknown config is not staleness. A surface that cannot compare must not
-  // mark anything — see `startOriginLabel`.
-  if (presets === null) return false;
-  if (!origin?.preset) return false;
-  return presetState(origin, presets) !== "current";
-}

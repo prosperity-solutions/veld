@@ -392,7 +392,7 @@ fn build_graph_snapshot(
     config: &VeldConfig,
     config_hash: String,
     plan: &[Vec<NodeSelection>],
-    started_from: crate::state::StartOrigin,
+    started_from: Option<crate::state::StartOrigin>,
 ) -> crate::state::GraphSnapshot {
     let mut nodes = std::collections::BTreeMap::new();
     // The FULL resolved graph, deliberately including the oneshot terminal
@@ -442,7 +442,7 @@ fn build_graph_snapshot(
     }
     crate::state::GraphSnapshot {
         config_hash,
-        started_from: Some(started_from),
+        started_from,
         nodes,
     }
 }
@@ -769,13 +769,17 @@ impl Orchestrator {
     /// verbatim: the orchestrator never re-reads the preset and never validates
     /// it against the config, because a preset can be edited while the run is
     /// live and the point of the record is to make that detectable later.
-    /// `veld restart` passes the previous run's origin through unchanged rather
-    /// than rebuilding it from node rows, which are the dependency closure.
+    ///
+    /// `None` means "not known", and is not the same as an empty origin. `veld
+    /// restart` passes the previous run's origin through unchanged — including its
+    /// absence, for a run recorded before provenance existed — rather than
+    /// rebuilding one from node rows, which are the dependency closure and would
+    /// record a wider selection set than anyone asked for.
     pub async fn start(
         &mut self,
         selections: &[NodeSelection],
         run_name: &str,
-        origin: crate::state::StartOrigin,
+        origin: Option<crate::state::StartOrigin>,
     ) -> Result<RunState, OrchestratorError> {
         // Semantic validation runs HERE, not in `parse_config`: a typo must not
         // strand `veld stop` against a running environment (its `on_stop` hooks
