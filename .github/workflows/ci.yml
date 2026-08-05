@@ -414,7 +414,6 @@ jobs:
           set -e
           ./target/debug/veld setup --help | grep -q "unprivileged"
           ./target/debug/veld setup --help | grep -q "privileged"
-          ./target/debug/veld setup --help | grep -q "hammerspoon"
           ./target/debug/veld doctor --help | grep -q "json"
           echo "Setup subcommands and doctor verified."
 

@@ -75,9 +75,5 @@ pub async fn run() -> i32 {
     println!("    veld setup unprivileged    No-sudo setup (port 18443)");
     println!("    veld setup privileged      Clean URLs, ports 80/443 (one-time sudo)");
 
-    if cfg!(target_os = "macos") && std::path::Path::new("/Applications/Hammerspoon.app").exists() {
-        println!("    veld setup hammerspoon     Menu bar widget");
-    }
-
     0
 }

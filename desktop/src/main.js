@@ -42,10 +42,10 @@ const {
  * `scripts/make-icons.py` (see that file for what comes from where).
  *
  * `icon.png` is the app icon — the same rounded-tile mark the favicon shows in a
- * browser tab. `trayTemplate.png` is the menu-bar icon and carries the mark the
- * Hammerspoon widget also uses, so veld has one menu-bar identity; the
- * `Template` suffix is what makes macOS tint it for the current menu bar, which
- * is the only way one asset stays legible in light *and* dark mode.
+ * browser tab. `trayTemplate.png` is the menu-bar icon and carries the
+ * `logo.svg` mark; the `Template` suffix is what makes macOS tint it for the
+ * current menu bar, which is the only way one asset stays legible in light
+ * *and* dark mode.
  */
 const ASSETS = path.join(__dirname, "..", "assets");
 const APP_ICON = path.join(ASSETS, "icon.png");

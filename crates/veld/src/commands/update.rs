@@ -71,7 +71,7 @@ pub async fn run() -> i32 {
                     cleanup_stale_binaries();
                     output::print_info("Restarting services with new binaries...");
                     restart_services(&new_version, helper_dead_privileged).await;
-                    refresh_hammerspoon().await;
+                    super::remove_legacy_hammerspoon().await;
                     0
                 }
                 Err(e) => {
@@ -82,6 +82,13 @@ pub async fn run() -> i32 {
         }
         Ok(None) => {
             output::print_success(&format!("Already on the latest version ({current})."));
+            // Also on the no-op branch, and not only for symmetry. `veld update`
+            // runs the *old* binary, so the release that carries this cleanup is
+            // never the release that runs it — without this arm the Spoon would
+            // survive until the user's *next* actual version bump. Here, any
+            // `veld update` after this one is installed clears it. Idempotent
+            // and silent on a machine that never had the Spoon.
+            super::remove_legacy_hammerspoon().await;
             0
         }
         Err(e) => {
@@ -108,34 +115,6 @@ fn find_running_environments() -> Vec<(std::path::PathBuf, String)> {
         }
     }
     running
-}
-
-/// Re-install the Hammerspoon Spoon if it was previously set up.
-/// The Spoon files are embedded in the binary, so they need to be re-extracted
-/// after every CLI update to pick up any changes.
-async fn refresh_hammerspoon() {
-    let spoon_dir = match dirs::home_dir() {
-        Some(h) => h.join(".hammerspoon/Spoons/Veld.spoon"),
-        None => return,
-    };
-    if !spoon_dir.exists() {
-        return;
-    }
-
-    output::print_info("Updating Hammerspoon Veld.spoon...");
-    match veld_core::setup::install_hammerspoon().await {
-        Ok(result) => {
-            output::print_success(&result.message);
-        }
-        Err(e) => {
-            output::print_error(
-                &format!(
-                    "Failed to update Hammerspoon Spoon: {e}. Run `veld setup hammerspoon` manually."
-                ),
-                false,
-            );
-        }
-    }
 }
 
 /// Remove stale daemon/helper copies next to the CLI binary.

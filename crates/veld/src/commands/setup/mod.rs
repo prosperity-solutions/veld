@@ -1,4 +1,3 @@
-mod hammerspoon;
 mod privileged;
 mod status;
 mod unprivileged;
@@ -16,6 +15,5 @@ pub async fn run(command: Option<SetupCommand>) -> i32 {
             user_socket,
             caddy_bin,
         }) => privileged::run(helper_bin, user_socket, caddy_bin).await,
-        Some(SetupCommand::Hammerspoon) => hammerspoon::run().await,
     }
 }

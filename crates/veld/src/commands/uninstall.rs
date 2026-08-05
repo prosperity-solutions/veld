@@ -54,6 +54,9 @@ pub async fn run() -> i32 {
 
     match veld_core::setup::uninstall().await {
         Ok(()) => {
+            // Last chance to tell the user their Hammerspoon config now points
+            // at nothing — after this, veld is gone and can never say it.
+            super::remove_legacy_hammerspoon().await;
             output::print_success("Veld has been uninstalled.");
             0
         }

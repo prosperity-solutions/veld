@@ -8,11 +8,7 @@ Outputs (committed; run this only when the brand changes):
                               transparent margin the way macOS expects.
   assets/trayTemplate.png     18², the menu-bar icon, plus @2x. The bare mark in
   assets/trayTemplate@2x.png  black + alpha: a macOS *template* image, so the OS
-                              tints it for the current menu bar. The same mark the
-                              Hammerspoon widget shows
-                              (integrations/hammerspoon/Veld.spoon/icon.png) — that
-                              asset predates this script and is NOT regenerated
-                              here, so the two drift if the mark changes.
+                              tints it for the current menu bar.
 
 **Why a rasteriser here instead of a tool.** The mark is two shapes — a polygon
 and a circle (`logo.svg`; every V segment is a straight line) — so drawing it
