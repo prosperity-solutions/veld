@@ -114,7 +114,16 @@ pub fn start_origin_label(
         // Expanded, but to something else: the name still resolves, so the run
         // is not "preset web-only" any more in any useful sense.
         Ok(_) => " (redefined since start)",
-        Err(_) => " (no longer defined)",
+        // Only *this* name being absent means the preset is gone. Every other
+        // failure — a dangling `@ref`, a cycle, a since-removed node, a tree over
+        // the expansion budget — is a preset that still exists and cannot be
+        // expanded, and reporting those as "no longer defined" asserts something
+        // false about the config the reader is looking at. It also contradicted the
+        // UI, which calls the same state "redefined".
+        Err(veld_core::graph::GraphError::UnknownPreset(ref missing)) if missing == preset => {
+            " (no longer defined)"
+        }
+        Err(_) => " (cannot be expanded — see `veld lint`)",
     };
     Some(format!("preset `{preset}`{qualifier} — {selections}"))
 }
@@ -274,6 +283,20 @@ mod tests {
         assert_eq!(
             label.as_deref(),
             Some("preset `gone` (no longer defined) — api:local")
+        );
+    }
+
+    #[test]
+    fn a_preset_that_exists_but_cannot_expand_is_not_called_undefined() {
+        // A dangling `@ref` leaves `stack` defined and unexpandable. Saying "no
+        // longer defined" about it is a false claim about the config on disk — and
+        // the UI calls this same state "redefined", so the two surfaces would
+        // contradict each other over one config.
+        let cfg = config(&["@missing"]);
+        let label = super::start_origin_label(Some(&origin(Some("stack"), &["api:local"])), &cfg);
+        assert_eq!(
+            label.as_deref(),
+            Some("preset `stack` (cannot be expanded — see `veld lint`) — api:local")
         );
     }
 

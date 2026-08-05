@@ -320,6 +320,14 @@ function usePersistedPerWindow(name: string): [string, (v: string) => void] {
  * inside run scope; for terminals and browsers the answer is no (a shell is a
  * shell in a directory). `""` means "no explicit choice", which resolves through
  * `pickRun`, not to an error.
+ *
+ * **The stored key travels *with* the value, and no effect corrects it.** The
+ * obvious shape — `useState(read)` plus an effect that re-reads when the key
+ * changes — commits one frame in which the new worktree is bound to the *previous*
+ * worktree's run name, so `pickRun` reports `missing` and the control whose entire
+ * job is never to misname a run renders "no environment named api here" before the
+ * effect fixes it. Staleness has to be impossible in the rendered value, not
+ * repaired after the fact.
  */
 function useSelectedRun(
   worktreePath: string | undefined,
@@ -333,16 +341,17 @@ function useSelectedRun(
       "",
     [scoped, global],
   );
-  const [value, setValue] = useState(read);
-  // The key changes when the worktree changes — `useState`'s initializer runs
-  // once per component, so without this the previous worktree's chosen run
-  // silently carries over and (worse) gets written back under the new key.
-  useEffect(() => {
-    setValue(read());
-  }, [read]);
+  // `key` is what makes the pair self-invalidating: a state entry written for
+  // another worktree simply does not apply, and the fallback read happens during
+  // this render rather than after it.
+  const [choice, setChoice] = useState<{ key: string; value: string }>(() => ({
+    key: scoped,
+    value: read(),
+  }));
+  const value = choice.key === scoped ? choice.value : read();
   const set = useCallback(
     (v: string) => {
-      setValue(v);
+      setChoice({ key: scoped, value: v });
       try {
         window.localStorage.setItem(scoped, v);
         window.localStorage.setItem(global, v);
@@ -844,8 +853,15 @@ function AppInner(props: {
    * The selector's counter carries this, so a hidden run that failed or is stuck
    * recovering colours the control the user is already looking at. Reporting the
    * healthiest sibling instead would hide precisely the case this exists for.
+   *
+   * **Live siblings only.** An environment whose last run failed keeps
+   * `status: "failed"` as history with `live: false`, so counting those made the
+   * counter permanently red over a run that ended days ago, with no way to dismiss
+   * it but to start that environment again — and the rail, one screen away, made
+   * the opposite choice (`worstStatus(liveAll)`). Two surfaces disagreeing about
+   * "does anything need attention" is worse than either answer.
    */
-  const siblingStatus = worstStatus(siblings);
+  const siblingStatus = worstStatus(liveRuns(siblings));
 
   // The permission policy every browser pane in this window is answered against.
   //
@@ -867,7 +883,15 @@ function AppInner(props: {
    * below still lists only the selected run's URLs — that one is a question about
    * a run, this is a property of the directory.
    */
-  const trustedOrigins = runs.flatMap((r) => Object.values(r.urls));
+  //
+  // Sorted, and that is not cosmetic: `RunInfo.urls` is a Rust `HashMap`, the one
+  // collection on that payload the daemon does not sort, so its JSON key order
+  // differs between responses. The joined string below is an effect dependency, so
+  // an unsorted list republishes every pane's permission policy on every poll —
+  // the exact thing the comment under it says must not happen.
+  const trustedOrigins = runs
+    .flatMap((r) => Object.values(r.urls))
+    .sort((a, b) => a.localeCompare(b));
   useEffect(() => {
     // The daemon's own origin is in the set because veld's UI is served from it,
     // and a pane pointed at a veld surface is still veld's own page.
@@ -2780,6 +2804,12 @@ function AppInner(props: {
         runSelect={
           worktree && runs.length > 0 ? (
             <RunSelect
+              // Remounts per worktree, which is what actually enforces the
+              // "reveal ended runs for this opening only" rule: React reconciles
+              // this element by position, so without a key the component keeps its
+              // `showEnded` state across menu closes *and* worktree switches, and
+              // one click leaked the reveal to every later worktree in the window.
+              key={worktree.path}
               runs={runs}
               selected={run}
               missing={pick.missing}
@@ -2788,7 +2818,10 @@ function AppInner(props: {
               // start this window just fired.
               pending={pendingForRun(worktree, selectedRunName || run?.name)}
               siblingStatus={siblingStatus}
-              presets={worktree.presets}
+              // `null` when the config did not parse: the empty preset list that
+              // comes back then would otherwise read as "the preset was deleted"
+              // for every healthy run in the worktree.
+              presets={worktree.config_parsed ? worktree.presets : null}
               startName={anotherNameFor(worktree)}
               startLabel={startSelectionLabel(effectiveStart, worktree)}
               canStartAnother={canStartAnother(worktree)}
@@ -3063,22 +3096,6 @@ function AppInner(props: {
 // ---------------------------------------------------------------------------
 
 /**
- * A single run's status as one of the `.dot` classes the top bar renders.
- *
- * Deliberately still folds `recovering` into `partial`, where [`worktreeStatus`]
- * no longer does: the rail had nothing but the dot's colour to go on, while this
- * dot sits beside the run's name in a tooltip that spells the status out. There
- * is no `.dot.recovering`, and inventing one to distinguish a state the hover
- * text already names would be the third channel this change removes.
- */
-function runStatusClass(status: string): WorktreeStatus {
-  if (status === "running") return "running";
-  if (status === "failed") return "failed";
-  if (status === "stopped") return "stopped";
-  return "partial";
-}
-
-/**
  * Which run the top bar — and every surface bound to it — is showing.
  *
  * This replaces the bare status dot rather than sitting next to it, because the
@@ -3114,7 +3131,8 @@ function RunSelect(props: {
    */
   pending: PendingAction | null;
   siblingStatus: WorktreeStatus;
-  presets: Preset[];
+  /** `null` when this worktree's config could not be parsed — see `startOriginLabel`. */
+  presets: Preset[] | null;
   /** The environment name a fresh start would create — shown before it happens. */
   startName: string;
   /** What that start would run (the stored preset/selection label). */
@@ -3429,23 +3447,13 @@ function TopBar(props: {
                   start/stop icon already says. The dot now rides on the run
                   selector, so the same glyph also says *which* run it describes —
                   a worktree can hold several, and a dot with no name attached was
-                  read as belonging to whatever the control beside it named. */}
-              {props.runSelect ??
-                (run && (
-                  <Tooltip
-                    label={
-                      props.pending
-                        ? `Run ${run.name}: ${props.pending}…`
-                        : `Run ${run.name}: ${run.status}`
-                    }
-                  >
-                    <span
-                      className={`dot ${runStatusClass(run.status)}`}
-                      role="img"
-                      aria-label={`Run ${run.name}: ${props.pending ?? run.status}`}
-                    />
-                  </Tooltip>
-                ))}
+                  read as belonging to whatever the control beside it named.
+
+                  No fallback for a missing selector: it is absent only when the
+                  worktree has no runs at all, and then there is no status to
+                  report. A standalone dot kept "just in case" was unreachable code
+                  that read as a live path. */}
+              {props.runSelect}
               {run && (
                 // Opens a browser pane on the run's URLs, not an overlay of its
                 // own: the URLs live in whichever pane is about to need them, and

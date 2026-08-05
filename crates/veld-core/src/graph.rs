@@ -89,6 +89,19 @@ pub enum GraphError {
     )]
     PresetCycle(String),
 
+    /// Distinct from [`GraphError::PresetCycle`]: every path here is acyclic, the
+    /// *total* is what blew the budget. A preset referenced from several places is
+    /// expanded once per reference, so a legal tree can still cost 2^depth.
+    #[error(
+        "preset \"{name}\" cannot be expanded: it nests `@preset` references more than \
+         {depth} levels deep, or takes more than {steps} expansion steps. Both limits are far \
+         above any hand-written preset — flatten the tree, or split it into presets a reader \
+         can follow",
+        depth = PRESET_DEPTH_LIMIT,
+        steps = PRESET_STEP_LIMIT
+    )]
+    PresetTooLarge { name: String },
+
     #[error(
         "node \"{node}:{variant}\" has sensitive_outputs {undeclared:?} not declared in outputs"
     )]
@@ -170,6 +183,30 @@ pub fn resolve_selections(
         .collect()
 }
 
+/// How deep `@preset` references may nest, and how many expansion steps one
+/// [`expand_preset`] may take.
+///
+/// **The cycle guard is not enough on its own, and the shape of the recursion is
+/// why.** `visiting.pop()` on the way out is deliberate — a preset referenced from
+/// two places is legal — but it also means such a preset is expanded *once per
+/// reference*, so `p{i} = ["@p{i-1}", "@p{i-1}"]` costs 2^i steps while every
+/// individual path stays acyclic. Measured before this guard existed: a 735-byte
+/// config with 25 such presets burned 12.9s of CPU, and a 200 000-long linear
+/// chain aborted the process outright with `fatal runtime error: stack overflow`.
+///
+/// That matters beyond a slow CLI. Expansion runs inside the daemon — the desktop
+/// repo listing ships each preset's expansion so a client can tell a run's
+/// recorded preset from what that name means now — and a stack overflow in any
+/// thread kills the whole daemon, taking every PTY session with it. A `veld.json`
+/// arrives with a checked-out branch, so "the config is trusted" is not an
+/// assumption this can rest on.
+///
+/// The limits are far above anything a human writes: 16 levels of nesting and
+/// 4096 steps, against a hand-written preset tree that is realistically 2-3 deep
+/// and a few dozen steps wide.
+const PRESET_DEPTH_LIMIT: usize = 16;
+const PRESET_STEP_LIMIT: usize = 4096;
+
 /// Expand a preset name into its selections, following `@other-preset`
 /// references (F9.5).
 ///
@@ -179,20 +216,32 @@ pub fn resolve_selections(
 /// selection, and the repetitions drift.
 ///
 /// Cycles are an error rather than a hang: `a → b → a` is a config mistake, and
-/// the error names the path so it is obvious which link to cut.
+/// the error names the path so it is obvious which link to cut. Acyclic-but-huge
+/// is an error too — see [`PRESET_DEPTH_LIMIT`] — because the cycle guard alone
+/// leaves a legal tree costing 2^depth.
 pub fn expand_preset(
     preset_name: &str,
     config: &VeldConfig,
 ) -> Result<Vec<NodeSelection>, GraphError> {
     let mut visiting = Vec::new();
-    expand_preset_inner(preset_name, config, &mut visiting)
+    let mut steps = 0usize;
+    expand_preset_inner(preset_name, config, &mut visiting, &mut steps)
 }
 
 fn expand_preset_inner(
     preset_name: &str,
     config: &VeldConfig,
     visiting: &mut Vec<String>,
+    steps: &mut usize,
 ) -> Result<Vec<NodeSelection>, GraphError> {
+    // Counted per *expansion*, not per unique preset: the same preset reached
+    // twice is two units of work, which is exactly the cost being bounded.
+    *steps += 1;
+    if *steps > PRESET_STEP_LIMIT || visiting.len() >= PRESET_DEPTH_LIMIT {
+        return Err(GraphError::PresetTooLarge {
+            name: preset_name.to_owned(),
+        });
+    }
     if visiting.iter().any(|p| p == preset_name) {
         let mut path = visiting.clone();
         path.push(preset_name.to_owned());
@@ -217,7 +266,7 @@ fn expand_preset_inner(
     for item in items {
         match item.strip_prefix('@') {
             Some(referenced) => {
-                for sel in expand_preset_inner(referenced, config, visiting)? {
+                for sel in expand_preset_inner(referenced, config, visiting, steps)? {
                     // De-duplicate: two presets that both include a node should
                     // not start it twice.
                     if !out.contains(&sel) {
@@ -814,6 +863,76 @@ mod tests {
             expand_preset("self", &config),
             Err(GraphError::PresetCycle(_))
         ));
+    }
+
+    /// A preset tree that is **acyclic and still ruinous**: each level references
+    /// the one below it twice, so the cycle guard never fires and the cost doubles
+    /// per level. Before the step budget this was 12.9s of CPU for a 735-byte
+    /// config — and expansion runs inside the daemon on an ungated `GET`, per poll.
+    #[test]
+    fn an_acyclic_preset_tree_cannot_cost_exponential_work() {
+        let mut config = make_config();
+        let mut entries: IndexMap<String, PresetDef> = IndexMap::new();
+        entries.insert(
+            "p0".to_owned(),
+            PresetDef::Selections(vec!["db:local".to_owned()]),
+        );
+        for i in 1..=24 {
+            entries.insert(
+                format!("p{i}"),
+                PresetDef::Selections(vec![format!("@p{}", i - 1), format!("@p{}", i - 1)]),
+            );
+        }
+        config.presets = Some(entries);
+        // Depth 24 trips the depth limit first; either budget is a correct refusal,
+        // and what matters is that it returns rather than running 2^24 steps.
+        let err = expand_preset("p24", &config).unwrap_err();
+        assert!(matches!(err, GraphError::PresetTooLarge { .. }), "{err:?}");
+
+        // Just inside the depth limit, the *step* budget is what has to catch it:
+        // 2^15 expansions from a 15-level doubling chain.
+        let mut shallow: IndexMap<String, PresetDef> = IndexMap::new();
+        shallow.insert(
+            "p0".to_owned(),
+            PresetDef::Selections(vec!["db:local".to_owned()]),
+        );
+        for i in 1..=15 {
+            shallow.insert(
+                format!("p{i}"),
+                PresetDef::Selections(vec![format!("@p{}", i - 1), format!("@p{}", i - 1)]),
+            );
+        }
+        config.presets = Some(shallow);
+        assert!(
+            matches!(
+                expand_preset("p15", &config),
+                Err(GraphError::PresetTooLarge { .. })
+            ),
+            "the step budget must catch a doubling tree that stays inside the depth limit"
+        );
+    }
+
+    /// The limits must not refuse a config a person would actually write. Bump
+    /// `PRESET_DEPTH_LIMIT` down and this fails — which is the point of asserting a
+    /// concrete shape rather than trusting the constant.
+    #[test]
+    fn ordinary_preset_nesting_stays_well_inside_the_limits() {
+        let mut config = make_config();
+        // A 5-level chain with a reused leaf at every level: deeper and wider than
+        // the 2-3 levels real configs use.
+        config.presets = Some(presets([
+            ("base", &["db:local"][..]),
+            ("l1", &["@base", "api:local"]),
+            ("l2", &["@l1", "@base"]),
+            ("l3", &["@l2", "@l1"]),
+            ("l4", &["@l3", "@l2", "frontend:local"]),
+        ]));
+        let sels = expand_preset("l4", &config).expect("ordinary nesting must expand");
+        assert_eq!(
+            sels.len(),
+            3,
+            "dedup still collapses the reused leaves: {sels:?}"
+        );
     }
 
     #[test]

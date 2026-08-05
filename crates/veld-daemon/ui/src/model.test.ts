@@ -45,6 +45,7 @@ const wt = (path: string): Worktree => ({
   trashed_at: "",
   trash_error: "",
   has_veld_config: true,
+  config_parsed: true,
   presets: [],
   nodes: [],
   ide: { quicklinks: [], permissions: [], panes: [] },

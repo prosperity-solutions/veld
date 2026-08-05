@@ -614,6 +614,18 @@ struct WorktreeView {
     /// Whether the checkout has a root config — drives whether the UI shows run
     /// controls for it.
     has_veld_config: bool,
+    /// Whether that config actually **parsed** on this poll.
+    ///
+    /// `has_veld_config` says the file exists; this says it could be read. The
+    /// difference is load-bearing rather than pedantic: a config that is mid-edit or
+    /// broken yields `presets: []` and `nodes: []`, which is indistinguishable from
+    /// "this project declares no presets" — and a client comparing a run's recorded
+    /// preset against an empty list concludes the preset was *deleted*, so every
+    /// healthy run in a worktree with a typo'd config reads
+    /// "preset dev (no longer defined)". A confident falsehood produced by missing
+    /// data is exactly what `startOrigin.ts`'s `null` sentinel exists to prevent,
+    /// and this flag is what lets the client reach for it.
+    config_parsed: bool,
     /// Presets from the checkout's root config, in display order, with their
     /// keys and labels (empty without a config). The UI shows the label a human
     /// can read; `name` is what it sends back to start the run.
@@ -719,6 +731,9 @@ fn worktree_view(wt: WorktreeRecord) -> WorktreeView {
     let cfg = config_path
         .as_deref()
         .and_then(|p| veld_core::config::parse_config(p).ok());
+    // A file that exists but did not parse. Reported rather than inferred from an
+    // empty `presets`, which a project with no presets also produces.
+    let config_parsed = cfg.is_some();
     // Display order comes from the resolver, not a sort here — the UI list and
     // the CLI picker must agree, or the key printed next to a preset in one
     // surface means something else in the other.
@@ -798,6 +813,7 @@ fn worktree_view(wt: WorktreeRecord) -> WorktreeView {
     WorktreeView {
         worktree: wt,
         has_veld_config,
+        config_parsed,
         presets,
         nodes,
         ide,

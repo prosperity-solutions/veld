@@ -155,6 +155,17 @@ export interface Worktree {
    */
   trash_error: string;
   has_veld_config: boolean;
+  /**
+   * Whether that config parsed on this poll.
+   *
+   * `has_veld_config` means the file is there; this means it could be read. A
+   * broken or mid-edit config yields empty `presets`/`nodes`, which reads exactly
+   * like "declares none" — and comparing a run's recorded preset against an empty
+   * list concludes it was deleted. Anything deriving preset provenance must treat
+   * `false` as "cannot compare" (pass `null` to `startOriginLabel`), never as an
+   * answer.
+   */
+  config_parsed: boolean;
   /** Presets in display order, as resolved by the daemon. */
   presets: Preset[];
   /** Startable nodes (hidden excluded) for custom selections. */

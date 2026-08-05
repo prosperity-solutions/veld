@@ -490,12 +490,21 @@ for scripts written against the old shape).
 `graph_snapshot.started_from = {preset, selections}` in `veld status --json` and
 `veld runs show --json`. `preset` is the config name (absent for an
 explicit-selection start), and `selections` is the sorted `node:variant` set that
-name expanded to *at start time*. Compare the two to answer "is the live run
-still what this preset means?" — presets are re-read from disk on every use, so
-the name alone can be stale, which is why the expansion is stored beside it. The
-human `veld status` prints one `Started from:` line and flags a preset that has
-been edited (`redefined since start`) or removed. Absent on runs started by a
-veld older than this feature.
+name expanded to *at start time*. The expansion is stored beside the name because
+presets are re-read from disk on every use, so the name alone can be stale.
+
+**Which surface answers "is the live run still what this preset means?"**: the
+human `veld status` and `veld runs show` do — they re-expand the preset and print
+`Started from: preset \`x\` (redefined since start)`, `(no longer defined)`, or
+`(cannot be expanded — see \`veld lint\`)`. The `--json` shapes carry the *record*
+(`started_from`) but not that verdict, and `veld presets --json` gives raw
+`selections` with `@preset` refs unexpanded — so an agent that wants the
+comparison should read the human line, or diff two runs with
+`veld runs diff <old> <new> --json`, which reports `origin_changed`. Do not
+compare `started_from.selections` against `veld presets --json` output directly:
+they are different shapes and will disagree for every preset written without
+explicit variants. `started_from` is absent on runs started by a veld older than
+this feature.
 
 To debug liveness probe failures and recovery decisions:
 ```sh
