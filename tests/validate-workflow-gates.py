@@ -4,9 +4,12 @@
 Draft PRs are where an agentic contributor's intermediate commits land, and
 `.github/workflows/ci.yml` is expensive to run: a pull_request run reaches five
 macOS legs (`integration`, `injection-test`, the mac leg of `desktop-package`,
-and both darwin legs of `release-build`), each billed at 10x a Linux minute, on
-top of a four-target release build matrix. The house workflow (AGENTS.md -> PR
-Workflow) reviews locally first and marks the PR ready for review second, so a
+and both darwin legs of `release-build`), on top of a four-target release build
+matrix. Standard macOS runners are free on public repositories, so what a draft
+run costs is runner time and the account's macOS concurrency allowance rather
+than a dollar figure -- five simultaneous mac jobs is a large share of it, and a
+draft's runs queue ahead of work that matters. The house workflow (AGENTS.md ->
+PR Workflow) reviews locally first and marks the PR ready for review second, so a
 draft has by definition not earned a CI run yet.
 
 Nothing in Actions enforces that, and the symptom of a missing guard is a bill
@@ -49,11 +52,19 @@ BARE_GUARD = GUARD
 # needs no draft guard. release.yml's build/desktop jobs are in this class.
 PUSH_ONLY = "github.event_name == 'push'"
 
-# These make a job run even when its `needs` were skipped, which is exactly how a
-# dependent job escapes the cascade. `cancelled()` counts because the common
-# `!cancelled()` idiom has the same effect as `always()` here.
-CASCADE_BREAKERS = ("always(", "cancelled(")
+# Any status-check function on a job that has `needs:` is treated as escaping the
+# skip cascade. This is deliberately broader than the two obvious spellings:
+# allowlisting `always(`/`cancelled(` let `if: '!failure()'` and
+# `success() || failure()` through, and the gate has no business deciding which
+# status functions happen to rescue a job whose dependency was skipped. If a job
+# needs one of these AND must not run on drafts, it states the guard explicitly.
+CASCADE_BREAKERS = ("always(", "cancelled(", "failure(", "success(")
 
+# `ready_for_review` is the half that makes the guard survivable, but `synchronize`
+# is the half that keeps a *ready* PR testing its own pushes. Requiring only the
+# former let `types: [ready_for_review]` pass, which is the same bug pointing the
+# other way: a ready PR that never re-runs on a push.
+REQUIRED_TYPES = ("opened", "synchronize", "reopened", "ready_for_review")
 REQUIRED_TYPE = "ready_for_review"
 
 # `pull_request_target` carries the same `draft` field and the same activity
@@ -128,14 +139,26 @@ def check_doc(doc, name):
                 f"{name}: `on.{trigger}` has no `types`, so it uses the default "
                 f"set (opened, synchronize, reopened) and will never fire on "
                 f"{REQUIRED_TYPE} -- a PR flipped from draft to ready would get "
-                f"no checks at all. Add: types: [opened, synchronize, reopened, "
-                f"{REQUIRED_TYPE}]"
+                f"no checks at all. Add: types: {list(REQUIRED_TYPES)}"
             )
-        elif REQUIRED_TYPE not in types:
+        elif not isinstance(types, list):
+            # `types: ready_for_review` is legal YAML and yields a string, against
+            # which `in` is substring matching rather than membership -- so a
+            # scalar would have satisfied the old check while listing one type.
             problems.append(
-                f"{name}: `on.{trigger}.types` is {types} and is missing "
-                f"`{REQUIRED_TYPE}`, so marking a draft PR ready fires nothing."
+                f"{name}: `on.{trigger}.types` is the scalar {types!r}, not a "
+                f"list. Write it as a list: types: {list(REQUIRED_TYPES)}"
             )
+        else:
+            missing = [t for t in REQUIRED_TYPES if t not in types]
+            if missing:
+                problems.append(
+                    f"{name}: `on.{trigger}.types` is {types} and is missing "
+                    f"{missing}. `{REQUIRED_TYPE}` is what makes marking a draft "
+                    f"ready fire anything at all; `synchronize` is what keeps a "
+                    f"ready PR re-testing its own pushes. Use: "
+                    f"types: {list(REQUIRED_TYPES)}"
+                )
 
     # `github.event_name != 'pull_request'` is TRUE for a pull_request_target
     # event, so the usual guard leaves such a job wide open. A workflow carrying
@@ -152,8 +175,19 @@ def check_doc(doc, name):
             continue
         cond = normalize(job.get("if", ""))
 
-        if cond in (ANY_EVENT_GUARD, PR_ONLY_GUARD, BARE_GUARD):
-            if cond == ANY_EVENT_GUARD and has_target:
+        # An extra clause may be ANDed ONTO a guard: `<guard> && X` is strictly
+        # more restrictive than `<guard>`, so it cannot start running on drafts.
+        #
+        # It may not be ANDed onto the bare `||` form, though, because `&&` binds
+        # tighter than `||` in Actions expressions: `A || B && X` parses as
+        # `A || (B && X)`, NOT `(A || B) && X` -- so the `A` branch escapes the
+        # extra condition entirely. Parenthesise it and it is fine.
+        andable = [PR_ONLY_GUARD, BARE_GUARD, "(" + ANY_EVENT_GUARD + ")"]
+        if any(cond == f or cond.startswith(f + " &&") for f in andable):
+            continue
+
+        if cond == ANY_EVENT_GUARD:
+            if has_target:
                 problems.append(
                     f"{name}: job `{job_name}` guards on "
                     f"`github.event_name != 'pull_request'`, which is TRUE for a "
@@ -164,6 +198,19 @@ def check_doc(doc, name):
             continue
 
         if cond == PUSH_ONLY or cond.startswith(PUSH_ONLY + " &&"):
+            # `github.event_name == 'push' && X || github.event_name ==
+            # 'pull_request'` starts with the push-only prefix and runs on every
+            # draft PR, because `&&` binds tighter than `||`. A push-only
+            # condition that contains `||` is not push-only.
+            if "||" not in cond:
+                continue
+            problems.append(
+                f"{name}: job `{job_name}` looks push-only but its condition "
+                f"contains `||`, and `&&` binds tighter than `||` -- so "
+                f"`{PUSH_ONLY} && X || <anything>` runs on draft PRs. Add the "
+                f"explicit guard, or parenthesise the push-only half.\n"
+                f"    (got: {cond})"
+            )
             continue
 
         if GUARD in cond:
@@ -171,10 +218,13 @@ def check_doc(doc, name):
                 f"{name}: job `{job_name}` mentions the draft guard but its "
                 f"condition as a whole is not an accepted form, so the guard may "
                 f"not gate anything -- `true || {GUARD}` is the shape this "
-                f"catches. Use exactly one of:\n"
+                f"catches. Extra conditions are fine, but they must be ANDed onto "
+                f"one of these (and the `||` form must be parenthesised first, "
+                f"because `&&` binds tighter than `||`):\n"
                 f"      if: {ANY_EVENT_GUARD}\n"
-                f"      if: {PR_ONLY_GUARD}\n"
-                f"      if: {BARE_GUARD}\n"
+                f"      if: ({ANY_EVENT_GUARD}) && <rest>\n"
+                f"      if: {PR_ONLY_GUARD} && <rest>\n"
+                f"      if: {BARE_GUARD} && <rest>\n"
                 f"    (got: {cond})"
             )
             continue
@@ -300,6 +350,93 @@ SELFTEST = [
               || github.event.pull_request.draft == false }}
             runs-on: ubuntu-latest
             steps: [{run: echo}]
+        """,
+    ),
+    (
+        "push-only prefix widened with || runs on draft PRs",
+        False,
+        """
+        on:
+          push: {branches: [main]}
+          pull_request: {types: [opened, synchronize, reopened, ready_for_review]}
+        jobs:
+          leaky:
+            if: github.event_name == 'push' && github.ref == 'refs/heads/main' || github.event_name == 'pull_request'
+            runs-on: macos-latest
+            steps: [{run: echo}]
+        """,
+    ),
+    (
+        "the || form ANDed without parens leaves a branch unguarded",
+        False,
+        """
+        on: {pull_request: {types: [opened, synchronize, reopened, ready_for_review]}}
+        jobs:
+          precedence:
+            if: github.event_name != 'pull_request' || github.event.pull_request.draft == false && github.ref != 'refs/heads/wip'
+            runs-on: macos-latest
+            steps: [{run: echo}]
+        """,
+    ),
+    (
+        "extra clause ANDed onto the bare guard is fine",
+        True,
+        """
+        on: {pull_request: {types: [opened, synchronize, reopened, ready_for_review]}}
+        jobs:
+          narrower:
+            if: github.event.pull_request.draft == false && github.event.pull_request.base.ref == 'main'
+            runs-on: ubuntu-latest
+            steps: [{run: echo}]
+        """,
+    ),
+    (
+        "the || form parenthesised then ANDed is fine",
+        True,
+        """
+        on: {pull_request: {types: [opened, synchronize, reopened, ready_for_review]}}
+        jobs:
+          narrower:
+            if: (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && github.ref != 'refs/heads/wip'
+            runs-on: ubuntu-latest
+            steps: [{run: echo}]
+        """,
+    ),
+    (
+        "types listing only ready_for_review stops a ready PR re-testing pushes",
+        False,
+        """
+        on: {pull_request: {types: [ready_for_review]}}
+        jobs:
+          ok:
+            if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+            runs-on: ubuntu-latest
+            steps: [{run: echo}]
+        """,
+    ),
+    (
+        "types as a YAML scalar is not membership",
+        False,
+        """
+        on: {pull_request: {types: ready_for_review}}
+        jobs:
+          ok:
+            if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+            runs-on: ubuntu-latest
+            steps: [{run: echo}]
+        """,
+    ),
+    (
+        "a dependent rescued by !failure() escapes the cascade",
+        False,
+        """
+        on: {pull_request: {types: [opened, synchronize, reopened, ready_for_review]}}
+        jobs:
+          root:
+            if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+            runs-on: ubuntu-latest
+            steps: [{run: echo}]
+          dep: {needs: root, if: '!failure()', runs-on: macos-latest, steps: [{run: echo}]}
         """,
     ),
     (

@@ -78,7 +78,7 @@ Follow this workflow for every feature or fix:
 3. **Review loop (autonomous, multi-angle, staged)** — Run the loop in [docs/agentic-review.md](docs/agentic-review.md) on the diff: pre-pass (clippy/fmt/tests) → context pack → staged angles as parallel background subagents with explicit per-angle model tiering → verify each critical/major yourself → fix → re-review the fix delta. Loop until the doc's exit criteria hold or a cap/hard stop fires. Do not run separate single-reviewer warm-up rounds — the multi-angle pass replaces them. Diffs under ~50 lines with no stakes flag take the doc's trivia clause (§11); the stakes override (§3.3) is never downgradable.
 4. **Push to draft PR** — Push the branch and open a draft PR on GitHub. **CI does not run while a PR is a draft** (see the CI cost convention below), so do not push intermediate commits expecting a signal from GitHub — the local pre-pass is your only signal at this stage, which is what makes it load-bearing rather than advisory.
 5. **Mark ready for review — only after the review loop is done.** `gh pr ready` is what actually spends runner minutes, so it is a deliberate step, not a formality. Do not flip a PR ready until step 3's exit criteria hold *and* the local pre-pass (clippy, fmt, tests, plus the UI checks when the diff touches them) is green. A draft that has not been locally reviewed has not earned a CI run.
-6. **Wait for CI** — All checks must be green *and none of them skipped*. A skipped job reports as a passing check, so a draft's checks look successful; `gh pr checks` will exit 0 and say "All checks were successful" on a PR where nothing ran. Confirm `isDraft: false` and zero `skipping` buckets (commands in the CI cost convention below) before believing a green summary. Never assume checks are missing just because they haven't started yet — but if none appear after marking ready, the PR is probably `CONFLICTING`, which stops `pull_request` events firing entirely.
+6. **Wait for CI** — All checks must be green, and no *CI* job may be skipped. A skipped job reports as a passing check, so a draft's checks look successful; `gh pr checks` will exit 0 and say "All checks were successful" on a PR where nothing ran. Confirm `isDraft: false` and that no check from the **CI** workflow is in the `skipping` bucket — `release.yml`'s push-only jobs are always skipped on a PR, so "nothing skipped" is the wrong test (commands in the CI cost convention below). Never assume checks are missing just because they haven't started yet — but if none appear after marking ready, the PR is probably `CONFLICTING`, which stops `pull_request` events firing entirely.
 7. **Ask before merging** — Ask the maintainer for explicit approval before merging. Only merge with admin bypass if the maintainer explicitly says so upfront at task start.
 
 **Hand the maintainer the running software before the PR.** For any change with a UI or a new CLI surface, the house style is *checkpointed autonomy*: stop after implementing so they can drive it themselves, run the review loop unattended, then stop once more after the review fixes — because fixes that touch rendering, wire shapes, or CLI output regress exactly what was hand-verified the first time. A review subagent cannot see that a graph renders wrong. `/ship` captures this in its kickoff questionnaire; the two stops are planned, not escalations.
@@ -168,25 +168,42 @@ and several were paid for in this codebase already.
   and both workflows list `ready_for_review` in `on.pull_request.types` — both
   halves are required, because with the guard and without the type a PR flipped
   from draft to ready would fire nothing at all and sit with no checks forever.
-  Pushes to a draft still create a workflow run whose jobs all skip: queue time,
-  not runner minutes. The reason is what this workflow costs — a `pull_request`
-  run reaches **five macOS legs** (`integration`, `injection-test`, the mac leg of
-  `desktop-package`, and both darwin legs of `release-build`), each billed at 10×
-  a Linux minute, on top of a four-target release build matrix — all of which an
-  agent was previously re-running on every intermediate commit of a branch nobody
-  had reviewed yet.
+  Pushes to a draft still create a workflow run, but every job in it skips. The
+  reason is what a `pull_request` run occupies: **five macOS legs**
+  (`integration`, `injection-test`, the mac leg of `desktop-package`, and both
+  darwin legs of `release-build`) plus a four-target release build matrix — all of
+  which an agent was previously re-running on every intermediate commit of a
+  branch nobody had reviewed yet. Standard macOS runners are free on public
+  repositories, so the cost being saved here is **runner time and the account's
+  macOS concurrency allowance**, not a dollar figure: five simultaneous mac jobs
+  is a large share of that allowance, and a draft's runs queue ahead of work that
+  matters. (The same legs bill at 10× a Linux minute wherever Actions billing does
+  apply — a reason to keep the shape small, not a claim about this repo's bill.)
 
   **A skipped job reports as a *passing* check, so a draft PR looks green rather
   than looking unrun.** This is the trap the convention creates, and it is
   Actions' behaviour, not ours: `gh pr checks` sorts a skipped check into the
   `skipping` bucket, exits 0, and prints "All checks were successful". Nothing
-  distinguishes that from a real pass except the bucket. So never conclude "CI
-  is green" from an exit code or a summary line — check both of these:
+  distinguishes that from a real pass except the bucket.
+
+  So never conclude "CI is green" from an exit code or a summary line. But also do
+  **not** assert that nothing is skipped: `release.yml`'s push-only jobs are
+  *always* skipped on a PR, on every green PR this repo has ever merged (five of
+  them — `Tag & Release`, `Publish Artifacts`, `Publish veld-gateway image`,
+  `Build`, `Build Desktop`). A rule that fails on every healthy PR is a rule an
+  agent learns to ignore, which costs you the detection you added it for. Scope
+  the assertion to the CI workflow's own jobs:
 
   ```sh
-  gh pr view --json isDraft,mergeable          # isDraft must be false
-  gh pr checks --json name,bucket,event        # no bucket may be "skipping"
+  gh pr view --json isDraft,mergeable        # isDraft must be false
+  gh pr checks --json name,bucket,workflow \
+    --jq '[.[] | select(.workflow == "CI" and .bucket == "skipping")]'   # must be []
   ```
+
+  Where a name appears twice — a draft run and a ready run can both attach check
+  runs to the same head SHA — take the newest per name, or list the run directly:
+  `gh run list --workflow CI --commit "$(git rev-parse HEAD)"` and read only the
+  latest run id.
 
   The other consequence: **the local pre-pass is the only correctness signal a
   draft gets**, so never push-and-mark-ready on a red pre-pass hoping CI will

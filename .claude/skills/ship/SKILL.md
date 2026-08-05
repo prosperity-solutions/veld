@@ -221,11 +221,18 @@ opening the PR.
   `ci.yml` and `release.yml` skips while `draft == true`, so pushing here buys you
   a workflow run in which nothing executes. Don't poll it, don't push extra
   commits to "kick" it, and don't read the absence of checks as a problem — this
-  is the design. Five macOS legs at 10× billing plus a four-target release matrix
-  are what a draft run used to cost per intermediate commit.
+  is the design. Five macOS legs plus a four-target release matrix are what a
+  draft run occupies.
 - **Those skipped jobs report as passing checks.** The draft PR you just opened
   will show a green tick. It means nothing ran. See step 6.3 before you ever
   report a CI result.
+- Note what this does and does not save *for this flow*: /ship pushes once, at
+  this step, with the review already done — so the guard's payoff here is the
+  `opened` run plus any push made before you mark ready (a checkpoint iteration, a
+  post-PR review fix). The per-intermediate-commit waste it was written for belongs
+  to flows that push repeatedly while drafting. Don't invent draft pushes to
+  "use" the saving, and don't treat a short draft window as a reason to skip
+  step 6.1.
 
 ## Step 6 — Ready, CI, and merge
 
@@ -244,12 +251,19 @@ PR is ready, so waiting on a draft's checks is an infinite wait, not patience.
    pass, and it looks exactly like one:** a draft's jobs all skip, `gh pr checks`
    files those under the `skipping` bucket, exits 0, and prints "All checks were
    successful". So the exit code cannot tell you whether anything ran. Assert on
-   the buckets:
+   the buckets — and scope the assertion to the **CI** workflow, because
+   `release.yml`'s push-only jobs are skipped on every healthy PR:
 
    ```sh
-   gh pr view --json isDraft,mergeable          # isDraft must be false
-   gh pr checks --json name,bucket,event        # zero buckets may be "skipping"
+   gh pr view --json isDraft,mergeable        # isDraft must be false
+   gh pr checks --json name,bucket,workflow \
+     --jq '[.[] | select(.workflow == "CI" and .bucket == "skipping")]'   # must be []
    ```
+
+   A draft run and a ready run can both attach check runs to the same head SHA, so
+   if a name appears twice, take the newest — or read the run directly with
+   `gh run list --workflow CI --commit "$(git rev-parse HEAD)"` and inspect only
+   the latest id.
 
    This is the failure mode to fear under autonomy: forget step 2, poll, read
    "All checks were successful", and report a green CI on a diff nothing ran.

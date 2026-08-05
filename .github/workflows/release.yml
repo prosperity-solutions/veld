@@ -16,8 +16,14 @@ env:
 # Only a PR's runs are cancellable. A push to main is a release: it tags,
 # publishes artifacts and pushes a container image, and cancelling that midway
 # leaves a tag with no artifacts behind it.
+#
+# Hence `github.sha`, not `github.ref`, as the non-PR key. A shared main group
+# would let a newer merge cancel an older *pending* release run — which
+# `cancel-in-progress: false` does not prevent, because that flag governs only
+# in-progress runs. Per-SHA groups keep main releases independent, as they were
+# before this block existed. See the fuller note in ci.yml.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions: {}

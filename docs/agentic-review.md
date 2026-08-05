@@ -163,13 +163,15 @@ Capture output verbatim.
   full list, including the UI checks when the diff touches
   `crates/veld-daemon/ui`, and re-run it after every fix (§8.4) rather than
   batching one run at the end.
-- **Two CI checks have no default local equivalent — add them when the diff
-  reaches them.** `just workflow-gates` when the change touches
-  `.github/workflows/` (the `schema` job's draft-PR gate), and a read of your own
-  commit subjects against the conventional-commits pattern in the `commits` job
-  (`ci.yml`, a regex over `git rev-list BASE..HEAD`). Both used to fail on the
-  first draft push; now they first run *after* the spending decision, so a
-  malformed commit subject costs a full five-macOS-leg run to discover.
+- **Two CI checks are now post-spend, so run them locally instead.**
+  `just workflow-gates` whenever the change touches `.github/workflows/`, and
+  `just commit-subjects` before pushing. Both used to fail on the first draft
+  push, in seconds, on a Linux runner; both are draft-guarded now and first report
+  *after* the PR is marked ready — so a malformed commit subject or an unguarded
+  new job is discovered only once the five macOS legs have already dispatched.
+  `just workflow-gates` is the sole thing standing between an unguarded job and a
+  draft that quietly runs it, because the gate's CI home (the `schema` job) is
+  draft-guarded too.
 - **Everything the pre-pass reports is out of scope for every subagent.** Put
   this line in every brief: *"The typechecker, linter and tests already ran;
   their output is in the context pack. Do not re-report it. Findings that
