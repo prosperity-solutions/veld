@@ -175,11 +175,19 @@ pub enum LogTimeZone {
 }
 
 impl LogTimeZone {
-    /// Every zone this binary understands. The validator's allow-list and the readers
-    /// are both derived from this, so adding a variant cannot leave a value that
-    /// validates but no surface honours — which is the trap the string-enum shape
-    /// invites: `one_of` hand-listing `["local","utc"]` beside a `_ => Local` reader
-    /// would accept `"Europe/Berlin"` and then silently render local.
+    /// Every zone this binary understands.
+    ///
+    /// The validator's allow-list and both **Rust** readers derive from this, so a new
+    /// variant cannot validate on write and then be ignored by `veld logs` or
+    /// `veld start` — which is the trap the string-enum shape invites: `one_of`
+    /// hand-listing `["local","utc"]` beside a `_ => Local` reader would accept
+    /// `"Europe/Berlin"` and silently render local.
+    ///
+    /// **It does not reach the `/ide` reader**, which hand-lists the same two spellings
+    /// in TypeScript (`ui/src/shared/settings.ts`, `logsTimeZone`). Nothing ties the two
+    /// lists together, so adding a variant here means editing that file in the same
+    /// change or the UI will validate the value and render local anyway. That is the
+    /// same Rust↔TS gap this module's header already names around `FALLBACK`.
     pub const ALL: &'static [LogTimeZone] = &[Self::Local, Self::Utc];
 
     pub fn as_str(self) -> &'static str {

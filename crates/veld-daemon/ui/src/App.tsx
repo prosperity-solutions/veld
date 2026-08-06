@@ -552,11 +552,13 @@ function AppInner(props: {
   // They do not necessarily agree on the zone, and it would be wrong to claim they do:
   // "local" is resolved twice and independently — `chrono::Local` from the CLI
   // process's environment, this side from the browser. An empty `TZ` makes chrono
-  // answer UTC while the browser stays on the machine's zone; a `veld logs` typed into
-  // a daemon-spawned terminal pane inherits launchd's environment rather than the login
-  // shell's (the same asymmetry AGENTS.md documents for `PATH`); and a browser on
-  // another host is simply somewhere else. "Local" means *each reader's own clock*,
-  // which is the intent — not a promise that two readers share one.
+  // answer UTC while the browser stays on the machine's zone, and a browser on another
+  // host is simply somewhere else. "Local" means *each reader's own clock*, which is
+  // the intent — not a promise that two readers share one.
+  //
+  // A Veld terminal pane is NOT one of those cases: the holder spawns `$SHELL -l` on a
+  // tty, so it reads the same startup files a real terminal does. That is the same
+  // reason it is the documented exception to AGENTS.md's daemon-`PATH` rule.
   const logsTz = logsTimeZone(settings ?? {});
 
   // Which of this worktree's config-declared panes the daemon holds a session

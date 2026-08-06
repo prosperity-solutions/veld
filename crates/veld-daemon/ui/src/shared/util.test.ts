@@ -103,7 +103,8 @@ describe("timestamps", () => {
   it("fmtTsFull carries the date, both zones, and a signed offset", () => {
     const utcFirst = fmtTsFull("2026-07-27T10:00:00.123Z", "utc");
     const [first, second, third] = utcFirst.split("\n");
-    // The rendered zone leads; the counterpart follows. Three lines, always.
+    // The rendered zone leads; the counterpart follows. Three lines for a parseable
+    // value — the unparseable one returns a bare single line, pinned below.
     expect(first).toBe("2026-07-27 10:00:00.123 (UTC)");
     expect(second).toMatch(/^\d{4}-\d{2}-\d{2} .* \(local, UTC[+-]\d{2}:\d{2}\)$/);
     expect(third).toBe("stored: 2026-07-27T10:00:00.123Z");
@@ -152,8 +153,9 @@ describe("timestamps", () => {
   });
 
   it("fmtTsFull keeps the microseconds the rendered lines drop", () => {
-    // `new Date` holds milliseconds, so both rendered lines round `.123456` to `.123`
-    // and two rows 200µs apart would tooltip identically. The CLI keeps the precision,
+    // `new Date` holds milliseconds, so both rendered lines truncate `.123456` to
+    // `.123` (truncate, not round — `.123999` is also `.123`) and two rows 200µs apart
+    // would tooltip identically. The CLI keeps the precision,
     // so the stored line is what makes this agree with `veld logs --utc` and what a
     // reader can paste into a bug report.
     const full = fmtTsFull("2026-07-27T10:00:00.123456Z", "utc");

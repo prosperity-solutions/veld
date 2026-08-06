@@ -342,9 +342,11 @@ export function LogsPanel(props: {
             <div className={`log-line${dim ? " ctx" : ""}${e.msg.startsWith("[VELD]") ? " ann" : ""}`}>
               {e.ts && (
                 // `|| e.ts` because `fmtTs` returns "" for a value `new Date` cannot
-                // parse, and `.ts` is an inline span: an empty one has no hit area, so
-                // the tooltip carrying the evidence could never be opened on exactly
-                // the row whose timestamp is wrong. `extractTs` (`./util`) is
+                // parse, which rendered an empty inline span: the row lost its
+                // timestamp column entirely and had no hit area, so there was nothing
+                // to hover either. What this buys is the value staying *visible* — on
+                // that path `fmtTsFull` also returns the raw string, so the tooltip
+                // adds nothing the row does not already show. `extractTs` (`./util`) is
                 // `/^\[([^\]]+)\]/` with no date gate at all — it hands back whatever
                 // the first bracket holds — so this depends entirely on the daemon
                 // always prefixing `r.ts`, not on any validation here.
