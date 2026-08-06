@@ -2108,6 +2108,67 @@ mod tests {
         init_lua_loads_veld_spoon, parse_launchctl_pid, parse_systemd_main_pid, remove_spoon_files,
     };
 
+    /// The happy path of the log preparation, against a real filesystem.
+    ///
+    /// Load-bearing because of what the `None` branch means: no log keys in the
+    /// plist. If this function started failing for the ordinary case, the daemon
+    /// would keep running and silently stop logging, which is precisely the state
+    /// this whole change exists to end — so "it returned a path, and that path is
+    /// owner-only" is asserted rather than assumed.
+    #[test]
+    #[cfg(unix)]
+    fn the_daemon_log_is_prepared_owner_only() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let home = std::env::temp_dir().join(format!("veld-log-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+
+        // Our own uid, taken from a file we just made rather than from a crate.
+        let probe = home.join("probe");
+        std::fs::write(&probe, b"x").unwrap();
+        let uid = std::fs::metadata(&probe).unwrap().uid();
+        let user = std::env::var("USER").unwrap_or_default();
+
+        let log = super::prepare_daemon_log(&user, &uid.to_string(), &home)
+            .expect("a writable home must yield a log path");
+        assert_eq!(log, home.join(".veld").join("veld-daemon.log"));
+        assert_eq!(
+            std::fs::metadata(&log).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "the file launchd will append diagnostics to must not be world-readable"
+        );
+
+        // Idempotent: `veld setup` is re-run routinely, and the second run must not
+        // fail or lose an existing log.
+        std::fs::write(&log, b"an earlier daemon's line\n").unwrap();
+        assert_eq!(
+            super::prepare_daemon_log(&user, &uid.to_string(), &home).as_ref(),
+            Some(&log)
+        );
+        assert!(
+            std::fs::read_to_string(&log)
+                .unwrap()
+                .contains("earlier daemon"),
+            "preparing the log must open it for append, never truncate it"
+        );
+
+        // A uid the file cannot end up owned by: the plist must name no log at all,
+        // and nothing may be left behind for launchd to trip over. Skipped when the
+        // tests themselves run as root, where uid 0 *is* the owner.
+        if uid != 0 {
+            assert_eq!(
+                super::prepare_daemon_log(&user, "0", &home),
+                None,
+                "a log the job's uid cannot own is worse than no log — launchd exits \
+                 such a job EX_CONFIG without ever running the program"
+            );
+            assert!(!log.exists(), "the unusable log must be removed, not left");
+        }
+
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
     #[test]
     fn init_lua_veld_spoon_detected_in_every_lua_call_form() {
         // What the removed installer used to prepend.

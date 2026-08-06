@@ -281,8 +281,9 @@ async fn restart_services(target_version: &str, helper_dead_privileged: bool) {
 /// Poll the daemon's `/api/health` until it reports `expected_version`, or the
 /// timeout elapses.
 ///
-/// The daemon is restarted by the installer — signalled to exit and relaunched by
-/// launchd/systemd onto the new binary (`restart_launch_agent` in install.sh) — so
+/// The daemon is restarted by the installer — on macOS signalled to exit and
+/// relaunched by launchd onto the new binary (`restart_launch_agent` in install.sh),
+/// on Linux a plain `systemctl --user restart veld-daemon` — so
 /// its HTTP endpoint goes down and comes back; waiting for the version to match
 /// confirms the NEW daemon is serving, not a lingering old instance or a
 /// pre-change daemon that has no `version` field (which reports nothing and

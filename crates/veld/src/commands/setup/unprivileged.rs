@@ -181,9 +181,11 @@ async fn install_helper_launchagent(
     </array>
     <key>RunAtLoad</key>
     <true/>
-    <!-- KeepAlive unconditionally true, like the daemon's and the privileged
-         helper's: install.sh restarts this job by signalling it to exit and relies on
-         launchd bringing it back onto the new binary (see `restart_launch_agent`). -->
+    <!-- KeepAlive unconditionally true, like the daemon's: install.sh restarts this
+         job through `restart_launch_agent`, which signals it to exit and relies on
+         launchd bringing it back onto the new binary. (The privileged helper is a
+         `system/` LaunchDaemon and takes a different path — a sudo `kill TERM` — since
+         that function only addresses `gui/<uid>` jobs.) -->
     <key>KeepAlive</key>
     <true/>
 </dict>

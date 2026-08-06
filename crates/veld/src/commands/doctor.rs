@@ -928,8 +928,14 @@ fn restart_daemon_hint() -> String {
     }
 }
 
-/// Which `veld setup <mode>` to suggest: the mode this machine is already in,
-/// since running the other one would change the install rather than repair it.
+/// Which `veld setup <mode>` to suggest.
+///
+/// `privileged` for a machine that is in that mode, since suggesting the other one
+/// would change the install rather than repair it. `unprivileged` for **everything
+/// else**, and that is a choice rather than a passthrough: `auto` and the literal
+/// "not configured" `read_mode` returns for a machine that never ran setup both land
+/// here, and neither is a mode `veld setup` takes. `unprivileged` is the no-sudo mode
+/// such a machine should be in, and it is what install.sh tells it to run.
 fn setup_mode_arg(mode: &str) -> &'static str {
     match mode {
         "privileged" => "privileged",
