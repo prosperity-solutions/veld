@@ -344,8 +344,10 @@ export function LogsPanel(props: {
                 // `|| e.ts` because `fmtTs` returns "" for a value `new Date` cannot
                 // parse, and `.ts` is an inline span: an empty one has no hit area, so
                 // the tooltip carrying the evidence could never be opened on exactly
-                // the row whose timestamp is wrong. Reachable — `extractTs` gates only
-                // on a leading `YYYY-MM-DDT`, which `2026-13-45T00:00:00Z` passes.
+                // the row whose timestamp is wrong. `extractTs` (`./util`) is
+                // `/^\[([^\]]+)\]/` with no date gate at all — it hands back whatever
+                // the first bracket holds — so this depends entirely on the daemon
+                // always prefixing `r.ts`, not on any validation here.
                 <span className="ts" title={fmtTsFull(e.ts, props.tz)}>
                   {fmtTs(e.ts, props.tz) || e.ts}
                 </span>
