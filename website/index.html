@@ -254,7 +254,10 @@
        the next feature lands, 19 doesn't divide — put `cell-wide` back on the
        last cell to make it 20... which also doesn't; add two, or leave one out. */
     .grid .cell-wide { grid-column: span 2; }
-    .grid .cell-next { grid-column: span 3; background: color-mix(in srgb, var(--accent-ink) 6%, var(--bg)); }
+    /* Spans exactly the columns the feature cells leave over, so the grid has no
+       gray gap. 19 cells + span 2 = 21 = 7 full rows; changing the cell count
+       means changing this number. */
+    .grid .cell-next { grid-column: span 2; background: color-mix(in srgb, var(--accent-ink) 6%, var(--bg)); }
     @media (max-width: 760px) {
       /* 2 columns: span 3 would overflow, and the wide cell should just fill a row. */
       .grid .cell-wide, .grid .cell-next { grid-column: 1 / -1; }
@@ -423,6 +426,7 @@ veld share <span class="kw">--web</span>
         <div class="cell"><h3>A config a monorepo can live with</h3><p>Comments where you need them &mdash; call the file <code>veld.jsonc</code> and your editor stops arguing. Split it across per-directory files so each team owns theirs. Say a value once and reference it everywhere. It deduplicates <em>values</em>, never structure — so opening a service&rsquo;s file still tells you what it runs, and grepping for an env var still finds the line that sets it.</p></div>
         <div class="cell"><h3>Your command, not the shell&rsquo;s opinion</h3><p>Write it as a list and veld runs it directly. A password with a space in it stays <em>one</em> argument &mdash; not two arguments and an incident. Want a pipe? Ask for a shell.</p></div>
         <div class="cell"><h3>Secrets it never keeps</h3><p>veld holds a pointer, not your password: an env var, a file, or a command that prints one. Mark it secret and it refuses to put it on a command line, where <code>ps</code> would read it out to the whole machine.</p></div>
+        <div class="cell"><h3>The bits that differ per laptop</h3><p>Some values in a checked-in config aren&rsquo;t project facts, they&rsquo;re machine facts &mdash; which container runtime you have, how much memory this machine can spare, where a tool lives. Declare a default, and each person answers once with <code>veld config set</code>. Kept per machine and shared across all your worktrees, so you answer it once, not once per checkout.</p></div>
         <div class="cell"><h3>Wrong config, caught early</h3><p><code>veld lint</code> lists every problem at once and fails CI. Typo&rsquo;d variable, one that is real but means nothing where you wrote it, a preset pointing at a node that moved, a service reading a URL that only exists under <em>some</em> presets, secret about to leak. Better now than 9am Monday.</p></div>
         <div class="cell"><h3>Many runs, side by side</h3><p>Give every branch or git worktree its own environment — they run in parallel without clashing. Re-running by name just resumes.</p></div>
         <div class="cell"><h3>Scripts &amp; agents love it</h3><p>Every command has a <code>--json</code> mode for CI, scripts, and coding agents.</p></div>
@@ -469,6 +473,7 @@ veld share <span class="kw">--web</span>
         <div class="cli-row"><code>veld graph / nodes / presets / runs</code><span>Inspect the config and the run history</span></div>
         <div class="cli-row"><code>veld lint</code><span>Check the config for problems — every one at once, exits non-zero in CI</span></div>
         <div class="cli-row"><code>veld config --files / --why P</code><span>Which file defines which node, and where an effective value came from</span></div>
+        <div class="cli-row"><code>veld config vars / set / unset</code><span>Values that differ per machine — answered once, shared across your worktrees</span></div>
         <div class="cli-row"><code>veld action NAME</code><span>Run a node-defined action (e.g. open the DB in a GUI)</span></div>
       </div>
 

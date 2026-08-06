@@ -260,6 +260,34 @@ backed by a `file` / `env` / `argv` / `shell` source is resolved only when the
 plan reaches it, so a credential helper behind a var is not run by a
 `veld start docs`.
 
+### Machine-overridable vars
+
+Values that are facts about the **machine** rather than the project — a locally
+installed container runtime, a memory ceiling, a path to a local tool — no longer
+need a hand-set env var or a gitignored file the project parses itself:
+
+```jsonc
+"vars": {
+  "container_runtime": {
+    "machine": {
+      "default": "docker",
+      "choices": ["docker", "podman"],
+      "description": "Which local runtime runs this project's containers"
+    }
+  }
+}
+```
+
+The declaration is committed; each developer answers it once with
+`veld config set container_runtime podman`. The answer is stored per machine and
+**shared across every worktree of the repo**, so it is not asked again in each
+checkout — `--worktree` narrows it when one checkout genuinely differs.
+
+Nothing changes for an existing config: this is opt-in per var, and a plain var is
+still a plain var. Adding a machine var with **no** `default` is the one thing to
+introduce deliberately, because every machine (and every CI runner) then has to
+answer it before the project starts.
+
 ### Named ports
 
 ```jsonc

@@ -32,6 +32,7 @@ No port numbers. No manual wiring. Just clean, stable, human-readable URLs.
 - **Config that scales to a monorepo** (`schemaVersion: "3"`) — comments and trailing commas in `veld.json` (or name the root file `veld.jsonc` and your editor works it out); split the config across per-directory files with `include` globs so teams own their own; declare a field once at node level and override it per variant; `vars` for one definition point per value, interpolated and resolved only when the plan reaches them. Deduplicates *values*, never structure — `rg <ENV_VAR>` still finds the line that sets it. `schemaVersion: "3"` is required — an older config fails to load with an error stating every change needed. See [docs/migrating-to-v3.md](docs/migrating-to-v3.md), written to hand to a coding agent, with `veld lint` as the check
 - **`argv` or `shell`** — one vocabulary everywhere veld runs something. `argv` is spawned directly, so an interpolated value containing spaces or globs can never change the argument count; `shell` is the permanently-supported escape hatch
 - **Value sources and secrets** — read a value from the environment, a file, or a command's stdout, and mark it `secret`. Veld carries a *pointer* and a flag, never custody: a secret reaches the process's environment or a file (`files:`) and is refused in a command line, where it would land in the process table
+- **Machine-overridable vars** — some values in a committed config are facts about the *laptop*, not the project: which of two installed container runtimes to use, a memory ceiling a 16 GB machine and a 64 GB machine disagree about, the path to a locally installed tool. A var declares `machine: { default, choices, description, prompt }` and each developer answers it once with `veld config set` — stored in Veld's database, **shared across every worktree of the repo** rather than asked again in each one, narrowable to one checkout with `--worktree`. A var with no default stops the run *before anything spawns*, asks when there is a terminal (or a UI), and otherwise refuses with the exact command — it never resolves a default nobody chose and never persists a guess
 - **Named ports** — `"ports": { "http": "auto", "debug": "auto" }` for debug adapters and multi-port containers, so nothing needs a hand-picked literal port that breaks parallel worktrees
 - **Structured output** — all commands support `--json` for scripting and CI
 - **Browser dashboard** — management UI at `https://veld.localhost` with service health, logs, search, stop/restart
@@ -184,6 +185,9 @@ veld stop --name dev
 | `veld gc` | Clean up stale state and logs |
 | `veld setup [unprivileged\|privileged]` | One-time system setup |
 | `veld config [--path] [--files] [--why <pointer>] [--json]` | Print the config. `--files`: each `include` glob, the files it matched, and the nodes each defines. `--why`: one effective value and where it was defined (a `secret` is described, never printed) |
+| `veld config vars [--json]` | Every machine-overridable var: effective value, and which scope it came from |
+| `veld config set <name> <value\|--env N\|--file P\|--shell C> [--worktree]` | Answer a machine-overridable var on this machine. Shared by every worktree of the project unless `--worktree` |
+| `veld config unset <name> [--worktree]` | Forget this machine's answer, falling back to the next scope and then the config default |
 | `veld init` | Create a new veld.json (veld also reads veld.jsonc) |
 
 ## Configuration

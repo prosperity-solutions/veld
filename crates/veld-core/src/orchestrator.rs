@@ -393,6 +393,8 @@ fn build_graph_snapshot(
     config_hash: String,
     plan: &[Vec<NodeSelection>],
     started_from: Option<crate::state::StartOrigin>,
+    overrides: &crate::values::VarOverrides,
+    provenance: &std::collections::BTreeMap<String, VarProvenance>,
 ) -> crate::state::GraphSnapshot {
     let mut nodes = std::collections::BTreeMap::new();
     // The FULL resolved graph, deliberately including the oneshot terminal
@@ -440,10 +442,35 @@ fn build_graph_snapshot(
             },
         );
     }
+    // Every var the config declared overridable, with where its value came from.
+    // Declared-but-unanswered vars are listed too (`from: "default"`), because
+    // "this machine had no override for it" is exactly as much of an explanation
+    // as "it did" when two runs disagree.
+    let mut var_overrides: Vec<crate::state::VarOverrideSnapshot> = config
+        .vars
+        .iter()
+        .flatten()
+        .filter(|(_, decl)| decl.machine().is_some())
+        .map(|(name, _)| crate::state::VarOverrideSnapshot {
+            name: name.clone(),
+            from: match provenance.get(name) {
+                Some(from) if overrides.contains_key(name) => from.as_str().to_owned(),
+                _ => "default".to_owned(),
+            },
+        })
+        .collect();
+    // `config.vars` is a HashMap, so without this the list's order would change
+    // between runs and `veld runs diff` would report a difference that is only
+    // hash iteration order.
+    var_overrides.sort_by(|a, b| a.name.cmp(&b.name));
+    // Always `Some` from a run this binary started, even when empty — that is
+    // what lets a later diff tell "no machine vars" from "recorded before the
+    // field existed".
     crate::state::GraphSnapshot {
         config_hash,
         started_from,
         nodes,
+        var_overrides: Some(var_overrides),
     }
 }
 
@@ -612,6 +639,48 @@ struct NodeExecutionResult {
     server_handle: Option<process::ServerHandle>,
 }
 
+/// Where an in-effect machine-var answer came from.
+///
+/// `has_row` is the question every consumer actually asks — "can a later
+/// `veld stop`, running in a fresh process that reads only the store, resolve
+/// this?" — so it is derived here rather than tracked in a second collection
+/// that has to be kept in step. Three review rounds produced a bug in that seam;
+/// this type is what makes the bug unrepresentable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VarProvenance {
+    /// A stored row shared by every worktree of the project.
+    Project,
+    /// A stored row scoped to this checkout.
+    Worktree,
+    /// Answered for this run only — `--var`, or a prompt answer the human chose
+    /// not to save. No row backs it, and it does not survive this process.
+    Flag,
+}
+
+impl VarProvenance {
+    pub fn from_scope(scope: crate::db::OverrideScope) -> Self {
+        match scope {
+            crate::db::OverrideScope::Project => Self::Project,
+            crate::db::OverrideScope::Worktree => Self::Worktree,
+        }
+    }
+
+    /// Whether a row in the database backs this answer — i.e. whether a process
+    /// that reads only the store can resolve it.
+    pub fn has_row(self) -> bool {
+        matches!(self, Self::Project | Self::Worktree)
+    }
+
+    /// The string recorded in a run snapshot.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Project => "project",
+            Self::Worktree => "worktree",
+            Self::Flag => "flag",
+        }
+    }
+}
+
 pub struct Orchestrator {
     pub config: VeldConfig,
     pub config_path: PathBuf,
@@ -650,6 +719,24 @@ pub struct Orchestrator {
     /// instead run afterwards via [`Orchestrator::run_terminal`]. Its exit ends
     /// the run (see `veld start --oneshot`).
     terminal_node: Option<NodeSelection>,
+    /// What this project is called for override purposes — one value across every
+    /// worktree of the repo. See [`crate::project_id`].
+    project_id: crate::project_id::ProjectId,
+    /// This machine's answers for machine-overridable vars, read once at
+    /// construction. Empty is a legal state: it means every var falls back to its
+    /// declared `default`.
+    var_overrides: crate::values::VarOverrides,
+    /// Where each answer above came from, kept beside the values rather than
+    /// inside them so resolution stays a plain name→value lookup while the run
+    /// snapshot can still record provenance.
+    ///
+    /// **One typed map, not a string plus a parallel set of "names that have a
+    /// row".** Three review rounds each produced a bug in this seam, and every
+    /// one was the same shape: two collections that had to agree and did not.
+    /// [`VarProvenance::has_row`] is now *derived* from the provenance rather
+    /// than tracked beside it, so "labelled a flag answer while a row exists" is
+    /// unrepresentable instead of merely avoided.
+    var_provenance: std::collections::BTreeMap<String, VarProvenance>,
     /// Project `vars`, resolved once during `start`. Stashed so `run_terminal` and
     /// the `on_stop` path reuse the same values rather than re-running a source
     /// command — two resolutions of a rotating credential would disagree.
@@ -681,11 +768,32 @@ impl Orchestrator {
                 .map(|bytes| format!("{:x}", Sha256::digest(&bytes)))
                 .unwrap_or_default()
         };
+        // Read once, here, so every path through this orchestrator sees the same
+        // answers — including `stop`, which builds a fresh instance in a
+        // different process. Teardown therefore reads the store and never asks:
+        // a `veld stop` that prompted, or that failed because a var had no
+        // answer, would leak the containers it exists to remove.
+        let project_id = crate::project_id::project_id_for(&project_root);
+        let stored = db
+            .effective_var_overrides(&project_id, &project_root)
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "could not read machine var overrides; using config defaults");
+                Default::default()
+            });
+        let var_provenance: std::collections::BTreeMap<String, VarProvenance> = stored
+            .iter()
+            .map(|(k, v)| (k.clone(), VarProvenance::from_scope(v.scope)))
+            .collect();
+        let var_overrides: crate::values::VarOverrides =
+            stored.into_iter().map(|(k, v)| (k, v.value)).collect();
         Ok(Self {
             config,
             config_path,
             config_hash,
             project_root,
+            project_id,
+            var_overrides,
+            var_provenance,
             db,
             port_allocator: PortAllocator::new(),
             helper_client: HelperClient::default_client(),
@@ -702,6 +810,100 @@ impl Orchestrator {
             resolved_vars_run: None,
             terminal_outputs: None,
         })
+    }
+
+    /// What this project is called for machine-override purposes.
+    pub fn project_id(&self) -> &crate::project_id::ProjectId {
+        &self.project_id
+    }
+
+    /// Supply per-run var answers (`veld start --var NAME=VALUE`).
+    ///
+    /// These sit **above** the stored machine answers. Whether they were also
+    /// *written* to the store is the caller's business and is expressed by the
+    /// `provenance` it passes — which is why that argument exists rather than
+    /// this function assuming `Flag`. An answer given at a prompt and saved is
+    /// backed by a row and must say so, or the teardown warning fires for a var
+    /// the user just set, and the run snapshot records the wrong origin.
+    pub fn set_var_answers(
+        &mut self,
+        answers: crate::values::VarOverrides,
+        provenance: VarProvenance,
+    ) {
+        for (name, value) in answers {
+            self.var_provenance.insert(name.clone(), provenance);
+            self.var_overrides.insert(name, value);
+        }
+    }
+
+    /// Which machine-overridable vars this start would need and this machine has
+    /// not answered — checked **before anything spawns**.
+    ///
+    /// The selections are expanded through `build_execution_plan` exactly as
+    /// `start` expands them, so a var reached only through a transitive
+    /// dependency is found here rather than after three nodes are already up.
+    /// Using the raw selections instead would leave precisely the case this
+    /// pre-flight exists to prevent.
+    pub fn unanswered_vars(
+        &self,
+        selections: &[NodeSelection],
+    ) -> Result<Vec<crate::values::UnansweredVar>, OrchestratorError> {
+        let resolved = graph::resolve_selections(selections, &self.config)?;
+        let plan = graph::build_execution_plan(&resolved, &self.config)?;
+        let planned: Vec<NodeSelection> = plan.into_iter().flatten().collect();
+        Ok(crate::values::unanswered_machine_vars(
+            &self.config,
+            &self.var_overrides,
+            &planned,
+        ))
+    }
+
+    /// `--var` answers that a later `veld stop` will need and cannot get.
+    ///
+    /// A flag answer lives only in this process. `veld stop` runs in a *new* one,
+    /// rebuilds the orchestrator, and reads the store — so a var answered only by
+    /// `--var` and referenced from `teardown` or `on_stop` is unresolvable at
+    /// stop time. That is not a small loss: one unresolvable var makes
+    /// [`Self::ensure_stop_vars`] warn and skip **every** `${vars.*}` teardown
+    /// step, so a container the teardown exists to remove is left running.
+    ///
+    /// Named at start, where the user can still choose `veld config set` instead,
+    /// rather than discovered at stop when the environment is already up.
+    pub fn flag_answers_needed_at_teardown(&self, selections: &[NodeSelection]) -> Vec<String> {
+        // Expanded, exactly as `unanswered_vars` expands — and for the identical
+        // reason. `vars_for_teardown` over the *raw* selections misses an
+        // `on_stop` on a node pulled in only by `depends_on`, which is precisely
+        // the transitive case this warning exists for: the containers left
+        // running are usually the dependency's, not the node that was named.
+        let planned: Vec<NodeSelection> = match graph::resolve_selections(selections, &self.config)
+            .and_then(|resolved| graph::build_execution_plan(&resolved, &self.config))
+        {
+            Ok(plan) => plan.into_iter().flatten().collect(),
+            // A plan that no longer resolves is not this warning's problem.
+            Err(_) => selections.to_vec(),
+        };
+        let needed = config::vars_for_teardown(&self.config, &planned);
+        let mut out: Vec<String> = self
+            .var_provenance
+            .iter()
+            // `!has_row` is the whole condition: a var backed by a row — whether
+            // it was stored before this run or saved during its prompt — is one
+            // `veld stop` can resolve from the store, so warning about it would
+            // send the user to `veld config set` for something already set.
+            .filter(|(name, from)| !from.has_row() && needed.contains(name.as_str()))
+            // A var with a default is fine: stop falls back to it.
+            .filter(|(name, _)| {
+                self.config
+                    .vars
+                    .as_ref()
+                    .and_then(|v| v.get(name.as_str()))
+                    .and_then(|d| d.machine())
+                    .is_some_and(|m| m.default.is_none())
+            })
+            .map(|(name, _)| name.clone())
+            .collect();
+        out.sort();
+        out
     }
 
     /// Designate a `command` node as the run's terminal one-off (`--oneshot`).
@@ -896,6 +1098,8 @@ impl Orchestrator {
             self.config_hash.clone(),
             &plan,
             origin,
+            &self.var_overrides,
+            &self.var_provenance,
         ));
         // Scope the run-level log streams to this instance (the writers were
         // created before the run existed).
@@ -936,6 +1140,7 @@ impl Orchestrator {
         // `failed` history directly — this run never held the live slot.
         let setup_result = match crate::values::resolve_vars(
             self.config.vars.as_ref(),
+            &self.var_overrides,
             Some(&self.project_root),
             &vars_ctx,
             &config::vars_for_setup(&self.config),
@@ -1145,6 +1350,7 @@ impl Orchestrator {
         all_vars.extend(
             crate::values::resolve_vars(
                 self.config.vars.as_ref(),
+                &self.var_overrides,
                 Some(&self.project_root),
                 &vars_ctx,
                 &config::vars_for_plan(&self.config, &planned),
@@ -2367,6 +2573,7 @@ impl Orchestrator {
             );
             match crate::values::resolve_vars(
                 self.config.vars.as_ref(),
+                &self.var_overrides,
                 Some(&self.project_root),
                 &ctx,
                 &needed,
@@ -3142,7 +3349,7 @@ async fn execute_start_server_isolated(
             .vars
             .iter()
             .flatten()
-            .filter(|(_, value)| value.secret)
+            .filter(|(_, value)| value.secret())
             .map(|(name, _)| name.clone())
             .collect();
         let mut tainted: Vec<String> = Vec::new();
@@ -3675,7 +3882,7 @@ async fn execute_command_isolated(
             .vars
             .iter()
             .flatten()
-            .filter(|(_, value)| value.secret)
+            .filter(|(_, value)| value.secret())
             .map(|(name, _)| name.clone())
             .collect();
         let mut tainted: Vec<String> = Vec::new();
@@ -4270,6 +4477,180 @@ mod tests {
         );
     }
 
+    /// **The pre-flight must see the whole plan, not the selections.**
+    ///
+    /// A var reached only through a transitive dependency is the exact case the
+    /// pre-flight exists for: without expansion it is discovered at resolution
+    /// time, after the dependency is already running, and the choice then is
+    /// between tearing down a half-started environment and prompting while it
+    /// runs. `unanswered_vars` therefore expands through `build_execution_plan`
+    /// exactly as `start` does — and the second half of the test is the other
+    /// side of the same coin: a var no selected node reaches must NOT be asked
+    /// for, or `veld start docs` demands the database password.
+    #[tokio::test]
+    async fn the_preflight_sees_dependencies_and_ignores_unrelated_nodes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config: VeldConfig = serde_json::from_str(
+            r#"{
+                "schemaVersion": "3",
+                "name": "testcfg",
+                "vars": {
+                    "db_secret": { "machine": { "prompt": "DB password?" } },
+                    "docs_only":  { "machine": { "prompt": "Docs token?" } },
+                    "answered":   { "machine": { "default": "fine" } }
+                },
+                "nodes": {
+                    "db": { "default_variant": "local", "variants": {
+                        "local": { "type": "command", "shell": "true",
+                                   "env": { "PW": "${vars.db_secret}" } }
+                    }},
+                    "api": { "default_variant": "local",
+                             "depends_on": { "db": "local" },
+                             "variants": { "local": { "type": "command", "shell": "true" } } },
+                    "docs": { "default_variant": "local", "variants": {
+                        "local": { "type": "command", "shell": "true",
+                                   "env": { "T": "${vars.docs_only}" } }
+                    }}
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let orch = test_orchestrator(tmp.path(), config);
+        let api = vec![NodeSelection {
+            node: "api".to_owned(),
+            variant: "local".to_owned(),
+        }];
+        let missing = orch.unanswered_vars(&api).expect("plan expands");
+        let names: Vec<&str> = missing.iter().map(|v| v.name.as_str()).collect();
+
+        assert!(
+            names.contains(&"db_secret"),
+            "a var used only by a dependency must be found before anything spawns, got {names:?}"
+        );
+        assert!(
+            !names.contains(&"docs_only"),
+            "a var outside the plan must not be demanded, got {names:?}"
+        );
+        assert!(
+            !names.contains(&"answered"),
+            "a var with a default is answered, got {names:?}"
+        );
+        assert_eq!(
+            missing
+                .iter()
+                .find(|v| v.name == "db_secret")
+                .map(|v| v.question()),
+            Some("DB password?".to_owned()),
+            "the declared prompt is what the human is asked"
+        );
+    }
+
+    /// A stored answer the config no longer allows is caught by the pre-flight
+    /// too, so `choices` changing under an override surfaces before the run.
+    #[tokio::test]
+    async fn the_preflight_flags_an_answer_the_choices_no_longer_allow() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config: VeldConfig = serde_json::from_str(
+            r#"{
+                "schemaVersion": "3",
+                "name": "testcfg",
+                "vars": {
+                    "runtime": { "machine": { "default": "docker",
+                                              "choices": ["docker", "podman"] } }
+                },
+                "nodes": {
+                    "task": { "default_variant": "local", "variants": {
+                        "local": { "type": "command", "shell": "true",
+                                   "env": { "R": "${vars.runtime}" } }
+                    }}
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let mut orch = test_orchestrator(tmp.path(), config);
+        let sels = vec![NodeSelection {
+            node: "task".to_owned(),
+            variant: "local".to_owned(),
+        }];
+        assert!(
+            orch.unanswered_vars(&sels).expect("expands").is_empty(),
+            "the default is legal, so nothing is missing"
+        );
+
+        orch.set_var_answers(
+            [(
+                "runtime".to_owned(),
+                crate::config::ConfigValue::literal("containerd"),
+            )]
+            .into(),
+            VarProvenance::Flag,
+        );
+        let missing = orch.unanswered_vars(&sels).expect("expands");
+        assert_eq!(missing.len(), 1);
+        assert_eq!(missing[0].name, "runtime");
+        assert_eq!(
+            missing[0].stale.as_deref(),
+            Some("containerd"),
+            "a non-secret stale literal is shown, so the human can see what to replace"
+        );
+    }
+
+    /// **The seam that produced a defect in three consecutive review rounds.**
+    ///
+    /// The teardown warning must fire for an answer no database row backs, and
+    /// stay silent for one that has a row — including an answer saved at the
+    /// prompt during *this* run. Every earlier version tracked "has a row" beside
+    /// the provenance and let the two disagree; `VarProvenance::has_row` derives
+    /// it, so the disagreement is unrepresentable. This test is what says so.
+    #[tokio::test]
+    async fn only_an_answer_without_a_row_is_reported_as_stranded_at_teardown() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config: VeldConfig = serde_json::from_str(
+            r#"{
+                "schemaVersion": "3",
+                "name": "testcfg",
+                "vars": { "token": { "machine": { "prompt": "?" } } },
+                "teardown": [ { "name": "rm", "shell": "echo ${vars.token}" } ],
+                "nodes": {
+                    "task": { "default_variant": "local", "variants": {
+                        "local": { "type": "command", "shell": "true" }
+                    }}
+                }
+            }"#,
+        )
+        .unwrap();
+        let sels = vec![NodeSelection {
+            node: "task".to_owned(),
+            variant: "local".to_owned(),
+        }];
+        let answer = || {
+            std::collections::BTreeMap::from([(
+                "token".to_owned(),
+                crate::config::ConfigValue::literal("t"),
+            )])
+        };
+
+        let mut orch = test_orchestrator(tmp.path(), config.clone());
+        orch.set_var_answers(answer(), VarProvenance::Flag);
+        assert_eq!(
+            orch.flag_answers_needed_at_teardown(&sels),
+            vec!["token".to_owned()],
+            "a per-run answer is invisible to the `veld stop` that runs later"
+        );
+
+        // The same value, saved to the store during this run's prompt. `veld
+        // stop` reads the store, so there is nothing to warn about — and warning
+        // would tell the user to set something they just set.
+        let mut orch = test_orchestrator(tmp.path(), config);
+        orch.set_var_answers(answer(), VarProvenance::Project);
+        assert!(
+            orch.flag_answers_needed_at_teardown(&sels).is_empty(),
+            "an answer backed by a row is resolvable at stop time"
+        );
+    }
+
     /// Build a minimal orchestrator backed by a throwaway database, with no
     /// helper interaction — enough to exercise `run_terminal` in isolation.
     fn test_orchestrator(project_root: &std::path::Path, config: VeldConfig) -> Orchestrator {
@@ -4280,6 +4661,9 @@ mod tests {
             config_path: project_root.join("veld.json"), // root-config-gate-ok
             config_hash: String::new(),
             project_root: project_root.to_path_buf(),
+            project_id: crate::project_id::ProjectId::from_stored(project_root.to_string_lossy()),
+            var_overrides: Default::default(),
+            var_provenance: Default::default(),
             db,
             port_allocator: PortAllocator::new(),
             helper_client: HelperClient::default_client(),
