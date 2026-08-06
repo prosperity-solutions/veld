@@ -330,6 +330,42 @@ if [ -n "$SWITCHING_TO_USER_PATHS" ] && [ -n "$PRIVILEGED_MODE" ]; then
   echo ""
 fi
 
+# Restart a user LaunchAgent so it runs the binary just installed.
+#
+# Deliberately NOT `bootout` followed by `bootstrap`. `bootout` returns before
+# launchd has finished tearing the job down, and a `bootstrap` into that window
+# fails with exit 5 — which this script swallows, leaving NO service registered
+# and, for the daemon, nothing running at all. `veld setup` hit the same race and
+# fixed it by waiting for the teardown to drain (`wait_for_launchd_job_removal`
+# in crates/veld-core/src/setup.rs); this path never got the fix, which is why an
+# update usually ended with a dead daemon and a manual `veld setup` to revive it.
+#
+# A job that is already registered does not need re-registering: only `veld setup`
+# writes these plists, so an update changes the binary and not the definition
+# launchd holds. Signalling the job to exit is therefore enough — `KeepAlive` is
+# unconditionally true in both plists, so launchd relaunches it immediately, onto
+# the new binary. SIGTERM rather than `kickstart -k`'s SIGKILL because both
+# services shut down deliberately: the helper leaves Caddy running, and the daemon
+# finishes in-flight requests.
+# $1 = launchd label, $2 = plist path, $3 = display name
+restart_launch_agent() {
+  local label="$1" plist="$2" name="$3" target
+  target="gui/$(id -u)/${label}"
+  if launchctl print "$target" >/dev/null 2>&1; then
+    echo "Restarting ${name} service..."
+    # A signal that lands on nothing is not a problem here, which is why there is
+    # no start-it-anyway fallback: `KeepAlive` is what guarantees the relaunch, not
+    # this line. A registered job that is momentarily down is already being brought
+    # back by launchd, and the binaries were replaced above — so whenever it comes
+    # back, it comes back on the new ones.
+    launchctl kill TERM "$target" 2>/dev/null || true
+  else
+    # Nothing registered to signal, and a bootstrap here has no teardown to race.
+    echo "Loading ${name} service..."
+    launchctl bootstrap "gui/$(id -u)" "$plist" 2>/dev/null || true
+  fi
+}
+
 if [ "$OS" = "macos" ]; then
   if [ -n "$PRIVILEGED_MODE" ] && [ -z "$SWITCHING_TO_USER_PATHS" ]; then
     # Privileged mode (staying in place): helper runs as a system LaunchDaemon
@@ -361,17 +397,13 @@ if [ "$OS" = "macos" ]; then
     # User mode: helper runs as a user LaunchAgent.
     HELPER_PLIST="$HOME/Library/LaunchAgents/dev.veld.helper.plist"
     if [ -f "$HELPER_PLIST" ]; then
-      echo "Restarting veld-helper service..."
-      launchctl bootout "gui/$(id -u)/dev.veld.helper" 2>/dev/null || true
-      launchctl bootstrap "gui/$(id -u)" "$HELPER_PLIST" 2>/dev/null || true
+      restart_launch_agent dev.veld.helper "$HELPER_PLIST" veld-helper
     fi
   fi
 
   DAEMON_PLIST="$HOME/Library/LaunchAgents/dev.veld.daemon.plist"
   if [ -f "$DAEMON_PLIST" ]; then
-    echo "Restarting veld-daemon service..."
-    launchctl bootout "gui/$(id -u)/dev.veld.daemon" 2>/dev/null || true
-    launchctl bootstrap "gui/$(id -u)" "$DAEMON_PLIST" 2>/dev/null || true
+    restart_launch_agent dev.veld.daemon "$DAEMON_PLIST" veld-daemon
   fi
 else
   # Linux: restart systemd services if they exist (skip if switching to user paths).
