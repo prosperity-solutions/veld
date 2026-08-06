@@ -491,15 +491,11 @@ A pane can also leave its window: right-click a tab → *Open in a new window*, 
 
 **It needs the veld CLI**, which it does not ship. On a machine that has never had veld the app shows the two commands that get you there — the installer and `veld setup unprivileged` — and waits for the daemon to appear.
 
-On macOS, let the CLI install it:
+On macOS **the installer brings it with the CLI** — `curl -fsSL https://veld.oss.life.li/get | bash` installs both halves, and `veld update` moves both. `VELD_DESKTOP=0` opts out (a CI box or a server that wants no Dock icon), and `veld desktop install` gets it on a machine that skipped it.
 
-```sh
-veld desktop install
-```
+Installing it this way is also what **skips the Gatekeeper detour.** A build downloaded in a browser carries `com.apple.quarantine`, and that flag is what makes macOS refuse the first launch of an app that is not notarized. curl does not set it, so an app installed by veld simply opens. `veld desktop status` says what is installed and whether it matches the CLI.
 
-That is the recommended route, and not only for convenience: **it is the one that skips the Gatekeeper detour.** A build downloaded in a browser carries `com.apple.quarantine`, and that flag is what makes macOS refuse the first launch of an app that is not notarized. curl does not set it, so an app installed by veld simply opens. The archive is checksum-verified against the release either way, and `veld desktop status` says what is installed and whether it matches the CLI.
-
-From then on `veld update` keeps both halves together — the app is updated whenever it is already installed, never installed behind your back — and the app's own *Check for Updates…* hands the job to the CLI: Veld quits, the CLI swaps the bundle, the app reopens on the new version. On Linux the AppImage still updates itself and a `.deb` still belongs to your package manager.
+The app's own *Check for Updates…* hands the job to the CLI too: Veld quits, the CLI swaps the bundle, the app reopens on the new version — an app cannot replace its own bundle while running. On Linux the AppImage still updates itself and a `.deb` still belongs to your package manager.
 
 You can also download the `.dmg` (macOS) or `.AppImage` / `.deb` (Linux x64) from the [latest release](https://github.com/prosperity-solutions/veld/releases/latest) — `checksums.txt` on the same page has a SHA-256 for every artifact. The app ships with every veld release and carries the same version number as the CLI — one tag, one version, so the app and the daemon it talks to are halves of the same thing. When they drift apart the app says so and names the fix.
 

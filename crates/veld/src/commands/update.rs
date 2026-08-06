@@ -104,30 +104,51 @@ pub async fn run() -> i32 {
     }
 }
 
-/// Bring Veld Desktop up to `version` when it is installed and on something else.
+/// Bring Veld Desktop to `version`, installing it if this machine has none.
 ///
-/// Only ever touches an app that is *already* installed — `veld update` putting a
-/// GUI app into /Applications for the first time would be a surprise, so that stays
-/// an explicit `veld desktop install`. When the CLI itself updates, the install
-/// script does this on its own; this covers the case where only the app is behind.
+/// The app and the CLI are two halves of one release, so an update moves both —
+/// the same reason the install script installs the app by default. When the CLI
+/// itself updates, that script does this on its own; this covers the branch where
+/// the CLI was already current, which is also where the "the app was running, so
+/// the installer skipped it" case lands.
+///
+/// macOS only, and quiet elsewhere: `desktop_app_status` reports nothing on Linux,
+/// where the AppImage updates itself and a .deb belongs to the package manager.
 async fn update_desktop_if_stale(version: &str) {
-    let Some((path, installed)) = veld_core::setup::desktop_app_status() else {
-        return;
-    };
-    if installed.as_deref() == Some(version) {
+    if std::env::consts::OS != "macos" {
         return;
     }
 
-    let installed = installed.unwrap_or_else(|| "unknown".to_string());
-    output::print_info(&format!(
-        "Veld Desktop at {} is {installed} — updating it to {version}.",
-        path.display()
-    ));
-    if let Err(e) = veld_core::setup::install_desktop(version, None, false).await {
+    let existing = veld_core::setup::desktop_app_status();
+    if let Some((_, installed)) = &existing {
+        if installed.as_deref() == Some(version) {
+            return;
+        }
+    }
+
+    match &existing {
+        Some((path, installed)) => output::print_info(&format!(
+            "Veld Desktop at {} is {} — updating it to {version}.",
+            path.display(),
+            installed.as_deref().unwrap_or("an unknown version"),
+        )),
+        None => output::print_info(&format!("Installing Veld Desktop {version}...")),
+    }
+    if let Err(e) = veld_core::setup::install_desktop(version, None, false)
+        .await
+        .and_then(|()| match veld_core::setup::desktop_app_status() {
+            Some((_, v)) if v.as_deref() == Some(version) => Ok(()),
+            // Same reason `veld desktop install` checks: the published install
+            // script may predate the desktop section entirely and exit 0.
+            _ => Err(anyhow::anyhow!(
+                "the install script did not update the app — it may predate this feature"
+            )),
+        })
+    {
         // Not fatal: the CLI is fine, and the app is the half the user can also
         // fix by hand. Say so rather than failing an update that succeeded.
         output::print_error(
-            &format!("Could not update Veld Desktop: {e}. Run 'veld desktop update' to retry."),
+            &format!("Could not install Veld Desktop: {e}. Run 'veld desktop update' to retry."),
             false,
         );
     }

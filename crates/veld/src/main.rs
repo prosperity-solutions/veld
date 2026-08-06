@@ -13,6 +13,14 @@ pub enum DesktopCommand {
 
     /// Update the installed app to match this CLI version.
     Update {
+        /// Install this version instead of the CLI's own.
+        ///
+        /// The app passes the version it was offered. Without it, an app told
+        /// "12.8.0 is available" by an older CLI would be reinstalled at the CLI's
+        /// version, re-offered 12.8.0 on relaunch, and loop forever.
+        #[arg(long)]
+        version: Option<String>,
+
         /// Wait for this process to exit before replacing the bundle. Used by the
         /// app to update itself: it cannot be swapped while it is running.
         #[arg(long, hide = true)]
@@ -903,10 +911,12 @@ async fn main() {
                 commands::desktop::status(false).await
             }
             Some(DesktopCommand::Status { json: true }) => commands::desktop::status(true).await,
-            Some(DesktopCommand::Install) => commands::desktop::install(None, false).await,
-            Some(DesktopCommand::Update { wait_pid, relaunch }) => {
-                commands::desktop::install(wait_pid, relaunch).await
-            }
+            Some(DesktopCommand::Install) => commands::desktop::install(None, None, false).await,
+            Some(DesktopCommand::Update {
+                version,
+                wait_pid,
+                relaunch,
+            }) => commands::desktop::install(version, wait_pid, relaunch).await,
         },
 
         Command::Uninstall => commands::uninstall::run().await,

@@ -285,7 +285,19 @@ async function updateViaCli(version) {
   try {
     const child = spawn(
       cliPath,
-      ["desktop", "update", "--wait-pid", String(process.pid), "--relaunch"],
+      [
+        "desktop",
+        "update",
+        // The version the user was just offered, not whatever the CLI happens to
+        // be. An older CLI would otherwise reinstall its own version, relaunch,
+        // be offered the newer one again, and loop — forever, since `offered` is
+        // per-session and the session just restarted.
+        "--version",
+        version,
+        "--wait-pid",
+        String(process.pid),
+        "--relaunch",
+      ],
       { detached: true, stdio: "ignore" },
     );
     child.unref();

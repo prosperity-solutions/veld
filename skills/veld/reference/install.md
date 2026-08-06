@@ -28,18 +28,20 @@ veld doctor
 
 ## Veld Desktop (macOS app)
 
+Installed by default alongside the CLI — the two are halves of one release. Set
+`VELD_DESKTOP=0` before the install script to skip it (CI boxes, servers).
+
 ```bash
-veld desktop install     # install it
 veld desktop status      # where it is, and whether it matches the CLI
+veld desktop install     # get it on a machine that skipped it
 veld desktop update      # bring it to this CLI's version
 ```
 
-Installing it through the CLI rather than downloading the `.dmg` is what avoids
-the Gatekeeper prompt: a browser marks a download with `com.apple.quarantine` and
+Arriving through the CLI rather than a `.dmg` download is what avoids the
+Gatekeeper prompt: a browser marks a download with `com.apple.quarantine` and
 macOS then refuses the first launch of an app that is not notarized, while curl
-sets no such flag. The archive is checksum-verified against the release either
-way. macOS only — on Linux the AppImage updates itself and a `.deb` belongs to
-the package manager.
+sets no such flag. macOS only — on Linux the AppImage updates itself and a `.deb`
+belongs to the package manager.
 
 ## Updating
 
@@ -48,9 +50,9 @@ veld update
 ```
 
 This downloads the latest release and restarts the background services
-(helper + daemon) onto the new binaries automatically. If Veld Desktop is
-installed, it is updated too — but never installed by an update that did not find
-it already there. **Running environments
+(helper + daemon) onto the new binaries automatically. On macOS it moves Veld
+Desktop to the same version as well, installing it if this machine has none —
+`VELD_DESKTOP=0` opts out. **Running environments
 are left running** — state lives in a migrated SQLite DB, so a binary swap no
 longer risks stale state, and services keep serving throughout. In privileged
 mode the root helper is restarted via sudo (you may be prompted once for your

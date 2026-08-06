@@ -18,7 +18,7 @@ use crate::output;
 /// `wait_pid` and `relaunch` exist for the app updating *itself*: it hands off to
 /// the CLI and quits, because an Electron app reads from its own bundle while it
 /// runs and cannot be swapped underneath.
-pub async fn install(wait_pid: Option<u32>, relaunch: bool) -> i32 {
+pub async fn install(version: Option<String>, wait_pid: Option<u32>, relaunch: bool) -> i32 {
     if std::env::consts::OS != "macos" {
         output::print_error(
             "Veld Desktop is installed by this command on macOS only. On Linux, download the \
@@ -28,15 +28,45 @@ pub async fn install(wait_pid: Option<u32>, relaunch: bool) -> i32 {
         return 1;
     }
 
-    // The app and the CLI ship from one tag with one version, so the app that
-    // matches *this* binary is the one to install. `veld update` moves both.
-    let version = env!("CARGO_PKG_VERSION");
+    // Defaults to this binary's version, because the app and the CLI ship from one
+    // tag. The app passes an explicit one when it was offered a release the CLI has
+    // not caught up to yet — otherwise it would be reinstalled at the CLI's version
+    // and offered the newer one again on every launch.
+    let version = version.unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
     output::print_info(&format!("Installing Veld Desktop {version}..."));
 
-    match veld_core::setup::install_desktop(version, wait_pid, relaunch).await {
-        Ok(()) => 0,
-        Err(e) => {
-            output::print_error(&format!("Could not install Veld Desktop: {e}"), false);
+    if let Err(e) = veld_core::setup::install_desktop(&version, wait_pid, relaunch).await {
+        output::print_error(&format!("Could not install Veld Desktop: {e}"), false);
+        return 1;
+    }
+
+    // The script is fetched from veld.oss.life.li, not from this checkout, so a
+    // published copy older than this feature simply has no desktop section: it
+    // exits 0 having installed nothing. Without this check the command would
+    // report success and the app would never appear.
+    match veld_core::setup::desktop_app_status() {
+        Some((path, installed)) if installed.as_deref() == Some(version.as_str()) => {
+            output::print_success(&format!("Veld Desktop {version} — {}", path.display()));
+            0
+        }
+        Some((path, installed)) => {
+            output::print_error(
+                &format!(
+                    "The installer left Veld Desktop at {} ({}), not {version}. Its install \
+                     script may predate this command — try again after the next release.",
+                    path.display(),
+                    installed.as_deref().unwrap_or("unknown version"),
+                ),
+                false,
+            );
+            1
+        }
+        None => {
+            output::print_error(
+                "The installer did not place Veld Desktop. Its install script may predate this \
+                 command — try again after the next release.",
+                false,
+            );
             1
         }
     }

@@ -7,10 +7,13 @@
 # Options (via env vars):
 #   VELD_VERSION=1.0.0    Install a specific version (default: latest)
 #   VELD_INSTALL_DIR=$HOME/.local/bin   Where to put the veld binary
-#   VELD_DESKTOP=1|0      Install Veld Desktop (macOS). Default: install it only
-#                         when it is already installed, so `veld update` keeps it
-#                         in step without a CLI install ever placing an app in
-#                         /Applications unasked.
+#   VELD_DESKTOP=0        Skip Veld Desktop, the macOS app. It is installed by
+#                         default — the app and the CLI are two halves of one
+#                         release — so this is the opt-out for a CI box or a
+#                         server that wants no Dock icon.
+#   VELD_DESKTOP_DIR=/Applications   Where the app goes. When set it is the ONLY
+#                         location consulted, for installs and for finding an
+#                         existing one.
 #   VELD_DESKTOP_WAIT_PID=<pid>   Wait for that process to exit before replacing
 #                         the app — how Veld Desktop updates itself (it hands off
 #                         to this script and quits).
@@ -589,13 +592,13 @@ if [ "$OS" = "macos" ]; then
     done
   fi
 
-  WANT_DESKTOP=""
+  # Default ON: the app is half of veld, not an add-on, and the two ship from one
+  # tag with one version — so an install brings both and an update moves both.
+  # `VELD_DESKTOP=0` is the opt-out, for a CI box or a server that wants the CLI
+  # and nothing with a Dock icon.
+  WANT_DESKTOP="1"
   case "${VELD_DESKTOP:-}" in
-    1|true|yes) WANT_DESKTOP="1" ;;
     0|false|no) WANT_DESKTOP="" ;;
-    # Unset: follow the machine. Updating an app that is already there is
-    # expected; putting one there because someone updated a CLI is not.
-    *) if [ -n "$DESKTOP_APP" ]; then WANT_DESKTOP="1"; fi ;;
   esac
 fi
 
