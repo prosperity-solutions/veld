@@ -148,7 +148,7 @@ impl LogWriter {
 /// `timestamp` is the stored string, which is always UTC, and deliberately is not
 /// affected by [`LogTimeZone`]: this is the machine-readable shape an agent or a CI
 /// script parses, so it has exactly one spelling regardless of who ran the command
-/// or where. Localising is [`format_ts`]'s job, at the human render site.
+/// or where. Localising is [`format_ts`]'s job, at the human render sites.
 pub fn row_to_json(row: &crate::db::LogRow, run: &str) -> serde_json::Value {
     serde_json::json!({
         "timestamp": row.ts,

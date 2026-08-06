@@ -82,8 +82,10 @@ describe("timestamps", () => {
   });
 
   it("fmtTs handles invalid dates", () => {
-    expect(fmtTs("garbage")).toBe("");
-    expect(fmtTs("2026-07-27T10:00:00Z")).toMatch(/^\d{2}:\d{2}:\d{2}\.\d{3}$/);
+    expect(fmtTs("garbage", "local")).toBe("");
+    expect(fmtTs("2026-07-27T10:00:00Z", "local")).toMatch(
+      /^\d{2}:\d{2}:\d{2}\.\d{3}$/,
+    );
   });
 
   it("fmtTs renders UTC as stored and local through the browser's zone", () => {
@@ -96,27 +98,35 @@ describe("timestamps", () => {
     expect(fmtTs("2026-07-27T10:00:00.123Z", "local")).toBe(
       `${String(d.getHours()).padStart(2, "0")}:00:00.123`,
     );
-    // Omitting the zone means local — the behaviour every caller had before the
-    // parameter existed.
-    expect(fmtTs("2026-07-27T10:00:00.123Z")).toBe(
-      fmtTs("2026-07-27T10:00:00.123Z", "local"),
-    );
   });
 
   it("fmtTsFull carries the date, both zones, and a signed offset", () => {
     const utcFirst = fmtTsFull("2026-07-27T10:00:00.123Z", "utc");
-    const [first, second] = utcFirst.split("\n");
-    // The rendered zone leads; the counterpart follows. Two lines, always.
+    const [first, second, third] = utcFirst.split("\n");
+    // The rendered zone leads; the counterpart follows. Three lines, always.
     expect(first).toBe("2026-07-27 10:00:00.123 (UTC)");
     expect(second).toMatch(/^\d{4}-\d{2}-\d{2} .* \(local, UTC[+-]\d{2}:\d{2}\)$/);
-    // …and the order flips with the setting, so the tooltip always expands the
-    // number that is actually on screen first.
+    expect(third).toBe("stored: 2026-07-27T10:00:00.123Z");
+    // …and the order of the two rendered lines flips with the setting, so the tooltip
+    // always expands the number that is actually on screen first. The stored line does
+    // not move: it is the same value either way.
     const localFirst = fmtTsFull("2026-07-27T10:00:00.123Z", "local");
     expect(localFirst.split("\n")[0]).toBe(second);
     expect(localFirst.split("\n")[1]).toBe(first);
+    expect(localFirst.split("\n")[2]).toBe(third);
     // The offset is signed even at zero, because it is interpolated after "UTC" and
     // a bare `Z` there would read as `UTCZ`.
     expect(localFirst).not.toContain("UTCZ");
+  });
+
+  it("fmtTsFull keeps the microseconds the rendered lines drop", () => {
+    // `new Date` holds milliseconds, so both rendered lines round `.123456` to `.123`
+    // and two rows 200µs apart would tooltip identically. The CLI keeps the precision,
+    // so the stored line is what makes this agree with `veld logs --utc` and what a
+    // reader can paste into a bug report.
+    const full = fmtTsFull("2026-07-27T10:00:00.123456Z", "utc");
+    expect(full).toContain("stored: 2026-07-27T10:00:00.123456Z");
+    expect(full.split("\n")[0]).toBe("2026-07-27 10:00:00.123 (UTC)");
   });
 
   it("fmtTsFull passes an unparseable timestamp through", () => {

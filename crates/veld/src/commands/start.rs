@@ -714,6 +714,12 @@ async fn follow_logs_until_interrupt(
 ) {
     // Skip historical output: start after the current newest row.
     let mut last_id = db.max_log_id().unwrap_or(0);
+    // Same rendering as `veld logs`, from the same setting: this prints the identical
+    // `node:variant [ts] line` shape into the same terminal, so a different zone here
+    // would show two clocks for one run. `veld start` has no `--utc`/`--local` of its
+    // own — the setting is the whole control, and `veld logs --utc` re-reads the same
+    // rows for anyone who wants the stored value once.
+    let tz = db.logs_time_zone();
     let target_set: std::collections::HashSet<(String, String)> = targets.iter().cloned().collect();
     let filter = veld_core::db::LogFilter {
         node: None,
@@ -741,7 +747,11 @@ async fn follow_logs_until_interrupt(
                         continue;
                     }
                     let label = output::cyan(&format!("{node}:{variant}"));
-                    println!("{label} [{}] {}", row.ts, row.line);
+                    println!(
+                        "{label} [{}] {}",
+                        veld_core::logging::format_ts(&row.ts, tz),
+                        row.line
+                    );
                 }
             }
             _ = tokio::signal::ctrl_c() => {

@@ -65,8 +65,13 @@ const pad = (n: number, w = 2) => String(n).padStart(w, "0");
  * A log row is dense and repetitive, so the visible form stays time-of-day only —
  * the date and the zone live in the tooltip ([`fmtTsFull`]), which is the only place
  * a reader ever needs them and the only place there is room.
+ *
+ * `tz` is **required and has no default**, for the same reason `LogsPanel`'s prop is:
+ * a defaulted zone here would let the next caller silently render local whatever
+ * `logs.timeZone` says, with nothing failing to compile. Defaulting at the leaf would
+ * reopen exactly the hole the required prop closes one layer up.
  */
-export function fmtTs(iso: string, tz: LogTimeZone = "local"): string {
+export function fmtTs(iso: string, tz: LogTimeZone): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return "";
   const [h, m, s, ms] =
@@ -99,11 +104,19 @@ function offsetLabel(d: Date): string {
 
 /**
  * The unambiguous form of a log timestamp, for a `title` tooltip: the rendered zone
- * with its date and offset, then the same instant in the other zone.
+ * with its date and offset, the same instant in the other zone, and the exact stored
+ * value on a third line.
  *
- * Both halves earn their place. The row itself shows neither a date nor a zone, so
+ * Each line earns its place. The row itself shows neither a date nor a zone, so
  * `09:12:33.123` answers neither "which day" — real once a history run or *All runs*
  * is selected — nor "whose clock", which is the question this whole setting is about.
+ *
+ * The stored line is not redundant with the UTC one: `new Date` holds **milliseconds**,
+ * so both rendered lines truncate the microseconds veld actually stored, and two rows
+ * 200 µs apart would tooltip identically. The CLI keeps that precision
+ * (`logging::format_ts`), so without this line `/ide` would show `.123` where
+ * `veld logs --utc` shows `.123456`, and a reader correlating the two — or pasting a
+ * timestamp into a bug report — would be working from a rounded value.
  */
 export function fmtTsFull(iso: string, tz: LogTimeZone): string {
   const d = new Date(iso);
@@ -116,7 +129,8 @@ export function fmtTsFull(iso: string, tz: LogTimeZone): string {
   const utc = `${date(true)} ${fmtTs(iso, "utc")} (UTC)`;
   // Rendered zone first: the tooltip's job is to expand the number on screen, and
   // only then to offer the counterpart.
-  return tz === "utc" ? `${utc}\n${local}` : `${local}\n${utc}`;
+  const both = tz === "utc" ? `${utc}\n${local}` : `${local}\n${utc}`;
+  return `${both}\nstored: ${iso}`;
 }
 
 /** Relative "when" for history entries / outcome lines. */

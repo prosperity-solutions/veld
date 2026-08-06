@@ -2704,7 +2704,7 @@ Details:
 
 All log output (both `start_server` stdout/stderr and internal Veld events) is timestamped when the line is emitted, which is what lets `veld logs` merge nodes chronologically.
 
-**Stored in UTC, shown in your time zone.** Every line is stored as RFC 3339 UTC with microsecond precision — not a display choice but a requirement, since Veld orders and interleaves lines by comparing those strings. What you *read* is converted:
+**Stored in UTC, shown in your time zone.** Every line is stored as RFC 3339 UTC with microsecond precision — not a display choice but a requirement, since Veld orders and interleaves lines by comparing those strings. What you *read* is converted — in `veld logs`, in `veld start --attach`'s live streaming, and in the `/ide` logs view:
 
 ```
 $ veld logs
@@ -2716,9 +2716,10 @@ web:local [2026-03-12T08:30:01.123456Z] Server listening on port 3000
 web:local [2026-03-12T08:30:01.456789Z] Connected to database
 ```
 
-- `--utc` prints the stored string verbatim; `--local` forces local. Either overrides the `logs.timeZone` setting for one command (Settings → Logs in the management UI, `local` by default).
-- **`--json` always emits UTC**, whatever the flags and the setting say. It is the machine-readable shape, so `timestamp` has exactly one spelling regardless of who ran the command.
-- The management UI's logs view follows the same setting, and its timestamps carry the full date and both zones in a tooltip.
+- `--utc` prints the stored string verbatim; `--local` forces local. Either overrides the `logs.timeZone` setting for one command, and the two cannot be combined with each other or with `--json`. `veld start --attach` has no such flags — it follows the setting, so a `veld logs` beside it shows the same clock.
+- **`--json` always emits UTC**, whatever the setting says. It is the machine-readable shape, so `timestamp` has exactly one spelling regardless of who ran the command.
+- The setting lives at **Settings → Logs** in the `/ide` management UI (and Veld Desktop), and defaults to `local`. The `/ide` logs view follows it, and each timestamp's tooltip carries the full date, both zones, and the exact stored value.
+- **The first-generation dashboard at `https://veld.localhost/` always shows local time** and does not read this setting — it fetches no settings at all. So with `logs.timeZone` set to `utc`, that one page still shows local. It is a frozen surface; `/ide` is where the setting applies.
 
 ---
 

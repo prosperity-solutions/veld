@@ -292,7 +292,10 @@ export function SettingsDialog(props: {
                "convert" here can only ever mean "spell differently on screen" — and a
                reader who thinks a setting rewrites stored data will not trust either
                value. The last sentence is the one people come here for. */
-            help="Display only — every line is stored in UTC, which is what veld sorts and interleaves by. Local is your browser's zone; hover a timestamp for the date and both zones. `veld logs` reads this same setting, and `--utc` / `--local` override it for one command."
+            /* No backticks: `help` renders through a plain Text, not markdown, so they
+               would appear on screen — every other help string in this file writes
+               flags and commands bare for that reason. */
+            help="Display only — every line is stored in UTC, which is what veld sorts and interleaves by. Local is your browser's zone; hover a timestamp for the date, both zones and the exact stored value. veld logs and veld start read this same setting, and --utc / --local override it for one command."
           >
             <NativeSelect
               size="xs"

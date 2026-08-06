@@ -150,8 +150,11 @@ const MAX_UNKNOWN_VALUE_LEN: usize = 4096;
 /// Storage is not affected and cannot be: every `log_lines.ts` is UTC because
 /// `super::ts_to_str` exists to make lexicographic order equal chronological order,
 /// which `logs_since`, the GC's pruning and both readers' interleave sorts all rely
-/// on. This is a rendering choice at the two places a human reads one — `veld logs`
-/// and the `/ide` logs view — and nothing else.
+/// on. This is a rendering choice, made at every place a human reads a log timestamp
+/// and nowhere else. Those places are: `veld logs`, `veld start`'s foreground log
+/// streaming (`--attach`), and the `/ide` logs view. Adding a fourth means honouring
+/// this key there too — a surface that prints `row.ts` raw shows a different clock
+/// than the terminal beside it.
 ///
 /// A string enum rather than a `logs.localTime` boolean because the obvious next
 /// value is a *named* zone (read a colleague's logs in theirs), and `"local"`/`"utc"`
@@ -167,11 +170,23 @@ pub enum LogTimeZone {
 }
 
 impl LogTimeZone {
+    /// Every zone this binary understands. The validator's allow-list and the readers
+    /// are both derived from this, so adding a variant cannot leave a value that
+    /// validates but no surface honours — which is the trap the string-enum shape
+    /// invites: `one_of` hand-listing `["local","utc"]` beside a `_ => Local` reader
+    /// would accept `"Europe/Berlin"` and then silently render local.
+    pub const ALL: &'static [LogTimeZone] = &[Self::Local, Self::Utc];
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Local => "local",
             Self::Utc => "utc",
         }
+    }
+
+    /// The inverse of [`Self::as_str`], exhaustive by construction over [`Self::ALL`].
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|tz| tz.as_str() == s)
     }
 }
 
@@ -361,11 +376,10 @@ impl SettingKey {
             // this key too, and a stored `"UTC"` that the reader then treats as the
             // default would mean the daemon reporting a saved preference neither
             // surface honours.
-            Self::LogsTimeZone => one_of(
-                value,
-                &[LogTimeZone::Local.as_str(), LogTimeZone::Utc.as_str()],
-            )
-            .ok_or_else(bad)?,
+            Self::LogsTimeZone => {
+                let s = value.as_str().ok_or_else(bad)?;
+                Value::from(LogTimeZone::parse(s).ok_or_else(bad)?.as_str())
+            }
             // A font family is free text, but **not** free-form: xterm's DOM
             // renderer interpolates it into a CSS *rule* —
             // `font-family: ${rawOptions.fontFamily};` inside a stylesheet's
@@ -668,16 +682,13 @@ impl Db {
     /// degrade-to-the-default posture [`Db::terminal_open_urls_in_app`] takes for a
     /// value a newer build wrote.
     pub fn logs_time_zone(&self) -> LogTimeZone {
-        match self
-            .setting(&SettingKey::LogsTimeZone)
+        self.setting(&SettingKey::LogsTimeZone)
             .ok()
             .flatten()
             .as_ref()
             .and_then(|v| v.as_str())
-        {
-            Some(s) if s == LogTimeZone::Utc.as_str() => LogTimeZone::Utc,
-            _ => LogTimeZone::Local,
-        }
+            .and_then(LogTimeZone::parse)
+            .unwrap_or_default()
     }
 
     /// How long a worktree stays in the trash before it is deleted, or `None` for
@@ -1071,6 +1082,21 @@ mod tests {
         }
         // …and the accepted value above survived every rejection.
         assert_eq!(db.logs_time_zone(), LogTimeZone::Utc);
+    }
+
+    #[test]
+    fn every_log_time_zone_round_trips_through_its_spelling() {
+        // `ALL` is hand-maintained and everything else derives from it: the validator's
+        // allow-list, `parse`, and both readers. A variant missing from it is refused on
+        // write rather than accepted-then-ignored, which is the failure this shape
+        // exists to prevent — so pin the round trip.
+        for tz in LogTimeZone::ALL {
+            assert_eq!(LogTimeZone::parse(tz.as_str()), Some(*tz));
+        }
+        assert_eq!(LogTimeZone::ALL.len(), 2);
+        assert_eq!(LogTimeZone::default(), LogTimeZone::Local);
+        assert!(LogTimeZone::parse("Europe/Berlin").is_none());
+        assert!(LogTimeZone::parse("UTC").is_none(), "spelling is exact");
     }
 
     #[test]

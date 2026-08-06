@@ -341,8 +341,13 @@ export function LogsPanel(props: {
             {gap && <div className="log-ctx-sep">···</div>}
             <div className={`log-line${dim ? " ctx" : ""}${e.msg.startsWith("[VELD]") ? " ann" : ""}`}>
               {e.ts && (
+                // `|| e.ts` because `fmtTs` returns "" for a value `new Date` cannot
+                // parse, and `.ts` is an inline span: an empty one has no hit area, so
+                // the tooltip carrying the evidence could never be opened on exactly
+                // the row whose timestamp is wrong. Reachable — `extractTs` gates only
+                // on a leading `YYYY-MM-DDT`, which `2026-13-45T00:00:00Z` passes.
                 <span className="ts" title={fmtTsFull(e.ts, props.tz)}>
-                  {fmtTs(e.ts, props.tz)}
+                  {fmtTs(e.ts, props.tz) || e.ts}
                 </span>
               )}
               {multi && (
