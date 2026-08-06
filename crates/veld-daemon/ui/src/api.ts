@@ -183,6 +183,14 @@ export interface Worktree {
   /** Startable nodes (hidden excluded) for custom selections. */
   nodes: NodeOption[];
   /**
+   * How many vars this checkout's config declares machine-overridable.
+   *
+   * **`null` means the config could not be read**, like `presets` — not zero.
+   * Treating the two the same would disable the one control able to show the
+   * reader why their config is broken.
+   */
+  machine_vars: number | null;
+  /**
    * The interpreted `ide` section of the checkout's config. Always sent, with
    * arrays that may be empty — a worktree with no config gets empty ones rather
    * than the key being omitted.

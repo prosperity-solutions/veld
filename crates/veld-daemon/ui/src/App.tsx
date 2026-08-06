@@ -1508,9 +1508,12 @@ function AppInner(props: {
             : []),
           {
             // Reachable without a blocked start, so an answer can be changed
-            // before it bites rather than only when it already has.
+            // before it bites rather than only when it already has. Disabled on
+            // the same condition as the top-bar button — an unreadable config
+            // (`null`) still opens, because the dialog is where the reason is.
             key: "config-vars",
             title: "Values for this machine…",
+            disabled: w.machine_vars === 0,
             onClick: () => setDialog({ kind: "config-vars", project: w.path }),
           },
           { key: "run-divider" },
@@ -2585,13 +2588,20 @@ function AppInner(props: {
       // reading or changing a machine value is not a run action and does not
       // conflict with one in flight. The right-click menu was the only way in,
       // which is not enough for something that can *block* a start.
-      items.push({
-        id: "run:config-vars",
-        group: "Run",
-        label: `Values for this machine (${w.alias})`,
-        alt: ["vars", "machine", "override", "config set", "configurable"],
-        run: () => setDialog({ kind: "config-vars", project: w.path }),
-      });
+      //
+      // Omitted rather than disabled when the project asks for nothing — ⌘K is a
+      // search, and a result that cannot be run is a worse answer than no result.
+      // That differs from the top bar deliberately: a button in a fixed position
+      // teaches that the feature exists, a search hit does not.
+      if (w.machine_vars !== 0) {
+        items.push({
+          id: "run:config-vars",
+          group: "Run",
+          label: `Values for this machine (${w.alias})`,
+          alt: ["vars", "machine", "override", "config set", "configurable"],
+          run: () => setDialog({ kind: "config-vars", project: w.path }),
+        });
+      }
       // Reachable while a run is live, which "Start" is not — ▶ is a toggle. The
       // name is in the label because that is what the command will create.
       if (running && canStartAnother(w)) {
@@ -2898,21 +2908,40 @@ function AppInner(props: {
    * rather than another gear for the same reason: two gears would read as two
    * ways into one thing.
    *
-   * Hidden rather than disabled when there is no worktree to answer for — a
-   * disabled control here would be a button whose tooltip can never open (#205).
+   * **Disabled, not hidden, when the project asks for nothing.** A control that
+   * vanishes teaches nobody it exists; one that is greyed out with a reason does.
+   * `machine_vars === 0` is that case — and `null` (an unreadable config) is
+   * deliberately *not*, because opening the dialog is how the reader finds out
+   * why it cannot be read.
+   *
+   * The `<span>` is load-bearing: a disabled Mantine control has
+   * `pointer-events: none`, so the tooltip explaining *why* it is disabled would
+   * never open — the #205 trap, where a disabled button's tooltip is exactly the
+   * thing the user needs and exactly the thing they cannot get. The wrapper
+   * still receives the hover.
    */
+  const configVarsNone = worktree?.machine_vars === 0;
   const configVarsButton = worktree && canRunWorktreeNow(worktree) && (
-    <Tooltip label={`Values for this machine — ${worktree.alias}`}>
-      <ActionIcon
-        size="md"
-        variant="default"
-        aria-label="Values for this machine"
-        onClick={() =>
-          setDialog({ kind: "config-vars", project: worktree.path })
-        }
-      >
-        <IconBraces size={14} />
-      </ActionIcon>
+    <Tooltip
+      label={
+        configVarsNone
+          ? `${worktree.alias} doesn’t ask you for any values`
+          : `Values for this machine — ${worktree.alias}`
+      }
+    >
+      <span style={{ display: "inline-flex" }}>
+        <ActionIcon
+          size="md"
+          variant="default"
+          aria-label="Values for this machine"
+          disabled={configVarsNone}
+          onClick={() =>
+            setDialog({ kind: "config-vars", project: worktree.path })
+          }
+        >
+          <IconBraces size={14} />
+        </ActionIcon>
+      </span>
     </Tooltip>
   );
 
