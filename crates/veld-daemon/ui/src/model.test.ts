@@ -21,6 +21,7 @@ import {
   runsForWorktree,
   selectorRuns,
   siblingRuns,
+  sortRunsForDisplay,
   sortedUrls,
   spinnerAction,
   startRunName,
@@ -56,12 +57,17 @@ const run = (
   name: string,
   status: RunInfo["status"],
   live = status !== "stopped" && status !== "failed",
+  created_at = "2026-01-01T00:00:00Z",
+  ended_at: string | null =
+    status === "stopped" || status === "failed" ? "2026-01-01T01:00:00Z" : null,
 ): RunInfo => ({
   name,
   status,
   live,
   run_id: `${name}-run-id`,
   short_id: name,
+  created_at,
+  ended_at,
   urls: {},
   nodes: [],
 });
@@ -348,6 +354,51 @@ describe("selectorRuns", () => {
     expect(selectorRuns([], undefined)).toEqual({ runs: [], hidden: 0 });
     const live = [run("api", "starting")];
     expect(selectorRuns(live, "api").hidden).toBe(0);
+  });
+});
+
+describe("sortRunsForDisplay", () => {
+  it("puts live runs newest-started first", () => {
+    const runs = sortRunsForDisplay([
+      run("a", "running", true, "2026-01-01T00:02:00Z"),
+      run("c", "running", true, "2026-01-01T00:03:00Z"),
+      run("b", "running", true, "2026-01-01T00:01:00Z"),
+    ]);
+    expect(runs.map((r) => r.name)).toEqual(["c", "a", "b"]);
+  });
+
+  it("puts ended runs last-stopped first", () => {
+    const runs = sortRunsForDisplay([
+      run("a", "stopped", false, "2026-01-01T00:00:00Z", "2026-01-01T00:05:00Z"),
+      run("b", "failed", false, "2026-01-01T00:00:00Z", "2026-01-01T00:06:00Z"),
+      run("c", "stopped", false, "2026-01-01T00:00:00Z", "2026-01-01T00:04:00Z"),
+    ]);
+    expect(runs.map((r) => r.name)).toEqual(["b", "a", "c"]);
+  });
+
+  it("keeps the live group ahead of ended runs whatever the times", () => {
+    const runs = sortRunsForDisplay([
+      // Ended long ago but after the live run started.
+      run("old", "stopped", false, "2026-01-01T00:00:00Z", "2026-01-01T00:07:00Z"),
+      run("live", "running", true, "2026-01-01T00:08:00Z"),
+    ]);
+    expect(runs.map((r) => r.name)).toEqual(["live", "old"]);
+  });
+
+  it("is deterministic on full ties (name, then run_id)", () => {
+    // Same start and end on both — the comparator must still pick a fixed order
+    // so a poll refresh never reshuffles the list.
+    const a = run("z", "stopped", false, "2026-01-01T00:00:00Z", "2026-01-01T00:01:00Z");
+    const b = run("a", "stopped", false, "2026-01-01T00:00:00Z", "2026-01-01T00:01:00Z");
+    expect(sortRunsForDisplay([a, b]).map((r) => r.name)).toEqual(["a", "z"]);
+    expect(sortRunsForDisplay([b, a]).map((r) => r.name)).toEqual(["a", "z"]);
+  });
+
+  it("does not mutate its input", () => {
+    const input: RunInfo[] = [run("b", "stopped"), run("a", "running")];
+    const before = input.map((r) => r.name);
+    sortRunsForDisplay(input);
+    expect(input.map((r) => r.name)).toEqual(before);
   });
 });
 

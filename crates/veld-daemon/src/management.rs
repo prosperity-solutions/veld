@@ -129,6 +129,10 @@ struct RunInfo {
     outcome: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     ended_at: Option<String>,
+    /// When this environment's latest run started (`created_at`), RFC 3339.
+    /// The client sorts the Active tab by start time, so it is part of the
+    /// wire payload (not just an ordering key).
+    created_at: String,
     urls: HashMap<String, String>,
     nodes: Vec<NodeInfo>,
     /// What the latest run was started from — a preset name plus the expansion
@@ -328,6 +332,9 @@ async fn list_environments() -> Result<Json<EnvironmentList>, StatusCode> {
                             .unwrap_or_else(|| r.run_id.to_string()[..8].to_owned()),
                         outcome: latest.filter(|l| !l.is_live()).map(|l| l.outcome_label()),
                         ended_at: latest.and_then(|l| l.ended_at).map(|t| t.to_rfc3339()),
+                        created_at: latest
+                            .map(|l| l.created_at.to_rfc3339())
+                            .unwrap_or_default(),
                         urls: if live { r.urls.clone() } else { HashMap::new() },
                         nodes,
                         started_from: latest
@@ -337,7 +344,43 @@ async fn list_environments() -> Result<Json<EnvironmentList>, StatusCode> {
                     }
                 })
                 .collect();
-            runs.sort_by(|a, b| a.name.cmp(&b.name));
+            // Active (live) runs first, newest-started at the top; then ended
+            // runs, last-stopped at the top. The UI relies on this order for
+            // its Active|History tabs and the IDE run selector — a lexical
+            // name sort made the newest run hard to find while debugging a
+            // crash, which is what this order exists to fix.
+            runs.sort_by(|a, b| {
+                // Active first.
+                let by_live = b.live.cmp(&a.live);
+                if by_live != std::cmp::Ordering::Equal {
+                    return by_live;
+                }
+                // Primary time — start for live runs, stop for ended.
+                // RFC 3339 UTC strings compare chronologically.
+                let a_primary = if a.live {
+                    a.created_at.as_str()
+                } else {
+                    a.ended_at.as_deref().unwrap_or("")
+                };
+                let b_primary = if b.live {
+                    b.created_at.as_str()
+                } else {
+                    b.ended_at.as_deref().unwrap_or("")
+                };
+                let by_primary = b_primary.cmp(a_primary);
+                if by_primary != std::cmp::Ordering::Equal {
+                    return by_primary;
+                }
+                // Deterministic tiebreakers so a poll refresh never reshuffles
+                // runs that share a timestamp (ended_at can be absent): the
+                // registry is a HashMap, so an `Equal` comparator would pin
+                // the order to whatever (unstable) iteration order the fresh
+                // registry happened to produce. `run_id` is unique → total.
+                b.created_at
+                    .cmp(&a.created_at)
+                    .then_with(|| a.name.cmp(&b.name))
+                    .then_with(|| a.run_id.cmp(&b.run_id))
+            });
 
             ProjectInfo {
                 name: entry.project_name.clone(),
@@ -347,7 +390,15 @@ async fn list_environments() -> Result<Json<EnvironmentList>, StatusCode> {
         })
         .collect();
 
-    projects.sort_by(|a, b| a.name.cmp(&b.name));
+    // Projects by name, with `project_root` as a deterministic tiebreak: two
+    // worktrees of one repo share the project *name* (`veld`), so a name-only
+    // sort ties and falls back to the registry HashMap's iteration order,
+    // which changes between polls and reshuffles their runs.
+    projects.sort_by(|a, b| {
+        a.name
+            .cmp(&b.name)
+            .then_with(|| a.project_root.cmp(&b.project_root))
+    });
 
     Ok(Json(EnvironmentList { projects }))
 }
@@ -945,7 +996,10 @@ async fn get_logs(
     };
 
     // Internal (veld daemon) log — not per-node, shown as _veld:internal.
-    if include_internal {
+    // Suppressed under a specific `node` filter: this is the run's liveness
+    // stream (probes, recoveries; rows have `node = NULL`), not the node you
+    // asked for, and it drowned per-node output while debugging a crash.
+    if include_internal && q.node.is_none() {
         let lines = tail(None, None, LogStream::Internal);
         if !lines.is_empty() {
             nodes.push(NodeLogs {

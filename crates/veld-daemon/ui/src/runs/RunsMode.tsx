@@ -18,6 +18,7 @@ import { JoinRequestRow, runOfShare } from "../shared/Sharing";
 import { countHidden, hiddenByHorizon, pruneRunHistory } from "../shared/runHistory";
 import { notifyError } from "../shared/notify";
 import { confirmedUnattached, unattachedShareIds } from "../shared/util";
+import { compareRunsForDisplay } from "../model";
 import { topbarClass } from "../shell";
 import type { ReactNode } from "react";
 
@@ -134,14 +135,15 @@ export function RunsMode(props: { modeSwitch: ReactNode; themeButton: ReactNode;
   const endedCount =
     allRuns.length - liveCount - hiddenCount;
 
+  // Split by tab, drop horizon-hidden rows, then order the whole flattened
+  // list (across every project) by the shared timestamp rule: the Active tab
+  // shows live runs newest-started first, the History tab ended runs
+  // last-stopped first. Doing it here — where the tab is known — is what lets
+  // a `main` project sit beside a crashed one by recency, not by name.
   const shown = allRuns
     .filter(({ r }) => (view === "active" ? r.live : !r.live))
     .filter(({ r }) => !hiddenByHorizon(r, props.historyDays, now))
-    .sort(
-      (a, b) =>
-        Number(b.r.status === "running") - Number(a.r.status === "running") ||
-        a.r.name.localeCompare(b.r.name),
-    );
+    .sort((a, b) => compareRunsForDisplay(a.r, b.r));
 
   const meta = offline
     ? "disconnected"

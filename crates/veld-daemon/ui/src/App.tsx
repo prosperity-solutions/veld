@@ -43,6 +43,7 @@ import {
   runsForWorktree,
   selectorRuns,
   siblingRuns,
+  sortRunsForDisplay,
   sortedUrls,
   spinnerAction,
   startRunName,
@@ -3360,7 +3361,15 @@ function RunSelect(props: {
   // would be a persisted answer to a question that has a right one.
   const [showEnded, setShowEnded] = useState(false);
   const { runs, hidden } = selectorRuns(props.runs, selected?.name, showEnded);
-  const position = selected ? runs.findIndex((r) => r.name === selected.name) + 1 : 0;
+  // Listed newest-first within each group (live by start, ended by stop) so
+  // "the run I last touched" leads the picker instead of sitting by name.
+  const orderedRuns = sortRunsForDisplay(runs);
+  // Position counted over the *sorted* list so the counter matches the order
+  // the menu actually shows (an unordered findIndex would label "1/3" a run
+  // rendered third).
+  const position = selected
+    ? orderedRuns.findIndex((r) => r.name === selected.name) + 1
+    : 0;
   // Counted over what is *listed*, so the counter and the dropdown cannot
   // disagree — "1/4" above a two-row list is worse than no counter.
   const siblingAlert = runs.length > 1 && needsAttention(props.siblingStatus);
@@ -3441,7 +3450,7 @@ function RunSelect(props: {
             no environment named {missing} here — showing {selected?.name ?? "nothing"}
           </Menu.Label>
         )}
-        {runs.map((r) => {
+        {orderedRuns.map((r) => {
           const from = startOriginLabel(r.started_from, props.presets);
           return (
             <Menu.Item

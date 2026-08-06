@@ -56,6 +56,24 @@ impl SourceFilter {
     }
 }
 
+/// The stored streams `--source` selects, minus the run-level **internal**
+/// stream when a specific `--node` filter is active.
+///
+/// Internal rows (liveness probes, recoveries) carry `node = NULL` — they are
+/// daemon noise, not the node the user asked for, and under `--node` they
+/// drowned the filtered node's output while debugging a crash. Setup/debug
+/// stay under `--source all`: setup is a node's real step output and debug is
+/// an opt-in trace, so neither is hidden by a node pick. Callers use this for
+/// both the follow-mode poll set and the snapshot filter list so the two
+/// never disagree about whether internal leaks in.
+fn selected_streams(source: SourceFilter, node: Option<&str>) -> Vec<&'static str> {
+    source
+        .streams()
+        .into_iter()
+        .filter(|s| !(node.is_some() && *s == LogStream::Internal.as_str()))
+        .collect()
+}
+
 pub struct LogsOptions {
     pub name: Option<String>,
     pub node: Option<String>,
@@ -174,11 +192,12 @@ pub async fn run(opts: LogsOptions) -> i32 {
     // streams (internal/debug/setup) never do — internal/debug rows have
     // `node = NULL`, so a node filter would silently drop them live even
     // though the snapshot shows them. The stream sets are disjoint, so no
-    // row is polled twice.
-    let (per_node_streams, run_level_streams): (Vec<&'static str>, Vec<&'static str>) = source
-        .streams()
-        .into_iter()
-        .partition(|s| stream_is_per_node(s));
+    // row is polled twice. `selected_streams` already drops internal under a
+    // `--node` filter, so follow and snapshot agree by construction.
+    let (per_node_streams, run_level_streams): (Vec<&'static str>, Vec<&'static str>) =
+        selected_streams(source, node.as_deref())
+            .into_iter()
+            .partition(|s| stream_is_per_node(s));
     let mut follow_filters: Vec<LogFilter> = Vec::new();
     if !per_node_streams.is_empty() {
         follow_filters.push(LogFilter {
@@ -201,7 +220,7 @@ pub async fn run(opts: LogsOptions) -> i32 {
     // `--lines N` means N lines per source (per node+stream), not N total —
     // otherwise one chatty node pushes every other node out of the window.
     let mut source_filters: Vec<LogFilter> = Vec::new();
-    for stream in source.streams() {
+    for stream in selected_streams(source, node.as_deref()) {
         if stream_is_per_node(stream) {
             // Per-node streams: one source per (node, variant).
             let mut targets: Vec<(&str, &str)> = run_state
@@ -221,7 +240,9 @@ pub async fn run(opts: LogsOptions) -> i32 {
             }
         } else {
             // Run-level streams (internal/debug; setup rows carry a node but
-            // the node: None filter matches them too).
+            // the node: None filter matches them too). `selected_streams` has
+            // already dropped internal under a node filter, mirroring follow
+            // mode.
             source_filters.push(LogFilter {
                 node: None,
                 variant: None,
@@ -481,4 +502,55 @@ fn parse_duration(s: &str) -> Option<u64> {
         _ => return s.parse().ok(),
     };
     num.parse::<u64>().ok().map(|n| n * multiplier)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn names(streams: Vec<&'static str>) -> Vec<String> {
+        streams.into_iter().map(|s| s.to_owned()).collect()
+    }
+
+    #[test]
+    fn all_sources_without_node_filter_keep_internal() {
+        let streams = selected_streams(SourceFilter::All, None);
+        assert!(streams.contains(&LogStream::Internal.as_str()));
+        assert!(streams.contains(&LogStream::Setup.as_str()));
+        assert!(streams.contains(&LogStream::Server.as_str()));
+    }
+
+    #[test]
+    fn a_node_filter_drops_internal_but_keeps_setup_and_debug() {
+        let streams = names(selected_streams(SourceFilter::All, Some("web")));
+        assert!(!streams.contains(&LogStream::Internal.as_str().to_owned()));
+        // Real project-step output and opt-in trace survive a node pick.
+        assert!(streams.contains(&LogStream::Setup.as_str().to_owned()));
+        assert!(streams.contains(&LogStream::Debug.as_str().to_owned()));
+        assert!(streams.contains(&LogStream::Server.as_str().to_owned()));
+        assert!(streams.contains(&LogStream::Client.as_str().to_owned()));
+    }
+
+    #[test]
+    fn explicit_internal_source_is_empty_under_a_node_filter() {
+        // `--node X --source internal` has nothing to show: internal is hidden
+        // the moment a node is picked, consistently with `--source all`.
+        assert_eq!(
+            names(selected_streams(SourceFilter::Internal, Some("web"))),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            names(selected_streams(SourceFilter::Internal, None)),
+            vec![LogStream::Internal.as_str().to_owned()]
+        );
+    }
+
+    #[test]
+    fn server_source_never_includes_internal() {
+        assert!(
+            selected_streams(SourceFilter::Server, None)
+                .iter()
+                .all(|s| *s != LogStream::Internal.as_str())
+        );
+    }
 }
