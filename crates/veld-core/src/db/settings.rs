@@ -150,11 +150,16 @@ const MAX_UNKNOWN_VALUE_LEN: usize = 4096;
 /// Storage is not affected and cannot be: every `log_lines.ts` is UTC because
 /// `super::ts_to_str` exists to make lexicographic order equal chronological order,
 /// which `logs_since`, the GC's pruning and both readers' interleave sorts all rely
-/// on. This is a rendering choice, made at every place a human reads a log timestamp
-/// and nowhere else. Those places are: `veld logs`, `veld start`'s foreground log
-/// streaming (`--attach`), and the `/ide` logs view. Adding a fourth means honouring
-/// this key there too — a surface that prints `row.ts` raw shows a different clock
-/// than the terminal beside it.
+/// on. This is a rendering choice, and these are the surfaces that honour it:
+/// `veld logs`, `veld start`'s foreground log streaming (`--attach`), and the `/ide`
+/// logs view. A new surface that prints `row.ts` raw shows a different clock than the
+/// terminal beside it, so it should read this key too.
+///
+/// One human render site deliberately does **not**: the first-generation dashboard
+/// (`veld-daemon/assets/management-ui.html`) renders local unconditionally, because it
+/// is a frozen page that fetches no settings at all. So with this key on `utc`, that
+/// page is the one still showing local — written down in `docs/configuration.md`
+/// § Log Timestamps rather than left for someone to discover.
 ///
 /// A string enum rather than a `logs.localTime` boolean because the obvious next
 /// value is a *named* zone (read a colleague's logs in theirs), and `"local"`/`"utc"`
@@ -673,7 +678,8 @@ impl Db {
             .collect()
     }
 
-    /// Which zone `veld logs` and the `/ide` logs view render a stored timestamp in.
+    /// Which zone a log timestamp is rendered in — read by `veld logs`,
+    /// `veld start --attach`'s streaming, and (over the settings API) the `/ide` view.
     ///
     /// Has an accessor rather than being read raw because the **CLI** reads this one —
     /// it is not a value the daemon merely stores for a browser — and [`Db::setting`]

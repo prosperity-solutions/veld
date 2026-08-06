@@ -295,7 +295,7 @@ export function SettingsDialog(props: {
             /* No backticks: `help` renders through a plain Text, not markdown, so they
                would appear on screen — every other help string in this file writes
                flags and commands bare for that reason. */
-            help="Display only — every line is stored in UTC, which is what veld sorts and interleaves by. Local is your browser's zone; hover a timestamp for the date, both zones and the exact stored value. veld logs and veld start read this same setting, and --utc / --local override it for one command."
+            help="Display only — every line is stored in UTC, which is what veld sorts and interleaves by. Local is your browser's zone; hover a timestamp for the date, both zones and the exact stored value. veld logs and veld start --attach follow this setting too, and veld logs takes --utc / --local to override it for one command."
           >
             <NativeSelect
               size="xs"

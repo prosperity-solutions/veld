@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   extractMsg,
   extractTs,
@@ -114,9 +114,41 @@ describe("timestamps", () => {
     expect(localFirst.split("\n")[0]).toBe(second);
     expect(localFirst.split("\n")[1]).toBe(first);
     expect(localFirst.split("\n")[2]).toBe(third);
-    // The offset is signed even at zero, because it is interpolated after "UTC" and
-    // a bare `Z` there would read as `UTCZ`.
-    expect(localFirst).not.toContain("UTCZ");
+  });
+
+  it("fmtTsFull signs a zero offset rather than emitting a bare Z", () => {
+    // Pinned by forcing the offset, not by asserting the absence of "UTCZ": that
+    // assertion passes whatever `offsetLabel` does at zero, since it never emits a
+    // bare `Z` on any path — so it could not have caught `"00:00"` or `"+00:0"`.
+    // The value is interpolated straight after the literal "UTC", which is why the
+    // sign and both fields have to be there.
+    const spy = vi
+      .spyOn(Date.prototype, "getTimezoneOffset")
+      .mockReturnValue(0);
+    try {
+      expect(fmtTsFull("2026-07-27T10:00:00.123Z", "local")).toContain(
+        "(local, UTC+00:00)",
+      );
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("fmtTsFull reports a west-of-UTC offset as negative", () => {
+    // `getTimezoneOffset` counts minutes *behind* UTC, so it returns +330 for
+    // UTC+05:30 and -330 for UTC-05:30 — the sign is inverted relative to an ISO
+    // offset, and getting that backwards is the mistake this pins. Half-hour zones
+    // also check the minutes field is the remainder, not a truncated hour.
+    const spy = vi
+      .spyOn(Date.prototype, "getTimezoneOffset")
+      .mockReturnValue(210); // UTC-03:30, e.g. St John's
+    try {
+      expect(fmtTsFull("2026-07-27T10:00:00.123Z", "local")).toContain(
+        "(local, UTC-03:30)",
+      );
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it("fmtTsFull keeps the microseconds the rendered lines drop", () => {
