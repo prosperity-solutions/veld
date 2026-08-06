@@ -1630,7 +1630,20 @@ fn install_script_override() -> Option<PathBuf> {
     if !cfg!(debug_assertions) {
         return None;
     }
-    let raw = std::env::var_os("VELD_INSTALL_SCRIPT").filter(|v| !v.is_empty())?;
+    install_script_override_from(std::env::var_os("VELD_INSTALL_SCRIPT"))
+}
+
+/// The decision half, split out so it can be tested without touching the
+/// process environment.
+///
+/// Not a style preference: `std::env::set_var` mutates state shared by every
+/// thread, which is why Rust 2024 made it `unsafe`, and a unit test that sets a
+/// variable while the other tests in its binary run in parallel is a race
+/// against every concurrent `getenv` in the process — including the ones inside
+/// `dirs`, `reqwest` and tokio. A predicate that takes its input as an argument
+/// has nothing to race.
+fn install_script_override_from(raw: Option<std::ffi::OsString>) -> Option<PathBuf> {
+    let raw = raw.filter(|v| !v.is_empty())?;
     let path = PathBuf::from(raw);
     (path.is_absolute() && path.is_file()).then_some(path)
 }
@@ -1696,6 +1709,13 @@ async fn run_install_script(
         // author in dev and may be invoked by the app in production: never let a
         // "which program do I run" variable propagate down a chain of installs.
         "VELD_INSTALL_SCRIPT",
+        // `bash -c` sources `$BASH_ENV` *before* the script body, so it is the
+        // same class of variable as the one above — it decides what runs — and
+        // it arrives from further away: the app forwards its whole inherited
+        // environment, and an app's environment comes from the user's launchd
+        // session. Setting it already requires running code as the user, so this
+        // closes hygiene rather than a hole; it costs one line.
+        "BASH_ENV",
     ] {
         cmd.env_remove(key);
     }
@@ -1909,6 +1929,28 @@ pub async fn uninstall() -> Result<(), anyhow::Error> {
             }
         }
         _ => {}
+    }
+
+    // Remove Veld Desktop.
+    //
+    // The installer puts it there by default now, so an uninstall that left it
+    // behind would leave the most *visible* half of veld on the machine — a Dock
+    // icon whose daemon no longer exists — after promising to remove everything.
+    // Best-effort: `/Applications` is group-writable by `admin`, so an admin user
+    // succeeds without sudo and anyone else keeps an app they can drag to the
+    // trash, which is not worth failing an uninstall over.
+    if std::env::consts::OS == "macos" {
+        if let Some((path, _)) = desktop_app_status() {
+            match std::fs::remove_dir_all(&path) {
+                // stderr, like every other human status line here: stdout is
+                // reserved for machine-readable output (AGENTS.md).
+                Ok(()) => eprintln!("Removed {}", path.display()),
+                Err(e) => eprintln!(
+                    "Could not remove {} ({e}). Drag it to the Trash to finish.",
+                    path.display()
+                ),
+            }
+        }
     }
 
     // Remove Caddy CA from system trust store.
@@ -2386,7 +2428,7 @@ fn hang_up_terminal_holders(veld_dir: &Path) {
 #[cfg(test)]
 mod tests {
     use super::{
-        init_lua_loads_veld_spoon, install_script_override, parse_launchctl_pid,
+        init_lua_loads_veld_spoon, install_script_override_from, parse_launchctl_pid,
         parse_systemd_main_pid, remove_spoon_files,
     };
 
@@ -2469,28 +2511,16 @@ mod tests {
         let real = dir.path().join("install.sh");
         std::fs::write(&real, "#!/usr/bin/env bash\n").unwrap();
 
-        let cases: [(&std::ffi::OsStr, bool); 6] = [
-            (real.as_os_str(), true),
-            ("".as_ref(), false),
-            ("install.sh".as_ref(), false),
-            ("./install.sh".as_ref(), false),
-            ("/nope/does/not/exist.sh".as_ref(), false),
-            // A directory is not a script, and reading one would fail later
-            // with a confusing error rather than here with none.
-            (dir.path().as_os_str(), false),
-        ];
-
-        for (value, accepted) in cases {
-            // SAFETY: this test's own variable, and nothing else in this module
-            // reads it.
-            unsafe { std::env::set_var("VELD_INSTALL_SCRIPT", value) };
-            assert_eq!(
-                install_script_override().is_some(),
-                accepted,
-                "VELD_INSTALL_SCRIPT={value:?}"
-            );
-        }
-        unsafe { std::env::remove_var("VELD_INSTALL_SCRIPT") };
+        let some = |s: &std::ffi::OsStr| Some(s.to_os_string());
+        assert!(install_script_override_from(some(real.as_os_str())).is_some());
+        assert!(install_script_override_from(None).is_none());
+        assert!(install_script_override_from(some("".as_ref())).is_none());
+        assert!(install_script_override_from(some("install.sh".as_ref())).is_none());
+        assert!(install_script_override_from(some("./install.sh".as_ref())).is_none());
+        assert!(install_script_override_from(some("/nope/does/not/exist.sh".as_ref())).is_none());
+        // A directory is not a script; reading one would fail later with a
+        // confusing error rather than here with none.
+        assert!(install_script_override_from(some(dir.path().as_os_str())).is_none());
     }
 
     #[test]

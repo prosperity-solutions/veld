@@ -96,14 +96,14 @@ pub async fn install(
         Ok(()) => match veld_core::setup::desktop_app_status_in(app_dir.as_deref()) {
             Some((path, installed)) if installed.as_deref() == Some(version.as_str()) => Ok(path),
             Some((path, installed)) => Err(format!(
-                "the installer left Veld Desktop at {} ({}), not {version}. Its install script \
-                 may predate this command — try again after the next release.",
+                "the installer left Veld Desktop at {} ({}), not {version}. See \
+                 ~/.veld/desktop-update.log for what the installer did.",
                 path.display(),
                 installed.as_deref().unwrap_or("unknown version"),
             )),
             None => Err(
-                "the installer did not place Veld Desktop. Its install script may predate this \
-                 command — try again after the next release."
+                "the installer did not place Veld Desktop. See ~/.veld/desktop-update.log for \
+                 what it did, then try again."
                     .to_string(),
             ),
         },

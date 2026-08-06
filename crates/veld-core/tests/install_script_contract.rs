@@ -165,6 +165,14 @@ fn an_ambient_handoff_variable_cannot_reach_the_script() {
         ("VELD_DESKTOP_ONLY", "1"),
         ("VELD_DESKTOP_WAIT_PID", "1"),
         ("VELD_DESKTOP_RELAUNCH", "1"),
+        // Not a veld variable, and the reason it is here: `bash -c` sources
+        // `$BASH_ENV` before the script body, so it decides what runs. The app
+        // forwards its whole inherited environment into this call.
+        ("BASH_ENV", "/tmp/veld-should-never-be-sourced.sh"),
+        // `VELD_INSTALL_SCRIPT` is the other variable of this class and is also
+        // stripped, but it cannot be asserted here: this harness *uses* it to
+        // point at the recorder, so setting it as ambient would replace the
+        // recorder rather than test anything.
     ];
     let (env, ok) = record(dir.path(), &ambient, || {
         veld_core::setup::perform_update("9.9.9")
@@ -173,6 +181,7 @@ fn an_ambient_handoff_variable_cannot_reach_the_script() {
     assert!(!env.has("VELD_DESKTOP_ONLY"));
     assert!(!env.has("VELD_DESKTOP_WAIT_PID"));
     assert!(!env.has("VELD_DESKTOP_RELAUNCH"));
+    assert!(!env.has("BASH_ENV"));
 }
 
 #[test]

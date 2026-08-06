@@ -172,13 +172,18 @@ function releasePageUrl(version) {
  *
  * A GUI app has no usable PATH — a launchd-started one gets a bare service PATH
  * — so `which veld` is not a question that can be asked. These are the
- * directories `install.sh` writes to.
+ * directories `install.sh` writes to, in the order it prefers them, so the app
+ * resolves the same binary the installer last wrote.
  *
- * **The order is a trust decision, not a preference.** Whatever this resolves to
- * is spawned *detached* by the app, so it must not be the first thing that can
- * drop a file named `veld` somewhere. `~/.local/bin` is writable by anything
- * already running as the user and comes last, so it only wins on a machine with
- * no system install at all — which is also the machine `install.sh` puts it on.
+ * **This order is not a security boundary, and an earlier version of this
+ * comment claimed it was.** The claim was that root-owned prefixes are probed
+ * before the user-writable one — but on Apple Silicon `/opt/homebrew/bin` is
+ * `drwxrwxr-x <user>:admin`, i.e. writable by the same user as `~/.local/bin`,
+ * and it is ranked above it. More to the point, anything that can write a file
+ * into *any* of these directories can already replace the real veld binary, so
+ * no ordering of them buys a defence. What the order actually buys is agreement
+ * with `install.sh`: prefer a system prefix, fall back to `$HOME`. Do not
+ * reintroduce a security argument here without changing the mechanism.
  *
  * @param {{home: string}} ctx
  * @returns {string[]}
@@ -194,10 +199,17 @@ function cliCandidatePaths({ home }) {
 /**
  * Whether `veld --version` output came from the veld CLI.
  *
- * Being executable and being named `veld` is not the same as being veld, and the
- * consequence of confusing them is a GUI app spawning an arbitrary binary
- * detached. The CLI prints `veld <semver>` (clap's `--version`), so that is what
- * this accepts — and nothing that merely mentions the word.
+ * Being executable and being named `veld` is not the same as being veld. Be
+ * precise about what this buys, because the obvious reading is wrong: the check
+ * is performed *by running the candidate*, so it cannot stop a bogus binary from
+ * executing — by the time this sees any output, it has already run. What it
+ * stops is the second, worse execution: without it, a wrong binary would be
+ * re-spawned **detached**, unbounded, with the app quitting behind it. With it,
+ * a wrong binary gets one 2-second, `PATH`-restricted, output-inspected run and
+ * is then discarded.
+ *
+ * The CLI prints `veld <semver>` (clap's `--version`), so that is what this
+ * accepts — and nothing that merely mentions the word.
  *
  * @param {string | null | undefined} output
  * @returns {boolean}

@@ -55,6 +55,15 @@ app cannot restart your daemon or ask for a password.
 | `VELD_DESKTOP_DIR=<dir>` | Where the app lives. When set it is the **only** location consulted, by the installer and by `veld desktop status` |
 | `VELD_BINARY_ICONS=0` | Leave the CLI/daemon/helper with the generic executable icon (see below) |
 
+**`veld uninstall` removes the app too**, and `veld doctor` reports it — where it
+is, which version, and whether it matches the CLI.
+
+**If the app cannot find a CLI that understands `veld desktop`**, it falls back
+to pointing you at the release page rather than handing over to a CLI that would
+exit with an unknown-subcommand error after the app had already quit. Update the
+CLI (`curl -fsSL https://veld.oss.life.li/get | bash`) and the in-app updater
+starts working again.
+
 **The binaries get the app's icon.** On macOS the installer copies the installed
 app's `.icns` onto `veld`, `veld-daemon` and `veld-helper`, because an
 authorization prompt raised on their behalf — 1Password's "Allow veld-daemon to

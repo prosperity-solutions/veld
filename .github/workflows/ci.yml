@@ -172,7 +172,17 @@ jobs:
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
           bash -n install.sh
-          shellcheck --severity=warning install.sh
+          bash -n tests/validate-install-contract.sh
+          shellcheck --severity=warning install.sh tests/validate-install-contract.sh
+      # The drift neither of the above can see: a `VELD_*` variable renamed on
+      # one side of the CLI/install.sh boundary. Both files stay individually
+      # valid while every app update silently reinstalls the CLI and restarts
+      # the daemon. Runs the script's two pre-network refusal paths, so it needs
+      # no macOS and downloads nothing.
+      - name: CLI and install.sh agree on their contract
+        run: |
+          chmod +x tests/validate-install-contract.sh
+          ./tests/validate-install-contract.sh
 
   licenses:
     name: Third-Party Licenses

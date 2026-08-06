@@ -164,7 +164,7 @@ async fn update_desktop_if_stale(version: &str) {
             // Same reason `veld desktop install` checks: the published install
             // script may predate the desktop section entirely and exit 0.
             _ => Err(anyhow::anyhow!(
-                "the install script did not update the app — it may predate this feature"
+                "the install script ran but did not update the app"
             )),
         })
     {

@@ -526,7 +526,13 @@ install_desktop_app() {
   fi
 
   echo "Error: could not install Veld Desktop to ${dest}"
-  # `cleanup` restores the backup; doing it here as well would race it.
+  # A failed `ditto` does not necessarily leave nothing behind: it fails
+  # *mid-copy* on ENOSPC or an I/O error, and what is at `$dest` then is half a
+  # bundle. `cleanup` restores the backup only when the destination is missing,
+  # so without this the half-copy would survive, get reopened by the relaunch,
+  # and have its only intact backup deleted by the next run's `rm -rf .old`.
+  # Remove the partial copy and leave DESKTOP_SWAP_* set, so the restore fires.
+  rm -rf "$dest"
   return 1
 }
 

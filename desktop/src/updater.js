@@ -104,9 +104,43 @@ function isVeldCli(candidate) {
   }
 }
 
+/**
+ * Whether this veld can actually carry out the handoff.
+ *
+ * Being veld is not enough: `veld desktop` is newer than the app, and the two
+ * halves do come apart — a `.dmg` download, or a `veld update` that failed after
+ * the app half. Such a CLI exits 2 on an unknown subcommand, and by then the app
+ * has already quit for it, so the user is left with no window, no relaunch and
+ * no report. That is the precise failure this file exists to eliminate, and it
+ * was reachable on the one path where the app is already gone.
+ *
+ * A capability probe rather than a version floor, deliberately: the release that
+ * introduces `veld desktop` is not knowable while writing this, and a hardcoded
+ * number would be a second thing to keep in step. `desktop status` reads a plist
+ * and nothing else — no daemon, no database, no network — so asking is free.
+ *
+ * @param {string} candidate
+ * @returns {boolean}
+ */
+function cliHandlesDesktop(candidate) {
+  try {
+    execFileSync(candidate, ["desktop", "status", "--json"], {
+      encoding: "utf8",
+      // Longer than the `--version` probe: this one shells out to PlistBuddy.
+      timeout: 5000,
+      env: { PATH: SAFE_PATH },
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    return true;
+  } catch {
+    // Non-zero exit (clap's 2 for an unknown subcommand), or a timeout.
+    return false;
+  }
+}
+
 function findCli() {
   for (const candidate of cliCandidatePaths({ home: app.getPath("home") })) {
-    if (isVeldCli(candidate)) return candidate;
+    if (isVeldCli(candidate) && cliHandlesDesktop(candidate)) return candidate;
   }
   return null;
 }

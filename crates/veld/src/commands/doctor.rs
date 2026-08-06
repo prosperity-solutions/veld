@@ -36,6 +36,8 @@ struct Diagnostics {
     daemon_path: String,
     daemon_version: String,
     caddy_path: String,
+    /// macOS only; empty elsewhere and on a machine with no app.
+    desktop_app: String,
     caddy_exists: bool,
     lib_dir: String,
     config_path: String,
@@ -126,6 +128,27 @@ impl Diagnostics {
             .unwrap_or_else(|| PathBuf::from("~/.veld/setup.json"));
         self.config_path = tilde_path(&config_path);
         self.config_mode = read_mode(&config_path);
+
+        // Veld Desktop. Installed by default on macOS now, updated by
+        // `veld update`, and able to be stale in a way nothing else here would
+        // show — the app half can lag while every binary above is current.
+        // Doctor is where a user is sent when something is wrong, so a stale
+        // app belongs in the list rather than only in `veld desktop status`.
+        self.desktop_app = match veld_core::setup::desktop_app_status() {
+            Some((path, version)) => {
+                let version = version.unwrap_or_else(|| "unknown version".to_string());
+                let suffix = if version == cli_version {
+                    String::new()
+                } else {
+                    format!(" — CLI is {cli_version}, run 'veld desktop update'")
+                };
+                format!("{} ({version}){suffix}", tilde_path(&path))
+            }
+            None if std::env::consts::OS == "macos" => {
+                "not installed ('veld desktop install')".to_string()
+            }
+            None => String::new(),
+        };
 
         // Read after the mode, because the repair it suggests names it.
         self.daemon_log = daemon_log_row(&daemon_bin, &self.config_mode);
@@ -786,6 +809,9 @@ impl Diagnostics {
         } else {
             println!("    {:<14}{} (not found)", "Caddy:", self.caddy_path);
         }
+        if !self.desktop_app.is_empty() {
+            println!("    {:<14}{}", "Desktop app:", self.desktop_app);
+        }
         println!("    {:<14}{}", "Lib dir:", self.lib_dir);
         println!("    {:<14}{}", "Config:", self.config_path);
         println!("    {:<14}{}", "Daemon log:", self.daemon_log);
@@ -892,6 +918,7 @@ impl Diagnostics {
                 "daemon_version": self.daemon_version,
                 "caddy_path": self.caddy_path,
                 "caddy_exists": self.caddy_exists,
+                "desktop_app": self.desktop_app,
                 "lib_dir": self.lib_dir,
                 "config_path": self.config_path,
                 "config_mode": self.config_mode,

@@ -165,22 +165,18 @@ test("releasePageUrl points at the tag, or at latest without one", () => {
   );
 });
 
-test("the user-writable CLI directory is probed last", () => {
-  // Not a style preference: whatever `findCli` returns is spawned *detached* by
-  // a GUI app. `~/.local/bin` is writable by anything already running as this
-  // user, the two system prefixes are not — so a dropped file named `veld` may
-  // only win on a machine that has no system install at all.
-  const paths = cliCandidatePaths({ home: "/Users/x" });
-  assert.deepEqual(paths, [
+test("CLI candidates are the installer's own directories, system prefix first", () => {
+  // Scoped deliberately. An earlier version of this test asserted the order was
+  // a *trust* boundary — "the user-writable candidate must be last" — which is
+  // false: /opt/homebrew/bin is drwxrwxr-x <user>:admin on Apple Silicon and
+  // ranks above ~/.local/bin, and anything able to write to any of these can
+  // replace the real veld anyway. What the order genuinely pins is agreement
+  // with install.sh, so that the app resolves the binary the installer wrote.
+  assert.deepEqual(cliCandidatePaths({ home: "/Users/x" }), [
     "/usr/local/bin/veld",
     "/opt/homebrew/bin/veld",
     "/Users/x/.local/bin/veld",
   ]);
-  assert.equal(
-    paths.indexOf("/Users/x/.local/bin/veld"),
-    paths.length - 1,
-    "the user-writable candidate must be last, or the trust order is inverted",
-  );
 });
 
 test("looksLikeVeldCli accepts the CLI's own --version and nothing looser", () => {
