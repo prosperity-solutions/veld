@@ -84,6 +84,7 @@ import {
   IconPlus,
   IconRefresh,
   IconSearch,
+  IconBraces,
   IconSettings,
   IconBroadcast,
   IconShare2,
@@ -2580,6 +2581,17 @@ function AppInner(props: {
           run: () => startWorktree(w),
         });
       }
+      // Offered whether or not anything is running, and not gated on `busy`:
+      // reading or changing a machine value is not a run action and does not
+      // conflict with one in flight. The right-click menu was the only way in,
+      // which is not enough for something that can *block* a start.
+      items.push({
+        id: "run:config-vars",
+        group: "Run",
+        label: `Values for this machine (${w.alias})`,
+        alt: ["vars", "machine", "override", "config set", "configurable"],
+        run: () => setDialog({ kind: "config-vars", project: w.path }),
+      });
       // Reachable while a run is live, which "Start" is not — ▶ is a toggle. The
       // name is in the label because that is what the command will create.
       if (running && canStartAnother(w)) {
@@ -2876,6 +2888,34 @@ function AppInner(props: {
     </Tooltip>
   );
 
+  /**
+   * The project's machine-overridable vars.
+   *
+   * Deliberately **not** folded into the settings gear beside it. That dialog is
+   * veld's own preferences — global, yours, the same whatever you have open.
+   * These are values *this project declared* and this machine answers, so they
+   * change with the selected worktree and are meaningless without one. `{}`
+   * rather than another gear for the same reason: two gears would read as two
+   * ways into one thing.
+   *
+   * Hidden rather than disabled when there is no worktree to answer for — a
+   * disabled control here would be a button whose tooltip can never open (#205).
+   */
+  const configVarsButton = worktree && canRunWorktreeNow(worktree) && (
+    <Tooltip label={`Values for this machine — ${worktree.alias}`}>
+      <ActionIcon
+        size="md"
+        variant="default"
+        aria-label="Values for this machine"
+        onClick={() =>
+          setDialog({ kind: "config-vars", project: worktree.path })
+        }
+      >
+        <IconBraces size={14} />
+      </ActionIcon>
+    </Tooltip>
+  );
+
   const themeButton = (
     <Tooltip
       label={`Theme: ${themePref === "auto" ? `system (${theme})` : themePref} — click to change`}
@@ -3109,6 +3149,7 @@ function AppInner(props: {
         onSearch={() => setDialog({ kind: "search" })}
         themeButton={themeButton}
         settingsButton={settingsButton}
+        configVarsButton={configVarsButton}
       />
 
       {offline && (
@@ -3607,6 +3648,7 @@ function TopBar(props: {
   onSearch: () => void;
   themeButton: React.ReactNode;
   settingsButton: React.ReactNode;
+  configVarsButton: React.ReactNode;
 }) {
   const { worktree, run } = props;
   const repoAvailable = props.repo?.available ?? false;
@@ -3771,6 +3813,7 @@ function TopBar(props: {
           <IconSearch size={14} />
         </ActionIcon>
       </Tooltip>
+      {props.configVarsButton}
       {props.settingsButton}
       {props.themeButton}
     </div>
