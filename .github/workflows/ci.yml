@@ -284,6 +284,13 @@ jobs:
         run: npm test
       - name: Build (single-file bundle)
         run: npm run build
+      # The bundle is what /ide actually serves, and the favicon reaches it only
+      # because Vite copies the tag through untouched. The `schema` job checks
+      # the sources; this is the one place a build that stopped doing that would
+      # show up (the script picks up `dist/index.html` when it exists).
+      - name: Favicon survives the bundle
+        working-directory: .
+        run: ./tests/validate-favicon.sh
 
   desktop:
     name: Desktop Shell (Electron)
