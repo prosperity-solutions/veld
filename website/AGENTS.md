@@ -92,7 +92,10 @@ copy buttons break.
 website/
 ├── index.html         # The whole site (served at /)
 ├── og.png             # Open Graph image (1200x630)
-├── favicon.svg        # Favicon (also inlined as data-URI in index.html)
+├── favicon.svg        # Canonical favicon for the whole product — inlined as a
+│                      #   data-URI here and in four other surfaces, kept in sync
+│                      #   by tests/validate-favicon.sh (`just favicon`). Must
+│                      #   stay one line with single-quoted attributes.
 ├── logo.svg           # Icon logo
 ├── logo-wordmark.svg  # Wordmark (source for the inlined nav SVG)
 ├── fonts/             # Self-hosted JetBrains Mono (woff2)

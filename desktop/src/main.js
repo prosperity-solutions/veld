@@ -181,7 +181,9 @@ function claimSlot(preferred) {
 // page is a drag region, which otherwise swallows the selection.
 const INSTALL_COMMAND = "curl -fsSL https://veld.oss.life.li/get | bash";
 const SETUP_COMMAND = "veld setup unprivileged";
-const WAITING_HTML = `<!doctype html><html><head><meta charset="utf-8"><title>Veld</title><style>
+const WAITING_HTML = `<!doctype html><html><head><meta charset="utf-8"><title>Veld</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'><path d='M40 0H8C3.58 0 0 3.58 0 8V40C0 44.42 3.58 48 8 48H40C44.42 48 48 44.42 48 40V8C48 3.58 44.42 0 40 0Z' fill='%230A0A0B'/><path d='M21.2 36L12 12H16.4L23.7 31.8H23.8L31.1 12H35.5L26.3 36H21.2Z' fill='white'/><path d='M32.5 37C33.8807 37 35 35.8807 35 34.5C35 33.1193 33.8807 32 32.5 32C31.1193 32 30 33.1193 30 34.5C30 35.8807 31.1193 37 32.5 37Z' fill='%23C4F56A'/></svg>">
+<style>
   body{margin:0;height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;
        background:#0d0e10;color:#98a0a9;font:13px/1.6 system-ui,sans-serif;-webkit-app-region:drag}
   .wm{font-weight:700;font-size:22px;color:#e7e9ec}.wm i{color:oklch(0.74 0.14 158);font-style:normal}

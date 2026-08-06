@@ -324,6 +324,16 @@ lint:
     cd crates/veld-daemon/frontend && npm run lint
     cd crates/veld-daemon/ui && npm run lint
     cd desktop && npm run lint
+    # Folded into `lint` (unlike `workflow-gates`) because it is bash and grep
+    # only — no dependency to install — and the drift it catches is invisible
+    # to every other check in this recipe.
+    just favicon
+
+# Assert every surface's inlined favicon still matches website/favicon.svg
+# (docs/branding.md). Five copies across HTML, Rust, and JS, tied together by
+# nothing but this gate.
+favicon:
+    ./tests/validate-favicon.sh
 
 # Assert no CI job can run on a draft PR (AGENTS.md → CI cost convention).
 # Deliberately not folded into `lint`: this needs PyYAML, and `lint` is the

@@ -36,7 +36,7 @@ const SHELL: &str = r#"<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex">
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'><path d='M40 0H8C3.58 0 0 3.58 0 8V40C0 44.42 3.58 48 8 48H40C44.42 48 48 44.42 48 40V8C48 3.58 44.42 0 40 0Z' fill='%230f1117'/><path d='M21.1 36L11.9 12H16.3L23.6 31.8H23.7L31 12H35.4L26.2 36H21.1Z' fill='white'/><path d='M32.5 36C33.88 36 35 34.88 35 33.5C35 32.12 33.88 31 32.5 31C31.12 31 30 32.12 30 33.5C30 34.88 31.12 36 32.5 36Z' fill='%23C4F56A'/></svg>">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'><path d='M40 0H8C3.58 0 0 3.58 0 8V40C0 44.42 3.58 48 8 48H40C44.42 48 48 44.42 48 40V8C48 3.58 44.42 0 40 0Z' fill='%230A0A0B'/><path d='M21.2 36L12 12H16.4L23.7 31.8H23.8L31.1 12H35.5L26.3 36H21.2Z' fill='white'/><path d='M32.5 37C33.8807 37 35 35.8807 35 34.5C35 33.1193 33.8807 32 32.5 32C31.1193 32 30 33.1193 30 34.5C30 35.8807 31.1193 37 32.5 37Z' fill='%23C4F56A'/></svg>">
 <title>{title}</title>
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}

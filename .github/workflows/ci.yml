@@ -154,6 +154,13 @@ jobs:
           # check trivially, which reads as a clean bill of health.
           python3 tests/validate-workflow-gates.py --selftest
           python3 tests/validate-workflow-gates.py
+      # Same reasoning: static, checkout-only, and the thing it guards (one
+      # favicon inlined into five files across three languages) has no compiler
+      # or linter that can see the drift.
+      - name: Favicon matches on every surface
+        run: |
+          chmod +x tests/validate-favicon.sh
+          ./tests/validate-favicon.sh
 
   licenses:
     name: Third-Party Licenses
@@ -277,6 +284,18 @@ jobs:
         run: npm test
       - name: Build (single-file bundle)
         run: npm run build
+      # The favicon reaches the served /ide only because Vite copies the tag
+      # through untouched. The `schema` job checks the sources; this checks a
+      # bundle built the same way as the one `crates/veld-daemon/build.rs`
+      # embeds (same config and entry, its own `--outDir`), which is where a
+      # Vite that stopped copying it through would show up. The script picks up
+      # `dist/index.html` whenever it exists.
+      # Spelled absolutely: this job's `defaults.run.working-directory` is the UI
+      # package, and a bare `.` here reads as either that or the workspace root
+      # depending on how you think overrides compose.
+      - name: Favicon survives the bundle
+        working-directory: ${{ github.workspace }}
+        run: ./tests/validate-favicon.sh
 
   desktop:
     name: Desktop Shell (Electron)

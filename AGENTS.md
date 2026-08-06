@@ -317,7 +317,9 @@ and several were paid for in this codebase already.
   404), overlays, error pages, and every future surface — must follow
   [docs/branding.md](docs/branding.md): embedded `veld.` wordmark (accent-green
   dot), the dark product token palette, self-contained assets (inline CSS,
-  data-URI favicon, no external requests), and no enumerable share/run
+  data-URI favicon — the one mark from `website/favicon.svg`, which
+  `tests/validate-favicon.sh` (in `just lint`) pins across every surface that
+  inlines it — no external requests), and no enumerable share/run
   metadata on anonymous pages. Never ship an unbranded, system-default-styled
   page; when adding one to an existing binary, reuse its page shell (e.g.
   `veld-gateway`'s `pages::shell`) instead of writing bespoke HTML.
