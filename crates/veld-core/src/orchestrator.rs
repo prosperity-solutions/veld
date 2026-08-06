@@ -463,11 +463,14 @@ fn build_graph_snapshot(
     // between runs and `veld runs diff` would report a difference that is only
     // hash iteration order.
     var_overrides.sort_by(|a, b| a.name.cmp(&b.name));
+    // Always `Some` from a run this binary started, even when empty — that is
+    // what lets a later diff tell "no machine vars" from "recorded before the
+    // field existed".
     crate::state::GraphSnapshot {
         config_hash,
         started_from,
         nodes,
-        var_overrides,
+        var_overrides: Some(var_overrides),
     }
 }
 
@@ -819,7 +822,19 @@ impl Orchestrator {
     /// Named at start, where the user can still choose `veld config set` instead,
     /// rather than discovered at stop when the environment is already up.
     pub fn flag_answers_needed_at_teardown(&self, selections: &[NodeSelection]) -> Vec<String> {
-        let needed = config::vars_for_teardown(&self.config, selections);
+        // Expanded, exactly as `unanswered_vars` expands — and for the identical
+        // reason. `vars_for_teardown` over the *raw* selections misses an
+        // `on_stop` on a node pulled in only by `depends_on`, which is precisely
+        // the transitive case this warning exists for: the containers left
+        // running are usually the dependency's, not the node that was named.
+        let planned: Vec<NodeSelection> = match graph::resolve_selections(selections, &self.config)
+            .and_then(|resolved| graph::build_execution_plan(&resolved, &self.config))
+        {
+            Ok(plan) => plan.into_iter().flatten().collect(),
+            // A plan that no longer resolves is not this warning's problem.
+            Err(_) => selections.to_vec(),
+        };
+        let needed = config::vars_for_teardown(&self.config, &planned);
         let mut out: Vec<String> = self
             .var_provenance
             .iter()

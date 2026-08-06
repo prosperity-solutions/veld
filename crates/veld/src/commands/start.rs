@@ -145,6 +145,17 @@ pub async fn run(
     };
     let run_name_str = run_name.as_str();
 
+    // Parsed before the config is moved into the orchestrator, because
+    // validating a `--var` name needs the declarations. Refusing an unknown one
+    // here also means we refuse *before* anything is built or spawned.
+    let var_answers = match parse_var_answers(&var, &config) {
+        Ok(answers) => answers,
+        Err(e) => {
+            output::print_error(&e, false);
+            return 1;
+        }
+    };
+
     // Build the orchestrator.
     let foreground = attach && is_tty();
     let mut orchestrator = match Orchestrator::new(config_path.clone(), config) {
@@ -159,13 +170,8 @@ pub async fn run(
     orchestrator.set_terminal_node(terminal_sel.clone());
 
     // Per-run answers, above the stored ones and never written anywhere.
-    match parse_var_answers(&var) {
-        Ok(answers) if !answers.is_empty() => orchestrator.set_var_answers(answers),
-        Ok(_) => {}
-        Err(e) => {
-            output::print_error(&e, false);
-            return 1;
-        }
+    if !var_answers.is_empty() {
+        orchestrator.set_var_answers(var_answers);
     }
 
     // Pre-flight: every machine-overridable var this plan needs must have an
@@ -987,8 +993,30 @@ fn unknown_preset_message(config: &VeldConfig, token: &str) -> String {
     )
 }
 
-/// Parse `--var NAME=VALUE` pairs.
-fn parse_var_answers(pairs: &[String]) -> Result<veld_core::values::VarOverrides, String> {
+/// Parse `--var NAME=VALUE` pairs, refusing a name the config does not declare
+/// machine-overridable.
+///
+/// Silence here is the worst option: resolution only consults an override for a
+/// var that is still declared `machine`, so `--var typo=x` — or a `--var` for an
+/// ordinary var — would otherwise be dropped without a word. The run starts, the
+/// config's value wins, and the snapshot does not record the flag either, so
+/// nothing anywhere says the answer was ignored. `veld config set` already
+/// refuses the same input and lists the declared names.
+fn parse_var_answers(
+    pairs: &[String],
+    config: &VeldConfig,
+) -> Result<veld_core::values::VarOverrides, String> {
+    let declared: Vec<&str> = {
+        let mut v: Vec<&str> = config
+            .vars
+            .iter()
+            .flatten()
+            .filter(|(_, d)| d.machine().is_some())
+            .map(|(n, _)| n.as_str())
+            .collect();
+        v.sort_unstable();
+        v
+    };
     let mut out = veld_core::values::VarOverrides::new();
     for pair in pairs {
         let Some((name, value)) = pair.split_once('=') else {
@@ -998,6 +1026,17 @@ fn parse_var_answers(pairs: &[String]) -> Result<veld_core::values::VarOverrides
         };
         if name.is_empty() {
             return Err(format!("--var `{pair}` has no name before the `=`"));
+        }
+        if !declared.contains(&name) {
+            return Err(format!(
+                "--var `{name}` is not declared machine-overridable in this project, so it \
+                 would be ignored. Machine-overridable vars: {}",
+                if declared.is_empty() {
+                    "(none)".to_owned()
+                } else {
+                    declared.join(", ")
+                }
+            ));
         }
         // Sensitivity is applied at resolution from the *declaration*, so a
         // `--var` answer for a secret var is still redacted. The flag itself is
@@ -1018,7 +1057,7 @@ fn parse_var_answers(pairs: &[String]) -> Result<veld_core::values::VarOverrides
 /// answer is stored only when the human says so. The failure that motivated it
 /// was a background process taking a default, which then looked exactly like a
 /// deliberate choice for as long as the machine lived.
-async fn resolve_machine_vars(
+pub(super) async fn resolve_machine_vars(
     orchestrator: &mut Orchestrator,
     selections: &[NodeSelection],
     project_root: &std::path::Path,
@@ -1038,12 +1077,25 @@ async fn resolve_machine_vars(
     // there is no channel, and inventing one — resolving a default, or worse
     // persisting a guess — is the documented failure.
     //
-    // Gated on **stdin**, not `output::is_tty()` (which is stdout). This prompt
-    // writes to stderr and reads stdin, so stdout's state is the one thing about
-    // it that does not matter: `veld start --oneshot … > out.json` from a real
-    // terminal was declared unattended and refused, with a human sitting right
-    // there. `veld update` already gates on stdin for the same reason.
+    // Gated on **both streams this prompt actually uses**, and on neither of the
+    // ones it doesn't.
+    //
+    // Not stdout (`output::is_tty()`): the question goes to stderr, so
+    // `veld start --oneshot … > out.json` from a real terminal was declared
+    // unattended and refused with a human sitting right there.
+    //
+    // Not stdin alone either, which is the trap on the way back: the daemon
+    // spawns `veld start` with stdout nulled and stderr redirected to a log file
+    // but **inherits stdin**, so a daemon launched from a terminal hands its tty
+    // to every run it starts. Gating on stdin alone would make that run believe a
+    // human was watching, write the question into a log file nobody reads, and
+    // block on `read_line` forever — while the UI, which already got its
+    // `202 ACCEPTED`, showed a run that never starts. Requiring stderr to be a
+    // terminal is what distinguishes the two: a human can only answer a question
+    // they can see. (`spawn_veld_in` also nulls stdin now; this is the half that
+    // does not depend on the spawner getting it right.)
     let attended = std::io::IsTerminal::is_terminal(&std::io::stdin())
+        && std::io::IsTerminal::is_terminal(&std::io::stderr())
         && std::env::var("VELD_NON_INTERACTIVE")
             .map(|v| v.is_empty())
             .unwrap_or(true);

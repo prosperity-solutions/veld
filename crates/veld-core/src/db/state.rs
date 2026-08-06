@@ -1038,7 +1038,7 @@ mod tests {
         run.graph_snapshot = Some(crate::state::GraphSnapshot {
             config_hash: "abc123".into(),
             started_from: None,
-            var_overrides: Vec::new(),
+            var_overrides: Some(Vec::new()),
             nodes: [(
                 "web:local".to_string(),
                 crate::state::NodeSnapshot {
@@ -1096,7 +1096,7 @@ mod tests {
                 preset: Some("web-only".into()),
                 selections: vec!["api:local".into(), "web:local".into()],
             }),
-            var_overrides: Vec::new(),
+            var_overrides: Some(Vec::new()),
             nodes: std::collections::BTreeMap::new(),
         });
         db.save_run(root, "proj", &run).unwrap();
@@ -1126,7 +1126,7 @@ mod tests {
         run.graph_snapshot = Some(crate::state::GraphSnapshot {
             config_hash: "abc".into(),
             started_from: None,
-            var_overrides: Vec::new(),
+            var_overrides: Some(Vec::new()),
             nodes: std::collections::BTreeMap::new(),
         });
         db.save_run(root, "proj", &run).unwrap();

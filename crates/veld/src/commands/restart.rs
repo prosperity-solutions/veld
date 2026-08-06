@@ -85,6 +85,17 @@ pub async fn run(name: Option<String>, debug: bool) -> i32 {
         }
     };
 
+    // **Before the stop, not after.** `veld start` refuses (or asks) before the
+    // first spawn; a restart that discovered the same missing answer inside the
+    // second `start` would already have torn the environment down — so pulling a
+    // commit that adds a machine var with no default would take the developer's
+    // running environment away and leave them with an error. Checked here, the
+    // environment is still up when the refusal arrives.
+    let project_root = veld_core::config::project_root(&config_path);
+    if !super::start::resolve_machine_vars(&mut orchestrator, &selections, &project_root).await {
+        return 1;
+    }
+
     output::print_info(&format!("Restarting environment '{run_name}'..."));
 
     // Stop the existing run (a no-op teardown when it already ended).

@@ -732,8 +732,6 @@ export interface ConfigVar {
   from: ConfigVarScope;
   /** Display string, or null when the var has no value at all. */
   value: string | null;
-  /** The stored answer is a pointer (env/file/shell) rather than a literal. */
-  isPointer: boolean;
   secret: boolean;
   /** The config's own fallback, display-safe, or null when there is none. */
   default: string | null;

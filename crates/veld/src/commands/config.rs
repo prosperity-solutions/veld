@@ -103,33 +103,6 @@ fn machine_var<'a>(
     }
 }
 
-/// How a value is shown. A secret is described, never printed — the same rule
-/// `--why` already follows, and the reason `veld config vars --json` is safe to
-/// paste into a bug report.
-///
-/// **`declared` is not optional, and reading only `value.secret` is a leak.**
-/// Sensitivity is now split across two places that are persisted separately: the
-/// *declaration* (`MachineVar::secret`, in the committed config) and each
-/// *answer* (`ConfigValue::secret`, in this machine's database). Two ways the
-/// value's own flag is false while the var is unmistakably secret:
-///
-/// - `{ "machine": { "default": "…" }, "secret": true }` — the spelling
-///   `machine-var-secret-placement` tells authors to prefer — sets the flag on
-///   the declaration, and it is never pushed down onto `default`.
-/// - An answer stored *before* the config gained `secret: true` keeps the flag it
-///   was written with, because the row records what was true at write time.
-///
-/// So the caller passes the declared sensitivity and redaction is the union.
-fn describe(value: &ConfigValue, declared: bool) -> String {
-    if declared || value.secret {
-        return format!("<secret, from {}>", value.source_label());
-    }
-    match value.as_literal() {
-        Some(literal) => literal.to_owned(),
-        None => format!("<from {}>", value.source_label()),
-    }
-}
-
 /// `veld config vars [--json]`
 ///
 /// Every machine-overridable var, its effective value, and **which scope that
@@ -178,9 +151,9 @@ pub async fn list_vars(json: bool) -> i32 {
                         None if m.default.is_some() => "default",
                         None => "unset",
                     },
-                    "value": effective.map(|v| describe(v, m.secret)),
+                    "value": effective.map(|v| m.describe(v)),
                     "secret": m.secret,
-                    "default": m.default.as_ref().map(|d| describe(d, m.secret)),
+                    "default": m.default.as_ref().map(|d| m.describe(d)),
                     "choices": m.choices,
                     "description": m.description,
                     "prompt": m.prompt,
@@ -211,9 +184,9 @@ pub async fn list_vars(json: bool) -> i32 {
         .iter()
         .map(|(name, m, over)| {
             let (from, value) = match over {
-                Some(o) => (o.scope.as_str().to_owned(), describe(&o.value, m.secret)),
+                Some(o) => (o.scope.as_str().to_owned(), m.describe(&o.value)),
                 None => match &m.default {
-                    Some(d) => ("default".to_owned(), describe(d, m.secret)),
+                    Some(d) => ("default".to_owned(), m.describe(d)),
                     None => ("unset".to_owned(), "-".to_owned()),
                 },
             };
@@ -347,7 +320,7 @@ pub async fn set_var(
             serde_json::to_string_pretty(&serde_json::json!({
                 "name": name,
                 "scope": scope.as_str(),
-                "value": describe(&source, machine.secret),
+                "value": machine.describe(&source),
                 "project_id": ctx.project_id.as_str(),
             }))
             .expect("serializable")
@@ -355,7 +328,7 @@ pub async fn set_var(
     } else {
         output::print_success(&format!(
             "{name} = {} ({scope} scope)",
-            describe(&source, machine.secret)
+            machine.describe(&source)
         ));
         match scope {
             OverrideScope::Project => {

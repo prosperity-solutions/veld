@@ -67,8 +67,7 @@ fn csrf(headers: &HeaderMap) -> Result<(), ApiError> {
     check_csrf(headers).map_err(|c| err(c, "missing the X-Veld-Request header"))
 }
 
-/// Which project's vars. A path to any directory inside the checkout — the same
-/// thing every other project-scoped endpoint takes.
+/// Which project's vars. A registered worktree root — see `resolve_project`.
 #[derive(Deserialize)]
 struct ProjectQuery {
     project: String,
@@ -83,8 +82,13 @@ struct Resolved {
 
 /// Find and parse the config for a client-supplied directory.
 ///
-/// `discover_config` walks upward, so the UI may pass a worktree root or any
-/// subdirectory of it and get the same answer the CLI would from that cwd.
+/// **Takes a registered worktree root exactly** — not any directory inside it.
+/// `discover_config` below does walk upward, but the registry gate is a string
+/// match on `worktrees.path`, so a subdirectory (or the same path with a
+/// trailing slash) is refused rather than resolved. Every caller sends
+/// `worktree.path` from the same registry, so that is a description of the
+/// contract and not a limitation anyone hits — stated because the walk-up
+/// underneath makes the looser reading look true.
 async fn resolve_project(project: &str) -> Result<Resolved, ApiError> {
     let dir = std::path::PathBuf::from(project);
     if !dir.is_absolute() {
@@ -155,26 +159,6 @@ async fn resolve_project(project: &str) -> Result<Resolved, ApiError> {
     })
 }
 
-/// How a value is shown to a client. Mirrors the CLI's `describe` — a secret is
-/// described, never printed.
-///
-/// **`declared` is not optional.** Sensitivity lives in two separately-persisted
-/// places: the declaration (`MachineVar::secret`, committed) and each stored
-/// answer (`ConfigValue::secret`, this machine's database). Reading only the
-/// value's own flag returns the literal for
-/// `{ "machine": { "default": "…" }, "secret": true }` — the spelling the lint
-/// tells authors to prefer — and for any answer stored before the config gained
-/// the flag. Redaction is the union of the two.
-fn describe(value: &ConfigValue, declared: bool) -> String {
-    if declared || value.secret {
-        return format!("<secret, from {}>", value.source_label());
-    }
-    match value.as_literal() {
-        Some(literal) => literal.to_owned(),
-        None => format!("<from {}>", value.source_label()),
-    }
-}
-
 /// Look up a var and insist the config declared it machine-overridable.
 fn machine_var<'a>(config: &'a config::VeldConfig, name: &str) -> Result<&'a MachineVar, ApiError> {
     config
@@ -224,13 +208,9 @@ async fn get_vars(Query(q): Query<ProjectQuery>) -> ApiResult {
                     None if m.default.is_some() => "default",
                     None => "unset",
                 },
-                "value": effective.map(|v| describe(v, m.secret)),
-                // Whether the stored answer is a pointer rather than a literal,
-                // so the UI can show the right editor without ever holding the
-                // value it points at.
-                "isPointer": over.is_some_and(|o| o.value.as_literal().is_none()),
+                "value": effective.map(|v| m.describe(v)),
                 "secret": m.secret,
-                "default": m.default.as_ref().map(|d| describe(d, m.secret)),
+                "default": m.default.as_ref().map(|d| m.describe(d)),
                 "choices": m.choices,
                 "description": m.description,
                 "prompt": m.prompt,
@@ -331,7 +311,7 @@ async fn put_var(headers: HeaderMap, Json(body): Json<PutVarBody>) -> ApiResult 
     Ok(Json(serde_json::json!({
         "name": body.name,
         "scope": scope.as_str(),
-        "value": describe(&value, machine.secret),
+        "value": machine.describe(&value),
     })))
 }
 

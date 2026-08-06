@@ -555,37 +555,41 @@ fn diff_snapshots(
         })
     };
 
-    // Union of both sides' names, so a var that only one run recorded still
-    // shows — a var added to the config between the runs is exactly the case
-    // worth seeing.
-    let mut var_names: Vec<&str> = old
-        .var_overrides
-        .iter()
-        .chain(new.var_overrides.iter())
-        .map(|v| v.name.as_str())
-        .collect();
-    var_names.sort_unstable();
-    var_names.dedup();
-    let var_overrides_changed: Vec<FieldChange> = var_names
-        .into_iter()
-        .filter_map(|name| {
-            let from = old
-                .var_overrides
+    // Compared only when **both** runs recorded the field. `None` means the run
+    // predates it, and treating that as "declared nothing" would report every var
+    // as newly-appeared on the first diff after an upgrade — a difference that
+    // did not happen. `Some([])` is a real answer ("this project has no machine
+    // vars") and compares normally; that distinction is the whole reason the
+    // field is an `Option` rather than a possibly-empty vec.
+    let var_overrides_changed: Vec<FieldChange> = match (&old.var_overrides, &new.var_overrides) {
+        (Some(old_vars), Some(new_vars)) => {
+            // Union of both sides' names, so a var only one run recorded still
+            // shows — a var added to the config between the runs is exactly the
+            // case worth seeing.
+            let mut var_names: Vec<&str> = old_vars
                 .iter()
-                .find(|v| v.name == name)
-                .map(|v| v.from.clone());
-            let to = new
-                .var_overrides
-                .iter()
-                .find(|v| v.name == name)
-                .map(|v| v.from.clone());
-            (from != to).then(|| FieldChange {
-                field: name.to_owned(),
-                from,
-                to,
-            })
-        })
-        .collect();
+                .chain(new_vars.iter())
+                .map(|v| v.name.as_str())
+                .collect();
+            var_names.sort_unstable();
+            var_names.dedup();
+            var_names
+                .into_iter()
+                .filter_map(|name| {
+                    let find = |vs: &[veld_core::state::VarOverrideSnapshot]| {
+                        vs.iter().find(|v| v.name == name).map(|v| v.from.clone())
+                    };
+                    let (from, to) = (find(old_vars), find(new_vars));
+                    (from != to).then(|| FieldChange {
+                        field: name.to_owned(),
+                        from,
+                        to,
+                    })
+                })
+                .collect()
+        }
+        _ => Vec::new(),
+    };
 
     SnapshotDiff {
         config_changed: (!old.config_hash.is_empty() && !new.config_hash.is_empty())
@@ -621,7 +625,7 @@ mod tests {
                 .iter()
                 .map(|(k, n)| (k.to_string(), n.clone()))
                 .collect(),
-            var_overrides: Vec::new(),
+            var_overrides: Some(Vec::new()),
         }
     }
 
@@ -641,8 +645,8 @@ mod tests {
         };
         let mut old = snap("same", &[]);
         let mut new = snap("same", &[]);
-        old.var_overrides = vec![vo("default")];
-        new.var_overrides = vec![vo("project")];
+        old.var_overrides = Some(vec![vo("default")]);
+        new.var_overrides = Some(vec![vo("project")]);
 
         let d = diff_snapshots(&old, &new);
         assert_eq!(
@@ -656,7 +660,7 @@ mod tests {
         assert_eq!(d.var_overrides_changed[0].to.as_deref(), Some("project"));
 
         // Same provenance on both sides is not a difference.
-        new.var_overrides = vec![vo("default")];
+        new.var_overrides = Some(vec![vo("default")]);
         assert!(diff_snapshots(&old, &new).var_overrides_changed.is_empty());
     }
 
@@ -668,15 +672,46 @@ mod tests {
         use veld_core::state::VarOverrideSnapshot;
         let mut old = snap("a", &[]);
         let mut new = snap("b", &[]);
-        old.var_overrides = vec![];
-        new.var_overrides = vec![VarOverrideSnapshot {
+        old.var_overrides = Some(vec![]);
+        new.var_overrides = Some(vec![VarOverrideSnapshot {
             name: "runtime".to_owned(),
             from: "worktree".to_owned(),
-        }];
+        }]);
         let d = diff_snapshots(&old, &new);
         assert_eq!(d.var_overrides_changed.len(), 1);
         assert_eq!(d.var_overrides_changed[0].from, None);
         assert_eq!(d.var_overrides_changed[0].to.as_deref(), Some("worktree"));
+    }
+
+    /// **A run recorded before the field existed reports nothing, not a phantom
+    /// difference.**
+    ///
+    /// `None` (absent) and `Some([])` (no machine vars declared) are different
+    /// facts, and only the type distinguishes them — with an empty vec for both,
+    /// the first diff after upgrading claimed every var had just appeared. The
+    /// pair of assertions here is the point: absent stays silent, empty compares.
+    #[test]
+    fn diff_says_nothing_about_a_run_recorded_before_the_field_existed() {
+        use veld_core::state::VarOverrideSnapshot;
+        let mut old = snap("same", &[]);
+        let mut new = snap("same", &[]);
+        old.var_overrides = None; // predates the field
+        new.var_overrides = Some(vec![VarOverrideSnapshot {
+            name: "runtime".to_owned(),
+            from: "project".to_owned(),
+        }]);
+        assert!(
+            diff_snapshots(&old, &new).var_overrides_changed.is_empty(),
+            "an absent record is not evidence that anything changed"
+        );
+
+        // …but a run that genuinely declared none still compares.
+        old.var_overrides = Some(Vec::new());
+        assert_eq!(
+            diff_snapshots(&old, &new).var_overrides_changed.len(),
+            1,
+            "`Some([])` is a real answer and must not be treated as absent"
+        );
     }
 
     #[test]

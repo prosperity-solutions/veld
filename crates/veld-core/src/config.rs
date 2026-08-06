@@ -652,6 +652,34 @@ pub struct MachineVar {
     pub unknown_keys: Vec<String>,
 }
 
+impl MachineVar {
+    /// How this var's value is shown to a human, with the redaction rule applied.
+    ///
+    /// **One implementation, because sensitivity lives in two places.** A machine
+    /// var's `secret` is on the *declaration*; each stored answer carries its own
+    /// flag, set when that answer was written. Either being true means redact:
+    ///
+    /// - `{ "machine": { "default": "…" }, "secret": true }` — the spelling
+    ///   `machine-var-secret-placement` tells authors to prefer — leaves
+    ///   `default.secret` false, and printing it leaked the value.
+    /// - An answer stored before the config gained `secret: true` keeps the flag
+    ///   it was written with.
+    ///
+    /// The CLI and the daemon both render this. They had a byte-identical copy
+    /// each with nothing tying them together, so a change to the rule could land
+    /// in one and be forgotten in the other — the two surfaces then disagree
+    /// about what is safe to print, which is the one thing they must never do.
+    pub fn describe(&self, value: &ConfigValue) -> String {
+        if self.secret || value.secret {
+            return format!("<secret, from {}>", value.source_label());
+        }
+        match value.as_literal() {
+            Some(literal) => literal.to_owned(),
+            None => format!("<from {}>", value.source_label()),
+        }
+    }
+}
+
 impl VarDecl {
     /// Declared sensitivity, whichever form this is.
     pub fn secret(&self) -> bool {
@@ -5711,11 +5739,15 @@ mod tests {
                 declared,
                 "{label}: every declared pane must survive parsing"
             );
-            assert_eq!(
-                round.vars.as_ref().map(|v| v.len()),
-                cfg.vars.as_ref().map(|v| v.len()),
-                "{label}"
-            );
+            // Compared by **content**, not by count. A count was enough while a
+            // var was a `ConfigValue`; a `VarDecl` has a hand-written `Serialize`
+            // with a match arm per field, so the failure this gate exists to
+            // catch — someone adds a field to `MachineVar`, the compiler forces
+            // the struct literal and `Deserialize`, and the `Serialize` arm is
+            // forgotten — drops that field's value on every re-serialize (share
+            // manifests, `veld config --files`) while leaving the map's length
+            // untouched. `VarDecl` derives `PartialEq`, so this costs nothing.
+            assert_eq!(round.vars, cfg.vars, "{label}: vars must round-trip");
         }
     }
 

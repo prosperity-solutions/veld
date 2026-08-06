@@ -118,9 +118,14 @@ fn main_worktree_root(dir: &Path, path_env: Option<&str>) -> Option<PathBuf> {
     let root = if common.file_name().is_some_and(|n| n == ".git") {
         common.parent()?.to_path_buf()
     } else {
-        // A separate git dir (`git init --separate-git-dir`) or a bare repo:
-        // there is no main checkout to point at, so fall back to no-git rather
-        // than key every worktree under a directory that holds no config.
+        // A separate git dir (`git init --separate-git-dir`), a bare repo, or —
+        // the case people actually have — a **submodule**, whose common dir is
+        // `<super>/.git/modules/<name>`. There is no main checkout to point at,
+        // so fall back to no-git rather than key every worktree under a directory
+        // that holds no config. A veld project inside a submodule therefore keys
+        // by its own directory and does not share answers across the
+        // superproject's worktrees: it fails safe, and it is a real limitation
+        // rather than an oversight.
         return None;
     };
     Some(canonicalize(&root))
@@ -140,7 +145,17 @@ fn git(dir: &Path, args: &[&str], path_env: Option<&str>) -> Option<String> {
     let mut cmd = Command::new("git");
     cmd.args(args)
         .current_dir(dir)
-        .stdin(std::process::Stdio::null());
+        .stdin(std::process::Stdio::null())
+        // Removed, not inherited. Under a hook, `git rebase --exec`, or
+        // `git bisect run`, these point at the repository git is *currently*
+        // operating on, so `--show-toplevel` answers for the main worktree while
+        // the cwd is a linked one — `strip_prefix` then fails and the fallback id
+        // is returned, making that machine's stored answers invisible for exactly
+        // those invocations. The cwd is the only input this should have.
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_INDEX_FILE");
     if let Some(path) = path_env {
         cmd.env("PATH", path);
     }

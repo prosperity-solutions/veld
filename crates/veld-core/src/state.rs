@@ -240,8 +240,15 @@ pub struct GraphSnapshot {
     /// truncated digest over that domain is a brute-forceable oracle published
     /// into the most-copied, most-pasted artifact veld produces. The names tell
     /// you where to look, which is the honest answer.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub var_overrides: Vec<VarOverrideSnapshot>,
+    /// **`None` means the run predates this field; `Some([])` means the project
+    /// declared no machine vars.** The distinction is carried by the type rather
+    /// than by an empty vec, for the reason `presets` in the daemon's worktree
+    /// view carries the same one: a consumer that treats "absent" as "none
+    /// declared" reports every var as newly-appeared when you diff a run recorded
+    /// before the upgrade — a difference that did not happen. Empty and absent
+    /// are not the same fact, and only the type can say so.
+    #[serde(default)]
+    pub var_overrides: Option<Vec<VarOverrideSnapshot>>,
 }
 
 /// One machine-overridable var as it stood when a run started.
