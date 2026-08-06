@@ -1333,6 +1333,8 @@ It is consumed like any other var — `${vars.container_runtime}` in `argv`, `en
 | `prompt` | The question asked when there is no default and no answer. Falls back to `description` |
 | `secret` | Sits beside `machine`, not inside it — it describes the var, not one of its layers |
 
+An unknown key under `machine` is a `machine-var-unknown-key` **error finding**, not a load failure. That split is deliberate: a typo (`defualt`) silently costs the var its default, so it must block `veld start` and `veld lint` — but a config written for a *newer* veld has to stay loadable by an older one, or `veld stop` cannot tear down a run that is already going and its containers leak.
+
 ```sh
 veld config vars                              # name, effective value, and which scope it came from
 veld config set container_runtime podman      # this machine, every worktree of the project
@@ -1533,6 +1535,7 @@ element no shell ever sees (inert text — a mistake, but not an exposure).
 | `machine-var-default-not-a-choice` | A machine var whose `default` is not one of its own `choices`, so it fails on every machine that has not overridden it | **error** |
 | `machine-var-duplicate-choice` | The same string listed twice in `choices` | warn |
 | `machine-var-unexplained` | A machine var with no `default`, so every machine must answer it, and no `prompt` or `description` saying what to answer | warn |
+| `machine-var-unknown-key` | A key under `machine` (or beside it) that this veld does not know. Reported rather than refused, so a config written for a newer veld can still be torn down by an older one | **error** (a finding, not a load failure) |
 | `machine-var-secret-placement` | `secret: true` written inside `machine.default` rather than beside `machine`. The var is treated as secret either way; the placement misleads a reader | notice |
 | `unknown-builtin-var` | `${veld.x}` naming something that is not a built-in at all | **error** |
 | `builtin-not-in-scope` | A real built-in written where it is not populated — `${veld.url}` in a `command` node, `${veld.port}` in a `vars` value, `${veld.node}` in a `setup` step. See [availability](#availability) | **error**, or warn when only *some* variants inheriting the value lack it |

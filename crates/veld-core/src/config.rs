@@ -636,6 +636,20 @@ pub struct MachineVar {
     /// Declared sensitivity, exactly as on [`ConfigValue`] — a `secret` machine
     /// var is redacted in every listing and may not be referenced from a command.
     pub secret: bool,
+    /// Keys this binary does not know, kept so `validate` can report them.
+    ///
+    /// **Parsed, stored, not understood** — the same treatment `ide` gives its
+    /// reserved keys, and the reason is F0.1: `parse_config` runs on *every*
+    /// subcommand including `stop`, and teardown reads the on-disk config at stop
+    /// time. Rejecting an unknown key here would make a config written for a
+    /// newer veld unloadable by an older one, so `veld stop` would fail and the
+    /// run's containers would leak with no way to clean them up. A typo is still
+    /// loud: `machine-var-unknown-key` is a `Severity::Error` *finding*, which
+    /// blocks `veld start` and `veld lint` while leaving teardown alone.
+    ///
+    /// Names only, so an unknown key does not survive a re-serialize. veld does
+    /// not propagate what it cannot interpret.
+    pub unknown_keys: Vec<String>,
 }
 
 impl VarDecl {
@@ -726,28 +740,21 @@ impl<'de> Deserialize<'de> for VarDecl {
                 )));
             }
         };
-        for key in map.keys() {
-            if key != "machine" && key != "secret" {
-                return Err(D::Error::custom(format!(
-                    "a machine var takes only \"machine\" and \"secret\", found \"{key}\" — put \
-                     \"default\", \"choices\", \"description\" and \"prompt\" inside \"machine\""
-                )));
-            }
-        }
+        // Unknown keys are collected, never rejected — see `MachineVar::unknown_keys`.
+        let mut unknown_keys: Vec<String> = map
+            .keys()
+            .filter(|k| *k != "machine" && *k != "secret")
+            .cloned()
+            .collect();
         let decl = decl.as_object().ok_or_else(|| {
             D::Error::custom("\"machine\" must be an object — use `{ \"machine\": {} }` for a var this machine must answer")
         })?;
-        for key in decl.keys() {
-            if !matches!(
-                key.as_str(),
-                "default" | "choices" | "description" | "prompt"
-            ) {
-                return Err(D::Error::custom(format!(
-                    "unknown key \"{key}\" in \"machine\"; expected \"default\", \"choices\", \
-                     \"description\", or \"prompt\""
-                )));
-            }
-        }
+        unknown_keys.extend(
+            decl.keys()
+                .filter(|k| !matches!(k.as_str(), "default" | "choices" | "description" | "prompt"))
+                .map(|k| format!("machine.{k}")),
+        );
+        unknown_keys.sort();
         let default = match decl.get("default") {
             None => None,
             Some(v) => Some(ConfigValue::deserialize(v.clone()).map_err(D::Error::custom)?),
@@ -790,6 +797,7 @@ impl<'de> Deserialize<'de> for VarDecl {
             choices,
             description: string_field("description")?,
             prompt: string_field("prompt")?,
+            unknown_keys,
         }))
     }
 }
@@ -3572,6 +3580,23 @@ fn check_vars(config: &VeldConfig, out: &mut Vec<Finding>) {
             ));
         }
 
+        // A key this binary does not understand. An **error finding**, not a load
+        // failure: a typo (`defualt`) silently costs the var its default, so it
+        // must block `veld start`, while a config written for a newer veld must
+        // still be loadable by this one or `veld stop` cannot tear its run down.
+        for key in &machine.unknown_keys {
+            out.push(Finding::error(
+                "machine-var-unknown-key",
+                loc(),
+                format!(
+                    "has an unknown key \"{key}\". Expected `machine.default`, \
+                     `machine.choices`, `machine.description`, `machine.prompt`, or a sibling \
+                     `secret`. If this config was written for a newer veld, run `veld update`; \
+                     otherwise it is a typo and the key is being ignored"
+                ),
+            ));
+        }
+
         // Sensitivity fails closed at parse time, so the var *is* secret here —
         // but a reader of the config sees `secret` nested inside `default` and
         // may not realise it covers the override too.
@@ -5472,13 +5497,61 @@ mod tests {
         assert!(d.secret());
     }
 
+    /// A key this binary does not know must **load** and be reported by
+    /// `validate`, never rejected by the parser.
+    ///
+    /// `parse_config` runs on every subcommand including `stop`, and teardown
+    /// reads the on-disk config at stop time (F0.1). A config written for a newer
+    /// veld that an older one refuses to *load* is a run whose containers cannot
+    /// be torn down — so forward compatibility here is a teardown guarantee, not
+    /// a courtesy. This is what lets a future `machine.pattern` ship without
+    /// stranding anyone still on this release.
     #[test]
-    fn machine_declaration_keys_are_closed() {
+    fn an_unknown_machine_key_loads_and_becomes_a_finding() {
+        let d = vd(r#"{ "machine": { "default": "2g", "pattern": "^[0-9]+[kmg]$" } }"#);
+        let m = d.machine().expect("still parses as a machine var");
+        assert_eq!(
+            m.default.as_ref().and_then(ConfigValue::as_literal),
+            Some("2g")
+        );
+        assert_eq!(m.unknown_keys, vec!["machine.pattern".to_owned()]);
+
+        // A sibling of `machine` is treated the same way.
+        let d = vd(r#"{ "machine": {}, "choices": ["a"] }"#);
+        assert_eq!(
+            d.machine().expect("parses").unknown_keys,
+            vec!["choices".to_owned()]
+        );
+    }
+
+    /// …and the finding is an **error**, so a typo still blocks `veld start`
+    /// rather than silently costing the var its default.
+    #[test]
+    fn a_misspelled_machine_key_is_an_error_finding() {
+        let cfg: VeldConfig = serde_json::from_str(
+            r#"{"schemaVersion":"3","name":"t",
+                "vars": { "mem": { "machine": { "defualt": "2g" } } },
+                "nodes": { "t": { "type": "command", "default_variant": "l",
+                  "variants": { "l": { "shell": "echo ${vars.mem}" } } } } }"#,
+        )
+        .expect("a typo must not stop the config loading");
+        let findings = validate(&cfg);
+        let f = findings
+            .iter()
+            .find(|f| f.rule == "machine-var-unknown-key")
+            .expect("the typo is reported");
+        assert_eq!(f.severity, Severity::Error);
+        assert!(f.message.contains("defualt"), "{}", f.message);
+    }
+
+    /// Shapes the parser must still reject: these are structural, not unknown
+    /// modifiers, so veld genuinely cannot interpret the declaration at all.
+    #[test]
+    fn structurally_invalid_machine_declarations_are_refused() {
         for bad in [
-            r#"{ "machine": { "defualt": "x" } }"#,
-            r#"{ "machine": {}, "choices": ["a"] }"#,
             r#"{ "machine": "docker" }"#,
             r#"{ "machine": { "choices": "docker" } }"#,
+            r#"{ "machine": {}, "secret": "yes" }"#,
         ] {
             assert!(
                 serde_json::from_str::<VarDecl>(bad).is_err(),
