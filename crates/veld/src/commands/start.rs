@@ -9,6 +9,9 @@ use tokio::sync::mpsc;
 use crate::output::{self, is_tty};
 
 /// `veld start [node:variant...] [--preset <n>] [--name <n>] [-a] [--oneshot] [--debug]`
+// One parameter per CLI flag, as with `share::run` and `logs::run`. Bundling
+// them into a struct would put the flag list in two places and drift.
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     selections: Vec<String>,
     preset: Option<String>,
@@ -16,6 +19,7 @@ pub async fn run(
     attach: bool,
     oneshot: bool,
     all_logs: bool,
+    var: Vec<String>,
     _debug: bool,
 ) -> i32 {
     let Some((config_path, config)) = super::parse_config(false) else {
@@ -141,6 +145,17 @@ pub async fn run(
     };
     let run_name_str = run_name.as_str();
 
+    // Parsed before the config is moved into the orchestrator, because
+    // validating a `--var` name needs the declarations. Refusing an unknown one
+    // here also means we refuse *before* anything is built or spawned.
+    let var_answers = match parse_var_answers(&var, &config) {
+        Ok(answers) => answers,
+        Err(e) => {
+            output::print_error(&e, false);
+            return 1;
+        }
+    };
+
     // Build the orchestrator.
     let foreground = attach && is_tty();
     let mut orchestrator = match Orchestrator::new(config_path.clone(), config) {
@@ -153,6 +168,36 @@ pub async fn run(
     orchestrator.set_debug(_debug);
     orchestrator.set_foreground(foreground);
     orchestrator.set_terminal_node(terminal_sel.clone());
+
+    // Per-run answers, above the stored ones and never written anywhere.
+    if !var_answers.is_empty() {
+        // `--var` is per-run by definition: nothing was written, so a later
+        // `veld stop` cannot see it.
+        orchestrator.set_var_answers(var_answers, veld_core::orchestrator::VarProvenance::Flag);
+    }
+
+    // Pre-flight: every machine-overridable var this plan needs must have an
+    // answer before the first process spawns.
+    if resolve_machine_vars(&mut orchestrator, &parsed_selections, &project_root, true)
+        .await
+        .is_none()
+    {
+        return 1;
+    }
+    // A `--var` answer does not survive this process, and `veld stop` runs in
+    // another one. Say so now, while `veld config set` is still an option.
+    let stranded = orchestrator.flag_answers_needed_at_teardown(&parsed_selections);
+    if !stranded.is_empty() {
+        eprintln!(
+            "Warning: {} answered with --var, but this project's teardown needs {}. \
+             `veld stop` runs in a different process and cannot see a --var answer, so its \
+             `${{vars.*}}` steps will be skipped. Use `veld config set` for {} if teardown \
+             has to work.",
+            stranded.join(", "),
+            if stranded.len() == 1 { "it" } else { "them" },
+            if stranded.len() == 1 { "it" } else { "them" },
+        );
+    }
 
     // Set up live progress channel.
     let (progress_tx, progress_rx) = mpsc::unbounded_channel::<ProgressEvent>();
@@ -961,6 +1006,360 @@ fn unknown_preset_message(config: &VeldConfig, token: &str) -> String {
         "Unknown preset `{}`. Available (name and key): {list}",
         output::one_line(token)
     )
+}
+
+/// Parse `--var NAME=VALUE` pairs, refusing a name the config does not declare
+/// machine-overridable.
+///
+/// Silence here is the worst option: resolution only consults an override for a
+/// var that is still declared `machine`, so `--var typo=x` — or a `--var` for an
+/// ordinary var — would otherwise be dropped without a word. The run starts, the
+/// config's value wins, and the snapshot does not record the flag either, so
+/// nothing anywhere says the answer was ignored. `veld config set` already
+/// refuses the same input and lists the declared names.
+fn parse_var_answers(
+    pairs: &[String],
+    config: &VeldConfig,
+) -> Result<veld_core::values::VarOverrides, String> {
+    let declared: Vec<&str> = {
+        let mut v: Vec<&str> = config
+            .vars
+            .iter()
+            .flatten()
+            .filter(|(_, d)| d.machine().is_some())
+            .map(|(n, _)| n.as_str())
+            .collect();
+        v.sort_unstable();
+        v
+    };
+    let mut out = veld_core::values::VarOverrides::new();
+    for pair in pairs {
+        let Some((name, value)) = pair.split_once('=') else {
+            return Err(format!(
+                "--var expects NAME=VALUE, got `{pair}`. An empty value is written `NAME=`"
+            ));
+        };
+        if name.is_empty() {
+            return Err(format!("--var `{pair}` has no name before the `=`"));
+        }
+        if !declared.contains(&name) {
+            return Err(format!(
+                "--var `{name}` is not declared machine-overridable in this project, so it \
+                 would be ignored. Machine-overridable vars: {}",
+                if declared.is_empty() {
+                    "(none)".to_owned()
+                } else {
+                    declared.join(", ")
+                }
+            ));
+        }
+        // Sensitivity is applied at resolution from the *declaration*, so a
+        // `--var` answer for a secret var is still redacted. The flag itself is
+        // visible in the process table, which is why it is documented as the
+        // wrong way to pass a secret.
+        out.insert(
+            name.to_owned(),
+            veld_core::config::ConfigValue::literal(value),
+        );
+    }
+    Ok(out)
+}
+
+/// Make sure every machine-overridable var this plan needs has an answer.
+///
+/// **The rule this function exists to enforce: a value nobody chose is never
+/// written.** Falling back to a declared `default` stores nothing, and a prompt's
+/// answer is stored only when the human says so. The failure that motivated it
+/// was a background process taking a default, which then looked exactly like a
+/// deliberate choice for as long as the machine lived.
+///
+/// **Returns the answers rather than only applying them.** They are applied to
+/// the orchestrator passed in *and* handed back, because `veld restart` throws
+/// that orchestrator away and builds a second one to start with — and an answer
+/// that reached memory but not the store (the human said "n" to saving it, or
+/// the write failed) exists nowhere else. Losing it there means the environment
+/// has already been torn down and the start then fails for the value the user
+/// just typed, which is precisely the outcome the restart pre-flight was added
+/// to prevent. `None` means refuse; `Some(answers)` means proceed and apply
+/// these to whatever eventually starts.
+pub(super) async fn resolve_machine_vars(
+    orchestrator: &mut Orchestrator,
+    selections: &[NodeSelection],
+    project_root: &std::path::Path,
+    // Whether the caller supports `--var`, so the refusal does not name a flag
+    // the subcommand the user typed does not have.
+    offer_var_flag: bool,
+) -> Option<MachineAnswers> {
+    let missing = match orchestrator.unanswered_vars(selections) {
+        Ok(m) => m,
+        Err(e) => {
+            output::print_error(&format!("{e}"), false);
+            return None;
+        }
+    };
+    if missing.is_empty() {
+        return Some(MachineAnswers {
+            answers: Default::default(),
+            stored: Default::default(),
+        });
+    }
+
+    // Attended means "a human is reading this and can type". Without a terminal
+    // there is no channel, and inventing one — resolving a default, or worse
+    // persisting a guess — is the documented failure.
+    //
+    // Gated on **both streams this prompt actually uses**, and on neither of the
+    // ones it doesn't.
+    //
+    // Not stdout (`output::is_tty()`): the question goes to stderr, so
+    // `veld start --oneshot … > out.json` from a real terminal was declared
+    // unattended and refused with a human sitting right there.
+    //
+    // Not stdin alone either, which is the trap on the way back: the daemon
+    // spawns `veld start` with stdout nulled and stderr redirected to a log file
+    // but **inherits stdin**, so a daemon launched from a terminal hands its tty
+    // to every run it starts. Gating on stdin alone would make that run believe a
+    // human was watching, write the question into a log file nobody reads, and
+    // block on `read_line` forever — while the UI, which already got its
+    // `202 ACCEPTED`, showed a run that never starts. Requiring stderr to be a
+    // terminal is what distinguishes the two: a human can only answer a question
+    // they can see. (`spawn_veld_in` also nulls stdin now; this is the half that
+    // does not depend on the spawner getting it right.)
+    let attended = std::io::IsTerminal::is_terminal(&std::io::stdin())
+        && std::io::IsTerminal::is_terminal(&std::io::stderr())
+        && std::env::var("VELD_NON_INTERACTIVE")
+            .map(|v| v.is_empty())
+            .unwrap_or(true);
+    if !attended {
+        report_unanswered_vars(&missing, offer_var_flag);
+        return None;
+    }
+
+    let mut answers = veld_core::values::VarOverrides::new();
+    let mut to_store: Vec<(String, veld_core::config::ConfigValue)> = Vec::new();
+    // Which names actually reached the database. Not `to_store` — a write can
+    // fail — and this is what tells a saved answer (backed by a row, resolvable
+    // by a later `veld stop`) from one that lives only in this process.
+    let mut stored: std::collections::BTreeSet<String> = Default::default();
+    eprintln!();
+    eprintln!(
+        "{} value(s) this project needs on your machine:",
+        missing.len()
+    );
+    for var in &missing {
+        if let Some(stale) = &var.stale {
+            eprintln!();
+            eprintln!(
+                "  {} is no longer one of the allowed values{}.",
+                var.name,
+                if stale.is_empty() {
+                    String::new()
+                } else {
+                    format!(" (currently \"{stale}\")")
+                }
+            );
+        }
+        let Some(value) = prompt_for_var(var) else {
+            eprintln!("Cancelled.");
+            return None;
+        };
+        let cv = veld_core::config::ConfigValue {
+            source: veld_core::config::SecretSource::Literal(value),
+            secret: var.secret,
+        };
+        // Ask before writing. A "no" still starts the run — the answer is just
+        // not this machine's answer, which is exactly the distinction the store
+        // is supposed to preserve.
+        if prompt_yes_no(&format!("  Save `{}` for this machine?", var.name)) {
+            to_store.push((var.name.clone(), cv.clone()));
+        } else {
+            eprintln!("  Using it for this run only.");
+        }
+        answers.insert(var.name.clone(), cv);
+    }
+
+    if !to_store.is_empty() {
+        // Counted, so the summary describes what happened rather than what was
+        // attempted: it used to print "Saved to …" even when every write failed,
+        // and print nothing at all when the database would not open — losing
+        // answers the human had explicitly confirmed saving, silently.
+        let mut saved = 0usize;
+        match super::open_db(false) {
+            Some(db) => {
+                let project_id = orchestrator.project_id().clone();
+                for (name, value) in &to_store {
+                    match db.set_var_override(
+                        &project_id,
+                        veld_core::db::OverrideScope::Project,
+                        project_root,
+                        name,
+                        value,
+                    ) {
+                        // Not fatal: the run has its answers in memory. Losing
+                        // the *storage* costs a re-prompt next time, not this
+                        // start.
+                        Err(e) => {
+                            eprintln!("Warning: could not save `{name}` for this machine: {e}");
+                        }
+                        Ok(()) => {
+                            saved += 1;
+                            stored.insert(name.clone());
+                        }
+                    }
+                }
+                if saved > 0 {
+                    eprintln!(
+                        "Saved {saved} value(s) to {project_id} — shared by every worktree of \
+                         this project. Change with `veld config set`, clear with \
+                         `veld config unset`."
+                    );
+                }
+            }
+            None => eprintln!(
+                "Warning: veld's database could not be opened, so nothing was saved for this \
+                 machine. This run has your answers; the next one will ask again."
+            ),
+        }
+    }
+    eprintln!();
+    let collected = MachineAnswers { answers, stored };
+    // Applied here for the caller that starts straight away, and returned so a
+    // caller that builds a second orchestrator (`veld restart`) can apply them
+    // to the one that will actually run.
+    collected.apply(orchestrator);
+    Some(collected)
+}
+
+/// Answers gathered by [`resolve_machine_vars`], with the provenance each one
+/// must carry.
+///
+/// **A struct with an `apply`, not a bare map.** Splitting these by provenance is
+/// the step three separate review rounds got wrong — a saved answer labelled as
+/// a per-run flag makes the teardown warning fire for a var the user just set and
+/// records the wrong origin in the run snapshot. Handing callers a value they
+/// cannot apply incorrectly is cheaper than remembering the rule at each call.
+pub(super) struct MachineAnswers {
+    answers: veld_core::values::VarOverrides,
+    /// Names that reached the database, so a later `veld stop` can resolve them.
+    stored: std::collections::BTreeSet<String>,
+}
+
+impl MachineAnswers {
+    pub(super) fn is_empty(&self) -> bool {
+        self.answers.is_empty()
+    }
+
+    /// Apply to whichever orchestrator will actually start.
+    pub(super) fn apply(&self, orchestrator: &mut Orchestrator) {
+        let (saved, per_run): (
+            veld_core::values::VarOverrides,
+            veld_core::values::VarOverrides,
+        ) = self
+            .answers
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .partition(|(k, _)| self.stored.contains(k));
+        if !saved.is_empty() {
+            orchestrator.set_var_answers(saved, veld_core::orchestrator::VarProvenance::Project);
+        }
+        if !per_run.is_empty() {
+            orchestrator.set_var_answers(per_run, veld_core::orchestrator::VarProvenance::Flag);
+        }
+    }
+}
+
+/// The refusal shown when there is no way to ask.
+///
+/// Names every var and prints the exact command, because the alternative — the
+/// process quietly choosing for the machine — is the thing this whole path is
+/// built to prevent. Goes to stderr so a `--oneshot` stdout capture stays clean.
+fn report_unanswered_vars(missing: &[veld_core::values::UnansweredVar], offer_var_flag: bool) {
+    let mut detail = String::from(
+        "This project needs values that are specific to your machine, and there is no \
+         terminal here to ask on.\n\n",
+    );
+    for var in missing {
+        detail.push_str(&format!("  {} — {}\n", var.name, var.question()));
+        if let Some(choices) = &var.choices {
+            detail.push_str(&format!("      one of: {}\n", choices.join(", ")));
+        }
+        if var.stale.is_some() {
+            detail.push_str("      (the stored answer is no longer an allowed value)\n");
+        }
+    }
+    detail.push_str("\nTo fix this, either:\n");
+    // A declared secret must never be told to put its value on a command line.
+    // `veld config set X <value>` and `--var X=…` both land in the process table
+    // (world-readable) and in shell history — the exact leak `secret: true`
+    // exists to prevent, and which `secret-in-command` makes a lint error
+    // elsewhere. Point those at a source instead.
+    let (secret, plain): (Vec<_>, Vec<_>) = missing.iter().partition(|v| v.secret);
+    for var in &plain {
+        detail.push_str(&format!("  - veld config set {} <value>\n", var.name));
+    }
+    for var in &secret {
+        detail.push_str(&format!(
+            "  - veld config set {name} --env NAME   (or --file PATH, or --shell 'op read …')\n    \
+             `{name}` is declared secret, so veld stores where to read it, not the value — \
+             a value on the command line is readable by every process on this machine\n",
+            name = var.name
+        ));
+    }
+    // Only when the subcommand actually has the flag: `veld restart` does not,
+    // and a refusal whose whole job is naming the exact command must not name
+    // one that does not exist.
+    if offer_var_flag && !plain.is_empty() {
+        detail.push_str("  - or pass `--var NAME=VALUE` for a one-off run (not saved)\n");
+    }
+    output::print_error(detail.trim_end(), false);
+}
+
+/// Ask for one value. Returns `None` on EOF, matching the repo's `Cancelled.`
+/// convention rather than erroring.
+fn prompt_for_var(var: &veld_core::values::UnansweredVar) -> Option<String> {
+    use std::io::{BufRead as _, Write as _};
+    loop {
+        eprintln!();
+        eprintln!("  {}", var.question());
+        if let Some(choices) = &var.choices {
+            eprintln!("  one of: {}", choices.join(", "));
+        }
+        if var.secret {
+            eprintln!(
+                "  (declared secret — it will be stored in veld's database only if you say yes)"
+            );
+        }
+        eprint!("  {} = ", var.name);
+        let _ = std::io::stderr().flush();
+        let mut line = String::new();
+        if std::io::stdin().lock().read_line(&mut line).ok()? == 0 {
+            return None;
+        }
+        let value = line.trim().to_owned();
+        if value.is_empty() {
+            eprintln!("  A value is required — there is no default for this one.");
+            continue;
+        }
+        match &var.choices {
+            Some(choices) if !choices.iter().any(|c| c == &value) => {
+                eprintln!("  \"{value}\" is not one of: {}", choices.join(", "));
+            }
+            _ => return Some(value),
+        }
+    }
+}
+
+/// `[Y/n]` confirm on stderr.
+fn prompt_yes_no(question: &str) -> bool {
+    use std::io::{BufRead as _, Write as _};
+    eprint!("{question} [Y/n] ");
+    let _ = std::io::stderr().flush();
+    let mut line = String::new();
+    if std::io::stdin().lock().read_line(&mut line).unwrap_or(0) == 0 {
+        // EOF mid-prompt is not consent.
+        return false;
+    }
+    !matches!(line.trim().to_ascii_lowercase().as_str(), "n" | "no")
 }
 
 /// Handle the case where no selections or preset were given.

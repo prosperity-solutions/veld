@@ -336,6 +336,7 @@ pub async fn diff(a: &str, b: Option<&str>, json: bool) -> i32 {
                 "new": { "run_id": new.run_id, "short_id": new.short_id(), "outcome": new.outcome_label() },
                 "config_changed": d.config_changed,
                 "origin_changed": d.origin_changed,
+                "var_overrides_changed": d.var_overrides_changed,
                 "added": d.added,
                 "removed": d.removed,
                 "changed": d.changed,
@@ -372,6 +373,20 @@ pub async fn diff(a: &str, b: Option<&str>, json: bool) -> i32 {
             output::red(origin.from.as_deref().unwrap_or("not recorded")),
             output::green(origin.to.as_deref().unwrap_or("not recorded")),
         );
+    }
+    // Also before the graph: this is the difference `veld.json: identical` cannot
+    // account for, so printing it after "Resolved graph is identical" would bury
+    // the only answer the reader came for.
+    if !d.var_overrides_changed.is_empty() {
+        println!("{}", output::bold("Values for this machine:"));
+        for change in &d.var_overrides_changed {
+            println!(
+                "  {} {} → {}",
+                change.field,
+                output::red(change.from.as_deref().unwrap_or("not declared")),
+                output::green(change.to.as_deref().unwrap_or("not declared")),
+            );
+        }
     }
     if old.created_at > new.created_at {
         println!(
@@ -418,6 +433,16 @@ struct SnapshotDiff {
     /// omits the only thing that was not.
     #[serde(skip_serializing_if = "Option::is_none")]
     origin_changed: Option<FieldChange>,
+    /// Machine-overridable vars whose *provenance* differed between the runs.
+    ///
+    /// The one difference `config_hash` structurally cannot see: an override
+    /// changes the effective configuration without changing a byte of
+    /// `veld.json`, so two runs that behaved differently otherwise report
+    /// "identical" here — which is the single most confusing thing this command
+    /// could say. Names and scope only, never values: that is the snapshot's
+    /// invariant, not a limitation of the diff.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    var_overrides_changed: Vec<FieldChange>,
     added: Vec<String>,
     removed: Vec<String>,
     changed: Vec<NodeChange>,
@@ -530,10 +555,47 @@ fn diff_snapshots(
         })
     };
 
+    // Compared only when **both** runs recorded the field. `None` means the run
+    // predates it, and treating that as "declared nothing" would report every var
+    // as newly-appeared on the first diff after an upgrade — a difference that
+    // did not happen. `Some([])` is a real answer ("this project has no machine
+    // vars") and compares normally; that distinction is the whole reason the
+    // field is an `Option` rather than a possibly-empty vec.
+    let var_overrides_changed: Vec<FieldChange> = match (&old.var_overrides, &new.var_overrides) {
+        (Some(old_vars), Some(new_vars)) => {
+            // Union of both sides' names, so a var only one run recorded still
+            // shows — a var added to the config between the runs is exactly the
+            // case worth seeing.
+            let mut var_names: Vec<&str> = old_vars
+                .iter()
+                .chain(new_vars.iter())
+                .map(|v| v.name.as_str())
+                .collect();
+            var_names.sort_unstable();
+            var_names.dedup();
+            var_names
+                .into_iter()
+                .filter_map(|name| {
+                    let find = |vs: &[veld_core::state::VarOverrideSnapshot]| {
+                        vs.iter().find(|v| v.name == name).map(|v| v.from.clone())
+                    };
+                    let (from, to) = (find(old_vars), find(new_vars));
+                    (from != to).then(|| FieldChange {
+                        field: name.to_owned(),
+                        from,
+                        to,
+                    })
+                })
+                .collect()
+        }
+        _ => Vec::new(),
+    };
+
     SnapshotDiff {
         config_changed: (!old.config_hash.is_empty() && !new.config_hash.is_empty())
             .then(|| old.config_hash != new.config_hash),
         origin_changed,
+        var_overrides_changed,
         added,
         removed,
         changed,
@@ -563,7 +625,93 @@ mod tests {
                 .iter()
                 .map(|(k, n)| (k.to_string(), n.clone()))
                 .collect(),
+            var_overrides: Some(Vec::new()),
         }
+    }
+
+    /// **The difference `config_hash` structurally cannot see.**
+    ///
+    /// A machine override changes the effective configuration without changing a
+    /// byte of `veld.json`, so two runs that behaved differently have identical
+    /// hashes and identical `NodeSnapshot`s (env is names-only). Before this,
+    /// `veld runs diff` recorded the provenance and then printed "Resolved graph
+    /// is identical" — the field existed and answered nothing.
+    #[test]
+    fn diff_reports_a_var_answered_differently_between_two_runs() {
+        use veld_core::state::VarOverrideSnapshot;
+        let vo = |from: &str| VarOverrideSnapshot {
+            name: "log_level".to_owned(),
+            from: from.to_owned(),
+        };
+        let mut old = snap("same", &[]);
+        let mut new = snap("same", &[]);
+        old.var_overrides = Some(vec![vo("default")]);
+        new.var_overrides = Some(vec![vo("project")]);
+
+        let d = diff_snapshots(&old, &new);
+        assert_eq!(
+            d.config_changed,
+            Some(false),
+            "the file is byte-identical — which is exactly why the hash cannot help"
+        );
+        assert_eq!(d.var_overrides_changed.len(), 1);
+        assert_eq!(d.var_overrides_changed[0].field, "log_level");
+        assert_eq!(d.var_overrides_changed[0].from.as_deref(), Some("default"));
+        assert_eq!(d.var_overrides_changed[0].to.as_deref(), Some("project"));
+
+        // Same provenance on both sides is not a difference.
+        new.var_overrides = Some(vec![vo("default")]);
+        assert!(diff_snapshots(&old, &new).var_overrides_changed.is_empty());
+    }
+
+    /// A var only one run recorded shows as declared-on-one-side, rather than
+    /// being dropped: a var added to the config between two runs is precisely
+    /// the case someone runs `diff` to understand.
+    #[test]
+    fn diff_reports_a_var_only_one_run_knew_about() {
+        use veld_core::state::VarOverrideSnapshot;
+        let mut old = snap("a", &[]);
+        let mut new = snap("b", &[]);
+        old.var_overrides = Some(vec![]);
+        new.var_overrides = Some(vec![VarOverrideSnapshot {
+            name: "runtime".to_owned(),
+            from: "worktree".to_owned(),
+        }]);
+        let d = diff_snapshots(&old, &new);
+        assert_eq!(d.var_overrides_changed.len(), 1);
+        assert_eq!(d.var_overrides_changed[0].from, None);
+        assert_eq!(d.var_overrides_changed[0].to.as_deref(), Some("worktree"));
+    }
+
+    /// **A run recorded before the field existed reports nothing, not a phantom
+    /// difference.**
+    ///
+    /// `None` (absent) and `Some([])` (no machine vars declared) are different
+    /// facts, and only the type distinguishes them — with an empty vec for both,
+    /// the first diff after upgrading claimed every var had just appeared. The
+    /// pair of assertions here is the point: absent stays silent, empty compares.
+    #[test]
+    fn diff_says_nothing_about_a_run_recorded_before_the_field_existed() {
+        use veld_core::state::VarOverrideSnapshot;
+        let mut old = snap("same", &[]);
+        let mut new = snap("same", &[]);
+        old.var_overrides = None; // predates the field
+        new.var_overrides = Some(vec![VarOverrideSnapshot {
+            name: "runtime".to_owned(),
+            from: "project".to_owned(),
+        }]);
+        assert!(
+            diff_snapshots(&old, &new).var_overrides_changed.is_empty(),
+            "an absent record is not evidence that anything changed"
+        );
+
+        // …but a run that genuinely declared none still compares.
+        old.var_overrides = Some(Vec::new());
+        assert_eq!(
+            diff_snapshots(&old, &new).var_overrides_changed.len(),
+            1,
+            "`Some([])` is a real answer and must not be treated as absent"
+        );
     }
 
     #[test]

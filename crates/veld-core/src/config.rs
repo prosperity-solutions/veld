@@ -364,8 +364,12 @@ pub struct VeldConfig {
     ///
     /// A var may not reference another var: one hop, always, so provenance is a
     /// single lookup (`veld config --why`).
+    ///
+    /// A var may additionally declare itself *machine-overridable*
+    /// ([`VarDecl::Machine`]), which keeps the declaration in the committed file
+    /// and moves the answer to this machine's database.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub vars: Option<HashMap<String, ConfigValue>>,
+    pub vars: Option<HashMap<String, VarDecl>>,
 
     /// Environment sharing policy: which relays to use, and where the public
     /// web gateway lives. Per-service opt-in lives on each variant (`share`).
@@ -579,6 +583,250 @@ impl<'de> Deserialize<'de> for ConfigValue {
                 "a value must be a string or a single-source object, got {other}"
             ))),
         }
+    }
+}
+
+/// A declaration in the `vars` block: either an ordinary value, or a value the
+/// *machine* may override.
+///
+/// **Why `vars` has its own type instead of `machine` being a seventh
+/// [`SecretSource`].** A [`ConfigValue`] is also what an `env` map holds at all
+/// three layers and what a [`FileDelivery`] carries, so making the machine form a
+/// value *source* would make `"env": { "DB": { "machine": … } }` parse — an
+/// overridable value inline in an env map, with no name for `veld config set` to
+/// address. Narrowing `vars` to this enum keeps the machine form addressable by
+/// construction: the only place it can appear is the one place a name exists.
+///
+/// The second thing this buys is the one-hop rule, for free. A [`MachineVar`]'s
+/// `default` is a [`ConfigValue`], and `ConfigValue` has no machine form — so
+/// "a machine var may not default to another machine var" is a type error rather
+/// than a lint that has to be written, tested, and remembered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VarDecl {
+    /// The original form: a literal or a single value source.
+    Value(ConfigValue),
+    /// Machine-overridable: the config carries the default, the machine carries
+    /// the answer (`veld config set`).
+    Machine(MachineVar),
+}
+
+/// A var the machine may answer differently from the checked-in config.
+///
+/// The config file is committed, so every value in it is identical for everyone
+/// who clones the repo — but some values are facts about the *laptop*, not the
+/// project (which of two installed container runtimes to use, a memory ceiling,
+/// the path to a locally installed tool). The declaration lives in the config so
+/// the var is discoverable, documented and validated; the answer lives in veld's
+/// database, keyed per project (see `veld_core::project_id`), so it is given once
+/// per machine rather than once per worktree.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct MachineVar {
+    /// The checked-in fallback, used when this machine has no override. `None`
+    /// means the machine *must* answer — `veld start` prompts when it can, and
+    /// refuses with the exact `veld config set` command when it cannot.
+    pub default: Option<ConfigValue>,
+    /// The legal answers. Enforced when setting *and* when resolving, because
+    /// the config can change under an override that was valid when it was set.
+    pub choices: Option<Vec<String>>,
+    /// What the value means, shown by `veld config vars`.
+    pub description: Option<String>,
+    /// The question asked when there is no default and no override. Falls back
+    /// to `description`, then to a generic line naming the var.
+    pub prompt: Option<String>,
+    /// Declared sensitivity, exactly as on [`ConfigValue`] — a `secret` machine
+    /// var is redacted in every listing and may not be referenced from a command.
+    pub secret: bool,
+    /// Keys this binary does not know, kept so `validate` can report them.
+    ///
+    /// **Parsed, stored, not understood** — the same treatment `ide` gives its
+    /// reserved keys, and the reason is F0.1: `parse_config` runs on *every*
+    /// subcommand including `stop`, and teardown reads the on-disk config at stop
+    /// time. Rejecting an unknown key here would make a config written for a
+    /// newer veld unloadable by an older one, so `veld stop` would fail and the
+    /// run's containers would leak with no way to clean them up. A typo is still
+    /// loud: `machine-var-unknown-key` is a `Severity::Error` *finding*, which
+    /// blocks `veld start` and `veld lint` while leaving teardown alone.
+    ///
+    /// Names only, so an unknown key does not survive a re-serialize. veld does
+    /// not propagate what it cannot interpret.
+    pub unknown_keys: Vec<String>,
+}
+
+impl MachineVar {
+    /// How this var's value is shown to a human, with the redaction rule applied.
+    ///
+    /// **One implementation, because sensitivity lives in two places.** A machine
+    /// var's `secret` is on the *declaration*; each stored answer carries its own
+    /// flag, set when that answer was written. Either being true means redact:
+    ///
+    /// - `{ "machine": { "default": "…" }, "secret": true }` — the spelling
+    ///   `machine-var-secret-placement` tells authors to prefer — leaves
+    ///   `default.secret` false, and printing it leaked the value.
+    /// - An answer stored before the config gained `secret: true` keeps the flag
+    ///   it was written with.
+    ///
+    /// The CLI and the daemon both render this. They had a byte-identical copy
+    /// each with nothing tying them together, so a change to the rule could land
+    /// in one and be forgotten in the other — the two surfaces then disagree
+    /// about what is safe to print, which is the one thing they must never do.
+    pub fn describe(&self, value: &ConfigValue) -> String {
+        if self.secret || value.secret {
+            return format!("<secret, from {}>", value.source_label());
+        }
+        match value.as_literal() {
+            Some(literal) => literal.to_owned(),
+            None => format!("<from {}>", value.source_label()),
+        }
+    }
+}
+
+impl VarDecl {
+    /// Declared sensitivity, whichever form this is.
+    pub fn secret(&self) -> bool {
+        match self {
+            VarDecl::Value(v) => v.secret,
+            VarDecl::Machine(m) => m.secret,
+        }
+    }
+
+    /// The machine declaration, if this var has one.
+    pub fn machine(&self) -> Option<&MachineVar> {
+        match self {
+            VarDecl::Machine(m) => Some(m),
+            VarDecl::Value(_) => None,
+        }
+    }
+
+    /// The value to resolve when this machine has no override: the value itself,
+    /// or a machine var's `default`. `None` means the machine must answer.
+    pub fn config_value(&self) -> Option<&ConfigValue> {
+        match self {
+            VarDecl::Value(v) => Some(v),
+            VarDecl::Machine(m) => m.default.as_ref(),
+        }
+    }
+
+    /// The literal text of whatever this resolves to without an override, if it
+    /// is inline. Drives the `vars-cannot-nest` and builtin-scope checks, which
+    /// apply to a machine var's `default` exactly as they do to a plain var.
+    pub fn as_literal(&self) -> Option<&str> {
+        self.config_value().and_then(ConfigValue::as_literal)
+    }
+}
+
+impl Serialize for VarDecl {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap as _;
+        match self {
+            VarDecl::Value(v) => v.serialize(s),
+            VarDecl::Machine(m) => {
+                let mut decl = serde_json::Map::new();
+                if let Some(default) = &m.default {
+                    decl.insert(
+                        "default".to_owned(),
+                        serde_json::to_value(default).map_err(serde::ser::Error::custom)?,
+                    );
+                }
+                if let Some(choices) = &m.choices {
+                    decl.insert("choices".to_owned(), serde_json::json!(choices));
+                }
+                if let Some(description) = &m.description {
+                    decl.insert("description".to_owned(), serde_json::json!(description));
+                }
+                if let Some(prompt) = &m.prompt {
+                    decl.insert("prompt".to_owned(), serde_json::json!(prompt));
+                }
+                let mut map = s.serialize_map(Some(if m.secret { 2 } else { 1 }))?;
+                map.serialize_entry("machine", &serde_json::Value::Object(decl))?;
+                if m.secret {
+                    map.serialize_entry("secret", &true)?;
+                }
+                map.end()
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for VarDecl {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use serde::de::Error as _;
+        let raw = serde_json::Value::deserialize(d)?;
+        // The machine form is selected by the presence of the `machine` key, so
+        // every shape that parsed before still parses to exactly what it did.
+        let Some(decl) = raw.as_object().and_then(|m| m.get("machine")) else {
+            return ConfigValue::deserialize(raw)
+                .map(VarDecl::Value)
+                .map_err(D::Error::custom);
+        };
+        let map = raw.as_object().expect("checked as_object above");
+        let secret = match map.get("secret") {
+            None => false,
+            Some(serde_json::Value::Bool(b)) => *b,
+            Some(other) => {
+                return Err(D::Error::custom(format!(
+                    "\"secret\" must be true or false, got {other}"
+                )));
+            }
+        };
+        // Unknown keys are collected, never rejected — see `MachineVar::unknown_keys`.
+        let mut unknown_keys: Vec<String> = map
+            .keys()
+            .filter(|k| *k != "machine" && *k != "secret")
+            .cloned()
+            .collect();
+        let decl = decl.as_object().ok_or_else(|| {
+            D::Error::custom("\"machine\" must be an object — use `{ \"machine\": {} }` for a var this machine must answer")
+        })?;
+        unknown_keys.extend(
+            decl.keys()
+                .filter(|k| !matches!(k.as_str(), "default" | "choices" | "description" | "prompt"))
+                .map(|k| format!("machine.{k}")),
+        );
+        unknown_keys.sort();
+        let default = match decl.get("default") {
+            None => None,
+            Some(v) => Some(ConfigValue::deserialize(v.clone()).map_err(D::Error::custom)?),
+        };
+        let choices = match decl.get("choices") {
+            None => None,
+            Some(serde_json::Value::Array(items)) => Some(
+                items
+                    .iter()
+                    .map(|v| {
+                        v.as_str().map(str::to_owned).ok_or_else(|| {
+                            D::Error::custom("\"choices\" must contain only strings")
+                        })
+                    })
+                    .collect::<Result<Vec<String>, _>>()?,
+            ),
+            Some(other) => {
+                return Err(D::Error::custom(format!(
+                    "\"choices\" must be an array of strings, got {other}"
+                )));
+            }
+        };
+        let string_field = |key: &str| -> Result<Option<String>, D::Error> {
+            match decl.get(key) {
+                None => Ok(None),
+                Some(serde_json::Value::String(s)) => Ok(Some(s.clone())),
+                Some(other) => Err(D::Error::custom(format!(
+                    "\"{key}\" must be a string, got {other}"
+                ))),
+            }
+        };
+        Ok(VarDecl::Machine(MachineVar {
+            // Sensitivity fails closed: a `default` that is itself declared
+            // secret makes the whole var secret even if the sibling flag is
+            // missing, because the alternative is a value the author *called* a
+            // secret being printed by `veld config vars`. `validate` warns about
+            // the mismatch so the declaration gets fixed.
+            secret: secret || default.as_ref().is_some_and(|d| d.secret),
+            default,
+            choices,
+            description: string_field("description")?,
+            prompt: string_field("prompt")?,
+            unknown_keys,
+        }))
     }
 }
 
@@ -3236,7 +3484,7 @@ fn check_default_preset(config: &VeldConfig, out: &mut Vec<Finding>) {
 }
 
 fn check_vars(config: &VeldConfig, out: &mut Vec<Finding>) {
-    let declared: BTreeMap<&str, &ConfigValue> = config
+    let declared: BTreeMap<&str, &VarDecl> = config
         .vars
         .iter()
         .flatten()
@@ -3289,6 +3537,105 @@ fn check_vars(config: &VeldConfig, out: &mut Vec<Finding>) {
                      it for the shell; for a node output use the value at the use site, or \
                      make the var a value source (`{{ \"env\": \"{reference}\" }}`)"
                 ),
+            ));
+        }
+    }
+
+    // Machine-var declaration rules. All of these are `validate` findings rather
+    // than parse errors on purpose: `parse_config` runs on every subcommand
+    // including `stop`, and teardown reads the on-disk config at stop time, so a
+    // declaration veld refuses to *load* means containers leak with no way to
+    // clean them up.
+    for (name, decl) in &declared {
+        let Some(machine) = decl.machine() else {
+            continue;
+        };
+        let loc = || format!("vars.{name}");
+
+        match machine.choices.as_deref() {
+            // An empty list is not "no constraint", it is "nothing is legal" —
+            // every value fails the check, including the author's own default.
+            Some([]) => out.push(Finding::error(
+                "machine-var-empty-choices",
+                loc(),
+                "declares `choices: []`, which no value can satisfy. Remove `choices` to \
+                 accept any value, or list the legal ones"
+                    .to_owned(),
+            )),
+            Some(choices) => {
+                let mut seen = BTreeSet::new();
+                for c in choices {
+                    if !seen.insert(c) {
+                        out.push(Finding::warning(
+                            "machine-var-duplicate-choice",
+                            loc(),
+                            format!("lists \"{c}\" in `choices` more than once"),
+                        ));
+                    }
+                }
+                // Checked here as well as at resolution: a default that is not a
+                // legal choice fails every machine that has not overridden it,
+                // and `veld lint` should say so before a start does.
+                if let Some(literal) = machine.default.as_ref().and_then(ConfigValue::as_literal)
+                    && !choices.iter().any(|c| c == literal)
+                {
+                    out.push(Finding::error(
+                        "machine-var-default-not-a-choice",
+                        loc(),
+                        format!(
+                            "its `default` is not one of the declared choices ({}). Every \
+                             machine without an override resolves to that default, so this \
+                             fails the run everywhere",
+                            choices.join(", ")
+                        ),
+                    ));
+                }
+            }
+            None => {}
+        }
+
+        // A var with neither a default nor an answer is a legitimate design —
+        // "every machine must answer this" — but only if a human can tell what
+        // is being asked. Without either field the prompt reads "Value for
+        // `x` on this machine", which is a question nobody can answer.
+        if machine.default.is_none() && machine.prompt.is_none() && machine.description.is_none() {
+            out.push(Finding::warning(
+                "machine-var-unexplained",
+                loc(),
+                "has no `default`, so every machine must answer it — but no `prompt` or \
+                 `description` says what to answer. Add one, or give it a default"
+                    .to_owned(),
+            ));
+        }
+
+        // A key this binary does not understand. An **error finding**, not a load
+        // failure: a typo (`defualt`) silently costs the var its default, so it
+        // must block `veld start`, while a config written for a newer veld must
+        // still be loadable by this one or `veld stop` cannot tear its run down.
+        for key in &machine.unknown_keys {
+            out.push(Finding::error(
+                "machine-var-unknown-key",
+                loc(),
+                format!(
+                    "has an unknown key \"{key}\". Expected `machine.default`, \
+                     `machine.choices`, `machine.description`, `machine.prompt`, or a sibling \
+                     `secret`. If this config was written for a newer veld, run `veld update`; \
+                     otherwise it is a typo and the key is being ignored"
+                ),
+            ));
+        }
+
+        // Sensitivity fails closed at parse time, so the var *is* secret here —
+        // but a reader of the config sees `secret` nested inside `default` and
+        // may not realise it covers the override too.
+        if machine.default.as_ref().is_some_and(|d| d.secret) {
+            out.push(Finding::notice(
+                "machine-var-secret-placement",
+                loc(),
+                "marks its `default` secret. The whole var is treated as secret — put \
+                 `secret: true` beside `machine` instead, where it describes the var rather \
+                 than one of its layers"
+                    .to_owned(),
             ));
         }
     }
@@ -3469,7 +3816,7 @@ fn check_secret_usage(config: &VeldConfig, out: &mut Vec<Finding>) {
             .vars
             .iter()
             .flatten()
-            .filter(|(_, value)| value.secret)
+            .filter(|(_, value)| value.secret())
             .map(|(name, _)| name)
         {
             // `${vars.NAME}` is expanded by veld itself, in every position.
@@ -5094,6 +5441,192 @@ mod tests {
     /// it to these Rust types, so it drifts silently — and a schema that has drifted
     /// is worse than none, because the editor confidently reports the wrong thing.
     ///
+    fn vd(json: &str) -> VarDecl {
+        serde_json::from_str(json).expect("var declaration parses")
+    }
+
+    /// Every shape that parsed before the machine form existed still parses to
+    /// exactly what it did. The machine form is selected by the presence of the
+    /// `machine` key, so nothing else can be pulled into it by accident.
+    #[test]
+    fn plain_vars_are_untouched_by_the_machine_form() {
+        assert_eq!(
+            vd(r#""hello""#),
+            VarDecl::Value(ConfigValue::literal("hello"))
+        );
+        assert_eq!(
+            vd(r#"{ "env": "TOKEN", "secret": true }"#),
+            VarDecl::Value(ConfigValue {
+                source: SecretSource::Env("TOKEN".to_owned()),
+                secret: true,
+            })
+        );
+        assert!(vd(r#""hello""#).machine().is_none());
+    }
+
+    #[test]
+    fn a_machine_var_carries_its_declaration() {
+        let d = vd(
+            r#"{ "machine": { "default": "docker", "choices": ["docker", "podman"],
+                 "description": "which runtime", "prompt": "Runtime?" } }"#,
+        );
+        let m = d.machine().expect("is a machine var");
+        assert_eq!(
+            m.default.as_ref().and_then(ConfigValue::as_literal),
+            Some("docker")
+        );
+        assert_eq!(
+            m.choices.as_deref(),
+            Some(&["docker".to_owned(), "podman".to_owned()][..])
+        );
+        assert_eq!(m.description.as_deref(), Some("which runtime"));
+        assert_eq!(m.prompt.as_deref(), Some("Runtime?"));
+        assert!(!m.secret);
+        // `config_value` is what resolution falls back to without an override.
+        assert_eq!(
+            d.config_value().and_then(ConfigValue::as_literal),
+            Some("docker")
+        );
+    }
+
+    /// A machine var with no default has no value at all until the machine
+    /// answers — the state `veld start` must refuse to guess past.
+    #[test]
+    fn a_machine_var_without_a_default_has_no_value() {
+        let d = vd(r#"{ "machine": { "prompt": "Token?" }, "secret": true }"#);
+        assert!(d.config_value().is_none());
+        assert!(d.secret(), "the sibling flag applies to the var");
+    }
+
+    /// **The one-hop rule, held by the type system rather than a lint.**
+    ///
+    /// `default` is a `ConfigValue`, and `ConfigValue` has no machine form — so a
+    /// machine var nested inside a machine var's default cannot be represented,
+    /// let alone parsed. If someone ever adds `machine` to `SecretSource`, this
+    /// test is what fails.
+    #[test]
+    fn a_machine_var_cannot_default_to_another_machine_var() {
+        let err = serde_json::from_str::<VarDecl>(
+            r#"{ "machine": { "default": { "machine": { "default": "x" } } } }"#,
+        )
+        .expect_err("a nested machine var must not parse");
+        // The message comes from `ConfigValue`'s own parser, which has no
+        // `machine` source — which is precisely the guarantee being asserted.
+        let msg = err.to_string();
+        assert!(msg.contains("machine"), "{msg}");
+    }
+
+    /// Sensitivity fails closed. A `default` the author called secret makes the
+    /// whole var secret even when the sibling flag was forgotten, because the
+    /// alternative is `veld config vars` printing it.
+    #[test]
+    fn a_secret_default_makes_the_whole_var_secret() {
+        let d = vd(r#"{ "machine": { "default": { "env": "PG", "secret": true } } }"#);
+        assert!(d.secret());
+    }
+
+    /// **The asymmetry that leaked, pinned.**
+    ///
+    /// Sensitivity propagates *upward* — a secret `default` makes the var secret
+    /// — but deliberately not downward, because the declaration is the authority
+    /// and a `ConfigValue` is also used in places that have no declaration. That
+    /// means `MachineVar::secret` can be true while `default.secret` is false, in
+    /// exactly the spelling `machine-var-secret-placement` tells authors to
+    /// prefer. Anything rendering a value must therefore consult the
+    /// *declaration*, never the value's own flag alone: three review angles
+    /// independently found `veld config vars`, `--json` and the daemon's GET all
+    /// printing such a default in the clear.
+    #[test]
+    fn a_declared_secret_does_not_mark_its_own_default() {
+        let d = vd(r#"{ "machine": { "default": "hunter2" }, "secret": true }"#);
+        assert!(d.secret(), "the var is secret");
+        let default = d
+            .machine()
+            .and_then(|m| m.default.as_ref())
+            .expect("has a default");
+        assert!(
+            !default.secret,
+            "the flag is NOT pushed down — so every renderer must take the \
+             declared sensitivity as a separate argument, and this test is what \
+             says so out loud"
+        );
+        assert_eq!(default.as_literal(), Some("hunter2"));
+    }
+
+    /// A key this binary does not know must **load** and be reported by
+    /// `validate`, never rejected by the parser.
+    ///
+    /// `parse_config` runs on every subcommand including `stop`, and teardown
+    /// reads the on-disk config at stop time (F0.1). A config written for a newer
+    /// veld that an older one refuses to *load* is a run whose containers cannot
+    /// be torn down — so forward compatibility here is a teardown guarantee, not
+    /// a courtesy. This is what lets a future `machine.pattern` ship without
+    /// stranding anyone still on this release.
+    #[test]
+    fn an_unknown_machine_key_loads_and_becomes_a_finding() {
+        let d = vd(r#"{ "machine": { "default": "2g", "pattern": "^[0-9]+[kmg]$" } }"#);
+        let m = d.machine().expect("still parses as a machine var");
+        assert_eq!(
+            m.default.as_ref().and_then(ConfigValue::as_literal),
+            Some("2g")
+        );
+        assert_eq!(m.unknown_keys, vec!["machine.pattern".to_owned()]);
+
+        // A sibling of `machine` is treated the same way.
+        let d = vd(r#"{ "machine": {}, "choices": ["a"] }"#);
+        assert_eq!(
+            d.machine().expect("parses").unknown_keys,
+            vec!["choices".to_owned()]
+        );
+    }
+
+    /// …and the finding is an **error**, so a typo still blocks `veld start`
+    /// rather than silently costing the var its default.
+    #[test]
+    fn a_misspelled_machine_key_is_an_error_finding() {
+        let cfg: VeldConfig = serde_json::from_str(
+            r#"{"schemaVersion":"3","name":"t",
+                "vars": { "mem": { "machine": { "defualt": "2g" } } },
+                "nodes": { "t": { "type": "command", "default_variant": "l",
+                  "variants": { "l": { "shell": "echo ${vars.mem}" } } } } }"#,
+        )
+        .expect("a typo must not stop the config loading");
+        let findings = validate(&cfg);
+        let f = findings
+            .iter()
+            .find(|f| f.rule == "machine-var-unknown-key")
+            .expect("the typo is reported");
+        assert_eq!(f.severity, Severity::Error);
+        assert!(f.message.contains("defualt"), "{}", f.message);
+    }
+
+    /// Shapes the parser must still reject: these are structural, not unknown
+    /// modifiers, so veld genuinely cannot interpret the declaration at all.
+    #[test]
+    fn structurally_invalid_machine_declarations_are_refused() {
+        for bad in [
+            r#"{ "machine": "docker" }"#,
+            r#"{ "machine": { "choices": "docker" } }"#,
+            r#"{ "machine": {}, "secret": "yes" }"#,
+        ] {
+            assert!(
+                serde_json::from_str::<VarDecl>(bad).is_err(),
+                "{bad} must not parse"
+            );
+        }
+    }
+
+    /// A machine var round-trips, so a config veld re-serializes (the share
+    /// manifest, `veld config --files`) does not lose the declaration.
+    #[test]
+    fn a_machine_var_round_trips_through_serde() {
+        let src = r#"{ "machine": { "default": "docker", "choices": ["docker", "podman"] }, "secret": true }"#;
+        let d = vd(src);
+        let back: VarDecl = serde_json::from_str(&serde_json::to_string(&d).expect("serializes"))
+            .expect("reparses");
+        assert_eq!(d, back);
+    }
+
     /// `schema/v3/examples/*.json` are the pin. This test deserializes every one of
     /// them with serde; `tests/validate-schema.sh` validates the same files against
     /// the schema in CI. A change to the types that the schema does not know about
@@ -5206,11 +5739,15 @@ mod tests {
                 declared,
                 "{label}: every declared pane must survive parsing"
             );
-            assert_eq!(
-                round.vars.as_ref().map(|v| v.len()),
-                cfg.vars.as_ref().map(|v| v.len()),
-                "{label}"
-            );
+            // Compared by **content**, not by count. A count was enough while a
+            // var was a `ConfigValue`; a `VarDecl` has a hand-written `Serialize`
+            // with a match arm per field, so the failure this gate exists to
+            // catch — someone adds a field to `MachineVar`, the compiler forces
+            // the struct literal and `Deserialize`, and the `Serialize` arm is
+            // forgotten — drops that field's value on every re-serialize (share
+            // manifests, `veld config --files`) while leaving the map's length
+            // untouched. `VarDecl` derives `PartialEq`, so this costs nothing.
+            assert_eq!(round.vars, cfg.vars, "{label}: vars must round-trip");
         }
     }
 

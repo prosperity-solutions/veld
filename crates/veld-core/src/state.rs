@@ -225,6 +225,46 @@ pub struct GraphSnapshot {
     /// Node keys (`"node:variant"`) → what the config said about them.
     /// BTreeMap for stable serialization (diff-friendly).
     pub nodes: std::collections::BTreeMap<String, NodeSnapshot>,
+    /// Which machine-overridable vars this machine was answering, and from which
+    /// scope — **names and provenance only, never values**.
+    ///
+    /// This exists because `config_hash` hashes the veld.json *bytes*, and a
+    /// machine override changes the effective configuration without changing one
+    /// of them. Two runs of the same commit that behaved differently would
+    /// otherwise be reported as identical, which is the single most confusing
+    /// thing this feature could do to `veld runs diff`.
+    ///
+    /// **No value and no hash of one.** A fingerprint was the tempting middle
+    /// ground and is worse than either end: the values people override are
+    /// low-entropy (`true`, `5432`, a handful of plausible hostnames), so a
+    /// truncated digest over that domain is a brute-forceable oracle published
+    /// into the most-copied, most-pasted artifact veld produces. The names tell
+    /// you where to look, which is the honest answer.
+    /// **`None` means the run predates this field; `Some([])` means the project
+    /// declared no machine vars.** The distinction is carried by the type rather
+    /// than by an empty vec, for the reason `presets` in the daemon's worktree
+    /// view carries the same one: a consumer that treats "absent" as "none
+    /// declared" reports every var as newly-appeared when you diff a run recorded
+    /// before the upgrade — a difference that did not happen. Empty and absent
+    /// are not the same fact, and only the type can say so.
+    #[serde(default)]
+    pub var_overrides: Option<Vec<VarOverrideSnapshot>>,
+}
+
+/// One machine-overridable var as it stood when a run started.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VarOverrideSnapshot {
+    /// The var's name, as declared in `vars`.
+    pub name: String,
+    /// Where the effective value came from: `"project"` or `"worktree"` for a
+    /// stored answer, `"flag"` for a `--var` given to this run alone, and
+    /// `"default"` when the config's own value was used.
+    ///
+    /// `"flag"` is not a scope and no row backs it — the distinction matters
+    /// because a per-run answer is the most volatile difference two runs of the
+    /// same commit can have, and calling it `"default"` would attribute it to a
+    /// file that never contained it.
+    pub from: String,
 }
 
 /// The invocation that started a run, recorded so a surface can say *what it

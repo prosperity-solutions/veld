@@ -130,6 +130,17 @@ veld stop --name dev
   `psql "postgres://u:$DB_PASS@host/db"` is not — the shell execs psql with the password in its
   argv). `veld config` prints a redacted placeholder and there is no flag that prints a resolved
   secret.
+- **Machine-overridable vars never guess.** A var declaring a `machine` block moves its *answer* out of
+  the committed config and into veld's per-user database, keyed by the repo's main checkout so every
+  worktree shares one answer. Presence is checked across the whole execution plan **before anything
+  spawns**, including transitive dependencies, so a missing value can never surface after half the
+  graph is up. With a terminal veld asks and stores the answer only on confirmation; with no terminal
+  (CI, a scripted start, a daemon-spawned run) it fails with the exact `veld config set` command
+  rather than resolving a default nobody chose — and it never persists a guess, because a background
+  process taking a default is indistinguishable afterwards from a human choosing it. `choices` are
+  enforced when set *and* when resolved, so an answer stored before the config changed is caught
+  rather than handed to a process. A run's snapshot records which vars were in play and from which
+  scope — names and provenance only, never values or a hash of one.
 - **`veld lint` reports every semantic problem at once** and exits non-zero, for CI. Covers unknown
   built-in variables, built-ins written where they are not populated (`${veld.url}` on a `command`
   node, `${veld.port}` in a `vars` value), a `${nodes.X}` naming a node that does not exist or one
@@ -169,6 +180,9 @@ veld stop --name dev
 | `veld leave [JOIN_ID] [--json]` | Disconnect from a joined share (defaults to the sole active join) |
 | `veld gc` | Clean up stale state and logs |
 | `veld setup [unprivileged\|privileged]` | One-time system setup |
+| `veld config vars [--json]` | List machine-overridable vars: effective value, and which scope supplied it. A `secret` value is described, never printed |
+| `veld config set <NAME> <VALUE\|--env N\|--file P\|--shell C> [--worktree] [--json]` | Answer a machine-overridable var on this machine. Project-scoped by default, so every worktree of the repo shares it; `--worktree` narrows it to this checkout. The source flags store a *pointer* instead of a value, which is how a `secret` var is answered without veld taking custody |
+| `veld config unset <NAME> [--worktree] [--json]` | Forget this machine's answer, falling back to the next scope and then the config `default` |
 | `veld init` | Create a new veld.json (veld also reads veld.jsonc) |
 
 All commands support `--json` for structured output, making veld scriptable and CI/agent-friendly.
@@ -374,7 +388,7 @@ Rewrite headers on the way through the reverse proxies with `proxy` at the proje
 | `$schema` | string | No | JSON Schema URL for editor autocompletion |
 | `schemaVersion` | string | Yes (root file only) | Must be `"3"`. `"1"` and `"2"` are not supported and fail to load with a message stating every change needed. veld ships no converter — `docs/migrating-to-v3.md` is the rule set, `veld lint` is the check |
 | `include` | string[] | No | v3: globs of further config files, relative to the root file. Splits a large config across per-directory files. A node is defined in exactly one file |
-| `vars` | object | No | v3: one definition point per value, referenced as `${vars.name}`. A scalar or a single value source — never a config fragment |
+| `vars` | object | No | v3: one definition point per value, referenced as `${vars.name}`. A scalar or a single value source — never a config fragment. A var may instead declare `machine: { default?, choices?, description?, prompt? }` (plus a sibling `secret`), making its answer a per-machine fact set with `veld config set` rather than a value in the committed file |
 | `name` | string | Yes | Project name (used in URLs) |
 | `url_template` | string | No | URL template for services |
 | `presets` | object | No | Named shortcuts for node:variant selections |

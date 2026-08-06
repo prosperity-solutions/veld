@@ -120,13 +120,49 @@
       }
     ]
   },
+  // Dogfooding again, for machine-overridable vars this time. Both of these are
+  // facts about *your machine*, not about this project, which is the whole test
+  // for whether something belongs here rather than as a plain value: nothing
+  // about the veld website differs between contributors, but how noisy you want
+  // its server while you debug something, and how long your filesystem takes to
+  // settle after a save, both do.
+  //
+  // Both carry a `default` that reproduces browser-sync's own behaviour, so a
+  // fresh clone and CI are unaffected and nobody has to answer anything. Change
+  // yours with `veld config set`, never by editing this file — the declaration is
+  // shared, the answer is not:
+  //
+  //   veld config vars
+  //   veld config set website_log_level debug
+  //   veld config unset website_log_level
+  //
+  // The two also show the two shapes a machine var takes. `website_log_level` is
+  // a **closed** set, so `choices` can enumerate it and veld refuses anything
+  // else at set time. `website_reload_delay` is **open** — any number of
+  // milliseconds — so today nothing validates it beyond being a string, which is
+  // the gap tracked in #227.
+  "vars": {
+    "website_log_level": {
+      "machine": {
+        "default": "info",
+        "choices": ["silent", "info", "debug"],
+        "description": "How loud the local website server is. `debug` when you are chasing a proxy or reload problem; `silent` when it is just in the way."
+      }
+    },
+    "website_reload_delay": {
+      "machine": {
+        "default": "0",
+        "description": "Milliseconds to wait before reloading the browser after a save. Raise it if this machine's editor or filesystem reports the write before it has landed (network mounts and some VM-shared checkouts do)."
+      }
+    }
+  },
   "nodes": {
     "website": {
       "default_variant": "local",
       "variants": {
         "local": {
           "type": "start_server",
-          "argv": ["npx","--yes","browser-sync","start","--server","website","--watch","--port","${veld.port}","--no-open","--no-ui"],
+          "argv": ["npx","--yes","browser-sync","start","--server","website","--watch","--port","${veld.port}","--no-open","--no-ui","--logLevel","${vars.website_log_level}","--reload-delay","${vars.website_reload_delay}"],
           "health_check": { "type": "http", "path": "/index.html", "timeout_seconds": 30 }
         }
       }

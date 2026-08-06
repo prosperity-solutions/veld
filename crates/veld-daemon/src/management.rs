@@ -1529,6 +1529,15 @@ fn spawn_veld_in(
         .args(args)
         .current_dir(project_root)
         .env("PATH", path_env)
+        // Explicitly null, not inherited. A daemon launched from a terminal
+        // (`veld daemon`, `just dev-daemon`, an Electron shell started from a
+        // shell) would otherwise hand its tty stdin to every run it spawns, and a
+        // `veld start` that needs a machine-var answer decides whether a human is
+        // watching partly from stdin — it would prompt into the stderr log file
+        // above and block on `read_line` forever, while the UI showed a run that
+        // never starts. Nothing the child does should depend on who launched the
+        // daemon.
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(stderr_sink)
         .spawn()

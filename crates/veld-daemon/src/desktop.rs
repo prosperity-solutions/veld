@@ -645,6 +645,16 @@ struct WorktreeView {
     /// Startable nodes with their variants — the UI's custom-selection
     /// source when no preset fits (hidden nodes excluded).
     nodes: Vec<NodeOptionView>,
+    /// How many vars this checkout's config declares machine-overridable, so the
+    /// UI can tell "this project asks you for nothing" from "this project asks
+    /// and you have not answered".
+    ///
+    /// **`null` means the config could not be read**, exactly as for `presets`
+    /// above, and for the same reason: a client that treats an unreadable config
+    /// as zero would disable the only control that could show the user *why* it
+    /// is unreadable. Free to compute — the config on this path is already parsed
+    /// for `presets` and `nodes`.
+    machine_vars: Option<usize>,
     /// The interpreted part of the checkout's `ide` config section.
     ///
     /// **Always present, with arrays that may be empty.** Omitting it when empty
@@ -878,12 +888,20 @@ fn worktree_view(wt: WorktreeRecord) -> WorktreeView {
     // `wt` is moved into the view below, so the guard read happens here — before
     // the move — rather than in the literal, where `wt.id` would not resolve.
     let deleting = super::worktree_trash::now_deleting(wt.id);
+    let machine_vars = cfg.as_ref().map(|c| {
+        c.vars
+            .iter()
+            .flatten()
+            .filter(|(_, decl)| decl.machine().is_some())
+            .count()
+    });
     WorktreeView {
         worktree: wt,
         deleting,
         has_veld_config,
         presets,
         nodes,
+        machine_vars,
         ide,
     }
 }

@@ -137,6 +137,42 @@ A var is a **scalar or a single value source** — never an object, never a conf
 fragment. It may not reference another var (one hop). Duplicate names and unknown
 references are errors. `veld config --why <pointer>` shows where a value came from.
 
+### Machine-overridable vars
+
+A var may declare that its answer belongs to the **machine**, not the repo — a
+locally installed container runtime, a memory ceiling, a path to a local tool:
+
+```jsonc
+"vars": {
+  "container_runtime": {
+    "machine": {
+      "default": "docker",                    // omit to force every machine to answer
+      "choices": ["docker", "podman"],        // enforced when set AND when resolved
+      "description": "Which runtime runs this project's containers",
+      "prompt": "Runtime?"                    // asked when there is no default
+    }
+  },
+  "vendor_token": { "machine": { "prompt": "Vendor token" }, "secret": true }
+}
+```
+
+`machine` is legal **only in `vars`** — an `env` map has no name for
+`veld config set` to address. `default` is an ordinary value (so it may be
+`{ "env": … }`) but can never be another machine var.
+
+```sh
+veld config vars                       # value + which scope it came from
+veld config set NAME VALUE             # this machine, every worktree of the repo
+veld config set NAME --env VAR         # store a pointer instead (how a secret is answered)
+veld config set NAME VALUE --worktree  # this checkout only
+veld config unset NAME
+veld start --var NAME=VALUE            # this run only, never stored
+```
+
+Precedence: `--var` → worktree scope → project scope → `default` → error naming
+the var and the command. Answers are keyed by the repo's **main checkout**, so
+every worktree shares one; moving a checkout orphans them.
+
 A var literal is **interpolated**, so every `${…}` in it is veld's to resolve: a
 reference in no veld namespace (`"${HOME}/.cache"`) is a
 `var-unresolvable-reference` error — write `$HOME` unbraced for the shell, or use

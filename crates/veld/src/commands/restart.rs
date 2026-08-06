@@ -85,6 +85,24 @@ pub async fn run(name: Option<String>, debug: bool) -> i32 {
         }
     };
 
+    // **Before the stop, not after.** `veld start` refuses (or asks) before the
+    // first spawn; a restart that discovered the same missing answer inside the
+    // second `start` would already have torn the environment down — so pulling a
+    // commit that adds a machine var with no default would take the developer's
+    // running environment away and leave them with an error. Checked here, the
+    // environment is still up when the refusal arrives.
+    let project_root = veld_core::config::project_root(&config_path);
+    // Kept, because the orchestrator that receives them below is discarded and
+    // rebuilt after the stop — and an answer the human declined to save exists
+    // nowhere but here. `veld restart` has no `--var`, so the refusal must not
+    // offer one.
+    let Some(machine_answers) =
+        super::start::resolve_machine_vars(&mut orchestrator, &selections, &project_root, false)
+            .await
+    else {
+        return 1;
+    };
+
     output::print_info(&format!("Restarting environment '{run_name}'..."));
 
     // Stop the existing run (a no-op teardown when it already ended).
@@ -150,6 +168,27 @@ pub async fn run(name: Option<String>, debug: bool) -> i32 {
         }
     };
     orchestrator.set_debug(debug);
+    // The answers from the pre-flight above. Without this the second
+    // orchestrator reads only the store, so a prompt answer the user chose not
+    // to save is lost — after the environment has already been torn down.
+    if !machine_answers.is_empty() {
+        machine_answers.apply(&mut orchestrator);
+    }
+    // Same warning `veld start` gives. Restart has no `--var`, so the only
+    // per-run answers it can hold are prompt answers the human declined to save
+    // — which is exactly the stranding case: a later `veld stop` reads only the
+    // store, cannot resolve the var, and then skips *every* `${vars.*}` teardown
+    // step rather than just that one.
+    let stranded = orchestrator.flag_answers_needed_at_teardown(&selections);
+    if !stranded.is_empty() {
+        eprintln!(
+            "Warning: {} answered for this run only, but this project's teardown needs {}. \
+             `veld stop` runs in a different process and cannot see them, so its \
+             `${{vars.*}}` steps will be skipped. Use `veld config set` if teardown has to work.",
+            stranded.join(", "),
+            if stranded.len() == 1 { "it" } else { "them" },
+        );
+    }
 
     match orchestrator.start(&selections, run_name, origin).await {
         Ok(new_run) => {

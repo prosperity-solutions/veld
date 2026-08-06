@@ -85,6 +85,7 @@ import {
   IconPlus,
   IconRefresh,
   IconSearch,
+  IconBraces,
   IconSettings,
   IconBroadcast,
   IconShare2,
@@ -172,6 +173,7 @@ import {
   startSelectionLabel,
   startStorageKey,
 } from "./components/StartConfig";
+import { ConfigVarsDialog } from "./components/ConfigVars";
 import {
   ChangeMarkerDialog,
   ImportRepoDialog,
@@ -1220,40 +1222,71 @@ function AppInner(props: {
       );
       return;
     }
+    const body = startBody(sel);
     // The name is computed here and sent explicitly. Leaving it to the daemon's
     // default (the worktree alias) is what minted a *third* environment when an
     // agent already had one live, and it also meant this window could not mark
     // the action against the run it was about.
     const target = name ?? startNameFor(w);
-    /**
-     * Bind this window to what it just started.
-     *
-     * Written at the moment of the action, not repaired afterwards by an effect:
-     * the intent ("I started this, I am looking at it") exists only here, and a
-     * poll-time rule like "select the newest run" would also hijack the selection
-     * when the *other* thing in this directory — a coding agent — starts one.
-     *
-     * Only for the selected worktree: a rail row's ▶ deliberately does not move
-     * the selection, and another worktree's choice is stored under its own key.
-     */
-    const previous = worktree && w.id === worktree.id ? selectedRunName : null;
-    if (previous !== null) setSelectedRunName(target);
-    void act(
-      w,
-      target,
-      "start",
-      () => api.startRun(w.id, { ...startBody(sel), run_name: target }),
-      // The start never happened, so leave the window bound to what it was
-      // looking at rather than to a name nothing created — but only if the user has
-      // not picked something else in the meantime. A failure can arrive seconds
-      // later, and restoring unconditionally would then yank a selection they made
-      // deliberately.
-      () => {
-        if (previous !== null && selectedRunRef.current === target) {
-          setSelectedRunName(previous);
+    void (async () => {
+      // Ask before starting, not after failing. A daemon-spawned `veld start`
+      // has no terminal, so its own pre-flight can only refuse — this is the
+      // channel that refusal assumes exists.
+      //
+      // Ahead of the run binding below on purpose: a start held back here never
+      // happened, so binding this window to `target` first would point it at a
+      // run nothing created.
+      try {
+        const { needed } = await api.configVarsPreflight({
+          project: w.path,
+          ...body,
+        });
+        if (needed.length > 0) {
+          setDialog({
+            kind: "config-vars",
+            project: w.path,
+            // Carries `name` through, so retrying a "start another run" still
+            // starts *another* one rather than the default.
+            retry: () => startWorktree(w, name),
+          });
+          return;
         }
-      },
-    );
+      } catch {
+        // Advisory only. If the check itself fails — an older daemon, a config
+        // that no longer parses — start anyway and let `veld start` report the
+        // real problem. Refusing to start because a *check* broke would be a
+        // worse failure than the one it was looking for.
+      }
+      /**
+       * Bind this window to what it just started.
+       *
+       * Written at the moment of the action, not repaired afterwards by an effect:
+       * the intent ("I started this, I am looking at it") exists only here, and a
+       * poll-time rule like "select the newest run" would also hijack the selection
+       * when the *other* thing in this directory — a coding agent — starts one.
+       *
+       * Only for the selected worktree: a rail row's ▶ deliberately does not move
+       * the selection, and another worktree's choice is stored under its own key.
+       */
+      const previous = worktree && w.id === worktree.id ? selectedRunName : null;
+      if (previous !== null) setSelectedRunName(target);
+      void act(
+        w,
+        target,
+        "start",
+        () => api.startRun(w.id, { ...body, run_name: target }),
+        // The start never happened, so leave the window bound to what it was
+        // looking at rather than to a name nothing created — but only if the user has
+        // not picked something else in the meantime. A failure can arrive seconds
+        // later, and restoring unconditionally would then yank a selection they made
+        // deliberately.
+        () => {
+          if (previous !== null && selectedRunRef.current === target) {
+            setSelectedRunName(previous);
+          }
+        },
+      );
+    })();
   };
   // `w.path` is the run's project root — every worktree with a veld.json is
   // its own project (see `runsForWorktree`), and the run name alone would be
@@ -1267,8 +1300,35 @@ function AppInner(props: {
   };
   const restartWorktree = (w: Worktree, target?: RunInfo | null) => {
     const r = target ?? targetRun(w);
-    if (r)
+    if (!r) return;
+    void (async () => {
+      // Same pre-flight as ▶, and for the more likely case: pulling a commit
+      // that adds a machine var with no default, then restarting what is already
+      // up. Without it the daemon's headless refusal surfaces as a toast and the
+      // dialog that could fix it never opens — the GUI dead end these endpoints
+      // exist to remove, reintroduced on the path most likely to hit it.
+      try {
+        // The run's own nodes, not an empty list: with no selections the daemon
+        // resolves an empty plan and every check passes, so the pre-flight would
+        // silently never fire. A restart re-runs exactly these.
+        const { needed } = await api.configVarsPreflight({
+          project: w.path,
+          selections: r.nodes.map((n) => `${n.name}:${n.variant}`),
+        });
+        if (needed.length > 0) {
+          setDialog({
+            kind: "config-vars",
+            project: w.path,
+            retry: () => restartWorktree(w, r),
+          });
+          return;
+        }
+      } catch {
+        // Advisory, as on the start path: a broken check must not block a
+        // restart that would otherwise work.
+      }
       void act(w, r.name, "restart", () => api.restartRun(runRef(w.path, r)));
+    })();
   };
 
   // ---- run diagnostics ----------------------------------------------------
@@ -1343,6 +1403,11 @@ function AppInner(props: {
     | { kind: "settings" }
     | { kind: "remove-repo"; repo: Repo }
     | { kind: "search" }
+    /**
+     * Values this machine owes the project. `retry` re-fires the start that
+     * was held back, so answering and starting is one flow rather than two.
+     */
+    | { kind: "config-vars"; project: string; retry?: () => void }
   >({ kind: "none" });
 
   // This app's own overlays are not portalled the way Mantine's are, so
@@ -1486,6 +1551,16 @@ function AppInner(props: {
                 },
               ]
             : []),
+          {
+            // Reachable without a blocked start, so an answer can be changed
+            // before it bites rather than only when it already has. Disabled on
+            // the same condition as the top-bar button — an unreadable config
+            // (`null`) still opens, because the dialog is where the reason is.
+            key: "config-vars",
+            title: "Values for this machine…",
+            disabled: w.machine_vars === 0,
+            onClick: () => setDialog({ kind: "config-vars", project: w.path }),
+          },
           { key: "run-divider" },
         ]
       : [];
@@ -2554,6 +2629,24 @@ function AppInner(props: {
           run: () => startWorktree(w),
         });
       }
+      // Offered whether or not anything is running, and not gated on `busy`:
+      // reading or changing a machine value is not a run action and does not
+      // conflict with one in flight. The right-click menu was the only way in,
+      // which is not enough for something that can *block* a start.
+      //
+      // Omitted rather than disabled when the project asks for nothing — ⌘K is a
+      // search, and a result that cannot be run is a worse answer than no result.
+      // That differs from the top bar deliberately: a button in a fixed position
+      // teaches that the feature exists, a search hit does not.
+      if (w.machine_vars !== 0) {
+        items.push({
+          id: "run:config-vars",
+          group: "Run",
+          label: `Values for this machine (${w.alias})`,
+          alt: ["vars", "machine", "override", "config set", "configurable"],
+          run: () => setDialog({ kind: "config-vars", project: w.path }),
+        });
+      }
       // Reachable while a run is live, which "Start" is not — ▶ is a toggle. The
       // name is in the label because that is what the command will create.
       if (running && canStartAnother(w)) {
@@ -2850,6 +2943,53 @@ function AppInner(props: {
     </Tooltip>
   );
 
+  /**
+   * The project's machine-overridable vars.
+   *
+   * Deliberately **not** folded into the settings gear beside it. That dialog is
+   * veld's own preferences — global, yours, the same whatever you have open.
+   * These are values *this project declared* and this machine answers, so they
+   * change with the selected worktree and are meaningless without one. `{}`
+   * rather than another gear for the same reason: two gears would read as two
+   * ways into one thing.
+   *
+   * **Disabled, not hidden, when the project asks for nothing.** A control that
+   * vanishes teaches nobody it exists; one that is greyed out with a reason does.
+   * `machine_vars === 0` is that case — and `null` (an unreadable config) is
+   * deliberately *not*, because opening the dialog is how the reader finds out
+   * why it cannot be read.
+   *
+   * The `<span>` is load-bearing: a disabled Mantine control has
+   * `pointer-events: none`, so the tooltip explaining *why* it is disabled would
+   * never open — the #205 trap, where a disabled button's tooltip is exactly the
+   * thing the user needs and exactly the thing they cannot get. The wrapper
+   * still receives the hover.
+   */
+  const configVarsNone = worktree?.machine_vars === 0;
+  const configVarsButton = worktree && canRunWorktreeNow(worktree) && (
+    <Tooltip
+      label={
+        configVarsNone
+          ? `${worktree.alias} doesn’t ask you for any values`
+          : `Values for this machine — ${worktree.alias}`
+      }
+    >
+      <span style={{ display: "inline-flex" }}>
+        <ActionIcon
+          size="md"
+          variant="default"
+          aria-label="Values for this machine"
+          disabled={configVarsNone}
+          onClick={() =>
+            setDialog({ kind: "config-vars", project: worktree.path })
+          }
+        >
+          <IconBraces size={14} />
+        </ActionIcon>
+      </span>
+    </Tooltip>
+  );
+
   const themeButton = (
     <Tooltip
       label={`Theme: ${themePref === "auto" ? `system (${theme})` : themePref} — click to change`}
@@ -2885,6 +3025,19 @@ function AppInner(props: {
     />
   );
 
+  /**
+   * Hoisted for the same reason as `settingsDialog`: a start can be held back
+   * from either mode, so the dialog that unblocks it has to render in both.
+   */
+  const configVarsDialog = dialog.kind === "config-vars" && (
+    <ConfigVarsDialog
+      opened
+      project={dialog.project}
+      onRetry={dialog.retry}
+      onClose={closeDialog}
+    />
+  );
+
   if (mode === "runs") {
     return (
       <div className="frame">
@@ -2896,6 +3049,7 @@ function AppInner(props: {
           logsTz={logsTz}
         />
         {settingsDialog}
+        {configVarsDialog}
       </div>
     );
   }
@@ -3070,6 +3224,7 @@ function AppInner(props: {
         onSearch={() => setDialog({ kind: "search" })}
         themeButton={themeButton}
         settingsButton={settingsButton}
+        configVarsButton={configVarsButton}
       />
 
       {offline && (
@@ -3300,6 +3455,7 @@ function AppInner(props: {
         />
       )}
       {settingsDialog}
+      {configVarsDialog}
       {sharingDialog}
       {dialog.kind === "search" && (
         <CommandPalette
@@ -3567,6 +3723,7 @@ function TopBar(props: {
   onSearch: () => void;
   themeButton: React.ReactNode;
   settingsButton: React.ReactNode;
+  configVarsButton: React.ReactNode;
 }) {
   const { worktree, run } = props;
   const repoAvailable = props.repo?.available ?? false;
@@ -3679,6 +3836,14 @@ function TopBar(props: {
                   <IconRefresh size={13} />
                 </ActionIcon>
               </Tooltip>
+              {/* Beside the start controls, not over with search/settings/theme.
+                  The bar has two clusters — what this *project* does on the left,
+                  what the *app* does on the right — and a machine var is squarely
+                  the first: it belongs to the selected worktree and changes what
+                  ▶ will actually run. Parked on the right it read as a second
+                  settings gear, which is the exact confusion the `{}` glyph was
+                  chosen to avoid. */}
+              {props.configVarsButton}
               {/* Status is a dot, not a word: the text was long enough to be
                   clipped in a crowded bar, and it duplicated what the
                   start/stop icon already says. The dot now rides on the run

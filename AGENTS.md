@@ -44,6 +44,18 @@ veld start website:local --name dev
 
 This starts a local HTTP server for the `website/` directory with an HTTPS URL like `https://website.dev.veld.localhost`. You can use `veld feedback` to leave feedback on the website via the in-browser overlay, enabling human-agent collaboration on design and content changes.
 
+Two knobs on that server are **machine-overridable vars** — the root `veld.json` declares them, your answers live in Veld's database, and they are shared across every worktree of this repo rather than asked for in each one. Defaults reproduce browser-sync's own behaviour, so a fresh clone needs no setup:
+
+```sh
+veld config vars                              # both, with their effective value and its scope
+veld config set website_log_level debug       # chasing a proxy or reload problem
+veld config set website_log_level silent      # when the server is just noise in the logs
+veld config set website_reload_delay 300      # filesystem reports the save before the write lands
+veld config unset website_log_level           # back to the default
+```
+
+Change them with `veld config set`, **never by editing `veld.json`** — the declaration is committed and shared, your answer is not.
+
 ### Feedback workflow
 
 1. Start the website: `veld start website:local --name dev`

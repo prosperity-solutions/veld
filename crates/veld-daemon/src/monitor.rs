@@ -629,6 +629,12 @@ async fn run_veld_restart(
             .arg(run_name)
             .current_dir(project_root)
             .env("PATH", user_path)
+            // Null rather than inherited, as in `spawn_veld_in`: a daemon
+            // launched from a terminal would otherwise pass its tty to an
+            // automatic recovery restart, which must never wait on a human.
+            // (Its stderr is piped, so the prompt gate already refuses here —
+            // this is the half that does not depend on that staying true.)
+            .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .output(),

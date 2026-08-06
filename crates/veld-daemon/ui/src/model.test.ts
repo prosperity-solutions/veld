@@ -50,6 +50,7 @@ const wt = (path: string): Worktree => ({
   has_veld_config: true,
   presets: [],
   nodes: [],
+  machine_vars: 0,
   ide: { quicklinks: [], permissions: [], panes: [] },
 });
 
