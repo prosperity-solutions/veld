@@ -47,6 +47,11 @@ where
 {
     let _guard = env_lock();
     let out = dir.join("env.txt");
+    // Removed first, so `expect("the recorder never ran")` below cannot be
+    // satisfied by a *previous* call's file — two tests reuse one tempdir, and
+    // a silently-not-run recorder would then be asserted against stale
+    // environment and pass.
+    let _ = std::fs::remove_file(&out);
     let script = dir.join("recorder.sh");
     // `env` rather than a hand-rolled loop: it reports what the process really
     // got, including variables this test did not think to name.
@@ -178,9 +183,10 @@ fn an_ambient_desktop_dir_is_kept_but_an_explicit_one_wins() {
     // Unlike the handoff knobs, this one is a real answer to a real question —
     // where this machine keeps its apps — so it survives.
     let plain = veld_core::setup::DesktopInstall::default();
-    let (env, _) = record(dir.path(), &ambient, || {
+    let (env, ok) = record(dir.path(), &ambient, || {
         veld_core::setup::install_desktop("9.9.9", &plain)
     });
+    assert!(ok);
     assert_eq!(env.get("VELD_DESKTOP_DIR"), Some("/Volumes/Apps"));
 
     // …and the app naming its own bundle outranks it.
@@ -188,9 +194,10 @@ fn an_ambient_desktop_dir_is_kept_but_an_explicit_one_wins() {
         app_dir: Some(PathBuf::from("/Users/x/Applications")),
         ..Default::default()
     };
-    let (env, _) = record(dir.path(), &ambient, || {
+    let (env, ok) = record(dir.path(), &ambient, || {
         veld_core::setup::install_desktop("9.9.9", &opts)
     });
+    assert!(ok);
     assert_eq!(env.get("VELD_DESKTOP_DIR"), Some("/Users/x/Applications"));
 }
 

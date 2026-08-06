@@ -1613,10 +1613,23 @@ pub async fn install_desktop(version: &str, opts: &DesktopInstall) -> Result<(),
 
 /// A local install script to run instead of fetching the published one.
 ///
-/// Test hook. Rejects anything that is not an absolute path to an existing file,
-/// so a stray or relative value falls back to the real thing rather than
-/// silently running something else — or nothing.
+/// **Debug builds only.** This is a test hook, and it is the one variable that
+/// changes *which program* `bash` executes — so a released binary must not read
+/// it at all. Veld Desktop spawns the CLI with the app's inherited environment,
+/// and an app's environment comes from the user's launchd session
+/// (`launchctl setenv`), so in a release build this would be a way to redirect a
+/// GUI-initiated install to an arbitrary local file. Setting that variable
+/// already requires the ability to run code as the user — but "the attacker
+/// could have done it another way" is a reason to keep a hole cheap to close,
+/// not a reason to leave it open.
+///
+/// Also rejects anything that is not an absolute path to an existing file, so a
+/// stray or relative value falls back to the real thing rather than silently
+/// running something else — or nothing.
 fn install_script_override() -> Option<PathBuf> {
+    if !cfg!(debug_assertions) {
+        return None;
+    }
     let raw = std::env::var_os("VELD_INSTALL_SCRIPT").filter(|v| !v.is_empty())?;
     let path = PathBuf::from(raw);
     (path.is_absolute() && path.is_file()).then_some(path)
@@ -1679,6 +1692,10 @@ async fn run_install_script(
         "VELD_DESKTOP_ONLY",
         "VELD_DESKTOP_WAIT_PID",
         "VELD_DESKTOP_RELAUNCH",
+        // Not read by the script, but this process was invoked *by* the script's
+        // author in dev and may be invoked by the app in production: never let a
+        // "which program do I run" variable propagate down a chain of installs.
+        "VELD_INSTALL_SCRIPT",
     ] {
         cmd.env_remove(key);
     }

@@ -127,6 +127,20 @@ async fn update_desktop_if_stale(version: &str) {
         return;
     }
 
+    // `VELD_DESKTOP=0` is documented as the opt-out for "a CI box or a server
+    // that wants no Dock icon" — and it was honoured by the install script only,
+    // which this path deliberately no longer relies on for the app half. Without
+    // this check the opt-out held for the install and then quietly failed on the
+    // first `veld update`, putting an app on exactly the machines that asked not
+    // to have one. `veld desktop install` is unaffected: naming the command is a
+    // stronger statement than an environment variable.
+    if matches!(
+        std::env::var("VELD_DESKTOP").as_deref(),
+        Ok("0") | Ok("false") | Ok("no")
+    ) {
+        return;
+    }
+
     let existing = veld_core::setup::desktop_app_status();
     if let Some((_, installed)) = &existing {
         if installed.as_deref() == Some(version) {
@@ -156,8 +170,16 @@ async fn update_desktop_if_stale(version: &str) {
     {
         // Not fatal: the CLI is fine, and the app is the half the user can also
         // fix by hand. Say so rather than failing an update that succeeded.
+        //
+        // "Run 'veld desktop update' to retry" is wrong advice for the most
+        // common cause by far — the app was open, so the installer skipped it,
+        // and the retry skips it for exactly as long. Name quitting first.
         output::print_error(
-            &format!("Could not install Veld Desktop: {e}. Run 'veld desktop update' to retry."),
+            &format!(
+                "Could not install Veld Desktop: {e}. If Veld Desktop is open, quit it and run \
+                 'veld desktop update' — or let the app update itself from its own \
+                 'Check for Updates…'."
+            ),
             false,
         );
     }

@@ -403,10 +403,16 @@ async function updateViaCli(version) {
       {
         detached: true,
         stdio: "ignore",
-        // A deliberate PATH, not this process's: see `SAFE_PATH`. The rest of
-        // the environment goes with it — an app's environment is whatever
-        // launched it, and none of it is the installer's business.
-        env: { PATH: SAFE_PATH, HOME: os.homedir() },
+        // A deliberate PATH (see `SAFE_PATH`) *over* the inherited environment,
+        // not instead of it. Replacing the whole environment looked safer and
+        // was worse: it dropped `TMPDIR`, `HTTPS_PROXY`/`NO_PROXY` and the
+        // locale, so the installer would fail to download behind a corporate
+        // proxy on the one path where nobody is watching a terminal — while the
+        // same `veld desktop update` typed into a shell worked. Nothing here
+        // needs to filter `VELD_*` either: `run_install_script` clears the
+        // handoff variables itself and sets the rest explicitly, which is where
+        // that belongs, and the CLI is the same binary the user runs by hand.
+        env: { ...process.env, PATH: SAFE_PATH },
       },
     );
   } catch (err) {

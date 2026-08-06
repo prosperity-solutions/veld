@@ -330,12 +330,23 @@ apply_binary_icons() {
 
 # The app is installed by two processes that can overlap — `veld update` and the
 # app's own updater — and the loser of that race would delete the winner's only
-# backup. Per-user (`TMPDIR` is per-user on macOS), which is the right grain for
-# `~/Applications` and one grain too fine for a shared `/Applications`; two
-# different humans updating the same machine's app in the same second is a race
-# this does not close.
+# backup.
+#
+# In `~/.veld` rather than `${TMPDIR:-/tmp}`. `/tmp` is `drwxrwxrwt`, so any
+# other local user can pre-create the lock directory with a pid file naming a
+# process of their own that stays alive; the steal branch below only fires on a
+# *dead* pid, so every Veld Desktop update on the machine would block for 60s and
+# then fail. `TMPDIR` is per-user on macOS and would have been fine — but it is
+# not always set, and it is specifically *unset* on the path that matters, since
+# the app spawns the CLI with a deliberately small environment. A lock whose
+# safety depends on a variable being present is a lock that is unsafe exactly
+# when nobody is looking.
+#
+# Per-user, which is the right grain for `~/Applications` and one grain too fine
+# for a shared `/Applications`: two different humans updating the same machine's
+# app in the same second is a race this does not close.
 desktop_lock() {
-  local lock="${TMPDIR:-/tmp}/veld-desktop-install.lock" owner waited=0 stole=""
+  local lock="$HOME/.veld/desktop-install.lock" owner waited=0 stole=""
   # The parent has to exist before a failed `mkdir` can be read as "someone else
   # holds this" rather than "this path is unusable" — an unset-but-nonexistent
   # TMPDIR otherwise sends the steal-and-retry below into a busy loop with no
@@ -350,7 +361,16 @@ desktop_lock() {
     # A crashed run leaves the directory behind and its pid does not answer.
     # Stealing is one-shot: if the steal did not win the next `mkdir`, something
     # live is racing for the lock and waiting is the right answer.
-    if [ -z "$stole" ] && { [ -z "$owner" ] || ! kill -0 "$owner" 2>/dev/null; }; then
+    #
+    # An *empty* pid file is not the same as a dead one, and treating it as one
+    # was a race: `mkdir` succeeds a few instructions before `echo $$ >` runs, so
+    # a racer arriving in that window would read no owner, delete a lock that had
+    # just been legitimately taken, and run the bundle swap concurrently with its
+    # holder — the exact thing this lock exists to prevent, and the first process
+    # would then `rm -rf` a lock the second one owned. So an empty pid is only
+    # stealable after waiting long enough that "the holder is mid-acquire" is no
+    # longer a plausible explanation.
+    if [ -z "$stole" ] && { { [ -z "$owner" ] && [ "$waited" -gt 25 ]; } || { [ -n "$owner" ] && ! kill -0 "$owner" 2>/dev/null; }; }; then
       stole="1"
       rm -rf "$lock" 2>/dev/null || true
       continue
@@ -436,14 +456,29 @@ install_desktop_app() {
     done
   fi
 
-  # `pgrep -f` matches a REGEX, not a literal string: a destination containing
-  # `+`, `.` or `(` — a versioned directory, a user named `a.b` — would otherwise
-  # match a different set of processes than the one asked about, in either
-  # direction. This still races anything launched in the microsecond after the
-  # check; the pid handoff above is the path that is actually airtight, and this
-  # is the courtesy guard for a human running the installer with the app open.
+  # `pgrep -f` matches a REGEX against a process's WHOLE command line, and both
+  # halves of that sentence have bitten this guard:
+  #
+  #  - Regex, not literal: a destination containing `+`, `.` or `(` — a versioned
+  #    directory, a user named `a.b` — matches a different set of processes than
+  #    the one asked about, in either direction. Hence the escaping.
+  #  - Whole command line, so **anchoring is load-bearing**. Unanchored, this
+  #    matched the veld CLI that spawned this script, because the app passes
+  #    `--app-path <dest>/Contents/MacOS/Veld` and that argument contains the
+  #    pattern verbatim. The guard fired against its own caller and the app's
+  #    self-update could never succeed — it reported "Veld Desktop is running"
+  #    every single time. A running app's argv[0] *is* its executable path, so
+  #    `^` matches the app and nothing that merely mentions it.
+  #
+  # Worth knowing if you go to test this: `pgrep -f` only sees a bounded prefix
+  # of a long command line, so a bundle under a deep path hides the bug that a
+  # bundle in /Applications shows. Test it with a short path.
+  #
+  # This still races anything launched in the microsecond after the check; the
+  # pid handoff above is the path that is actually airtight, and this is the
+  # courtesy guard for a human running the installer with the app open.
   pattern="$(printf '%s' "${dest}/Contents/MacOS/" | sed 's/[][(){}.*+?^$|\\]/\\&/g')"
-  if pgrep -f -- "$pattern" >/dev/null 2>&1; then
+  if pgrep -f -- "^${pattern}" >/dev/null 2>&1; then
     echo "Veld Desktop is running — skipping the app update."
     echo "  Quit it and re-run, or use the app's own 'Check for Updates…'."
     return 1
