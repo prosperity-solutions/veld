@@ -579,8 +579,6 @@ fn prepare_daemon_log(
     real_uid: &str,
     real_home: &std::path::Path,
 ) -> Option<PathBuf> {
-    use std::os::unix::fs::MetadataExt;
-
     let uid: u32 = real_uid.parse().ok()?;
     let log = crate::paths::daemon_log_path_in(real_home);
     let dir = log.parent()?;
