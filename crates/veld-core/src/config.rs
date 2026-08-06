@@ -5497,6 +5497,34 @@ mod tests {
         assert!(d.secret());
     }
 
+    /// **The asymmetry that leaked, pinned.**
+    ///
+    /// Sensitivity propagates *upward* — a secret `default` makes the var secret
+    /// — but deliberately not downward, because the declaration is the authority
+    /// and a `ConfigValue` is also used in places that have no declaration. That
+    /// means `MachineVar::secret` can be true while `default.secret` is false, in
+    /// exactly the spelling `machine-var-secret-placement` tells authors to
+    /// prefer. Anything rendering a value must therefore consult the
+    /// *declaration*, never the value's own flag alone: three review angles
+    /// independently found `veld config vars`, `--json` and the daemon's GET all
+    /// printing such a default in the clear.
+    #[test]
+    fn a_declared_secret_does_not_mark_its_own_default() {
+        let d = vd(r#"{ "machine": { "default": "hunter2" }, "secret": true }"#);
+        assert!(d.secret(), "the var is secret");
+        let default = d
+            .machine()
+            .and_then(|m| m.default.as_ref())
+            .expect("has a default");
+        assert!(
+            !default.secret,
+            "the flag is NOT pushed down — so every renderer must take the \
+             declared sensitivity as a separate argument, and this test is what \
+             says so out loud"
+        );
+        assert_eq!(default.as_literal(), Some("hunter2"));
+    }
+
     /// A key this binary does not know must **load** and be reported by
     /// `validate`, never rejected by the parser.
     ///

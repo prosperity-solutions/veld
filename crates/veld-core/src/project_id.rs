@@ -64,13 +64,29 @@ impl std::fmt::Display for ProjectId {
 /// that project's other worktrees, which is exactly the behaviour of having no
 /// feature at all.
 pub fn project_id_for(config_dir: &Path) -> ProjectId {
+    project_id_for_with_path(config_dir, None)
+}
+
+/// [`project_id_for`], with an explicit `PATH` for the `git` it shells out to.
+///
+/// **A daemon must pass one.** The daemon runs with a bare service `PATH`
+/// (launchd/systemd), so a `git` installed by nix, asdf, or Homebrew-on-Linux is
+/// not on it — and because this function never fails, a daemon that cannot run
+/// `git` silently gets the *fallback* id (the config directory) while the CLI, on
+/// the user's `PATH`, gets the git-derived one. The two then key the same project
+/// differently: the UI writes an answer, reports success, and `veld start` never
+/// reads it. AGENTS.md already requires the injection for the daemon's other git
+/// plumbing (`desktop.rs`); this is the same rule, and the silent-divergence
+/// failure mode is why it matters more here than a "command not found" would.
+pub fn project_id_for_with_path(config_dir: &Path, path_env: Option<&str>) -> ProjectId {
     let here = canonicalize(config_dir);
-    match main_worktree_root(&here) {
+    match main_worktree_root(&here, path_env) {
         Some(main_root) => {
             // The config's position *inside this checkout*, replayed against the
             // main checkout. `strip_prefix` is exact — both sides are
             // canonicalized, so this is not a textual prefix match.
-            let checkout_root = canonicalize(&worktree_root(&here).unwrap_or(here.clone()));
+            let checkout_root =
+                canonicalize(&worktree_root(&here, path_env).unwrap_or(here.clone()));
             match here.strip_prefix(&checkout_root) {
                 Ok(rel) if rel.as_os_str().is_empty() => ProjectId(path_key(&main_root)),
                 Ok(rel) => ProjectId(path_key(&main_root.join(rel))),
@@ -90,10 +106,11 @@ pub fn project_id_for(config_dir: &Path) -> ProjectId {
 /// without it the answer is a bare relative `.git` in the main checkout and an
 /// absolute path in a linked worktree — the same code reading two different kinds
 /// of answer depending on where the user is standing.
-fn main_worktree_root(dir: &Path) -> Option<PathBuf> {
+fn main_worktree_root(dir: &Path, path_env: Option<&str>) -> Option<PathBuf> {
     let common = git(
         dir,
         &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        path_env,
     )?;
     let common = PathBuf::from(common);
     // `<main>/.git` for a normal clone; a bare repo has no working tree and no
@@ -110,21 +127,24 @@ fn main_worktree_root(dir: &Path) -> Option<PathBuf> {
 }
 
 /// The canonicalized root of the worktree `dir` sits in.
-fn worktree_root(dir: &Path) -> Option<PathBuf> {
+fn worktree_root(dir: &Path, path_env: Option<&str>) -> Option<PathBuf> {
     git(
         dir,
         &["rev-parse", "--path-format=absolute", "--show-toplevel"],
+        path_env,
     )
     .map(PathBuf::from)
 }
 
-fn git(dir: &Path, args: &[&str]) -> Option<String> {
-    let out = Command::new("git")
-        .args(args)
+fn git(dir: &Path, args: &[&str], path_env: Option<&str>) -> Option<String> {
+    let mut cmd = Command::new("git");
+    cmd.args(args)
         .current_dir(dir)
-        .stdin(std::process::Stdio::null())
-        .output()
-        .ok()?;
+        .stdin(std::process::Stdio::null());
+    if let Some(path) = path_env {
+        cmd.env("PATH", path);
+    }
+    let out = cmd.output().ok()?;
     if !out.status.success() {
         return None;
     }

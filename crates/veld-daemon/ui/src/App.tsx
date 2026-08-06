@@ -1283,8 +1283,35 @@ function AppInner(props: {
   };
   const restartWorktree = (w: Worktree, target?: RunInfo | null) => {
     const r = target ?? targetRun(w);
-    if (r)
+    if (!r) return;
+    void (async () => {
+      // Same pre-flight as ▶, and for the more likely case: pulling a commit
+      // that adds a machine var with no default, then restarting what is already
+      // up. Without it the daemon's headless refusal surfaces as a toast and the
+      // dialog that could fix it never opens — the GUI dead end these endpoints
+      // exist to remove, reintroduced on the path most likely to hit it.
+      try {
+        // The run's own nodes, not an empty list: with no selections the daemon
+        // resolves an empty plan and every check passes, so the pre-flight would
+        // silently never fire. A restart re-runs exactly these.
+        const { needed } = await api.configVarsPreflight({
+          project: w.path,
+          selections: r.nodes.map((n) => `${n.name}:${n.variant}`),
+        });
+        if (needed.length > 0) {
+          setDialog({
+            kind: "config-vars",
+            project: w.path,
+            retry: () => restartWorktree(w, r),
+          });
+          return;
+        }
+      } catch {
+        // Advisory, as on the start path: a broken check must not block a
+        // restart that would otherwise work.
+      }
       void act(w, r.name, "restart", () => api.restartRun(runRef(w.path, r)));
+    })();
   };
 
   // ---- run diagnostics ----------------------------------------------------

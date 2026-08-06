@@ -249,8 +249,14 @@ pub struct GraphSnapshot {
 pub struct VarOverrideSnapshot {
     /// The var's name, as declared in `vars`.
     pub name: String,
-    /// Where the effective value came from: `"project"`, `"worktree"`, or
+    /// Where the effective value came from: `"project"` or `"worktree"` for a
+    /// stored answer, `"flag"` for a `--var` given to this run alone, and
     /// `"default"` when the config's own value was used.
+    ///
+    /// `"flag"` is not a scope and no row backs it — the distinction matters
+    /// because a per-run answer is the most volatile difference two runs of the
+    /// same commit can have, and calling it `"default"` would attribute it to a
+    /// file that never contained it.
     pub from: String,
 }
 

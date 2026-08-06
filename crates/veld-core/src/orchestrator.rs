@@ -394,7 +394,7 @@ fn build_graph_snapshot(
     plan: &[Vec<NodeSelection>],
     started_from: Option<crate::state::StartOrigin>,
     overrides: &crate::values::VarOverrides,
-    scopes: &std::collections::BTreeMap<String, crate::db::OverrideScope>,
+    provenance: &std::collections::BTreeMap<String, String>,
 ) -> crate::state::GraphSnapshot {
     let mut nodes = std::collections::BTreeMap::new();
     // The FULL resolved graph, deliberately including the oneshot terminal
@@ -453,8 +453,8 @@ fn build_graph_snapshot(
         .filter(|(_, decl)| decl.machine().is_some())
         .map(|(name, _)| crate::state::VarOverrideSnapshot {
             name: name.clone(),
-            from: match scopes.get(name) {
-                Some(scope) if overrides.contains_key(name) => scope.to_string(),
+            from: match provenance.get(name) {
+                Some(from) if overrides.contains_key(name) => from.clone(),
                 _ => "default".to_owned(),
             },
         })
@@ -681,10 +681,11 @@ pub struct Orchestrator {
     /// construction. Empty is a legal state: it means every var falls back to its
     /// declared `default`.
     var_overrides: crate::values::VarOverrides,
-    /// Which scope each answer above came from, kept beside the values rather
-    /// than inside them so resolution stays a plain name→value lookup while the
-    /// run snapshot can still record provenance.
-    var_override_scopes: std::collections::BTreeMap<String, crate::db::OverrideScope>,
+    /// Where each answer above came from, kept beside the values rather than
+    /// inside them so resolution stays a plain name→value lookup while the run
+    /// snapshot can still record provenance. `"project"` / `"worktree"` for a
+    /// stored row, `"flag"` for a `--var` answer that no row backs.
+    var_provenance: std::collections::BTreeMap<String, String>,
     /// Project `vars`, resolved once during `start`. Stashed so `run_terminal` and
     /// the `on_stop` path reuse the same values rather than re-running a source
     /// command — two resolutions of a rotating credential would disagree.
@@ -728,7 +729,10 @@ impl Orchestrator {
                 tracing::warn!(error = %e, "could not read machine var overrides; using config defaults");
                 Default::default()
             });
-        let var_override_scopes = stored.iter().map(|(k, v)| (k.clone(), v.scope)).collect();
+        let var_provenance = stored
+            .iter()
+            .map(|(k, v)| (k.clone(), v.scope.to_string()))
+            .collect();
         let var_overrides: crate::values::VarOverrides =
             stored.into_iter().map(|(k, v)| (k, v.value)).collect();
         Ok(Self {
@@ -738,7 +742,7 @@ impl Orchestrator {
             project_root,
             project_id,
             var_overrides,
-            var_override_scopes,
+            var_provenance,
             db,
             port_allocator: PortAllocator::new(),
             helper_client: HelperClient::default_client(),
@@ -770,9 +774,13 @@ impl Orchestrator {
     /// chosen deliberately.
     pub fn set_var_answers(&mut self, answers: crate::values::VarOverrides) {
         for (name, value) in answers {
-            // Recorded as `default` provenance rather than a scope, because no
-            // scope holds it — the snapshot must not imply a row exists.
-            self.var_override_scopes.remove(&name);
+            // Its own provenance, not `default` and not a scope. "default" would
+            // claim the config supplied a value it did not, and a scope would
+            // imply a stored row that does not exist — and a `--var` answer is
+            // the most volatile difference two runs of one commit can have, so
+            // labelling it as either is exactly the case the snapshot exists to
+            // distinguish.
+            self.var_provenance.insert(name.clone(), "flag".to_owned());
             self.var_overrides.insert(name, value);
         }
     }
@@ -797,6 +805,38 @@ impl Orchestrator {
             &self.var_overrides,
             &planned,
         ))
+    }
+
+    /// `--var` answers that a later `veld stop` will need and cannot get.
+    ///
+    /// A flag answer lives only in this process. `veld stop` runs in a *new* one,
+    /// rebuilds the orchestrator, and reads the store — so a var answered only by
+    /// `--var` and referenced from `teardown` or `on_stop` is unresolvable at
+    /// stop time. That is not a small loss: one unresolvable var makes
+    /// [`Self::ensure_stop_vars`] warn and skip **every** `${vars.*}` teardown
+    /// step, so a container the teardown exists to remove is left running.
+    ///
+    /// Named at start, where the user can still choose `veld config set` instead,
+    /// rather than discovered at stop when the environment is already up.
+    pub fn flag_answers_needed_at_teardown(&self, selections: &[NodeSelection]) -> Vec<String> {
+        let needed = config::vars_for_teardown(&self.config, selections);
+        let mut out: Vec<String> = self
+            .var_provenance
+            .iter()
+            .filter(|(name, from)| from.as_str() == "flag" && needed.contains(name.as_str()))
+            // A var with a default is fine: stop falls back to it.
+            .filter(|(name, _)| {
+                self.config
+                    .vars
+                    .as_ref()
+                    .and_then(|v| v.get(name.as_str()))
+                    .and_then(|d| d.machine())
+                    .is_some_and(|m| m.default.is_none())
+            })
+            .map(|(name, _)| name.clone())
+            .collect();
+        out.sort();
+        out
     }
 
     /// Designate a `command` node as the run's terminal one-off (`--oneshot`).
@@ -992,7 +1032,7 @@ impl Orchestrator {
             &plan,
             origin,
             &self.var_overrides,
-            &self.var_override_scopes,
+            &self.var_provenance,
         ));
         // Scope the run-level log streams to this instance (the writers were
         // created before the run existed).
@@ -4501,7 +4541,7 @@ mod tests {
             project_root: project_root.to_path_buf(),
             project_id: crate::project_id::ProjectId::from_stored(project_root.to_string_lossy()),
             var_overrides: Default::default(),
-            var_override_scopes: Default::default(),
+            var_provenance: Default::default(),
             db,
             port_allocator: PortAllocator::new(),
             helper_client: HelperClient::default_client(),

@@ -173,6 +173,20 @@ pub async fn run(
     if !resolve_machine_vars(&mut orchestrator, &parsed_selections, &project_root).await {
         return 1;
     }
+    // A `--var` answer does not survive this process, and `veld stop` runs in
+    // another one. Say so now, while `veld config set` is still an option.
+    let stranded = orchestrator.flag_answers_needed_at_teardown(&parsed_selections);
+    if !stranded.is_empty() {
+        eprintln!(
+            "Warning: {} answered with --var, but this project's teardown needs {}. \
+             `veld stop` runs in a different process and cannot see a --var answer, so its \
+             `${{vars.*}}` steps will be skipped. Use `veld config set` for {} if teardown \
+             has to work.",
+            stranded.join(", "),
+            if stranded.len() == 1 { "it" } else { "them" },
+            if stranded.len() == 1 { "it" } else { "them" },
+        );
+    }
 
     // Set up live progress channel.
     let (progress_tx, progress_rx) = mpsc::unbounded_channel::<ProgressEvent>();
@@ -1023,7 +1037,13 @@ async fn resolve_machine_vars(
     // Attended means "a human is reading this and can type". Without a terminal
     // there is no channel, and inventing one — resolving a default, or worse
     // persisting a guess — is the documented failure.
-    let attended = is_tty()
+    //
+    // Gated on **stdin**, not `output::is_tty()` (which is stdout). This prompt
+    // writes to stderr and reads stdin, so stdout's state is the one thing about
+    // it that does not matter: `veld start --oneshot … > out.json` from a real
+    // terminal was declared unattended and refused, with a human sitting right
+    // there. `veld update` already gates on stdin for the same reason.
+    let attended = std::io::IsTerminal::is_terminal(&std::io::stdin())
         && std::env::var("VELD_NON_INTERACTIVE")
             .map(|v| v.is_empty())
             .unwrap_or(true);
@@ -1071,28 +1091,45 @@ async fn resolve_machine_vars(
         answers.insert(var.name.clone(), cv);
     }
 
-    if !to_store.is_empty()
-        && let Some(db) = super::open_db(false)
-    {
-        let project_id = orchestrator.project_id().clone();
-        for (name, value) in &to_store {
-            if let Err(e) = db.set_var_override(
-                &project_id,
-                veld_core::db::OverrideScope::Project,
-                project_root,
-                name,
-                value,
-            ) {
-                // Not fatal: the run has its answers in memory. Losing the
-                // *storage* costs a re-prompt next time, not this start.
-                eprintln!("Warning: could not save `{name}` for this machine: {e}");
+    if !to_store.is_empty() {
+        // Counted, so the summary describes what happened rather than what was
+        // attempted: it used to print "Saved to …" even when every write failed,
+        // and print nothing at all when the database would not open — losing
+        // answers the human had explicitly confirmed saving, silently.
+        let mut saved = 0usize;
+        match super::open_db(false) {
+            Some(db) => {
+                let project_id = orchestrator.project_id().clone();
+                for (name, value) in &to_store {
+                    match db.set_var_override(
+                        &project_id,
+                        veld_core::db::OverrideScope::Project,
+                        project_root,
+                        name,
+                        value,
+                    ) {
+                        // Not fatal: the run has its answers in memory. Losing
+                        // the *storage* costs a re-prompt next time, not this
+                        // start.
+                        Err(e) => {
+                            eprintln!("Warning: could not save `{name}` for this machine: {e}");
+                        }
+                        Ok(()) => saved += 1,
+                    }
+                }
+                if saved > 0 {
+                    eprintln!(
+                        "Saved {saved} value(s) to {project_id} — shared by every worktree of \
+                         this project. Change with `veld config set`, clear with \
+                         `veld config unset`."
+                    );
+                }
             }
+            None => eprintln!(
+                "Warning: veld's database could not be opened, so nothing was saved for this \
+                 machine. This run has your answers; the next one will ask again."
+            ),
         }
-        eprintln!(
-            "Saved to {} — shared by every worktree of this project. \
-             Change with `veld config set`, clear with `veld config unset`.",
-            project_id
-        );
     }
     eprintln!();
     orchestrator.set_var_answers(answers);
@@ -1119,10 +1156,26 @@ fn report_unanswered_vars(missing: &[veld_core::values::UnansweredVar]) {
         }
     }
     detail.push_str("\nTo fix this, either:\n");
-    for var in missing {
+    // A declared secret must never be told to put its value on a command line.
+    // `veld config set X <value>` and `--var X=…` both land in the process table
+    // (world-readable) and in shell history — the exact leak `secret: true`
+    // exists to prevent, and which `secret-in-command` makes a lint error
+    // elsewhere. Point those at a source instead.
+    let (secret, plain): (Vec<_>, Vec<_>) = missing.iter().partition(|v| v.secret);
+    for var in &plain {
         detail.push_str(&format!("  - veld config set {} <value>\n", var.name));
     }
-    detail.push_str("  - or pass `--var NAME=VALUE` for a one-off run (not saved)\n");
+    for var in &secret {
+        detail.push_str(&format!(
+            "  - veld config set {name} --env NAME   (or --file PATH, or --shell 'op read …')\n    \
+             `{name}` is declared secret, so veld stores where to read it, not the value — \
+             a value on the command line is readable by every process on this machine\n",
+            name = var.name
+        ));
+    }
+    if !plain.is_empty() {
+        detail.push_str("  - or pass `--var NAME=VALUE` for a one-off run (not saved)\n");
+    }
     output::print_error(detail.trim_end(), false);
 }
 

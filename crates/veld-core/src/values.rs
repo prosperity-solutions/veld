@@ -99,11 +99,17 @@ pub enum ValueError {
     /// machine's answer — is how a background process's shrug becomes permanent.
     #[error(
         "{at}: no value on this machine. `{name}` is declared machine-overridable with no \
-         default, so each machine answers it once:\n    veld config set {name} <value>{choices}"
+         default, so each machine answers it once:\n    {how}{choices}"
     )]
     MachineVarUnanswered {
         at: String,
         name: String,
+        /// The command to suggest. A **declared secret is never told to put its
+        /// value on a command line** — the process table is world-readable and it
+        /// lands in shell history, which is the leak `secret: true` exists to
+        /// prevent and which `secret-in-command` makes a lint error elsewhere. A
+        /// secret var gets the pointer forms instead.
+        how: String,
         /// Pre-rendered `\n    one of: a, b`, or empty. Formatting a list inside
         /// a `thiserror` template is not worth a helper.
         choices: String,
@@ -487,13 +493,22 @@ pub async fn resolve_vars(
         let at = format!("vars.{name}");
         let machine = decl.machine();
 
+        // **Only a var that is still declared `machine` may be overridden.**
+        // Rows outlive declarations: drop the `machine` block and hard-code
+        // `"runtime": "docker"`, and every machine that had answered would
+        // otherwise keep resolving its stale answer forever — with no `choices`
+        // check (there is no declaration to check against) and no way to see it,
+        // since `veld config vars` lists only machine vars. The config is the
+        // authority on what is overridable; the database only remembers answers.
+        let applicable = machine.and_then(|_| overrides.get(name.as_str()));
+
         // An override replaces the declaration's own value. It is used
         // **verbatim** — never interpolated — even when it is a literal, which
         // is where it differs from a config literal below. An override is data a
         // human typed on this machine rather than authored config, so a value
         // containing `${` must arrive intact instead of breaking or expanding;
         // that is the same rule a *fetched* value already follows.
-        let resolved = if let Some(over) = overrides.get(name.as_str()) {
+        let resolved = if let Some(over) = applicable {
             match over.as_literal() {
                 Some(literal) => literal.to_owned(),
                 None => resolve_value(over, &at, project_root).await?,
@@ -503,6 +518,15 @@ pub async fn resolve_vars(
                 let m = machine.expect("only a machine var can lack a value");
                 return Err(ValueError::MachineVarUnanswered {
                     at,
+                    how: if m.secret {
+                        format!(
+                            "veld config set {name} --env NAME   (or --file PATH, or \
+                             --shell 'op read …')\n    `{name}` is declared secret, so veld \
+                             stores where to read it rather than the value itself"
+                        )
+                    } else {
+                        format!("veld config set {name} <value>")
+                    },
                     name: name.clone(),
                     choices: match &m.choices {
                         Some(c) if !c.is_empty() => format!("\n    one of: {}", c.join(", ")),
@@ -529,7 +553,11 @@ pub async fn resolve_vars(
                 at: format!("vars.{name}"),
                 name: name.clone(),
                 choices: choices.join(", "),
-                source_label: match overrides.get(name.as_str()) {
+                // `applicable`, not a fresh lookup: a row that was skipped for
+                // not being declared `machine` did not produce this value, and
+                // blaming it would send the reader to `veld config set` for a
+                // value that came out of the config file.
+                source_label: match applicable {
                     Some(_) => "this machine's override".to_owned(),
                     None => "the config default".to_owned(),
                 },
@@ -1003,6 +1031,34 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("this machine's override"), "{msg}");
         assert!(msg.contains("docker, podman"), "{msg}");
+    }
+
+    /// **Rows outlive declarations, so the config stays the authority.**
+    ///
+    /// A project that drops a `machine` block and hard-codes the value would
+    /// otherwise keep serving every already-answered machine its stale answer,
+    /// forever — unchecked against `choices` (there is no declaration left to
+    /// check) and invisible, because `veld config vars` lists only machine vars.
+    #[tokio::test]
+    async fn an_override_for_a_var_that_is_no_longer_machine_is_ignored() {
+        let vars: HashMap<String, VarDecl> =
+            HashMap::from([("runtime".to_owned(), vd(r#""docker""#))]);
+        let overrides: VarOverrides = [("runtime".to_owned(), cv(r#""podman""#))].into();
+        let needed = vars.keys().cloned().collect();
+        let out = resolve_vars(
+            Some(&vars),
+            &overrides,
+            None,
+            &crate::variables::VariableContext::new(),
+            &needed,
+            &HashMap::new(),
+        )
+        .await
+        .expect("resolves");
+        assert_eq!(
+            out["runtime"], "docker",
+            "the config's own value wins once the var is no longer overridable"
+        );
     }
 
     /// An override for a var the plan never mentions must not be resolved — the
