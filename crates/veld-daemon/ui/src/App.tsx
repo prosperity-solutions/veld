@@ -3761,6 +3761,14 @@ function TopBar(props: {
                   <IconRefresh size={13} />
                 </ActionIcon>
               </Tooltip>
+              {/* Beside the start controls, not over with search/settings/theme.
+                  The bar has two clusters — what this *project* does on the left,
+                  what the *app* does on the right — and a machine var is squarely
+                  the first: it belongs to the selected worktree and changes what
+                  ▶ will actually run. Parked on the right it read as a second
+                  settings gear, which is the exact confusion the `{}` glyph was
+                  chosen to avoid. */}
+              {props.configVarsButton}
               {/* Status is a dot, not a word: the text was long enough to be
                   clipped in a crowded bar, and it duplicated what the
                   start/stop icon already says. The dot now rides on the run
@@ -3813,7 +3821,6 @@ function TopBar(props: {
           <IconSearch size={14} />
         </ActionIcon>
       </Tooltip>
-      {props.configVarsButton}
       {props.settingsButton}
       {props.themeButton}
     </div>
