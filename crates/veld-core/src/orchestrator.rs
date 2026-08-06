@@ -689,6 +689,15 @@ pub struct Orchestrator {
     /// snapshot can still record provenance. `"project"` / `"worktree"` for a
     /// stored row, `"flag"` for a `--var` answer that no row backs.
     var_provenance: std::collections::BTreeMap<String, String>,
+    /// Names that had a **stored row** when this orchestrator was built.
+    ///
+    /// Separate from `var_provenance`, which a `--var` answer overwrites: the
+    /// fact "a row exists in the database" survives being shadowed for one run,
+    /// and [`Self::flag_answers_needed_at_teardown`] needs it. Without it, a var
+    /// that *is* stored and merely re-answered with `--var` was reported as one a
+    /// later `veld stop` could not see — and the user was told to
+    /// `veld config set` something they had already set.
+    var_names_with_rows: std::collections::BTreeSet<String>,
     /// Project `vars`, resolved once during `start`. Stashed so `run_terminal` and
     /// the `on_stop` path reuse the same values rather than re-running a source
     /// command — two resolutions of a rotating credential would disagree.
@@ -732,10 +741,11 @@ impl Orchestrator {
                 tracing::warn!(error = %e, "could not read machine var overrides; using config defaults");
                 Default::default()
             });
-        let var_provenance = stored
+        let var_provenance: std::collections::BTreeMap<String, String> = stored
             .iter()
             .map(|(k, v)| (k.clone(), v.scope.to_string()))
             .collect();
+        let var_names_with_rows = stored.keys().cloned().collect();
         let var_overrides: crate::values::VarOverrides =
             stored.into_iter().map(|(k, v)| (k, v.value)).collect();
         Ok(Self {
@@ -746,6 +756,7 @@ impl Orchestrator {
             project_id,
             var_overrides,
             var_provenance,
+            var_names_with_rows,
             db,
             port_allocator: PortAllocator::new(),
             helper_client: HelperClient::default_client(),
@@ -839,6 +850,10 @@ impl Orchestrator {
             .var_provenance
             .iter()
             .filter(|(name, from)| from.as_str() == "flag" && needed.contains(name.as_str()))
+            // A var that also has a stored row is fine: `veld stop` rebuilds
+            // from the store and resolves it there, so warning would send the
+            // user to `veld config set` for something already set.
+            .filter(|(name, _)| !self.var_names_with_rows.contains(name.as_str()))
             // A var with a default is fine: stop falls back to it.
             .filter(|(name, _)| {
                 self.config
@@ -4557,6 +4572,7 @@ mod tests {
             project_id: crate::project_id::ProjectId::from_stored(project_root.to_string_lossy()),
             var_overrides: Default::default(),
             var_provenance: Default::default(),
+            var_names_with_rows: Default::default(),
             db,
             port_allocator: PortAllocator::new(),
             helper_client: HelperClient::default_client(),

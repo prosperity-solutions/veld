@@ -176,7 +176,10 @@ pub async fn run(
 
     // Pre-flight: every machine-overridable var this plan needs must have an
     // answer before the first process spawns.
-    if !resolve_machine_vars(&mut orchestrator, &parsed_selections, &project_root).await {
+    if resolve_machine_vars(&mut orchestrator, &parsed_selections, &project_root, true)
+        .await
+        .is_none()
+    {
         return 1;
     }
     // A `--var` answer does not survive this process, and `veld stop` runs in
@@ -1057,20 +1060,33 @@ fn parse_var_answers(
 /// answer is stored only when the human says so. The failure that motivated it
 /// was a background process taking a default, which then looked exactly like a
 /// deliberate choice for as long as the machine lived.
+///
+/// **Returns the answers rather than only applying them.** They are applied to
+/// the orchestrator passed in *and* handed back, because `veld restart` throws
+/// that orchestrator away and builds a second one to start with — and an answer
+/// that reached memory but not the store (the human said "n" to saving it, or
+/// the write failed) exists nowhere else. Losing it there means the environment
+/// has already been torn down and the start then fails for the value the user
+/// just typed, which is precisely the outcome the restart pre-flight was added
+/// to prevent. `None` means refuse; `Some(answers)` means proceed and apply
+/// these to whatever eventually starts.
 pub(super) async fn resolve_machine_vars(
     orchestrator: &mut Orchestrator,
     selections: &[NodeSelection],
     project_root: &std::path::Path,
-) -> bool {
+    // Whether the caller supports `--var`, so the refusal does not name a flag
+    // the subcommand the user typed does not have.
+    offer_var_flag: bool,
+) -> Option<veld_core::values::VarOverrides> {
     let missing = match orchestrator.unanswered_vars(selections) {
         Ok(m) => m,
         Err(e) => {
             output::print_error(&format!("{e}"), false);
-            return false;
+            return None;
         }
     };
     if missing.is_empty() {
-        return true;
+        return Some(veld_core::values::VarOverrides::new());
     }
 
     // Attended means "a human is reading this and can type". Without a terminal
@@ -1100,8 +1116,8 @@ pub(super) async fn resolve_machine_vars(
             .map(|v| v.is_empty())
             .unwrap_or(true);
     if !attended {
-        report_unanswered_vars(&missing);
-        return false;
+        report_unanswered_vars(&missing, offer_var_flag);
+        return None;
     }
 
     let mut answers = veld_core::values::VarOverrides::new();
@@ -1126,7 +1142,7 @@ pub(super) async fn resolve_machine_vars(
         }
         let Some(value) = prompt_for_var(var) else {
             eprintln!("Cancelled.");
-            return false;
+            return None;
         };
         let cv = veld_core::config::ConfigValue {
             source: veld_core::config::SecretSource::Literal(value),
@@ -1184,8 +1200,11 @@ pub(super) async fn resolve_machine_vars(
         }
     }
     eprintln!();
-    orchestrator.set_var_answers(answers);
-    true
+    // Applied here for the caller that starts straight away, and returned so a
+    // caller that builds a second orchestrator (`veld restart`) can apply them
+    // to the one that will actually run.
+    orchestrator.set_var_answers(answers.clone());
+    Some(answers)
 }
 
 /// The refusal shown when there is no way to ask.
@@ -1193,7 +1212,7 @@ pub(super) async fn resolve_machine_vars(
 /// Names every var and prints the exact command, because the alternative — the
 /// process quietly choosing for the machine — is the thing this whole path is
 /// built to prevent. Goes to stderr so a `--oneshot` stdout capture stays clean.
-fn report_unanswered_vars(missing: &[veld_core::values::UnansweredVar]) {
+fn report_unanswered_vars(missing: &[veld_core::values::UnansweredVar], offer_var_flag: bool) {
     let mut detail = String::from(
         "This project needs values that are specific to your machine, and there is no \
          terminal here to ask on.\n\n",
@@ -1225,7 +1244,10 @@ fn report_unanswered_vars(missing: &[veld_core::values::UnansweredVar]) {
             name = var.name
         ));
     }
-    if !plain.is_empty() {
+    // Only when the subcommand actually has the flag: `veld restart` does not,
+    // and a refusal whose whole job is naming the exact command must not name
+    // one that does not exist.
+    if offer_var_flag && !plain.is_empty() {
         detail.push_str("  - or pass `--var NAME=VALUE` for a one-off run (not saved)\n");
     }
     output::print_error(detail.trim_end(), false);

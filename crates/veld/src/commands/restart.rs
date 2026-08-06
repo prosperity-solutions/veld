@@ -92,9 +92,16 @@ pub async fn run(name: Option<String>, debug: bool) -> i32 {
     // running environment away and leave them with an error. Checked here, the
     // environment is still up when the refusal arrives.
     let project_root = veld_core::config::project_root(&config_path);
-    if !super::start::resolve_machine_vars(&mut orchestrator, &selections, &project_root).await {
+    // Kept, because the orchestrator that receives them below is discarded and
+    // rebuilt after the stop — and an answer the human declined to save exists
+    // nowhere but here. `veld restart` has no `--var`, so the refusal must not
+    // offer one.
+    let Some(machine_answers) =
+        super::start::resolve_machine_vars(&mut orchestrator, &selections, &project_root, false)
+            .await
+    else {
         return 1;
-    }
+    };
 
     output::print_info(&format!("Restarting environment '{run_name}'..."));
 
@@ -161,6 +168,12 @@ pub async fn run(name: Option<String>, debug: bool) -> i32 {
         }
     };
     orchestrator.set_debug(debug);
+    // The answers from the pre-flight above. Without this the second
+    // orchestrator reads only the store, so a prompt answer the user chose not
+    // to save is lost — after the environment has already been torn down.
+    if !machine_answers.is_empty() {
+        orchestrator.set_var_answers(machine_answers);
+    }
 
     match orchestrator.start(&selections, run_name, origin).await {
         Ok(new_run) => {

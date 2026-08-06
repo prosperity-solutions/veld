@@ -1124,9 +1124,9 @@ export const api = {
   /**
    * Machine-overridable vars for one project, with each value's scope.
    *
-   * `project` is any directory inside the checkout — the daemon walks upward for
-   * the config, exactly as the CLI does, so a worktree path is the natural thing
-   * to pass. The answer is shared by every worktree of the repo unless a var was
+   * `project` is a **registered worktree root**, exactly — the daemon refuses a
+   * path it is not tracking, and a subdirectory of one does not resolve even
+   * though the config lookup underneath walks upward. The answer is shared by every worktree of the repo unless a var was
    * set with `worktree: true`.
    */
   configVars: (project: string) =>

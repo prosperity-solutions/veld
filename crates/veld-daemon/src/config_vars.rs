@@ -305,7 +305,7 @@ async fn put_var(headers: HeaderMap, Json(body): Json<PutVarBody>) -> ApiResult 
             warn!("failed to store var override: {e}");
             err(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "veld's database could not be read",
+                "veld's database could not be written",
             )
         })?;
     Ok(Json(serde_json::json!({
@@ -422,7 +422,7 @@ async fn delete_var(headers: HeaderMap, Query(q): Query<DeleteVarQuery>) -> ApiR
             warn!("failed to clear var override: {e}");
             err(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "veld's database could not be read",
+                "veld's database could not be written",
             )
         })?;
     Ok(Json(serde_json::json!({
