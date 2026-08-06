@@ -310,8 +310,15 @@ pub fn routes() -> Router {
 /// without it.
 pub fn prepare_shims() {
     let _ = shims::dir();
-    // Only the daemon clears them, and only here — see `shims::clear_unbacked`, whose
-    // one hard rule is that it must not be reachable from `shims::dir()`.
+}
+
+/// Remove shim scripts no `veld` CLI backs any more.
+///
+/// Separate from [`prepare_shims`] and called **after the daemon has bound its port**
+/// — see the call site and [`shims::clear_unbacked`]. Writing the scripts early is
+/// harmless; deleting them is only safe once this process has proved it owns this
+/// instance's state.
+pub fn clear_unbacked_shims() {
     shims::clear_unbacked();
 }
 

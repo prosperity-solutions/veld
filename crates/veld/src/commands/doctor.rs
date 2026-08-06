@@ -962,6 +962,16 @@ fn daemon_log_row(daemon_bin: &Path, mode: &str) -> String {
     if !cfg!(target_os = "macos") {
         return "n/a".to_owned();
     }
+    // **Skipped under sudo**, for the reason the terminal-shim check is: every path
+    // this row reads is `HOME`-derived and none of it is `SUDO_USER`-aware. As root the
+    // plist at `/var/root/Library/LaunchAgents` is absent and `read_mode` finds no
+    // `setup.json`, so a healthy privileged install would be reported as "not
+    // captured" *and* handed `veld setup unprivileged` — a command that converts the
+    // install rather than repairing it. A row that cannot see the user's home says so
+    // instead of guessing.
+    if std::env::var("SUDO_UID").is_ok_and(|u| !u.is_empty()) {
+        return "not checked under sudo (run `veld doctor` without it)".to_owned();
+    }
     // The path the plist actually names, rather than "does it mention the one we
     // would derive". The two differ on a developer machine — `just
     // dev-install-daemon` copies the binary to wherever the plist already pointed —

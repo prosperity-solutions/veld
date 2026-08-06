@@ -548,17 +548,22 @@ pub async fn trust_caddy_ca() -> Result<StepResult, anyhow::Error> {
 ///
 /// `None` means "do not name a log in the plist". That is the safe answer, not a
 /// degraded one: launchd refuses to exec a job whose `StandardOutPath` it cannot
-/// create — exit `EX_CONFIG` (78), program never reached, retried forever under
+/// **open** — exit `EX_CONFIG` (78), program never reached, retried forever under
 /// `KeepAlive` — so a path this function is unsure about would take the daemon down
 /// on machines that work today. No log is what every veld before this shipped.
 ///
-/// The file is created here rather than left to launchd for two reasons: it is the
-/// only way to know the job will be able to open it, and it is the only chance to
-/// set the mode. Owner-only, because this file exists to collect diagnostics and the
-/// next `warn!` someone adds while chasing a share or a machine-var prompt is
-/// exactly where a URL or an environment value gets interpolated — the same reason
-/// `spawn_stderr_file` keeps captured output owner-only. launchd opens the existing
-/// file `O_APPEND` and does not reset its mode.
+/// Measured, because the distinction decides what this function has to check: a
+/// *missing* directory is fine — launchd creates the intervening directories and the
+/// file, so `rm -rf ~/.veld` self-heals on the next launch. An **unwritable** one is
+/// fatal, which is the whole reason the log does not live beside the binary where a
+/// `/usr/local` prefix is root-owned.
+///
+/// The file is still created here rather than left to launchd, for the one thing
+/// launchd will not do: set the mode. Owner-only, because this file exists to collect
+/// diagnostics and the next `warn!` someone adds while chasing a share or a
+/// machine-var prompt is exactly where a URL or an environment value gets
+/// interpolated — the same reason `spawn_stderr_file` keeps captured output
+/// owner-only. launchd opens an existing file `O_APPEND` and does not reset its mode.
 ///
 /// Ownership is the trap and the reason for the `chown`: `veld setup` can be running
 /// under `sudo`, and a root-owned `0600` log is precisely the unopenable file
@@ -576,34 +581,66 @@ fn prepare_daemon_log(
 ) -> Option<PathBuf> {
     use std::os::unix::fs::MetadataExt;
 
+    let uid: u32 = real_uid.parse().ok()?;
     let log = crate::paths::daemon_log_path_in(real_home);
     let dir = log.parent()?;
+
+    // The **directory** is checked as carefully as the file, and that is not
+    // symmetry for its own sake. Under `sudo veld setup` this is the first thing in
+    // the run to touch the *real* user's `~/.veld` (`setup.rs`'s own `create_dir_all`
+    // goes through `dirs::home_dir()`, which under sudo is root's), so a `chown` that
+    // does not take — an `NFSHomeDirectory` on a network share, the very case
+    // `resolve_real_user_macos` consults `dscl` for — would leave `~/.veld` owned by
+    // root. That directory is where the user's daemon socket, holder sockets,
+    // `pty-<port>/` and `setup.json` live: a far larger break than this log feature
+    // not existing. So if it cannot end up owned by the user, undo what we created
+    // and give up on the log.
+    let we_created_dir = !dir.exists();
     std::fs::create_dir_all(dir).ok()?;
-    // `~/.veld` may not exist yet on a fresh machine, and created as root it would
-    // be another thing the daemon cannot write.
-    let _ = std::process::Command::new("chown")
-        .args([format!("{real_user}:staff"), dir.display().to_string()])
-        .status();
+    if we_created_dir {
+        chown_to(real_user, dir);
+    }
+    if !owned_by(dir, uid) {
+        if we_created_dir {
+            let _ = std::fs::remove_dir(dir);
+        }
+        return None;
+    }
+
     std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&log)
         .ok()?;
     let _ = crate::paths::set_owner_only(&log);
-    let _ = std::process::Command::new("chown")
-        .args([format!("{real_user}:staff"), log.display().to_string()])
-        .status();
-    // Verified, not assumed: the `chown` above is a best-effort external command and
-    // its failure is the one that matters here.
-    let uid: u32 = real_uid.parse().ok()?;
-    let owned_by_the_job = std::fs::metadata(&log)
-        .map(|m| m.uid() == uid)
-        .unwrap_or(false);
-    if !owned_by_the_job {
+    chown_to(real_user, &log);
+    // Verified, not assumed: `chown` is a best-effort external command and its failure
+    // is the one that matters. A root-owned `0600` log is exactly the file launchd
+    // cannot open, and a job whose log it cannot open does not run at all.
+    if !owned_by(&log, uid) {
         let _ = std::fs::remove_file(&log);
         return None;
     }
     Some(log)
+}
+
+/// `chown <user>:staff <path>`, best-effort — every caller verifies the result
+/// instead of trusting it.
+#[cfg(unix)]
+fn chown_to(user: &str, path: &std::path::Path) {
+    let _ = std::process::Command::new("chown")
+        .args([format!("{user}:staff"), path.display().to_string()])
+        .status();
+}
+
+/// Whether `path` is owned by `uid`. False when it cannot be read at all, which is
+/// the answer that makes every caller refuse rather than assume.
+#[cfg(unix)]
+fn owned_by(path: &std::path::Path, uid: u32) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path)
+        .map(|m| m.uid() == uid)
+        .unwrap_or(false)
 }
 
 /// Install (or verify) the Veld daemon.
@@ -2153,17 +2190,23 @@ mod tests {
             "preparing the log must open it for append, never truncate it"
         );
 
-        // A uid the file cannot end up owned by: the plist must name no log at all,
-        // and nothing may be left behind for launchd to trip over. Skipped when the
-        // tests themselves run as root, where uid 0 *is* the owner.
+        // A uid that does not own the directory: the plist must name no log at all,
+        // because a log the job cannot open is worse than no log — launchd exits such
+        // a job EX_CONFIG without ever running the program. Skipped when the tests
+        // themselves run as root, where uid 0 *is* the owner.
         if uid != 0 {
-            assert_eq!(
-                super::prepare_daemon_log(&user, "0", &home),
-                None,
-                "a log the job's uid cannot own is worse than no log — launchd exits \
-                 such a job EX_CONFIG without ever running the program"
+            assert_eq!(super::prepare_daemon_log(&user, "0", &home), None);
+            // And it is left alone rather than deleted. The directory check comes
+            // first and this call did not create it, so the file belongs to whoever
+            // does own that home — refusing to use a log is not a licence to delete
+            // somebody's diagnostics.
+            assert!(
+                log.exists()
+                    && std::fs::read_to_string(&log)
+                        .unwrap()
+                        .contains("earlier daemon"),
+                "refusing the log must not destroy it"
             );
-            assert!(!log.exists(), "the unusable log must be removed, not left");
         }
 
         std::fs::remove_dir_all(&home).unwrap();

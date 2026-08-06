@@ -342,7 +342,15 @@ fi
 #
 # A job that is already registered does not need re-registering: only `veld setup`
 # writes these plists, so an update changes the binary and not the definition
-# launchd holds. Signalling it to exit is enough, because `KeepAlive` is
+# launchd holds. The consequence is worth stating rather than discovering: because
+# this no longer re-bootstraps, an update is no longer a point where a plist file
+# that is newer than launchd's registration converges. `veld setup` is now the only
+# one — which is where such a mismatch comes from in the first place (a bootstrap
+# that lost the race and fell back to kickstarting the stale registration, the
+# `BootstrapOutcome::KickstartedStale` warning), and that warning already tells the
+# user to re-run setup.
+#
+# Signalling it to exit is enough, because `KeepAlive` is
 # unconditionally true in both — measured, not assumed: a `KeepAlive=true` agent
 # with `RunAtLoad=false` is started by launchd anyway, so a registered veld job is
 # always running or on its way back.

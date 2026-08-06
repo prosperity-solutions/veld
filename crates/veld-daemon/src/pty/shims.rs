@@ -316,16 +316,21 @@ fn prepare() -> std::io::Result<PathBuf> {
 /// [`session_env`] injects nothing and a shell's `open` and `$BROWSER` are the
 /// system's own.
 ///
-/// Two constraints on *how*, both learned the hard way:
+/// Three constraints on *how*, every one of them learned the hard way:
 ///
-/// - **Only from the daemon's startup path** ([`super::prepare_shims`]), never from
-///   [`dir`]. `dir` is reached by this crate's own unit tests, which run in a test
-///   binary that resolves no CLI and — with no `VELD_PTY_DIR` set — compute the
-///   **developer's real** `~/.veld/pty-<port>/shims`. With the removal wired into
+/// - **Never from [`dir`].** `dir` is reached by this crate's own unit tests, which run
+///   in a test binary that resolves no CLI and — with no `VELD_PTY_DIR` set — compute
+///   the **developer's real** `~/.veld/pty-<port>/shims`. With the removal wired into
 ///   `prepare`, one `cargo test --workspace` deleted the live shims out from under a
 ///   running installed daemon. `pty_recovery`'s confinement assert did not catch it
 ///   because it watches for files *written* into the real home, and this wrote
 ///   nothing.
+/// - **Only once the daemon owns its port** ([`super::clear_unbacked_shims`], called
+///   after the listener binds). "From the daemon's startup path" was not enough on its
+///   own: `pty_dir` is keyed on the daemon *port*, the bind happens after startup, and
+///   a failed bind is deliberately non-fatal — so a stray `cargo run -p veld-daemon`
+///   on the default port would delete the installed daemon's shims and then carry on
+///   running without an HTTP API.
 /// - **Only files veld generated**, identified by the header every generated script
 ///   carries. This directory is on a developer's `PATH`; a blanket
 ///   `remove_file(dir.join(name))` is a shim feature that deletes a file it does not
