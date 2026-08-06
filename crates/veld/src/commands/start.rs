@@ -171,7 +171,9 @@ pub async fn run(
 
     // Per-run answers, above the stored ones and never written anywhere.
     if !var_answers.is_empty() {
-        orchestrator.set_var_answers(var_answers);
+        // `--var` is per-run by definition: nothing was written, so a later
+        // `veld stop` cannot see it.
+        orchestrator.set_var_answers(var_answers, veld_core::orchestrator::VarProvenance::Flag);
     }
 
     // Pre-flight: every machine-overridable var this plan needs must have an
@@ -1077,7 +1079,7 @@ pub(super) async fn resolve_machine_vars(
     // Whether the caller supports `--var`, so the refusal does not name a flag
     // the subcommand the user typed does not have.
     offer_var_flag: bool,
-) -> Option<veld_core::values::VarOverrides> {
+) -> Option<MachineAnswers> {
     let missing = match orchestrator.unanswered_vars(selections) {
         Ok(m) => m,
         Err(e) => {
@@ -1086,7 +1088,10 @@ pub(super) async fn resolve_machine_vars(
         }
     };
     if missing.is_empty() {
-        return Some(veld_core::values::VarOverrides::new());
+        return Some(MachineAnswers {
+            answers: Default::default(),
+            stored: Default::default(),
+        });
     }
 
     // Attended means "a human is reading this and can type". Without a terminal
@@ -1122,6 +1127,10 @@ pub(super) async fn resolve_machine_vars(
 
     let mut answers = veld_core::values::VarOverrides::new();
     let mut to_store: Vec<(String, veld_core::config::ConfigValue)> = Vec::new();
+    // Which names actually reached the database. Not `to_store` — a write can
+    // fail — and this is what tells a saved answer (backed by a row, resolvable
+    // by a later `veld stop`) from one that lives only in this process.
+    let mut stored: std::collections::BTreeSet<String> = Default::default();
     eprintln!();
     eprintln!(
         "{} value(s) this project needs on your machine:",
@@ -1182,7 +1191,10 @@ pub(super) async fn resolve_machine_vars(
                         Err(e) => {
                             eprintln!("Warning: could not save `{name}` for this machine: {e}");
                         }
-                        Ok(()) => saved += 1,
+                        Ok(()) => {
+                            saved += 1;
+                            stored.insert(name.clone());
+                        }
                     }
                 }
                 if saved > 0 {
@@ -1200,11 +1212,50 @@ pub(super) async fn resolve_machine_vars(
         }
     }
     eprintln!();
+    let collected = MachineAnswers { answers, stored };
     // Applied here for the caller that starts straight away, and returned so a
     // caller that builds a second orchestrator (`veld restart`) can apply them
     // to the one that will actually run.
-    orchestrator.set_var_answers(answers.clone());
-    Some(answers)
+    collected.apply(orchestrator);
+    Some(collected)
+}
+
+/// Answers gathered by [`resolve_machine_vars`], with the provenance each one
+/// must carry.
+///
+/// **A struct with an `apply`, not a bare map.** Splitting these by provenance is
+/// the step three separate review rounds got wrong — a saved answer labelled as
+/// a per-run flag makes the teardown warning fire for a var the user just set and
+/// records the wrong origin in the run snapshot. Handing callers a value they
+/// cannot apply incorrectly is cheaper than remembering the rule at each call.
+pub(super) struct MachineAnswers {
+    answers: veld_core::values::VarOverrides,
+    /// Names that reached the database, so a later `veld stop` can resolve them.
+    stored: std::collections::BTreeSet<String>,
+}
+
+impl MachineAnswers {
+    pub(super) fn is_empty(&self) -> bool {
+        self.answers.is_empty()
+    }
+
+    /// Apply to whichever orchestrator will actually start.
+    pub(super) fn apply(&self, orchestrator: &mut Orchestrator) {
+        let (saved, per_run): (
+            veld_core::values::VarOverrides,
+            veld_core::values::VarOverrides,
+        ) = self
+            .answers
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .partition(|(k, _)| self.stored.contains(k));
+        if !saved.is_empty() {
+            orchestrator.set_var_answers(saved, veld_core::orchestrator::VarProvenance::Project);
+        }
+        if !per_run.is_empty() {
+            orchestrator.set_var_answers(per_run, veld_core::orchestrator::VarProvenance::Flag);
+        }
+    }
 }
 
 /// The refusal shown when there is no way to ask.

@@ -172,7 +172,22 @@ pub async fn run(name: Option<String>, debug: bool) -> i32 {
     // orchestrator reads only the store, so a prompt answer the user chose not
     // to save is lost — after the environment has already been torn down.
     if !machine_answers.is_empty() {
-        orchestrator.set_var_answers(machine_answers);
+        machine_answers.apply(&mut orchestrator);
+    }
+    // Same warning `veld start` gives. Restart has no `--var`, so the only
+    // per-run answers it can hold are prompt answers the human declined to save
+    // — which is exactly the stranding case: a later `veld stop` reads only the
+    // store, cannot resolve the var, and then skips *every* `${vars.*}` teardown
+    // step rather than just that one.
+    let stranded = orchestrator.flag_answers_needed_at_teardown(&selections);
+    if !stranded.is_empty() {
+        eprintln!(
+            "Warning: {} answered for this run only, but this project's teardown needs {}. \
+             `veld stop` runs in a different process and cannot see them, so its \
+             `${{vars.*}}` steps will be skipped. Use `veld config set` if teardown has to work.",
+            stranded.join(", "),
+            if stranded.len() == 1 { "it" } else { "them" },
+        );
     }
 
     match orchestrator.start(&selections, run_name, origin).await {

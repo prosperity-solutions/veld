@@ -394,7 +394,7 @@ fn build_graph_snapshot(
     plan: &[Vec<NodeSelection>],
     started_from: Option<crate::state::StartOrigin>,
     overrides: &crate::values::VarOverrides,
-    provenance: &std::collections::BTreeMap<String, String>,
+    provenance: &std::collections::BTreeMap<String, VarProvenance>,
 ) -> crate::state::GraphSnapshot {
     let mut nodes = std::collections::BTreeMap::new();
     // The FULL resolved graph, deliberately including the oneshot terminal
@@ -454,7 +454,7 @@ fn build_graph_snapshot(
         .map(|(name, _)| crate::state::VarOverrideSnapshot {
             name: name.clone(),
             from: match provenance.get(name) {
-                Some(from) if overrides.contains_key(name) => from.clone(),
+                Some(from) if overrides.contains_key(name) => from.as_str().to_owned(),
                 _ => "default".to_owned(),
             },
         })
@@ -639,6 +639,48 @@ struct NodeExecutionResult {
     server_handle: Option<process::ServerHandle>,
 }
 
+/// Where an in-effect machine-var answer came from.
+///
+/// `has_row` is the question every consumer actually asks — "can a later
+/// `veld stop`, running in a fresh process that reads only the store, resolve
+/// this?" — so it is derived here rather than tracked in a second collection
+/// that has to be kept in step. Three review rounds produced a bug in that seam;
+/// this type is what makes the bug unrepresentable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VarProvenance {
+    /// A stored row shared by every worktree of the project.
+    Project,
+    /// A stored row scoped to this checkout.
+    Worktree,
+    /// Answered for this run only — `--var`, or a prompt answer the human chose
+    /// not to save. No row backs it, and it does not survive this process.
+    Flag,
+}
+
+impl VarProvenance {
+    pub fn from_scope(scope: crate::db::OverrideScope) -> Self {
+        match scope {
+            crate::db::OverrideScope::Project => Self::Project,
+            crate::db::OverrideScope::Worktree => Self::Worktree,
+        }
+    }
+
+    /// Whether a row in the database backs this answer — i.e. whether a process
+    /// that reads only the store can resolve it.
+    pub fn has_row(self) -> bool {
+        matches!(self, Self::Project | Self::Worktree)
+    }
+
+    /// The string recorded in a run snapshot.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Project => "project",
+            Self::Worktree => "worktree",
+            Self::Flag => "flag",
+        }
+    }
+}
+
 pub struct Orchestrator {
     pub config: VeldConfig,
     pub config_path: PathBuf,
@@ -686,18 +728,15 @@ pub struct Orchestrator {
     var_overrides: crate::values::VarOverrides,
     /// Where each answer above came from, kept beside the values rather than
     /// inside them so resolution stays a plain name→value lookup while the run
-    /// snapshot can still record provenance. `"project"` / `"worktree"` for a
-    /// stored row, `"flag"` for a `--var` answer that no row backs.
-    var_provenance: std::collections::BTreeMap<String, String>,
-    /// Names that had a **stored row** when this orchestrator was built.
+    /// snapshot can still record provenance.
     ///
-    /// Separate from `var_provenance`, which a `--var` answer overwrites: the
-    /// fact "a row exists in the database" survives being shadowed for one run,
-    /// and [`Self::flag_answers_needed_at_teardown`] needs it. Without it, a var
-    /// that *is* stored and merely re-answered with `--var` was reported as one a
-    /// later `veld stop` could not see — and the user was told to
-    /// `veld config set` something they had already set.
-    var_names_with_rows: std::collections::BTreeSet<String>,
+    /// **One typed map, not a string plus a parallel set of "names that have a
+    /// row".** Three review rounds each produced a bug in this seam, and every
+    /// one was the same shape: two collections that had to agree and did not.
+    /// [`VarProvenance::has_row`] is now *derived* from the provenance rather
+    /// than tracked beside it, so "labelled a flag answer while a row exists" is
+    /// unrepresentable instead of merely avoided.
+    var_provenance: std::collections::BTreeMap<String, VarProvenance>,
     /// Project `vars`, resolved once during `start`. Stashed so `run_terminal` and
     /// the `on_stop` path reuse the same values rather than re-running a source
     /// command — two resolutions of a rotating credential would disagree.
@@ -741,11 +780,10 @@ impl Orchestrator {
                 tracing::warn!(error = %e, "could not read machine var overrides; using config defaults");
                 Default::default()
             });
-        let var_provenance: std::collections::BTreeMap<String, String> = stored
+        let var_provenance: std::collections::BTreeMap<String, VarProvenance> = stored
             .iter()
-            .map(|(k, v)| (k.clone(), v.scope.to_string()))
+            .map(|(k, v)| (k.clone(), VarProvenance::from_scope(v.scope)))
             .collect();
-        let var_names_with_rows = stored.keys().cloned().collect();
         let var_overrides: crate::values::VarOverrides =
             stored.into_iter().map(|(k, v)| (k, v.value)).collect();
         Ok(Self {
@@ -756,7 +794,6 @@ impl Orchestrator {
             project_id,
             var_overrides,
             var_provenance,
-            var_names_with_rows,
             db,
             port_allocator: PortAllocator::new(),
             helper_client: HelperClient::default_client(),
@@ -782,19 +819,19 @@ impl Orchestrator {
 
     /// Supply per-run var answers (`veld start --var NAME=VALUE`).
     ///
-    /// These sit **above** the stored machine answers and are never written
-    /// anywhere: a value that is right for one run is not an answer about the
-    /// machine, and the whole point of the store is that what is in it was
-    /// chosen deliberately.
-    pub fn set_var_answers(&mut self, answers: crate::values::VarOverrides) {
+    /// These sit **above** the stored machine answers. Whether they were also
+    /// *written* to the store is the caller's business and is expressed by the
+    /// `provenance` it passes — which is why that argument exists rather than
+    /// this function assuming `Flag`. An answer given at a prompt and saved is
+    /// backed by a row and must say so, or the teardown warning fires for a var
+    /// the user just set, and the run snapshot records the wrong origin.
+    pub fn set_var_answers(
+        &mut self,
+        answers: crate::values::VarOverrides,
+        provenance: VarProvenance,
+    ) {
         for (name, value) in answers {
-            // Its own provenance, not `default` and not a scope. "default" would
-            // claim the config supplied a value it did not, and a scope would
-            // imply a stored row that does not exist — and a `--var` answer is
-            // the most volatile difference two runs of one commit can have, so
-            // labelling it as either is exactly the case the snapshot exists to
-            // distinguish.
-            self.var_provenance.insert(name.clone(), "flag".to_owned());
+            self.var_provenance.insert(name.clone(), provenance);
             self.var_overrides.insert(name, value);
         }
     }
@@ -849,11 +886,11 @@ impl Orchestrator {
         let mut out: Vec<String> = self
             .var_provenance
             .iter()
-            .filter(|(name, from)| from.as_str() == "flag" && needed.contains(name.as_str()))
-            // A var that also has a stored row is fine: `veld stop` rebuilds
-            // from the store and resolves it there, so warning would send the
-            // user to `veld config set` for something already set.
-            .filter(|(name, _)| !self.var_names_with_rows.contains(name.as_str()))
+            // `!has_row` is the whole condition: a var backed by a row — whether
+            // it was stored before this run or saved during its prompt — is one
+            // `veld stop` can resolve from the store, so warning about it would
+            // send the user to `veld config set` for something already set.
+            .filter(|(name, from)| !from.has_row() && needed.contains(name.as_str()))
             // A var with a default is fine: stop falls back to it.
             .filter(|(name, _)| {
                 self.config
@@ -4548,6 +4585,7 @@ mod tests {
                 crate::config::ConfigValue::literal("containerd"),
             )]
             .into(),
+            VarProvenance::Flag,
         );
         let missing = orch.unanswered_vars(&sels).expect("expands");
         assert_eq!(missing.len(), 1);
@@ -4556,6 +4594,60 @@ mod tests {
             missing[0].stale.as_deref(),
             Some("containerd"),
             "a non-secret stale literal is shown, so the human can see what to replace"
+        );
+    }
+
+    /// **The seam that produced a defect in three consecutive review rounds.**
+    ///
+    /// The teardown warning must fire for an answer no database row backs, and
+    /// stay silent for one that has a row — including an answer saved at the
+    /// prompt during *this* run. Every earlier version tracked "has a row" beside
+    /// the provenance and let the two disagree; `VarProvenance::has_row` derives
+    /// it, so the disagreement is unrepresentable. This test is what says so.
+    #[tokio::test]
+    async fn only_an_answer_without_a_row_is_reported_as_stranded_at_teardown() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config: VeldConfig = serde_json::from_str(
+            r#"{
+                "schemaVersion": "3",
+                "name": "testcfg",
+                "vars": { "token": { "machine": { "prompt": "?" } } },
+                "teardown": [ { "name": "rm", "shell": "echo ${vars.token}" } ],
+                "nodes": {
+                    "task": { "default_variant": "local", "variants": {
+                        "local": { "type": "command", "shell": "true" }
+                    }}
+                }
+            }"#,
+        )
+        .unwrap();
+        let sels = vec![NodeSelection {
+            node: "task".to_owned(),
+            variant: "local".to_owned(),
+        }];
+        let answer = || {
+            std::collections::BTreeMap::from([(
+                "token".to_owned(),
+                crate::config::ConfigValue::literal("t"),
+            )])
+        };
+
+        let mut orch = test_orchestrator(tmp.path(), config.clone());
+        orch.set_var_answers(answer(), VarProvenance::Flag);
+        assert_eq!(
+            orch.flag_answers_needed_at_teardown(&sels),
+            vec!["token".to_owned()],
+            "a per-run answer is invisible to the `veld stop` that runs later"
+        );
+
+        // The same value, saved to the store during this run's prompt. `veld
+        // stop` reads the store, so there is nothing to warn about — and warning
+        // would tell the user to set something they just set.
+        let mut orch = test_orchestrator(tmp.path(), config);
+        orch.set_var_answers(answer(), VarProvenance::Project);
+        assert!(
+            orch.flag_answers_needed_at_teardown(&sels).is_empty(),
+            "an answer backed by a row is resolvable at stop time"
         );
     }
 
@@ -4572,7 +4664,6 @@ mod tests {
             project_id: crate::project_id::ProjectId::from_stored(project_root.to_string_lossy()),
             var_overrides: Default::default(),
             var_provenance: Default::default(),
-            var_names_with_rows: Default::default(),
             db,
             port_allocator: PortAllocator::new(),
             helper_client: HelperClient::default_client(),
