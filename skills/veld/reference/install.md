@@ -43,6 +43,25 @@ macOS then refuses the first launch of an app that is not notarized, while curl
 sets no such flag. macOS only — on Linux the AppImage updates itself and a `.deb`
 belongs to the package manager.
 
+**An app operation never touches the CLI.** `veld desktop install|update` runs
+the installer with `VELD_DESKTOP_ONLY=1`, which skips the CLI tarball, the binary
+swap, the service restarts and the sudo negotiation entirely — so updating the
+app cannot restart your daemon or ask for a password.
+
+| Variable | Effect |
+|---|---|
+| `VELD_DESKTOP=0` | Skip the app. The opt-out for a CI box or a server |
+| `VELD_DESKTOP_ONLY=1` | Install *only* the app: no CLI, no services, no sudo. macOS only |
+| `VELD_DESKTOP_DIR=<dir>` | Where the app lives. When set it is the **only** location consulted, by the installer and by `veld desktop status` |
+
+The app's own *Check for Updates…* takes the same route: it spawns
+`veld desktop update`, quits so its bundle can be replaced, and the CLI reopens
+it. Because nothing is watching a terminal on that path, the installer's output
+goes to `~/.veld/desktop-update.log` and the outcome to
+`~/.veld/desktop-update.json`, which the app reads when it comes back — a failed
+update reaches you as a dialog with the reason, not as an app that quietly
+reopened on the old version.
+
 ## Updating
 
 ```bash

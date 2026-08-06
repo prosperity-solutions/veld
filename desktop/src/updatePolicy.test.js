@@ -2,8 +2,10 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 
 const {
+  cliCandidatePaths,
   compareVersions,
   downloadOnlyReason,
+  looksLikeVeldCli,
   releasePageUrl,
   updateMode,
   versionSkew,
@@ -161,4 +163,40 @@ test("releasePageUrl points at the tag, or at latest without one", () => {
     releasePageUrl(undefined),
     "https://github.com/prosperity-solutions/veld/releases/latest",
   );
+});
+
+test("the user-writable CLI directory is probed last", () => {
+  // Not a style preference: whatever `findCli` returns is spawned *detached* by
+  // a GUI app. `~/.local/bin` is writable by anything already running as this
+  // user, the two system prefixes are not — so a dropped file named `veld` may
+  // only win on a machine that has no system install at all.
+  const paths = cliCandidatePaths({ home: "/Users/x" });
+  assert.deepEqual(paths, [
+    "/usr/local/bin/veld",
+    "/opt/homebrew/bin/veld",
+    "/Users/x/.local/bin/veld",
+  ]);
+  assert.equal(
+    paths.indexOf("/Users/x/.local/bin/veld"),
+    paths.length - 1,
+    "the user-writable candidate must be last, or the trust order is inverted",
+  );
+});
+
+test("looksLikeVeldCli accepts the CLI's own --version and nothing looser", () => {
+  // What `veld --version` actually prints (clap).
+  assert.equal(looksLikeVeldCli("veld 16.6.0"), true);
+  assert.equal(looksLikeVeldCli("  veld 16.6.0\n"), true);
+  assert.equal(looksLikeVeldCli("veld v16.6.0"), true);
+
+  // The point of the check: being executable and being named `veld` is not the
+  // same as being veld, and this is the only thing standing between the two.
+  assert.equal(looksLikeVeldCli("veld"), false);
+  assert.equal(looksLikeVeldCli("veldctl 1.2.3"), false);
+  assert.equal(looksLikeVeldCli("this is not veld 1.2.3"), false);
+  assert.equal(looksLikeVeldCli("bash: veld: command not found"), false);
+  assert.equal(looksLikeVeldCli(""), false);
+  for (const junk of [null, undefined, {}, 12, ["veld 1.0.0"]]) {
+    assert.equal(looksLikeVeldCli(junk), false, `${JSON.stringify(junk)} is not veld`);
+  }
 });

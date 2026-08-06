@@ -167,10 +167,52 @@ function releasePageUrl(version) {
   return `https://github.com/${GITHUB_REPO}/releases/${tag}`;
 }
 
+/**
+ * Where to look for the veld CLI, in the order the app is willing to trust.
+ *
+ * A GUI app has no usable PATH — a launchd-started one gets a bare service PATH
+ * — so `which veld` is not a question that can be asked. These are the
+ * directories `install.sh` writes to.
+ *
+ * **The order is a trust decision, not a preference.** Whatever this resolves to
+ * is spawned *detached* by the app, so it must not be the first thing that can
+ * drop a file named `veld` somewhere. `~/.local/bin` is writable by anything
+ * already running as the user and comes last, so it only wins on a machine with
+ * no system install at all — which is also the machine `install.sh` puts it on.
+ *
+ * @param {{home: string}} ctx
+ * @returns {string[]}
+ */
+function cliCandidatePaths({ home }) {
+  return [
+    "/usr/local/bin/veld",
+    "/opt/homebrew/bin/veld",
+    `${home}/.local/bin/veld`,
+  ];
+}
+
+/**
+ * Whether `veld --version` output came from the veld CLI.
+ *
+ * Being executable and being named `veld` is not the same as being veld, and the
+ * consequence of confusing them is a GUI app spawning an arbitrary binary
+ * detached. The CLI prints `veld <semver>` (clap's `--version`), so that is what
+ * this accepts — and nothing that merely mentions the word.
+ *
+ * @param {string | null | undefined} output
+ * @returns {boolean}
+ */
+function looksLikeVeldCli(output) {
+  if (typeof output !== "string") return false;
+  return /^veld\s+v?\d+\.\d+\.\d+/i.test(output.trim());
+}
+
 module.exports = {
   GITHUB_REPO,
+  cliCandidatePaths,
   compareVersions,
   downloadOnlyReason,
+  looksLikeVeldCli,
   releasePageUrl,
   updateMode,
   versionSkew,

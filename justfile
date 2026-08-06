@@ -332,6 +332,21 @@ lint:
     # only — no dependency to install — and the drift it catches is invisible
     # to every other check in this recipe.
     just favicon
+    just shellcheck
+
+# Parse and lint `install.sh` — the one program here that `curl | bash` runs and
+# that no compiler, test or linter reads. `--severity=warning` is where the file
+# sits clean; the remaining `info` diagnostics are deliberate. Mirrors the
+# `schema` job's step, so a local run catches what CI would.
+shellcheck:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    bash -n install.sh
+    if command -v shellcheck >/dev/null 2>&1; then
+      shellcheck --severity=warning install.sh
+    else
+      echo "shellcheck not installed — skipping (brew install shellcheck). CI runs it."
+    fi
 
 # Assert every surface's inlined favicon still matches website/favicon.svg
 # (docs/branding.md). Five copies across HTML, Rust, and JS, tied together by

@@ -7,18 +7,28 @@
 //! opens — no Developer ID required. The trust boundary is unchanged, since the
 //! script came from the same origin and the archive is checksum-verified.
 //!
-//! All three subcommands are thin: the work lives in the install script, so that
-//! `veld update` keeps the app in step without a second implementation of
-//! download-verify-install (`veld_core::setup::install_desktop`).
+//! The work lives in the install script, so that `veld update` keeps the app in
+//! step without a second implementation of download-verify-install
+//! (`veld_core::setup::install_desktop`). What lives *here* is everything the
+//! script cannot do from inside itself: knowing whether the app actually moved,
+//! and — when the app handed its own update over and quit — making sure the user
+//! ends up with a window and an explanation rather than neither.
+
+use std::path::{Path, PathBuf};
 
 use crate::output;
 
 /// `veld desktop install` / `veld desktop update`.
 ///
-/// `wait_pid` and `relaunch` exist for the app updating *itself*: it hands off to
-/// the CLI and quits, because an Electron app reads from its own bundle while it
-/// runs and cannot be swapped underneath.
-pub async fn install(version: Option<String>, wait_pid: Option<u32>, relaunch: bool) -> i32 {
+/// `wait_pid`, `relaunch` and `app_path` exist for the app updating *itself*: it
+/// hands off to the CLI and quits, because an Electron app reads from its own
+/// bundle while it runs and cannot be swapped underneath.
+pub async fn install(
+    version: Option<String>,
+    wait_pid: Option<u32>,
+    relaunch: bool,
+    app_path: Option<PathBuf>,
+) -> i32 {
     if std::env::consts::OS != "macos" {
         output::print_error(
             "Veld Desktop is installed by this command on macOS only. On Linux, download the \
@@ -33,43 +43,141 @@ pub async fn install(version: Option<String>, wait_pid: Option<u32>, relaunch: b
     // not caught up to yet — otherwise it would be reinstalled at the CLI's version
     // and offered the newer one again on every launch.
     let version = version.unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
-    output::print_info(&format!("Installing Veld Desktop {version}..."));
 
-    if let Err(e) = veld_core::setup::install_desktop(&version, wait_pid, relaunch).await {
-        output::print_error(&format!("Could not install Veld Desktop: {e}"), false);
-        return 1;
+    // The bundle the app is running from, not wherever an installer would guess.
+    // Passed as `process.execPath`, which is
+    // `…/Veld.app/Contents/MacOS/Veld` — four levels below the directory the
+    // script needs. Anything that does not look like a bundle is dropped rather
+    // than passed on: an unexpected shape would otherwise become a
+    // `VELD_DESKTOP_DIR` and install the app somewhere arbitrary.
+    let app_dir = app_path.as_deref().and_then(bundle_dir_of);
+    if app_path.is_some() && app_dir.is_none() {
+        output::print_error(
+            &format!(
+                "Ignoring --app-path {}: it is not inside a Veld.app bundle.",
+                app_path.as_deref().unwrap_or(Path::new("")).display(),
+            ),
+            false,
+        );
     }
 
-    // The script is fetched from veld.oss.life.li, not from this checkout, so a
-    // published copy older than this feature simply has no desktop section: it
-    // exits 0 having installed nothing. Without this check the command would
-    // report success and the app would never appear.
-    match veld_core::setup::desktop_app_status() {
-        Some((path, installed)) if installed.as_deref() == Some(version.as_str()) => {
+    // Only the app passes a pid, and only the app is not watching this terminal.
+    let handoff = wait_pid.is_some();
+    let log = if handoff {
+        veld_core::setup::desktop_update_log_path()
+    } else {
+        None
+    };
+
+    output::print_info(&format!("Installing Veld Desktop {version}..."));
+    if let Some(path) = &log {
+        output::print_info(&format!("Logging to {}", path.display()));
+    }
+
+    let opts = veld_core::setup::DesktopInstall {
+        wait_pid,
+        relaunch,
+        app_dir: app_dir.clone(),
+        log,
+    };
+
+    let outcome = match veld_core::setup::install_desktop(&version, &opts).await {
+        // "install script exited with code 1" is true and useless. The script
+        // already said why — into the log, where on the handoff path nobody was
+        // going to look — so lift that line into the message the user gets.
+        Err(e) => Err(match opts.log.as_deref().and_then(last_diagnostic) {
+            Some(reason) => format!("{reason} ({e})"),
+            None => format!("{e}"),
+        }),
+        // The script is fetched from veld.oss.life.li, not from this checkout, so
+        // a published copy older than this feature simply has no desktop section:
+        // it exits 0 having installed nothing. Without this check the command
+        // would report success and the app would never appear.
+        Ok(()) => match veld_core::setup::desktop_app_status_in(app_dir.as_deref()) {
+            Some((path, installed)) if installed.as_deref() == Some(version.as_str()) => Ok(path),
+            Some((path, installed)) => Err(format!(
+                "the installer left Veld Desktop at {} ({}), not {version}. Its install script \
+                 may predate this command — try again after the next release.",
+                path.display(),
+                installed.as_deref().unwrap_or("unknown version"),
+            )),
+            None => Err(
+                "the installer did not place Veld Desktop. Its install script may predate this \
+                 command — try again after the next release."
+                    .to_string(),
+            ),
+        },
+    };
+
+    if handoff {
+        veld_core::setup::write_desktop_update_report(
+            &version,
+            outcome.as_ref().map(|_| ()).map_err(|e| e.as_str()),
+        );
+    }
+
+    match outcome {
+        Ok(path) => {
             output::print_success(&format!("Veld Desktop {version} — {}", path.display()));
             0
         }
-        Some((path, installed)) => {
-            output::print_error(
-                &format!(
-                    "The installer left Veld Desktop at {} ({}), not {version}. Its install \
-                     script may predate this command — try again after the next release.",
-                    path.display(),
-                    installed.as_deref().unwrap_or("unknown version"),
-                ),
-                false,
-            );
-            1
-        }
-        None => {
-            output::print_error(
-                "The installer did not place Veld Desktop. Its install script may predate this \
-                 command — try again after the next release.",
-                false,
-            );
+        Err(e) => {
+            output::print_error(&format!("Could not install Veld Desktop: {e}"), false);
+            // The script relaunches the app on every one of *its* exit paths, but
+            // it never ran if the failure was reaching it at all — no network for
+            // the script itself, bash missing, a 500 from the host. The app quit
+            // for this, so bringing it back is this process's job too. `open` on a
+            // running app focuses it, so doing it twice is harmless.
+            if relaunch {
+                relaunch_app(app_dir.as_deref());
+            }
             1
         }
     }
+}
+
+/// The directory containing the `Veld.app` that `exe` runs from.
+///
+/// `…/Veld.app/Contents/MacOS/Veld` → `…`. Returns `None` for anything that is
+/// not an absolute path with a `Veld.app` in it — better to fall back to the
+/// script's own search than to install into a directory nobody named. A relative
+/// path is refused for the same reason: the script runs from wherever the CLI
+/// happened to be spawned, which under launchd is `/`.
+fn bundle_dir_of(exe: &Path) -> Option<PathBuf> {
+    let bundle = exe
+        .ancestors()
+        .find(|p| p.file_name().is_some_and(|n| n == "Veld.app"))?;
+    bundle
+        .parent()
+        .filter(|p| p.is_absolute())
+        .map(|p| p.to_path_buf())
+}
+
+/// The last thing the install script complained about, if it complained.
+///
+/// The script's own `Error:`/`Warning:` lines are the only place the *reason* for
+/// a failed handoff exists — the exit code carries none of it, and on that path
+/// there is no terminal to have watched. Last rather than first: the script warns
+/// and continues in places, so the final complaint is the one that ended it.
+fn last_diagnostic(log: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(log).ok()?;
+    text.lines()
+        .rev()
+        .map(str::trim)
+        .find(|l| l.starts_with("Error:") || l.starts_with("Warning:"))
+        // Long enough for any line the script emits, short enough that a
+        // runaway one cannot become the whole dialog.
+        .map(|l| l.chars().take(300).collect())
+}
+
+/// Reopen the app after a failure that stopped the script from doing it.
+fn relaunch_app(app_dir: Option<&Path>) {
+    let Some((path, _)) = veld_core::setup::desktop_app_status_in(app_dir) else {
+        return;
+    };
+    let _ = std::process::Command::new("/usr/bin/open")
+        .arg(&path)
+        .status();
 }
 
 /// `veld desktop status` -- where the app is and whether it matches this CLI.
@@ -118,5 +226,70 @@ pub async fn status(json: bool) -> i32 {
             }
             0
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bundle_dir_is_the_directory_the_app_lives_in() {
+        assert_eq!(
+            bundle_dir_of(Path::new("/Applications/Veld.app/Contents/MacOS/Veld")),
+            Some(PathBuf::from("/Applications")),
+        );
+        assert_eq!(
+            bundle_dir_of(Path::new(
+                "/Users/x/Applications/Veld.app/Contents/MacOS/Veld"
+            )),
+            Some(PathBuf::from("/Users/x/Applications")),
+        );
+    }
+
+    #[test]
+    fn the_reported_failure_is_the_scripts_last_complaint() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("log.txt");
+        // The script warns and carries on in places, so the *last* complaint is
+        // the one that ended the run — and it is the only place the reason
+        // exists, since the exit code carries none of it.
+        std::fs::write(
+            &log,
+            "Downloading checksums...\nWarning: checksums.txt not available\nVerifying...\nError: checksum verification failed for veld-desktop-1.0.0-mac-arm64.zip\nsome trailing noise\n",
+        )
+        .unwrap();
+        assert_eq!(
+            last_diagnostic(&log).as_deref(),
+            Some("Error: checksum verification failed for veld-desktop-1.0.0-mac-arm64.zip"),
+        );
+
+        // Nothing to lift: the caller keeps its own message rather than
+        // inventing one.
+        std::fs::write(&log, "all fine\n").unwrap();
+        assert_eq!(last_diagnostic(&log), None);
+        assert_eq!(last_diagnostic(&dir.path().join("nope.txt")), None);
+
+        // A pathological line cannot become the whole dialog.
+        std::fs::write(&log, format!("Error: {}\n", "x".repeat(5000))).unwrap();
+        assert_eq!(last_diagnostic(&log).unwrap().chars().count(), 300);
+    }
+
+    #[test]
+    fn a_path_with_no_bundle_in_it_is_refused_rather_than_guessed() {
+        // The failure this guards: anything returned here becomes
+        // `VELD_DESKTOP_DIR`, i.e. the one directory the installer will consider.
+        assert_eq!(bundle_dir_of(Path::new("/usr/local/bin/veld")), None);
+        assert_eq!(
+            bundle_dir_of(Path::new("/Applications/Other.app/Contents/MacOS/Other")),
+            None
+        );
+        // Relative: the CLI's working directory under launchd is `/`, so this
+        // would resolve somewhere neither the app nor the user meant.
+        assert_eq!(bundle_dir_of(Path::new("Veld.app")), None);
+        assert_eq!(
+            bundle_dir_of(Path::new("dist/Veld.app/Contents/MacOS/Veld")),
+            None
+        );
     }
 }

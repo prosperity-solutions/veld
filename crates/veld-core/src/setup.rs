@@ -1543,8 +1543,39 @@ pub fn is_newer(latest: &str, current: &str) -> bool {
 }
 
 /// Download and run the install script to update to the given version.
+///
+/// The CLI half only. `VELD_DESKTOP=0` is explicit rather than left to the
+/// script's default, because the default is now "install the app too" and this
+/// is not the code path that decides that — `update_desktop_if_stale` is, and it
+/// runs afterwards with a version of its own. Leaving it implicit would also let
+/// an ambient `VELD_DESKTOP` in the caller's environment decide whether a GUI app
+/// gets installed.
 pub async fn perform_update(version: &str) -> Result<(), anyhow::Error> {
-    run_install_script(version, &[]).await
+    run_install_script(version, &[("VELD_DESKTOP".into(), "0".into())], None).await
+}
+
+/// What `install_desktop` needs to know. A struct rather than five positional
+/// arguments because three of them are `Option`s that mean nothing to a reader at
+/// the call site.
+#[derive(Debug, Default, Clone)]
+pub struct DesktopInstall {
+    /// Wait for this process to exit before replacing the bundle — how the app
+    /// updates itself, since an Electron app reads from its own bundle while it
+    /// runs.
+    pub wait_pid: Option<u32>,
+    /// Reopen the app when the script is done, whatever the outcome.
+    pub relaunch: bool,
+    /// The directory holding the bundle to replace, when the caller knows it.
+    ///
+    /// The app passes its own (`dirname(process.execPath)`'s bundle), because
+    /// otherwise the script picks `/Applications` and an app running from
+    /// anywhere else gets a *second* copy installed there while the one in the
+    /// user's Dock stays stale.
+    pub app_dir: Option<PathBuf>,
+    /// Where to write the script's output. The app spawns the CLI detached with
+    /// no streams, so without this every word the installer says is discarded —
+    /// including the reason it failed.
+    pub log: Option<PathBuf>,
 }
 
 /// Install or update Veld Desktop, the macOS app.
@@ -1556,45 +1587,79 @@ pub async fn perform_update(version: &str) -> Result<(), anyhow::Error> {
 /// Keeping it in the script also means `veld update` keeps the app in step for
 /// free, rather than through a second implementation of download-and-verify here.
 ///
-/// `wait_pid` makes the script wait for that process to exit before replacing the
-/// bundle — how the app updates itself, since an Electron app reads from its own
-/// bundle while it runs.
-pub async fn install_desktop(
-    version: &str,
-    wait_pid: Option<u32>,
-    relaunch: bool,
-) -> Result<(), anyhow::Error> {
-    let mut env: Vec<(String, String)> = vec![("VELD_DESKTOP".into(), "1".into())];
-    if let Some(pid) = wait_pid {
+/// Runs with `VELD_DESKTOP_ONLY=1`, which is what makes this an *app* operation:
+/// the script skips the CLI tarball, the binary swap, the sudo negotiation, the
+/// service restarts and the PATH edits entirely. Without it, updating an app
+/// bounced the daemon and could prompt for a password.
+pub async fn install_desktop(version: &str, opts: &DesktopInstall) -> Result<(), anyhow::Error> {
+    let mut env: Vec<(String, String)> = vec![
+        ("VELD_DESKTOP".into(), "1".into()),
+        ("VELD_DESKTOP_ONLY".into(), "1".into()),
+    ];
+    if let Some(pid) = opts.wait_pid {
         env.push(("VELD_DESKTOP_WAIT_PID".into(), pid.to_string()));
     }
-    if relaunch {
+    if opts.relaunch {
         env.push(("VELD_DESKTOP_RELAUNCH".into(), "1".into()));
     }
-    run_install_script(version, &env).await
+    if let Some(dir) = &opts.app_dir {
+        env.push((
+            "VELD_DESKTOP_DIR".into(),
+            dir.to_string_lossy().into_owned(),
+        ));
+    }
+    run_install_script(version, &env, opts.log.as_deref()).await
+}
+
+/// A local install script to run instead of fetching the published one.
+///
+/// Test hook. Rejects anything that is not an absolute path to an existing file,
+/// so a stray or relative value falls back to the real thing rather than
+/// silently running something else — or nothing.
+fn install_script_override() -> Option<PathBuf> {
+    let raw = std::env::var_os("VELD_INSTALL_SCRIPT").filter(|v| !v.is_empty())?;
+    let path = PathBuf::from(raw);
+    (path.is_absolute() && path.is_file()).then_some(path)
 }
 
 /// Download and run the install script with the given version pinned.
+///
+/// `log`, when given, receives the script's stdout and stderr instead of this
+/// process's.
 async fn run_install_script(
     version: &str,
     extra_env: &[(String, String)],
+    log: Option<&std::path::Path>,
 ) -> Result<(), anyhow::Error> {
-    let install_url = "https://veld.oss.life.li/get".to_string();
+    let script = match install_script_override() {
+        // A *local file path*, never a URL — deliberately, because the whole
+        // value of this hook is that it cannot change where code comes from. It
+        // reads a file the caller could already have run with `bash` themselves,
+        // and it is the only way to exercise the contract between this function
+        // and `install.sh`: the published script is what production fetches, so
+        // an unreleased change to the script is otherwise unreachable from here.
+        // `tests/install_script_contract.rs` is the reason it exists.
+        Some(path) => std::fs::read_to_string(&path)
+            .with_context(|| format!("failed to read VELD_INSTALL_SCRIPT {}", path.display()))?,
+        None => {
+            let install_url = "https://veld.oss.life.li/get".to_string();
 
-    let client = reqwest::Client::builder()
-        .user_agent(format!("veld/{}", env!("CARGO_PKG_VERSION")))
-        .timeout(Duration::from_secs(30))
-        .build()
-        .context("failed to build HTTP client")?;
+            let client = reqwest::Client::builder()
+                .user_agent(format!("veld/{}", env!("CARGO_PKG_VERSION")))
+                .timeout(Duration::from_secs(30))
+                .build()
+                .context("failed to build HTTP client")?;
 
-    let script = client
-        .get(&install_url)
-        .send()
-        .await
-        .context("failed to download install script")?
-        .text()
-        .await
-        .context("failed to read install script")?;
+            client
+                .get(&install_url)
+                .send()
+                .await
+                .context("failed to download install script")?
+                .text()
+                .await
+                .context("failed to read install script")?
+        }
+    };
 
     // Run the install script with the target version pinned, in
     // non-interactive mode (skip the `veld setup` prompt at the end).
@@ -1603,8 +1668,38 @@ async fn run_install_script(
         .arg(&script)
         .env("VELD_VERSION", version)
         .env("VELD_NON_INTERACTIVE", "1");
+
+    // The handoff knobs are pure mechanics — which pid to wait for, whether to
+    // reopen the app — and never something a user's shell should be able to
+    // supply. Clear them, then let `extra_env` put back exactly what this call
+    // asked for. `VELD_DESKTOP_DIR` is deliberately NOT in this list: it names
+    // where a machine keeps its apps, so an ambient one is a real answer, and a
+    // caller that knows better overrides it through `extra_env` below.
+    for key in [
+        "VELD_DESKTOP_ONLY",
+        "VELD_DESKTOP_WAIT_PID",
+        "VELD_DESKTOP_RELAUNCH",
+    ] {
+        cmd.env_remove(key);
+    }
+
     for (key, value) in extra_env {
         cmd.env(key, value);
+    }
+
+    if let Some(path) = log {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        // Truncated per run on purpose: this is "what happened the last time",
+        // read by the app right after it relaunches, not an audit trail.
+        let file = std::fs::File::create(path)
+            .with_context(|| format!("failed to open install log {}", path.display()))?;
+        let err = file
+            .try_clone()
+            .context("failed to duplicate the install log handle")?;
+        cmd.stdout(std::process::Stdio::from(file));
+        cmd.stderr(std::process::Stdio::from(err));
     }
 
     let status = cmd
@@ -1624,17 +1719,32 @@ async fn run_install_script(
 
 /// Where Veld Desktop is installed, and which version, if it is installed at all.
 ///
-/// Mirrors the install script's own search order (`/Applications` before
-/// `~/Applications`) so the CLI reports on the bundle the script would replace.
-pub fn desktop_app_status() -> Option<(PathBuf, Option<String>)> {
+/// Mirrors the install script's own search exactly, including the part that is
+/// easy to miss: when `VELD_DESKTOP_DIR` is set it is the *only* place either
+/// side looks. A machine that sets it and a CLI that ignored it disagreed about
+/// whether the app existed at all — `veld desktop status` said "not installed",
+/// `veld update` never refreshed it, and a second copy landed in `/Applications`.
+///
+/// `app_dir`, when given, overrides both: it is the caller naming the bundle it
+/// means (the app passing its own), not a machine-wide preference.
+pub fn desktop_app_status_in(
+    app_dir: Option<&std::path::Path>,
+) -> Option<(PathBuf, Option<String>)> {
     if std::env::consts::OS != "macos" {
         return None;
     }
 
-    let mut candidates = vec![PathBuf::from("/Applications/Veld.app")];
-    if let Some(home) = dirs::home_dir() {
-        candidates.push(home.join("Applications/Veld.app"));
-    }
+    let candidates: Vec<PathBuf> = if let Some(dir) = app_dir {
+        vec![dir.join("Veld.app")]
+    } else if let Some(dir) = std::env::var_os("VELD_DESKTOP_DIR").filter(|v| !v.is_empty()) {
+        vec![PathBuf::from(dir).join("Veld.app")]
+    } else {
+        let mut c = vec![PathBuf::from("/Applications/Veld.app")];
+        if let Some(home) = dirs::home_dir() {
+            c.push(home.join("Applications/Veld.app"));
+        }
+        c
+    };
 
     let path = candidates.into_iter().find(|p| p.is_dir())?;
     let plist = path.join("Contents/Info.plist");
@@ -1652,6 +1762,53 @@ pub fn desktop_app_status() -> Option<(PathBuf, Option<String>)> {
         .filter(|s| !s.is_empty());
 
     Some((path, version))
+}
+
+/// Where Veld Desktop is installed, honouring `VELD_DESKTOP_DIR`.
+pub fn desktop_app_status() -> Option<(PathBuf, Option<String>)> {
+    desktop_app_status_in(None)
+}
+
+/// `~/.veld/desktop-update.log` — the install script's output from the last app
+/// update the CLI ran on the app's behalf.
+///
+/// `~/.veld` rather than the lib dir, for the same reason the daemon's log moved
+/// there: the lib dir is root-owned on a privileged install, and this is written
+/// by whichever user is running the app.
+pub fn desktop_update_log_path() -> Option<PathBuf> {
+    Some(dirs::home_dir()?.join(".veld").join("desktop-update.log"))
+}
+
+/// `~/.veld/desktop-update.json` — what to tell the user about that update once
+/// the app is back on screen.
+pub fn desktop_update_report_path() -> Option<PathBuf> {
+    Some(dirs::home_dir()?.join(".veld").join("desktop-update.json"))
+}
+
+/// Leave a note for the app to read when it relaunches.
+///
+/// The app spawns the CLI detached and quits, so nothing it can await survives to
+/// hear the outcome. Without this, every failure of the handoff — a download that
+/// 404s, a checksum that does not match, a bundle that could not be replaced —
+/// reached the user as an app that reopened on the old version and said nothing.
+///
+/// Best-effort by design: a report that cannot be written must not turn a
+/// successful install into a failed one.
+pub fn write_desktop_update_report(version: &str, result: Result<(), &str>) {
+    let Some(path) = desktop_update_report_path() else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let payload = serde_json::json!({
+        "version": version,
+        "ok": result.is_ok(),
+        "error": result.err(),
+        "log": desktop_update_log_path().map(|p| p.display().to_string()),
+        "finished_at": chrono::Utc::now().to_rfc3339(),
+    });
+    let _ = std::fs::write(&path, payload.to_string());
 }
 
 /// Uninstall Veld from this machine.
@@ -2212,7 +2369,8 @@ fn hang_up_terminal_holders(veld_dir: &Path) {
 #[cfg(test)]
 mod tests {
     use super::{
-        init_lua_loads_veld_spoon, parse_launchctl_pid, parse_systemd_main_pid, remove_spoon_files,
+        init_lua_loads_veld_spoon, install_script_override, parse_launchctl_pid,
+        parse_systemd_main_pid, remove_spoon_files,
     };
 
     /// The happy path of the log preparation, against a real filesystem.
@@ -2280,6 +2438,42 @@ mod tests {
         }
 
         std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    #[test]
+    fn only_an_existing_absolute_file_overrides_the_published_install_script() {
+        // The override exists to make the CLI↔`install.sh` contract testable
+        // (`tests/install_script_contract.rs`), so the one thing it must never do
+        // is quietly change which code runs on a real machine. Anything it does
+        // not recognise falls through to the published script rather than to a
+        // path resolved against whatever directory the CLI was started in —
+        // which, for a process the desktop app spawned, is `/`.
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("install.sh");
+        std::fs::write(&real, "#!/usr/bin/env bash\n").unwrap();
+
+        let cases: [(&std::ffi::OsStr, bool); 6] = [
+            (real.as_os_str(), true),
+            ("".as_ref(), false),
+            ("install.sh".as_ref(), false),
+            ("./install.sh".as_ref(), false),
+            ("/nope/does/not/exist.sh".as_ref(), false),
+            // A directory is not a script, and reading one would fail later
+            // with a confusing error rather than here with none.
+            (dir.path().as_os_str(), false),
+        ];
+
+        for (value, accepted) in cases {
+            // SAFETY: this test's own variable, and nothing else in this module
+            // reads it.
+            unsafe { std::env::set_var("VELD_INSTALL_SCRIPT", value) };
+            assert_eq!(
+                install_script_override().is_some(),
+                accepted,
+                "VELD_INSTALL_SCRIPT={value:?}"
+            );
+        }
+        unsafe { std::env::remove_var("VELD_INSTALL_SCRIPT") };
     }
 
     #[test]

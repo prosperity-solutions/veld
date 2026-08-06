@@ -29,6 +29,15 @@ pub enum DesktopCommand {
         /// Reopen the app once it has been replaced.
         #[arg(long)]
         relaunch: bool,
+
+        /// The running app's executable (`process.execPath`), so the bundle that
+        /// gets replaced is the one the user launched.
+        ///
+        /// Without it the installer picks `/Applications`, and an app running from
+        /// `~/Applications` or a second copy elsewhere gets a *new* install there
+        /// while the one in the Dock stays stale.
+        #[arg(long, hide = true)]
+        app_path: Option<std::path::PathBuf>,
     },
 
     /// Show where the app is installed and whether it matches this CLI.
@@ -911,12 +920,15 @@ async fn main() {
                 commands::desktop::status(false).await
             }
             Some(DesktopCommand::Status { json: true }) => commands::desktop::status(true).await,
-            Some(DesktopCommand::Install) => commands::desktop::install(None, None, false).await,
+            Some(DesktopCommand::Install) => {
+                commands::desktop::install(None, None, false, None).await
+            }
             Some(DesktopCommand::Update {
                 version,
                 wait_pid,
                 relaunch,
-            }) => commands::desktop::install(version, wait_pid, relaunch).await,
+                app_path,
+            }) => commands::desktop::install(version, wait_pid, relaunch, app_path).await,
         },
 
         Command::Uninstall => commands::uninstall::run().await,

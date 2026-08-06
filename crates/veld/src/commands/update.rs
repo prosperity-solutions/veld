@@ -72,6 +72,13 @@ pub async fn run() -> i32 {
                     output::print_info("Restarting services with new binaries...");
                     restart_services(&new_version, helper_dead_privileged).await;
                     super::remove_legacy_hammerspoon().await;
+                    // On this branch too, not only the "already latest" one. The
+                    // CLI install runs with `VELD_DESKTOP=0`, so the app half is
+                    // this call and nothing else — and the case the comment on
+                    // `update_desktop_if_stale` names, an installer skipping a
+                    // *running* app, is far likelier on a real version bump than
+                    // on a no-op update.
+                    update_desktop_if_stale(&new_version).await;
                     0
                 }
                 Err(e) => {
@@ -107,10 +114,11 @@ pub async fn run() -> i32 {
 /// Bring Veld Desktop to `version`, installing it if this machine has none.
 ///
 /// The app and the CLI are two halves of one release, so an update moves both —
-/// the same reason the install script installs the app by default. When the CLI
-/// itself updates, that script does this on its own; this covers the branch where
-/// the CLI was already current, which is also where the "the app was running, so
-/// the installer skipped it" case lands.
+/// the same reason the install script installs the app by default. This is the
+/// *only* thing that moves the app half: `perform_update` runs the script with
+/// `VELD_DESKTOP=0`, so both arms of `veld update` come through here and the app
+/// is downloaded once, not twice. It also covers the case its own name is about —
+/// an installer that skipped a *running* app.
 ///
 /// macOS only, and quiet elsewhere: `desktop_app_status` reports nothing on Linux,
 /// where the AppImage updates itself and a .deb belongs to the package manager.
@@ -134,7 +142,8 @@ async fn update_desktop_if_stale(version: &str) {
         )),
         None => output::print_info(&format!("Installing Veld Desktop {version}...")),
     }
-    if let Err(e) = veld_core::setup::install_desktop(version, None, false)
+    let opts = veld_core::setup::DesktopInstall::default();
+    if let Err(e) = veld_core::setup::install_desktop(version, &opts)
         .await
         .and_then(|()| match veld_core::setup::desktop_app_status() {
             Some((_, v)) if v.as_deref() == Some(version) => Ok(()),
