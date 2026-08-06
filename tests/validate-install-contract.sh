@@ -59,8 +59,26 @@ done
 # These are the two paths that exit before any network call, which is what makes
 # them safe to run here — and running them is what proves the variable names in
 # section 1 are wired to behaviour rather than merely present in both files.
+#
+# Both stub `uname`, so this file asserts the same thing on a Linux runner and on
+# a maintainer's Mac. That is not tidiness: the first version stubbed nothing,
+# passed locally, and failed in CI, because on Linux the macOS-only refusal fires
+# *before* the contradiction check and answers with a different message. A test
+# whose expected output depends on the host it runs on is a test that reports on
+# the host.
+STUB="$(mktemp -d)"
+trap 'rm -rf "$STUB"' EXIT
 
-out="$(VELD_DESKTOP_ONLY=1 VELD_DESKTOP=0 VELD_NON_INTERACTIVE=1 bash "$SCRIPT" 2>&1)"
+stub_uname() { # stub_uname <Darwin|Linux>
+  cat > "$STUB/uname" <<EOF
+#!/bin/sh
+case "\$1" in -s) echo $1 ;; *) exec /usr/bin/uname "\$@" ;; esac
+EOF
+  chmod +x "$STUB/uname"
+}
+
+stub_uname Darwin
+out="$(PATH="$STUB:$PATH" VELD_DESKTOP_ONLY=1 VELD_DESKTOP=0 VELD_NON_INTERACTIVE=1 bash "$SCRIPT" 2>&1)"
 code=$?
 if [ "$code" -eq 1 ] && printf '%s' "$out" | grep -q "contradict"; then
   ok "VELD_DESKTOP_ONLY=1 with VELD_DESKTOP=0 is refused"
@@ -68,14 +86,7 @@ else
   bad "expected exit 1 + 'contradict', got exit ${code}: ${out}"
 fi
 
-# The macOS-only refusal, reached by making the script believe it is on Linux.
-STUB="$(mktemp -d)"
-trap 'rm -rf "$STUB"' EXIT
-cat > "$STUB/uname" <<'EOF'
-#!/bin/sh
-case "$1" in -s) echo Linux ;; *) exec /usr/bin/uname "$@" ;; esac
-EOF
-chmod +x "$STUB/uname"
+stub_uname Linux
 out="$(PATH="$STUB:$PATH" VELD_DESKTOP_ONLY=1 VELD_NON_INTERACTIVE=1 bash "$SCRIPT" 2>&1)"
 code=$?
 if [ "$code" -eq 1 ] && printf '%s' "$out" | grep -q "macOS-only"; then
