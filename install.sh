@@ -147,12 +147,22 @@ DESKTOP_RELAUNCH_PATH="" # bundle to reopen when VELD_DESKTOP_RELAUNCH is set
 cleanup() {
   rm -rf "$TMP_DIR"
 
-  # An interrupted swap leaves the bundle moved aside and nothing in its place;
-  # auto-mode keys off "a directory exists there", so nothing would ever put it
-  # back. Restore it before anything else, because the relaunch below depends
-  # on it.
-  if [ -n "$DESKTOP_SWAP_BACKUP" ] && [ -d "$DESKTOP_SWAP_BACKUP" ] && [ ! -e "$DESKTOP_SWAP_DEST" ]; then
+  # An interrupted swap leaves the bundle moved aside; auto-mode keys off "a
+  # directory exists there", so nothing would ever put it back. Restore it
+  # before anything else, because the relaunch below depends on it.
+  #
+  # Note what is NOT guarded on here: whether the destination is missing. It
+  # very often is not. Ctrl-C during a multi-hundred-megabyte `ditto` kills the
+  # copy partway, so what sits at the destination is *half a bundle* — and an
+  # earlier version of this guard (`[ ! -e "$DESKTOP_SWAP_DEST" ]`) therefore
+  # refused to restore in exactly the interruption it was written for, leaving
+  # the user a broken app, reopening it, and letting the next run's
+  # `rm -rf "${dest}.old"` destroy the only intact copy. These two variables are
+  # non-empty *only* while a swap is in flight — the success path clears them
+  # before removing the backup — so anything at the destination here is rubble.
+  if [ -n "$DESKTOP_SWAP_BACKUP" ] && [ -d "$DESKTOP_SWAP_BACKUP" ]; then
     echo "Restoring the previous Veld Desktop from ${DESKTOP_SWAP_BACKUP}..."
+    rm -rf "$DESKTOP_SWAP_DEST"
     mv "$DESKTOP_SWAP_BACKUP" "$DESKTOP_SWAP_DEST" 2>/dev/null || true
   fi
 
@@ -510,6 +520,18 @@ install_desktop_app() {
   # working app rather than a gap. Recorded in DESKTOP_SWAP_* first: between the
   # `mv` and the `ditto` there is no app at that path, and `cleanup` is what puts
   # it back if the script dies in that window.
+  # Checked again, here, because the check above is a hundred megabytes of
+  # download and an unpack away from this line — and the gap is not theoretical:
+  # the app quits itself to hand this script the update, so a user clicking the
+  # Dock icon while the zip downloads relaunches the very bundle about to be
+  # moved aside. The pid wait is airtight only up to the instant it returns.
+  # This check is free (no network) and closes all but the final microseconds.
+  if pgrep -f -- "^${pattern}" >/dev/null 2>&1; then
+    echo "Veld Desktop started while the update was downloading — not replacing it."
+    echo "  Quit it and re-run, or use the app's own 'Check for Updates…'."
+    return 1
+  fi
+
   rm -rf "${dest}.old" || return 1
   DESKTOP_SWAP_DEST="$dest"
   DESKTOP_SWAP_BACKUP="${dest}.old"
@@ -517,9 +539,22 @@ install_desktop_app() {
     mv "$dest" "${dest}.old" || return 1
   fi
   if ditto "$new_app" "$dest"; then
+    # Signals are ignored across the next three lines, and the reason is narrow
+    # but real: between `ditto` returning 0 and `DESKTOP_SWAP_*` being cleared,
+    # the destination holds a *complete, new* bundle while `cleanup` still
+    # believes a swap is in flight. Bash dispatches traps between simple
+    # commands, so a signal landing in that gap would delete the install that
+    # just succeeded and put the old version back. (The guard removed above,
+    # `[ ! -e "$DESKTOP_SWAP_DEST" ]`, made this window safe by accident — and
+    # made the interrupted-copy case, which is the one that actually happens,
+    # unrecoverable. This closes the window without reopening that.)
+    trap '' INT TERM
     DESKTOP_SWAP_BACKUP=""
     DESKTOP_SWAP_DEST=""
     rm -rf "${dest}.old"
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+
     DESKTOP_APP="$dest"
     echo "Veld Desktop installed to ${dest}"
     return 0

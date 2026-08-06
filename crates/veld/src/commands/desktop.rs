@@ -89,10 +89,16 @@ pub async fn install(
             Some(reason) => format!("{reason} ({e})"),
             None => format!("{e}"),
         }),
-        // The script is fetched from veld.oss.life.li, not from this checkout, so
-        // a published copy older than this feature simply has no desktop section:
-        // it exits 0 having installed nothing. Without this check the command
-        // would report success and the app would never appear.
+        // The script is fetched from veld.oss.life.li, not from this checkout,
+        // and `/get` 302s to `raw.githubusercontent.com/.../main/install.sh`
+        // (website/nginx.conf) — so it tracks **main**, not the release, and
+        // `--version` pins the release *assets* while the program that installs
+        // them is whatever was merged. That is worth knowing in both directions:
+        // an installer fix reaches every already-installed CLI the moment it
+        // merges, and an unreleased change to install.sh is live for everyone
+        // immediately. Either way the script can do something this binary does
+        // not expect, so its success is checked rather than trusted: without
+        // this the command would report success and the app would never appear.
         Ok(()) => match veld_core::setup::desktop_app_status_in(app_dir.as_deref()) {
             Some((path, installed)) if installed.as_deref() == Some(version.as_str()) => Ok(path),
             Some((path, installed)) => Err(format!(

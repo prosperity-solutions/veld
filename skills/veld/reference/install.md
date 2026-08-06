@@ -71,6 +71,11 @@ get CLI access", a sudo sheet — otherwise shows a generic `exec` tile, i.e. as
 the user to approve access to their secrets on behalf of something they cannot
 identify. The icon comes from the installed app, so a machine with
 `VELD_DESKTOP=0` simply skips this; `VELD_BINARY_ICONS=0` skips it explicitly.
+This runs on a full install (`curl | bash` or `veld update`), not on
+`veld desktop install|update` — those are app-only by design and must not touch
+binaries a root helper is among. A machine that installed the app on its own
+therefore keeps the generic icon until its next `veld update`.
+
 One documented cost: a custom icon lives in the file's resource fork, and
 `codesign --verify --strict` rejects a Mach-O carrying one. Plain
 `codesign --verify` passes, the ad-hoc signature is intact, and the binaries run

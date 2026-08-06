@@ -17,10 +17,13 @@
 // laptop is offline more often than a release is broken). A check the user asked
 // for reports every outcome, including "you're up to date".
 
-const { execFileSync, spawn } = require("node:child_process");
+const { execFile, spawn } = require("node:child_process");
 const fs = require("node:fs");
 const os = require("node:os");
+const { promisify } = require("node:util");
 const path = require("node:path");
+
+const execFileAsync = promisify(execFile);
 
 const { Notification, app, dialog, shell } = require("electron");
 const { autoUpdater } = require("electron-updater");
@@ -62,13 +65,15 @@ const updateReportPath = () =>
  * own PATH handling uses: look where the installer puts things, not where a login
  * shell would have found them.
  *
- * Two properties this carries, neither of them cosmetic — both live in
- * `updatePolicy.js`, with tests, because both are claims rather than details:
- * root-owned prefixes are probed before the user-writable one, and being
- * executable is not accepted as being veld. `X_OK` alone would have a GUI app
- * spawn any executable named `veld` that anything running as this user had
- * dropped in `~/.local/bin`, detached — so the candidate has to answer
- * `--version` like the CLI does.
+ * Resolved lazily and re-resolved per check, never at startup: the probes below
+ * spawn processes, and a session outlives a `veld update` that moves the CLI.
+ *
+ * Two claims worth reading precisely, both of which live in `updatePolicy.js`
+ * with tests: the candidate order matches `install.sh`'s own preference and is
+ * **not** a trust boundary (anything able to write to any of these can replace
+ * the real veld), and the `--version` check cannot stop a wrong binary from
+ * running — it is performed by running it — but it does stop one from being
+ * re-spawned detached with the app quitting behind it.
  *
  * @type {string | null}
  */
@@ -77,28 +82,27 @@ let cliPath = null;
 /**
  * Whether `candidate` is really the veld CLI.
  *
+ * Asynchronous, like every probe here: these run on the main thread, and a
+ * candidate that hangs would freeze the window rather than just the check.
+ *
  * @param {string} candidate
- * @returns {boolean}
+ * @returns {Promise<boolean>}
  */
-function isVeldCli(candidate) {
+async function isVeldCli(candidate) {
   try {
     fs.accessSync(candidate, fs.constants.X_OK);
   } catch {
     return false;
   }
   try {
-    return looksLikeVeldCli(
-      execFileSync(candidate, ["--version"], {
-        encoding: "utf8",
-        // Bounded: this runs on every update check, and a candidate that hangs
-        // must not hang the check with it.
-        timeout: 2000,
-        // A bare launchd PATH is enough for `--version`, and an inherited one
-        // would let the environment decide what a subprocess of this resolves to.
-        env: { PATH: SAFE_PATH },
-        stdio: ["ignore", "pipe", "ignore"],
-      }),
-    );
+    const { stdout } = await execFileAsync(candidate, ["--version"], {
+      encoding: "utf8",
+      timeout: 2000,
+      // A bare launchd PATH is enough for `--version`, and an inherited one
+      // would let the environment decide what a subprocess of this resolves to.
+      env: { PATH: SAFE_PATH },
+    });
+    return looksLikeVeldCli(stdout);
   } catch {
     return false;
   }
@@ -120,16 +124,15 @@ function isVeldCli(candidate) {
  * and nothing else — no daemon, no database, no network — so asking is free.
  *
  * @param {string} candidate
- * @returns {boolean}
+ * @returns {Promise<boolean>}
  */
-function cliHandlesDesktop(candidate) {
+async function cliHandlesDesktop(candidate) {
   try {
-    execFileSync(candidate, ["desktop", "status", "--json"], {
+    await execFileAsync(candidate, ["desktop", "status", "--json"], {
       encoding: "utf8",
       // Longer than the `--version` probe: this one shells out to PlistBuddy.
       timeout: 5000,
       env: { PATH: SAFE_PATH },
-      stdio: ["ignore", "pipe", "ignore"],
     });
     return true;
   } catch {
@@ -138,9 +141,12 @@ function cliHandlesDesktop(candidate) {
   }
 }
 
-function findCli() {
+/** @returns {Promise<string | null>} */
+async function findCli() {
   for (const candidate of cliCandidatePaths({ home: app.getPath("home") })) {
-    if (isVeldCli(candidate) && cliHandlesDesktop(candidate)) return candidate;
+    if ((await isVeldCli(candidate)) && (await cliHandlesDesktop(candidate))) {
+      return candidate;
+    }
   }
   return null;
 }
@@ -176,12 +182,23 @@ let onQuitCancelled = null;
 function initUpdater(opts = {}) {
   onSkewChange = opts.onSkewChange ?? null;
   onQuitCancelled = opts.onQuitCancelled ?? null;
-  cliPath = findCli();
+  // Deliberately does NOT resolve the CLI here. `findCli` spawns up to three
+  // candidates × two probes, and this runs inside `whenReady`, before the first
+  // window exists — to answer a question nothing needs for another fifteen
+  // seconds. It used to do it synchronously, which on the pathological path put
+  // twenty seconds of `execFileSync` in front of the user's window; the probes
+  // are async now, but the right fix is still not to ask yet.
+  //
+  // `updateMode` returns `"off"` exactly when the build is unpackaged, which
+  // depends on `isPackaged` alone — so a provisional call with `cli: null` gets
+  // the one answer this function acts on right, and `checkForUpdates` resolves
+  // properly before it needs the rest.
+  cliPath = null;
   mode = updateMode({
     platform: process.platform,
     isPackaged: app.isPackaged,
     env: process.env,
-    cli: cliPath,
+    cli: null,
   });
 
   // Every download in this file is one the user agreed to in a dialog first —
@@ -250,7 +267,7 @@ async function checkForUpdates({ manual }) {
   // mode for as long as the app is open — telling the user, wrongly, that it
   // cannot update itself.
   if (mode !== "off") {
-    cliPath = findCli();
+    cliPath = await findCli();
     mode = updateMode({
       platform: process.platform,
       isPackaged: app.isPackaged,
@@ -384,7 +401,7 @@ async function updateViaCli(version) {
   // `veld update` moving the CLI from `~/.local/bin` to `/usr/local/bin` (or
   // an uninstall) between then and now would have this spawn a path that is no
   // longer there — or, worse, one something else has since put back.
-  cliPath = findCli();
+  cliPath = await findCli();
   if (!cliPath) {
     mode = updateMode({
       platform: process.platform,
