@@ -96,9 +96,16 @@ const POINTER_LABEL: Record<PointerKind, string> = {
 };
 
 const POINTER_HELP: Record<PointerKind, string> = {
-  env: "Veld reads this environment variable each time it starts the project.",
+  // The caveat is here rather than in the docs because *this* surface is where
+  // it bites. A variable exported in a shell profile is visible to `veld start`
+  // typed in a terminal and invisible to one this app spawns, since the daemon
+  // has its own environment — so the reader most likely to pick `env` is the one
+  // it will fail for. `shell` does not have the problem: those commands run with
+  // the user's login-shell PATH.
+  env: "Read when the project starts, from the environment of whatever started it — a run launched from this app reads the daemon's environment, not your terminal's.",
   file: "Veld reads this file each time it starts the project.",
-  shell: "Veld runs this and uses what it prints, each time it starts the project.",
+  shell:
+    "Veld runs this and uses what it prints, each time it starts the project. Runs with your normal PATH, so password-manager CLIs work.",
 };
 
 const POINTER_PLACEHOLDER: Record<PointerKind, string> = {
