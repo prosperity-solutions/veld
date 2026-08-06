@@ -155,6 +155,16 @@ pub async fn run_feedback_server(share_manager: Arc<crate::share::manager::Share
 
     match tokio::net::TcpListener::bind(addr).await {
         Ok(listener) => {
+            // **After the bind, because binding the port is what proves this process
+            // owns this instance's state.** `pty_dir` — and so the shim directory — is
+            // keyed on the daemon port alone, so a second daemon started on the default
+            // port (a bare `cargo run -p veld-daemon`, which also builds no `veld`
+            // sibling to resolve) would otherwise delete the *installed*, running
+            // daemon's shims and then fail to bind and keep going, leaving every
+            // terminal opened afterwards without `$BROWSER` until that daemon restarts.
+            // Writing them before the bind is harmless — it is idempotent and produces
+            // the same bytes — but deleting is not.
+            pty::clear_unbacked_shims();
             if let Err(e) = axum::serve(listener, app).await {
                 warn!("feedback server error: {e}");
             }

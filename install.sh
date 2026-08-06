@@ -330,6 +330,59 @@ if [ -n "$SWITCHING_TO_USER_PATHS" ] && [ -n "$PRIVILEGED_MODE" ]; then
   echo ""
 fi
 
+# Restart a user LaunchAgent so it runs the binary just installed.
+#
+# Deliberately NOT `bootout` followed by `bootstrap`. `bootout` returns before
+# launchd has finished tearing the job down, and a `bootstrap` into that window
+# fails with exit 5 — which this script swallows, leaving NO service registered
+# and, for the daemon, nothing running at all. `veld setup` hit the same race and
+# fixed it by waiting for the teardown to drain (`wait_for_launchd_job_removal`
+# in crates/veld-core/src/setup.rs); this path never got the fix, which is why an
+# update usually ended with a dead daemon and a manual `veld setup` to revive it.
+#
+# A job that is already registered does not need re-registering: only `veld setup`
+# writes these plists, so an update changes the binary and not the definition
+# launchd holds. The consequence is worth stating rather than discovering: because
+# this no longer re-bootstraps, an update is no longer a point where a plist file
+# that is newer than launchd's registration converges. `veld setup` is now the only
+# one — which is where such a mismatch comes from in the first place (a bootstrap
+# that lost the race and fell back to kickstarting the stale registration, the
+# `BootstrapOutcome::KickstartedStale` warning), and that warning already tells the
+# user to re-run setup.
+#
+# Signalling it to exit is enough, because `KeepAlive` is
+# unconditionally true in both — measured, not assumed: a `KeepAlive=true` agent
+# with `RunAtLoad=false` is started by launchd anyway, so a registered veld job is
+# always running or on its way back.
+#
+# SIGTERM rather than `kickstart -k`'s SIGKILL so each service runs its own
+# shutdown path: the helper exits while leaving Caddy up (every live URL survives
+# the swap), and the daemon deregisters its route, records the terminal sessions it
+# is leaving behind and removes its socket. It does *not* drain in-flight requests —
+# `main.rs` aborts its tasks — so this is about veld's own cleanup, not about
+# request draining.
+# $1 = launchd label, $2 = plist path, $3 = display name
+restart_launch_agent() {
+  local label="$1" plist="$2" name="$3" target
+  target="gui/$(id -u)/${label}"
+  if launchctl print "$target" >/dev/null 2>&1; then
+    echo "Restarting ${name} service..."
+    launchctl kill TERM "$target" 2>/dev/null || true
+    # Belt, not redundancy: it makes this restart correct *without* depending on a
+    # `KeepAlive` that lives in a different file. A job launchd is not currently
+    # running has nothing to signal (`kill` exits 3, "No process to signal"), and a
+    # later plist edit — a `SuccessfulExit` condition, say — would silently turn
+    # this whole function back into the dead-daemon-after-update it exists to fix.
+    # Verified no-op when the job is healthy: `kickstart` without `-k` on a running
+    # job exits 0 and leaves the same pid.
+    launchctl kickstart "$target" 2>/dev/null || true
+  else
+    # Nothing registered to signal, and a bootstrap here has no teardown to race.
+    echo "Loading ${name} service..."
+    launchctl bootstrap "gui/$(id -u)" "$plist" 2>/dev/null || true
+  fi
+}
+
 if [ "$OS" = "macos" ]; then
   if [ -n "$PRIVILEGED_MODE" ] && [ -z "$SWITCHING_TO_USER_PATHS" ]; then
     # Privileged mode (staying in place): helper runs as a system LaunchDaemon
@@ -361,17 +414,13 @@ if [ "$OS" = "macos" ]; then
     # User mode: helper runs as a user LaunchAgent.
     HELPER_PLIST="$HOME/Library/LaunchAgents/dev.veld.helper.plist"
     if [ -f "$HELPER_PLIST" ]; then
-      echo "Restarting veld-helper service..."
-      launchctl bootout "gui/$(id -u)/dev.veld.helper" 2>/dev/null || true
-      launchctl bootstrap "gui/$(id -u)" "$HELPER_PLIST" 2>/dev/null || true
+      restart_launch_agent dev.veld.helper "$HELPER_PLIST" veld-helper
     fi
   fi
 
   DAEMON_PLIST="$HOME/Library/LaunchAgents/dev.veld.daemon.plist"
   if [ -f "$DAEMON_PLIST" ]; then
-    echo "Restarting veld-daemon service..."
-    launchctl bootout "gui/$(id -u)/dev.veld.daemon" 2>/dev/null || true
-    launchctl bootstrap "gui/$(id -u)" "$DAEMON_PLIST" 2>/dev/null || true
+    restart_launch_agent dev.veld.daemon "$DAEMON_PLIST" veld-daemon
   fi
 else
   # Linux: restart systemd services if they exist (skip if switching to user paths).

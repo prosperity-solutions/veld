@@ -301,14 +301,25 @@ pub fn routes() -> Router {
 /// Write the shim directory a terminal's `$BROWSER` points into.
 ///
 /// At startup rather than lazily on the first terminal, for two reasons: a machine
-/// with no `veld` binary beside the daemon logs the warning where somebody is
-/// looking, and `$VELD_SHIM_DIR` (the documented opt-in for `open`/`xdg-open`) is
-/// live for the very first shell instead of the second. Three small files.
+/// where no `veld` CLI resolves (`veld_core::paths::cli_for_exe`) logs the warning
+/// where somebody is looking, and `$VELD_SHIM_DIR` (the documented opt-in for
+/// `open`/`xdg-open`) is live for the very first shell instead of the second. Three
+/// small files.
 ///
 /// Idempotent, and deliberately not fatal: everything else about a terminal works
 /// without it.
 pub fn prepare_shims() {
     let _ = shims::dir();
+}
+
+/// Remove shim scripts no `veld` CLI backs any more.
+///
+/// Separate from [`prepare_shims`] and called **after the daemon has bound its port**
+/// — see the call site and [`shims::clear_unbacked`]. Writing the scripts early is
+/// harmless; deleting them is only safe once this process has proved it owns this
+/// instance's state.
+pub fn clear_unbacked_shims() {
+    shims::clear_unbacked();
 }
 
 /// Which of a worktree's config-declared panes have something to resume.

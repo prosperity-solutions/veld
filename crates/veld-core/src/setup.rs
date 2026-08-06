@@ -544,6 +544,103 @@ pub async fn trust_caddy_ca() -> Result<StepResult, anyhow::Error> {
     ))
 }
 
+/// Make the daemon's log file, and answer whether launchd may be pointed at it.
+///
+/// `None` means "do not name a log in the plist". That is the safe answer, not a
+/// degraded one: launchd refuses to exec a job whose `StandardOutPath` it cannot
+/// **open** — exit `EX_CONFIG` (78), program never reached, retried forever under
+/// `KeepAlive` — so a path this function is unsure about would take the daemon down
+/// on machines that work today. No log is what every veld before this shipped.
+///
+/// Measured, because the distinction decides what this function has to check: a
+/// *missing* directory is fine — launchd creates the intervening directories and the
+/// file, so `rm -rf ~/.veld` self-heals on the next launch. An **unwritable** one is
+/// fatal, which is the whole reason the log does not live beside the binary where a
+/// `/usr/local` prefix is root-owned.
+///
+/// The file is still created here rather than left to launchd, for the one thing
+/// launchd will not do: set the mode. Owner-only, because this file exists to collect
+/// diagnostics and the next `warn!` someone adds while chasing a share or a
+/// machine-var prompt is exactly where a URL or an environment value gets
+/// interpolated — the same reason `spawn_stderr_file` keeps captured output
+/// owner-only. launchd opens an existing file `O_APPEND` and does not reset its mode.
+///
+/// Ownership is the trap and the reason for the `chown`: `veld setup` can be running
+/// under `sudo`, and a root-owned `0600` log is precisely the unopenable file
+/// described above. If the file cannot end up owned by the user the job runs as, it
+/// is removed and `None` is returned.
+// `cfg(unix)`, not `cfg(target_os = "macos")`, even though only the macOS branch of
+// `install_daemon` calls it: that branch is *compiled* on Linux too (it is a runtime
+// `match` on `env::consts::OS`, exactly like `resolve_real_user_macos` above), so a
+// macOS-only item here is a Linux build failure that no macOS pre-pass can see.
+#[cfg(unix)]
+fn prepare_daemon_log(
+    real_user: &str,
+    real_uid: &str,
+    real_home: &std::path::Path,
+) -> Option<PathBuf> {
+    let uid: u32 = real_uid.parse().ok()?;
+    let log = crate::paths::daemon_log_path_in(real_home);
+    let dir = log.parent()?;
+
+    // The **directory** is checked as carefully as the file, and that is not
+    // symmetry for its own sake. Under `sudo veld setup` this is the first thing in
+    // the run to touch the *real* user's `~/.veld` (`setup.rs`'s own `create_dir_all`
+    // goes through `dirs::home_dir()`, which under sudo is root's), so a `chown` that
+    // does not take — an `NFSHomeDirectory` on a network share, the very case
+    // `resolve_real_user_macos` consults `dscl` for — would leave `~/.veld` owned by
+    // root. That directory is where the user's daemon socket, holder sockets,
+    // `pty-<port>/` and `setup.json` live: a far larger break than this log feature
+    // not existing. So if it cannot end up owned by the user, undo what we created
+    // and give up on the log.
+    let we_created_dir = !dir.exists();
+    std::fs::create_dir_all(dir).ok()?;
+    if we_created_dir {
+        chown_to(real_user, dir);
+    }
+    if !owned_by(dir, uid) {
+        if we_created_dir {
+            let _ = std::fs::remove_dir(dir);
+        }
+        return None;
+    }
+
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log)
+        .ok()?;
+    let _ = crate::paths::set_owner_only(&log);
+    chown_to(real_user, &log);
+    // Verified, not assumed: `chown` is a best-effort external command and its failure
+    // is the one that matters. A root-owned `0600` log is exactly the file launchd
+    // cannot open, and a job whose log it cannot open does not run at all.
+    if !owned_by(&log, uid) {
+        let _ = std::fs::remove_file(&log);
+        return None;
+    }
+    Some(log)
+}
+
+/// `chown <user>:staff <path>`, best-effort — every caller verifies the result
+/// instead of trusting it.
+#[cfg(unix)]
+fn chown_to(user: &str, path: &std::path::Path) {
+    let _ = std::process::Command::new("chown")
+        .args([format!("{user}:staff"), path.display().to_string()])
+        .status();
+}
+
+/// Whether `path` is owned by `uid`. False when it cannot be read at all, which is
+/// the answer that makes every caller refuse rather than assume.
+#[cfg(unix)]
+fn owned_by(path: &std::path::Path, uid: u32) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path)
+        .map(|m| m.uid() == uid)
+        .unwrap_or(false)
+}
+
 /// Install (or verify) the Veld daemon.
 ///
 /// The daemon is a user-level LaunchAgent, so on macOS it must be loaded
@@ -564,6 +661,30 @@ pub async fn install_daemon() -> Result<StepResult, anyhow::Error> {
                 .context("failed to create LaunchAgents directory")?;
             let plist_path = plist_dir.join("dev.veld.daemon.plist");
 
+            // Give the daemon a log, for the reason the helper has one: launchd
+            // discards a job's stdout and stderr, so the daemon's own diagnostics —
+            // a terminal that would not spawn, a shim directory it could not write,
+            // a run whose command was not found — went nowhere, and every message
+            // anywhere in veld that said "check the daemon log" pointed at a file
+            // that did not exist.
+            //
+            // **A path the job cannot create is worse than no path**, which is why
+            // this is prepared and checked rather than simply formatted in: launchd
+            // exits such a job `EX_CONFIG` (78) *before* running the program, and
+            // `KeepAlive` turns that into a permanent retry. A daemon that logs
+            // nowhere is the status quo; a daemon that never starts is an outage.
+            let log_path = prepare_daemon_log(&real_user, &real_uid, &real_home);
+            let log_keys = match &log_path {
+                Some(p) => format!(
+                    "    <key>StandardOutPath</key>\n    <string>{p}</string>\n    \
+                     <key>StandardErrorPath</key>\n    <string>{p}</string>\n",
+                    p = p.display()
+                ),
+                // Silent here, said out loud by `veld doctor`'s `Daemon log:` row,
+                // which reads the plist and reports "not captured".
+                None => String::new(),
+            };
+
             let plist = format!(
                 r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
@@ -578,16 +699,22 @@ pub async fn install_daemon() -> Result<StepResult, anyhow::Error> {
     </array>
     <key>RunAtLoad</key>
     <true/>
+    <!-- KeepAlive unconditionally true, like the helper's: install.sh restarts this
+         job by signalling it to exit and relies on launchd bringing it back onto the
+         new binary. A SuccessfulExit or crash-only condition here would make every
+         `veld update` leave the daemon dead — the failure that motivated
+         `restart_launch_agent`. That function kickstarts as a belt, so this is not
+         the only thing holding it up, but it is the intended mechanism. -->
     <key>KeepAlive</key>
     <true/>
     <key>WatchPaths</key>
     <array>
         <string>{bin_path}</string>
     </array>
-</dict>
+{log_keys}</dict>
 </plist>
 "#,
-                bin_path = veld_daemon_bin.display()
+                bin_path = veld_daemon_bin.display(),
             );
             let label = "dev.veld.daemon";
             let domain_target = format!("gui/{real_uid}/{label}");
@@ -842,10 +969,7 @@ async fn install_helper_macos(bin: &Path, caddy_bin: Option<&Path>) -> Result<()
     // restarts, Caddy recovery, pid adoption) is observable — launchd otherwise
     // discards the helper's stderr, making a post-sleep recovery impossible to
     // diagnose.
-    let log_path = bin
-        .parent()
-        .map(|p| p.join("veld-helper.log"))
-        .unwrap_or_else(|| PathBuf::from("/tmp/veld-helper.log"));
+    let log_path = crate::paths::service_log_path(bin);
 
     let plist = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -2018,6 +2142,73 @@ mod tests {
     use super::{
         init_lua_loads_veld_spoon, parse_launchctl_pid, parse_systemd_main_pid, remove_spoon_files,
     };
+
+    /// The happy path of the log preparation, against a real filesystem.
+    ///
+    /// Load-bearing because of what the `None` branch means: no log keys in the
+    /// plist. If this function started failing for the ordinary case, the daemon
+    /// would keep running and silently stop logging, which is precisely the state
+    /// this whole change exists to end — so "it returned a path, and that path is
+    /// owner-only" is asserted rather than assumed.
+    #[test]
+    #[cfg(unix)]
+    fn the_daemon_log_is_prepared_owner_only() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let home = std::env::temp_dir().join(format!("veld-log-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+
+        // Our own uid, taken from a file we just made rather than from a crate.
+        let probe = home.join("probe");
+        std::fs::write(&probe, b"x").unwrap();
+        let uid = std::fs::metadata(&probe).unwrap().uid();
+        let user = std::env::var("USER").unwrap_or_default();
+
+        let log = super::prepare_daemon_log(&user, &uid.to_string(), &home)
+            .expect("a writable home must yield a log path");
+        assert_eq!(log, home.join(".veld").join("veld-daemon.log"));
+        assert_eq!(
+            std::fs::metadata(&log).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "the file launchd will append diagnostics to must not be world-readable"
+        );
+
+        // Idempotent: `veld setup` is re-run routinely, and the second run must not
+        // fail or lose an existing log.
+        std::fs::write(&log, b"an earlier daemon's line\n").unwrap();
+        assert_eq!(
+            super::prepare_daemon_log(&user, &uid.to_string(), &home).as_ref(),
+            Some(&log)
+        );
+        assert!(
+            std::fs::read_to_string(&log)
+                .unwrap()
+                .contains("earlier daemon"),
+            "preparing the log must open it for append, never truncate it"
+        );
+
+        // A uid that does not own the directory: the plist must name no log at all,
+        // because a log the job cannot open is worse than no log — launchd exits such
+        // a job EX_CONFIG without ever running the program. Skipped when the tests
+        // themselves run as root, where uid 0 *is* the owner.
+        if uid != 0 {
+            assert_eq!(super::prepare_daemon_log(&user, "0", &home), None);
+            // And it is left alone rather than deleted. The directory check comes
+            // first and this call did not create it, so the file belongs to whoever
+            // does own that home — refusing to use a log is not a licence to delete
+            // somebody's diagnostics.
+            assert!(
+                log.exists()
+                    && std::fs::read_to_string(&log)
+                        .unwrap()
+                        .contains("earlier daemon"),
+                "refusing the log must not destroy it"
+            );
+        }
+
+        std::fs::remove_dir_all(&home).unwrap();
+    }
 
     #[test]
     fn init_lua_veld_spoon_detected_in_every_lua_call_form() {

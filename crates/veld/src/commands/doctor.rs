@@ -40,6 +40,11 @@ struct Diagnostics {
     lib_dir: String,
     config_path: String,
     config_mode: String,
+    /// Where the daemon's own diagnostics go, and whether they are actually
+    /// getting there. Printed unconditionally rather than only on failure: the
+    /// row exists so that "check the daemon log" is a followable instruction,
+    /// and the moment someone needs it is the moment they are already stuck.
+    daemon_log: String,
 
     // Services
     helper_status: String,
@@ -121,6 +126,9 @@ impl Diagnostics {
             .unwrap_or_else(|| PathBuf::from("~/.veld/setup.json"));
         self.config_path = tilde_path(&config_path);
         self.config_mode = read_mode(&config_path);
+
+        // Read after the mode, because the repair it suggests names it.
+        self.daemon_log = daemon_log_row(&daemon_bin, &self.config_mode);
     }
 
     // -- Services ------------------------------------------------------------
@@ -565,13 +573,49 @@ impl Diagnostics {
         }
         let browser = dir.join("veld-open");
         if !browser.is_file() {
+            // Two different failures reach here and they have different repairs, so
+            // the row has to say which one it is. The daemon needs a `veld` CLI it
+            // can name by absolute path (`paths::cli_for_exe`): when one is there,
+            // the scripts are simply older than it and a restart writes them; when
+            // one is not, restarting achieves nothing and the install is what is
+            // wrong. The previous wording asked for neither and pointed at a daemon
+            // log that macOS was discarding — three unfollowable instructions for a
+            // check whose whole job is to be followable.
+            // Resolved from the directory the **running** daemon lives in, which is
+            // the plist's `ProgramArguments` when it names one and `lib_dir()`
+            // otherwise. Not `lib_dir()` alone: a legacy `/usr/local` install with a
+            // leftover `~/.local/lib/veld` (install.sh's cleanup removes the three
+            // binaries and leaves `caddy-data`, so the directory survives and
+            // `lib_dir()` prefers it) would have this row resolve a CLI the daemon
+            // never considered and print "restart it" for a daemon that will keep
+            // writing nothing. Doctor asking a different question than the daemon is
+            // the exact defect this row exists to report.
+            let daemon_dir = daemon_program_dir().unwrap_or_else(veld_core::paths::lib_dir);
+            let cause = match veld_core::paths::cli_for_exe(&daemon_dir) {
+                Some(_) => format!("Restart the daemon to write it: {}", restart_daemon_hint()),
+                None => {
+                    let looked: Vec<String> = veld_core::paths::cli_candidates(&daemon_dir)
+                        .iter()
+                        .map(|p| tilde_path(p))
+                        .collect();
+                    // Reinstall, or a symlink — and not `veld setup`, which writes
+                    // service definitions and records nothing about where the CLI
+                    // is, so suggesting it here would be a repair that cannot
+                    // work. A custom `VELD_INSTALL_DIR` is the case that lands
+                    // here on a healthy install: the CLI is fine, it is simply
+                    // somewhere the daemon has no way to derive.
+                    format!(
+                        "the daemon found no veld CLI to point it at (looked for {}). \
+                         Reinstall with `veld update`, or symlink your veld binary to \
+                         one of those paths if it lives somewhere else",
+                        looked.join(" and ")
+                    )
+                }
+            };
             return Check {
                 pass: false,
                 label: format!(
-                    "Terminal URL opening is off: {shown}/veld-open is missing. The \
-                     daemon writes it at startup — check the daemon log for a \
-                     warning, and that a `veld` binary sits beside the running \
-                     veld-daemon"
+                    "Terminal URL opening is off: {shown}/veld-open is missing. {cause}"
                 ),
             };
         }
@@ -595,7 +639,8 @@ impl Diagnostics {
                     return Check {
                         pass: false,
                         label: format!(
-                            "Terminal URLs open in Veld, but {shown}/zdotdir/.zshenv is missing, so open/xdg-open are not caught. Restart the daemon to rewrite it"
+                            "Terminal URLs open in Veld, but {shown}/zdotdir/.zshenv is missing, so open/xdg-open are not caught. Restart the daemon to rewrite it: {}",
+                            restart_daemon_hint()
                         ),
                     };
                 }
@@ -616,15 +661,17 @@ impl Diagnostics {
                 pass: false,
                 label: format!(
                     "Terminal URL opening is off: {shown}/veld-open points at {}, \
-                     which is not there. Restart the daemon to rewrite it",
-                    cli.display()
+                     which is not there. Restart the daemon to rewrite it: {}",
+                    cli.display(),
+                    restart_daemon_hint()
                 ),
             },
             None => Check {
                 pass: false,
                 label: format!(
                     "Terminal URL opening is off: {shown}/veld-open names no veld \
-                     binary. Restart the daemon to rewrite it"
+                     binary. Restart the daemon to rewrite it: {}",
+                    restart_daemon_hint()
                 ),
             },
         }
@@ -741,6 +788,7 @@ impl Diagnostics {
         }
         println!("    {:<14}{}", "Lib dir:", self.lib_dir);
         println!("    {:<14}{}", "Config:", self.config_path);
+        println!("    {:<14}{}", "Daemon log:", self.daemon_log);
         println!();
 
         // Mode (prominent)
@@ -847,6 +895,7 @@ impl Diagnostics {
                 "lib_dir": self.lib_dir,
                 "config_path": self.config_path,
                 "config_mode": self.config_mode,
+                "daemon_log": self.daemon_log,
             },
             "services": {
                 "helper": self.helper_status,
@@ -863,6 +912,121 @@ impl Diagnostics {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// The command that restarts the daemon on this machine.
+///
+/// Spelled out rather than "restart the daemon", because there is no
+/// `veld daemon restart` to name and the service manager's own incantation is not
+/// something a user should have to derive — on macOS it needs the uid of the gui
+/// domain the agent was bootstrapped into.
+fn restart_daemon_hint() -> String {
+    if cfg!(target_os = "macos") {
+        let uid = current_uid().unwrap_or_else(|| "$(id -u)".to_owned());
+        format!("launchctl kickstart -k gui/{uid}/dev.veld.daemon")
+    } else {
+        "systemctl --user restart veld-daemon".to_owned()
+    }
+}
+
+/// Which `veld setup <mode>` to suggest.
+///
+/// `privileged` for a machine that is in that mode, since suggesting the other one
+/// would change the install rather than repair it. `unprivileged` for **everything
+/// else**, and that is a choice rather than a passthrough: `auto` and the literal
+/// "not configured" `read_mode` returns for a machine that never ran setup both land
+/// here, and neither is a mode `veld setup` takes. `unprivileged` is the no-sudo mode
+/// such a machine should be in, and it is what install.sh tells it to run.
+fn setup_mode_arg(mode: &str) -> &'static str {
+    match mode {
+        "privileged" => "privileged",
+        _ => "unprivileged",
+    }
+}
+
+/// The `Daemon log:` row — where the daemon's diagnostics go, or why they go
+/// nowhere.
+///
+/// On macOS a launchd job's stdout and stderr are discarded unless its plist names
+/// a file, and the daemon's plist did not until this row's sibling change added it.
+/// So the honest answer for an install set up by an older version is "not
+/// configured", with the command that fixes it — anything else sends someone to
+/// `tail` a file that will never exist. systemd captures a unit's output on its
+/// own, so on Linux the answer is the query rather than a path.
+///
+/// `mode` is the setup mode from `setup.json`; `veld setup` is per-mode and running
+/// the wrong one would change the install rather than repair it.
+fn daemon_log_row(daemon_bin: &Path, mode: &str) -> String {
+    if cfg!(target_os = "linux") {
+        return "journalctl --user -u veld-daemon".to_owned();
+    }
+    if !cfg!(target_os = "macos") {
+        return "n/a".to_owned();
+    }
+    // **Skipped under sudo**, for the reason the terminal-shim check is: every path
+    // this row reads is `HOME`-derived and none of it is `SUDO_USER`-aware. As root the
+    // plist at `/var/root/Library/LaunchAgents` is absent and `read_mode` finds no
+    // `setup.json`, so a healthy privileged install would be reported as "not
+    // captured" *and* handed `veld setup unprivileged` — a command that converts the
+    // install rather than repairing it. A row that cannot see the user's home says so
+    // instead of guessing.
+    if std::env::var("SUDO_UID").is_ok_and(|u| !u.is_empty()) {
+        return "not checked under sudo (run `veld doctor` without it)".to_owned();
+    }
+    // The path the plist actually names, rather than "does it mention the one we
+    // would derive". The two differ on a developer machine — `just
+    // dev-install-daemon` copies the binary to wherever the plist already pointed —
+    // and, more importantly, on a machine where `veld setup` deliberately wrote no
+    // log keys because the job could not have created the file.
+    match daemon_plist()
+        .as_deref()
+        .and_then(|xml| launchd_string_after_key(xml, "StandardErrorPath"))
+    {
+        Some(path) => tilde_path(Path::new(&path)),
+        None => format!(
+            "not captured — run `veld setup {}` to enable it ({})",
+            setup_mode_arg(mode),
+            veld_core::paths::daemon_log_path()
+                .map(|p| tilde_path(&p))
+                .unwrap_or_else(|| daemon_bin.display().to_string())
+        ),
+    }
+}
+
+/// The daemon LaunchAgent's plist, as text.
+fn daemon_plist() -> Option<String> {
+    let path = dirs::home_dir()?.join("Library/LaunchAgents/dev.veld.daemon.plist");
+    std::fs::read_to_string(path).ok()
+}
+
+/// The directory holding the daemon binary launchd was told to run.
+///
+/// `None` when there is no plist to read or it names nothing — the caller then falls
+/// back to `lib_dir()`, which is a guess, and says so by being the fallback.
+fn daemon_program_dir() -> Option<PathBuf> {
+    let xml = daemon_plist()?;
+    let program = launchd_string_after_key(&xml, "ProgramArguments")?;
+    Path::new(&program).parent().map(Path::to_path_buf)
+}
+
+/// The first `<string>` value after `<key>NAME</key>` in a plist.
+///
+/// A deliberate two-token scan rather than a plist parser: these are two optional
+/// rows of a diagnostic, the file is one veld wrote itself, and a dependency to read
+/// it would be paid for by every `veld` invocation. `None` covers every shape this
+/// cannot read — no key, no `<string>` after it, an empty value, a binary plist —
+/// and every caller treats `None` as "unknown", which is also the right answer when
+/// the file is unreadable.
+///
+/// Works for `ProgramArguments` only because its first `<string>` is the program;
+/// that is the same reading launchd does, and an argument-bearing daemon plist is
+/// not something veld writes.
+fn launchd_string_after_key(xml: &str, key: &str) -> Option<String> {
+    let after_key = xml.split(&format!("<key>{key}</key>")).nth(1)?;
+    let open = after_key.find("<string>")? + "<string>".len();
+    let close = after_key[open..].find("</string>")? + open;
+    let value = after_key[open..close].trim();
+    (!value.is_empty()).then(|| value.to_owned())
+}
 
 /// Replace the home directory prefix with `~`.
 fn tilde_path(path: &Path) -> String {
@@ -1117,5 +1281,65 @@ fn colorize_status(status: &str) -> String {
         output::red(status)
     } else {
         output::yellow(status)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_log_path_is_read_out_of_a_plist() {
+        let plist = "<dict>\n    <key>StandardOutPath</key>\n    <string>/a/out.log</string>\n \
+                     <key>StandardErrorPath</key>\n    <string>/a/err.log</string>\n</dict>";
+        assert_eq!(
+            launchd_string_after_key(plist, "StandardErrorPath").as_deref(),
+            Some("/a/err.log"),
+            "the value must come from the named key, not the first <string> in the file"
+        );
+    }
+
+    #[test]
+    fn the_program_is_read_out_of_its_array() {
+        // The shape `install_daemon` writes: the program is the first <string> of
+        // ProgramArguments, and it must win over every later key in the file.
+        let plist = "<dict>\n    <key>Label</key>\n    <string>dev.veld.daemon</string>\n    \
+                     <key>ProgramArguments</key>\n    <array>\n        \
+                     <string>/p/lib/veld/veld-daemon</string>\n    </array>\n    \
+                     <key>StandardErrorPath</key>\n    <string>/h/.veld/veld-daemon.log</string>\n</dict>";
+        assert_eq!(
+            launchd_string_after_key(plist, "ProgramArguments").as_deref(),
+            Some("/p/lib/veld/veld-daemon")
+        );
+    }
+
+    #[test]
+    fn a_plist_without_the_key_captures_nothing() {
+        // The shape every install written before this change has: a complete,
+        // valid plist with no output paths at all.
+        let plist = "<dict>\n    <key>Label</key>\n    <string>dev.veld.daemon</string>\n</dict>";
+        assert_eq!(launchd_string_after_key(plist, "StandardErrorPath"), None);
+        // And the shapes that would panic a naive slice or answer with a lie.
+        assert_eq!(launchd_string_after_key("", "StandardErrorPath"), None);
+        assert_eq!(
+            launchd_string_after_key("<key>StandardErrorPath</key>", "StandardErrorPath"),
+            None
+        );
+        assert_eq!(
+            launchd_string_after_key(
+                "<key>StandardErrorPath</key><string></string>",
+                "StandardErrorPath"
+            ),
+            None,
+            "an empty value is not a log file"
+        );
+        assert_eq!(
+            launchd_string_after_key(
+                "<key>StandardErrorPath</key><string>/a.log",
+                "StandardErrorPath"
+            ),
+            None,
+            "an unterminated element is unreadable, not a path"
+        );
     }
 }

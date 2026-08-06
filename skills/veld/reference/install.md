@@ -57,3 +57,4 @@ veld uninstall
 - **"Version mismatch detected"** — run `veld update` to sync all binaries
 - **HTTPS certificate warnings** — run `veld setup unprivileged` (or `privileged`) to trust the local CA
 - **Port conflicts** — veld uses ports 18080/18443 (unprivileged) or 80/443 (privileged) and 19000-29999 for services
+- **Where the service logs are** — macOS: the daemon logs to `~/.veld/veld-daemon.log` (owner-only; in the user's directory because launchd will not run a user agent whose log file it cannot create, and a `/usr/local` lib dir is root-owned), and the *privileged* helper to `~/.local/lib/veld/veld-helper.log`. The unprivileged helper has no log file. Linux: `journalctl --user -u veld-daemon`. `veld doctor` prints the daemon's log location under `Installation`, read from the service definition itself; "not captured" means the install predates it — `veld setup unprivileged` (or `privileged`) rewrites the definition

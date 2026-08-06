@@ -162,17 +162,22 @@ async fn wait_for_health(instance: &Instance) {
 /// directory did before it moved under `VELD_PTY_DIR`. Asserted rather than
 /// documented, because the symptom is silent.
 fn assert_state_is_confined(instance: &Instance) {
-    // The daemon writes no shims without a `veld` binary beside it, and nothing in
+    // The daemon writes no shims without a `veld` CLI it can resolve, and nothing in
     // this crate's test build produces one — so its absence is a missing artifact,
     // not a misplaced directory. Which of the two it is matters: the first version of
     // this assert reported "the shim directory is in the wrong place" on a clean
     // tree, sending the reader to look somewhere nothing is wrong.
-    let sibling_cli = std::path::Path::new(env!("CARGO_BIN_EXE_veld-daemon"))
+    //
+    // Asked of the resolver the daemon itself uses, never re-derived here. This
+    // predicate has to mean *exactly* "would that daemon have written shims", and a
+    // second copy of the rule is a copy that can disagree — the sibling-only rule
+    // this used to duplicate was wrong for every installed layout, and a test
+    // carrying its own copy would have kept passing while agreeing with nothing.
+    let cli = std::path::Path::new(env!("CARGO_BIN_EXE_veld-daemon"))
         .parent()
-        .map(|d| d.join("veld"))
-        .is_some_and(|p| p.is_file());
+        .and_then(veld_core::paths::cli_for_exe);
     let shims = instance.pty_dir().join("shims");
-    if sibling_cli {
+    if cli.is_some() {
         assert!(
             shims.join("veld-open").is_file(),
             "the daemon's shim directory is not under VELD_PTY_DIR — check where it \
