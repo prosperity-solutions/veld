@@ -5,6 +5,7 @@ import {
   markerFace,
   detachGraceMinutes,
   externalOrigins,
+  logsTimeZone,
   markerStyle,
   quickSwitchPrefs,
   terminalInterceptSystemOpen,
@@ -144,6 +145,27 @@ describe("quickSwitchPrefs", () => {
         "browser.quickSwitch.colorScheme": 0 as unknown as boolean,
       }).colorScheme,
     ).toBe(true);
+  });
+});
+
+describe("logsTimeZone", () => {
+  it("reads the key and defaults to local", () => {
+    expect(logsTimeZone({ "logs.timeZone": "utc" })).toBe("utc");
+    expect(logsTimeZone({ "logs.timeZone": "local" })).toBe("local");
+    // A daemon that predates the key: local is both the shipped default and what this
+    // view already did before the setting existed, so the two rules agree here.
+    expect(logsTimeZone({})).toBe("local");
+  });
+
+  it("falls back rather than trusting a value it does not know", () => {
+    // The daemon rejects these on write, so this is the path where one got in another
+    // way — a hand-edited row, or a newer build that added a named zone. Showing
+    // local is the honest degrade: it is what the control will report, too.
+    for (const bad of ["UTC", "Europe/Berlin", "", true, 0]) {
+      expect(logsTimeZone({ "logs.timeZone": bad as unknown as string })).toBe(
+        "local",
+      );
+    }
   });
 });
 

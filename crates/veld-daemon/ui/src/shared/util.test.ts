@@ -1,9 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   extractMsg,
   extractTs,
   fmtBytes,
   fmtTs,
+  fmtTsFull,
   fmtWhen,
   runKey,
   shortUrl,
@@ -81,8 +82,93 @@ describe("timestamps", () => {
   });
 
   it("fmtTs handles invalid dates", () => {
-    expect(fmtTs("garbage")).toBe("");
-    expect(fmtTs("2026-07-27T10:00:00Z")).toMatch(/^\d{2}:\d{2}:\d{2}\.\d{3}$/);
+    expect(fmtTs("garbage", "local")).toBe("");
+    expect(fmtTs("2026-07-27T10:00:00Z", "local")).toMatch(
+      /^\d{2}:\d{2}:\d{2}\.\d{3}$/,
+    );
+  });
+
+  it("fmtTs renders UTC as stored and local through the browser's zone", () => {
+    // The UTC arm is exact, because it must not depend on the runner's zone — CI is
+    // UTC and a developer is not, and a test that passes only in one is not a test.
+    expect(fmtTs("2026-07-27T10:00:00.123Z", "utc")).toBe("10:00:00.123");
+    // The local arm is asserted as *shape plus agreement with the platform*, for the
+    // same reason: `Date`'s own getters are the definition of "the browser's zone".
+    const d = new Date("2026-07-27T10:00:00.123Z");
+    expect(fmtTs("2026-07-27T10:00:00.123Z", "local")).toBe(
+      `${String(d.getHours()).padStart(2, "0")}:00:00.123`,
+    );
+  });
+
+  it("fmtTsFull carries the date, both zones, and a signed offset", () => {
+    const utcFirst = fmtTsFull("2026-07-27T10:00:00.123Z", "utc");
+    const [first, second, third] = utcFirst.split("\n");
+    // The rendered zone leads; the counterpart follows. Three lines for a parseable
+    // value — the unparseable one returns a bare single line, pinned below.
+    expect(first).toBe("2026-07-27 10:00:00.123 (UTC)");
+    expect(second).toMatch(/^\d{4}-\d{2}-\d{2} .* \(local, UTC[+-]\d{2}:\d{2}\)$/);
+    expect(third).toBe("stored: 2026-07-27T10:00:00.123Z");
+    // …and the order of the two rendered lines flips with the setting, so the tooltip
+    // always expands the number that is actually on screen first. The stored line does
+    // not move: it is the same value either way.
+    const localFirst = fmtTsFull("2026-07-27T10:00:00.123Z", "local");
+    expect(localFirst.split("\n")[0]).toBe(second);
+    expect(localFirst.split("\n")[1]).toBe(first);
+    expect(localFirst.split("\n")[2]).toBe(third);
+  });
+
+  it("fmtTsFull signs a zero offset rather than emitting a bare Z", () => {
+    // Pinned by forcing the offset, not by asserting the absence of "UTCZ": that
+    // assertion passes whatever `offsetLabel` does at zero, since it never emits a
+    // bare `Z` on any path — so it could not have caught `"00:00"` or `"+00:0"`.
+    // The value is interpolated straight after the literal "UTC", which is why the
+    // sign and both fields have to be there.
+    const spy = vi
+      .spyOn(Date.prototype, "getTimezoneOffset")
+      .mockReturnValue(0);
+    try {
+      expect(fmtTsFull("2026-07-27T10:00:00.123Z", "local")).toContain(
+        "(local, UTC+00:00)",
+      );
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("fmtTsFull reports a west-of-UTC offset as negative", () => {
+    // `getTimezoneOffset` counts minutes *behind* UTC, so it returns +330 for
+    // UTC+05:30 and -330 for UTC-05:30 — the sign is inverted relative to an ISO
+    // offset, and getting that backwards is the mistake this pins. Half-hour zones
+    // also check the minutes field is the remainder, not a truncated hour.
+    const spy = vi
+      .spyOn(Date.prototype, "getTimezoneOffset")
+      .mockReturnValue(210); // UTC-03:30, e.g. St John's
+    try {
+      expect(fmtTsFull("2026-07-27T10:00:00.123Z", "local")).toContain(
+        "(local, UTC-03:30)",
+      );
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("fmtTsFull keeps the microseconds the rendered lines drop", () => {
+    // `new Date` holds milliseconds, so both rendered lines truncate `.123456` to
+    // `.123` (truncate, not round — `.123999` is also `.123`) and two rows 200µs apart
+    // would tooltip identically. The CLI keeps the precision,
+    // so the stored line is what makes this agree with `veld logs --utc` and what a
+    // reader can paste into a bug report.
+    const full = fmtTsFull("2026-07-27T10:00:00.123456Z", "utc");
+    expect(full).toContain("stored: 2026-07-27T10:00:00.123456Z");
+    expect(full.split("\n")[0]).toBe("2026-07-27 10:00:00.123 (UTC)");
+  });
+
+  it("fmtTsFull passes an unparseable timestamp through", () => {
+    // A log row's timestamp is evidence: a `ts` column holding something unexpected
+    // is exactly the row a reader needs to see as-is, so the tooltip must not blank
+    // it the way `fmtTs` blanks the dense on-screen form.
+    expect(fmtTsFull("garbage", "local")).toBe("garbage");
+    expect(fmtTsFull("garbage", "utc")).toBe("garbage");
   });
 
   it("fmtWhen buckets relative time", () => {

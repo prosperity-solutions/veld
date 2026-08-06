@@ -21,6 +21,15 @@ import type { SettingsDoc } from "../api";
 
 export type CursorStyle = "block" | "underline" | "bar";
 export type MarkerStyle = "color" | "emoji";
+/**
+ * Which zone a log timestamp is *shown* in — never which zone it is stored in.
+ *
+ * Every line arrives from the daemon stamped in UTC (`db::ts_to_str` in
+ * `veld-core`, because lexicographic order has to equal chronological order there),
+ * so this is a rendering choice made at `fmtTs`/`fmtTsFull` and nowhere else. Mirrors
+ * `LogTimeZone` in `veld-core/src/db/settings.rs`; `veld logs` reads the same key.
+ */
+export type LogTimeZone = "local" | "utc";
 
 /**
  * Last-resort values for a daemon that predates a key.
@@ -79,6 +88,10 @@ const FALLBACK = {
   // before it because the daemon has not heard of the key.
   terminalOpenUrlsInApp: true,
   terminalInterceptSystemOpen: true,
+  // The one place this file's "previous release's behaviour" rule and the Rust default
+  // happen to *agree*: this view already rendered browser-local time before the key
+  // existed (its `fmtTs` read `Date` getters), so `local` is both.
+  logsTimeZone: "local" as LogTimeZone,
 } as const;
 
 function strings(doc: SettingsDoc, key: string): string[] {
@@ -300,6 +313,22 @@ export function terminalInterceptSystemOpen(doc: SettingsDoc): boolean {
     doc,
     "terminal.interceptSystemOpen",
     FALLBACK.terminalInterceptSystemOpen,
+  );
+}
+
+/**
+ * Which zone the logs view renders a line's timestamp in. **Defaults to `local`.**
+ *
+ * The same key `veld logs` reads, so the terminal and the app agree about what
+ * `09:12:33` means without either being told twice — which was the actual defect: the
+ * CLI printed UTC, this view printed local, and the legacy dashboard printed UTC.
+ */
+export function logsTimeZone(doc: SettingsDoc): LogTimeZone {
+  return oneOf(
+    doc,
+    "logs.timeZone",
+    ["local", "utc"] as const,
+    FALLBACK.logsTimeZone,
   );
 }
 

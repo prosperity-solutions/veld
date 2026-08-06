@@ -28,7 +28,7 @@ mod worktrees;
 
 pub use logs::{LogFilter, LogRow, LogStream, stream_is_per_node};
 pub use panes::{PaneSession, mint_pane_token};
-pub use settings::{DEFAULT_DETACH_GRACE_MINUTES, MAX_RUN_HISTORY_DAYS};
+pub use settings::{DEFAULT_DETACH_GRACE_MINUTES, LogTimeZone, MAX_RUN_HISTORY_DAYS};
 pub use var_overrides::{OverrideScope, VarOverride};
 pub use worktrees::{
     DiscoveredWorktree, LaneRecord, MAX_LANE_NAME_LEN, MAX_ORDER_LEN, RepoRecord, WORKTREE_COLORS,

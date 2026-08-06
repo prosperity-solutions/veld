@@ -17,6 +17,7 @@ import { EnvCard } from "./EnvCard";
 import { JoinRequestRow, runOfShare } from "../shared/Sharing";
 import { countHidden, hiddenByHorizon, pruneRunHistory } from "../shared/runHistory";
 import { notifyError } from "../shared/notify";
+import type { LogTimeZone } from "../shared/settings";
 import { confirmedUnattached, unattachedShareIds } from "../shared/util";
 import { compareRunsForDisplay } from "../model";
 import { topbarClass } from "../shell";
@@ -38,6 +39,8 @@ export function RunsMode(props: { modeSwitch: ReactNode; themeButton: ReactNode;
    * for the same document.
    */
   historyDays: number;
+  /** `logs.timeZone`, for the same reason as `historyDays` above. */
+  logsTz: LogTimeZone;
 }) {
   const [envs, setEnvs] = useState<EnvironmentList | null>(null);
   const [shares, setShares] = useState<SharesList | null>(null);
@@ -310,6 +313,7 @@ export function RunsMode(props: { modeSwitch: ReactNode; themeButton: ReactNode;
               shares={shares?.shares ?? []}
               stats={stats?.projects?.[p.project_root]?.[r.name]}
               onChanged={() => void refresh()}
+              logsTz={props.logsTz}
             />
           ))}
         </Stack>

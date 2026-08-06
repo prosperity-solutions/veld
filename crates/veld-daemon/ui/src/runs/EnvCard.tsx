@@ -25,6 +25,7 @@ import { PeerShareStrip, ShareControls, WebShareStrip, sharesForRun } from "../s
 import { useCopyFlash } from "../shared/copy";
 import { startOriginLabel } from "../shared/startOrigin";
 import { notifyError } from "../shared/notify";
+import type { LogTimeZone } from "../shared/settings";
 import { fmtWhen, statusBucket } from "../shared/util";
 
 /** Restart / Stop / Terminal / Copy path — everything you can do to this run. */
@@ -101,6 +102,8 @@ export function EnvCard(props: {
   shares: ShareInfo[];
   stats?: Record<string, NodeStats>;
   onChanged: () => void;
+  /** `logs.timeZone`, resolved by the app from its single settings document. */
+  logsTz: LogTimeZone;
 }) {
   const { project, run } = props;
   // Every run-addressed call goes through this — the card's own project scope,
@@ -252,7 +255,12 @@ export function EnvCard(props: {
           filters, the scroll position and the fetched lines all survive a switch
           back to Nodes. */}
       {logsEverOpened && (
-        <LogsView target={target} selected={selected} visible={view === "logs"} />
+        <LogsView
+          target={target}
+          selected={selected}
+          visible={view === "logs"}
+          tz={props.logsTz}
+        />
       )}
     </div>
   );

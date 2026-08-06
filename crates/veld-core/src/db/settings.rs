@@ -145,6 +145,64 @@ const MAX_ORIGIN_LEN: usize = 280;
 const MAX_UNKNOWN_KEY_LEN: usize = 128;
 const MAX_UNKNOWN_VALUE_LEN: usize = 4096;
 
+/// Which zone a log timestamp is *shown* in.
+///
+/// Storage is not affected and cannot be: every `log_lines.ts` is UTC because
+/// `super::ts_to_str` exists to make lexicographic order equal chronological order,
+/// which `logs_since`, the GC's pruning and both readers' interleave sorts all rely
+/// on. This is a rendering choice, and these are the surfaces that honour it:
+/// `veld logs`, `veld start`'s foreground log streaming (`--attach`), and the `/ide`
+/// logs view. A new surface that prints `row.ts` raw shows a different clock than the
+/// terminal beside it, so it should read this key too.
+///
+/// One human render site deliberately does **not**: the first-generation dashboard
+/// (`veld-daemon/assets/management-ui.html`) renders local unconditionally, because it
+/// is a frozen page that fetches no settings at all. So with this key on `utc`, that
+/// page is the one still showing local — written down in `docs/configuration.md`
+/// § Log Timestamps rather than left for someone to discover.
+///
+/// A string enum rather than a `logs.localTime` boolean because the obvious next
+/// value is a *named* zone (read a colleague's logs in theirs), and `"local"`/`"utc"`
+/// leaves room for one where a boolean would have to be replaced and migrated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LogTimeZone {
+    /// The reader's own zone: the machine's for the CLI, the browser's for the UI.
+    /// The default — a log line is almost always read against the clock on the wall.
+    #[default]
+    Local,
+    /// UTC, exactly as stored.
+    Utc,
+}
+
+impl LogTimeZone {
+    /// Every zone this binary understands.
+    ///
+    /// The validator's allow-list and both **Rust** readers derive from this, so a new
+    /// variant cannot validate on write and then be ignored by `veld logs` or
+    /// `veld start` — which is the trap the string-enum shape invites: `one_of`
+    /// hand-listing `["local","utc"]` beside a `_ => Local` reader would accept
+    /// `"Europe/Berlin"` and silently render local.
+    ///
+    /// **It does not reach the `/ide` reader**, which hand-lists the same two spellings
+    /// in TypeScript (`ui/src/shared/settings.ts`, `logsTimeZone`). Nothing ties the two
+    /// lists together, so adding a variant here means editing that file in the same
+    /// change or the UI will validate the value and render local anyway. That is the
+    /// same Rust↔TS gap this module's header already names around `FALLBACK`.
+    pub const ALL: &'static [LogTimeZone] = &[Self::Local, Self::Utc];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::Utc => "utc",
+        }
+    }
+
+    /// The inverse of [`Self::as_str`], exhaustive by construction over [`Self::ALL`].
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|tz| tz.as_str() == s)
+    }
+}
+
 /// Every setting this binary understands.
 ///
 /// `Unknown` is not an error case — see the module docs. It is how a preference
@@ -163,6 +221,7 @@ pub enum SettingKey {
     WorktreeMarkerStyle,
     WorktreeTrashRetention,
     RunsHistoryDays,
+    LogsTimeZone,
     BrowserQuickSwitchResponsive,
     BrowserQuickSwitchColorScheme,
     BrowserExternalOrigins,
@@ -193,6 +252,7 @@ impl SettingKey {
         Self::WorktreeMarkerStyle,
         Self::WorktreeTrashRetention,
         Self::RunsHistoryDays,
+        Self::LogsTimeZone,
         Self::BrowserQuickSwitchResponsive,
         Self::BrowserQuickSwitchColorScheme,
         Self::BrowserExternalOrigins,
@@ -212,6 +272,7 @@ impl SettingKey {
             Self::WorktreeMarkerStyle => "worktree.markerStyle",
             Self::WorktreeTrashRetention => "worktree.trashRetentionDays",
             Self::RunsHistoryDays => "runs.historyDays",
+            Self::LogsTimeZone => "logs.timeZone",
             Self::BrowserQuickSwitchResponsive => "browser.quickSwitch.responsive",
             Self::BrowserQuickSwitchColorScheme => "browser.quickSwitch.colorScheme",
             Self::BrowserExternalOrigins => "browser.externalOrigins",
@@ -233,6 +294,7 @@ impl SettingKey {
             "worktree.markerStyle" => Self::WorktreeMarkerStyle,
             "worktree.trashRetentionDays" => Self::WorktreeTrashRetention,
             "runs.historyDays" => Self::RunsHistoryDays,
+            "logs.timeZone" => Self::LogsTimeZone,
             "browser.quickSwitch.responsive" => Self::BrowserQuickSwitchResponsive,
             "browser.quickSwitch.colorScheme" => Self::BrowserQuickSwitchColorScheme,
             "browser.externalOrigins" => Self::BrowserExternalOrigins,
@@ -323,6 +385,14 @@ impl SettingKey {
                 one_of(value, &["block", "underline", "bar"]).ok_or_else(bad)?
             }
             Self::WorktreeMarkerStyle => one_of(value, &["color", "emoji"]).ok_or_else(bad)?,
+            // Rejected rather than coerced, like every other enum here: the CLI reads
+            // this key too, and a stored `"UTC"` that the reader then treats as the
+            // default would mean the daemon reporting a saved preference neither
+            // surface honours.
+            Self::LogsTimeZone => {
+                let s = value.as_str().ok_or_else(bad)?;
+                Value::from(LogTimeZone::parse(s).ok_or_else(bad)?.as_str())
+            }
             // A font family is free text, but **not** free-form: xterm's DOM
             // renderer interpolates it into a CSS *rule* —
             // `font-family: ${rawOptions.fontFamily};` inside a stylesheet's
@@ -444,6 +514,14 @@ pub fn defaults() -> BTreeMap<String, Value> {
         (
             SettingKey::RunsHistoryDays,
             Value::from(DEFAULT_RUN_HISTORY_DAYS),
+        ),
+        // Local, because a log line is read against the clock the reader is looking
+        // at. UTC is what veld *stores* — a correctness requirement, not a display
+        // preference — and printing storage at a human was the previous behaviour
+        // only because nothing had decided otherwise.
+        (
+            SettingKey::LogsTimeZone,
+            Value::from(LogTimeZone::default().as_str()),
         ),
     ]
     .into_iter()
@@ -606,6 +684,25 @@ impl Db {
             .filter_map(|v| v.as_str())
             .filter_map(|raw| crate::ide::parse_origin(raw).ok())
             .collect()
+    }
+
+    /// Which zone a log timestamp is rendered in — read by `veld logs`,
+    /// `veld start --attach`'s streaming, and (over the settings API) the `/ide` view.
+    ///
+    /// Has an accessor rather than being read raw because the **CLI** reads this one —
+    /// it is not a value the daemon merely stores for a browser — and [`Db::setting`]
+    /// returns the stored bytes without revalidating them. Anything that is not one of
+    /// the two spellings resolves to [`LogTimeZone::Local`], the same
+    /// degrade-to-the-default posture [`Db::terminal_open_urls_in_app`] takes for a
+    /// value a newer build wrote.
+    pub fn logs_time_zone(&self) -> LogTimeZone {
+        self.setting(&SettingKey::LogsTimeZone)
+            .ok()
+            .flatten()
+            .as_ref()
+            .and_then(|v| v.as_str())
+            .and_then(LogTimeZone::parse)
+            .unwrap_or_default()
     }
 
     /// How long a worktree stays in the trash before it is deleted, or `None` for
@@ -965,6 +1062,77 @@ mod tests {
         assert_eq!(
             db.settings().unwrap().get("runs.historyDays"),
             Some(&Value::from(2))
+        );
+    }
+
+    #[test]
+    fn logs_time_zone_defaults_to_local_and_rejects_anything_but_the_two_spellings() {
+        let (_dir, db) = test_db();
+        // Local by default: the stored zone is UTC because ordering depends on it,
+        // which is not a reason to show a human UTC.
+        assert_eq!(db.logs_time_zone(), LogTimeZone::Local);
+        assert_eq!(
+            db.settings().unwrap()["logs.timeZone"],
+            Value::from("local")
+        );
+
+        db.patch_settings(&patch(&[("logs.timeZone", Value::from("utc"))]))
+            .unwrap();
+        assert_eq!(db.logs_time_zone(), LogTimeZone::Utc);
+
+        // An enum, so a near-miss is refused rather than coerced — the CLI and the UI
+        // both read this, and a value only one of them honoured would be worse than
+        // an error at the point of writing.
+        for bad in [
+            Value::from("UTC"),
+            Value::from("Local"),
+            Value::from("Europe/Berlin"),
+            Value::from(true),
+        ] {
+            let e = db
+                .patch_settings(&patch(&[("logs.timeZone", bad.clone())]))
+                .expect_err(&format!("{bad} must be refused"));
+            assert!(matches!(e, DbError::InvalidSetting { .. }), "{e}");
+        }
+        // …and the accepted value above survived every rejection.
+        assert_eq!(db.logs_time_zone(), LogTimeZone::Utc);
+    }
+
+    #[test]
+    fn every_log_time_zone_round_trips_through_its_spelling() {
+        // `ALL` is hand-maintained and everything else derives from it: the validator's
+        // allow-list, `parse`, and both readers. A variant missing from it is refused on
+        // write rather than accepted-then-ignored, which is the failure this shape
+        // exists to prevent — so pin the round trip.
+        for tz in LogTimeZone::ALL {
+            assert_eq!(LogTimeZone::parse(tz.as_str()), Some(*tz));
+        }
+        assert_eq!(LogTimeZone::ALL.len(), 2);
+        assert_eq!(LogTimeZone::default(), LogTimeZone::Local);
+        assert!(LogTimeZone::parse("Europe/Berlin").is_none());
+        assert!(LogTimeZone::parse("UTC").is_none(), "spelling is exact");
+    }
+
+    #[test]
+    fn an_unreadable_logs_time_zone_reads_as_local() {
+        // The shape a newer build with a third zone would leave behind. `setting`
+        // does not revalidate, so the accessor is the only guard — and the CLI is a
+        // caller, which makes "degrade to the default" the whole point.
+        let (_dir, db) = test_db();
+        {
+            let conn = db.lock();
+            conn.execute(
+                "INSERT INTO settings (scope, key, value, updated_at)
+                 VALUES ('global', 'logs.timeZone', '\"Asia/Tokyo\"', '2026-01-01T00:00:00.000000Z')",
+                [],
+            )
+            .unwrap();
+        }
+        assert_eq!(db.logs_time_zone(), LogTimeZone::Local);
+        // And the effective document degrades the same way, so the UI agrees.
+        assert_eq!(
+            db.settings().unwrap()["logs.timeZone"],
+            Value::from("local")
         );
     }
 

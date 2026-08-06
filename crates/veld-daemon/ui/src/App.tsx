@@ -15,6 +15,7 @@ import {
   type Worktree,
 } from "./api";
 import {
+  logsTimeZone,
   markerFace,
   markerStyle,
   quickSwitchPrefs,
@@ -545,6 +546,22 @@ function AppInner(props: {
   // rather than each pane calling `useSettings` — that would be a fetch and a
   // focus listener per pane for one document the app already holds.
   const quickSwitches = quickSwitchPrefs(settings ?? {});
+
+  // Which zone the logs views spell a line's timestamp in. Read here and threaded for
+  // the same reason as the two above, and it is the same key `veld logs` reads — so the
+  // two agree on the *policy*.
+  //
+  // They do not necessarily agree on the zone, and it would be wrong to claim they do:
+  // "local" is resolved twice and independently — `chrono::Local` from the CLI
+  // process's environment, this side from the browser. An empty `TZ` makes chrono
+  // answer UTC while the browser stays on the machine's zone, and a browser on another
+  // host is simply somewhere else. "Local" means *each reader's own clock*, which is
+  // the intent — not a promise that two readers share one.
+  //
+  // A Veld terminal pane is NOT one of those cases: the holder spawns `$SHELL -l` on a
+  // tty, so it reads the same startup files a real terminal does. That is the same
+  // reason it is the documented exception to AGENTS.md's daemon-`PATH` rule.
+  const logsTz = logsTimeZone(settings ?? {});
 
   // Which of this worktree's config-declared panes the daemon holds a session
   // token for, so a restored pane can offer "Resume" rather than only "Start".
@@ -1329,6 +1346,7 @@ function AppInner(props: {
     // the focused dock rather than each inventing a placement.
     onOpenPane: (name, url) =>
       setLayout((prev) => addTabToFocused(prev, browserTab({ url, title: name }))),
+    logsTz,
   };
 
   // ---- sharing ------------------------------------------------------------
@@ -3028,6 +3046,7 @@ function AppInner(props: {
           themeButton={themeButton}
           settingsButton={settingsButton}
           historyDays={historyDays}
+          logsTz={logsTz}
         />
         {settingsDialog}
         {configVarsDialog}

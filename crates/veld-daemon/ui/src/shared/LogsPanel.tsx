@@ -10,7 +10,8 @@ import {
   useComputedColorScheme,
 } from "@mantine/core";
 import { api, type HistoryEntry, type LogResponse, type RunRef } from "../api";
-import { extractMsg, extractTs, fmtTs, fmtWhen, nodeColor } from "./util";
+import { extractMsg, extractTs, fmtTs, fmtTsFull, fmtWhen, nodeColor } from "./util";
+import type { LogTimeZone } from "./settings";
 import { ansiCss, markAnsiSpans, parseAnsi, type AnsiSpan } from "./ansi";
 
 interface Entry {
@@ -47,6 +48,14 @@ export function LogsPanel(props: {
   visible: boolean;
   /** Fill the parent (a pane) instead of sitting at a fixed height in a card. */
   fill?: boolean;
+  /**
+   * Which zone to render each line's timestamp in (`logs.timeZone`).
+   *
+   * Required rather than defaulted, so a host that forgets it is a type error rather
+   * than a panel that silently disagrees with the setting the other host honours.
+   * Passed down from the app's single `useSettings` like every other preference here.
+   */
+  tz: LogTimeZone;
 }) {
   const [runFilter, setRunFilter] = useState<string>("");
   const [nodeFilter, setNodeFilter] = useState<string>("");
@@ -331,7 +340,20 @@ export function LogsPanel(props: {
           <div key={i}>
             {gap && <div className="log-ctx-sep">···</div>}
             <div className={`log-line${dim ? " ctx" : ""}${e.msg.startsWith("[VELD]") ? " ann" : ""}`}>
-              {e.ts && <span className="ts">{fmtTs(e.ts)}</span>}
+              {e.ts && (
+                // `|| e.ts` because `fmtTs` returns "" for a value `new Date` cannot
+                // parse, which rendered an empty inline span: the row lost its
+                // timestamp column entirely and had no hit area, so there was nothing
+                // to hover either. What this buys is the value staying *visible* — on
+                // that path `fmtTsFull` also returns the raw string, so the tooltip
+                // adds nothing the row does not already show. `extractTs` (`./util`) is
+                // `/^\[([^\]]+)\]/` with no date gate at all — it hands back whatever
+                // the first bracket holds — so this depends entirely on the daemon
+                // always prefixing `r.ts`, not on any validation here.
+                <span className="ts" title={fmtTsFull(e.ts, props.tz)}>
+                  {fmtTs(e.ts, props.tz) || e.ts}
+                </span>
+              )}
               {multi && (
                 <span
                   className="node-tag"

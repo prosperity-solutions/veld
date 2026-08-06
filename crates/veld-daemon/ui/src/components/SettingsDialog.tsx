@@ -41,6 +41,7 @@ import {
 import {
   detachGraceMinutes,
   externalOrigins,
+  logsTimeZone,
   terminalInterceptSystemOpen,
   runHistoryDays,
   terminalOpenUrlsInApp,
@@ -48,6 +49,7 @@ import {
   markerStyle,
   quickSwitchPrefs,
   terminalPrefs,
+  type LogTimeZone,
   type MarkerStyle,
 } from "../shared/settings";
 
@@ -97,6 +99,7 @@ export function SettingsDialog(props: {
   const quick = quickSwitchPrefs(settings ?? {});
   const openInApp = terminalOpenUrlsInApp(settings ?? {});
   const intercept = terminalInterceptSystemOpen(settings ?? {});
+  const logsTz = logsTimeZone(settings ?? {});
 
   // Number inputs are held locally while being typed and committed on blur —
   // see the file header. Re-seeded whenever the daemon's value changes so a
@@ -276,6 +279,36 @@ export function SettingsDialog(props: {
               onKeyDown={(e) => {
                 if (e.key === "Enter") e.currentTarget.blur();
               }}
+            />
+          </Row>
+        </Stack>
+
+        <Stack gap="xs">
+          <SectionTitle>Logs</SectionTitle>
+          <Row
+            label="Show timestamps in"
+            /* Says plainly that this is display only. Every line is stored in UTC
+               because veld sorts and merges lines by comparing those strings, so
+               "convert" here can only ever mean "spell differently on screen" — and a
+               reader who thinks a setting rewrites stored data will not trust either
+               value. The last sentence is the one people come here for. */
+            /* No backticks: `help` renders through a plain Text, not markdown, so they
+               would appear on screen — every other help string in this file writes
+               flags and commands bare for that reason. */
+            help="Display only — every line is stored in UTC, which is what veld sorts and interleaves by. Local is your browser's zone; hover a timestamp for the date, both zones and the exact stored value. veld logs and veld start --attach follow this setting too, and veld logs takes --utc / --local to override it for one command."
+          >
+            <NativeSelect
+              size="xs"
+              w={140}
+              value={logsTz}
+              disabled={locked}
+              data={[
+                { value: "local", label: "Local time" },
+                { value: "utc", label: "UTC" },
+              ]}
+              onChange={(e) =>
+                set({ "logs.timeZone": e.currentTarget.value as LogTimeZone })
+              }
             />
           </Row>
         </Stack>

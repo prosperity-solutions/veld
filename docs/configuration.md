@@ -2821,14 +2821,26 @@ Details:
 
 ### Log Timestamps
 
-All log output (both `start_server` stdout/stderr and internal Veld events) is timestamped with ISO 8601 timestamps:
+All log output (both `start_server` stdout/stderr and internal Veld events) is timestamped when the line is emitted, which is what lets `veld logs` merge nodes chronologically.
+
+**Stored in UTC, shown in your time zone.** Every line is stored as RFC 3339 UTC with microsecond precision — not a display choice but a requirement, since Veld orders and interleaves lines by comparing those strings. What you *read* is converted — in `veld logs`, in `veld start --attach`'s live streaming, and in the `/ide` logs view:
 
 ```
-[2026-03-12T08:30:01.123456+00:00] Server listening on port 3000
-[2026-03-12T08:30:01.456789+00:00] Connected to database
+$ veld logs
+web:local [2026-03-12T09:30:01.123456+01:00] Server listening on port 3000
+web:local [2026-03-12T09:30:01.456789+01:00] Connected to database
+
+$ veld logs --utc
+web:local [2026-03-12T08:30:01.123456Z] Server listening on port 3000
+web:local [2026-03-12T08:30:01.456789Z] Connected to database
 ```
 
-Timestamps are written at the time each line is emitted, enabling chronological merging across nodes in `veld logs`.
+- `--utc` prints the stored string verbatim; `--local` forces local. Either overrides the `logs.timeZone` setting for one command, and the two cannot be combined with each other or with `--json`. `veld start --attach` has no such flags — it follows the setting, so a `veld logs` beside it shows the same clock.
+- **`--json` always emits UTC**, whatever the setting says. It is the machine-readable shape, so `timestamp` has exactly one spelling regardless of who ran the command.
+- The setting lives at **Settings → Logs** in the `/ide` management UI (and Veld Desktop), and defaults to `local`. The `/ide` logs view follows it, and each timestamp's tooltip carries the full date, both zones, and the exact stored value.
+- **The first-generation dashboard at `https://veld.localhost/` always shows local time** and does not read this setting — it fetches no settings at all. So with `logs.timeZone` set to `utc`, that one page still shows local. It is a frozen surface; `/ide` is where the setting applies.
+- **"Local" means each reader's own clock, not one shared clock.** The setting fixes the policy; the zone is resolved where the timestamp is rendered — from the process environment for the CLI, from the browser for `/ide`. So a `veld logs` run with an empty `TZ` prints `+00:00` (an empty `TZ` resolves to UTC) while the same daemon's `/ide` shows your machine's zone, and a browser on another machine shows that machine's. Use `--utc` when two readers must agree exactly.
+- **One hour a year, the displayed time is not monotonic.** At the DST fall-back the local clock repeats an hour, so correctly-ordered lines can render `02:59:00` then `02:01:00`. The lines are not misordered and nothing is wrong with the data — the stored UTC values are strictly increasing, which is what Veld sorts by. `veld logs` shows the offset inline (`+02:00` then `+01:00`), and in `/ide` the tooltip's offset is the tiebreak. `--utc` avoids the ambiguity entirely.
 
 ---
 

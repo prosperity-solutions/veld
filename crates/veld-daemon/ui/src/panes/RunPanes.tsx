@@ -24,6 +24,7 @@
 
 import type { NodeStats, RunInfo, RunRef } from "../api";
 import { LogsView, NodesView, NoRunView, type RunViewTarget } from "../shared/RunViews";
+import type { LogTimeZone } from "../shared/settings";
 
 /** What the diagnostics panes need about the selected worktree's run. */
 export interface RunPaneContext {
@@ -38,6 +39,9 @@ export interface RunPaneContext {
   onChanged: () => void;
   /** Open a URL in a browser pane in this worktree's layout. */
   onOpenPane: (name: string, url: string) => void;
+  /** `logs.timeZone` — the app holds the settings document, so a pane is handed the
+   *  resolved value rather than fetching it again. */
+  logsTz: LogTimeZone;
 }
 
 /** The context as a view target, or null when there is nothing to show. */
@@ -55,7 +59,7 @@ function target(ctx: RunPaneContext): RunViewTarget | null {
 export function LogsPane(props: { ctx: RunPaneContext }) {
   const t = target(props.ctx);
   if (!t) return <NoRunView kind="logs" hint={props.ctx.emptyHint} />;
-  return <LogsView target={t} fill />;
+  return <LogsView target={t} fill tz={props.ctx.logsTz} />;
 }
 
 export function NodesPane(props: { ctx: RunPaneContext }) {
