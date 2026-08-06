@@ -154,6 +154,13 @@ jobs:
           # check trivially, which reads as a clean bill of health.
           python3 tests/validate-workflow-gates.py --selftest
           python3 tests/validate-workflow-gates.py
+      # Same reasoning: static, checkout-only, and the thing it guards (one
+      # favicon inlined into five files across three languages) has no compiler
+      # or linter that can see the drift.
+      - name: Favicon matches on every surface
+        run: |
+          chmod +x tests/validate-favicon.sh
+          ./tests/validate-favicon.sh
 
   licenses:
     name: Third-Party Licenses
