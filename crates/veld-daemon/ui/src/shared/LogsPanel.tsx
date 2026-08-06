@@ -124,11 +124,13 @@ export function LogsPanel(props: {
   const { rows, matchCount } = useMemo(() => {
     const entries: Entry[] = [];
     for (const n of data?.nodes ?? []) {
-      // `_veld:*` sections (internal, setup/teardown steps) belong to the run,
-      // not to a node, so a node filter does not apply to them — same rule the
-      // daemon and `veld logs` follow for run-level streams. Filtering them out
-      // left the Setup view blank whenever a node was picked.
+      // `_veld:internal` is the run's liveness stream (probes, recoveries —
+      // daemon noise, not any node's output), so a node pick hides it — same
+      // rule the daemon and `veld logs` follow. `_veld:setup`/`teardown` are
+      // a node's real step output and stay under the old rule: kept even with
+      // a node picked (filtering them out blanked the Setup view).
       const runLevel = n.node === "_veld";
+      if (runLevel && n.variant === "internal" && nodeFilter) continue;
       if (nodeFilter && !runLevel && `${n.node}:${n.variant}` !== nodeFilter) continue;
       for (const raw of n.lines) {
         // The CLI colours its own output and dev servers colour far more, so a
@@ -210,95 +212,112 @@ export function LogsPanel(props: {
       className={props.fill ? "logs-fill" : "logs-card"}
       style={props.visible ? undefined : { display: "none" }}
     >
-      <Group gap="xs" px={10} py={6} wrap="wrap">
-        {/* Which environment these lines belong to — pane mode only, since a
-            card already has the name in its header.
+      <div
+        style={{
+          display: "flex",
+          flexDirection: "column",
+          gap: 6,
+          padding: "6px 10px",
+        }}
+      >
+        {/* Row 1 — which run, node and stream. Stable: never moves when a
+            search starts. */}
+        <Group gap="xs" wrap="wrap" align="center">
+          {/* Which environment these lines belong to — pane mode only, since a
+              card already has the name in its header.
 
-            `NodesView` carries this and `LogsView` did not, which was survivable
-            while a worktree had one environment and is not now: the control beside
-            it is a *history* picker ("Latest run", "All runs") for the environment
-            already bound, so a reader with two live runs would take that dropdown
-            for the answer to "which run is this?" and be wrong. The title below
-            says `Run history` for the same reason. */}
-        {props.fill && (
-          <Text size="xs" ff="monospace" fw={700} title="The environment these logs belong to">
-            {props.run.name}
-          </Text>
-        )}
-        <NativeSelect
-          size="xs"
-          title="Run history"
-          value={runFilter}
-          onChange={(e) => {
-            setRunFilter(e.currentTarget.value);
-            setAutoScroll(true);
-            setData(null);
-          }}
-          data={[
-            { value: "", label: "Latest run" },
-            ...props.history.map((h) => ({
-              value: h.run_id,
-              label: `${h.outcome || h.status} · ${fmtWhen(h.created_at)}`,
-            })),
-            { value: "all", label: "All runs" },
-          ]}
-        />
-        <NativeSelect
-          size="xs"
-          title="Node"
-          value={nodeFilter}
-          onChange={(e) => setNodeFilter(e.currentTarget.value)}
-          data={[
-            { value: "", label: "All nodes" },
-            ...[...knownNodes.current.keys()].sort().map((k) => ({ value: k, label: k })),
-          ]}
-        />
-        <SegmentedControl
-          size="xs"
-          value={sourceFilter}
-          onChange={(v) => {
-            setSourceFilter(v);
-            setData(null);
-          }}
-          data={[
-            { value: "all", label: "All" },
-            { value: "server", label: "Server" },
-            { value: "client", label: "Client" },
-            { value: "setup", label: "Setup" },
-            { value: "internal", label: "Internal" },
-          ]}
-        />
-        <TextInput
-          size="xs"
-          placeholder="Search…"
-          value={search}
-          onChange={(e) => setSearch(e.currentTarget.value)}
-          style={{ width: 150 }}
-        />
-        {term && (
-          <>
-            <Text size="xs" c="dimmed">
-              {matchCount} matches
+              `NodesView` carries this and `LogsView` did not, which was survivable
+              while a worktree had one environment and is not now: the control beside
+              it is a *history* picker ("Latest run", "All runs") for the environment
+              already bound, so a reader with two live runs would take that dropdown
+              for the answer to "which run is this?" and be wrong. The title below
+              says `Run history` for the same reason. */}
+          {props.fill && (
+            <Text size="xs" ff="monospace" fw={700} title="The environment these logs belong to">
+              {props.run.name}
             </Text>
-            <NumberInput
-              size="xs"
-              title="Context lines"
-              value={ctxLines}
-              onChange={(v) => setCtxLines(Math.max(0, Math.min(50, Number(v) || 0)))}
-              min={0}
-              max={50}
-              style={{ width: 70 }}
-            />
-          </>
-        )}
-        <Button
-          size="compact-xs"
-          variant={autoScroll ? "light" : "default"}
-          onClick={() => setAutoScroll((v) => !v)}
-        >
-          Auto-scroll {autoScroll ? "ON" : "OFF"}
-        </Button>
-      </Group>
+          )}
+          <NativeSelect
+            size="xs"
+            title="Run history"
+            value={runFilter}
+            onChange={(e) => {
+              setRunFilter(e.currentTarget.value);
+              setAutoScroll(true);
+              setData(null);
+            }}
+            data={[
+              { value: "", label: "Latest run" },
+              ...props.history.map((h) => ({
+                value: h.run_id,
+                label: `${h.outcome || h.status} · ${fmtWhen(h.created_at)}`,
+              })),
+              { value: "all", label: "All runs" },
+            ]}
+          />
+          <NativeSelect
+            size="xs"
+            title="Node"
+            value={nodeFilter}
+            onChange={(e) => setNodeFilter(e.currentTarget.value)}
+            data={[
+              { value: "", label: "All nodes" },
+              ...[...knownNodes.current.keys()].sort().map((k) => ({ value: k, label: k })),
+            ]}
+          />
+          <SegmentedControl
+            size="xs"
+            value={sourceFilter}
+            onChange={(v) => {
+              setSourceFilter(v);
+              setData(null);
+            }}
+            data={[
+              { value: "all", label: "All" },
+              { value: "server", label: "Server" },
+              { value: "client", label: "Client" },
+              { value: "setup", label: "Setup" },
+              { value: "internal", label: "Internal" },
+            ]}
+          />
+        </Group>
+        {/* Row 2 — search and its affordances. Kept on their own row/group so
+            the auto-scroll toggle and the context control never relocate or wrap
+            onto orphaned lines when a search term appears: that reflow was making
+            them hard to reach mid-debug. */}
+        <Group gap="xs" wrap="wrap" align="center">
+          <TextInput
+            size="xs"
+            placeholder="Search…"
+            value={search}
+            onChange={(e) => setSearch(e.currentTarget.value)}
+            style={{ width: 180 }}
+          />
+          {term && (
+            <>
+              <Text size="xs" c="dimmed">
+                {matchCount} matches
+              </Text>
+              <NumberInput
+                size="xs"
+                title="Context lines"
+                value={ctxLines}
+                onChange={(v) => setCtxLines(Math.max(0, Math.min(50, Number(v) || 0)))}
+                min={0}
+                max={50}
+                style={{ width: 70 }}
+              />
+            </>
+          )}
+          <Button
+            size="compact-xs"
+            variant={autoScroll ? "light" : "default"}
+            onClick={() => setAutoScroll((v) => !v)}
+          >
+            Auto-scroll {autoScroll ? "ON" : "OFF"}
+          </Button>
+        </Group>
+      </div>
       <div
         className={`log-area${props.fill ? " fill" : ""}`}
         ref={areaRef}

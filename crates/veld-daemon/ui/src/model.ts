@@ -156,6 +156,40 @@ export function selectorRuns(
   return { runs: shown, hidden: runs.length - shown.length };
 }
 
+/** Locale-independent string compare (RFC 3339 UTC timestamps sort correctly). */
+const cmpStr = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
+
+/**
+ * Compare two runs for display order: **active first, then by time** — a live
+ * run by its start (`created_at`), an ended run by its stop (`ended_at`),
+ * both newest-first. This is the single ordering every runs surface uses so
+ * "find the run I last touched" works whether it is still running (Active /
+ * IDE selector) or has crashed (History): the latest-started run is at the
+ * top of the live group, the last-stopped at the top of the ended group,
+ * regardless of project or environment name.
+ *
+ * Determinstic to the last tie: `created_at` desc, then name, then the unique
+ * `run_id`. A non-total comparator would pin equal rows to the daemon's
+ * unstable HashMap order and reshuffle the list on every poll refresh.
+ */
+export function compareRunsForDisplay(a: RunInfo, b: RunInfo): number {
+  if (a.live !== b.live) return a.live ? -1 : 1; // active group first
+  const ka = a.live ? a.created_at : a.ended_at ?? "";
+  const kb = b.live ? b.created_at : b.ended_at ?? "";
+  const byTime = cmpStr(kb, ka); // latest first
+  if (byTime !== 0) return byTime;
+  const byStart = cmpStr(b.created_at, a.created_at); // latest-started first
+  if (byStart !== 0) return byStart;
+  const byName = cmpStr(a.name, b.name);
+  if (byName !== 0) return byName;
+  return cmpStr(a.run_id, b.run_id);
+}
+
+/** Sort a run list for display with [`compareRunsForDisplay`] (returns a copy). */
+export function sortRunsForDisplay(runs: RunInfo[]): RunInfo[] {
+  return [...runs].sort(compareRunsForDisplay);
+}
+
 /**
  * The environment name a fresh start should use, given what is already live.
  *

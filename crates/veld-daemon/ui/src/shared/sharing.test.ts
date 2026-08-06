@@ -67,6 +67,7 @@ const run = (over: Partial<RunInfo> = {}): RunInfo => ({
   run_id: "run-a",
   short_id: "run-a",
   urls: {},
+  created_at: "2026-07-30T10:00:00Z",
   nodes: [
     {
       name: "web",

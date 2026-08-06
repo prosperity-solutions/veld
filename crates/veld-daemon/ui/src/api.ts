@@ -63,6 +63,8 @@ export interface RunInfo {
   run_id: string;
   short_id: string;
   outcome?: string | null;
+  /** When this environment's latest run started (RFC 3339). */
+  created_at: string;
   ended_at?: string | null;
   urls: Record<string, string>;
   nodes: NodeInfo[];

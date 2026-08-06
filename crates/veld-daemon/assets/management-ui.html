@@ -160,7 +160,7 @@ header{position:relative}
 .svc-empty{color:var(--dim);font-size:12px;padding:8px 0}
 
 /* log tab */
-.log-bar{display:flex;align-items:center;gap:8px;padding:0 0 8px;font-size:11px;color:var(--text2)}
+.log-bar{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:0 0 8px;font-size:11px;color:var(--text2)}
 .log-bar select{background:var(--surface2);border:1px solid var(--border);color:var(--text);font-size:11px;padding:2px 8px;border-radius:4px;font-family:inherit}
 .log-bar select:focus{outline:none;border-color:var(--accent)}
 .log-search{background:var(--surface2);border:1px solid var(--border);color:var(--text);font-size:11px;padding:3px 8px;border-radius:4px;font-family:inherit;width:160px;transition:border-color .15s}
@@ -268,6 +268,22 @@ const runState={},nodeColors={};
 let colorIdx=0;
 function nc(n){if(!(n in nodeColors))nodeColors[n]='node-c'+(colorIdx++%8);return nodeColors[n];}
 function rk(projectRoot,run){return projectRoot+'::'+run;}
+/* Order the flat run card list by recency: live runs newest-started first,
+   ended runs last-stopped first, across every project — the same rule the
+   new IDE and the React runs view use. Deterministic to the last tie so a
+   6s/focus poll never reshuffles the list (the registry is a HashMap, and
+   two worktrees of one repo share the project name).
+   `desc` sorts newest first via cmpStr(b,a). */
+function cmpStr(a,b){return a<b?-1:a>b?1:0;}
+function compareRuns(a,b){
+  if(a.live!==b.live)return a.live?-1:1;                    // active group first
+  var ka=a.live?a.created_at:(a.ended_at||''),
+      kb=b.live?b.created_at:(b.ended_at||'');
+  var byTime=cmpStr(kb,ka); if(byTime)return byTime;        // latest first
+  var byStart=cmpStr(b.created_at,a.created_at); if(byStart)return byStart;
+  var byName=cmpStr(a.name,b.name); if(byName)return byName;
+  return cmpStr(a.run_id,b.run_id);
+}
 // The project half of a run address (`RunScope` in management.rs): a run
 // name alone resolves ambiguously when two projects run the same name.
 function scopeOf(card){return 'project_root='+encodeURIComponent(card.dataset.path);}
@@ -357,16 +373,16 @@ function render(data){
   for(const k of Object.keys(runState)){const s=runState[k];if(s.panelEl&&s.panelEl.parentNode)s.panelEl.parentNode.removeChild(s.panelEl);}
   let h='';
   const shownKeys=new Set();
+  // Flat card list across every project, ordered by recency (see compareRuns).
+  const cards=[];
   for(const proj of data.projects){
-    const runs=proj.runs.slice()
-      .filter(r=>view==='active'?r.live:!r.live)
-      .sort((a,b)=>{
-        if(a.status==='running'&&b.status!=='running')return -1;
-        if(b.status==='running'&&a.status!=='running')return 1;
-        return a.name.localeCompare(b.name);
-      });
-    for(const run of runs){
-      shownKeys.add(rk(proj.project_root,run.name));
+    for(const run of proj.runs){
+      if(view==='active'?run.live:!run.live)cards.push({proj:proj,run:run});
+    }
+  }
+  cards.sort((x,y)=>compareRuns(x.run,y.run));
+  for(const {proj,run} of cards){
+    shownKeys.add(rk(proj.project_root,run.name));
       const key=rk(proj.project_root,run.name);
       const st=runState[key]||{tab:'services'};
 
@@ -514,7 +530,6 @@ function render(data){
       h+='<div class="tab-panel'+(st.tab==='logs'?' active':'')+'" data-panel="logs" data-loghost="'+esc(key)+'"></div>';
       h+='</div>';
     }
-  }
   content.innerHTML=h;
   // Run history per card, for the logs run picker (kept out of the DOM
   // string — the picker lives in the persistent log panel element).

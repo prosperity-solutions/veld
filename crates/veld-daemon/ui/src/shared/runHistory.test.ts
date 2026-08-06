@@ -22,6 +22,7 @@ function run(over: Partial<RunInfo> = {}): RunInfo {
     short_id: "r1",
     urls: {},
     nodes: [],
+    created_at: "2026-08-05T00:00:00Z",
     ...over,
   };
 }
