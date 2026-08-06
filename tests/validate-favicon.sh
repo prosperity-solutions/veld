@@ -90,7 +90,7 @@ case "$svg" in
   *'%'*)  fail "website/favicon.svg contains a literal '%' — encode it as %25" ;;
   *'"'*)  fail "website/favicon.svg must use single-quoted attributes (a '\"' closes the href)" ;;
   *'&'*)  fail "website/favicon.svg contains '&', which starts a character reference in an href" ;;
-  *'\`'*) fail "website/favicon.svg contains a backtick, which breaks the JS template literal in desktop/src/main.js" ;;
+  *'`'*)  fail "website/favicon.svg contains a backtick, which breaks the JS template literal in desktop/src/main.js" ;;
   *'$'*)  fail "website/favicon.svg contains '\$', which can interpolate in desktop/src/main.js" ;;
   *'{'*|*'}'*) fail "website/favicon.svg contains a brace, which collides with the {title}/{wordmark}/{body} substitution in crates/veld-gateway/src/pages.rs" ;;
 esac

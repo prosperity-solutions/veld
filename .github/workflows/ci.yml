@@ -288,8 +288,11 @@ jobs:
       # because Vite copies the tag through untouched. The `schema` job checks
       # the sources; this is the one place a build that stopped doing that would
       # show up (the script picks up `dist/index.html` when it exists).
+      # Spelled absolutely: this job's `defaults.run.working-directory` is the UI
+      # package, and a bare `.` here reads as either that or the workspace root
+      # depending on how you think overrides compose.
       - name: Favicon survives the bundle
-        working-directory: .
+        working-directory: ${{ github.workspace }}
         run: ./tests/validate-favicon.sh
 
   desktop:
