@@ -53,6 +53,19 @@ app cannot restart your daemon or ask for a password.
 | `VELD_DESKTOP=0` | Skip the app. The opt-out for a CI box or a server |
 | `VELD_DESKTOP_ONLY=1` | Install *only* the app: no CLI, no services, no sudo. macOS only |
 | `VELD_DESKTOP_DIR=<dir>` | Where the app lives. When set it is the **only** location consulted, by the installer and by `veld desktop status` |
+| `VELD_BINARY_ICONS=0` | Leave the CLI/daemon/helper with the generic executable icon (see below) |
+
+**The binaries get the app's icon.** On macOS the installer copies the installed
+app's `.icns` onto `veld`, `veld-daemon` and `veld-helper`, because an
+authorization prompt raised on their behalf — 1Password's "Allow veld-daemon to
+get CLI access", a sudo sheet — otherwise shows a generic `exec` tile, i.e. asks
+the user to approve access to their secrets on behalf of something they cannot
+identify. The icon comes from the installed app, so a machine with
+`VELD_DESKTOP=0` simply skips this; `VELD_BINARY_ICONS=0` skips it explicitly.
+One documented cost: a custom icon lives in the file's resource fork, and
+`codesign --verify --strict` rejects a Mach-O carrying one. Plain
+`codesign --verify` passes, the ad-hoc signature is intact, and the binaries run
+and are launched by launchd normally.
 
 The app's own *Check for Updates…* takes the same route: it spawns
 `veld desktop update`, quits so its bundle can be replaced, and the CLI reopens

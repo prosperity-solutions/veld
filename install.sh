@@ -23,6 +23,9 @@
 #   VELD_DESKTOP_WAIT_PID=<pid>   Wait for that process to exit before replacing
 #                         the app — how Veld Desktop updates itself (it hands off
 #                         to this script and quits).
+#   VELD_BINARY_ICONS=0   Do not give the CLI/daemon/helper the app's icon. They get
+#                         it so an authorization prompt raised on their behalf (1Password,
+#                         sudo) shows the Veld mark instead of a generic "exec" tile.
 #   VELD_DESKTOP_RELAUNCH=1   Reopen the app afterwards — on EVERY exit path, not
 #                         only a successful one. The app quit itself to hand over,
 #                         so an unhandled failure would otherwise leave the user
@@ -253,6 +256,78 @@ verify_checksum() {
 # would replace a real Developer ID signature with an ad-hoc one the day releases
 # are signed.
 
+# Where an existing Veld.app is, if there is one. Sets DESKTOP_APP (empty when
+# there is none).
+#
+# VELD_DESKTOP_DIR, when set, is the *only* place looked at — it names where this
+# machine keeps apps, so falling back to /Applications after it would install
+# somewhere the caller explicitly did not ask for. Veld Desktop passes its own
+# bundle's directory here when it hands over an update, so the copy that gets
+# replaced is the one the user launched. Otherwise /Applications wins over
+# ~/Applications, and whichever exists is what gets updated.
+#
+# Separate from `install_desktop_app` because two other things need the answer
+# even when the app half does not run: the closing "Run 'veld desktop install'"
+# hint, and the icon step below.
+find_desktop_app() {
+  DESKTOP_APP=""
+  if [ -n "${VELD_DESKTOP_DIR:-}" ]; then
+    if [ -d "${VELD_DESKTOP_DIR}/Veld.app" ]; then
+      DESKTOP_APP="${VELD_DESKTOP_DIR}/Veld.app"
+    fi
+    return 0
+  fi
+  for candidate in "/Applications/Veld.app" "$HOME/Applications/Veld.app"; do
+    if [ -d "$candidate" ]; then
+      DESKTOP_APP="$candidate"
+      return 0
+    fi
+  done
+}
+
+# Give the CLI, daemon and helper the app's icon.
+#
+# Why this is not cosmetic: an authorization prompt raised on behalf of a bare
+# Mach-O executable — 1Password's "Allow veld-daemon to get CLI access", and any
+# other consent sheet that shows the requesting process — renders the generic
+# "exec" tile, which tells the user nothing about who is asking. A user is being
+# asked to approve access to their secrets by something they cannot identify.
+# A custom icon is what turns that into the Veld mark.
+#
+# The source is the *installed app's* own .icns, not a new release asset: it
+# cannot drift from the app's icon, it needs no change to the release pipeline,
+# and it is absent exactly where it does not matter — a CI box or a server that
+# set VELD_DESKTOP=0 has no GUI to show a prompt in.
+#
+# The cost, measured rather than assumed: a custom icon is stored in
+# `com.apple.ResourceFork` + `com.apple.FinderInfo`, and `codesign --verify
+# --strict` then rejects the binary ("resource fork, Finder information, or
+# similar detritus not allowed", exit 1). Plain `codesign --verify` still passes,
+# the ad-hoc signature is intact, and the binaries execute and are spawned by
+# launchd normally. Nothing in veld runs a strict verify on its own binaries, and
+# Gatekeeper does not assess a locally ad-hoc-signed executable at all — but the
+# day these binaries carry a Developer ID, this step is the reason a strict
+# verification of them would fail, so it is here in writing. `VELD_BINARY_ICONS=0`
+# opts out.
+#
+# Runs AFTER `install_bin` has signed each binary: `xattr -cr` there would strip
+# the icon straight back off. `osascript -l JavaScript` rather than the
+# Rez/SetFile dance every recipe for this uses — those are Xcode command-line
+# tools, absent on a plain macOS, which is precisely the machine a `curl | bash`
+# installer lands on.
+apply_binary_icons() {
+  local icns="$1" target rc=0
+  [ -f "$icns" ] || return 0
+
+  for target in "${INSTALL_DIR}/veld" "${LIB_DIR}/veld-helper" "${LIB_DIR}/veld-daemon"; do
+    [ -f "$target" ] || continue
+    $NEED_SUDO osascript -l JavaScript \
+      -e 'function run(a){ObjC.import("AppKit");var i=$.NSImage.alloc.initWithContentsOfFile(a[0]);if(!i||i.isNil())throw new Error("cannot read "+a[0]);if(!$.NSWorkspace.sharedWorkspace.setIconForFileOptions(i,a[1],0))throw new Error("setIcon refused "+a[1])}' \
+      "$icns" "$target" >/dev/null 2>&1 || rc=1
+  done
+  return "$rc"
+}
+
 # The app is installed by two processes that can overlap — `veld update` and the
 # app's own updater — and the loser of that race would delete the winner's only
 # backup. Per-user (`TMPDIR` is per-user on macOS), which is the right grain for
@@ -313,25 +388,7 @@ install_desktop_app() {
       ;;
   esac
 
-  # Where an existing install would be. VELD_DESKTOP_DIR, when set, is the *only*
-  # place looked at — it names where this machine keeps apps, so falling back to
-  # /Applications after it would install somewhere the caller explicitly did not
-  # ask for. Veld Desktop passes its own bundle's directory here when it hands
-  # over an update, so the copy that gets replaced is the one the user launched.
-  # Otherwise /Applications wins over ~/Applications, and whichever exists is
-  # what gets updated.
-  if [ -n "${VELD_DESKTOP_DIR:-}" ]; then
-    if [ -d "${VELD_DESKTOP_DIR}/Veld.app" ]; then
-      DESKTOP_APP="${VELD_DESKTOP_DIR}/Veld.app"
-    fi
-  else
-    for candidate in "/Applications/Veld.app" "$HOME/Applications/Veld.app"; do
-      if [ -d "$candidate" ]; then
-        DESKTOP_APP="$candidate"
-        break
-      fi
-    done
-  fi
+  find_desktop_app
 
   zip="veld-desktop-${VERSION}-mac-${desktop_arch}.zip"
   url="https://github.com/${REPO}/releases/download/${TAG}/${zip}"
@@ -892,9 +949,32 @@ fi
 DESKTOP_FAILED=""
 if [ -n "$WANT_DESKTOP" ]; then
   install_desktop_app || DESKTOP_FAILED="1"
+elif [ "$OS" = "macos" ]; then
+  # Not installing one does not mean there isn't one — the closing hint and the
+  # icon step below both need to know.
+  find_desktop_app
 fi
 if [ -n "$DESKTOP_FAILED" ]; then
   echo "  Run 'veld desktop install' to retry the app on its own."
+fi
+
+# --- Binary icons (macOS) ---
+#
+# See `apply_binary_icons`. Deliberately last of the install steps: it must run
+# after `install_bin` has signed each binary, or `xattr -cr` there strips the
+# icon straight back off.
+WANT_BINARY_ICONS="1"
+case "${VELD_BINARY_ICONS:-}" in
+  0|false|no) WANT_BINARY_ICONS="" ;;
+esac
+if [ "$OS" = "macos" ] && [ -n "$WANT_BINARY_ICONS" ] && [ -n "$DESKTOP_APP" ]; then
+  echo "Applying the Veld icon to the binaries..."
+  if ! apply_binary_icons "${DESKTOP_APP}/Contents/Resources/icon.icns"; then
+    # Never fatal: an authorization prompt with the wrong icon is a worse prompt,
+    # not a broken install.
+    echo "Warning: could not set the Veld icon on one or more binaries."
+    echo "  Harmless — authorization prompts will show the generic executable icon."
+  fi
 fi
 
 # --- Next steps (no auto-run of veld setup) ---
