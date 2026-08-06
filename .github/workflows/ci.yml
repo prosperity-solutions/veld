@@ -284,10 +284,12 @@ jobs:
         run: npm test
       - name: Build (single-file bundle)
         run: npm run build
-      # The bundle is what /ide actually serves, and the favicon reaches it only
-      # because Vite copies the tag through untouched. The `schema` job checks
-      # the sources; this is the one place a build that stopped doing that would
-      # show up (the script picks up `dist/index.html` when it exists).
+      # The favicon reaches the served /ide only because Vite copies the tag
+      # through untouched. The `schema` job checks the sources; this checks a
+      # bundle built the same way as the one `crates/veld-daemon/build.rs`
+      # embeds (same config and entry, its own `--outDir`), which is where a
+      # Vite that stopped copying it through would show up. The script picks up
+      # `dist/index.html` whenever it exists.
       # Spelled absolutely: this job's `defaults.run.working-directory` is the UI
       # package, and a bare `.` here reads as either that or the workspace root
       # depending on how you think overrides compose.

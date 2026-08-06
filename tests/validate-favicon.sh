@@ -141,25 +141,52 @@ EOF
   exit 1
 fi
 
-# Reverse direction: a *new* page that inlines an icon and never registers here
-# is exactly the drift this gate exists to stop — the /ide shell had grown its
-# own hand-drawn mark and the v1 dashboard had none, and no check saw either.
-# `-a` because crates/veld-daemon/ui/src/App.tsx contains a NUL byte, which
-# makes grep skip the file silently (AGENTS.md).
+# Reverse direction: a *new* page that inlines an icon link and never registers
+# here would drift unnoticed, which is half of how `/ide` ended up with a
+# hand-drawn `v`. Only half: a page that ships *no* icon at all — the v1
+# dashboard's actual bug — has nothing for this to match on, and no check
+# catches that. The branding checklist in docs/branding.md is what covers it.
+#
+# Matches `rel=icon` unquoted and the compound relations (`shortcut icon`,
+# `apple-touch-icon`, `mask-icon`) as well as the plain quoted form, because a
+# surface spelled any of those ways is still a surface.
+#
+# Scoped to **tracked** files: walking the filesystem made the result depend on
+# whatever happened to be lying in the worktree (gitignored scratch dirs, a
+# stale build), so a local `just lint` could fail on something CI's clean
+# checkout would never see. `-a` because crates/veld-daemon/ui/src/App.tsx
+# contains a NUL byte, which makes grep skip the file silently (AGENTS.md).
+ICON_LINK_RE="rel=[\"']?[a-z-]* ?icon"
+
+# A function rather than an inline pipeline: bash 3.2 (what macOS ships as
+# /bin/bash) mis-parses a `case` inside a `$(…)`, taking the first pattern's
+# `)` as the end of the substitution.
+scan_icon_links() {
+  cd "$REPO_ROOT" || return 0
+  git ls-files -z | while IFS= read -r -d '' f; do
+    case "$f" in
+      *.md|tests/validate-favicon.sh) continue ;;
+    esac
+    printf '%s\0' "$f"
+  # `/dev/null` as a fixed first argument: it keeps grep from reading stdin if
+  # xargs ever runs it with no files, and keeps filenames in the output.
+  done | xargs -0 grep -alE "$ICON_LINK_RE" /dev/null 2>/dev/null | sort || true
+}
+
 unregistered=""
-while IFS= read -r hit; do
-  [ -n "$hit" ] || continue
-  case " ${SURFACES[*]} ${OPTIONAL_SURFACES[*]} " in
-    *" $hit "*) ;;
-    *) unregistered="$unregistered  $hit"$'\n' ;;
-  esac
-done <<EOF
-$(cd "$REPO_ROOT" && grep -ralE "rel=[\"']icon[\"']" . \
-    --exclude-dir=node_modules --exclude-dir=target --exclude-dir=.git \
-    --exclude-dir=dist --exclude-dir=.veld-dev \
-    --exclude="*.md" --exclude="validate-favicon.sh" 2>/dev/null \
-  | sed 's|^\./||' | sort)
+if git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+  while IFS= read -r hit; do
+    [ -n "$hit" ] || continue
+    case " ${SURFACES[*]} ${OPTIONAL_SURFACES[*]} " in
+      *" $hit "*) ;;
+      *) unregistered="$unregistered  $hit"$'\n' ;;
+    esac
+  done <<EOF
+$(scan_icon_links)
 EOF
+else
+  echo "  note: not a git checkout — skipping the unregistered-surface scan" >&2
+fi
 
 if [ -n "$unregistered" ]; then
   printf 'error: these files inline an icon link but are not in SURFACES:\n%s\n' "$unregistered" >&2

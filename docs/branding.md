@@ -45,9 +45,12 @@ percent-escaped into a data-URI in `website/index.html`,
 that those five agree, so `tests/validate-favicon.sh` derives the expected string
 from `website/favicon.svg` and greps for it — run by `just lint`, by CI's
 `schema` job, and (against the built `/ide` bundle) by CI's `ui` job. It also
-scans the other way: a new page that inlines an icon link and never registers
-itself in that script's list fails the gate, because *that* is how `/ide` grew a
-hand-drawn `v` and `/` ended up with no icon at all. The one deliberate omission
+scans the other way, over tracked files: a new page that inlines an icon link
+and never registers itself in that script's list fails the gate. Note what that
+does *not* cover — a new page shipping **no** icon at all, which is what `/`
+did for years, is invisible to a scan for icon links. The checklist at the
+bottom of this file is the only thing standing between you and that one. The
+one deliberate omission
 is the feedback overlay: it is injected into someone else's page and must never
 replace that page's icon.
 
