@@ -41,12 +41,13 @@
 //!
 //! # Rewritten every daemon start, never trusted from disk
 //!
-//! The scripts carry the absolute path of the `veld` binary **beside the running
-//! daemon**, so a dev instance's terminals call the dev CLI and the installed one's
-//! call the installed CLI. That also means an upgrade must rewrite them, which is
-//! why generation is unconditional rather than "if missing". If the sibling binary
-//! is not there, nothing is written and no `BROWSER` is injected: a `$BROWSER`
-//! pointing at a script that cannot work is worse than no `$BROWSER` at all.
+//! The scripts carry the absolute path of the `veld` binary **belonging to the
+//! running daemon** (`veld_cli_path`), so a dev instance's terminals call the dev
+//! CLI and the installed one's call the installed CLI. That also means an upgrade
+//! must rewrite them, which is why generation is unconditional rather than "if
+//! missing". If no such binary is there, nothing is written and no `BROWSER` is
+//! injected: a `$BROWSER` pointing at a script that cannot work is worse than no
+//! `$BROWSER` at all.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -423,15 +424,23 @@ fn quote(path: &Path) -> String {
     format!("'{}'", path.display().to_string().replace('\'', "'\\''"))
 }
 
-/// The `veld` CLI beside the running daemon.
+/// The `veld` CLI belonging to the running daemon.
 ///
-/// Beside, deliberately, rather than `PATH`: the daemon may be a dev build on its
-/// own port with its own database, and its terminals must reach *its* CLI. This is
-/// also the check that decides whether the feature is available at all.
+/// An absolute path derived from this binary's own location rather than looked up
+/// on `PATH`: the daemon may be a dev build on its own port with its own database,
+/// and its terminals must reach *its* CLI. This is also the check that decides
+/// whether the feature is available at all.
+///
+/// The resolution lives in [`veld_core::paths::cli_for_exe`] — a sibling `veld`
+/// first, then the install prefix's `bin/` when this daemon is the installed one —
+/// because `veld doctor` reports on the outcome and the two must not have separate
+/// ideas about where a CLI is. "Sibling only" was that separate idea: it is
+/// satisfiable in a build tree and in no install at all, since the release splits
+/// the CLI into `<prefix>/bin` and the daemon into `<prefix>/lib/veld`. Every
+/// installed machine therefore had this feature silently off.
 fn veld_cli_path() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
-    let candidate = exe.parent()?.join("veld");
-    candidate.is_file().then_some(candidate)
+    veld_core::paths::cli_for_exe(exe.parent()?)
 }
 
 #[cfg(test)]

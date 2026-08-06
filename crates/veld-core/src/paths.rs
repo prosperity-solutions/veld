@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Resolve the veld lib directory.
 ///
@@ -26,6 +26,75 @@ pub fn lib_dir() -> PathBuf {
     user_dir.unwrap_or(system_dir)
 }
 
+/// Where a service binary's log lives: beside the binary, named after it.
+///
+/// launchd discards a job's stdout and stderr unless the plist names a file, so
+/// both service plists point here (see `setup::install_daemon` and
+/// `setup::install_helper_macos`). One owner rather than a `format!` in each
+/// writer, because `veld doctor` has to name the same file for the log to be
+/// findable — a diagnostic that says "check the daemon log" and cannot say where
+/// it is is the failure mode this exists to prevent.
+///
+/// `/tmp` when the binary has no parent, which only a relative bare filename
+/// produces.
+pub fn service_log_path(service_bin: &Path) -> PathBuf {
+    let name = service_bin
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "veld-service".to_owned());
+    match service_bin.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir.join(format!("{name}.log")),
+        _ => PathBuf::from(format!("/tmp/{name}.log")),
+    }
+}
+
+/// Every path the `veld` CLI belonging to a binary in `exe_dir` could be at, in
+/// the order they are tried. [`cli_for_exe`] takes the first that exists; this is
+/// the same list, exposed so a diagnostic can say where it looked.
+///
+/// A pure function of the path: no environment, no filesystem. `install.sh` splits
+/// a release across two directories — the CLI into `<prefix>/bin` (on `PATH`) and
+/// the daemon and helper into `<prefix>/lib/veld` — so a **sibling** `veld` exists
+/// in a build tree and in no install at all, which is why "beside me" alone
+/// answered "no CLI" on every installed machine.
+///
+/// The second candidate is derived from the shape of the directory rather than
+/// from [`lib_dir`]: a binary in something named `<prefix>/lib/veld` *is* installed
+/// under `<prefix>`, wherever that prefix is, and its CLI is `<prefix>/bin/veld`.
+/// That covers both install prefixes (`~/.local` and `/usr/local`) without naming
+/// either — and, being structural, it says nothing about a dev build. A
+/// `target/debug` daemon whose CLI has not been built must report *no* CLI rather
+/// than reach for `~/.local/bin/veld`, which would drive the installed instance's
+/// database and daemon from a dev instance's terminal.
+pub fn cli_candidates(exe_dir: &Path) -> Vec<PathBuf> {
+    let mut out = vec![exe_dir.join("veld")];
+    let in_lib_veld = exe_dir.file_name().is_some_and(|n| n == "veld")
+        && exe_dir
+            .parent()
+            .and_then(Path::file_name)
+            .is_some_and(|n| n == "lib");
+    if in_lib_veld {
+        if let Some(prefix) = exe_dir.parent().and_then(Path::parent) {
+            out.push(prefix.join("bin").join("veld"));
+        }
+    }
+    out
+}
+
+/// The `veld` CLI belonging to a binary in `exe_dir`, or `None` if there is none.
+///
+/// Callers are the daemon (which bakes this path into the terminal shims) and
+/// `veld doctor` (which reports on them), so the two can never disagree about
+/// where a CLI is expected to be.
+pub fn cli_for_exe(exe_dir: &Path) -> Option<PathBuf> {
+    cli_candidates(exe_dir)
+        .into_iter()
+        // `is_file` follows symlinks, which is deliberate: `~/.local/bin/veld` is a
+        // real file today, but a symlink there is a normal way to manage a CLI and
+        // points at one just as well.
+        .find(|c| c.is_file())
+}
+
 pub fn caddy_bin() -> PathBuf {
     lib_dir().join("caddy")
 }
@@ -36,4 +105,90 @@ pub fn caddy_data_dir() -> PathBuf {
 
 pub fn dnsmasq_conf_dir() -> PathBuf {
     lib_dir().join("dnsmasq.d")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_installed_layout_finds_the_cli_in_bin() {
+        assert_eq!(
+            cli_candidates(Path::new("/home/u/.local/lib/veld")),
+            vec![
+                PathBuf::from("/home/u/.local/lib/veld/veld"),
+                PathBuf::from("/home/u/.local/bin/veld"),
+            ],
+            "the installed daemon has no sibling CLI — `<prefix>/bin/veld` is where it is"
+        );
+    }
+
+    #[test]
+    fn a_system_prefix_derives_its_own_bin_dir() {
+        assert_eq!(
+            cli_candidates(Path::new("/usr/local/lib/veld"))
+                .last()
+                .unwrap(),
+            &PathBuf::from("/usr/local/bin/veld")
+        );
+    }
+
+    #[test]
+    fn a_dev_binary_is_never_pointed_at_the_installed_cli() {
+        // The only answer for a build tree is its own sibling: reaching for
+        // `~/.local/bin/veld` would drive the installed instance from a dev one.
+        let dev = Path::new("/repo/target/debug");
+        assert_eq!(cli_candidates(dev), vec![dev.join("veld")]);
+        // `lib` alone is not the install shape either — the leaf must be `veld`.
+        assert_eq!(
+            cli_candidates(Path::new("/opt/thing/lib")),
+            vec![PathBuf::from("/opt/thing/lib/veld")]
+        );
+    }
+
+    #[test]
+    fn an_installed_prefix_can_be_anywhere() {
+        // The rule is the *shape* of the directory, not a known prefix, so a
+        // relocated install resolves as well as a default one — and a test can
+        // exercise the real path without being installed.
+        assert_eq!(
+            cli_candidates(Path::new("/tmp/t1/lib/veld"))
+                .last()
+                .unwrap(),
+            &PathBuf::from("/tmp/t1/bin/veld")
+        );
+    }
+
+    #[test]
+    fn the_first_existing_candidate_wins() {
+        let tmp = std::env::temp_dir().join(format!("veld-paths-{}", std::process::id()));
+        let lib = tmp.join("lib/veld");
+        let bin = tmp.join("bin");
+        std::fs::create_dir_all(&lib).unwrap();
+        std::fs::create_dir_all(&bin).unwrap();
+        // Nothing installed yet: the feature is off rather than pointed at a
+        // path that does not resolve.
+        assert_eq!(cli_for_exe(&lib), None);
+        std::fs::write(bin.join("veld"), "#!/bin/sh\n").unwrap();
+        assert_eq!(cli_for_exe(&lib), Some(bin.join("veld")));
+        // A sibling takes precedence — that is a dev tree or a self-contained
+        // install, and either way it is the CLI that belongs to this binary.
+        std::fs::write(lib.join("veld"), "#!/bin/sh\n").unwrap();
+        assert_eq!(cli_for_exe(&lib), Some(lib.join("veld")));
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn a_service_log_sits_beside_its_binary() {
+        assert_eq!(
+            service_log_path(Path::new("/home/u/.local/lib/veld/veld-daemon")),
+            PathBuf::from("/home/u/.local/lib/veld/veld-daemon.log")
+        );
+        // A bare filename has no directory to log into; `/tmp` is the same
+        // fallback the helper's plist has always used.
+        assert_eq!(
+            service_log_path(Path::new("veld-daemon")),
+            PathBuf::from("/tmp/veld-daemon.log")
+        );
+    }
 }

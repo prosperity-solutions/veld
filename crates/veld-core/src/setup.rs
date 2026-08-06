@@ -564,6 +564,14 @@ pub async fn install_daemon() -> Result<StepResult, anyhow::Error> {
                 .context("failed to create LaunchAgents directory")?;
             let plist_path = plist_dir.join("dev.veld.daemon.plist");
 
+            // Log to a file beside the binary, for the same reason the helper's
+            // plist does it: launchd discards a job's stdout and stderr, so the
+            // daemon's own diagnostics — a terminal that would not spawn, a shim
+            // directory it could not write, a run whose command was not found —
+            // went nowhere, and every message anywhere in veld that said "check
+            // the daemon log" was pointing at a file that did not exist.
+            let log_path = crate::paths::service_log_path(&veld_daemon_bin);
+
             let plist = format!(
                 r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
@@ -584,10 +592,15 @@ pub async fn install_daemon() -> Result<StepResult, anyhow::Error> {
     <array>
         <string>{bin_path}</string>
     </array>
+    <key>StandardOutPath</key>
+    <string>{log_path}</string>
+    <key>StandardErrorPath</key>
+    <string>{log_path}</string>
 </dict>
 </plist>
 "#,
-                bin_path = veld_daemon_bin.display()
+                bin_path = veld_daemon_bin.display(),
+                log_path = log_path.display()
             );
             let label = "dev.veld.daemon";
             let domain_target = format!("gui/{real_uid}/{label}");
@@ -842,10 +855,7 @@ async fn install_helper_macos(bin: &Path, caddy_bin: Option<&Path>) -> Result<()
     // restarts, Caddy recovery, pid adoption) is observable — launchd otherwise
     // discards the helper's stderr, making a post-sleep recovery impossible to
     // diagnose.
-    let log_path = bin
-        .parent()
-        .map(|p| p.join("veld-helper.log"))
-        .unwrap_or_else(|| PathBuf::from("/tmp/veld-helper.log"));
+    let log_path = crate::paths::service_log_path(bin);
 
     let plist = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>

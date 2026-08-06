@@ -333,6 +333,12 @@ Three binaries work together:
 
 Caddy handles HTTPS termination and reverse proxying. Its internal CA is trusted in the system keychain during setup so browsers accept certificates without warnings.
 
+### Service logs
+
+The helper and the daemon run under launchd or systemd, and a launchd job's stdout and stderr are **discarded** unless its plist names a file — so both plists name one, beside the binary: `~/.local/lib/veld/veld-helper.log` and `~/.local/lib/veld/veld-daemon.log` for a default install. On Linux systemd captures the output itself: `journalctl --user -u veld-daemon`. `veld doctor` prints the daemon's log location in its Installation block, and says so plainly when a machine set up by an older veld is not capturing it yet — `veld setup <mode>` writes the current service definition and starts.
+
+
+
 ### Storage
 
 All CLI/daemon state — run state, the project registry, service logs, per-node and per-process resource samples, feedback threads and screenshots, relay auth tokens — lives in one SQLite database at `<data_dir>/veld/veld.db` (macOS: `~/Library/Application Support/veld/veld.db`; Linux: `~/.local/share/veld/veld.db`; override with `VELD_DB_PATH`). The file is `0600` (it holds secrets) and runs in WAL mode, so the CLI, daemon, and detached log writers read and write concurrently without file locking. The schema is versioned (`PRAGMA user_version`) and migrates forward automatically on upgrade — a CLI update never orphans or stops running environments because the data shape changed. A database created by a *newer* veld is refused with an error instead of being modified.
@@ -380,7 +386,7 @@ The shims route a single http(s) URL and hand **anything else** to the real tool
 
 Anything that runs inside your shell's startup gets an off switch: *Also catch programs that call open / xdg-open* (Settings → Terminal). Turn it off and Veld sets no `ZDOTDIR` at all; turn off *Open links from the terminal in Veld* and Veld puts **nothing** in the shell — no `$BROWSER`, no `ZDOTDIR`, no round trip. Both take effect for new terminals; a shell already open keeps the environment it started with.
 
-`veld doctor` reports whether this is actually working, because its failure mode is otherwise silent: the little scripts are written once when the daemon starts, and a daemon with no `veld` binary beside it (a moved install, an interrupted update) leaves the feature off with nothing but a line in a log.
+`veld doctor` reports whether this is actually working, because its failure mode is otherwise silent: the little scripts are written once when the daemon starts, and they carry the absolute path of the `veld` CLI belonging to that daemon — a sibling binary for a dev build, `<prefix>/bin/veld` for an installed one. A daemon that can find neither (a moved install, an interrupted update) leaves the feature off, and the row says which case it is and what fixes it — restarting the daemon, or reinstalling.
 
 **Settings** (`⌘,`, or the gear in the top bar) covers terminal font, cursor, scrollback, the Shift+Enter behaviour, whether terminal links open in a pane, whether `open`/`xdg-open` are caught as well, and which origins are exempt, how long detached shells are kept, how worktrees are marked in the rail, how long trashed worktrees are kept before they are deleted for good, how far back the run history views reach, which time zone log timestamps are shown in, and which quick switches a browser pane's toolbar carries. They are stored by the daemon rather than the browser, so Veld Desktop and a browser tab against the same daemon agree, and every window sees a change. There is no Save button — each control writes as you change it.
 

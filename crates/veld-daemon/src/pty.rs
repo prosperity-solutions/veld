@@ -301,9 +301,10 @@ pub fn routes() -> Router {
 /// Write the shim directory a terminal's `$BROWSER` points into.
 ///
 /// At startup rather than lazily on the first terminal, for two reasons: a machine
-/// with no `veld` binary beside the daemon logs the warning where somebody is
-/// looking, and `$VELD_SHIM_DIR` (the documented opt-in for `open`/`xdg-open`) is
-/// live for the very first shell instead of the second. Three small files.
+/// where no `veld` CLI resolves (`veld_core::paths::cli_for_exe`) logs the warning
+/// where somebody is looking, and `$VELD_SHIM_DIR` (the documented opt-in for
+/// `open`/`xdg-open`) is live for the very first shell instead of the second. Three
+/// small files.
 ///
 /// Idempotent, and deliberately not fatal: everything else about a terminal works
 /// without it.
