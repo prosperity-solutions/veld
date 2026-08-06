@@ -181,6 +181,9 @@ async fn install_helper_launchagent(
     </array>
     <key>RunAtLoad</key>
     <true/>
+    <!-- KeepAlive unconditionally true, like the daemon's and the privileged
+         helper's: install.sh restarts this job by signalling it to exit and relies on
+         launchd bringing it back onto the new binary (see `restart_launch_agent`). -->
     <key>KeepAlive</key>
     <true/>
 </dict>

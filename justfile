@@ -175,7 +175,11 @@ dev-install-daemon:
     plist_bin=""
     for plist in "$HOME/Library/LaunchAgents/dev.veld.daemon.plist"; do
         if [ -f "$plist" ]; then
-            plist_bin=$(grep "veld-daemon" "$plist" | head -1 | sed 's/.*<string>//;s/<\/string>.*//' | tr -d '[:space:]')
+            # Anchored on the executable line, not on "veld-daemon" anywhere in the
+            # file: the plist now also names ~/.veld/veld-daemon.log, and a plain
+            # first-match grep would hand back the log path the moment the keys are
+            # ever reordered — then `cp` and `codesign` would land on the log file.
+            plist_bin=$(grep -E "<string>[^<]*/veld-daemon</string>" "$plist" | head -1 | sed 's/.*<string>//;s/<\/string>.*//' | tr -d '[:space:]')
             [ -n "$plist_bin" ] && break
         fi
     done

@@ -310,6 +310,9 @@ pub fn routes() -> Router {
 /// without it.
 pub fn prepare_shims() {
     let _ = shims::dir();
+    // Only the daemon clears them, and only here — see `shims::clear_unbacked`, whose
+    // one hard rule is that it must not be reachable from `shims::dir()`.
+    shims::clear_unbacked();
 }
 
 /// Which of a worktree's config-declared panes have something to resume.

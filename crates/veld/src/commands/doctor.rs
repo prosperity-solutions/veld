@@ -581,8 +581,19 @@ impl Diagnostics {
             // wrong. The previous wording asked for neither and pointed at a daemon
             // log that macOS was discarding — three unfollowable instructions for a
             // check whose whole job is to be followable.
-            let lib = veld_core::paths::lib_dir();
-            let cli = veld_core::paths::cli_for_exe(&lib);
+            // Resolved from the directory the **running** daemon lives in, which is
+            // the plist's `ProgramArguments` when it names one and `lib_dir()`
+            // otherwise. Not `lib_dir()` alone: a legacy `/usr/local` install with a
+            // leftover `~/.local/lib/veld` (install.sh's cleanup removes the three
+            // binaries and leaves `caddy-data`, so the directory survives and
+            // `lib_dir()` prefers it) would have this row resolve a CLI the daemon
+            // never considered and print "restart it" for a daemon that will keep
+            // writing nothing. Doctor asking a different question than the daemon is
+            // the exact defect this row exists to report.
+            let dir_of_running_daemon =
+                daemon_program_dir().unwrap_or_else(veld_core::paths::lib_dir);
+            let cli = veld_core::paths::cli_for_exe(&dir_of_running_daemon);
+            let lib = dir_of_running_daemon;
             let cause = match &cli {
                 Some(_) => format!("Restart the daemon to write it: {}", restart_daemon_hint()),
                 None => {
@@ -948,35 +959,56 @@ fn daemon_log_row(daemon_bin: &Path, mode: &str) -> String {
     if !cfg!(target_os = "macos") {
         return "n/a".to_owned();
     }
-    let plist = dirs::home_dir()
-        .map(|h| h.join("Library/LaunchAgents/dev.veld.daemon.plist"))
-        .and_then(|p| std::fs::read_to_string(p).ok());
-    // The path the plist actually names, rather than "does it mention ours". The two
-    // differ on a developer machine: `just dev-install-daemon` copies the binary to
-    // wherever the plist already pointed, so the running daemon's log can legitimately
-    // be a file this CLI would not have derived — and answering "not captured" there
-    // would send someone to enable something that is already on, in a file they were
-    // never told about.
-    match plist.as_deref().and_then(launchd_string_after_key) {
+    // The path the plist actually names, rather than "does it mention the one we
+    // would derive". The two differ on a developer machine — `just
+    // dev-install-daemon` copies the binary to wherever the plist already pointed —
+    // and, more importantly, on a machine where `veld setup` deliberately wrote no
+    // log keys because the job could not have created the file.
+    match daemon_plist()
+        .as_deref()
+        .and_then(|xml| launchd_string_after_key(xml, "StandardErrorPath"))
+    {
         Some(path) => tilde_path(Path::new(&path)),
         None => format!(
             "not captured — run `veld setup {}` to enable it ({})",
             setup_mode_arg(mode),
-            tilde_path(&veld_core::paths::service_log_path(daemon_bin))
+            veld_core::paths::daemon_log_path()
+                .map(|p| tilde_path(&p))
+                .unwrap_or_else(|| daemon_bin.display().to_string())
         ),
     }
 }
 
-/// The `<string>` value following `<key>StandardErrorPath</key>` in a plist.
+/// The daemon LaunchAgent's plist, as text.
+fn daemon_plist() -> Option<String> {
+    let path = dirs::home_dir()?.join("Library/LaunchAgents/dev.veld.daemon.plist");
+    std::fs::read_to_string(path).ok()
+}
+
+/// The directory holding the daemon binary launchd was told to run.
 ///
-/// A deliberate two-token scan rather than a plist parser: this is one optional row
-/// of a diagnostic, the file is one veld wrote itself, and a dependency to read it
-/// would be paid for by every `veld` invocation. `None` covers every shape this
+/// `None` when there is no plist to read or it names nothing — the caller then falls
+/// back to `lib_dir()`, which is a guess, and says so by being the fallback.
+fn daemon_program_dir() -> Option<PathBuf> {
+    let xml = daemon_plist()?;
+    let program = launchd_string_after_key(&xml, "ProgramArguments")?;
+    Path::new(&program).parent().map(Path::to_path_buf)
+}
+
+/// The first `<string>` value after `<key>NAME</key>` in a plist.
+///
+/// A deliberate two-token scan rather than a plist parser: these are two optional
+/// rows of a diagnostic, the file is one veld wrote itself, and a dependency to read
+/// it would be paid for by every `veld` invocation. `None` covers every shape this
 /// cannot read — no key, no `<string>` after it, an empty value, a binary plist —
-/// and `None` renders as the honest "not captured", which is also the right answer
-/// when the file is unreadable.
-fn launchd_string_after_key(xml: &str) -> Option<String> {
-    let after_key = xml.split("<key>StandardErrorPath</key>").nth(1)?;
+/// and every caller treats `None` as "unknown", which is also the right answer when
+/// the file is unreadable.
+///
+/// Works for `ProgramArguments` only because its first `<string>` is the program;
+/// that is the same reading launchd does, and an argument-bearing daemon plist is
+/// not something veld writes.
+fn launchd_string_after_key(xml: &str, key: &str) -> Option<String> {
+    let after_key = xml.split(&format!("<key>{key}</key>")).nth(1)?;
     let open = after_key.find("<string>")? + "<string>".len();
     let close = after_key[open..].find("</string>")? + open;
     let value = after_key[open..close].trim();
@@ -1248,9 +1280,23 @@ mod tests {
         let plist = "<dict>\n    <key>StandardOutPath</key>\n    <string>/a/out.log</string>\n \
                      <key>StandardErrorPath</key>\n    <string>/a/err.log</string>\n</dict>";
         assert_eq!(
-            launchd_string_after_key(plist).as_deref(),
+            launchd_string_after_key(plist, "StandardErrorPath").as_deref(),
             Some("/a/err.log"),
-            "the value must come from the error key, not the first <string> in the file"
+            "the value must come from the named key, not the first <string> in the file"
+        );
+    }
+
+    #[test]
+    fn the_program_is_read_out_of_its_array() {
+        // The shape `install_daemon` writes: the program is the first <string> of
+        // ProgramArguments, and it must win over every later key in the file.
+        let plist = "<dict>\n    <key>Label</key>\n    <string>dev.veld.daemon</string>\n    \
+                     <key>ProgramArguments</key>\n    <array>\n        \
+                     <string>/p/lib/veld/veld-daemon</string>\n    </array>\n    \
+                     <key>StandardErrorPath</key>\n    <string>/h/.veld/veld-daemon.log</string>\n</dict>";
+        assert_eq!(
+            launchd_string_after_key(plist, "ProgramArguments").as_deref(),
+            Some("/p/lib/veld/veld-daemon")
         );
     }
 
@@ -1259,17 +1305,26 @@ mod tests {
         // The shape every install written before this change has: a complete,
         // valid plist with no output paths at all.
         let plist = "<dict>\n    <key>Label</key>\n    <string>dev.veld.daemon</string>\n</dict>";
-        assert_eq!(launchd_string_after_key(plist), None);
+        assert_eq!(launchd_string_after_key(plist, "StandardErrorPath"), None);
         // And the shapes that would panic a naive slice or answer with a lie.
-        assert_eq!(launchd_string_after_key(""), None);
-        assert_eq!(launchd_string_after_key("<key>StandardErrorPath</key>"), None);
+        assert_eq!(launchd_string_after_key("", "StandardErrorPath"), None);
         assert_eq!(
-            launchd_string_after_key("<key>StandardErrorPath</key><string></string>"),
+            launchd_string_after_key("<key>StandardErrorPath</key>", "StandardErrorPath"),
+            None
+        );
+        assert_eq!(
+            launchd_string_after_key(
+                "<key>StandardErrorPath</key><string></string>",
+                "StandardErrorPath"
+            ),
             None,
             "an empty value is not a log file"
         );
         assert_eq!(
-            launchd_string_after_key("<key>StandardErrorPath</key><string>/a.log"),
+            launchd_string_after_key(
+                "<key>StandardErrorPath</key><string>/a.log",
+                "StandardErrorPath"
+            ),
             None,
             "an unterminated element is unreadable, not a path"
         );

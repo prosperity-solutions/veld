@@ -342,23 +342,32 @@ fi
 #
 # A job that is already registered does not need re-registering: only `veld setup`
 # writes these plists, so an update changes the binary and not the definition
-# launchd holds. Signalling the job to exit is therefore enough — `KeepAlive` is
-# unconditionally true in both plists, so launchd relaunches it immediately, onto
-# the new binary. SIGTERM rather than `kickstart -k`'s SIGKILL because both
-# services shut down deliberately: the helper leaves Caddy running, and the daemon
-# finishes in-flight requests.
+# launchd holds. Signalling it to exit is enough, because `KeepAlive` is
+# unconditionally true in both — measured, not assumed: a `KeepAlive=true` agent
+# with `RunAtLoad=false` is started by launchd anyway, so a registered veld job is
+# always running or on its way back.
+#
+# SIGTERM rather than `kickstart -k`'s SIGKILL so each service runs its own
+# shutdown path: the helper exits while leaving Caddy up (every live URL survives
+# the swap), and the daemon deregisters its route, records the terminal sessions it
+# is leaving behind and removes its socket. It does *not* drain in-flight requests —
+# `main.rs` aborts its tasks — so this is about veld's own cleanup, not about
+# request draining.
 # $1 = launchd label, $2 = plist path, $3 = display name
 restart_launch_agent() {
   local label="$1" plist="$2" name="$3" target
   target="gui/$(id -u)/${label}"
   if launchctl print "$target" >/dev/null 2>&1; then
     echo "Restarting ${name} service..."
-    # A signal that lands on nothing is not a problem here, which is why there is
-    # no start-it-anyway fallback: `KeepAlive` is what guarantees the relaunch, not
-    # this line. A registered job that is momentarily down is already being brought
-    # back by launchd, and the binaries were replaced above — so whenever it comes
-    # back, it comes back on the new ones.
     launchctl kill TERM "$target" 2>/dev/null || true
+    # Belt, not redundancy: it makes this restart correct *without* depending on a
+    # `KeepAlive` that lives in a different file. A job launchd is not currently
+    # running has nothing to signal (`kill` exits 3, "No process to signal"), and a
+    # later plist edit — a `SuccessfulExit` condition, say — would silently turn
+    # this whole function back into the dead-daemon-after-update it exists to fix.
+    # Verified no-op when the job is healthy: `kickstart` without `-k` on a running
+    # job exits 0 and leaves the same pid.
+    launchctl kickstart "$target" 2>/dev/null || true
   else
     # Nothing registered to signal, and a bootstrap here has no teardown to race.
     echo "Loading ${name} service..."

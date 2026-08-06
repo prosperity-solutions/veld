@@ -544,6 +544,68 @@ pub async fn trust_caddy_ca() -> Result<StepResult, anyhow::Error> {
     ))
 }
 
+/// Make the daemon's log file, and answer whether launchd may be pointed at it.
+///
+/// `None` means "do not name a log in the plist". That is the safe answer, not a
+/// degraded one: launchd refuses to exec a job whose `StandardOutPath` it cannot
+/// create — exit `EX_CONFIG` (78), program never reached, retried forever under
+/// `KeepAlive` — so a path this function is unsure about would take the daemon down
+/// on machines that work today. No log is what every veld before this shipped.
+///
+/// The file is created here rather than left to launchd for two reasons: it is the
+/// only way to know the job will be able to open it, and it is the only chance to
+/// set the mode. Owner-only, because this file exists to collect diagnostics and the
+/// next `warn!` someone adds while chasing a share or a machine-var prompt is
+/// exactly where a URL or an environment value gets interpolated — the same reason
+/// `spawn_stderr_file` keeps captured output owner-only. launchd opens the existing
+/// file `O_APPEND` and does not reset its mode.
+///
+/// Ownership is the trap and the reason for the `chown`: `veld setup` can be running
+/// under `sudo`, and a root-owned `0600` log is precisely the unopenable file
+/// described above. If the file cannot end up owned by the user the job runs as, it
+/// is removed and `None` is returned.
+// `cfg(unix)`, not `cfg(target_os = "macos")`, even though only the macOS branch of
+// `install_daemon` calls it: that branch is *compiled* on Linux too (it is a runtime
+// `match` on `env::consts::OS`, exactly like `resolve_real_user_macos` above), so a
+// macOS-only item here is a Linux build failure that no macOS pre-pass can see.
+#[cfg(unix)]
+fn prepare_daemon_log(
+    real_user: &str,
+    real_uid: &str,
+    real_home: &std::path::Path,
+) -> Option<PathBuf> {
+    use std::os::unix::fs::MetadataExt;
+
+    let log = crate::paths::daemon_log_path_in(real_home);
+    let dir = log.parent()?;
+    std::fs::create_dir_all(dir).ok()?;
+    // `~/.veld` may not exist yet on a fresh machine, and created as root it would
+    // be another thing the daemon cannot write.
+    let _ = std::process::Command::new("chown")
+        .args([format!("{real_user}:staff"), dir.display().to_string()])
+        .status();
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log)
+        .ok()?;
+    let _ = crate::paths::set_owner_only(&log);
+    let _ = std::process::Command::new("chown")
+        .args([format!("{real_user}:staff"), log.display().to_string()])
+        .status();
+    // Verified, not assumed: the `chown` above is a best-effort external command and
+    // its failure is the one that matters here.
+    let uid: u32 = real_uid.parse().ok()?;
+    let owned_by_the_job = std::fs::metadata(&log)
+        .map(|m| m.uid() == uid)
+        .unwrap_or(false);
+    if !owned_by_the_job {
+        let _ = std::fs::remove_file(&log);
+        return None;
+    }
+    Some(log)
+}
+
 /// Install (or verify) the Veld daemon.
 ///
 /// The daemon is a user-level LaunchAgent, so on macOS it must be loaded
@@ -564,13 +626,29 @@ pub async fn install_daemon() -> Result<StepResult, anyhow::Error> {
                 .context("failed to create LaunchAgents directory")?;
             let plist_path = plist_dir.join("dev.veld.daemon.plist");
 
-            // Log to a file beside the binary, for the same reason the helper's
-            // plist does it: launchd discards a job's stdout and stderr, so the
-            // daemon's own diagnostics — a terminal that would not spawn, a shim
-            // directory it could not write, a run whose command was not found —
-            // went nowhere, and every message anywhere in veld that said "check
-            // the daemon log" was pointing at a file that did not exist.
-            let log_path = crate::paths::service_log_path(&veld_daemon_bin);
+            // Give the daemon a log, for the reason the helper has one: launchd
+            // discards a job's stdout and stderr, so the daemon's own diagnostics —
+            // a terminal that would not spawn, a shim directory it could not write,
+            // a run whose command was not found — went nowhere, and every message
+            // anywhere in veld that said "check the daemon log" pointed at a file
+            // that did not exist.
+            //
+            // **A path the job cannot create is worse than no path**, which is why
+            // this is prepared and checked rather than simply formatted in: launchd
+            // exits such a job `EX_CONFIG` (78) *before* running the program, and
+            // `KeepAlive` turns that into a permanent retry. A daemon that logs
+            // nowhere is the status quo; a daemon that never starts is an outage.
+            let log_path = prepare_daemon_log(&real_user, &real_uid, &real_home);
+            let log_keys = match &log_path {
+                Some(p) => format!(
+                    "    <key>StandardOutPath</key>\n    <string>{p}</string>\n    \
+                     <key>StandardErrorPath</key>\n    <string>{p}</string>\n",
+                    p = p.display()
+                ),
+                // Silent here, said out loud by `veld doctor`'s `Daemon log:` row,
+                // which reads the plist and reports "not captured".
+                None => String::new(),
+            };
 
             let plist = format!(
                 r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -586,21 +664,22 @@ pub async fn install_daemon() -> Result<StepResult, anyhow::Error> {
     </array>
     <key>RunAtLoad</key>
     <true/>
+    <!-- KeepAlive unconditionally true, like the helper's: install.sh restarts this
+         job by signalling it to exit and relies on launchd bringing it back onto the
+         new binary. A SuccessfulExit or crash-only condition here would make every
+         `veld update` leave the daemon dead — the failure that motivated
+         `restart_launch_agent`. That function kickstarts as a belt, so this is not
+         the only thing holding it up, but it is the intended mechanism. -->
     <key>KeepAlive</key>
     <true/>
     <key>WatchPaths</key>
     <array>
         <string>{bin_path}</string>
     </array>
-    <key>StandardOutPath</key>
-    <string>{log_path}</string>
-    <key>StandardErrorPath</key>
-    <string>{log_path}</string>
-</dict>
+{log_keys}</dict>
 </plist>
 "#,
                 bin_path = veld_daemon_bin.display(),
-                log_path = log_path.display()
             );
             let label = "dev.veld.daemon";
             let domain_target = format!("gui/{real_uid}/{label}");

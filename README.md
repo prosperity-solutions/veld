@@ -335,7 +335,12 @@ Caddy handles HTTPS termination and reverse proxying. Its internal CA is trusted
 
 ### Service logs
 
-The helper and the daemon run under launchd or systemd, and a launchd job's stdout and stderr are **discarded** unless its plist names a file — so both plists name one, beside the binary: `~/.local/lib/veld/veld-helper.log` and `~/.local/lib/veld/veld-daemon.log` for a default install. On Linux systemd captures the output itself: `journalctl --user -u veld-daemon`. `veld doctor` prints the daemon's log location in its Installation block, and says so plainly when a machine set up by an older veld is not capturing it yet — `veld setup <mode>` writes the current service definition and starts.
+On macOS a launchd job's stdout and stderr are **discarded** unless its plist names a file, so:
+
+- **The daemon** logs to `~/.veld/veld-daemon.log`, owner-only. In the user's own directory rather than beside the binary, because the daemon is a user LaunchAgent and a legacy `/usr/local` install's lib dir is root-owned — and launchd does not run a job whose log file it cannot create, it exits it `EX_CONFIG` before the program starts.
+- **The privileged helper** logs to `<lib dir>/veld-helper.log` (`~/.local/lib/veld/veld-helper.log` for a default install). It runs as root, so that directory is writable whichever prefix it is. The *unprivileged* helper has no log file yet.
+
+On Linux systemd captures unit output itself: `journalctl --user -u veld-daemon`. `veld doctor` prints the daemon's log location in its Installation block — read out of the service definition, so it names the file that is really being written — and says plainly when a machine is not capturing it, which is the case for any install set up before this existed. `veld setup <mode>` writes the current definition.
 
 
 

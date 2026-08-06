@@ -26,14 +26,57 @@ pub fn lib_dir() -> PathBuf {
     user_dir.unwrap_or(system_dir)
 }
 
+/// Where the **daemon's** log lives: in the user's own `~/.veld`, never in the
+/// install prefix.
+///
+/// launchd discards a job's stdout and stderr unless the plist names a file — but a
+/// job whose named file it **cannot create does not run at all**: it exits
+/// `EX_CONFIG` (78) before the program is reached, and with `KeepAlive` that is a
+/// permanent throttled retry. Measured, not inferred, with a throwaway agent whose
+/// `StandardOutPath` sat in a `0555` directory.
+///
+/// That is why the daemon does not log beside its binary the way the helper does.
+/// The daemon is a **user** LaunchAgent in both setup modes, and on a legacy
+/// `/usr/local` install its lib dir is `root:wheel 0755` — so naming
+/// `<lib dir>/veld-daemon.log` there would have bricked the daemon on exactly the
+/// machines that were working before. `~/.veld` is the user's, is where every other
+/// piece of per-user veld state already lives (sockets, holder directories,
+/// `spawn-logs`), and is removed wholesale by `veld uninstall`.
+///
+/// `home` is passed rather than read because `veld setup` can be running under
+/// `sudo`, where `dirs::home_dir()` is root's and a log written there would be
+/// unwritable by the job that needs it.
+pub fn daemon_log_path_in(home: &Path) -> PathBuf {
+    home.join(".veld").join("veld-daemon.log")
+}
+
+/// [`daemon_log_path_in`] for this user.
+pub fn daemon_log_path() -> Option<PathBuf> {
+    dirs::home_dir().as_deref().map(daemon_log_path_in)
+}
+
+/// Restrict a file to its owner.
+///
+/// Here rather than inline at the one call site because "a file veld writes
+/// diagnostics into is owner-only" is a rule, and a rule with one caller today is
+/// still the thing the second caller should reach for.
+#[cfg(unix)]
+pub fn set_owner_only(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+}
+
+#[cfg(not(unix))]
+pub fn set_owner_only(_path: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
 /// Where a service binary's log lives: beside the binary, named after it.
 ///
-/// launchd discards a job's stdout and stderr unless the plist names a file, so
-/// both service plists point here (see `setup::install_daemon` and
-/// `setup::install_helper_macos`). One owner rather than a `format!` in each
-/// writer, because `veld doctor` has to name the same file for the log to be
-/// findable — a diagnostic that says "check the daemon log" and cannot say where
-/// it is is the failure mode this exists to prevent.
+/// The **helper's** rule, and only the helper's — see [`daemon_log_path_in`] for why
+/// the daemon cannot share it. In privileged mode the helper is a root
+/// `LaunchDaemon`, so root writing to a root-owned lib dir is exactly right, and
+/// this is where `veld-helper.log` has always been.
 ///
 /// `/tmp` when the binary has no parent, which only a relative bare filename
 /// produces.
@@ -83,9 +126,18 @@ pub fn cli_candidates(exe_dir: &Path) -> Vec<PathBuf> {
 
 /// The `veld` CLI belonging to a binary in `exe_dir`, or `None` if there is none.
 ///
-/// Callers are the daemon (which bakes this path into the terminal shims) and
-/// `veld doctor` (which reports on them), so the two can never disagree about
-/// where a CLI is expected to be.
+/// Callers are the daemon — which bakes the answer into the terminal shims, passing
+/// its own `current_exe()` directory — and `veld doctor`, which reports on them and
+/// passes the directory of the daemon its plist actually names. One rule, so the two
+/// cannot disagree about *what* a CLI is; they still have to be given the same
+/// directory to agree about *which* one, and that is doctor's job, not this
+/// function's.
+///
+/// Two more resolvers in this repo answer a related question differently and are
+/// deliberately left alone here: `veld-daemon`'s `monitor::find_veld_binary` (which
+/// falls back to `PATH` when restarting a run) and `management::spawn_veld`. Both
+/// predate this and changing what they resolve would change when a run restarts —
+/// tracked separately rather than folded into a shim fix.
 pub fn cli_for_exe(exe_dir: &Path) -> Option<PathBuf> {
     cli_candidates(exe_dir)
         .into_iter()
