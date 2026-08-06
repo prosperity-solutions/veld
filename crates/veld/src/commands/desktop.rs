@@ -232,14 +232,28 @@ fn relaunch_app(app_dir: Option<&Path>) {
 }
 
 /// `veld desktop status` -- where the app is and whether it matches this CLI.
+///
+/// Two different questions, depending on the platform, and conflating them was a
+/// bug: on macOS veld *manages* the app, so it can report a version and offer to
+/// fix a mismatch. On Linux the app belongs to dpkg or to a single AppImage file
+/// the user parked somewhere, so the honest answer is where it is (if that can be
+/// known) and that veld does not update it. It used to say "Veld Desktop is not
+/// installed." on a Linux box with a `.deb` installed, which is simply false.
 pub async fn status(json: bool) -> i32 {
     let cli_version = env!("CARGO_PKG_VERSION");
+
+    if std::env::consts::OS != "macos" {
+        return status_unmanaged(json, cli_version);
+    }
+
     let found = veld_core::setup::desktop_app_status();
 
     if json {
         let payload = match &found {
             Some((path, version)) => serde_json::json!({
                 "installed": true,
+                "managed": true,
+                "platform": std::env::consts::OS,
                 "path": path.display().to_string(),
                 "version": version,
                 "cli_version": cli_version,
@@ -247,6 +261,8 @@ pub async fn status(json: bool) -> i32 {
             }),
             None => serde_json::json!({
                 "installed": false,
+                "managed": true,
+                "platform": std::env::consts::OS,
                 "cli_version": cli_version,
             }),
         };
@@ -272,12 +288,57 @@ pub async fn status(json: bool) -> i32 {
         }
         None => {
             output::print_info("Veld Desktop is not installed.");
-            if std::env::consts::OS == "macos" {
-                println!("  {}", output::dim("veld desktop install"));
-            }
+            println!("  {}", output::dim("veld desktop install"));
             0
         }
     }
+}
+
+/// `veld desktop status` where veld does not install the app.
+///
+/// `installed` is deliberately absent from the JSON when nothing was found: on
+/// Linux an AppImage lives wherever the user saved it, so "not in the three
+/// places a `.deb` uses" is not evidence of absence, and a consumer keying on
+/// `installed: false` would be reading a claim this cannot make. `found` says
+/// only what was actually looked for.
+fn status_unmanaged(json: bool, cli_version: &str) -> i32 {
+    let path = veld_core::setup::desktop_app_linux();
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "managed": false,
+                "platform": std::env::consts::OS,
+                "found": path.as_ref().map(|p| p.display().to_string()),
+                "cli_version": cli_version,
+            }))
+            .unwrap_or_default()
+        );
+        return 0;
+    }
+
+    match path {
+        Some(path) => {
+            output::print_info("Veld Desktop is installed.");
+            println!("  {}", output::dim(&path.display().to_string()));
+            println!();
+            output::print_info(
+                "Its version belongs to your package manager, not to veld — an AppImage \
+                 updates itself and a .deb is updated with apt.",
+            );
+        }
+        None => {
+            output::print_info("No Veld Desktop found in the usual locations.");
+            println!();
+            output::print_info(
+                "veld installs the app on macOS only. On Linux, download the AppImage or \
+                 .deb from the releases page — and note an AppImage can live anywhere, so \
+                 one may be installed that this did not find.",
+            );
+        }
+    }
+    0
 }
 
 #[cfg(test)]

@@ -43,6 +43,12 @@ macOS then refuses the first launch of an app that is not notarized, while curl
 sets no such flag. macOS only — on Linux the AppImage updates itself and a `.deb`
 belongs to the package manager.
 
+On Linux `veld desktop status` therefore **reports rather than manages**: it
+names the `.deb`'s binary if it finds one and says the version belongs to your
+package manager. Finding nothing is not the same as nothing being installed —
+an AppImage lives wherever you saved it — so it says that too, and the `--json`
+output omits `installed` entirely rather than asserting `false`.
+
 **An app operation never touches the CLI.** `veld desktop install|update` runs
 the installer with `VELD_DESKTOP_ONLY=1`, which skips the CLI tarball, the binary
 swap, the service restarts and the sudo negotiation entirely — so updating the

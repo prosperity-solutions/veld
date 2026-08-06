@@ -147,7 +147,14 @@ impl Diagnostics {
             None if std::env::consts::OS == "macos" => {
                 "not installed ('veld desktop install')".to_string()
             }
-            None => String::new(),
+            // Elsewhere veld does not install the app, so it reports rather than
+            // judges — and says nothing at all when it found nothing, because an
+            // AppImage lives wherever the user saved it and "not found" would
+            // read as "not installed".
+            None => match veld_core::setup::desktop_app_linux() {
+                Some(path) => format!("{} (managed by your package manager)", tilde_path(&path)),
+                None => String::new(),
+            },
         };
 
         // Read after the mode, because the repair it suggests names it.

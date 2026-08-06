@@ -1802,8 +1802,46 @@ pub fn desktop_app_status_in(
 }
 
 /// Where Veld Desktop is installed, honouring `VELD_DESKTOP_DIR`.
+///
+/// macOS only, and that is a deliberate limit rather than an oversight: this
+/// answers "which bundle would the installer replace", and veld only installs
+/// or replaces the app on macOS. Reporting surfaces that merely want to *show*
+/// a Linux install use [`desktop_app_linux`] instead.
 pub fn desktop_app_status() -> Option<(PathBuf, Option<String>)> {
     desktop_app_status_in(None)
+}
+
+/// The paths electron-builder's `.deb` installs Veld Desktop to.
+///
+/// `productName: Veld` + `executableName: veld-desktop` (desktop/electron-builder.yml)
+/// puts the binary in `/opt/Veld` with a symlink on `PATH`. An **AppImage is not
+/// here on purpose**: it is a single file the user saves wherever they like, so
+/// there is no location to check and its absence from this list proves nothing.
+fn linux_desktop_candidates() -> [&'static str; 3] {
+    [
+        "/usr/bin/veld-desktop",
+        "/usr/local/bin/veld-desktop",
+        "/opt/Veld/veld-desktop",
+    ]
+}
+
+/// Where a Linux Veld Desktop is, if one was installed somewhere findable.
+///
+/// Report-only. No version: a `.deb`'s version belongs to dpkg and an Electron
+/// binary does not answer `--version`, so claiming one would mean guessing.
+/// `None` means "not found in the usual places", **not** "not installed" — an
+/// AppImage lives wherever the user put it. Callers must phrase it that way.
+pub fn desktop_app_linux() -> Option<PathBuf> {
+    if std::env::consts::OS != "linux" {
+        return None;
+    }
+    first_existing_file(linux_desktop_candidates().into_iter().map(PathBuf::from))
+}
+
+/// First path that is an existing regular file. Split out so the selection can
+/// be tested off Linux, where `desktop_app_linux` returns early by design.
+fn first_existing_file<I: IntoIterator<Item = PathBuf>>(paths: I) -> Option<PathBuf> {
+    paths.into_iter().find(|p| p.is_file())
 }
 
 /// `~/.veld/desktop-update.log` — the install script's output from the last app
@@ -2428,8 +2466,8 @@ fn hang_up_terminal_holders(veld_dir: &Path) {
 #[cfg(test)]
 mod tests {
     use super::{
-        init_lua_loads_veld_spoon, install_script_override_from, parse_launchctl_pid,
-        parse_systemd_main_pid, remove_spoon_files,
+        first_existing_file, init_lua_loads_veld_spoon, install_script_override_from,
+        linux_desktop_candidates, parse_launchctl_pid, parse_systemd_main_pid, remove_spoon_files,
     };
 
     /// The happy path of the log preparation, against a real filesystem.
@@ -2521,6 +2559,41 @@ mod tests {
         // A directory is not a script; reading one would fail later with a
         // confusing error rather than here with none.
         assert!(install_script_override_from(some(dir.path().as_os_str())).is_none());
+    }
+
+    #[test]
+    fn the_linux_desktop_candidates_match_what_electron_builder_installs() {
+        // desktop/electron-builder.yml: `productName: Veld` +
+        // `executableName: veld-desktop`, so the .deb lands in /opt/Veld with a
+        // symlink on PATH. Renaming either without updating this list makes
+        // `veld desktop status` and `veld doctor` quietly stop seeing the app.
+        let c = linux_desktop_candidates();
+        assert!(c.contains(&"/opt/Veld/veld-desktop"));
+        assert!(c.contains(&"/usr/bin/veld-desktop"));
+        // An AppImage is deliberately absent: it is a single file the user saves
+        // wherever they like, so there is no path to check and its absence from
+        // this list is why `None` must never be reported as "not installed".
+        assert!(!c.iter().any(|p| p.contains("AppImage")));
+    }
+
+    #[test]
+    fn the_first_existing_candidate_wins_and_a_directory_is_not_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("nope");
+        let real = dir.path().join("veld-desktop");
+        let second = dir.path().join("veld-desktop-2");
+        std::fs::write(&real, "#!/bin/sh\n").unwrap();
+        std::fs::write(&second, "#!/bin/sh\n").unwrap();
+
+        assert_eq!(
+            first_existing_file([missing.clone(), real.clone(), second]),
+            Some(real.clone()),
+            "order must be preserved — the first hit wins"
+        );
+        assert_eq!(first_existing_file([missing.clone()]), None);
+        // A directory named like the binary is not the binary.
+        assert_eq!(first_existing_file([dir.path().to_path_buf()]), None);
+        assert_eq!(first_existing_file(Vec::new()), None);
     }
 
     #[test]
