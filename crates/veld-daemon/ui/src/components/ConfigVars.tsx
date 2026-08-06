@@ -78,25 +78,30 @@ const SCOPE_HELP =
   "answer once. “Just here” saves it for this one folder, for when this branch " +
   "needs something different from the rest.";
 
-/** The ways an answer can be supplied. A plain value is the overwhelming case. */
-type SourceKind = "value" | "env" | "file" | "shell";
+/**
+ * Ways to answer *without* typing the value — veld stores where to look instead
+ * of what to use, and reads it afresh on every start.
+ *
+ * Typing a value is deliberately **not** in this list. It is the collapsed state
+ * of the row, so offering it here too produced a picker whose first option was
+ * what the reader was already doing, under a link inviting them to do it: three
+ * controls saying "type the value" and no way to tell them apart.
+ */
+type PointerKind = "env" | "file" | "shell";
 
-const SOURCE_LABEL: Record<SourceKind, string> = {
-  value: "Type the value",
-  env: "From an environment variable",
-  file: "From a file",
-  shell: "From a command",
+const POINTER_LABEL: Record<PointerKind, string> = {
+  env: "An environment variable",
+  file: "A file",
+  shell: "What a command prints",
 };
 
-const SOURCE_HELP: Record<SourceKind, string> = {
-  value: "Saved as you type it.",
+const POINTER_HELP: Record<PointerKind, string> = {
   env: "Veld reads this environment variable each time it starts the project.",
   file: "Veld reads this file each time it starts the project.",
   shell: "Veld runs this and uses what it prints, each time it starts the project.",
 };
 
-const SOURCE_PLACEHOLDER: Record<SourceKind, string> = {
-  value: "",
+const POINTER_PLACEHOLDER: Record<PointerKind, string> = {
   env: "MY_VARIABLE",
   file: "~/.config/thing/value",
   shell: "op read op://vault/item/field",
@@ -176,18 +181,16 @@ function VarRow({
   project: string;
   onSaved: () => void;
 }) {
-  const [kind, setKind] = useState<SourceKind>("value");
-  // Whether the "read it from somewhere else" controls are showing. Off by
-  // default for *every* var, not only the ones with a fixed set of answers:
-  // typing the value is what nearly everyone does, and four source options as
-  // the default face made a two-digit number look like a configuration task.
-  const [advanced, setAdvanced] = useState(false);
+  // `null` is the collapsed state: type the value. A [`PointerKind`] means the
+  // reader chose to point somewhere instead. One piece of state, not a boolean
+  // plus a kind — two of those let the row sit in "advanced, but the source is
+  // 'type it'", which renders as the plain state wearing extra controls.
+  const [pointer, setPointer] = useState<PointerKind | null>(null);
   const [draft, setDraft] = useState("");
   const [worktree, setWorktree] = useState(v.from === "worktree");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
-  const effectiveKind: SourceKind = advanced ? kind : "value";
   const badge = scopeBadge(v.from);
 
   const save = async () => {
@@ -198,11 +201,11 @@ function VarRow({
         project,
         name: v.name,
         worktree,
-        ...(effectiveKind === "value"
+        ...(pointer === null
           ? { value: draft }
-          : effectiveKind === "env"
+          : pointer === "env"
             ? { env: draft }
-            : effectiveKind === "file"
+            : pointer === "file"
               ? { file: draft }
               : { shell: draft }),
       });
@@ -232,9 +235,23 @@ function VarRow({
   // on this machine to remove, and offering the button would imply veld could
   // edit the project's own file, which it never does.
   const clearable = v.from === "project" || v.from === "worktree";
+  // What removing actually lands on, said accurately. "Reset to default" is only
+  // true for a project-wide answer: clearing a *checkout's* answer falls back to
+  // whatever you set everywhere, and only then to the project's default — and
+  // this payload carries the effective value, so the UI cannot tell which of the
+  // two is underneath. Naming the outcome it cannot verify would be a lie on a
+  // button that destroys something.
+  const resetLabel =
+    v.from === "worktree" ? "Reset this checkout" : "Reset to default";
+  const resetHelp =
+    v.from === "worktree"
+      ? "Removes the answer you set for just this folder. Whatever you use everywhere takes over — or the project’s default if you haven’t set one."
+      : v.default
+        ? `Removes your answer. The project’s default takes over again: ${v.default}`
+        : "Removes your answer. This project has no default, so it will ask again before it starts.";
   // A fixed set of answers only constrains a typed value. A pointer's value is
   // not known until the project starts, so veld checks it then instead.
-  const pickList = v.choices && v.choices.length > 0 && effectiveKind === "value";
+  const pickList = v.choices && v.choices.length > 0 && pointer === null;
 
   return (
     <Paper withBorder radius="md" p="sm">
@@ -290,9 +307,9 @@ function VarRow({
           ) : (
             <TextInput
               size="xs"
-              label={advanced ? SOURCE_LABEL[effectiveKind] : "Change to"}
-              description={advanced ? SOURCE_HELP[effectiveKind] : undefined}
-              placeholder={SOURCE_PLACEHOLDER[effectiveKind]}
+              label={pointer ? POINTER_LABEL[pointer] : "Change to"}
+              description={pointer ? POINTER_HELP[pointer] : undefined}
+              placeholder={pointer ? POINTER_PLACEHOLDER[pointer] : undefined}
               value={draft}
               onChange={(e) => setDraft(e.currentTarget.value)}
               style={{ flex: 1, minWidth: 220 }}
@@ -326,23 +343,25 @@ function VarRow({
             Save
           </Button>
           {clearable && (
-            <Button size="xs" variant="subtle" onClick={clear} disabled={busy}>
-              Remove
-            </Button>
+            <Tooltip label={resetHelp} multiline w={280} withArrow>
+              <Button size="xs" variant="subtle" onClick={clear} disabled={busy}>
+                {resetLabel}
+              </Button>
+            </Tooltip>
           )}
         </Group>
 
-        {advanced && (
+        {pointer && (
           <NativeSelect
             size="xs"
-            label="Where the value comes from"
-            data={(Object.keys(SOURCE_LABEL) as SourceKind[]).map((k) => ({
-              label: SOURCE_LABEL[k],
+            label="Read it from"
+            data={(Object.keys(POINTER_LABEL) as PointerKind[]).map((k) => ({
+              label: POINTER_LABEL[k],
               value: k,
             }))}
-            value={kind}
+            value={pointer}
             onChange={(e) => {
-              setKind(e.currentTarget.value as SourceKind);
+              setPointer(e.currentTarget.value as PointerKind);
               setDraft("");
             }}
             style={{ maxWidth: 320 }}
@@ -354,16 +373,18 @@ function VarRow({
             size="compact-xs"
             variant="subtle"
             onClick={() => {
-              setAdvanced((a) => !a);
-              setKind("value");
+              // Opening lands on `env` rather than on a "type it" option: the
+              // whole point of this control is the thing the collapsed state
+              // cannot do.
+              setPointer((p) => (p === null ? "env" : null));
               setDraft("");
             }}
           >
-            {advanced
-              ? "Just type a value"
+            {pointer
+              ? "Type a value instead"
               : "Or point at an environment variable, file, or command…"}
           </Button>
-          {v.secret && effectiveKind === "value" && (
+          {v.secret && pointer === null && (
             <Text size="xs" c="dimmed">
               Typing it saves it in veld’s database. Pointing at a password
               manager keeps it out.
