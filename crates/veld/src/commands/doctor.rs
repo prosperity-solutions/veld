@@ -590,14 +590,11 @@ impl Diagnostics {
             // never considered and print "restart it" for a daemon that will keep
             // writing nothing. Doctor asking a different question than the daemon is
             // the exact defect this row exists to report.
-            let dir_of_running_daemon =
-                daemon_program_dir().unwrap_or_else(veld_core::paths::lib_dir);
-            let cli = veld_core::paths::cli_for_exe(&dir_of_running_daemon);
-            let lib = dir_of_running_daemon;
-            let cause = match &cli {
+            let daemon_dir = daemon_program_dir().unwrap_or_else(veld_core::paths::lib_dir);
+            let cause = match veld_core::paths::cli_for_exe(&daemon_dir) {
                 Some(_) => format!("Restart the daemon to write it: {}", restart_daemon_hint()),
                 None => {
-                    let looked: Vec<String> = veld_core::paths::cli_candidates(&lib)
+                    let looked: Vec<String> = veld_core::paths::cli_candidates(&daemon_dir)
                         .iter()
                         .map(|p| tilde_path(p))
                         .collect();
