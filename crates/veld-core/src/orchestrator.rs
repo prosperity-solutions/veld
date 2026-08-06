@@ -393,6 +393,8 @@ fn build_graph_snapshot(
     config_hash: String,
     plan: &[Vec<NodeSelection>],
     started_from: Option<crate::state::StartOrigin>,
+    overrides: &crate::values::VarOverrides,
+    scopes: &std::collections::BTreeMap<String, crate::db::OverrideScope>,
 ) -> crate::state::GraphSnapshot {
     let mut nodes = std::collections::BTreeMap::new();
     // The FULL resolved graph, deliberately including the oneshot terminal
@@ -440,10 +442,32 @@ fn build_graph_snapshot(
             },
         );
     }
+    // Every var the config declared overridable, with where its value came from.
+    // Declared-but-unanswered vars are listed too (`from: "default"`), because
+    // "this machine had no override for it" is exactly as much of an explanation
+    // as "it did" when two runs disagree.
+    let mut var_overrides: Vec<crate::state::VarOverrideSnapshot> = config
+        .vars
+        .iter()
+        .flatten()
+        .filter(|(_, decl)| decl.machine().is_some())
+        .map(|(name, _)| crate::state::VarOverrideSnapshot {
+            name: name.clone(),
+            from: match scopes.get(name) {
+                Some(scope) if overrides.contains_key(name) => scope.to_string(),
+                _ => "default".to_owned(),
+            },
+        })
+        .collect();
+    // `config.vars` is a HashMap, so without this the list's order would change
+    // between runs and `veld runs diff` would report a difference that is only
+    // hash iteration order.
+    var_overrides.sort_by(|a, b| a.name.cmp(&b.name));
     crate::state::GraphSnapshot {
         config_hash,
         started_from,
         nodes,
+        var_overrides,
     }
 }
 
@@ -650,6 +674,17 @@ pub struct Orchestrator {
     /// instead run afterwards via [`Orchestrator::run_terminal`]. Its exit ends
     /// the run (see `veld start --oneshot`).
     terminal_node: Option<NodeSelection>,
+    /// What this project is called for override purposes — one value across every
+    /// worktree of the repo. See [`crate::project_id`].
+    project_id: crate::project_id::ProjectId,
+    /// This machine's answers for machine-overridable vars, read once at
+    /// construction. Empty is a legal state: it means every var falls back to its
+    /// declared `default`.
+    var_overrides: crate::values::VarOverrides,
+    /// Which scope each answer above came from, kept beside the values rather
+    /// than inside them so resolution stays a plain name→value lookup while the
+    /// run snapshot can still record provenance.
+    var_override_scopes: std::collections::BTreeMap<String, crate::db::OverrideScope>,
     /// Project `vars`, resolved once during `start`. Stashed so `run_terminal` and
     /// the `on_stop` path reuse the same values rather than re-running a source
     /// command — two resolutions of a rotating credential would disagree.
@@ -681,11 +716,29 @@ impl Orchestrator {
                 .map(|bytes| format!("{:x}", Sha256::digest(&bytes)))
                 .unwrap_or_default()
         };
+        // Read once, here, so every path through this orchestrator sees the same
+        // answers — including `stop`, which builds a fresh instance in a
+        // different process. Teardown therefore reads the store and never asks:
+        // a `veld stop` that prompted, or that failed because a var had no
+        // answer, would leak the containers it exists to remove.
+        let project_id = crate::project_id::project_id_for(&project_root);
+        let stored = db
+            .effective_var_overrides(&project_id, &project_root)
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "could not read machine var overrides; using config defaults");
+                Default::default()
+            });
+        let var_override_scopes = stored.iter().map(|(k, v)| (k.clone(), v.scope)).collect();
+        let var_overrides: crate::values::VarOverrides =
+            stored.into_iter().map(|(k, v)| (k, v.value)).collect();
         Ok(Self {
             config,
             config_path,
             config_hash,
             project_root,
+            project_id,
+            var_overrides,
+            var_override_scopes,
             db,
             port_allocator: PortAllocator::new(),
             helper_client: HelperClient::default_client(),
@@ -702,6 +755,48 @@ impl Orchestrator {
             resolved_vars_run: None,
             terminal_outputs: None,
         })
+    }
+
+    /// What this project is called for machine-override purposes.
+    pub fn project_id(&self) -> &crate::project_id::ProjectId {
+        &self.project_id
+    }
+
+    /// Supply per-run var answers (`veld start --var NAME=VALUE`).
+    ///
+    /// These sit **above** the stored machine answers and are never written
+    /// anywhere: a value that is right for one run is not an answer about the
+    /// machine, and the whole point of the store is that what is in it was
+    /// chosen deliberately.
+    pub fn set_var_answers(&mut self, answers: crate::values::VarOverrides) {
+        for (name, value) in answers {
+            // Recorded as `default` provenance rather than a scope, because no
+            // scope holds it — the snapshot must not imply a row exists.
+            self.var_override_scopes.remove(&name);
+            self.var_overrides.insert(name, value);
+        }
+    }
+
+    /// Which machine-overridable vars this start would need and this machine has
+    /// not answered — checked **before anything spawns**.
+    ///
+    /// The selections are expanded through `build_execution_plan` exactly as
+    /// `start` expands them, so a var reached only through a transitive
+    /// dependency is found here rather than after three nodes are already up.
+    /// Using the raw selections instead would leave precisely the case this
+    /// pre-flight exists to prevent.
+    pub fn unanswered_vars(
+        &self,
+        selections: &[NodeSelection],
+    ) -> Result<Vec<crate::values::UnansweredVar>, OrchestratorError> {
+        let resolved = graph::resolve_selections(selections, &self.config)?;
+        let plan = graph::build_execution_plan(&resolved, &self.config)?;
+        let planned: Vec<NodeSelection> = plan.into_iter().flatten().collect();
+        Ok(crate::values::unanswered_machine_vars(
+            &self.config,
+            &self.var_overrides,
+            &planned,
+        ))
     }
 
     /// Designate a `command` node as the run's terminal one-off (`--oneshot`).
@@ -896,6 +991,8 @@ impl Orchestrator {
             self.config_hash.clone(),
             &plan,
             origin,
+            &self.var_overrides,
+            &self.var_override_scopes,
         ));
         // Scope the run-level log streams to this instance (the writers were
         // created before the run existed).
@@ -936,6 +1033,7 @@ impl Orchestrator {
         // `failed` history directly — this run never held the live slot.
         let setup_result = match crate::values::resolve_vars(
             self.config.vars.as_ref(),
+            &self.var_overrides,
             Some(&self.project_root),
             &vars_ctx,
             &config::vars_for_setup(&self.config),
@@ -1145,6 +1243,7 @@ impl Orchestrator {
         all_vars.extend(
             crate::values::resolve_vars(
                 self.config.vars.as_ref(),
+                &self.var_overrides,
                 Some(&self.project_root),
                 &vars_ctx,
                 &config::vars_for_plan(&self.config, &planned),
@@ -2367,6 +2466,7 @@ impl Orchestrator {
             );
             match crate::values::resolve_vars(
                 self.config.vars.as_ref(),
+                &self.var_overrides,
                 Some(&self.project_root),
                 &ctx,
                 &needed,
@@ -3142,7 +3242,7 @@ async fn execute_start_server_isolated(
             .vars
             .iter()
             .flatten()
-            .filter(|(_, value)| value.secret)
+            .filter(|(_, value)| value.secret())
             .map(|(name, _)| name.clone())
             .collect();
         let mut tainted: Vec<String> = Vec::new();
@@ -3675,7 +3775,7 @@ async fn execute_command_isolated(
             .vars
             .iter()
             .flatten()
-            .filter(|(_, value)| value.secret)
+            .filter(|(_, value)| value.secret())
             .map(|(name, _)| name.clone())
             .collect();
         let mut tainted: Vec<String> = Vec::new();
@@ -4270,6 +4370,125 @@ mod tests {
         );
     }
 
+    /// **The pre-flight must see the whole plan, not the selections.**
+    ///
+    /// A var reached only through a transitive dependency is the exact case the
+    /// pre-flight exists for: without expansion it is discovered at resolution
+    /// time, after the dependency is already running, and the choice then is
+    /// between tearing down a half-started environment and prompting while it
+    /// runs. `unanswered_vars` therefore expands through `build_execution_plan`
+    /// exactly as `start` does — and the second half of the test is the other
+    /// side of the same coin: a var no selected node reaches must NOT be asked
+    /// for, or `veld start docs` demands the database password.
+    #[tokio::test]
+    async fn the_preflight_sees_dependencies_and_ignores_unrelated_nodes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config: VeldConfig = serde_json::from_str(
+            r#"{
+                "schemaVersion": "3",
+                "name": "testcfg",
+                "vars": {
+                    "db_secret": { "machine": { "prompt": "DB password?" } },
+                    "docs_only":  { "machine": { "prompt": "Docs token?" } },
+                    "answered":   { "machine": { "default": "fine" } }
+                },
+                "nodes": {
+                    "db": { "default_variant": "local", "variants": {
+                        "local": { "type": "command", "shell": "true",
+                                   "env": { "PW": "${vars.db_secret}" } }
+                    }},
+                    "api": { "default_variant": "local",
+                             "depends_on": { "db": "local" },
+                             "variants": { "local": { "type": "command", "shell": "true" } } },
+                    "docs": { "default_variant": "local", "variants": {
+                        "local": { "type": "command", "shell": "true",
+                                   "env": { "T": "${vars.docs_only}" } }
+                    }}
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let orch = test_orchestrator(tmp.path(), config);
+        let api = vec![NodeSelection {
+            node: "api".to_owned(),
+            variant: "local".to_owned(),
+        }];
+        let missing = orch.unanswered_vars(&api).expect("plan expands");
+        let names: Vec<&str> = missing.iter().map(|v| v.name.as_str()).collect();
+
+        assert!(
+            names.contains(&"db_secret"),
+            "a var used only by a dependency must be found before anything spawns, got {names:?}"
+        );
+        assert!(
+            !names.contains(&"docs_only"),
+            "a var outside the plan must not be demanded, got {names:?}"
+        );
+        assert!(
+            !names.contains(&"answered"),
+            "a var with a default is answered, got {names:?}"
+        );
+        assert_eq!(
+            missing
+                .iter()
+                .find(|v| v.name == "db_secret")
+                .map(|v| v.question()),
+            Some("DB password?".to_owned()),
+            "the declared prompt is what the human is asked"
+        );
+    }
+
+    /// A stored answer the config no longer allows is caught by the pre-flight
+    /// too, so `choices` changing under an override surfaces before the run.
+    #[tokio::test]
+    async fn the_preflight_flags_an_answer_the_choices_no_longer_allow() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config: VeldConfig = serde_json::from_str(
+            r#"{
+                "schemaVersion": "3",
+                "name": "testcfg",
+                "vars": {
+                    "runtime": { "machine": { "default": "docker",
+                                              "choices": ["docker", "podman"] } }
+                },
+                "nodes": {
+                    "task": { "default_variant": "local", "variants": {
+                        "local": { "type": "command", "shell": "true",
+                                   "env": { "R": "${vars.runtime}" } }
+                    }}
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let mut orch = test_orchestrator(tmp.path(), config);
+        let sels = vec![NodeSelection {
+            node: "task".to_owned(),
+            variant: "local".to_owned(),
+        }];
+        assert!(
+            orch.unanswered_vars(&sels).expect("expands").is_empty(),
+            "the default is legal, so nothing is missing"
+        );
+
+        orch.set_var_answers(
+            [(
+                "runtime".to_owned(),
+                crate::config::ConfigValue::literal("containerd"),
+            )]
+            .into(),
+        );
+        let missing = orch.unanswered_vars(&sels).expect("expands");
+        assert_eq!(missing.len(), 1);
+        assert_eq!(missing[0].name, "runtime");
+        assert_eq!(
+            missing[0].stale.as_deref(),
+            Some("containerd"),
+            "a non-secret stale literal is shown, so the human can see what to replace"
+        );
+    }
+
     /// Build a minimal orchestrator backed by a throwaway database, with no
     /// helper interaction — enough to exercise `run_terminal` in isolation.
     fn test_orchestrator(project_root: &std::path::Path, config: VeldConfig) -> Orchestrator {
@@ -4280,6 +4499,9 @@ mod tests {
             config_path: project_root.join("veld.json"), // root-config-gate-ok
             config_hash: String::new(),
             project_root: project_root.to_path_buf(),
+            project_id: crate::project_id::ProjectId::from_stored(project_root.to_string_lossy()),
+            var_overrides: Default::default(),
+            var_override_scopes: Default::default(),
             db,
             port_allocator: PortAllocator::new(),
             helper_client: HelperClient::default_client(),

@@ -76,6 +76,12 @@ enum Command {
         #[arg(long)]
         all_logs: bool,
 
+        /// Answer a machine-overridable var for this run only, as `NAME=VALUE`.
+        /// Repeatable. Never stored — use `veld config set` for that. Visible in
+        /// the process table, so not the way to pass a secret.
+        #[arg(long, value_name = "NAME=VALUE")]
+        var: Vec<String>,
+
         /// Enable debug logging for the started environment.
         #[arg(long)]
         debug: bool,
@@ -315,6 +321,9 @@ enum Command {
         /// Output as JSON.
         #[arg(long)]
         json: bool,
+
+        #[command(subcommand)]
+        cmd: Option<ConfigCmd>,
     },
 
     /// Check veld.json for semantic problems (CI-friendly).
@@ -531,6 +540,71 @@ enum RunsCmd {
     },
 }
 
+/// This machine's answers for vars the config declared `machine`-overridable.
+///
+/// The declaration is committed and shared; the answer is not. Both scopes write
+/// to veld's own database, never to veld.json — veld does not rewrite a user's
+/// config, and the whole point is that the answer differs per machine.
+#[derive(Subcommand)]
+enum ConfigCmd {
+    /// List every machine-overridable var: its effective value, where that value
+    /// came from, and what the config says about it.
+    Vars {
+        /// Output as JSON. Secret values are redacted in both forms.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Set this machine's answer for one var.
+    ///
+    /// With no source flag the value is stored literally. The source flags store
+    /// a *pointer* instead, which is how a `secret` var is answered without the
+    /// secret itself landing in the database.
+    Set {
+        /// The var's name, as declared in `vars`.
+        name: String,
+
+        /// The literal value. Omit when using a source flag.
+        value: Option<String>,
+
+        /// Read the value from this environment variable at run start.
+        #[arg(long, value_name = "NAME", conflicts_with_all = ["file", "shell"])]
+        env: Option<String>,
+
+        /// Read the value from this file at run start (relative to the project
+        /// root).
+        #[arg(long, value_name = "PATH", conflicts_with_all = ["env", "shell"])]
+        file: Option<String>,
+
+        /// Run this command at run start and use its stdout.
+        #[arg(long, value_name = "COMMAND", conflicts_with_all = ["env", "file"])]
+        shell: Option<String>,
+
+        /// Apply to this checkout only, instead of every worktree of the
+        /// project. Use for a value that is about this branch's work rather than
+        /// about the machine.
+        #[arg(long)]
+        worktree: bool,
+
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Forget this machine's answer, falling back to the next scope down and
+    /// then to the config's `default`.
+    Unset {
+        /// The var's name.
+        name: String,
+
+        /// Forget the checkout-scoped answer instead of the project-scoped one.
+        #[arg(long)]
+        worktree: bool,
+
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 fn init_tracing(debug: bool) {
     use tracing_subscriber::EnvFilter;
 
@@ -610,8 +684,14 @@ async fn main() {
             attach,
             oneshot,
             all_logs,
+            var,
             debug,
-        } => commands::start::run(selections, preset, name, attach, oneshot, all_logs, debug).await,
+        } => {
+            commands::start::run(
+                selections, preset, name, attach, oneshot, all_logs, var, debug,
+            )
+            .await
+        }
 
         Command::Stop { name, all } => commands::stop::run(name, all).await,
 
@@ -708,7 +788,40 @@ async fn main() {
             files,
             why,
             json,
-        } => commands::config::run(path, files, why, json).await,
+            cmd,
+        } => match cmd {
+            // The outer `--json` is OR-ed in so both `veld config --json vars`
+            // and `veld config vars --json` work, matching `veld runs`.
+            Some(ConfigCmd::Vars { json: inner }) => {
+                commands::config::list_vars(json || inner).await
+            }
+            Some(ConfigCmd::Set {
+                name,
+                value,
+                env,
+                file,
+                shell,
+                worktree,
+                json: inner,
+            }) => {
+                commands::config::set_var(
+                    &name,
+                    value.as_deref(),
+                    env.as_deref(),
+                    file.as_deref(),
+                    shell.as_deref(),
+                    worktree,
+                    json || inner,
+                )
+                .await
+            }
+            Some(ConfigCmd::Unset {
+                name,
+                worktree,
+                json: inner,
+            }) => commands::config::unset_var(&name, worktree, json || inner).await,
+            None => commands::config::run(path, files, why, json).await,
+        },
 
         Command::Lint { json } => commands::lint::run(json).await,
 

@@ -27,7 +27,7 @@ use serde::Deserialize;
 
 use crate::config::{
     ConfigError, ConfigValue, FeaturesConfig, NodeConfig, NullableMap, ProxyConfig, SetupStep,
-    SharingConfig, VeldConfig,
+    SharingConfig, VarDecl, VeldConfig,
 };
 use crate::presets::PresetDef;
 
@@ -79,7 +79,7 @@ pub struct Document {
     #[serde(default)]
     pub env: Option<NullableMap<ConfigValue>>,
     #[serde(default)]
-    pub vars: Option<HashMap<String, ConfigValue>>,
+    pub vars: Option<HashMap<String, VarDecl>>,
     #[serde(default)]
     pub sharing: Option<SharingConfig>,
     #[serde(default)]
@@ -398,7 +398,7 @@ fn merge(
     // everyone on the team.
     let mut presets: IndexMap<String, PresetDef> = IndexMap::new();
     let mut preset_origin: HashMap<String, usize> = HashMap::new();
-    let mut vars: HashMap<String, ConfigValue> = HashMap::new();
+    let mut vars: HashMap<String, VarDecl> = HashMap::new();
     let mut var_origin: HashMap<String, usize> = HashMap::new();
     let mut env: NullableMap<ConfigValue> = HashMap::new();
     let mut setup: Vec<SetupStep> = Vec::new();

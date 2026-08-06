@@ -225,6 +225,33 @@ pub struct GraphSnapshot {
     /// Node keys (`"node:variant"`) → what the config said about them.
     /// BTreeMap for stable serialization (diff-friendly).
     pub nodes: std::collections::BTreeMap<String, NodeSnapshot>,
+    /// Which machine-overridable vars this machine was answering, and from which
+    /// scope — **names and provenance only, never values**.
+    ///
+    /// This exists because `config_hash` hashes the veld.json *bytes*, and a
+    /// machine override changes the effective configuration without changing one
+    /// of them. Two runs of the same commit that behaved differently would
+    /// otherwise be reported as identical, which is the single most confusing
+    /// thing this feature could do to `veld runs diff`.
+    ///
+    /// **No value and no hash of one.** A fingerprint was the tempting middle
+    /// ground and is worse than either end: the values people override are
+    /// low-entropy (`true`, `5432`, a handful of plausible hostnames), so a
+    /// truncated digest over that domain is a brute-forceable oracle published
+    /// into the most-copied, most-pasted artifact veld produces. The names tell
+    /// you where to look, which is the honest answer.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub var_overrides: Vec<VarOverrideSnapshot>,
+}
+
+/// One machine-overridable var as it stood when a run started.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VarOverrideSnapshot {
+    /// The var's name, as declared in `vars`.
+    pub name: String,
+    /// Where the effective value came from: `"project"`, `"worktree"`, or
+    /// `"default"` when the config's own value was used.
+    pub from: String,
 }
 
 /// The invocation that started a run, recorded so a surface can say *what it

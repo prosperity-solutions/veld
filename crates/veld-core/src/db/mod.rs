@@ -23,11 +23,13 @@ mod panes;
 mod settings;
 pub(crate) mod state;
 mod stats;
+mod var_overrides;
 mod worktrees;
 
 pub use logs::{LogFilter, LogRow, LogStream, stream_is_per_node};
 pub use panes::{PaneSession, mint_pane_token};
 pub use settings::{DEFAULT_DETACH_GRACE_MINUTES, MAX_RUN_HISTORY_DAYS};
+pub use var_overrides::{OverrideScope, VarOverride};
 pub use worktrees::{
     DiscoveredWorktree, LaneRecord, MAX_LANE_NAME_LEN, MAX_ORDER_LEN, RepoRecord, WORKTREE_COLORS,
     WORKTREE_EMOJI, WorktreeRecord, default_alias, is_worktree_color, is_worktree_emoji,
@@ -459,6 +461,11 @@ const MIGRATIONS: &[Migration] = &[
         version: 11,
         name: "pane-sessions",
         apply: migrate_v11_pane_sessions,
+    },
+    Migration {
+        version: 12,
+        name: "machine-var-overrides",
+        apply: migrate_v12_var_overrides,
     },
 ];
 
@@ -1030,6 +1037,50 @@ fn migrate_v11_pane_sessions(conn: &Connection) -> rusqlite::Result<()> {
     )
 }
 
+/// v12: this machine's answers for vars the config declared overridable.
+///
+/// **Not the `settings` table, whose `scope` column was added for this.** That
+/// column anticipated per-project *preferences*, and the settings store around it
+/// is built for what a preference is: a known key, a clamped scalar or a `one_of`
+/// enum, validated on read against a `defaults()` table. An override is none of
+/// those — its key is a var name only the project's config knows, its legal
+/// values are a `choices` list only that config knows, and its value may be a
+/// *pointer* (`{"env": …}`, `{"shell": …}`) rather than a scalar. Storing it there
+/// would mean every row is an "unknown key" that the validator waves through, so
+/// the validation the settings store exists to provide would apply to none of it.
+/// Same reasoning that kept lanes out in v10; `settings.scope` stays unused.
+///
+/// **`project_id` is not a project root.** It is where this config lives in the
+/// repo's *main* checkout (see `veld_core::project_id`), so every worktree of one
+/// repo shares a row — the whole point, since an override describes the laptop
+/// and not the checkout. A project root would ask again in every worktree.
+///
+/// **`scope` + `scope_key` is a two-level lattice, and `scope_key` is what makes
+/// it one table.** A `project` row carries `scope_key = ''`; a `worktree` row
+/// carries the canonicalized checkout directory, so the narrower answer is a row
+/// rather than a second table. Reads take both and let `worktree` win.
+///
+/// **`value` is a serialized `ConfigValue`, not a string.** An override may be a
+/// pointer — `veld config set token --shell 'op read op://…'` — which is what
+/// lets a `secret: true` var be overridable without veld taking custody of the
+/// secret. A plain scalar round-trips as a bare JSON string, so the common case
+/// stays readable in `sqlite3`.
+fn migrate_v12_var_overrides(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        r#"
+        CREATE TABLE var_overrides (
+            project_id TEXT NOT NULL,
+            scope      TEXT NOT NULL,
+            scope_key  TEXT NOT NULL,
+            name       TEXT NOT NULL,
+            value      TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (project_id, scope, scope_key, name)
+        );
+        "#,
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Timestamp helpers — one canonical format for every TEXT timestamp column
 // (RFC 3339, UTC, microsecond precision, `Z` suffix) so lexicographic
@@ -1146,6 +1197,86 @@ mod tests {
             "veld.db",
             "must not be the dev *instance*'s database — `just dev` owns that one"
         );
+    }
+
+    /// v12 against a real v11 database, built from the shipped bodies so the
+    /// migration runs over rows that already exist rather than an empty file.
+    ///
+    /// The property worth pinning is that v12 is purely additive: it creates one
+    /// table and touches nothing, so every pre-existing row and every foreign key
+    /// survives. A machine that upgrades mid-project keeps its worktrees, its
+    /// runs, and its settings, and simply gains somewhere to put an answer.
+    #[test]
+    fn v11_v12_upgrade_adds_var_overrides_and_disturbs_nothing() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("veld.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+            migrate_v1_initial(&conn).unwrap();
+            migrate_v2_node_stats(&conn).unwrap();
+            migrate_v3_environments_and_runs(&conn).unwrap();
+            migrate_v4_graph_snapshot(&conn).unwrap();
+            migrate_v5_desktop_worktrees(&conn).unwrap();
+            migrate_v6_worktree_emoji(&conn).unwrap();
+            migrate_v7_detailed_process_stats(&conn).unwrap();
+            migrate_v8_settings(&conn).unwrap();
+            migrate_v9_worktree_marker_color(&conn).unwrap();
+            migrate_v10_rail_lanes_and_trash(&conn).unwrap();
+            migrate_v11_pane_sessions(&conn).unwrap();
+            conn.pragma_update(None, "user_version", 11).unwrap();
+            conn.execute_batch(
+                r#"
+                INSERT INTO repos (root, name, created_at)
+                  VALUES ('/tmp/r', 'r', '2026-01-01T00:00:00.000000Z');
+                INSERT INTO worktrees (repo_root, path, branch, alias, emoji, is_main, created_at)
+                  VALUES ('/tmp/r', '/tmp/r', 'main', 'main', '🦊', 1,
+                          '2026-01-01T00:00:00.000000Z');
+                INSERT INTO settings (scope, key, value, updated_at)
+                  VALUES ('global', 'terminal.detachGraceMinutes', '30',
+                          '2026-01-01T00:00:00.000000Z');
+                "#,
+            )
+            .unwrap();
+        }
+
+        let db = Db::open_at(&path).unwrap();
+        assert_eq!(
+            db.schema_version().unwrap(),
+            MIGRATIONS.last().unwrap().version
+        );
+
+        let conn = db.lock();
+        // Pre-existing rows are untouched…
+        let worktrees: i64 = conn
+            .query_row("SELECT COUNT(*) FROM worktrees", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(worktrees, 1);
+        let setting: String = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = 'terminal.detachGraceMinutes'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(setting, "30");
+        // …the new table is empty rather than backfilled: an override is an
+        // answer someone gave, and there is nothing to infer one from.
+        let overrides: i64 = conn
+            .query_row("SELECT COUNT(*) FROM var_overrides", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(overrides, 0);
+        // …and the upgrade left the database internally consistent.
+        let fk: i64 = conn
+            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(fk, 0, "the upgrade must not orphan a row");
+        let integrity: String = conn
+            .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(integrity, "ok");
     }
 
     #[test]

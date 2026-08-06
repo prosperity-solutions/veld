@@ -24,7 +24,7 @@ use std::time::Duration;
 
 use thiserror::Error;
 
-use crate::config::{CommandSpec, ConfigValue, SecretSource};
+use crate::config::{CommandSpec, ConfigValue, SecretSource, VarDecl};
 
 /// How long a single source command may take.
 ///
@@ -91,6 +91,37 @@ pub enum ValueError {
         at: String,
         path: String,
         source: std::io::Error,
+    },
+
+    /// A machine-overridable var with no `default` and no answer on this
+    /// machine. The message carries the exact command because the alternative —
+    /// resolving a default nobody chose, or worse persisting a guess as the
+    /// machine's answer — is how a background process's shrug becomes permanent.
+    #[error(
+        "{at}: no value on this machine. `{name}` is declared machine-overridable with no \
+         default, so each machine answers it once:\n    veld config set {name} <value>{choices}"
+    )]
+    MachineVarUnanswered {
+        at: String,
+        name: String,
+        /// Pre-rendered `\n    one of: a, b`, or empty. Formatting a list inside
+        /// a `thiserror` template is not worth a helper.
+        choices: String,
+    },
+
+    /// The effective value is not one of the declared `choices`. Checked after
+    /// resolution, not only when setting: the config can add or remove a choice
+    /// long after an override was stored, and the stale answer must be caught
+    /// rather than silently handed to a process.
+    #[error(
+        "{at}: {source_label} produced a value that is not one of the declared choices \
+         ({choices}). Set a legal one:\n    veld config set {name} <value>"
+    )]
+    MachineVarNotAChoice {
+        at: String,
+        name: String,
+        choices: String,
+        source_label: String,
     },
 
     /// A `vars` literal that references something a var cannot see. Only the
@@ -335,8 +366,106 @@ fn warn_if_not_git_ignored(project_root: &std::path::Path, path: &std::path::Pat
 /// verbatim, exactly as a node's `env` treats one: substituting inside content
 /// that came out of a secret store would turn the store into an interpolation
 /// vector, and a password containing `${` would break or, worse, expand.
+/// This machine's answers, keyed by var name — see
+/// [`crate::db::Db::effective_var_overrides`]. An entry replaces the declared
+/// `default` (or supplies the only value a var has).
+pub type VarOverrides = std::collections::BTreeMap<String, ConfigValue>;
+
+/// A machine-overridable var the plan needs and this machine cannot supply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnansweredVar {
+    pub name: String,
+    /// What the value means, for the prompt and for `veld config vars`.
+    pub description: Option<String>,
+    /// The declared question, if the author wrote one.
+    pub prompt: Option<String>,
+    /// The legal answers, if enumerated.
+    pub choices: Option<Vec<String>>,
+    pub secret: bool,
+    /// Set when a *stored* answer exists but is no longer legal — the config's
+    /// `choices` changed under it. Carries the offending value only when it is
+    /// a non-secret literal, which is the only case it can be shown safely.
+    pub stale: Option<String>,
+}
+
+impl UnansweredVar {
+    /// The question to put to a human.
+    pub fn question(&self) -> String {
+        match (&self.prompt, &self.description) {
+            (Some(p), _) => p.clone(),
+            (None, Some(d)) => d.clone(),
+            (None, None) => format!("Value for `{}` on this machine", self.name),
+        }
+    }
+}
+
+/// Which machine-overridable vars this plan needs and this machine has not
+/// answered — the **pre-flight**, run before anything spawns.
+///
+/// Laziness is retained for *values*: a var backed by a credential helper still
+/// runs its command only when the plan reaches it. What is checked here is
+/// *presence*, which costs nothing and is knowable at second zero. Without this,
+/// a var reachable only through the fourth node in the graph is discovered after
+/// three others are already running, and the choice at that point is between
+/// tearing down a half-started environment and prompting while it runs.
+///
+/// Vars outside the plan are deliberately not reported: `veld start docs` must
+/// not demand an answer for a var only the database node uses.
+pub fn unanswered_machine_vars(
+    config: &crate::config::VeldConfig,
+    overrides: &VarOverrides,
+    selections: &[crate::graph::NodeSelection],
+) -> Vec<UnansweredVar> {
+    let Some(vars) = config.vars.as_ref() else {
+        return Vec::new();
+    };
+    let mut needed = crate::config::vars_for_setup(config);
+    needed.extend(crate::config::vars_for_plan(config, selections));
+
+    let mut out: Vec<UnansweredVar> = Vec::new();
+    for name in &needed {
+        let Some(decl) = vars.get(name) else { continue };
+        let Some(machine) = decl.machine() else {
+            continue;
+        };
+        let answer = overrides.get(name);
+        let has_value = answer.is_some() || machine.default.is_some();
+
+        // A stale stored answer is only knowable here when nothing has to be
+        // fetched to know it. A pointer's value is unknown until the command
+        // runs, so it stays a resolution-time error.
+        let stale = match machine.choices.as_ref().filter(|c| !c.is_empty()) {
+            Some(choices) => answer
+                .or(machine.default.as_ref())
+                .and_then(ConfigValue::as_literal)
+                .filter(|lit| !choices.iter().any(|c| c == lit))
+                .map(|lit| {
+                    if machine.secret {
+                        String::new()
+                    } else {
+                        lit.to_owned()
+                    }
+                }),
+            None => None,
+        };
+        if has_value && stale.is_none() {
+            continue;
+        }
+        out.push(UnansweredVar {
+            name: name.clone(),
+            description: machine.description.clone(),
+            prompt: machine.prompt.clone(),
+            choices: machine.choices.clone(),
+            secret: machine.secret,
+            stale,
+        });
+    }
+    out
+}
+
 pub async fn resolve_vars(
-    vars: Option<&HashMap<String, ConfigValue>>,
+    vars: Option<&HashMap<String, VarDecl>>,
+    overrides: &VarOverrides,
     project_root: Option<&std::path::Path>,
     ctx: &crate::variables::VariableContext,
     needed: &BTreeSet<String>,
@@ -354,13 +483,58 @@ pub async fn resolve_vars(
         .collect();
     names.sort();
     for name in names {
-        let value = &vars[name];
+        let decl = &vars[name];
         let at = format!("vars.{name}");
-        let resolved = match value.as_literal() {
-            Some(literal) => crate::variables::interpolate(literal, ctx)
-                .map_err(|source| ValueError::Interpolation { at, source })?,
-            None => resolve_value(value, &at, project_root).await?,
+        let machine = decl.machine();
+
+        // An override replaces the declaration's own value. It is used
+        // **verbatim** — never interpolated — even when it is a literal, which
+        // is where it differs from a config literal below. An override is data a
+        // human typed on this machine rather than authored config, so a value
+        // containing `${` must arrive intact instead of breaking or expanding;
+        // that is the same rule a *fetched* value already follows.
+        let resolved = if let Some(over) = overrides.get(name.as_str()) {
+            match over.as_literal() {
+                Some(literal) => literal.to_owned(),
+                None => resolve_value(over, &at, project_root).await?,
+            }
+        } else {
+            let Some(value) = decl.config_value() else {
+                let m = machine.expect("only a machine var can lack a value");
+                return Err(ValueError::MachineVarUnanswered {
+                    at,
+                    name: name.clone(),
+                    choices: match &m.choices {
+                        Some(c) if !c.is_empty() => format!("\n    one of: {}", c.join(", ")),
+                        _ => String::new(),
+                    },
+                });
+            };
+            match value.as_literal() {
+                Some(literal) => crate::variables::interpolate(literal, ctx)
+                    .map_err(|source| ValueError::Interpolation { at, source })?,
+                None => resolve_value(value, &at, project_root).await?,
+            }
         };
+
+        // Choices are enforced on the *effective* value, whichever layer it came
+        // from: an override stored while `choices` said one thing outlives the
+        // commit that changed them, and a `default` can be edited into an illegal
+        // value just as easily.
+        if let Some(choices) = machine.and_then(|m| m.choices.as_ref())
+            && !choices.is_empty()
+            && !choices.contains(&resolved)
+        {
+            return Err(ValueError::MachineVarNotAChoice {
+                at: format!("vars.{name}"),
+                name: name.clone(),
+                choices: choices.join(", "),
+                source_label: match overrides.get(name.as_str()) {
+                    Some(_) => "this machine's override".to_owned(),
+                    None => "the config default".to_owned(),
+                },
+            });
+        }
         out.insert(name.clone(), resolved);
     }
     Ok(out)
@@ -372,6 +546,12 @@ mod tests {
 
     fn cv(json: &str) -> ConfigValue {
         serde_json::from_str(json).expect("value parses")
+    }
+
+    /// A `vars` entry. The plain forms parse to `VarDecl::Value`, so these
+    /// tests exercise exactly the shape a pre-feature config had.
+    fn vd(json: &str) -> VarDecl {
+        serde_json::from_str(json).expect("var declaration parses")
     }
 
     #[tokio::test]
@@ -589,24 +769,31 @@ mod tests {
         ctx.set_builtin("run", "demo".to_owned());
         ctx.set_builtin("branch", "main".to_owned());
 
-        let vars: HashMap<String, ConfigValue> = HashMap::from([
+        let vars: HashMap<String, VarDecl> = HashMap::from([
             (
                 "run_url".to_owned(),
-                cv(r#""https://web.${veld.run}.example.test""#),
+                vd(r#""https://web.${veld.run}.example.test""#),
             ),
-            ("branchy".to_owned(), cv(r#""${veld.branch}-cache""#)),
+            ("branchy".to_owned(), vd(r#""${veld.branch}-cache""#)),
             // A *fetched* value is used verbatim: substituting inside content
             // that came out of a secret store would make the store an
             // interpolation vector.
             (
                 "fetched".to_owned(),
-                cv(r#"{ "shell": "printf '${veld.run}'" }"#),
+                vd(r#"{ "shell": "printf '${veld.run}'" }"#),
             ),
         ]);
         let needed = vars.keys().cloned().collect();
-        let out = resolve_vars(Some(&vars), None, &ctx, &needed, &HashMap::new())
-            .await
-            .expect("all three resolve");
+        let out = resolve_vars(
+            Some(&vars),
+            &VarOverrides::new(),
+            None,
+            &ctx,
+            &needed,
+            &HashMap::new(),
+        )
+        .await
+        .expect("all three resolve");
 
         assert_eq!(out["run_url"], "https://web.demo.example.test");
         assert_eq!(out["branchy"], "main-cache");
@@ -617,10 +804,11 @@ mod tests {
     /// message that points at the var, not at whichever node happened to use it.
     #[tokio::test]
     async fn var_literal_with_an_out_of_scope_builtin_errors_by_name() {
-        let vars: HashMap<String, ConfigValue> =
-            HashMap::from([("api".to_owned(), cv(r#""localhost:${veld.port}""#))]);
+        let vars: HashMap<String, VarDecl> =
+            HashMap::from([("api".to_owned(), vd(r#""localhost:${veld.port}""#))]);
         let err = resolve_vars(
             Some(&vars),
+            &VarOverrides::new(),
             None,
             &crate::variables::VariableContext::new(),
             &vars.keys().cloned().collect(),
@@ -644,16 +832,16 @@ mod tests {
     async fn unreferenced_and_already_resolved_vars_are_not_run() {
         let dir = tempfile::tempdir().unwrap();
         let marker = dir.path().join("ran");
-        let vars: HashMap<String, ConfigValue> = HashMap::from([
+        let vars: HashMap<String, VarDecl> = HashMap::from([
             (
                 "eager".to_owned(),
-                cv(&format!(
+                vd(&format!(
                     r#"{{ "shell": "touch {}; echo x" }}"#,
                     marker.display()
                 )),
             ),
-            ("wanted".to_owned(), cv(r#""literal""#)),
-            ("cached".to_owned(), cv(r#""fresh""#)),
+            ("wanted".to_owned(), vd(r#""literal""#)),
+            ("cached".to_owned(), vd(r#""fresh""#)),
         ]);
 
         let already = HashMap::from([("cached".to_owned(), "from-the-first-pass".to_owned())]);
@@ -662,6 +850,7 @@ mod tests {
             .collect();
         let out = resolve_vars(
             Some(&vars),
+            &VarOverrides::new(),
             None,
             &crate::variables::VariableContext::new(),
             &needed,
@@ -686,5 +875,174 @@ mod tests {
     fn source_label_never_leaks_a_literal() {
         let v = cv(r#"{ "value": "hunter2", "secret": true }"#);
         assert!(!v.source_label().contains("hunter2"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Machine-overridable vars
+    // -----------------------------------------------------------------------
+
+    async fn resolve_one(
+        decl: &str,
+        overrides: &[(&str, &str)],
+    ) -> Result<HashMap<String, String>, ValueError> {
+        let vars: HashMap<String, VarDecl> = HashMap::from([("v".to_owned(), vd(decl))]);
+        let overrides: VarOverrides = overrides
+            .iter()
+            .map(|(k, json)| ((*k).to_owned(), cv(json)))
+            .collect();
+        let needed = vars.keys().cloned().collect();
+        resolve_vars(
+            Some(&vars),
+            &overrides,
+            None,
+            &crate::variables::VariableContext::new(),
+            &needed,
+            &HashMap::new(),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn a_machine_var_falls_back_to_its_default() {
+        let out = resolve_one(r#"{ "machine": { "default": "docker" } }"#, &[])
+            .await
+            .expect("the default resolves");
+        assert_eq!(out["v"], "docker");
+    }
+
+    #[tokio::test]
+    async fn an_override_beats_the_default() {
+        let out = resolve_one(
+            r#"{ "machine": { "default": "docker" } }"#,
+            &[("v", r#""podman""#)],
+        )
+        .await
+        .expect("the override resolves");
+        assert_eq!(out["v"], "podman");
+    }
+
+    /// An override may be a *pointer*, which is what lets a `secret` var be
+    /// answered per machine without veld storing the secret.
+    #[tokio::test]
+    async fn an_override_may_be_a_source_rather_than_a_literal() {
+        let out = resolve_one(
+            r#"{ "machine": { "prompt": "?" }, "secret": true }"#,
+            &[("v", r#"{ "shell": "printf resolved-by-command" }"#)],
+        )
+        .await
+        .expect("the pointer resolves");
+        assert_eq!(out["v"], "resolved-by-command");
+    }
+
+    /// **A config default interpolates; an override does not.**
+    ///
+    /// An override is data a human typed on this machine, not authored config,
+    /// so a value containing `${` must arrive intact rather than expanding or
+    /// failing — the same rule a *fetched* value already follows. Getting this
+    /// backwards would make a password containing `${` break the run.
+    #[tokio::test]
+    async fn an_override_literal_is_used_verbatim() {
+        let mut ctx = crate::variables::VariableContext::new();
+        ctx.set_builtin("run", "demo".to_owned());
+        let vars: HashMap<String, VarDecl> = HashMap::from([
+            (
+                "from_config".to_owned(),
+                vd(r#"{ "machine": { "default": "c-${veld.run}" } }"#),
+            ),
+            (
+                "from_machine".to_owned(),
+                vd(r#"{ "machine": { "default": "unused" } }"#),
+            ),
+        ]);
+        let overrides: VarOverrides =
+            [("from_machine".to_owned(), cv(r#""m-${veld.run}""#))].into();
+        let needed = vars.keys().cloned().collect();
+        let out = resolve_vars(
+            Some(&vars),
+            &overrides,
+            None,
+            &ctx,
+            &needed,
+            &HashMap::new(),
+        )
+        .await
+        .expect("both resolve");
+        assert_eq!(
+            out["from_config"], "c-demo",
+            "a config default interpolates"
+        );
+        assert_eq!(
+            out["from_machine"], "m-${veld.run}",
+            "an override is verbatim — it is a typed value, not config"
+        );
+    }
+
+    /// The refusal that replaces guessing: no default, no answer, so the run
+    /// stops and the message carries the command that fixes it.
+    #[tokio::test]
+    async fn a_machine_var_with_no_answer_names_the_command() {
+        let err = resolve_one(r#"{ "machine": { "prompt": "Which one?" } }"#, &[])
+            .await
+            .expect_err("must refuse rather than resolve nothing");
+        assert!(matches!(err, ValueError::MachineVarUnanswered { .. }));
+        let msg = err.to_string();
+        assert!(msg.contains("veld config set v"), "{msg}");
+    }
+
+    /// Choices are enforced on the *effective* value, so an answer stored while
+    /// the config allowed it is caught after the config stops allowing it.
+    #[tokio::test]
+    async fn a_stored_answer_outside_the_choices_is_refused() {
+        let err = resolve_one(
+            r#"{ "machine": { "default": "docker", "choices": ["docker", "podman"] } }"#,
+            &[("v", r#""containerd""#)],
+        )
+        .await
+        .expect_err("a stale answer must not reach a process");
+        assert!(matches!(err, ValueError::MachineVarNotAChoice { .. }));
+        let msg = err.to_string();
+        assert!(msg.contains("this machine's override"), "{msg}");
+        assert!(msg.contains("docker, podman"), "{msg}");
+    }
+
+    /// An override for a var the plan never mentions must not be resolved — the
+    /// laziness that keeps a credential helper asleep applies to overrides too.
+    #[tokio::test]
+    async fn an_override_for_an_unneeded_var_is_not_resolved() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let marker = dir.path().join("ran");
+        let vars: HashMap<String, VarDecl> = HashMap::from([
+            (
+                "wanted".to_owned(),
+                vd(r#"{ "machine": { "default": "x" } }"#),
+            ),
+            (
+                "ignored".to_owned(),
+                vd(r#"{ "machine": { "default": "y" } }"#),
+            ),
+        ]);
+        let overrides: VarOverrides = [(
+            "ignored".to_owned(),
+            cv(&format!(
+                r#"{{ "shell": "touch {}; echo x" }}"#,
+                marker.display()
+            )),
+        )]
+        .into();
+        let needed = ["wanted".to_owned()].into_iter().collect();
+        resolve_vars(
+            Some(&vars),
+            &overrides,
+            None,
+            &crate::variables::VariableContext::new(),
+            &needed,
+            &HashMap::new(),
+        )
+        .await
+        .expect("resolves");
+        assert!(
+            !marker.exists(),
+            "an unneeded override must not run its command"
+        );
     }
 }

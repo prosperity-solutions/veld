@@ -707,6 +707,63 @@ export async function errorMessage(res: Response): Promise<string> {
   return `${raw.slice(0, cut)}…`;
 }
 
+/** Where a machine-overridable var's effective value came from. */
+export type ConfigVarScope = "project" | "worktree" | "default" | "unset";
+
+/**
+ * One machine-overridable var as the daemon reports it.
+ *
+ * `value` is already **display-safe**: a var declared `secret` arrives as a
+ * description (`<secret, from environment variable PGPASS>`), never as the
+ * value. There is no endpoint that returns the real one — its only egress is
+ * into a child process's environment at run start.
+ */
+export interface ConfigVar {
+  name: string;
+  /** Which layer supplied `value`. `unset` means nothing did. */
+  from: ConfigVarScope;
+  /** Display string, or null when the var has no value at all. */
+  value: string | null;
+  /** The stored answer is a pointer (env/file/shell) rather than a literal. */
+  isPointer: boolean;
+  secret: boolean;
+  /** The config's own fallback, display-safe, or null when there is none. */
+  default: string | null;
+  choices: string[] | null;
+  description: string | null;
+  prompt: string | null;
+}
+
+export interface ConfigVarList {
+  /** Identifies the project across all of its worktrees. */
+  projectId: string;
+  /** The checkout these values were read for. */
+  worktree: string;
+  vars: ConfigVar[];
+}
+
+/** A var a pending start needs and this machine has not answered. */
+export interface RequiredConfigVar {
+  name: string;
+  /** The declared prompt, description, or a generic fallback. */
+  question: string;
+  choices: string[] | null;
+  secret: boolean;
+  /** A stored answer exists but the config's `choices` no longer allow it. */
+  stale: boolean;
+}
+
+export interface SetConfigVarBody {
+  project: string;
+  name: string;
+  value?: string;
+  env?: string;
+  file?: string;
+  shell?: string;
+  /** Scope to this checkout instead of every worktree of the project. */
+  worktree?: boolean;
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const mutating = init?.method && init.method !== "GET";
   const res = await fetch(path, {
@@ -1057,4 +1114,51 @@ export const api = {
     request<void>(`/api/shares/joins/${encodeURIComponent(joinId)}`, {
       method: "DELETE",
     }),
+
+  /**
+   * Machine-overridable vars for one project, with each value's scope.
+   *
+   * `project` is any directory inside the checkout — the daemon walks upward for
+   * the config, exactly as the CLI does, so a worktree path is the natural thing
+   * to pass. The answer is shared by every worktree of the repo unless a var was
+   * set with `worktree: true`.
+   */
+  configVars: (project: string) =>
+    request<ConfigVarList>(
+      `/api/config/vars?project=${encodeURIComponent(project)}`,
+    ),
+  /**
+   * Store one answer. Pass exactly one of `value` (a literal) or `env`/`file`/
+   * `shell` (a pointer resolved at run start).
+   *
+   * A pointer is how a `secret` var is answered without the secret itself
+   * landing in veld's database — the same choice `veld config set` offers.
+   */
+  setConfigVar: (body: SetConfigVarBody) =>
+    request<{ name: string; scope: ConfigVarScope; value: string }>(
+      "/api/config/vars",
+      { method: "PUT", body: JSON.stringify(body) },
+    ),
+  /**
+   * What *this* start would need and this machine has not answered.
+   *
+   * Scoped to the plan the given preset/selections expand to, including
+   * transitive dependencies — so it asks for exactly the vars the run will
+   * reach, and not for the ones it won't.
+   */
+  configVarsPreflight: (body: {
+    project: string;
+    preset?: string;
+    selections?: string[];
+  }) =>
+    request<{ needed: RequiredConfigVar[] }>("/api/config/vars/preflight", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  /** Forget one answer, falling back to the next scope and then the default. */
+  clearConfigVar: (project: string, name: string, worktree = false) =>
+    request<{ name: string; scope: ConfigVarScope; removed: boolean }>(
+      `/api/config/vars?project=${encodeURIComponent(project)}&name=${encodeURIComponent(name)}&worktree=${worktree}`,
+      { method: "DELETE" },
+    ),
 };

@@ -1,0 +1,86 @@
+{
+  "$schema": "https://veld.oss.life.li/schema/v3/veld.schema.json",
+  "schemaVersion": "3",
+  "name": "machine-vars",
+  "vars": {
+    "api_url": "https://api.example.com",
+    "container_runtime": {
+      "machine": {
+        "default": "docker",
+        "choices": [
+          "docker",
+          "podman"
+        ],
+        "description": "Which local container runtime runs this project's service containers"
+      }
+    },
+    "db_memory": {
+      "machine": {
+        "default": "2g",
+        "description": "Memory ceiling for the database container on this machine"
+      }
+    },
+    "toolchain_path": {
+      "machine": {
+        "default": {
+          "env": "ACME_TOOLCHAIN"
+        },
+        "prompt": "Absolute path to the acme toolchain on this machine"
+      }
+    },
+    "vendor_token": {
+      "machine": {
+        "prompt": "Vendor API token (per developer; get one from the vendor dashboard)"
+      },
+      "secret": true
+    }
+  },
+  "nodes": {
+    "db": {
+      "type": "start_server",
+      "default_variant": "dev",
+      "variants": {
+        "dev": {
+          "argv": [
+            "${vars.container_runtime}",
+            "run",
+            "--memory",
+            "${vars.db_memory}",
+            "postgres:16"
+          ]
+        }
+      },
+      "probes": {
+        "readiness": {
+          "type": "port"
+        }
+      }
+    },
+    "api": {
+      "type": "start_server",
+      "default_variant": "dev",
+      "depends_on": {
+        "db": "dev"
+      },
+      "env": {
+        "API_URL": "${vars.api_url}",
+        "TOOLCHAIN": "${vars.toolchain_path}",
+        "VENDOR_TOKEN": "${vars.vendor_token}"
+      },
+      "variants": {
+        "dev": {
+          "argv": [
+            "node",
+            "server.js"
+          ]
+        }
+      },
+      "probes": {
+        "readiness": {
+          "type": "http",
+          "path": "/healthz"
+        }
+      }
+    }
+  }
+}

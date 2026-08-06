@@ -171,6 +171,7 @@ import {
   startSelectionLabel,
   startStorageKey,
 } from "./components/StartConfig";
+import { ConfigVarsDialog } from "./components/ConfigVars";
 import {
   ChangeMarkerDialog,
   ImportRepoDialog,
@@ -1203,40 +1204,71 @@ function AppInner(props: {
       );
       return;
     }
+    const body = startBody(sel);
     // The name is computed here and sent explicitly. Leaving it to the daemon's
     // default (the worktree alias) is what minted a *third* environment when an
     // agent already had one live, and it also meant this window could not mark
     // the action against the run it was about.
     const target = name ?? startNameFor(w);
-    /**
-     * Bind this window to what it just started.
-     *
-     * Written at the moment of the action, not repaired afterwards by an effect:
-     * the intent ("I started this, I am looking at it") exists only here, and a
-     * poll-time rule like "select the newest run" would also hijack the selection
-     * when the *other* thing in this directory — a coding agent — starts one.
-     *
-     * Only for the selected worktree: a rail row's ▶ deliberately does not move
-     * the selection, and another worktree's choice is stored under its own key.
-     */
-    const previous = worktree && w.id === worktree.id ? selectedRunName : null;
-    if (previous !== null) setSelectedRunName(target);
-    void act(
-      w,
-      target,
-      "start",
-      () => api.startRun(w.id, { ...startBody(sel), run_name: target }),
-      // The start never happened, so leave the window bound to what it was
-      // looking at rather than to a name nothing created — but only if the user has
-      // not picked something else in the meantime. A failure can arrive seconds
-      // later, and restoring unconditionally would then yank a selection they made
-      // deliberately.
-      () => {
-        if (previous !== null && selectedRunRef.current === target) {
-          setSelectedRunName(previous);
+    void (async () => {
+      // Ask before starting, not after failing. A daemon-spawned `veld start`
+      // has no terminal, so its own pre-flight can only refuse — this is the
+      // channel that refusal assumes exists.
+      //
+      // Ahead of the run binding below on purpose: a start held back here never
+      // happened, so binding this window to `target` first would point it at a
+      // run nothing created.
+      try {
+        const { needed } = await api.configVarsPreflight({
+          project: w.path,
+          ...body,
+        });
+        if (needed.length > 0) {
+          setDialog({
+            kind: "config-vars",
+            project: w.path,
+            // Carries `name` through, so retrying a "start another run" still
+            // starts *another* one rather than the default.
+            retry: () => startWorktree(w, name),
+          });
+          return;
         }
-      },
-    );
+      } catch {
+        // Advisory only. If the check itself fails — an older daemon, a config
+        // that no longer parses — start anyway and let `veld start` report the
+        // real problem. Refusing to start because a *check* broke would be a
+        // worse failure than the one it was looking for.
+      }
+      /**
+       * Bind this window to what it just started.
+       *
+       * Written at the moment of the action, not repaired afterwards by an effect:
+       * the intent ("I started this, I am looking at it") exists only here, and a
+       * poll-time rule like "select the newest run" would also hijack the selection
+       * when the *other* thing in this directory — a coding agent — starts one.
+       *
+       * Only for the selected worktree: a rail row's ▶ deliberately does not move
+       * the selection, and another worktree's choice is stored under its own key.
+       */
+      const previous = worktree && w.id === worktree.id ? selectedRunName : null;
+      if (previous !== null) setSelectedRunName(target);
+      void act(
+        w,
+        target,
+        "start",
+        () => api.startRun(w.id, { ...body, run_name: target }),
+        // The start never happened, so leave the window bound to what it was
+        // looking at rather than to a name nothing created — but only if the user has
+        // not picked something else in the meantime. A failure can arrive seconds
+        // later, and restoring unconditionally would then yank a selection they made
+        // deliberately.
+        () => {
+          if (previous !== null && selectedRunRef.current === target) {
+            setSelectedRunName(previous);
+          }
+        },
+      );
+    })();
   };
   // `w.path` is the run's project root — every worktree with a veld.json is
   // its own project (see `runsForWorktree`), and the run name alone would be
@@ -1325,6 +1357,11 @@ function AppInner(props: {
     | { kind: "settings" }
     | { kind: "remove-repo"; repo: Repo }
     | { kind: "search" }
+    /**
+     * Values this machine owes the project. `retry` re-fires the start that
+     * was held back, so answering and starting is one flow rather than two.
+     */
+    | { kind: "config-vars"; project: string; retry?: () => void }
   >({ kind: "none" });
 
   // This app's own overlays are not portalled the way Mantine's are, so
@@ -1468,6 +1505,13 @@ function AppInner(props: {
                 },
               ]
             : []),
+          {
+            // Reachable without a blocked start, so an answer can be changed
+            // before it bites rather than only when it already has.
+            key: "config-vars",
+            title: "Values for this machine…",
+            onClick: () => setDialog({ kind: "config-vars", project: w.path }),
+          },
           { key: "run-divider" },
         ]
       : [];
@@ -2867,6 +2911,19 @@ function AppInner(props: {
     />
   );
 
+  /**
+   * Hoisted for the same reason as `settingsDialog`: a start can be held back
+   * from either mode, so the dialog that unblocks it has to render in both.
+   */
+  const configVarsDialog = dialog.kind === "config-vars" && (
+    <ConfigVarsDialog
+      opened
+      project={dialog.project}
+      onRetry={dialog.retry}
+      onClose={closeDialog}
+    />
+  );
+
   if (mode === "runs") {
     return (
       <div className="frame">
@@ -2877,6 +2934,7 @@ function AppInner(props: {
           historyDays={historyDays}
         />
         {settingsDialog}
+        {configVarsDialog}
       </div>
     );
   }
@@ -3281,6 +3339,7 @@ function AppInner(props: {
         />
       )}
       {settingsDialog}
+      {configVarsDialog}
       {sharingDialog}
       {dialog.kind === "search" && (
         <CommandPalette

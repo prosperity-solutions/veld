@@ -41,7 +41,14 @@
       "type": "object",
       "description": "One definition point per value, referenced as ${vars.<name>} at every use site. A var is a scalar or a single value source \u2014 never an object, never a config fragment: the key stays written in the node that uses it, so `rg <ENV_VAR>` still finds the line that sets it. A var may not reference another var (one hop, always). A literal may use the run-scoped built-ins (${veld.run}, run_id, name, project, root, worktree, branch, username); the per-node ones (port, url, url.*, ports.*, node, variant) are a lint error here, because a var is one value for the whole run \u2014 compose those at the use site. A var backed by a value source is resolved only when the resolved plan reaches it, so a credential helper behind a var costs nothing on a run that does not use it.",
       "additionalProperties": {
-        "$ref": "#/$defs/value"
+        "oneOf": [
+          {
+            "$ref": "#/$defs/value"
+          },
+          {
+            "$ref": "#/$defs/machineVar"
+          }
+        ]
       }
     },
     "env": {
@@ -511,6 +518,45 @@
           }
         }
       ]
+    },
+    "machineVar": {
+      "type": "object",
+      "description": "A var whose answer belongs to the MACHINE, not the repo. The declaration is committed and shared; the answer lives in veld's database and is set with `veld config set <name> <value>` (or in the management UI). Use it for values that are facts about the developer's computer rather than about the project — which of two installed container runtimes to run containers with, a memory ceiling that differs between a laptop and a workstation, the path to a locally installed tool. The answer is keyed per project across every worktree of the repo, so it is given once per machine and not once per checkout; `veld config set --worktree` narrows it to one checkout. Legal only inside `vars`, deliberately: an `env` map has no name for `veld config set` to address. If there is no `default`, every machine must answer — `veld start` asks when it has a terminal and refuses with the exact command when it does not, and it never persists a value nobody chose.",
+      "additionalProperties": false,
+      "required": [
+        "machine"
+      ],
+      "properties": {
+        "machine": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "default": {
+              "$ref": "#/$defs/value",
+              "description": "The checked-in fallback used on a machine with no override. Omit to require every machine to answer. This is an ordinary value, so it may itself be a source (`{\"env\": \"CONTAINER_RUNTIME\"}`) — but it can never be another machine var, which is what keeps a var one hop from its value."
+            },
+            "choices": {
+              "type": "array",
+              "description": "The legal answers. Enforced when setting AND when resolving, because the config can change under an answer that was valid when it was stored. An empty array is a lint error — no value could satisfy it.",
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1
+            },
+            "description": {
+              "type": "string",
+              "description": "What the value means. Shown by `veld config vars` and used as the prompt when no `prompt` is given."
+            },
+            "prompt": {
+              "type": "string",
+              "description": "The question asked when this machine has no answer and there is no default. Falls back to `description`."
+            }
+          }
+        },
+        "secret": {
+          "$ref": "#/$defs/secretFlag"
+        }
+      }
     },
     "secretFlag": {
       "type": "boolean",

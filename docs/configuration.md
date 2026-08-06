@@ -91,6 +91,7 @@ The same applies to anything else that reads the file as strict JSON — `veld c
 | `features`          | object | No       | Feature toggles (see [Features](#features))       |
 | `proxy`             | object | No       | Reverse-proxy header rules (see [Proxy](#proxy))   |
 | `env`               | object | No       | Global environment variables inherited by all nodes |
+| `vars`              | object | No       | One definition point per value, referenced as `${vars.<name>}` (see [`vars`](#vars)). A var may declare itself [machine-overridable](#machine-overridable-vars) |
 | `sharing`           | object | No       | Sharing policy: relays and public gateway (see [Sharing](#sharing)) |
 | `setup`             | array  | No       | Lifecycle steps that run before the graph (see [Setup & Teardown]) |
 | `teardown`          | array  | No       | Lifecycle steps that run after all nodes stop (see [Setup & Teardown]) |
@@ -1293,6 +1294,116 @@ veld config --why nodes.api.variants.dev.env.DATABASE_URL
 prints the effective value, where it was defined, and what it overrides. A
 `secret` value is described, never printed, and there is no flag that will.
 
+### Machine-overridable vars
+
+Some values in a checked-in config are not facts about the *project* — they are
+facts about the **machine**. Which of two locally installed container runtimes
+should run the containers. A memory ceiling that a 16 GB laptop and a 64 GB
+workstation genuinely disagree about. The path to a tool installed somewhere
+unusual. `veld.json` is committed, so every value in it is identical for everyone
+who clones the repo, and none of those are.
+
+A var declares itself overridable with a `machine` block. The declaration stays
+in the committed file; the *answer* lives in Veld's own database.
+
+```jsonc
+"vars": {
+  "container_runtime": {
+    "machine": {
+      "default": "docker",
+      "choices": ["docker", "podman"],
+      "description": "Which local container runtime runs this project's containers"
+    }
+  },
+  "vendor_token": {
+    "machine": { "prompt": "Vendor API token (per developer)" },
+    "secret": true
+  }
+}
+```
+
+It is consumed like any other var — `${vars.container_runtime}` in `argv`, `env`,
+`cwd` — so nothing downstream changes.
+
+| Key | |
+|---|---|
+| `default` | The checked-in fallback for a machine with no answer. Omit it to require every machine to answer. May itself be a [value source](#value-sources) (`{ "env": "…" }`), but never another machine var — that is a type error, not a lint |
+| `choices` | The legal answers. Enforced when setting **and** when resolving, because the config can change under an answer that was valid when it was stored. `[]` is a lint error: nothing could satisfy it |
+| `description` | What the value means. Shown by `veld config vars` |
+| `prompt` | The question asked when there is no default and no answer. Falls back to `description` |
+| `secret` | Sits beside `machine`, not inside it — it describes the var, not one of its layers |
+
+```sh
+veld config vars                              # name, effective value, and which scope it came from
+veld config set container_runtime podman      # this machine, every worktree of the project
+veld config set container_runtime podman --worktree   # this checkout only
+veld config unset container_runtime           # back to the next scope, then the default
+```
+
+**Resolution is most-specific-first:** `veld start --var NAME=VALUE` (this run
+only, never stored) → the worktree-scoped answer → the project-scoped answer →
+the config's `default` → an error naming the var and printing the command that
+sets it.
+
+#### What an override is keyed by
+
+**The project, across every worktree of it.** An override describes the laptop,
+not the checkout, so answering it once per worktree would be the bug rather than
+the feature. The key is where this config lives in the repo's *main* checkout, so
+six worktrees of one repo share one answer, and two configs in one monorepo stay
+separate. Outside a git repo it falls back to the config's own directory.
+
+`veld config vars` always prints which scope a value came from. That is not
+decoration: a value arriving silently from a scope you had forgotten is worse
+than no feature at all.
+
+Moving or renaming a checkout orphans its answers — the key is a path, like every
+other project-scoped thing Veld stores. Re-set it, or `veld config vars` will
+show the var back on its default.
+
+#### Secrets
+
+A `secret` machine var **is** overridable, because an override is a
+[value source](#value-sources) and not necessarily a literal:
+
+```sh
+veld config set vendor_token --env VENDOR_TOKEN     # a pointer
+veld config set vendor_token --shell 'op read op://dev/vendor/token'
+veld config set vendor_token sk_live_…              # the value itself
+```
+
+The first two keep Veld carrying *a pointer plus a sensitivity flag*, which is
+the rule everywhere else in this file. The third stores the value in Veld's
+database (owner-readable, not encrypted) and says so when you run it. Either way
+the value is redacted in `veld config vars`, in `--json`, and in the management
+UI — there is no flag or endpoint that prints it.
+
+#### Asking, and refusing to guess
+
+A machine var with no `default` and no answer stops the run **before anything
+spawns** — presence is checked across the whole execution plan, including
+transitive dependencies, so it can never surface after half the graph is up.
+
+At a terminal, Veld asks, and saves the answer only if you say yes. With no
+terminal — CI, a scripted start, a run launched by the daemon for the management
+UI — it refuses with the exact `veld config set` command instead. It never
+resolves a default nobody chose, and it never persists a guess: a background
+process quietly taking a default is indistinguishable from a human choosing it,
+and the wrong value then sticks around.
+
+From the management UI and Veld Desktop there *is* a reachable human, so a start
+that would need a value opens a form instead of failing.
+
+#### Run history
+
+A run's snapshot records which machine vars were in play and which scope each
+answer came from — **names and provenance only, never values**. `config_hash`
+hashes the `veld.json` bytes, so without this two runs of the same commit that
+behaved differently would be reported as identical. A hash of the value was
+considered and rejected: the values people override are low-entropy (`true`,
+`5432`, a handful of hostnames), so a digest over that domain is a
+brute-forceable oracle in the most-copied artifact Veld produces.
+
 ---
 
 ## Value sources
@@ -1418,6 +1529,11 @@ element no shell ever sees (inert text — a mistake, but not an exposure).
 | `start-server-needs-readiness` | A `start_server` with no readiness probe | **error** in a v3 config, warn in v1/v2 |
 | `unknown-var` | `${vars.x}` naming a var that is not declared, listing the declared names | **error** |
 | `vars-cannot-nest` | A var referencing another var | **error** |
+| `machine-var-empty-choices` | `"choices": []` on a machine var — no value could satisfy it, including the declared default | **error** |
+| `machine-var-default-not-a-choice` | A machine var whose `default` is not one of its own `choices`, so it fails on every machine that has not overridden it | **error** |
+| `machine-var-duplicate-choice` | The same string listed twice in `choices` | warn |
+| `machine-var-unexplained` | A machine var with no `default`, so every machine must answer it, and no `prompt` or `description` saying what to answer | warn |
+| `machine-var-secret-placement` | `secret: true` written inside `machine.default` rather than beside `machine`. The var is treated as secret either way; the placement misleads a reader | notice |
 | `unknown-builtin-var` | `${veld.x}` naming something that is not a built-in at all | **error** |
 | `builtin-not-in-scope` | A real built-in written where it is not populated — `${veld.url}` in a `command` node, `${veld.port}` in a `vars` value, `${veld.node}` in a `setup` step. See [availability](#availability) | **error**, or warn when only *some* variants inheriting the value lack it |
 | `unknown-node-ref` | `${nodes.X.…}` naming a node that is not defined anywhere | **error** |

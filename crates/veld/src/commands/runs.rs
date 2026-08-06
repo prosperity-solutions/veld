@@ -563,6 +563,7 @@ mod tests {
                 .iter()
                 .map(|(k, n)| (k.to_string(), n.clone()))
                 .collect(),
+            var_overrides: Vec::new(),
         }
     }
 
