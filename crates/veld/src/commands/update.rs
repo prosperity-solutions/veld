@@ -89,12 +89,47 @@ pub async fn run() -> i32 {
             // `veld update` after this one is installed clears it. Idempotent
             // and silent on a machine that never had the Spoon.
             super::remove_legacy_hammerspoon().await;
+            // The app can lag the CLI even when the CLI is current: the installer
+            // skips an app that is running, and someone may have installed the app
+            // after the last update. Without this, `veld update` would report
+            // success while leaving a stale app in /Applications and never mention
+            // it — the CLI half moves, the app half silently does not.
+            update_desktop_if_stale(current).await;
             0
         }
         Err(e) => {
             output::print_error(&format!("Update check failed: {e}"), false);
             1
         }
+    }
+}
+
+/// Bring Veld Desktop up to `version` when it is installed and on something else.
+///
+/// Only ever touches an app that is *already* installed — `veld update` putting a
+/// GUI app into /Applications for the first time would be a surprise, so that stays
+/// an explicit `veld desktop install`. When the CLI itself updates, the install
+/// script does this on its own; this covers the case where only the app is behind.
+async fn update_desktop_if_stale(version: &str) {
+    let Some((path, installed)) = veld_core::setup::desktop_app_status() else {
+        return;
+    };
+    if installed.as_deref() == Some(version) {
+        return;
+    }
+
+    let installed = installed.unwrap_or_else(|| "unknown".to_string());
+    output::print_info(&format!(
+        "Veld Desktop at {} is {installed} — updating it to {version}.",
+        path.display()
+    ));
+    if let Err(e) = veld_core::setup::install_desktop(version, None, false).await {
+        // Not fatal: the CLI is fine, and the app is the half the user can also
+        // fix by hand. Say so rather than failing an update that succeeded.
+        output::print_error(
+            &format!("Could not update Veld Desktop: {e}. Run 'veld desktop update' to retry."),
+            false,
+        );
     }
 }
 

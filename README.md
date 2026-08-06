@@ -182,6 +182,9 @@ veld stop --name dev
 | `veld unshare [SHARE_ID] [--json]` | Stop hosting a share (defaults to the sole active share) |
 | `veld leave [JOIN_ID] [--json]` | Disconnect from a joined share (defaults to the sole active join) |
 | `veld ui` | Open the management dashboard in the browser |
+| `veld desktop [status] [--json]` | Where Veld Desktop is installed and whether it matches the CLI |
+| `veld desktop install` | Install the Mac app (macOS). Skips the Gatekeeper detour a browser download gets, since curl sets no quarantine flag |
+| `veld desktop update [--relaunch]` | Update the installed app to this CLI's version. `veld update` does this on its own when the app is installed |
 | `veld gc` | Clean up stale state and logs |
 | `veld setup [unprivileged\|privileged]` | One-time system setup |
 | `veld config [--path] [--files] [--why <pointer>] [--json]` | Print the config. `--files`: each `include` glob, the files it matched, and the nodes each defines. `--why`: one effective value and where it was defined (a `secret` is described, never printed) |
@@ -488,11 +491,19 @@ A pane can also leave its window: right-click a tab → *Open in a new window*, 
 
 **It needs the veld CLI**, which it does not ship. On a machine that has never had veld the app shows the two commands that get you there — the installer and `veld setup unprivileged` — and waits for the daemon to appear.
 
-Download the `.dmg` (macOS) or `.AppImage` / `.deb` (Linux x64) from the [latest release](https://github.com/prosperity-solutions/veld/releases/latest) — `checksums.txt` on the same release page has a SHA-256 for every artifact if you want to verify what you downloaded. The app ships with every veld release and carries the same version number as the CLI — one tag, one version, so the app and the daemon it talks to are halves of the same thing. When they drift apart (you updated one and not the other) the app says so and names the fix: `veld update` for the CLI, its own updater for itself.
+On macOS, let the CLI install it:
 
-> **macOS: not code-signed yet.** Gatekeeper refuses the first launch. Open it once, let the warning appear, then go to **System Settings → Privacy & Security** and click *Open Anyway* — or clear the quarantine flag from a terminal: `xattr -dr com.apple.quarantine /Applications/Veld.app`. (Right-click → *Open* used to be the shortcut for this; macOS 15 removed it for apps that aren't notarized.) Developer ID signing and notarization are [tracked in #167](https://github.com/prosperity-solutions/veld/issues/167).
+```sh
+veld desktop install
+```
 
-Updates are checked in the background and offered, never applied behind your back — applying one restarts the app. The Linux AppImage installs the update itself; on macOS and on `.deb` installs the app opens the release page instead, because macOS only lets an app replace itself when the replacement carries the same code signature (and there isn't one yet) and a `.deb`'s files belong to your package manager. *Check for Updates…* is in the menu bar icon (macOS) and the application menu.
+That is the recommended route, and not only for convenience: **it is the one that skips the Gatekeeper detour.** A build downloaded in a browser carries `com.apple.quarantine`, and that flag is what makes macOS refuse the first launch of an app that is not notarized. curl does not set it, so an app installed by veld simply opens. The archive is checksum-verified against the release either way, and `veld desktop status` says what is installed and whether it matches the CLI.
+
+From then on `veld update` keeps both halves together — the app is updated whenever it is already installed, never installed behind your back — and the app's own *Check for Updates…* hands the job to the CLI: Veld quits, the CLI swaps the bundle, the app reopens on the new version. On Linux the AppImage still updates itself and a `.deb` still belongs to your package manager.
+
+You can also download the `.dmg` (macOS) or `.AppImage` / `.deb` (Linux x64) from the [latest release](https://github.com/prosperity-solutions/veld/releases/latest) — `checksums.txt` on the same page has a SHA-256 for every artifact. The app ships with every veld release and carries the same version number as the CLI — one tag, one version, so the app and the daemon it talks to are halves of the same thing. When they drift apart the app says so and names the fix.
+
+> **macOS, browser download: not code-signed yet.** Gatekeeper refuses the first launch of a `.dmg` you downloaded in a browser. Open it once, let the warning appear, then **System Settings → Privacy & Security** → *Open Anyway* — or `xattr -dr com.apple.quarantine /Applications/Veld.app`. (Right-click → *Open* used to be the shortcut; macOS 15 removed it for apps that aren't notarized.) `veld desktop install` avoids all of this; Developer ID signing and notarization are [tracked in #167](https://github.com/prosperity-solutions/veld/issues/167).
 
 ## Sharing
 

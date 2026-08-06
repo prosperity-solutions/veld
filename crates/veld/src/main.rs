@@ -7,6 +7,31 @@ use std::time::Duration;
 use clap::{CommandFactory, Parser, Subcommand};
 
 #[derive(Subcommand)]
+pub enum DesktopCommand {
+    /// Download and install the Mac app matching this CLI version.
+    Install,
+
+    /// Update the installed app to match this CLI version.
+    Update {
+        /// Wait for this process to exit before replacing the bundle. Used by the
+        /// app to update itself: it cannot be swapped while it is running.
+        #[arg(long, hide = true)]
+        wait_pid: Option<u32>,
+
+        /// Reopen the app once it has been replaced.
+        #[arg(long)]
+        relaunch: bool,
+    },
+
+    /// Show where the app is installed and whether it matches this CLI.
+    Status {
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
 pub enum SetupCommand {
     /// No-sudo setup: Caddy, daemon, helper on port 18443.
     Unprivileged,
@@ -380,6 +405,12 @@ enum Command {
 
     /// Update Veld to the latest version.
     Update,
+
+    /// Install, update or inspect Veld Desktop (macOS app).
+    Desktop {
+        #[command(subcommand)]
+        command: Option<DesktopCommand>,
+    },
 
     /// Uninstall Veld and clean up.
     Uninstall,
@@ -864,6 +895,19 @@ async fn main() {
         Command::Setup { command } => commands::setup::run(command).await,
 
         Command::Update => commands::update::run().await,
+
+        Command::Desktop { command } => match command {
+            // Bare `veld desktop` reports rather than installs: a command that
+            // puts an app in /Applications should be asked for by name.
+            None | Some(DesktopCommand::Status { json: false }) => {
+                commands::desktop::status(false).await
+            }
+            Some(DesktopCommand::Status { json: true }) => commands::desktop::status(true).await,
+            Some(DesktopCommand::Install) => commands::desktop::install(None, false).await,
+            Some(DesktopCommand::Update { wait_pid, relaunch }) => {
+                commands::desktop::install(wait_pid, relaunch).await
+            }
+        },
 
         Command::Uninstall => commands::uninstall::run().await,
 

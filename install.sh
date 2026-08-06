@@ -7,6 +7,14 @@
 # Options (via env vars):
 #   VELD_VERSION=1.0.0    Install a specific version (default: latest)
 #   VELD_INSTALL_DIR=$HOME/.local/bin   Where to put the veld binary
+#   VELD_DESKTOP=1|0      Install Veld Desktop (macOS). Default: install it only
+#                         when it is already installed, so `veld update` keeps it
+#                         in step without a CLI install ever placing an app in
+#                         /Applications unasked.
+#   VELD_DESKTOP_WAIT_PID=<pid>   Wait for that process to exit before replacing
+#                         the app — how Veld Desktop updates itself (it hands off
+#                         to this script and quits).
+#   VELD_DESKTOP_RELAUNCH=1   Reopen the app afterwards.
 #
 # Related (read by `veld setup`, not this script):
 #   VELD_ALLOW_UNMANAGED_HELPER=1   Let setup direct-spawn the helper when
@@ -74,30 +82,52 @@ echo "Downloading ${URL}..."
 curl -fSL -o "${TMP_DIR}/${TARBALL}" "$URL"
 
 echo "Downloading checksums..."
+HAVE_CHECKSUMS=""
 if curl -fSL -o "${TMP_DIR}/checksums.txt" "$CHECKSUMS_URL" 2>/dev/null; then
-  EXPECTED_HASH="$(grep -F " ${TARBALL}" "${TMP_DIR}/checksums.txt" | awk '{print $1}')"
-
-  if [ -n "$EXPECTED_HASH" ]; then
-    echo "Verifying checksum..."
-    if [ "$OS" = "macos" ]; then
-      ACTUAL_HASH="$(shasum -a 256 "${TMP_DIR}/${TARBALL}" | awk '{print $1}')"
-    else
-      ACTUAL_HASH="$(sha256sum "${TMP_DIR}/${TARBALL}" | awk '{print $1}')"
-    fi
-
-    if [ "$EXPECTED_HASH" != "$ACTUAL_HASH" ]; then
-      echo "Error: checksum verification failed"
-      echo "  Expected: ${EXPECTED_HASH}"
-      echo "  Actual:   ${ACTUAL_HASH}"
-      exit 1
-    fi
-    echo "Checksum verified."
-  else
-    echo "Warning: checksum for ${TARBALL} not found in checksums.txt, skipping verification"
-  fi
+  HAVE_CHECKSUMS="1"
 else
   echo "Warning: checksums.txt not available, skipping verification"
 fi
+
+# Verify a downloaded release asset against checksums.txt.
+# $1 = path to the downloaded file, $2 = its name as published on the release.
+#
+# A missing checksums.txt or a missing entry is a warning rather than an error,
+# matching how this script has always treated the tarball: an old release that
+# predates a given asset must still be installable. A checksum that is present
+# and *wrong* is always fatal.
+verify_checksum() {
+  local file="$1" name="$2" expected actual
+  [ -n "$HAVE_CHECKSUMS" ] || return 0
+
+  # Exact field match, not `grep -F " ${name}"`: every asset with a sibling whose
+  # name merely *starts* the same — `…zip` and `…zip.blockmap`, both published for
+  # the desktop app — would otherwise match twice and compare a two-line "hash"
+  # against one, failing every verification. checksums.txt is `sha256sum` output,
+  # so field 1 is the hash and field 2 the name.
+  expected="$(awk -v n="$name" '$2 == n { print $1; exit }' "${TMP_DIR}/checksums.txt")"
+  if [ -z "$expected" ]; then
+    echo "Warning: checksum for ${name} not found in checksums.txt, skipping verification"
+    return 0
+  fi
+
+  echo "Verifying checksum..."
+  if [ "$OS" = "macos" ]; then
+    actual="$(shasum -a 256 "$file" | awk '{print $1}')"
+  else
+    actual="$(sha256sum "$file" | awk '{print $1}')"
+  fi
+
+  if [ "$expected" != "$actual" ]; then
+    echo "Error: checksum verification failed for ${name}"
+    echo "  Expected: ${expected}"
+    echo "  Actual:   ${actual}"
+    exit 1
+  fi
+  echo "Checksum verified."
+}
+
+verify_checksum "${TMP_DIR}/${TARBALL}" "$TARBALL"
 
 # --- Extract ---
 
@@ -526,11 +556,153 @@ if [ "$INSTALL_DIR" != "/usr/local/bin" ] && [ -f "/usr/local/bin/veld" ]; then
   fi
 fi
 
+# --- Veld Desktop (macOS) ---
+#
+# Why the CLI installs the app at all: a build downloaded in a browser carries
+# `com.apple.quarantine`, which is what makes Gatekeeper refuse the first launch
+# of a build that is not notarized. curl does not set that attribute, so an app
+# delivered through this script simply opens — no dialog, no Developer ID needed.
+# The trust boundary is unchanged: you are already running this script from the
+# same origin, and the archive is checksum-verified like the tarball above.
+#
+# Deliberately NOT re-signed after unpacking, unlike the binaries: the bundle
+# arrives with a valid signature of its own, and `codesign --force --sign -`
+# would replace a real Developer ID signature with an ad-hoc one the day releases
+# are signed. Clearing quarantine is all that is needed.
+DESKTOP_APP=""
+if [ "$OS" = "macos" ]; then
+  # Where an existing install would be. VELD_DESKTOP_DIR, when set, is the *only*
+  # place looked at — it names where this machine keeps apps, so falling back to
+  # /Applications after it would install somewhere the caller explicitly did not
+  # ask for. Otherwise /Applications wins over ~/Applications, and whichever
+  # exists is what gets updated.
+  if [ -n "${VELD_DESKTOP_DIR:-}" ]; then
+    if [ -d "${VELD_DESKTOP_DIR}/Veld.app" ]; then
+      DESKTOP_APP="${VELD_DESKTOP_DIR}/Veld.app"
+    fi
+  else
+    for candidate in "/Applications/Veld.app" "$HOME/Applications/Veld.app"; do
+      if [ -d "$candidate" ]; then
+        DESKTOP_APP="$candidate"
+        break
+      fi
+    done
+  fi
+
+  WANT_DESKTOP=""
+  case "${VELD_DESKTOP:-}" in
+    1|true|yes) WANT_DESKTOP="1" ;;
+    0|false|no) WANT_DESKTOP="" ;;
+    # Unset: follow the machine. Updating an app that is already there is
+    # expected; putting one there because someone updated a CLI is not.
+    *) if [ -n "$DESKTOP_APP" ]; then WANT_DESKTOP="1"; fi ;;
+  esac
+fi
+
+if [ -n "${WANT_DESKTOP:-}" ]; then
+  case "$ARCH" in
+    arm64) DESKTOP_ARCH="arm64" ;;
+    amd64) DESKTOP_ARCH="x64" ;;   # electron-builder spells it x64, not amd64
+    *)     DESKTOP_ARCH="" ;;
+  esac
+
+  if [ -z "$DESKTOP_ARCH" ]; then
+    echo "Warning: no Veld Desktop build for ${ARCH}, skipping"
+  else
+    DESKTOP_ZIP="veld-desktop-${VERSION}-mac-${DESKTOP_ARCH}.zip"
+    DESKTOP_URL="https://github.com/${REPO}/releases/download/${TAG}/${DESKTOP_ZIP}"
+    DESKTOP_DEST="${DESKTOP_APP:-${VELD_DESKTOP_DIR:-/Applications}/Veld.app}"
+
+    # Fall back to a per-user location rather than asking for sudo: the app is
+    # not a system component and nothing else needs to read it.
+    if [ -z "$DESKTOP_APP" ] && [ -z "${VELD_DESKTOP_DIR:-}" ] && [ ! -w "/Applications" ]; then
+      DESKTOP_DEST="$HOME/Applications/Veld.app"
+    fi
+    mkdir -p "$(dirname "$DESKTOP_DEST")"
+
+    echo ""
+    echo "Installing Veld Desktop ${VERSION}..."
+
+    # The app that is being replaced must not be running: an Electron app reads
+    # from its own bundle while it runs (asar, framework dylibs), so swapping the
+    # directory under a live process is how you get a half-broken window rather
+    # than an updated one. Veld Desktop's own updater passes its pid here and
+    # quits, which is what makes that handoff safe.
+    if [ -n "${VELD_DESKTOP_WAIT_PID:-}" ]; then
+      echo "Waiting for Veld Desktop (pid ${VELD_DESKTOP_WAIT_PID}) to quit..."
+      waited=0
+      while kill -0 "${VELD_DESKTOP_WAIT_PID}" 2>/dev/null; do
+        sleep 0.2
+        waited=$((waited + 1))
+        if [ "$waited" -gt 150 ]; then   # 30s
+          echo "Error: Veld Desktop did not quit within 30s, leaving it alone"
+          exit 1
+        fi
+      done
+    fi
+
+    if pgrep -f "${DESKTOP_DEST}/Contents/MacOS/" >/dev/null 2>&1; then
+      echo "Veld Desktop is running — skipping the app update."
+      echo "  Quit it and re-run, or use the app's own 'Check for Updates…'."
+    else
+      echo "Downloading ${DESKTOP_URL}..."
+      if ! curl -fSL -o "${TMP_DIR}/${DESKTOP_ZIP}" "$DESKTOP_URL"; then
+        echo "Warning: could not download ${DESKTOP_ZIP}, skipping the app"
+      else
+        verify_checksum "${TMP_DIR}/${DESKTOP_ZIP}" "$DESKTOP_ZIP"
+
+        # `ditto -x -k`, not `unzip`: it is the tool that preserves the symlinks,
+        # permissions and metadata an .app bundle's code signature is sealed over.
+        rm -rf "${TMP_DIR}/desktop"
+        ditto -x -k "${TMP_DIR}/${DESKTOP_ZIP}" "${TMP_DIR}/desktop"
+
+        NEW_APP="${TMP_DIR}/desktop/Veld.app"
+        NEW_ID="$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "${NEW_APP}/Contents/Info.plist" 2>/dev/null || true)"
+        if [ "$NEW_ID" != "dev.veld.desktop" ]; then
+          # Same reasoning as the tarball's contents check above: refuse to install
+          # something that is not the thing this script claims to install.
+          echo "Error: ${DESKTOP_ZIP} does not contain Veld.app (bundle id: ${NEW_ID:-none})"
+          exit 1
+        fi
+
+        # Quarantine is set by whatever downloads a file; curl does not set it,
+        # but a bundle extracted from an archive that was ever handled by a browser
+        # can carry it, so clear it rather than assume.
+        xattr -dr com.apple.quarantine "$NEW_APP" 2>/dev/null || true
+
+        # Move the old one aside instead of deleting it, so a failed copy leaves a
+        # working app rather than a gap.
+        rm -rf "${DESKTOP_DEST}.old"
+        if [ -d "$DESKTOP_DEST" ]; then
+          mv "$DESKTOP_DEST" "${DESKTOP_DEST}.old"
+        fi
+        if ditto "$NEW_APP" "$DESKTOP_DEST"; then
+          rm -rf "${DESKTOP_DEST}.old"
+          DESKTOP_APP="$DESKTOP_DEST"
+          echo "Veld Desktop installed to ${DESKTOP_DEST}"
+          if [ -n "${VELD_DESKTOP_RELAUNCH:-}" ]; then
+            open "$DESKTOP_DEST" 2>/dev/null || true
+          fi
+        else
+          echo "Error: could not install Veld Desktop to ${DESKTOP_DEST}"
+          if [ -d "${DESKTOP_DEST}.old" ]; then
+            mv "${DESKTOP_DEST}.old" "$DESKTOP_DEST"
+          fi
+          exit 1
+        fi
+      fi
+    fi
+  fi
+fi
+
 # --- Next steps (no auto-run of veld setup) ---
 
 echo ""
 echo "Run 'veld start' in any project to get going."
 echo "Run 'veld setup' for more options."
+if [ "$OS" = "macos" ] && [ -z "$DESKTOP_APP" ]; then
+  echo "Run 'veld desktop install' for the Mac app."
+fi
 
 # --- PATH handling ---
 
@@ -579,3 +751,8 @@ echo "  veld binary:   ${INSTALL_DIR}/veld"
 echo "  veld-helper:   ${LIB_DIR}/veld-helper"
 echo "  veld-daemon:   ${LIB_DIR}/veld-daemon"
 echo "  caddy:         ${LIB_DIR}/caddy"
+# An `[ … ] && echo` here would be the script's last command, so a machine with no
+# app installed would exit non-zero — and `veld update` reads that exit code.
+if [ -n "$DESKTOP_APP" ]; then
+  echo "  Veld Desktop:  ${DESKTOP_APP}"
+fi

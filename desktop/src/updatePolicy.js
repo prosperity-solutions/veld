@@ -30,21 +30,42 @@ const MACOS_SIGNED = false;
  *   swap, and `APPIMAGE` in the environment is how the running process knows it
  *   *is* one (a .deb install has no such variable, and nothing in it a process
  *   may replace without the package manager).
+ * - `"cli"` — hand the update to the veld CLI, which quits this app, replaces the
+ *   bundle and reopens it. macOS only, and only when the CLI is actually present.
+ *   It works where the app cannot replace *itself*: Squirrel.Mac accepts only a
+ *   replacement carrying the running app's signature, which an ad-hoc build does
+ *   not have — while the CLI installs the same release the installer does, with
+ *   curl, which never sets `com.apple.quarantine`, so Gatekeeper is not consulted
+ *   at all. It also keeps the app and the CLI on one version, which is the shape
+ *   the release already promises.
  * - `"download"` — check and tell the user, but hand the install to them. macOS
- *   is here because Squirrel.Mac verifies that the replacement carries the same
- *   code signature as the running app, and veld has no Developer ID yet (issue
- *   #167 §10); the .deb is here because its files belong to dpkg.
+ *   lands here only with no CLI to delegate to, because Squirrel.Mac verifies that
+ *   the replacement carries the same code signature as the running app and veld
+ *   has no Developer ID yet (issue #167 §10); the .deb is here because its files
+ *   belong to dpkg.
  *
- * The macOS half flips with `MACOS_SIGNED` above, once signing lands.
+ * The macOS *self*-install half flips with `MACOS_SIGNED` above, once signing
+ * lands. `"cli"` outranks it either way: same-version-as-the-CLI is worth more
+ * than Squirrel's delta downloads, and it is the one route that works whether or
+ * not the build is signed.
  *
- * @param {{platform: string, isPackaged: boolean, env?: Record<string, string | undefined>, macSigned?: boolean}} ctx
- * @returns {"off" | "install" | "download"}
+ * @param {{platform: string, isPackaged: boolean, env?: Record<string, string | undefined>, macSigned?: boolean, cli?: string | null}} ctx
+ * @returns {"off" | "install" | "download" | "cli"}
  */
-function updateMode({ platform, isPackaged, env = {}, macSigned = MACOS_SIGNED }) {
+function updateMode({
+  platform,
+  isPackaged,
+  env = {},
+  macSigned = MACOS_SIGNED,
+  cli = null,
+}) {
   if (!isPackaged) return "off";
-  // Unsigned → Squirrel.Mac rejects the swap after the download, so there is
-  // nothing to gain by starting one.
-  if (platform === "darwin") return macSigned ? "install" : "download";
+  if (platform === "darwin") {
+    if (cli) return "cli";
+    // Unsigned → Squirrel.Mac rejects the swap after the download, so there is
+    // nothing to gain by starting one.
+    return macSigned ? "install" : "download";
+  }
   if (platform === "linux") return env.APPIMAGE ? "install" : "download";
   return "download";
 }

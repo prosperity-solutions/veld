@@ -1544,6 +1544,41 @@ pub fn is_newer(latest: &str, current: &str) -> bool {
 
 /// Download and run the install script to update to the given version.
 pub async fn perform_update(version: &str) -> Result<(), anyhow::Error> {
+    run_install_script(version, &[]).await
+}
+
+/// Install or update Veld Desktop, the macOS app.
+///
+/// The same install script does it, for a reason worth stating: a build that a
+/// browser downloaded carries `com.apple.quarantine`, which is what makes
+/// Gatekeeper refuse the first launch of a build that is not notarized. curl does
+/// not set that attribute, so an app delivered by the installer simply opens.
+/// Keeping it in the script also means `veld update` keeps the app in step for
+/// free, rather than through a second implementation of download-and-verify here.
+///
+/// `wait_pid` makes the script wait for that process to exit before replacing the
+/// bundle — how the app updates itself, since an Electron app reads from its own
+/// bundle while it runs.
+pub async fn install_desktop(
+    version: &str,
+    wait_pid: Option<u32>,
+    relaunch: bool,
+) -> Result<(), anyhow::Error> {
+    let mut env: Vec<(String, String)> = vec![("VELD_DESKTOP".into(), "1".into())];
+    if let Some(pid) = wait_pid {
+        env.push(("VELD_DESKTOP_WAIT_PID".into(), pid.to_string()));
+    }
+    if relaunch {
+        env.push(("VELD_DESKTOP_RELAUNCH".into(), "1".into()));
+    }
+    run_install_script(version, &env).await
+}
+
+/// Download and run the install script with the given version pinned.
+async fn run_install_script(
+    version: &str,
+    extra_env: &[(String, String)],
+) -> Result<(), anyhow::Error> {
     let install_url = "https://veld.oss.life.li/get".to_string();
 
     let client = reqwest::Client::builder()
@@ -1563,11 +1598,16 @@ pub async fn perform_update(version: &str) -> Result<(), anyhow::Error> {
 
     // Run the install script with the target version pinned, in
     // non-interactive mode (skip the `veld setup` prompt at the end).
-    let status = Command::new("bash")
-        .arg("-c")
+    let mut cmd = Command::new("bash");
+    cmd.arg("-c")
         .arg(&script)
         .env("VELD_VERSION", version)
-        .env("VELD_NON_INTERACTIVE", "1")
+        .env("VELD_NON_INTERACTIVE", "1");
+    for (key, value) in extra_env {
+        cmd.env(key, value);
+    }
+
+    let status = cmd
         .status()
         .await
         .context("failed to execute install script")?;
@@ -1580,6 +1620,38 @@ pub async fn perform_update(version: &str) -> Result<(), anyhow::Error> {
     }
 
     Ok(())
+}
+
+/// Where Veld Desktop is installed, and which version, if it is installed at all.
+///
+/// Mirrors the install script's own search order (`/Applications` before
+/// `~/Applications`) so the CLI reports on the bundle the script would replace.
+pub fn desktop_app_status() -> Option<(PathBuf, Option<String>)> {
+    if std::env::consts::OS != "macos" {
+        return None;
+    }
+
+    let mut candidates = vec![PathBuf::from("/Applications/Veld.app")];
+    if let Some(home) = dirs::home_dir() {
+        candidates.push(home.join("Applications/Veld.app"));
+    }
+
+    let path = candidates.into_iter().find(|p| p.is_dir())?;
+    let plist = path.join("Contents/Info.plist");
+    // Read the version with the tool macOS ships rather than a plist crate: this
+    // is one field, on macOS only, and the dependency would be carried by every
+    // platform's build.
+    let version = std::process::Command::new("/usr/libexec/PlistBuddy")
+        .args(["-c", "Print :CFBundleShortVersionString"])
+        .arg(&plist)
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .and_then(|out| String::from_utf8(out.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    Some((path, version))
 }
 
 /// Uninstall Veld from this machine.

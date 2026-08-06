@@ -33,6 +33,40 @@ test("macOS is download-only until the app is signed", () => {
   );
 });
 
+test("the veld CLI takes the macOS update when there is one to take it", () => {
+  const cli = "/Users/x/.local/bin/veld";
+  assert.equal(updateMode({ platform: "darwin", isPackaged: true, cli }), "cli");
+  // Outranks Squirrel even once the app is signed: the CLI is what keeps the app
+  // and the CLI on one version, which is what the release promises.
+  assert.equal(
+    updateMode({ platform: "darwin", isPackaged: true, cli, macSigned: true }),
+    "cli",
+  );
+  // No CLI on the machine → unchanged behaviour, both sides of the signing switch.
+  assert.equal(updateMode({ platform: "darwin", isPackaged: true }), "download");
+  assert.equal(
+    updateMode({ platform: "darwin", isPackaged: true, cli: null, macSigned: true }),
+    "install",
+  );
+  // An unpackaged run has no bundle to replace, CLI or not.
+  assert.equal(updateMode({ platform: "darwin", isPackaged: false, cli }), "off");
+  // macOS only: the Linux AppImage already replaces itself, and a .deb belongs to
+  // the package manager whatever else is installed.
+  assert.equal(
+    updateMode({ platform: "linux", isPackaged: true, env: {}, cli }),
+    "download",
+  );
+  assert.equal(
+    updateMode({
+      platform: "linux",
+      isPackaged: true,
+      env: { APPIMAGE: "/opt/Veld.AppImage" },
+      cli,
+    }),
+    "install",
+  );
+});
+
 test("only an AppImage can install in place on Linux", () => {
   assert.equal(
     updateMode({

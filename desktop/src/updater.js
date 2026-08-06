@@ -17,6 +17,10 @@
 // laptop is offline more often than a release is broken). A check the user asked
 // for reports every outcome, including "you're up to date".
 
+const { spawn } = require("node:child_process");
+const fs = require("node:fs");
+const path = require("node:path");
+
 const { Notification, app, dialog, shell } = require("electron");
 const { autoUpdater } = require("electron-updater");
 
@@ -31,7 +35,37 @@ const {
 const FIRST_CHECK_DELAY_MS = 15_000;
 const CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
-/** @type {"off" | "install" | "download"} */
+/**
+ * Where the veld CLI is, if this machine has one. Resolved once at init.
+ *
+ * A GUI app does not inherit the shell's PATH — a launchd-started app gets a bare
+ * one — so `which veld` is not a question that can be asked here. These are the
+ * two directories `install.sh` writes to, which is the same reasoning the daemon's
+ * own PATH handling uses: look where the installer puts things, not where a login
+ * shell would have found them.
+ *
+ * @type {string | null}
+ */
+let cliPath = null;
+
+function findCli() {
+  const candidates = [
+    path.join(app.getPath("home"), ".local/bin/veld"),
+    "/usr/local/bin/veld",
+    "/opt/homebrew/bin/veld",
+  ];
+  for (const candidate of candidates) {
+    try {
+      fs.accessSync(candidate, fs.constants.X_OK);
+      return candidate;
+    } catch {
+      // Not there, or not executable — try the next one.
+    }
+  }
+  return null;
+}
+
+/** @type {"off" | "install" | "download" | "cli"} */
 let mode = "off";
 /** Versions already offered this session, so a periodic check can't re-ask. */
 const offered = new Set();
@@ -62,10 +96,12 @@ let onQuitCancelled = null;
 function initUpdater(opts = {}) {
   onSkewChange = opts.onSkewChange ?? null;
   onQuitCancelled = opts.onQuitCancelled ?? null;
+  cliPath = findCli();
   mode = updateMode({
     platform: process.platform,
     isPackaged: app.isPackaged,
     env: process.env,
+    cli: cliPath,
   });
 
   // Every download in this file is one the user agreed to in a dialog first —
@@ -181,19 +217,36 @@ async function checkForUpdates({ manual }) {
 
 async function offerUpdate(version) {
   const canInstall = mode === "install";
+  const viaCli = mode === "cli";
+
+  let detail;
+  if (viaCli) {
+    // Says what actually happens, because it is unusual: the app closes *before*
+    // the download, and something outside it does the work.
+    detail = `You're on ${app.getVersion()}. Veld quits, the veld CLI installs the update, and the app reopens — the CLI and the app move to the same version together.`;
+  } else if (canInstall) {
+    detail = `You're on ${app.getVersion()}. Downloading takes a moment; the app restarts to apply it.`;
+  } else {
+    detail = `You're on ${app.getVersion()}. ${downloadOnlyReason({ platform: process.platform })} The release page has the download.\n\nUpdate the veld CLI separately with \`veld update\`.`;
+  }
+
   const { response } = await dialog.showMessageBox({
     type: "info",
     message: `Veld Desktop ${version} is available.`,
-    detail: canInstall
-      ? `You're on ${app.getVersion()}. Downloading takes a moment; the app restarts to apply it.`
-      : `You're on ${app.getVersion()}. ${downloadOnlyReason({ platform: process.platform })} The release page has the download.\n\nUpdate the veld CLI separately with \`veld update\`.`,
-    buttons: canInstall
-      ? ["Download and Install", "Later"]
-      : ["Open Release Page", "Later"],
+    detail,
+    buttons:
+      canInstall || viaCli
+        ? [viaCli ? "Quit and Update" : "Download and Install", "Later"]
+        : ["Open Release Page", "Later"],
     defaultId: 0,
     cancelId: 1,
   });
   if (response !== 0) return;
+
+  if (viaCli) {
+    await updateViaCli(version);
+    return;
+  }
 
   if (!canInstall) {
     await shell.openExternal(releasePageUrl(version));
@@ -211,6 +264,55 @@ async function offerUpdate(version) {
       buttons: ["OK"],
     });
   }
+}
+
+/**
+ * Hand the update to the veld CLI and get out of its way.
+ *
+ * The order is the whole design. An Electron app reads from its own bundle while
+ * it runs — the asar, the framework dylibs — so the bundle cannot be replaced
+ * underneath it. So this spawns the CLI *detached*, tells it which pid to wait
+ * for, and quits: the CLI outlives the app, waits for the process to actually be
+ * gone, swaps the bundle and reopens it.
+ *
+ * Detached and with its streams let go, or the child would die with its parent
+ * and take the update with it — the app is the parent, and the app is about to
+ * quit on purpose.
+ */
+async function updateViaCli(version) {
+  if (!cliPath) return; // mode would not be "cli" without one
+
+  try {
+    const child = spawn(
+      cliPath,
+      ["desktop", "update", "--wait-pid", String(process.pid), "--relaunch"],
+      { detached: true, stdio: "ignore" },
+    );
+    child.unref();
+    // A spawn that fails asynchronously (ENOENT between the access check and
+    // here) must not leave the app quitting into nothing.
+    child.on("error", (err) => {
+      void dialog.showMessageBox({
+        type: "warning",
+        message: "The update could not be started.",
+        detail: `${String(err?.message ?? err)}\n\nRun \`veld update\` in a terminal instead.`,
+        buttons: ["OK"],
+      });
+    });
+  } catch (err) {
+    await dialog.showMessageBox({
+      type: "warning",
+      message: "The update could not be started.",
+      detail: `${String(err?.message ?? err)}\n\nRun \`veld update\` in a terminal instead.`,
+      buttons: ["OK"],
+    });
+    return;
+  }
+
+  notify("Updating Veld Desktop", `Installing ${version} — the app will reopen.`);
+  // Not `quitAndInstall`: nothing here goes through Squirrel. A plain quit is
+  // what the CLI is waiting for.
+  app.quit();
 }
 
 async function promptRestart(version) {
