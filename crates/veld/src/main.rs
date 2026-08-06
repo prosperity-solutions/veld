@@ -264,6 +264,17 @@ enum Command {
         /// Number of context lines to show around search matches.
         #[arg(long, short = 'C', default_value = "0")]
         context: usize,
+
+        /// Print timestamps in UTC, exactly as stored, instead of your local
+        /// time zone. Affects human-readable output only — `--json` always
+        /// emits UTC. Overrides the `logs.timeZone` setting for this run.
+        #[arg(long, conflicts_with = "local")]
+        utc: bool,
+
+        /// Print timestamps in your local time zone (the default), overriding
+        /// the `logs.timeZone` setting for this run.
+        #[arg(long)]
+        local: bool,
     },
 
     /// Print the dependency graph for the given selections.
@@ -669,6 +680,8 @@ async fn main() {
             run,
             previous,
             all_runs,
+            utc,
+            local,
         } => {
             let source_filter =
                 commands::logs::SourceFilter::from_str(&source).unwrap_or_else(|| {
@@ -693,6 +706,16 @@ async fn main() {
                 run,
                 previous,
                 all_runs,
+                // `None` means "whatever `logs.timeZone` says", resolved once the
+                // database is open. The flags are clap-exclusive, so at most one arm
+                // can be taken.
+                time_zone: if utc {
+                    Some(veld_core::db::LogTimeZone::Utc)
+                } else if local {
+                    Some(veld_core::db::LogTimeZone::Local)
+                } else {
+                    None
+                },
             })
             .await
         }

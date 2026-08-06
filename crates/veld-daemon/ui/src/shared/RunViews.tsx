@@ -25,6 +25,7 @@ import { useState } from "react";
 import type { HistoryEntry, NodeStats, RunInfo, RunRef } from "../api";
 import { LogsPanel } from "./LogsPanel";
 import { NodeList, nodeRows } from "./NodeList";
+import type { LogTimeZone } from "./settings";
 import { fmtWhen, statusBucket } from "./util";
 
 /** Everything a run view needs about the run it is showing. */
@@ -171,7 +172,14 @@ export function NodesView(props: { target: RunViewTarget } & HostProps) {
  * interleaved), so history needs nothing extra here — the host's selection only
  * scopes what "latest" means.
  */
-export function LogsView(props: { target: RunViewTarget } & HostProps) {
+export function LogsView(
+  props: {
+    target: RunViewTarget;
+    /** `logs.timeZone` — see `LogsPanel`'s own prop. Not on `HostProps`, which
+     *  `NodesView` shares and which shows no log timestamps. */
+    tz: LogTimeZone;
+  } & HostProps,
+) {
   const { ref, run } = props.target;
   const selected = props.selected ?? null;
   return (
@@ -192,6 +200,7 @@ export function LogsView(props: { target: RunViewTarget } & HostProps) {
       histSel={selected?.run_id ?? null}
       visible={props.visible ?? true}
       fill={props.fill}
+      tz={props.tz}
     />
   );
 }

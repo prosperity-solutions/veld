@@ -879,7 +879,12 @@ document.addEventListener('input',e=>{
 
 function extractTs(l){if(l.charAt(0)!=='[')return null;const e=l.indexOf(']');if(e<0)return null;const t=l.substring(1,e);return/^\d{4}-\d{2}-\d{2}T/.test(t)?t:null;}
 function extractMsg(l){const e=l.indexOf(']');if(e<0||l.charAt(0)!=='[')return l;return l.substring(e+2);}
-function fmtTs(ts){const i=ts.indexOf('T');if(i<0)return ts;let t=ts.substring(i+1).replace(/[Z+].*$/,'');const d=t.indexOf('.');if(d>=0)t=t.substring(0,d+4);return t;}
+// Local HH:MM:SS.mmm, matching the /ide view's `fmtTs` default. This page used to
+// string-slice the UTC value straight out of the stored timestamp, which made it the
+// one surface that showed a different clock than /ide did for every user. It does not
+// read `logs.timeZone` — this page is frozen legacy and fetches no settings; /ide and
+// `veld logs` are where the setting applies.
+function fmtTs(ts){const d=new Date(ts);if(isNaN(d.getTime()))return ts;const p=(n,w)=>String(n).padStart(w||2,'0');return p(d.getHours())+':'+p(d.getMinutes())+':'+p(d.getSeconds())+'.'+p(d.getMilliseconds(),3);}
 function shortUrl(u){try{return new URL(u).hostname;}catch{return u;}}
 function esc(s){if(s==null)return'';return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
 

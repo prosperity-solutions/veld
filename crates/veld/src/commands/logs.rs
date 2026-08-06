@@ -1,5 +1,5 @@
 use veld_core::config;
-use veld_core::db::{Db, LogFilter, LogRow, LogStream, stream_is_per_node};
+use veld_core::db::{Db, LogFilter, LogRow, LogStream, LogTimeZone, stream_is_per_node};
 use veld_core::logging;
 
 use crate::output;
@@ -91,6 +91,9 @@ pub struct LogsOptions {
     /// Every run under the name interleaved (pre-v3 behavior, includes
     /// legacy unscoped rows).
     pub all_runs: bool,
+    /// Which zone to print timestamps in, or `None` to follow the
+    /// `logs.timeZone` setting. `--utc`/`--local` set it for one invocation.
+    pub time_zone: Option<LogTimeZone>,
 }
 
 /// `veld logs [--name <n>] [--node <n>] [--lines <n>] [--since <d>] [-f] [--json] [--source <s>] [--search <term>] [--context <n>]`
@@ -108,6 +111,7 @@ pub async fn run(opts: LogsOptions) -> i32 {
         run,
         previous,
         all_runs,
+        time_zone,
     } = opts;
     let Some((config_path, _cfg)) = super::parse_config(json) else {
         return 1;
@@ -117,6 +121,9 @@ pub async fn run(opts: LogsOptions) -> i32 {
     let Some(db) = super::open_db(json) else {
         return 1;
     };
+    // Flag beats setting beats default (local). Resolved once, here, so the snapshot
+    // and follow mode cannot render the same run in two different zones.
+    let time_zone = time_zone.unwrap_or_else(|| db.logs_time_zone());
     let project_state = match db.load_project_state(&project_root) {
         Ok(s) => s,
         Err(e) => {
@@ -332,7 +339,7 @@ pub async fn run(opts: LogsOptions) -> i32 {
             let is_match = search_lower
                 .as_ref()
                 .is_none_or(|n| row.line.to_lowercase().contains(n.as_str()));
-            let text = format_row(row);
+            let text = format_row(row, time_zone);
             if is_match {
                 println!("{text}");
             } else {
@@ -374,6 +381,7 @@ pub async fn run(opts: LogsOptions) -> i32 {
             already_shown,
             json,
             &search_lower,
+            time_zone,
         )
         .await;
     }
@@ -382,7 +390,10 @@ pub async fn run(opts: LogsOptions) -> i32 {
 }
 
 /// Human-readable label + line for one log row.
-fn format_row(row: &LogRow) -> String {
+///
+/// `tz` decides only how the stored UTC timestamp is *spelled* — see
+/// `logging::format_ts`. The `--json` path never comes through here.
+fn format_row(row: &LogRow, tz: LogTimeZone) -> String {
     let label = match (&row.node, row.stream.as_str()) {
         (Some(node), "client") => output::cyan(&format!(
             "{node}:{}:client",
@@ -393,7 +404,7 @@ fn format_row(row: &LogRow) -> String {
         }
         (None, stream) => output::cyan(&format!("_veld:{stream}")),
     };
-    format!("{label} [{}] {}", row.ts, row.line)
+    format!("{label} [{}] {}", logging::format_ts(&row.ts, tz), row.line)
 }
 
 /// Poll the database for new rows, printing them as they appear, until
@@ -415,6 +426,7 @@ async fn follow_logs(
     mut already_shown: std::collections::HashSet<i64>,
     json: bool,
     search: &Option<String>,
+    tz: LogTimeZone,
 ) {
     let mut interval = tokio::time::interval(std::time::Duration::from_millis(200));
     // Check the run's status only every ~2s (every 10th tick) — the status
@@ -449,7 +461,7 @@ async fn follow_logs(
                         let entry = logging::row_to_json(&row, run_name);
                         println!("{}", serde_json::to_string(&entry).unwrap());
                     } else {
-                        println!("{}", format_row(&row));
+                        println!("{}", format_row(&row, tz));
                     }
                 }
 
@@ -542,6 +554,47 @@ mod tests {
         assert_eq!(
             names(selected_streams(SourceFilter::Internal, None)),
             vec![LogStream::Internal.as_str().to_owned()]
+        );
+    }
+
+    fn row(ts: &str) -> LogRow {
+        LogRow {
+            id: 1,
+            node: Some("web".to_owned()),
+            variant: Some("local".to_owned()),
+            stream: LogStream::Server.as_str().to_owned(),
+            ts: ts.to_owned(),
+            line: "listening on 3000".to_owned(),
+        }
+    }
+
+    #[test]
+    fn utc_output_is_unchanged_from_before_the_flag_existed() {
+        // `--utc` is the compatibility escape hatch, so it prints the stored string
+        // verbatim rather than re-deriving one that merely means the same instant.
+        let text = format_row(&row("2026-08-06T09:12:33.123456Z"), LogTimeZone::Utc);
+        assert!(text.contains("[2026-08-06T09:12:33.123456Z]"), "{text}");
+        assert!(text.ends_with("listening on 3000"), "{text}");
+    }
+
+    #[test]
+    fn local_output_stays_bracketed_and_parseable() {
+        // The bracket is what every downstream reader of this output keys on — a
+        // person scanning, and the `/ide` view's own `extractTs` regex on the
+        // daemon-prefixed copy of the same shape. Localising must not change it.
+        let text = format_row(&row("2026-08-06T09:12:33.123456Z"), LogTimeZone::Local);
+        let inner = text
+            .split_once('[')
+            .and_then(|(_, rest)| rest.split_once(']'))
+            .map(|(ts, _)| ts)
+            .expect("still one bracketed timestamp");
+        assert_eq!(
+            chrono::DateTime::parse_from_rfc3339(inner)
+                .expect("still RFC 3339")
+                .to_utc(),
+            chrono::DateTime::parse_from_rfc3339("2026-08-06T09:12:33.123456Z")
+                .unwrap()
+                .to_utc()
         );
     }
 

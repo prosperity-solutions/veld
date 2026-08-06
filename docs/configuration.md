@@ -2702,14 +2702,23 @@ Details:
 
 ### Log Timestamps
 
-All log output (both `start_server` stdout/stderr and internal Veld events) is timestamped with ISO 8601 timestamps:
+All log output (both `start_server` stdout/stderr and internal Veld events) is timestamped when the line is emitted, which is what lets `veld logs` merge nodes chronologically.
+
+**Stored in UTC, shown in your time zone.** Every line is stored as RFC 3339 UTC with microsecond precision — not a display choice but a requirement, since Veld orders and interleaves lines by comparing those strings. What you *read* is converted:
 
 ```
-[2026-03-12T08:30:01.123456+00:00] Server listening on port 3000
-[2026-03-12T08:30:01.456789+00:00] Connected to database
+$ veld logs
+web:local [2026-03-12T09:30:01.123456+01:00] Server listening on port 3000
+web:local [2026-03-12T09:30:01.456789+01:00] Connected to database
+
+$ veld logs --utc
+web:local [2026-03-12T08:30:01.123456Z] Server listening on port 3000
+web:local [2026-03-12T08:30:01.456789Z] Connected to database
 ```
 
-Timestamps are written at the time each line is emitted, enabling chronological merging across nodes in `veld logs`.
+- `--utc` prints the stored string verbatim; `--local` forces local. Either overrides the `logs.timeZone` setting for one command (Settings → Logs in the management UI, `local` by default).
+- **`--json` always emits UTC**, whatever the flags and the setting say. It is the machine-readable shape, so `timestamp` has exactly one spelling regardless of who ran the command.
+- The management UI's logs view follows the same setting, and its timestamps carry the full date and both zones in a tooltip.
 
 ---
 

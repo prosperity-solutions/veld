@@ -15,6 +15,7 @@ import {
   type Worktree,
 } from "./api";
 import {
+  logsTimeZone,
   markerFace,
   markerStyle,
   quickSwitchPrefs,
@@ -543,6 +544,11 @@ function AppInner(props: {
   // rather than each pane calling `useSettings` — that would be a fetch and a
   // focus listener per pane for one document the app already holds.
   const quickSwitches = quickSwitchPrefs(settings ?? {});
+
+  // Which zone the logs views spell a line's timestamp in. Read here and threaded
+  // for the same reason as the two above — and the same key `veld logs` reads, so a
+  // terminal and this window never disagree about what `09:12:33` means.
+  const logsTz = logsTimeZone(settings ?? {});
 
   // Which of this worktree's config-declared panes the daemon holds a session
   // token for, so a restored pane can offer "Resume" rather than only "Start".
@@ -1269,6 +1275,7 @@ function AppInner(props: {
     // the focused dock rather than each inventing a placement.
     onOpenPane: (name, url) =>
       setLayout((prev) => addTabToFocused(prev, browserTab({ url, title: name }))),
+    logsTz,
   };
 
   // ---- sharing ------------------------------------------------------------
@@ -2875,6 +2882,7 @@ function AppInner(props: {
           themeButton={themeButton}
           settingsButton={settingsButton}
           historyDays={historyDays}
+          logsTz={logsTz}
         />
         {settingsDialog}
       </div>

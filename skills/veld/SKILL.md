@@ -522,6 +522,13 @@ Log sources, and where each kind of output lands:
 | `internal` | Liveness probe outcomes, recovery decisions |
 | `all` (default) | All four, interleaved by timestamp |
 
+**Timestamps.** Lines are stored in UTC and printed in the machine's **local** time
+zone, so a human reading `veld logs` sees the clock on their wall. `--utc` prints the
+stored value verbatim, `--local` forces local, and either overrides the `logs.timeZone`
+setting for that command. **`--json` always emits UTC RFC 3339** regardless of the
+flags or the setting — parse `timestamp` and convert on your side rather than reaching
+for `--local`, which does nothing to JSON output.
+
 Step output is recorded verbatim and never redacted, so a node or step that
 echoes a secret from its environment puts it in that run's log. A `command`
 step's stdin is `/dev/null` — one that prompts fails on EOF instead of hanging.
@@ -568,6 +575,7 @@ step's stdin is `/dev/null` — one that prompts fails on EOF instead of hanging
 - **One directory can hold several live environments, and that is a supported state** — `veld start --preset api --name api` beside `veld start --name web` in the same project root gives two independent runs with their own nodes, ports, hostnames (the run name is in the hostname), logs and stats. This is the shape an agent creates by starting a preset in a project the human is also running, so pass `--name` explicitly rather than relying on resolution, and say which environment you started. Veld Desktop shows a **run selector** in its top bar: one control per window naming the bound environment, with `1/2` when there are live siblings. ▶ is a toggle bound to that run (it re-runs an ended one under its own name); the dropdown's **Start another run** entry is what creates a *second* environment while one is live, and it shows the name it will use (`dev-2`) first. The list holds **live** environments only — ended ones sit behind a "Show N ended" disclosure, or appear outright when nothing is live, since run history is Runs mode's job
 - **`veld logs` defaults to the latest run** — after a restart, `veld logs` no longer reaches into the previous generation's lines. Use `--run <id-prefix>` for a specific past run, `-p`/`--previous` for the run before the latest, or `--all-runs` to restore the old interleaved-across-runs behavior
 - **`veld logs -f` exits 0 when the run ends** — it no longer hangs forever on a run that crashed or was stopped; it prints history then a stderr note and returns
+- **`veld logs` prints local time, `veld logs --json` prints UTC** — human output is converted to the machine's zone (`--utc` opts out, `--local` forces it, both override the `logs.timeZone` setting); the `timestamp` field in `--json` is always UTC so a parser has one format to handle. Don't compare a `--json` timestamp against a human-output one without converting
 - **`veld status`/`veld urls` on a stopped environment** — `status` still works and shows the last run's outcome, but hides the URL column (routes are torn down); `urls` errors outright instead of printing dead links
 - **`veld urls --json` shape** — `{ "urls": [{node, variant, url}...], "live": bool }` (no longer a bare array; stopped environments add `"ended_at"`); check `.live` first, then read `.urls`
 - **`--json`** — most commands accept it for machine-readable output, prefer it when parsing results

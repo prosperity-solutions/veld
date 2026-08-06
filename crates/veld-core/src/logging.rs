@@ -144,6 +144,11 @@ impl LogWriter {
 // ---------------------------------------------------------------------------
 
 /// Format a stored log row as JSON for `--json` output.
+///
+/// `timestamp` is the stored string, which is always UTC, and deliberately is not
+/// affected by [`LogTimeZone`]: this is the machine-readable shape an agent or a CI
+/// script parses, so it has exactly one spelling regardless of who ran the command
+/// or where. Localising is [`format_ts`]'s job, at the human render site.
 pub fn row_to_json(row: &crate::db::LogRow, run: &str) -> serde_json::Value {
     serde_json::json!({
         "timestamp": row.ts,
@@ -153,4 +158,71 @@ pub fn row_to_json(row: &crate::db::LogRow, run: &str) -> serde_json::Value {
         "source": row.stream,
         "line": row.line,
     })
+}
+
+/// Render a stored log timestamp for a human reader.
+///
+/// The input is what `db::ts_to_str` wrote: RFC 3339, UTC, microseconds, `Z`.
+///
+/// [`LogTimeZone::Utc`] returns it untouched, so `veld logs --utc` is byte-for-byte
+/// what veld printed before this function existed. [`LogTimeZone::Local`] re-renders
+/// it in the machine's zone **in the same RFC 3339 shape, offset included** — same
+/// field order, same precision, still parseable by anything that parsed the old
+/// output, and the trailing `+02:00` instead of `Z` is what makes the two
+/// distinguishable in a pasted snippet with no context.
+///
+/// A string that does not parse is passed through unchanged rather than replaced with
+/// a placeholder: a log line's timestamp is evidence, and a row whose `ts` column
+/// holds something unexpected is exactly the row you need to see as-is.
+pub fn format_ts(ts: &str, tz: crate::db::LogTimeZone) -> String {
+    match tz {
+        crate::db::LogTimeZone::Utc => ts.to_string(),
+        crate::db::LogTimeZone::Local => chrono::DateTime::parse_from_rfc3339(ts)
+            .map(|t| {
+                t.with_timezone(&chrono::Local)
+                    .to_rfc3339_opts(chrono::SecondsFormat::Micros, false)
+            })
+            .unwrap_or_else(|_| ts.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod format_ts_tests {
+    use super::format_ts;
+    use crate::db::LogTimeZone;
+
+    #[test]
+    fn utc_is_the_stored_string_untouched() {
+        // The compatibility promise of `--utc`: not "UTC re-rendered", the same bytes.
+        let stored = "2026-08-06T09:12:33.123456Z";
+        assert_eq!(format_ts(stored, LogTimeZone::Utc), stored);
+    }
+
+    #[test]
+    fn local_keeps_the_instant_and_says_which_zone_it_is_in() {
+        // Asserted against the machine's own zone rather than a fixed offset: CI runs
+        // in UTC and a developer does not, and pinning either would make this test a
+        // statement about the runner instead of about the conversion.
+        let stored = "2026-08-06T09:12:33.123456Z";
+        let local = format_ts(stored, LogTimeZone::Local);
+        let reparsed = chrono::DateTime::parse_from_rfc3339(&local).expect("still RFC 3339");
+        assert_eq!(
+            reparsed.to_utc(),
+            chrono::DateTime::parse_from_rfc3339(stored)
+                .unwrap()
+                .to_utc(),
+            "conversion must move the label, never the instant"
+        );
+        // Microseconds survive: dropping precision would silently lose the ordering
+        // information the interleave sort depends on being visible.
+        assert!(local.contains(".123456"), "{local}");
+    }
+
+    #[test]
+    fn an_unparseable_timestamp_is_passed_through_in_both_zones() {
+        for tz in [LogTimeZone::Local, LogTimeZone::Utc] {
+            assert_eq!(format_ts("not-a-timestamp", tz), "not-a-timestamp");
+            assert_eq!(format_ts("", tz), "");
+        }
+    }
 }

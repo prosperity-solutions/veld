@@ -4,6 +4,7 @@ import {
   extractTs,
   fmtBytes,
   fmtTs,
+  fmtTsFull,
   fmtWhen,
   runKey,
   shortUrl,
@@ -83,6 +84,47 @@ describe("timestamps", () => {
   it("fmtTs handles invalid dates", () => {
     expect(fmtTs("garbage")).toBe("");
     expect(fmtTs("2026-07-27T10:00:00Z")).toMatch(/^\d{2}:\d{2}:\d{2}\.\d{3}$/);
+  });
+
+  it("fmtTs renders UTC as stored and local through the browser's zone", () => {
+    // The UTC arm is exact, because it must not depend on the runner's zone — CI is
+    // UTC and a developer is not, and a test that passes only in one is not a test.
+    expect(fmtTs("2026-07-27T10:00:00.123Z", "utc")).toBe("10:00:00.123");
+    // The local arm is asserted as *shape plus agreement with the platform*, for the
+    // same reason: `Date`'s own getters are the definition of "the browser's zone".
+    const d = new Date("2026-07-27T10:00:00.123Z");
+    expect(fmtTs("2026-07-27T10:00:00.123Z", "local")).toBe(
+      `${String(d.getHours()).padStart(2, "0")}:00:00.123`,
+    );
+    // Omitting the zone means local — the behaviour every caller had before the
+    // parameter existed.
+    expect(fmtTs("2026-07-27T10:00:00.123Z")).toBe(
+      fmtTs("2026-07-27T10:00:00.123Z", "local"),
+    );
+  });
+
+  it("fmtTsFull carries the date, both zones, and a signed offset", () => {
+    const utcFirst = fmtTsFull("2026-07-27T10:00:00.123Z", "utc");
+    const [first, second] = utcFirst.split("\n");
+    // The rendered zone leads; the counterpart follows. Two lines, always.
+    expect(first).toBe("2026-07-27 10:00:00.123 (UTC)");
+    expect(second).toMatch(/^\d{4}-\d{2}-\d{2} .* \(local, UTC[+-]\d{2}:\d{2}\)$/);
+    // …and the order flips with the setting, so the tooltip always expands the
+    // number that is actually on screen first.
+    const localFirst = fmtTsFull("2026-07-27T10:00:00.123Z", "local");
+    expect(localFirst.split("\n")[0]).toBe(second);
+    expect(localFirst.split("\n")[1]).toBe(first);
+    // The offset is signed even at zero, because it is interpolated after "UTC" and
+    // a bare `Z` there would read as `UTCZ`.
+    expect(localFirst).not.toContain("UTCZ");
+  });
+
+  it("fmtTsFull passes an unparseable timestamp through", () => {
+    // A log row's timestamp is evidence: a `ts` column holding something unexpected
+    // is exactly the row a reader needs to see as-is, so the tooltip must not blank
+    // it the way `fmtTs` blanks the dense on-screen form.
+    expect(fmtTsFull("garbage", "local")).toBe("garbage");
+    expect(fmtTsFull("garbage", "utc")).toBe("garbage");
   });
 
   it("fmtWhen buckets relative time", () => {
