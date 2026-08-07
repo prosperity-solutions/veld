@@ -26,6 +26,7 @@ import {
   spinnerAction,
   startRunName,
   transitionAction,
+  UNGROUPED_LABEL,
   worktreeStatus,
   worstStatus,
   DELETING_LANE,
@@ -38,6 +39,7 @@ const wt = (path: string): Worktree => ({
   path,
   branch: "feat/checkout-v2",
   alias: "chk",
+  display_name: "",
   emoji: "🦊",
   marker_color: "#008cff",
   is_main: false,
@@ -761,13 +763,62 @@ describe("railGroups", () => {
     );
     const live = groups.filter((g) => g.key !== TRASH_LANE && g.key !== DELETING_LANE);
     expect(live.map((g) => g.lane)).toEqual(["", "review", "spikes"]);
-    expect(groups[0].label).toBeNull();
+    expect(groups[0].label).toBe(UNGROUPED_LABEL);
     expect(groups[0].worktrees.map((w) => w.path)).toEqual(["/wts/a"]);
     expect(groups[1].worktrees.map((w) => w.path)).toEqual(["/wts/b"]);
     // An empty lane is kept: it is where you drop the first worktree into it.
     expect(groups[2].worktrees).toEqual([]);
     // The always-on trash sits last, after the lanes.
     expect(groups[groups.length - 1].key).toBe(TRASH_LANE);
+  });
+
+  it("offers a create button on exactly the sections a worktree can be created into", () => {
+    // The rail's only create affordance lives in these headers, so a section
+    // wrongly marked `addable: false` is a destination the user cannot reach —
+    // and one wrongly marked `true` is a button whose click the daemon rejects.
+    const groups = railGroups(
+      [
+        rw("/repo", { is_main: true }),
+        rw("/wts/a"),
+        rw("/wts/b", { lane: "review" }),
+        rw("/wts/gone", { trashed_at: "2026-01-01T00:00:00Z" }),
+        rw("/wts/going", { trashed_at: "2026-01-01T00:00:00Z", deleting: true }),
+      ],
+      [lane("review", 0)],
+    );
+    expect(
+      groups.filter((g) => g.addable).map((g) => g.key),
+    ).toEqual(["", "review"]);
+    // Never the main checkout's own section, the trash, or a removal in flight.
+    expect(groups.find((g) => g.key === "main")?.addable).toBe(false);
+    expect(groups.find((g) => g.key === TRASH_LANE)?.addable).toBe(false);
+    expect(groups.find((g) => g.key === DELETING_LANE)?.addable).toBe(false);
+  });
+
+  it("offers the lane menu only on a real lane", () => {
+    // `editable` is deliberately not `!pinned`: the ungrouped section is not
+    // pinned and does take drops, but there is no lane record behind it, so a ⋮
+    // there would offer to rename and delete something that does not exist.
+    const groups = railGroups(
+      [rw("/repo", { is_main: true }), rw("/wts/a"), rw("/wts/b", { lane: "review" })],
+      [lane("review", 0)],
+    );
+    expect(groups.filter((g) => g.editable).map((g) => g.key)).toEqual(["review"]);
+    expect(groups.find((g) => g.key === "")?.editable).toBe(false);
+    expect(groups.find((g) => g.key === "")?.pinned).toBe(false);
+  });
+
+  it("gives every section but the main checkout's a header", () => {
+    // The header is where the create button lives, so a section with no label
+    // renders no "＋" at all. Main is the deliberate exception: it holds exactly
+    // one row and creating "into" it means nothing.
+    const groups = railGroups(
+      [rw("/repo", { is_main: true }), rw("/wts/a")],
+      [lane("review", 0)],
+    );
+    expect(groups.filter((g) => g.label === null).map((g) => g.key)).toEqual([
+      "main",
+    ]);
   });
 
   it("preserves the daemon's order rather than re-sorting", () => {

@@ -20,6 +20,7 @@ use crate::progress::ProgressEvent;
 use crate::state::{
     EndDetail, EndReason, NodeState, NodeStatus, ReadinessPhase, RunState, RunStatus,
 };
+use crate::stats;
 use crate::url;
 use crate::variables::VariableContext;
 
@@ -622,6 +623,10 @@ struct NodeExecutionContext {
     /// (not tokio) so the lock is acquired without an `.await` point —
     /// this makes the spawn→checkpoint sequence cancellation-safe.
     checkpoint: Arc<std::sync::Mutex<CheckpointState>>,
+    /// Told when a `command` step's process starts and stops, so the CLI can
+    /// sample the resource usage of a build or an install while it runs. `None`
+    /// everywhere except a real `veld start` — see [`stats::StepObserver`].
+    step_observer: Option<Arc<dyn stats::StepObserver>>,
 }
 
 /// Shared mutable state for PID checkpointing during parallel execution.
@@ -754,6 +759,13 @@ pub struct Orchestrator {
     /// is set, so `run_terminal` can interpolate `${nodes.X.url}` etc. with the
     /// exact values the stages produced (no reconstruction drift).
     terminal_outputs: Option<HashMap<String, HashMap<String, String>>>,
+    /// Optional observer told when a `command` step spawns and exits.
+    ///
+    /// The seam that lets the CLI record resource usage during a run's start
+    /// phase without this crate depending on `sysinfo` — see
+    /// [`stats::StepObserver`]. Left `None` by `new`, so every other consumer of
+    /// the orchestrator (`stop`, `restart`, tests) is unaffected.
+    step_observer: Option<Arc<dyn stats::StepObserver>>,
 }
 
 impl Orchestrator {
@@ -809,7 +821,23 @@ impl Orchestrator {
             resolved_vars: None,
             resolved_vars_run: None,
             terminal_outputs: None,
+            step_observer: None,
         })
+    }
+
+    /// Watch this run's `command` steps while they execute.
+    ///
+    /// The `veld` CLI installs `veld_stats::CommandStatsRecorder` here so a
+    /// build's or an install's CPU and memory are recorded like any other node's
+    /// — the start phase is otherwise unobserved, because a `command` step's PID
+    /// never leaves the task that spawned it and the daemon's sampler can only
+    /// see PIDs that were persisted.
+    ///
+    /// Only `command` steps go through here. A `start_server` node checkpoints
+    /// its PID on spawn and is sampled by the daemon from that, and the two must
+    /// stay disjoint or a node's tree would be recorded twice.
+    pub fn with_step_observer(&mut self, observer: Arc<dyn stats::StepObserver>) {
+        self.step_observer = Some(observer);
     }
 
     /// What this project is called for machine-override purposes.
@@ -1709,14 +1737,22 @@ impl Orchestrator {
             node: sel.node.clone(),
             variant: sel.variant.clone(),
         };
+        // The terminal node is a `command` step like any other — it is simply
+        // executed here rather than in the stage loop — so it is sampled like
+        // any other. It is also usually the heaviest thing in a `--oneshot` run
+        // (an end-to-end suite), which makes it the last node that should have
+        // been left unmeasured.
+        let observed = ObservedStep::new(self.step_observer.clone(), key.clone());
         let result = process::run_command_streaming(
             &resolved_cmd,
             &working_dir,
             &env,
             Some(&output_file),
             Some(log_target),
+            observed.on_spawn(),
         )
         .await?;
+        drop(observed);
 
         // Persist the terminal node's final state. Undeclared outputs are
         // ignored (not fatal): the node has already produced its result and its
@@ -1820,6 +1856,7 @@ impl Orchestrator {
                 run: run.clone(),
                 project_root: self.project_root.clone(),
             })),
+            step_observer: self.step_observer.clone(),
         };
 
         // Assign indices and extract precomputed servers before spawning.
@@ -3694,6 +3731,42 @@ async fn execute_start_server_isolated(
     Ok(handle)
 }
 
+/// Registers a `command` step with the [`stats::StepObserver`] for exactly as
+/// long as its process runs.
+///
+/// The pairing is a `Drop` rather than an explicit call because the step's
+/// `run_command` is followed by `?` and lives inside a task a failing stage can
+/// cancel. A missed `step_finished` would leave the sampler walking a PID that
+/// has exited and, once the OS recycles it, recording an unrelated process's
+/// memory as the node's.
+struct ObservedStep {
+    observer: Option<Arc<dyn stats::StepObserver>>,
+    node_key: String,
+}
+
+impl ObservedStep {
+    fn new(observer: Option<Arc<dyn stats::StepObserver>>, node_key: String) -> Self {
+        Self { observer, node_key }
+    }
+
+    /// The callback [`process::run_command_observed`] fires once the step has
+    /// spawned. `None` when no observer is installed, which is every path except
+    /// a real `veld start`.
+    fn on_spawn(&self) -> Option<Box<dyn FnOnce(u32) + Send>> {
+        let observer = Arc::clone(self.observer.as_ref()?);
+        let key = self.node_key.clone();
+        Some(Box::new(move |pid| observer.step_started(&key, pid)))
+    }
+}
+
+impl Drop for ObservedStep {
+    fn drop(&mut self) {
+        if let Some(observer) = &self.observer {
+            observer.step_finished(&self.node_key);
+        }
+    }
+}
+
 /// Execute a `command` node without `&self`.
 async fn execute_command_isolated(
     ctx: &NodeExecutionContext,
@@ -3810,14 +3883,27 @@ async fn execute_command_isolated(
         &ctx.progress_tx,
         (sel.node.clone(), sel.variant.clone()),
     );
-    let result = process::run_command(
+    // Registered for the life of the step and deregistered by the guard's
+    // `Drop`, so the `?` below — and a cancelled stage — cannot leave the
+    // sampler walking a tree that has exited.
+    // `RunState::node_key`, never a hand-rolled `format!`: this string has to
+    // match the key the daemon's sampler writes under, and a second spelling of
+    // it would fail as "sampling silently stopped working" rather than as a
+    // compile error.
+    let observed = ObservedStep::new(
+        ctx.step_observer.clone(),
+        RunState::node_key(&sel.node, &sel.variant),
+    );
+    let result = process::run_command_observed(
         &resolved_cmd,
         &working_dir,
         &env,
         Some(&output_file),
         Some(sink),
+        observed.on_spawn(),
     )
     .await?;
+    drop(observed);
 
     node_state
         .outputs
@@ -4112,6 +4198,164 @@ fn whoami_hostname() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Records what a [`stats::StepObserver`] was told, in order.
+    #[derive(Default)]
+    struct RecordingObserver {
+        events: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl RecordingObserver {
+        fn events(&self) -> Vec<String> {
+            self.events.lock().unwrap().clone()
+        }
+    }
+
+    impl stats::StepObserver for RecordingObserver {
+        fn step_started(&self, node_key: &str, pid: u32) {
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("start {node_key} {pid}"));
+        }
+        fn step_finished(&self, node_key: &str) {
+            self.events.lock().unwrap().push(format!("stop {node_key}"));
+        }
+    }
+
+    /// The registration must be released by `Drop`, not by a call after the
+    /// step's `run_command` — that call is behind a `?` and inside a task a
+    /// failing stage can cancel. A leaked registration leaves the sampler
+    /// walking a PID that has exited, and once the OS recycles the number it
+    /// records an unrelated process's memory as this node's.
+    #[test]
+    fn an_observed_step_is_always_released_even_when_the_step_fails() {
+        let obs = Arc::new(RecordingObserver::default());
+        {
+            let step = ObservedStep::new(Some(obs.clone()), "build:local".to_owned());
+            let on_spawn = step
+                .on_spawn()
+                .expect("an installed observer yields a callback");
+            on_spawn(4242);
+            // The `?` path: the guard is dropped by the early return, not by
+            // reaching the end of the function.
+        }
+        assert_eq!(
+            obs.events(),
+            vec!["start build:local 4242", "stop build:local"]
+        );
+    }
+
+    /// No observer installed is the normal case (`veld stop`, every test), and
+    /// it must cost nothing — including not handing `run_command_observed` a
+    /// callback that would fire into nowhere.
+    #[test]
+    fn without_an_observer_a_step_yields_no_callback() {
+        let step = ObservedStep::new(None, "build:local".to_owned());
+        assert!(step.on_spawn().is_none());
+    }
+
+    /// The guard is built *before* the spawn, so a step that never spawns
+    /// reports `step_finished` with no matching `step_started`. Implementations
+    /// are told to be idempotent ([`stats::StepObserver`]); this pins that the
+    /// unpaired call is a case they actually have to handle.
+    #[test]
+    fn a_step_that_never_spawns_still_reports_finished() {
+        let obs = Arc::new(RecordingObserver::default());
+        drop(ObservedStep::new(
+            Some(obs.clone()),
+            "build:local".to_owned(),
+        ));
+        assert_eq!(obs.events(), vec!["stop build:local"]);
+    }
+
+    /// Both spawn paths must hand the observer a PID: `run_command` for a staged
+    /// `command` node, and `run_command_streaming` for the `--oneshot` terminal
+    /// node. The terminal node is skipped by the stage loop and executed by
+    /// `run_terminal`, so it took a second seam — and it is usually the heaviest
+    /// command in the run it belongs to, which is what made missing it worth a
+    /// test rather than a comment.
+    #[tokio::test]
+    async fn both_spawn_paths_report_the_step_to_the_observer() {
+        let dir = std::env::temp_dir();
+        let env = HashMap::new();
+        let cmd = config::CommandSpec::Shell("true".to_owned());
+
+        for path in ["run_command", "run_command_streaming"] {
+            let obs = Arc::new(RecordingObserver::default());
+            {
+                let step = ObservedStep::new(Some(obs.clone()), "e2e:local".to_owned());
+                let on_spawn = step.on_spawn();
+                if path == "run_command" {
+                    process::run_command_observed(&cmd, &dir, &env, None, None, on_spawn)
+                        .await
+                        .expect("step runs");
+                } else {
+                    process::run_command_streaming(&cmd, &dir, &env, None, None, on_spawn)
+                        .await
+                        .expect("step runs");
+                }
+            }
+            let events = obs.events();
+            assert_eq!(
+                events.len(),
+                2,
+                "{path}: one start and one stop, got {events:?}"
+            );
+            assert!(
+                events[0].starts_with("start e2e:local "),
+                "{path}: the observer must be given the step's pid, got {events:?}"
+            );
+            assert_ne!(
+                events[0], "start e2e:local 0",
+                "{path}: 0 is not a pid a sampler may walk"
+            );
+            assert_eq!(events[1], "stop e2e:local");
+        }
+    }
+
+    /// **The disjointness invariant between the two stats producers.**
+    ///
+    /// The daemon samples every node with a persisted `NodeState.pid`; the CLI
+    /// samples the `command` steps it was told about. Nothing may be in both
+    /// sets, or a node's tree is recorded twice by two cadences. That holds
+    /// because the *only* place a PID is ever persisted is the `start_server`
+    /// path, and a `command` step's PID reaches `ObservedStep` and nowhere else.
+    ///
+    /// Persisting one would also be a lifecycle bug well beyond the graphs:
+    /// `is_reapable_orphan` would see a finished build as "spawned then died"
+    /// and reap a run that is still coming up, and `veld stop` would eventually
+    /// signal whatever recycled the number.
+    ///
+    /// **What this actually pins, and what it does not.** It scans *this file* —
+    /// the only one that spawns a run's processes — for every spelling of
+    /// assigning a live PID (`x.pid = Some(…)` and the struct-literal
+    /// `pid: Some(…)`), and requires exactly one. It cannot see a PID persisted
+    /// from another module, so it is a tripwire on the path a future change is
+    /// overwhelmingly likely to take, not a proof. Scoped in the name for that
+    /// reason.
+    #[test]
+    fn only_one_site_in_this_module_persists_a_live_node_pid() {
+        let src = include_str!("orchestrator.rs");
+        // Assembled at runtime so this test's own source does not contain the
+        // literals it searches for and match itself.
+        let some = "Some";
+        let assign = format!(".pid = {some}(");
+        let field = format!("pid: {some}(");
+        let assignments: Vec<&str> = src
+            .lines()
+            .map(str::trim)
+            .filter(|l| (l.contains(&assign) || l.contains(&field)) && !l.starts_with("//"))
+            .collect();
+        assert_eq!(
+            assignments.len(),
+            1,
+            "exactly one site in the orchestrator may persist a live node PID \
+             (the start_server spawn); found {assignments:?}. If one of these is a \
+             `command` step's PID, it must not be persisted — see \
+             veld_core::stats::StepObserver for why."
+        );
+    }
 
     #[test]
     fn reap_only_proven_dead_orphans() {
@@ -4679,6 +4923,7 @@ mod tests {
             resolved_vars: None,
             resolved_vars_run: None,
             terminal_outputs: Some(HashMap::new()),
+            step_observer: None,
         }
     }
 

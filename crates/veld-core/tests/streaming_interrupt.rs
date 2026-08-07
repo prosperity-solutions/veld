@@ -36,6 +36,7 @@ async fn streaming_interrupt_reports_130() {
         &HashMap::new(),
         None,
         None,
+        None,
     )
     .await
     .expect("interrupted run reports a code, not an error");
