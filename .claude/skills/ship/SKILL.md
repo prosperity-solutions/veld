@@ -75,8 +75,16 @@ in their request):
    maintainer want to drive the change themselves before it moves on? This is the
    house style for anything with a UI or a new CLI surface, because a review
    subagent cannot see that a graph renders wrong.
-   - *Two checkpoints (recommended for user-visible change)* — see
-     **Checkpointed autonomy** below.
+   - *One checkpoint, before review (recommended — the house default)* —
+     implement, hand over so the maintainer drives the feature, then run the
+     review loop and everything after it unattended. This is the proposed answer
+     for a user-visible change: the checkpoint that catches what a subagent
+     cannot see is the one on the *feature*, and it is worth most while the
+     design is still cheap to change. Put it first in the question's options.
+   - *Two checkpoints* — the above plus a second hand-over after the review
+     fixes, for a regression pass. See **Checkpointed autonomy** below. Reach for
+     it when the review is likely to touch rendering, wire shapes, or CLI output
+     rather than its own fixes.
    - *One checkpoint, after review* — implement and review unattended, then hand
      over once before the PR.
    - *None* — fully unattended from kickoff to the merge policy's endpoint.
@@ -89,12 +97,23 @@ Record the answers and follow them for the rest of the run. Do not re-ask.
 ### Checkpointed autonomy
 
 The default working mode for a user-visible change in this repo. Autonomy is not
-all-or-nothing: the maintainer tests the running software, twice, and everything
-between and after those two points is unattended.
+all-or-nothing: the maintainer tests the running software, and everything after
+that point is unattended.
+
+The house default is **one checkpoint, before the review** — the shape to propose
+first:
 
 ```
-implement  →  ⏸ HAND OVER (maintainer drives it)  →  review loop  →
-⏸ HAND OVER AGAIN (regression pass on the review fixes)  →  PR  →  green CI  →  merge policy
+implement  →  ⏸ HAND OVER (maintainer drives it)  →  review loop  →  PR  →
+green CI  →  merge policy
+```
+
+The two-checkpoint variant adds a second stop for a regression pass, and is the
+answer when the review is likely to touch rendering, wire shapes, or CLI output:
+
+```
+implement  →  ⏸ HAND OVER  →  review loop  →  ⏸ HAND OVER AGAIN  →  PR  →
+green CI  →  merge policy
 ```
 
 Rules that make it work:
@@ -104,10 +123,13 @@ Rules that make it work:
   Do not start the next step "while they check".
 - **Name the exercise.** Concrete commands and concrete screens, not "please
   test". The maintainer should not have to reconstruct your feature's surface.
-- **The second checkpoint exists because review fixes are code too.** A review
-  round that touches rendering, wire shapes, or CLI output can regress what was
-  hand-verified at checkpoint one. Say explicitly which review fixes are
-  behaviour-visible and therefore worth re-driving.
+- **A second checkpoint, when chosen, exists because review fixes are code too.**
+  A review round that touches rendering, wire shapes, or CLI output can regress
+  what was hand-verified at checkpoint one. Say explicitly which review fixes are
+  behaviour-visible and therefore worth re-driving. When the maintainer chose one
+  checkpoint before the review, say the same thing in the **final report**
+  instead — they get one shot at spotting a regression, so it has to be named
+  rather than left in the diff.
 - **Resume without re-asking.** Their "looks good" / "continue" is the signal to
   run the rest of the chosen policy to completion, including a bypass merge if
   that's what they picked. Feedback instead of approval means fix it and
@@ -158,9 +180,10 @@ Three rules that make it worth the spend rather than theatre:
   as you go. For a JS/TS change, run the Biome `lint` + `typecheck`/`test` in the
   affected surface too (`desktop/`, `crates/veld-daemon/ui`, `crates/veld-daemon/frontend`)
   — `just lint` and `just test` cover all of it in one command each.
-- If Step 0 chose two checkpoints: this is **checkpoint one**. Finish the whole
-  feature (including the docs audit in Step 3), leave it building and runnable,
-  then hand over per **Checkpointed autonomy** and wait.
+- If Step 0 chose a pre-review checkpoint — the default *one checkpoint, before
+  review*, or the two-checkpoint variant: this is **checkpoint one**. Finish the
+  whole feature (including the docs audit in Step 3), leave it building and
+  runnable, then hand over per **Checkpointed autonomy** and wait.
 
 ## Step 3 — Docs audit
 
