@@ -559,9 +559,11 @@ const MAX_DISPLAY_NAME_LEN: usize = 80;
 ///   *blank* — a checkout with nothing on screen identifying it. JavaScript's
 ///   `\s` does not match U+200B either, so the create dialog's own whitespace
 ///   collapsing does not catch it first.
-/// - **U+2028/U+2029 are real line breaks**, which is precisely what the rule
-///   below says it rejects. `white-space: nowrap` suppresses soft wraps, not
-///   forced ones, so `"prod\u{2028}rm -rf"` renders in the rail as `prod`.
+/// - **U+2028/U+2029 are real line breaks**, which is precisely what
+///   [`validate_display_name`] claims to reject. `white-space: nowrap` suppresses
+///   soft wraps, not forced ones, so `"prod\u{2028}rm -rf"` renders in the rail
+///   as `prod`. (Rejecting them is [`is_forbidden`]'s job, not this predicate's —
+///   this one only answers whether a character renders.)
 /// - **U+202E reverses the rendered label**, so `"\u{202E}tset olleH"` displays
 ///   as `Hello test`.
 ///

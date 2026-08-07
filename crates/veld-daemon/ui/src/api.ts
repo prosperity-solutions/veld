@@ -121,10 +121,17 @@ export interface Worktree {
    * lossy slug derived from it. Not unique, deliberately: two rows sharing a
    * label collide in nothing, and the branch renders beside it.
    *
+   * **Optional because it can genuinely be absent, not as a convenience.** A
+   * daemon older than schema v13 has no such column and sends no such key, and
+   * `just dev-ui` proxies `/api` to whatever daemon is *installed* — so the dev
+   * loop is exactly that pairing. Typed as required, `w.display_name.trim()`
+   * compiled clean and crashed there; the `?` is what makes the type checker ask.
+   *
    * Read it through `worktreeLabel(w)` rather than testing it inline, so
-   * "which name does this surface show" has exactly one answer.
+   * "which name does this surface show" has exactly one answer, and so the
+   * absent case is handled in one place instead of at every call site.
    */
-  display_name: string;
+  display_name?: string;
   /**
    * One-glyph identifier from a curated animal set. Unique *when assigned*
    * — the picker lets the user choose a glyph another worktree already holds,
