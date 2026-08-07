@@ -454,6 +454,44 @@ select:focus {
   display: flex;
   flex-direction: column;
   gap: 2px;
+  /* The anchor for the lane-reorder bars below. */
+  position: relative;
+}
+
+/* --- Dragging a whole lane -------------------------------------------------
+ *
+ * The lane being carried, and where it would land. The landing bar is a
+ * pseudo-element on the section rather than a `.rail-caret` sibling like the row
+ * drag uses, for two reasons: an element inserted between two `.rail-group`s
+ * breaks `.rail-group + .rail-group` — the divider and its 9px of separation
+ * would vanish under the pointer mid-drag — and it would add a gap of its own to
+ * the column. A pseudo-element costs no layout at all, so the rail cannot move
+ * while you are aiming at it. */
+.rail-group.lane-dragging {
+  opacity: 0.45;
+}
+.rail-group.lane-drop-before::before,
+.rail-group.lane-drop-after::after {
+  content: "";
+  position: absolute;
+  left: 3px;
+  right: 3px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--accent);
+  box-shadow:
+    0 0 0 1px color-mix(in oklab, var(--accent) 40%, transparent),
+    0 0 9px 1px color-mix(in oklab, var(--accent) 75%, transparent);
+  z-index: 2;
+}
+/* Centred in the 9px gutter a `.rail-group + .rail-group` opens above itself, so
+   the bar sits between the two sections rather than on top of either one's
+   header. */
+.rail-group.lane-drop-before::before {
+  top: -6px;
+}
+.rail-group.lane-drop-after::after {
+  bottom: -6px;
 }
 
 /* A hairline between sections, on top of the gap.
@@ -512,6 +550,21 @@ select:focus {
   text-transform: uppercase;
   user-select: none;
 }
+/* The whole header is the drag handle for reordering lanes, so it says so on
+   hover. Only on a real lane in the expanded rail — the class carries that
+   decision, the cursor only reports it. */
+.lane-head.grab {
+  cursor: grab;
+}
+.lane-head.grab:active {
+  cursor: grabbing;
+}
+/* The header's own buttons are clicks, not drags, even though a drag started on
+   one still carries the lane. */
+.lane-head.grab .lane-edit {
+  cursor: pointer;
+}
+
 /* Takes the slack, so the header's controls sit on the rows' right edge.
  *
  * `margin-right: auto` used to belong to the row count that sat here. The count

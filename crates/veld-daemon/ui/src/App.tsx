@@ -32,6 +32,7 @@ import {
   freshRunName,
   fuzzyMatch,
   liveRuns,
+  moveLane,
   moveWorktree,
   needsAttention,
   parsePendingKey,
@@ -1716,20 +1717,32 @@ function AppInner(props: {
     await refresh();
   };
 
+  /**
+   * Move a lane to an insertion point in the rail — the drag's write path, and
+   * the ⋮ menu's.
+   *
+   * One write for both gestures: `moveLane` owns the coordinate arithmetic (see
+   * its note on what `toIndex` counts) and returns `null` for a move that changes
+   * nothing, which is most drops.
+   */
+  const moveLaneTo = async (lane: string, toIndex: number) => {
+    if (!repo) return;
+    const order = moveLane(lanes, lane, toIndex);
+    if (!order) return;
+    try {
+      await api.reorderLanes(repo.root, order);
+    } catch (e) {
+      notifyError("Could not reorder the lanes", e);
+    }
+    await refresh();
+  };
+
   const laneMenu = (lane: string) => {
     const index = lanes.findIndex((l) => l.name === lane);
-    const move = async (to: number) => {
-      if (!repo) return;
-      const order = lanes.map((l) => l.name);
-      const [name] = order.splice(index, 1);
-      order.splice(to, 0, name);
-      try {
-        await api.reorderLanes(repo.root, order);
-      } catch (e) {
-        notifyError("Could not reorder the lanes", e);
-      }
-      await refresh();
-    };
+    // Insertion points, not final positions — `moveLane`'s coordinates. Moving
+    // down past one neighbour is `index + 2`: `index + 1` is this lane's own
+    // trailing edge, which is where it already sits.
+    const move = (toIndex: number) => void moveLaneTo(lane, toIndex);
     return showContextMenu([
       {
         key: "lane-rename",
@@ -1740,13 +1753,13 @@ function AppInner(props: {
         key: "lane-up",
         title: "Move lane up",
         disabled: index <= 0,
-        onClick: () => void move(index - 1),
+        onClick: () => move(index - 1),
       },
       {
         key: "lane-down",
         title: "Move lane down",
         disabled: index < 0 || index >= lanes.length - 1,
-        onClick: () => void move(index + 1),
+        onClick: () => move(index + 2),
       },
       { key: "lane-divider" },
       {
@@ -3370,6 +3383,7 @@ function AppInner(props: {
             onAddLane={() => setDialog({ kind: "new-lane" })}
             onLaneMenu={(e, lane) => laneMenu(lane)(e)}
             onMove={moveWorktreeTo}
+            onMoveLane={(lane, toIndex) => void moveLaneTo(lane, toIndex)}
             onRestore={restoreWorktree}
             onEmptyTrash={emptyTrash}
             onTrashDrop={trashWorktree}
@@ -3438,6 +3452,29 @@ function AppInner(props: {
               // user reads why the rest did not.
               await refresh();
               throw e;
+            }
+            // Newest first, in the section it was created into. Unplaced rows sort
+            // last (`WT_ORDER`), so a new checkout used to appear at the bottom of
+            // a long lane — furthest from the "＋" that was just clicked, and
+            // furthest from the row the user is about to work in. The order is
+            // computed from the list *plus* the created row rather than after a
+            // refresh, because `worktrees` here is this render's list and would
+            // still be the pre-create one.
+            const order = moveWorktree(
+              railGroups([...worktrees, created], lanes),
+              created.path,
+              dialog.lane,
+              0,
+            );
+            if (order) {
+              try {
+                await api.reorderWorktrees(repo.root, order.order);
+              } catch (e) {
+                // The worktree exists and is usable; only its position is wrong.
+                // Reported, not thrown — throwing would keep the create dialog
+                // open over a create that succeeded.
+                notifyError("Could not place the new worktree", e);
+              }
             }
             await refresh();
             setActiveWtKey(String(created.id));
@@ -4167,6 +4204,9 @@ function Rail(props: {
   onAddLane: () => void;
   onLaneMenu: (e: React.MouseEvent, lane: string) => void;
   onMove: (path: string, toLane: string, toIndex: number) => void;
+  /** Reorder whole lanes by dragging their headers. `toIndex` is an insertion
+   *  point in the current lane list — see `moveLane`. */
+  onMoveLane: (lane: string, toIndex: number) => void;
   onRestore: (w: Worktree) => void;
   onEmptyTrash: () => void;
   /** Dropping a dragged worktree onto the trash — bins it (revertible), which is
@@ -4201,6 +4241,18 @@ function Rail(props: {
   const [dropAt, setDropAt] = useState<{ key: string; index: number } | null>(
     null,
   );
+  // The second drag kind: a whole lane by its header. Kept in its own pair of
+  // states rather than folded into `dragPath`/`dropAt` with a discriminant,
+  // because the two drags have different drop targets and different feedback —
+  // and a single "what is being dragged" value made every handler on both sides
+  // ask what kind it was before doing anything.
+  const [dragLane, setDragLane] = useState<string | null>(null);
+  const [laneDropAt, setLaneDropAt] = useState<number | null>(null);
+  // Insertion coordinates for the lane sections, by group key. Only real lanes
+  // are in here: the ungrouped section, the main checkout and the two pending
+  // -removal lanes hold no position in the lane order, so they are neither
+  // draggable nor lane drop targets.
+  const laneIndex = new Map(props.lanes.map((l, i) => [l.name, i]));
   // Suppresses the rail's width transition for the duration of a resize drag. The
   // transition exists for the collapse/expand toggle, where 236px→64px should
   // animate; during a drag it re-animates on every pointer move, so the edge
@@ -4209,6 +4261,8 @@ function Rail(props: {
   const endDrag = () => {
     setDragPath(null);
     setDropAt(null);
+    setDragLane(null);
+    setLaneDropAt(null);
   };
   // Dropping is disabled while the rail is collapsed. A 64px row shows only a
   // marker, so there is no way to see *where* a drop would land — and a reorder
@@ -4256,12 +4310,59 @@ function Rail(props: {
   });
 
   /**
+   * Drop handlers for a section receiving a dragged **lane**, or `null` when no
+   * lane drag is in flight or this section holds no place in the lane order.
+   *
+   * Resolved against the section as a whole — its own index, or the one after it
+   * when the pointer is past its midpoint. Deliberately coarse: a lane is a block,
+   * so which of its rows the pointer happens to be over says nothing about where
+   * the block should land, and the rows' own drop zones bail on a lane drag
+   * without stopping propagation so the event reaches here.
+   *
+   * Spread *after* `dropZone`, overriding it: the two drags are mutually exclusive
+   * (each handler bails unless its own drag is the live one), and this keeps the
+   * override in one place instead of a kind check inside every worktree handler.
+   */
+  const laneDropZone = (group: RailGroup) => {
+    const index = laneIndex.get(group.key);
+    if (dragLane === null || index === undefined) return null;
+    const at = (e: React.DragEvent) => index + (below(e) ? 1 : 0);
+    return {
+      onDragOver: (e: React.DragEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+        setLaneDropAt(at(e));
+      },
+      onDrop: (e: React.DragEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+        props.onMoveLane(dragLane, at(e));
+        endDrag();
+      },
+    };
+  };
+
+  /**
    * Render one rail section — a lane, a user lane, or one of the two
    * pinned bottom lanes (trash / deleting). Shared by the scrollable list
    * and the bottom dock, so a lane and the trash render identically; they
    * differ only in where they live, not in how a row looks.
    */
-  const renderGroup = (group: RailGroup) => (
+  const renderGroup = (group: RailGroup) => {
+    const laneAt = laneIndex.get(group.key);
+    const laneDrag = dragLane !== null && laneAt !== undefined;
+    // Where the dragged lane would land, drawn in the gutter between sections.
+    // Only ever a *leading* bar, plus a trailing one on the last lane — the
+    // gutter between two lanes belongs to exactly one of them, or both would
+    // draw the same bar on top of each other.
+    const lastLane = props.lanes.length - 1;
+    const laneDropBefore = laneDrag && laneDropAt === laneAt;
+    const laneDropAfter =
+      laneDrag &&
+      laneAt === lastLane &&
+      laneDropAt !== null &&
+      laneDropAt > lastLane;
+    return (
           <div
             key={group.key}
             className={`rail-group${group.key === TRASH_LANE ? " trash" : ""}${group.key === DELETING_LANE ? " deleting" : ""}${
@@ -4271,7 +4372,7 @@ function Rail(props: {
               dragPath && canDropOn(group) && dropAt?.key === group.key
                 ? " drop-in"
                 : ""
-            }`}
+            }${dragLane === group.key ? " lane-dragging" : ""}${laneDropBefore ? " lane-drop-before" : ""}${laneDropAfter ? " lane-drop-after" : ""}`}
             // The section itself is the fallback target, and it resolves to its
             // FIRST position rather than its last. What actually reaches this
             // handler is the header and the padding above it — the rows stop
@@ -4281,10 +4382,31 @@ function Rail(props: {
             // Appending is still reachable, and unambiguously so: it is the lower
             // half of the last row.
             {...dropZone(group, 0)}
+            {...(laneDropZone(group) ?? {})}
           >
             {group.label !== null && props.wide && (
               <div
-                className="lane-head"
+                className={`lane-head${group.editable && canDrag ? " grab" : ""}`}
+                /* The header IS the handle — the whole bar, not a grip icon
+                   beside the name. A lane's header is already the thing that
+                   stands for the lane (it is where the menu and the ＋ live), and
+                   a rail this narrow cannot spare a third control per section.
+                   The nested buttons drag it too, which is harmless: they act on
+                   click, and a drag that starts on one is still a drag of the
+                   lane it belongs to.
+
+                   Only a real lane, and only expanded: the ungrouped section and
+                   the trash hold no place in the lane order, and a collapsed rail
+                   renders no headers at all. */
+                draggable={group.editable && canDrag}
+                onDragStart={(e) => {
+                  setDragLane(group.lane);
+                  e.dataTransfer.effectAllowed = "move";
+                  // Firefox ignores a drag with no payload. Prefixed because a
+                  // worktree drag puts a bare path here and something outside the
+                  // rail may yet read it — the rail itself keys off the state.
+                  e.dataTransfer.setData("text/plain", `lane:${group.lane}`);
+                }}
                 onContextMenu={
                   group.editable
                     ? (e) => props.onLaneMenu(e, group.lane)
@@ -4695,7 +4817,8 @@ function Rail(props: {
               );
             })}
           </div>
-  );
+    );
+  };
   return (
     <div
       className={`rail${props.wide ? " wide" : ""}${resizing ? " resizing" : ""}`}

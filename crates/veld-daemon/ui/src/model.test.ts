@@ -7,6 +7,7 @@ import {
   freshRunName,
   fuzzyMatch,
   liveRuns,
+  moveLane,
   moveWorktree,
   needsAttention,
   parsePendingKey,
@@ -999,5 +1000,53 @@ describe("moveWorktree", () => {
       "/wts/b",
       "/wts/a",
     ]);
+  });
+});
+
+describe("moveLane", () => {
+  const lanes = () => [lane("a", 0), lane("b", 1), lane("c", 2)];
+
+  it("moves a lane up, in insertion coordinates", () => {
+    // Dropping "c" on the upper half of "b" reports insertion point 1.
+    expect(moveLane(lanes(), "c", 1)).toEqual(["a", "c", "b"]);
+  });
+
+  it("moves a lane down, shifting the insertion point past its own gap", () => {
+    // Dropping "a" on the lower half of "b" reports 2 — counted with "a" still in
+    // the list, so the lane lands *after* "b", not between "a" and "b".
+    expect(moveLane(lanes(), "a", 2)).toEqual(["b", "a", "c"]);
+  });
+
+  it("is what the ⋮ menu's one-step moves mean", () => {
+    // Up is `index - 1` and down is `index + 2` — the same coordinates the drag
+    // produces, which is the whole reason both gestures share this function.
+    expect(moveLane(lanes(), "b", 0)).toEqual(["b", "a", "c"]);
+    expect(moveLane(lanes(), "b", 3)).toEqual(["a", "c", "b"]);
+  });
+
+  it("returns the full order, not a delta", () => {
+    // `reorder_lanes` appends anything unmentioned, so a partial write would
+    // silently move every lane the drag did not touch.
+    expect(moveLane(lanes(), "a", 3)).toEqual(["b", "c", "a"]);
+  });
+
+  it("reports a move that changes nothing as null", () => {
+    // Both edges of the dragged lane itself: the common drop, and one that must
+    // not cost a request and a refresh.
+    expect(moveLane(lanes(), "b", 1)).toBeNull();
+    expect(moveLane(lanes(), "b", 2)).toBeNull();
+  });
+
+  it("clamps an insertion point past the end", () => {
+    expect(moveLane(lanes(), "a", 99)).toEqual(["b", "c", "a"]);
+  });
+
+  it("returns null for a lane it does not know", () => {
+    expect(moveLane(lanes(), "ghost", 0)).toBeNull();
+  });
+
+  it("has nothing to do with a single lane", () => {
+    expect(moveLane([lane("only", 0)], "only", 0)).toBeNull();
+    expect(moveLane([lane("only", 0)], "only", 1)).toBeNull();
   });
 });

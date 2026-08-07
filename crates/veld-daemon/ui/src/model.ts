@@ -626,6 +626,38 @@ export function moveWorktree(
 }
 
 /**
+ * The lane order after moving the lane `name` to insertion point `toIndex`.
+ *
+ * `toIndex` is an **insertion point in the list as it currently stands** — the
+ * position the lane is dropped *before*, counted with the dragged lane still in
+ * place. That is the coordinate a drop produces (the rail hovers lane `i` and
+ * resolves to `i` or `i + 1`), so the conversion to a final position happens
+ * here, once, rather than at each call site. The ⋮ menu's up/down speak the same
+ * coordinates: one step down is `index + 2`, because `index + 1` is the lane's
+ * own trailing edge.
+ *
+ * Returns the **full order** as names, mirroring [`moveWorktree`] and
+ * `reorder_lanes`, so the write is idempotent. `null` when the move is unknown or
+ * changes nothing — a drop on the lane's own edges is the common case, and a
+ * no-op write would still cost a request and a refresh.
+ */
+export function moveLane(
+  lanes: Lane[],
+  name: string,
+  toIndex: number,
+): string[] | null {
+  const from = lanes.findIndex((l) => l.name === name);
+  if (from < 0) return null;
+  const order = lanes.map((l) => l.name);
+  order.splice(from, 1);
+  // Past its own position the insertion point shifts by one, because removing the
+  // lane closed the gap the index was counted against.
+  const at = Math.max(0, Math.min(toIndex > from ? toIndex - 1 : toIndex, order.length));
+  order.splice(at, 0, name);
+  return at === from ? null : order;
+}
+
+/**
  * A value that changes whenever a fired action has visibly landed — what the
  * optimistic pending markers watch.
  *
