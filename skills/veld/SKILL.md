@@ -21,11 +21,11 @@ triggers:
   - preview the UI
   - feedback loop
   - "*.localhost"
-compatibility: Requires veld v16.11.1+
+compatibility: Requires veld v16.11.2+
 allowed-tools: Read, Edit, Bash(veld *)
 metadata:
   author: prosperity-solutions
-  version: "16.11.1"
+  version: "16.11.2"
 ---
 
 # Veld
