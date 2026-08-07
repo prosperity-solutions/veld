@@ -273,8 +273,10 @@ select:focus {
  * Scoped to `.topbar` so dialogs and panes keep Mantine's sizing; menus and
  * dropdowns portal to `body`, so their contents are outside this too. `.chip`
  * (the "no veld config" / "repository unavailable" label) is also deliberately
- * outside it: it is the bar's one non-Mantine element and the only thing in
- * there that is not a control, so it keeps its smaller pill shape.
+ * outside it: it is the one thing in the bar that is not a control, so it keeps
+ * its smaller pill shape. Note that `.sep` is non-Mantine too but *is* levelled,
+ * by its own `height: var(--topbar-control-h)` rule below — so "not a Mantine
+ * component" is not the exemption; "not a control" is.
  *
  * **This is an enumeration, and an under-filled one fails silently** — a control
  * whose size var is missing here just renders at Mantine's own metrics, and
@@ -283,6 +285,22 @@ select:focus {
  * audit rather than assume:
  * `git grep -a -oE '<(Button|ActionIcon|Select|SegmentedControl|[A-Z][A-Za-z]+)' -- src/App.tsx src/runs/RunsMode.tsx`
  * and check every component that renders inside a `.topbar` against this block. */
+/* Literal px, deliberately, where Mantine's own values are
+   `calc(1.625rem * var(--mantine-scale))` and friends.
+ *
+ * This bar is the one row in the app pinned to *native* window chrome: its
+ * Electron height is mirrored by `TOPBAR_HEIGHT` in `desktop/src/main.js`, a
+ * main-process number that places the macOS traffic lights, and no CSS unit can
+ * follow a value the OS has already drawn against. So the bar cannot scale, and
+ * controls that scaled inside a bar that does not would overflow it — which is
+ * why converting these to rem would make the failure worse rather than better.
+ *
+ * The honest cost: `--mantine-scale` and a non-default root font size still
+ * reach the *padding* and section widths Mantine computes inside these
+ * controls, so at a scale other than 1 the bar's boxes stay 26px while their
+ * contents grow. Nothing in this repo sets `theme.scale` today. If something
+ * ever does, this bar and `TOPBAR_HEIGHT` are what have to learn about it
+ * together. */
 .topbar {
   --topbar-control-h: 26px;
 }
@@ -2805,6 +2823,14 @@ body[data-theme="light"] .swatch-cell > span {
 }
 .topbar .mode-switch .ms-hover {
   opacity: 0;
+}
+/* Same reasoning as `.qr-shield` above: the *state* is information and is kept,
+   only the fade goes. This is the app's most-hovered animation, so it is the one
+   most worth honouring the setting on. */
+@media (prefers-reduced-motion: reduce) {
+  .topbar .mode-switch .ms-layer {
+    transition: none;
+  }
 }
 /* `.hovered` is a React class, not `:hover` — see ModeSwitch. `:focus-visible`
    stays a real pseudo-class: a keyboard user gets no pointer and would

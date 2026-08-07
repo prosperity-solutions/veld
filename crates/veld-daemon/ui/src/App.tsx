@@ -2590,7 +2590,11 @@ function AppInner(props: {
   };
 
   // Above both bars so the crossfade survives ModeSwitch remounting as it moves
-  // between them — see the component's own note.
+  // between them — see the component's own note. Focus does *not* survive that
+  // remount either, which is a real gap the `:focus-visible` rules make more
+  // visible; it predates this change and is tracked as a follow-up rather than
+  // fixed here, because restoring it means new state on the app's busiest render
+  // path and this diff's review budget is spent.
   const [switchHover, setSwitchHover] = useState(false);
   const modeSwitch = (
     <ModeSwitch
