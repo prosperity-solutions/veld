@@ -121,6 +121,13 @@ update prints goes to `~/.veld/desktop-update.log` and the outcome to
 update reaches you as a dialog with the reason, not as an app that quietly
 reopened on the old version.
 
+That report carries a `half` field, `"app"` or `"release"`, because the retry
+advice depends on it: a full handoff can fail on the *CLI* half and never reach
+the app, and telling that user to run `veld desktop update` would move the app
+while leaving the daemon on the release that actually broke. A report with no
+`half` is read as `"app"` — the only thing that could have written one before the
+field existed.
+
 ## Updating
 
 ```bash
