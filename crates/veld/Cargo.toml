@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 veld-core = { workspace = true }
+veld-stats = { workspace = true }
 clap = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }

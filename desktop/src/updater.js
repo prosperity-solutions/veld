@@ -29,9 +29,13 @@ const { Notification, app, dialog, shell } = require("electron");
 const { autoUpdater } = require("electron-updater");
 
 const {
+  FULL_UPDATE_HANDOFF,
+  capabilitiesFrom,
   cliCandidatePaths,
   downloadOnlyReason,
+  handoffCommand,
   looksLikeVeldCli,
+  primaryAction,
   releasePageUrl,
   reportIsFresh,
   updateMode,
@@ -58,6 +62,41 @@ const updateReportPath = () =>
   path.join(os.homedir(), ".veld", "desktop-update.json");
 
 /**
+ * Where the handed-off update writes what it did.
+ *
+ * The same path `veld_core::setup::desktop_update_log_path` returns, because the
+ * failure report the app shows offers to reveal it and the CLI names it in its
+ * own errors. Two constants for one file, in two languages — the pairing is
+ * pinned by `crates/veld-core/tests/install_script_contract.rs`.
+ */
+const updateLogPath = () =>
+  path.join(os.homedir(), ".veld", "desktop-update.log");
+
+/**
+ * stdout/stderr handles for the handed-off CLI, as a `[stdout, stderr]` pair.
+ *
+ * Truncating (`"w"`) rather than appending: this answers "what happened the last
+ * time", which is exactly what the app reads back on relaunch, and an appending
+ * log would have the *previous* failure sitting above the current success.
+ *
+ * Falls back to discarding the output if the file cannot be opened — a log that
+ * will not open is not a reason to refuse an update, and everything downstream
+ * already treats a missing log as "no diagnostic available".
+ *
+ * @returns {[number | "ignore", number | "ignore"]}
+ */
+function handoffLogHandles() {
+  try {
+    const file = updateLogPath();
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const fd = fs.openSync(file, "w");
+    return [fd, fd];
+  } catch {
+    return ["ignore", "ignore"];
+  }
+}
+
+/**
  * Where the veld CLI is, if this machine has one.
  *
  * A GUI app does not inherit the shell's PATH — a launchd-started app gets a bare
@@ -76,9 +115,15 @@ const updateReportPath = () =>
  * running — it is performed by running it — but it does stop one from being
  * re-spawned detached with the app quitting behind it.
  *
- * @type {string | null}
+ * Carries the CLI's advertised capabilities alongside its path, because the two
+ * are learned from the same probe and must not drift apart: deciding *which*
+ * command to spawn from a capability list resolved at some earlier moment, for a
+ * binary that has since been replaced, is how the app ends up spawning a flag the
+ * CLI on disk does not accept.
+ *
+ * @type {{path: string, capabilities: string[]} | null}
  */
-let cliPath = null;
+let cli = null;
 
 /**
  * Whether `candidate` is really the veld CLI.
@@ -129,25 +174,37 @@ async function isVeldCli(candidate) {
  */
 async function cliHandlesDesktop(candidate) {
   try {
-    await execFileAsync(candidate, ["desktop", "status", "--json"], {
-      encoding: "utf8",
-      // Longer than the `--version` probe: this one shells out to PlistBuddy.
-      timeout: 5000,
-      env: { PATH: SAFE_PATH },
-    });
-    return true;
+    const { stdout } = await execFileAsync(
+      candidate,
+      ["desktop", "status", "--json"],
+      {
+        encoding: "utf8",
+        // Longer than the `--version` probe: this one shells out to PlistBuddy.
+        timeout: 5000,
+        env: { PATH: SAFE_PATH },
+      },
+    );
+    // The same call answers both questions — "does this CLI know `desktop` at
+    // all" and "what else can it be asked to do" — so learning the second costs
+    // nothing. An older CLI omits `capabilities` and comes back as `[]`, which is
+    // the honest answer for it.
+    return capabilitiesFrom(stdout);
   } catch {
     // Non-zero exit (clap's 2 for an unknown subcommand), or a timeout.
-    return false;
+    return null;
   }
 }
 
-/** @returns {Promise<string | null>} */
+/**
+ * The CLI to hand an update to, and what it is able to do with it.
+ *
+ * @returns {Promise<{path: string, capabilities: string[]} | null>}
+ */
 async function findCli() {
   for (const candidate of cliCandidatePaths({ home: app.getPath("home") })) {
-    if ((await isVeldCli(candidate)) && (await cliHandlesDesktop(candidate))) {
-      return candidate;
-    }
+    if (!(await isVeldCli(candidate))) continue;
+    const capabilities = await cliHandlesDesktop(candidate);
+    if (capabilities) return { path: candidate, capabilities };
   }
   return null;
 }
@@ -194,7 +251,7 @@ function initUpdater(opts = {}) {
   // depends on `isPackaged` alone — so a provisional call with `cli: null` gets
   // the one answer this function acts on right, and `checkForUpdates` resolves
   // properly before it needs the rest.
-  cliPath = null;
+  cli = null;
   mode = updateMode({
     platform: process.platform,
     isPackaged: app.isPackaged,
@@ -268,12 +325,12 @@ async function checkForUpdates({ manual }) {
   // mode for as long as the app is open — telling the user, wrongly, that it
   // cannot update itself.
   if (mode !== "off") {
-    cliPath = await findCli();
+    cli = await findCli();
     mode = updateMode({
       platform: process.platform,
       isPackaged: app.isPackaged,
       env: process.env,
-      cli: cliPath,
+      cli: cli?.path ?? null,
     });
   }
 
@@ -336,12 +393,20 @@ async function checkForUpdates({ manual }) {
 async function offerUpdate(version) {
   const canInstall = mode === "install";
   const viaCli = mode === "cli";
+  // Whether the one button on offer moves the whole release or only this app.
+  // It decides the wording, so it is resolved before the dialog rather than
+  // inside the handler: a prompt that says "veld" and then updates the app alone
+  // is worse than one that never claimed to.
+  const full =
+    viaCli && (cli?.capabilities ?? []).includes(FULL_UPDATE_HANDOFF);
 
   let detail;
-  if (viaCli) {
+  if (full) {
     // Says what actually happens, because it is unusual: the app closes *before*
     // the download, and something outside it does the work.
-    detail = `You're on ${app.getVersion()}. Veld quits, the veld CLI installs the update, and the app reopens — the CLI and the app move to the same version together.`;
+    detail = `You're on ${app.getVersion()}. Veld quits, the veld CLI installs the release — CLI, daemon and app together — and the app reopens.\n\nNothing in flight is lost: terminal sessions belong to the daemon and reattach with their scrollback.`;
+  } else if (viaCli) {
+    detail = `You're on ${app.getVersion()}. Veld quits, the veld CLI installs the app, and it reopens.\n\nThis veld CLI updates the app only — run \`veld update\` afterwards to move the rest of the release.`;
   } else if (canInstall) {
     detail = `You're on ${app.getVersion()}. Downloading takes a moment; the app restarts to apply it.`;
   } else {
@@ -350,12 +415,15 @@ async function offerUpdate(version) {
 
   const { response } = await dialog.showMessageBox({
     type: "info",
-    message: `Veld Desktop ${version} is available.`,
+    // Named for what is actually being offered. The feed's version is the
+    // *release*, and on the path that installs the whole thing, calling it a
+    // Veld Desktop update undersells it and leaves the user believing the CLI
+    // still needs a separate trip to a terminal.
+    message: full
+      ? `veld ${version} is available.`
+      : `Veld Desktop ${version} is available.`,
     detail,
-    buttons:
-      canInstall || viaCli
-        ? [viaCli ? "Quit and Update" : "Download and Install", "Later"]
-        : ["Open Release Page", "Later"],
+    buttons: [primaryAction({ viaCli, canInstall, full }), "Later"],
     defaultId: 0,
     cancelId: 1,
   });
@@ -402,13 +470,13 @@ async function updateViaCli(version) {
   // `veld update` moving the CLI from `~/.local/bin` to `/usr/local/bin` (or
   // an uninstall) between then and now would have this spawn a path that is no
   // longer there — or, worse, one something else has since put back.
-  cliPath = await findCli();
-  if (!cliPath) {
+  cli = await findCli();
+  if (!cli) {
     mode = updateMode({
       platform: process.platform,
       isPackaged: app.isPackaged,
       env: process.env,
-      cli: cliPath,
+      cli: null,
     });
     await dialog.showMessageBox({
       type: "warning",
@@ -429,32 +497,40 @@ async function updateViaCli(version) {
     // A report we cannot clear is not a reason to refuse the update.
   }
 
+  // Chosen from the capabilities of the binary just resolved, not from the ones
+  // resolved when the dialog opened — `veld update` may have moved the CLI in
+  // between. See `handoffCommand` for what each shape does and why the older one
+  // needs `--version` while the newer one must not have it.
+  const { args, full } = handoffCommand({
+    capabilities: cli.capabilities,
+    version,
+    pid: process.pid,
+    execPath: process.execPath,
+  });
+
   /** @type {import("node:child_process").ChildProcess} */
   let child;
   try {
     child = spawn(
-      cliPath,
-      [
-        "desktop",
-        "update",
-        // The version the user was just offered, not whatever the CLI happens to
-        // be. An older CLI would otherwise reinstall its own version, relaunch,
-        // be offered the newer one again, and loop — forever, since `offered` is
-        // per-session and the session just restarted.
-        "--version",
-        version,
-        "--wait-pid",
-        String(process.pid),
-        "--relaunch",
-        // Which bundle to replace. Without it the installer picks
-        // `/Applications`, and an app running from anywhere else gets a second
-        // copy written there while the one in the Dock stays stale.
-        "--app-path",
-        process.execPath,
-      ],
+      cli.path,
+      args,
       {
         detached: true,
-        stdio: "ignore",
+        // Everything the CLI says goes to one file, in order — its own progress
+        // lines and the install script's output alike. On this path there is no
+        // terminal by construction, and `stdio: "ignore"` used to mean the only
+        // record of a full-release update was whatever the script itself chose to
+        // log.
+        //
+        // **Only on the full route.** `veld desktop update` opens the same file
+        // itself (`desktop.rs` → `desktop_update_log_path`, then `File::create`
+        // in `run_install_script`), so handing it these descriptors puts two
+        // independent open descriptions with independent offsets on one path: the
+        // child's truncate discards what the parent already wrote and the
+        // parent's later writes land past the child's, through output that
+        // `last_diagnostic` then reads to build the user-visible failure reason.
+        // The old route logs itself; leave it to it.
+        stdio: ["ignore", ...(full ? handoffLogHandles() : ["ignore", "ignore"])],
         // A deliberate PATH (see `SAFE_PATH`) *over* the inherited environment,
         // not instead of it. Replacing the whole environment looked safer and
         // was worse: it dropped `TMPDIR`, `HTTPS_PROXY`/`NO_PROXY` and the
@@ -494,8 +570,10 @@ async function updateViaCli(version) {
       done(() => {
         child.unref();
         notify(
-          "Updating Veld Desktop",
-          `Installing ${version} — the app will reopen.`,
+          full ? "Updating veld" : "Updating Veld Desktop",
+          full
+            ? `Installing ${version} — CLI, daemon and app. The app will reopen.`
+            : `Installing ${version} — the app will reopen.`,
         );
         // Not `quitAndInstall`: nothing here goes through Squirrel. A plain quit
         // is what the CLI is waiting for.
@@ -547,14 +625,21 @@ async function reportPreviousCliUpdate() {
   // duly announced that a version it had never tried to install had failed.
   if (!reportIsFresh({ finishedAt: report.finished_at })) return;
 
+  // What failed decides both sentences. A `veld update` handoff can fail on the
+  // *CLI* half — the download, the check, the service restart — and never reach
+  // the app at all; telling that user to run `veld desktop update` would move
+  // the app and leave the daemon on the release that actually broke. Reports
+  // written before `half` existed came only from the app-only command, so
+  // treating a missing field as `"app"` is the right reading of an old file.
+  const wholeRelease = report.half === "release";
   const buttons = report.log ? ["Show Log", "Close"] : ["Close"];
   const { response } = await dialog.showMessageBox({
     type: "warning",
-    message: `Veld Desktop ${report.version ?? ""} was not installed.`.replace(
-      /\s+/g,
-      " ",
-    ),
-    detail: `${report.error ?? "The veld CLI did not say why."}\n\nYou are still on ${app.getVersion()}. Run \`veld desktop update\` in a terminal to retry.`,
+    message: (wholeRelease
+      ? `veld ${report.version ?? ""} was not installed.`
+      : `Veld Desktop ${report.version ?? ""} was not installed.`
+    ).replace(/\s+/g, " "),
+    detail: `${report.error ?? "The veld CLI did not say why."}\n\nYou are still on ${app.getVersion()}. Run \`${wholeRelease ? "veld update" : "veld desktop update"}\` in a terminal to retry.`,
     buttons,
     defaultId: 0,
     cancelId: buttons.length - 1,
@@ -569,8 +654,14 @@ async function promptRestart(version) {
       /\s+/g,
       " ",
     ),
+    // "…but their panes are re-opened empty" used to end this sentence, and it
+    // has not been true since sessions moved into per-session holder processes:
+    // a restored pane reattaches to the same shell and the daemon replays its
+    // scrollback (`crates/veld-daemon/src/pty/holder.rs`, and the row on session
+    // lifetime in `ARCHITECTURE.md`). Telling the user to finish up first made
+    // them schedule around a restart that costs nothing.
     detail:
-      "The app restarts to apply it. Terminal sessions survive — they belong to the daemon, not to this window — but their panes are re-opened empty, so finish anything mid-flight first.",
+      "The app restarts to apply it. Terminal sessions survive — they belong to the daemon, not to this window — and their panes reattach to the same shells, with scrollback, when it comes back.",
     buttons: ["Restart Now", "Later"],
     defaultId: 0,
     cancelId: 1,

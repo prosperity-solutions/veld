@@ -133,6 +133,9 @@ pub async fn install(
         veld_core::setup::write_desktop_update_report(
             &version,
             outcome.as_ref().map(|_| ()).map_err(|e| e.as_str()),
+            // This command only ever installs the app, so a failure here is
+            // always retried with `veld desktop update`.
+            veld_core::setup::UpdateHalf::App,
         );
     }
 
@@ -163,7 +166,7 @@ pub async fn install(
 /// script's own search than to install into a directory nobody named. A relative
 /// path is refused for the same reason: the script runs from wherever the CLI
 /// happened to be spawned, which under launchd is `/`.
-fn bundle_dir_of(exe: &Path) -> Option<PathBuf> {
+pub(crate) fn bundle_dir_of(exe: &Path) -> Option<PathBuf> {
     let bundle = exe
         .ancestors()
         .find(|p| p.file_name().is_some_and(|n| n == "Veld.app"))?;
@@ -200,7 +203,7 @@ fn bundle_dir_of(exe: &Path) -> Option<PathBuf> {
 /// `mv: … Read-only file system` and no prefix at all. Preferring a prefixed
 /// line and *settling* for any line is the difference between telling the user
 /// their disk is full and telling them "exited with code 1".
-fn last_diagnostic(log: &Path) -> Option<String> {
+pub(crate) fn last_diagnostic(log: &Path) -> Option<String> {
     let text = std::fs::read_to_string(log).ok()?;
     let clamp = |l: &str| -> String {
         // Long enough for any line the script emits, short enough that a runaway
@@ -231,6 +234,55 @@ fn relaunch_app(app_dir: Option<&Path>) {
         .status();
 }
 
+/// What this CLI can be asked to do, for a caller that cannot know its version.
+///
+/// The app already runs `veld desktop status --json` as a capability probe before
+/// it hands anything over, so the answer travels on a call that was being made
+/// anyway. A **list**, not a boolean per feature: the app tests for membership, an
+/// older CLI omits the key entirely, and adding the next capability does not
+/// change the shape either side parses.
+///
+/// `full-update-handoff` — `veld update` accepts `--wait-pid`/`--relaunch`/
+/// `--app-path` and moves *both* halves of the release. Without it the app must
+/// fall back to `veld desktop update`, which moves the app only and leaves the
+/// CLI behind.
+///
+/// Advertised **conditionally**, and the condition is the whole reason this is a
+/// capability rather than a version floor: see [`can_hand_off_full_update`].
+fn capabilities() -> Vec<&'static str> {
+    let mut caps = Vec::new();
+    if can_hand_off_full_update(&std::env::current_exe().unwrap_or_default()) {
+        caps.push("full-update-handoff");
+    }
+    caps
+}
+
+/// Whether an *unattended* full update from this binary can actually succeed.
+///
+/// It cannot when the CLI lives under `/usr/local/`. `install.sh` treats that as
+/// a system install and refuses to relocate it — a privileged LaunchDaemon still
+/// references `/usr/local` paths — so under `VELD_NON_INTERACTIVE=1` it requires
+/// `sudo -n` and exits 1 when that fails. The app's handoff is a detached child
+/// with no controlling terminal, so `sudo -n` fails there unless a credential
+/// happens to be cached: the app would quit, the whole update would fail, and the
+/// user would be told to run curl by hand.
+///
+/// So the app is told "no" and takes the app-only route it took before this
+/// existed — which works, and leaves `veld update` in a terminal (where sudo may
+/// prompt) as the way those machines move both halves. Advertising a capability
+/// this binary cannot deliver would be worse than not having it.
+///
+/// Deliberately **not** probed with `sudo -n`: this runs on the app's periodic
+/// update check, and a status command must not poke sudo every six hours.
+/// Mirrors install.sh's own `case "$EXISTING_DIR" in /usr/local/*)` test, which
+/// `tests/validate-install-contract.sh` pins.
+fn can_hand_off_full_update(exe: &Path) -> bool {
+    let Some(dir) = exe.parent() else {
+        return false;
+    };
+    !dir.starts_with("/usr/local")
+}
+
 /// `veld desktop status` -- where the app is and whether it matches this CLI.
 ///
 /// Two different questions, depending on the platform, and conflating them was a
@@ -258,12 +310,14 @@ pub async fn status(json: bool) -> i32 {
                 "version": version,
                 "cli_version": cli_version,
                 "in_sync": version.as_deref() == Some(cli_version),
+                "capabilities": capabilities(),
             }),
             None => serde_json::json!({
                 "installed": false,
                 "managed": true,
                 "platform": std::env::consts::OS,
                 "cli_version": cli_version,
+                "capabilities": capabilities(),
             }),
         };
         println!(
@@ -312,6 +366,7 @@ fn status_unmanaged(json: bool, cli_version: &str) -> i32 {
                 "platform": std::env::consts::OS,
                 "found": path.as_ref().map(|p| p.display().to_string()),
                 "cli_version": cli_version,
+                "capabilities": capabilities(),
             }))
             .unwrap_or_default()
         );
@@ -425,5 +480,53 @@ mod tests {
             )),
             None
         );
+    }
+
+    #[test]
+    fn a_system_install_does_not_advertise_a_handoff_it_cannot_complete() {
+        // The failure this guards is not subtle: advertise the capability from
+        // `/usr/local`, and the app quits into a `veld update` that needs
+        // `sudo -n` it cannot get, fails, and leaves the user with a closed app
+        // and no new version. install.sh refuses to relocate a system install
+        // because a privileged LaunchDaemon still references those paths, so this
+        // is not something a later release can simply fix.
+        assert!(!can_hand_off_full_update(Path::new("/usr/local/bin/veld")));
+        assert!(!can_hand_off_full_update(Path::new("/usr/local/veld")));
+
+        // Everywhere install.sh updates in place without sudo.
+        assert!(can_hand_off_full_update(Path::new(
+            "/opt/homebrew/bin/veld"
+        )));
+        assert!(can_hand_off_full_update(Path::new(
+            "/Users/x/.local/bin/veld"
+        )));
+
+        // Not a substring test: `/usr/local-ish` is a different directory, and
+        // `Path::starts_with` compares components, which is what makes that true.
+        assert!(can_hand_off_full_update(Path::new(
+            "/usr/local-ish/bin/veld"
+        )));
+
+        // A path with no parent cannot be reasoned about, so it gets the
+        // conservative answer rather than the convenient one.
+        assert!(!can_hand_off_full_update(Path::new("/")));
+    }
+
+    #[test]
+    fn the_advertised_capabilities_are_the_ones_the_app_looks_for() {
+        // Pins the *set*, not just membership: a capability added here without a
+        // consumer, or renamed, is caught by the cross-language test in
+        // `crates/veld-core/tests/install_script_contract.rs`, which reads this
+        // file. This one pins that the list is derived rather than constant —
+        // turning `capabilities()` back into a `const` is the natural-but-wrong
+        // simplification, and it would re-enable the handoff on `/usr/local`.
+        let from_a_user_prefix = {
+            let mut caps = Vec::new();
+            if can_hand_off_full_update(Path::new("/Users/x/.local/bin/veld")) {
+                caps.push("full-update-handoff");
+            }
+            caps
+        };
+        assert_eq!(from_a_user_prefix, vec!["full-update-handoff"]);
     }
 }

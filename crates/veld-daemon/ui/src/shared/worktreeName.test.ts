@@ -2,10 +2,85 @@ import { describe, expect, it } from "vitest";
 
 import {
   MAX_DERIVED_LEN,
+  MAX_DISPLAY_NAME_LEN,
   aliasCollides,
   deriveAlias,
   deriveBranch,
+  deriveDisplayName,
+  worktreeLabel,
 } from "./worktreeName";
+
+describe("deriveDisplayName", () => {
+  it("keeps everything the alias throws away", () => {
+    // The whole reason `display_name` exists beside the alias: the alias of this
+    // is `checkout-v2-final`, and that used to be the only name the rail had.
+    expect(deriveDisplayName("Checkout V2 (final)")).toBe("Checkout V2 (final)");
+    expect(deriveDisplayName("Hello test")).toBe("Hello test");
+    expect(deriveDisplayName("Zahlungsübersicht")).toBe("Zahlungsübersicht");
+  });
+
+  it("normalises whitespace and nothing else", () => {
+    expect(deriveDisplayName("  Hello   test  ")).toBe("Hello test");
+    expect(deriveDisplayName("a\tb")).toBe("a b");
+    // Punctuation and case are content, not noise.
+    expect(deriveDisplayName("A/B_c.d")).toBe("A/B_c.d");
+  });
+
+  it("caps at the daemon's bound without leaving a trailing space", () => {
+    const long = "word ".repeat(40);
+    const capped = deriveDisplayName(long);
+    expect(capped.length).toBeLessThanOrEqual(MAX_DISPLAY_NAME_LEN);
+    // `slice` can land mid-gap; a name ending in a space renders as one that
+    // ends early and compares unequal to the same name retyped.
+    expect(capped).toBe(capped.trim());
+  });
+
+  it("caps by code point, so a surrogate pair is never cut in half", () => {
+    // `String.prototype.slice` cuts UTF-16 code units. A cap landing inside a
+    // pair leaves a lone high surrogate, `JSON.stringify` emits it as `\ud83d`,
+    // and serde_json rejects the entire request body — so the failure surfaced
+    // as an unparseable payload rather than as "that name is too long", with
+    // nothing created. The daemon counts characters, so this also makes the
+    // client's courtesy bound mean the same thing as the real one.
+    const capped = deriveDisplayName("😀".repeat(MAX_DISPLAY_NAME_LEN + 20));
+    expect([...capped]).toHaveLength(MAX_DISPLAY_NAME_LEN);
+    expect(JSON.stringify(capped)).not.toMatch(/\\u[dD][89abAB]/);
+    // Round-trips, which a lone surrogate does not.
+    expect(JSON.parse(JSON.stringify(capped))).toBe(capped);
+
+    // The boundary case: one leading ASCII char makes the cap land exactly
+    // between the two halves of an emoji.
+    const straddle = deriveDisplayName("a" + "😀".repeat(MAX_DISPLAY_NAME_LEN));
+    expect(JSON.parse(JSON.stringify(straddle))).toBe(straddle);
+  });
+
+  it("collapses a whitespace-only name to nothing", () => {
+    // `""` is the "no separate name" sentinel, so this is how typing spaces into
+    // the rename dialog gets you back to the alias rather than to a blank row.
+    expect(deriveDisplayName("   ")).toBe("");
+    expect(deriveDisplayName("")).toBe("");
+  });
+});
+
+describe("worktreeLabel", () => {
+  it("prefers the display name and falls back to the alias", () => {
+    expect(worktreeLabel({ alias: "hello-test", display_name: "Hello test" })).toBe(
+      "Hello test",
+    );
+    // Every row created before the column existed is in this state.
+    expect(worktreeLabel({ alias: "hello-test", display_name: "" })).toBe(
+      "hello-test",
+    );
+  });
+
+  it("falls back when the field is absent, not just empty", () => {
+    // A UI build talking to a daemon that predates v13 gets no key at all, and
+    // `w.display_name || w.alias` written inline at a call site would be fine
+    // here but `w.display_name` alone would render nothing. Pinned so the
+    // fallback cannot be narrowed to `""` later.
+    expect(worktreeLabel({ alias: "hello-test" })).toBe("hello-test");
+  });
+});
 
 describe("deriveAlias", () => {
   it("slugs a typed label into an identifier the daemon accepts", () => {

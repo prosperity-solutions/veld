@@ -1720,6 +1720,54 @@ async fn run_install_script(
         cmd.env_remove(key);
     }
 
+    // The script decides **where to install** by asking `command -v veld`, and a
+    // PATH that cannot find this binary sends it somewhere else entirely. That is
+    // not hypothetical: Veld Desktop spawns the CLI with a deliberate
+    // `PATH=/usr/bin:/bin:/usr/sbin:/sbin` (`SAFE_PATH` in `desktop/src/updater.js`,
+    // there so a GUI app's arbitrary launchd PATH cannot decide what a subprocess
+    // resolves to). Under it, `command -v veld` finds nothing, install.sh's
+    // `EXISTING_VELD` block is skipped whole, and `INSTALL_DIR` falls back to
+    // `$HOME/.local/bin` — so a machine whose CLI lives in `/opt/homebrew/bin`
+    // gets a *second* CLI in `~/.local/bin` and keeps running the old one.
+    // Silently, exit 0.
+    //
+    // **Appended, never prepended.** A terminal `veld update` already has a PATH
+    // that finds the right veld, and putting this directory first would let a
+    // binary run from one location retarget an install the user's PATH says
+    // belongs to another. Appending changes nothing when the inherited PATH can
+    // already answer the question, and answers it only when nothing else can.
+    if let Ok(dir) = std::env::current_exe().and_then(|exe| {
+        exe.parent()
+            .map(|d| d.to_path_buf())
+            .ok_or_else(|| std::io::Error::other("no parent"))
+    }) {
+        let inherited = std::env::var_os("PATH").unwrap_or_default();
+        // Empty components dropped, and that is not tidying. `split_paths("")`
+        // yields one *empty* entry, and an empty PATH element means the current
+        // working directory — so an unset or empty PATH would come out as
+        // `:<exe dir>` and have the install script resolve `curl`, `tar` and
+        // `sudo` from whatever directory it happened to be spawned in.
+        let mut parts: Vec<PathBuf> = std::env::split_paths(&inherited)
+            .filter(|p| !p.as_os_str().is_empty())
+            .collect();
+        parts.push(dir);
+        match std::env::join_paths(parts) {
+            Ok(joined) => cmd.env("PATH", joined),
+            // Only reachable if a directory on PATH — or this binary's own —
+            // contains a colon, which `join_paths` cannot express. Leaving the
+            // inherited PATH would silently reintroduce the wrong-install-dir bug
+            // this block exists to prevent, so say so rather than carry on
+            // quietly: the log is the only place anyone will see it.
+            Err(e) => {
+                eprintln!(
+                    "Warning: could not extend PATH for the installer ({e}); it may install to \
+                     the default location rather than beside this binary."
+                );
+                &mut cmd
+            }
+        };
+    }
+
     for (key, value) in extra_env {
         cmd.env(key, value);
     }
@@ -1811,6 +1859,243 @@ pub fn desktop_app_status() -> Option<(PathBuf, Option<String>)> {
     desktop_app_status_in(None)
 }
 
+/// The main process of a running Veld Desktop, for the bundle at `bundle`.
+///
+/// `ps` rather than `pgrep`, and the difference is not stylistic. `pgrep -f`
+/// matches a **regex** against a **bounded prefix** of the command line, and
+/// install.sh has been bitten by both halves (see the guard in
+/// `install_desktop_app`): a destination containing `+` or `.` matches a
+/// different set of processes than the one asked about, and a bundle under a deep
+/// path hides a bug that a bundle in `/Applications` shows. Reading `ps` output
+/// and comparing prefixes in Rust has neither property — there is no pattern to
+/// escape and no truncation to fall off the end of.
+///
+/// Only the main process matches, which is what makes the prefix the right test:
+/// Electron's renderer and GPU children run from
+/// `…/Contents/Frameworks/Veld Helper.app/…`, so `…/Contents/MacOS/` selects the
+/// one process whose exit means the bundle is free to be replaced.
+///
+/// An empty result means "no process is running from that bundle", not "the app
+/// is not installed" — callers must not conflate them.
+pub fn desktop_app_pids(bundle: &std::path::Path) -> Vec<u32> {
+    if std::env::consts::OS != "macos" {
+        return Vec::new();
+    }
+    // `-ww` disables the width clamp `ps` otherwise applies to the command
+    // column; without it a long bundle path is silently cut off and the prefix
+    // never matches.
+    // `uid=` as well as pid and command: `-a` lists **every user's** processes,
+    // and on a machine with fast user switching and a shared `/Applications` that
+    // means another account's Veld appears here. Signalling it fails with EPERM,
+    // the poll never clears, and this user's app half is permanently `Refused` —
+    // by a window they cannot even see. Only this uid's processes can be quit, so
+    // only this uid's processes count as running.
+    let out = match std::process::Command::new("/bin/ps")
+        .args(["-axww", "-o", "uid=,pid=,command="])
+        .output()
+    {
+        Ok(out) if out.status.success() => out,
+        // A `ps` that will not run is not evidence that nothing is running, and
+        // the callers below treat "no pids" as "safe to replace the bundle". So
+        // this is the one place where being wrong is expensive — but there is
+        // nothing better to return, and every caller re-checks after the fact by
+        // asking whether the installed version actually moved.
+        _ => return Vec::new(),
+    };
+    pids_running_from(
+        &String::from_utf8_lossy(&out.stdout),
+        bundle,
+        nix::unistd::getuid().as_raw(),
+    )
+}
+
+/// The parsing half of [`desktop_app_pids`], split out so it can be tested
+/// against real `ps` output without one.
+///
+/// Each line is `<uid> <pid> <argv…>`. A process matches when it belongs to
+/// `uid` *and* its command line **starts with** `<bundle>/Contents/MacOS/` — a
+/// prefix rather than an equality, because argv[0] is followed by the app's own
+/// arguments, and a prefix rather than a substring, because the CLI that spawned
+/// this carries the same path inside `--app-path` and would otherwise match
+/// itself. That exact bug shipped once in install.sh's `pgrep` guard, where it
+/// made the app's self-update fail every time by reporting the app as running
+/// against its own caller.
+fn pids_running_from(ps_output: &str, bundle: &std::path::Path, uid: u32) -> Vec<u32> {
+    let prefix = bundle.join("Contents/MacOS/");
+    let prefix = prefix.to_string_lossy().into_owned();
+
+    ps_output
+        .lines()
+        .filter_map(|line| {
+            let (owner, rest) = line.trim_start().split_once(char::is_whitespace)?;
+            if owner.parse::<u32>().ok()? != uid {
+                return None;
+            }
+            let (pid, command) = rest.trim_start().split_once(char::is_whitespace)?;
+            if !command.trim_start().starts_with(&prefix) {
+                return None;
+            }
+            pid.parse::<u32>().ok()
+        })
+        .collect()
+}
+
+/// How [`quit_desktop_app`] went.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QuitOutcome {
+    /// Nothing was running from that bundle; there was nothing to quit.
+    NotRunning,
+    /// The app is gone and the bundle can be replaced.
+    Quit,
+    /// It was asked and it is still running — an unsaved-work sheet, a modal, a
+    /// hung renderer. The caller must leave the bundle alone.
+    Refused,
+}
+
+/// Ask Veld Desktop to quit, and wait until it actually has.
+///
+/// Two mechanisms, in this order, and the order is the whole design:
+///
+/// 1. An Apple Event (`osascript … to quit`). This is a *polite* quit: the app
+///    runs `before-quit`, so window layout and pane state are persisted exactly
+///    as they are when the user presses ⌘Q. It works against every version of the
+///    app that has ever shipped, which is why it goes first — but it is
+///    Automation-TCC-gated, so the first use prompts, and a denial makes it fail.
+/// 2. `SIGTERM`, which needs no permission. The app installs a handler that turns
+///    it into `app.quit()`, so from this release on it is just as polite as the
+///    Apple Event. Against an app that predates the handler it is Node's default
+///    disposition — the process dies without running `before-quit`, losing that
+///    session's window layout. That is the cost of the fallback and the reason it
+///    is the fallback.
+///
+/// **Never `SIGKILL`.** An app that refuses both is an app with something on
+/// screen the user has not answered, and taking it out from under them to install
+/// an update is worse than not installing the update.
+pub async fn quit_desktop_app(bundle: &std::path::Path, timeout: Duration) -> QuitOutcome {
+    let pids = desktop_app_pids(bundle);
+    if pids.is_empty() {
+        return QuitOutcome::NotRunning;
+    }
+
+    // Half the budget for the polite route, the rest for the fallback — rather
+    // than spending it all on the first mechanism and leaving the second no time
+    // to work. Measured against a real clock rather than handed out twice: the
+    // Apple Event *and* the wait for it share this half, so a slow `osascript`
+    // eats into its own polling budget instead of extending the total past what
+    // this function's caller was promised.
+    let started = std::time::Instant::now();
+    let half = timeout / 2;
+    let remaining = |spent_by: Duration| spent_by.saturating_sub(started.elapsed());
+
+    // The bundle's **path**, not `application id "dev.veld.desktop"`. A machine
+    // with two installed copies (`/Applications` and `~/Applications`) has one
+    // bundle id and two bundles, and LaunchServices decides which the id means —
+    // so an id-addressed quit can close the copy that is *not* being replaced,
+    // leaving the target running and an innocent window shut. `open_desktop_app`
+    // only ever reopens the bundle this plan named, so that window would not come
+    // back either. A path names exactly one app.
+    let target = format!(
+        "tell application {:?} to quit",
+        bundle.to_string_lossy().as_ref()
+    );
+
+    // Timed out, and this is what `kill_on_drop` above is for: dropping the
+    // future is what kills the child. Sending an Apple Event is Automation-TCC
+    // gated, so the first call can sit on a consent prompt, and an app that is
+    // not pumping its event loop leaves AppleScript waiting on its own default
+    // timeout (~2 minutes) — well past the budget this function promises, and
+    // never reaching the SIGTERM fallback the split budget exists to fund.
+    let _ = tokio::time::timeout(
+        half,
+        tokio::process::Command::new("/usr/bin/osascript")
+            .args(["-e", &target])
+            // Whatever the user's environment says, this needs only what macOS ships.
+            .env("PATH", "/usr/bin:/bin")
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await;
+
+    if wait_for_exit(bundle, remaining(half)).await {
+        return QuitOutcome::Quit;
+    }
+
+    // The Apple Event was denied, went to a different copy of the app, or the app
+    // is old enough not to answer it. Signal the pids that were actually found
+    // running from *this* bundle, which is the part the Apple Event could get
+    // wrong.
+    for pid in desktop_app_pids(bundle) {
+        let _ = nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(pid as i32),
+            nix::sys::signal::Signal::SIGTERM,
+        );
+    }
+
+    if wait_for_exit(bundle, remaining(timeout)).await {
+        QuitOutcome::Quit
+    } else {
+        QuitOutcome::Refused
+    }
+}
+
+/// Poll until nothing runs from `bundle`, or the budget is spent.
+async fn wait_for_exit(bundle: &std::path::Path, timeout: Duration) -> bool {
+    let start = std::time::Instant::now();
+    loop {
+        if desktop_app_pids(bundle).is_empty() {
+            return true;
+        }
+        if start.elapsed() >= timeout {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// Wait for one specific process to exit — the app handing its own update over.
+///
+/// `kill(pid, 0)` rather than a `ps` scan: the app tells us its pid, and the
+/// question here is only whether that process is gone. `ESRCH` is the answer;
+/// `EPERM` counts as still-running, since a pid we may not signal is a pid that
+/// exists.
+///
+/// Returns false on timeout, which the caller must treat as "do not touch the
+/// bundle" — an app that has not exited is still reading from it.
+pub async fn wait_for_pid_exit(pid: u32, timeout: Duration) -> bool {
+    // `kill(0, …)` means "my own process group", and `kill(-n, …)` means a group
+    // too — neither is a process this can wait for, and both would poll until the
+    // timeout and then claim the app never quit. Callers filter 0 already; this
+    // is the same answer stated where the pid is actually used.
+    if pid == 0 || pid > i32::MAX as u32 {
+        return false;
+    }
+    let target = nix::unistd::Pid::from_raw(pid as i32);
+    let start = std::time::Instant::now();
+    loop {
+        if nix::sys::signal::kill(target, None) == Err(nix::errno::Errno::ESRCH) {
+            return true;
+        }
+        if start.elapsed() >= timeout {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// Reopen Veld Desktop after an update that had to close it.
+///
+/// `open` on an app that is already running focuses it rather than starting a
+/// second copy, so this is safe to call on a path that is not certain the app is
+/// down — which every failure path here is.
+pub fn open_desktop_app(app: &std::path::Path) {
+    if std::env::consts::OS != "macos" {
+        return;
+    }
+    let _ = std::process::Command::new("/usr/bin/open")
+        .arg(app)
+        .status();
+}
+
 /// The paths electron-builder's `.deb` installs Veld Desktop to.
 ///
 /// `productName: Veld` + `executableName: veld-desktop` (desktop/electron-builder.yml)
@@ -1869,7 +2154,30 @@ pub fn desktop_update_report_path() -> Option<PathBuf> {
 ///
 /// Best-effort by design: a report that cannot be written must not turn a
 /// successful install into a failed one.
-pub fn write_desktop_update_report(version: &str, result: Result<(), &str>) {
+/// Which half of the release a handed-off update was working on when it failed.
+///
+/// The app's dialog and its retry advice differ, and getting it wrong is worse
+/// than saying nothing: telling someone whose *CLI* update failed to run
+/// `veld desktop update` would move the app and leave the daemon on the release
+/// that actually broke.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpdateHalf {
+    /// Veld Desktop only — `veld desktop install|update`.
+    App,
+    /// The whole release, through `veld update`.
+    Release,
+}
+
+impl UpdateHalf {
+    fn as_str(self) -> &'static str {
+        match self {
+            UpdateHalf::App => "app",
+            UpdateHalf::Release => "release",
+        }
+    }
+}
+
+pub fn write_desktop_update_report(version: &str, result: Result<(), &str>, half: UpdateHalf) {
     let Some(path) = desktop_update_report_path() else {
         return;
     };
@@ -1881,6 +2189,10 @@ pub fn write_desktop_update_report(version: &str, result: Result<(), &str>) {
         "ok": result.is_ok(),
         "error": result.err(),
         "log": desktop_update_log_path().map(|p| p.display().to_string()),
+        // Absent in reports written before this field existed, which the app
+        // reads as the app-only half — correct, since that was the only thing
+        // that could write one.
+        "half": half.as_str(),
         "finished_at": chrono::Utc::now().to_rfc3339(),
     });
     let _ = std::fs::write(&path, payload.to_string());
@@ -2465,10 +2777,165 @@ fn hang_up_terminal_holders(veld_dir: &Path) {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::{
         first_existing_file, init_lua_loads_veld_spoon, install_script_override_from,
-        linux_desktop_candidates, parse_launchctl_pid, parse_systemd_main_pid, remove_spoon_files,
+        linux_desktop_candidates, parse_launchctl_pid, parse_systemd_main_pid, pids_running_from,
+        remove_spoon_files,
     };
+
+    /// This user, in the fixture below.
+    const ME: u32 = 501;
+
+    /// Real `ps -axww -o uid=,pid=,command=` output, trimmed to the lines that
+    /// decide this. Every one of them is a case that has to come out right before
+    /// the installer is allowed to replace a bundle.
+    const PS_OUTPUT: &str = "\
+    0     1 /sbin/launchd
+  501   901 /Applications/Veld.app/Contents/MacOS/Veld
+  501   902 /Applications/Veld.app/Contents/Frameworks/Veld Helper.app/Contents/MacOS/Veld Helper --type=renderer
+  501   903 /usr/local/bin/veld update --wait-pid 901 --relaunch --app-path /Applications/Veld.app/Contents/MacOS/Veld
+  501   904 /Users/x/Applications/Veld.app/Contents/MacOS/Veld
+  501   905 /Applications/Veld.app/Contents/MacOS/Veld --some-flag
+  502   906 /Applications/Veld.app/Contents/MacOS/Veld
+  501 notapid /Applications/Veld.app/Contents/MacOS/Veld
+  501   907
+";
+
+    /// Pid 0 is a process *group*, not a process.
+    ///
+    /// `kill(0, sig)` addresses the caller's own group and always succeeds, so
+    /// polling it for `ESRCH` never terminates early: the caller would spend its
+    /// whole 30s budget and then report that Veld Desktop had not quit — about a
+    /// process that never existed. Asserted rather than commented, because the
+    /// natural simplification is to delete the guard as a redundant check on a
+    /// value "the app never sends".
+    #[test]
+    fn pid_zero_is_not_a_process_to_wait_for() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let started = std::time::Instant::now();
+        assert!(!rt.block_on(super::wait_for_pid_exit(0, Duration::from_secs(30))));
+        // Returned on the guard, not by exhausting the budget. Bounded well below
+        // the budget rather than near zero: the claim is "it did not poll for 30
+        // seconds", and a tighter bound would only add a way for a loaded CI
+        // runner to fail a test about something other than timing.
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "took {:?} — pid 0 should be refused before any polling",
+            started.elapsed(),
+        );
+
+        // Anything that would wrap into a negative `Pid` is a group too.
+        assert!(!rt.block_on(super::wait_for_pid_exit(u32::MAX, Duration::from_secs(30))));
+    }
+
+    #[test]
+    fn another_users_copy_of_the_app_is_not_this_users_problem() {
+        // pid 906 is the same bundle under a different uid — fast user switching
+        // with a shared /Applications. Counting it would mean SIGTERMing a
+        // process this user may not signal (EPERM), so the poll would never
+        // clear and the app half would be permanently `Refused` by a window this
+        // user cannot see.
+        let pids = pids_running_from(
+            PS_OUTPUT,
+            std::path::Path::new("/Applications/Veld.app"),
+            ME,
+        );
+        assert!(!pids.contains(&906));
+        // …and it is found when it *is* the asking user.
+        assert_eq!(
+            pids_running_from(
+                PS_OUTPUT,
+                std::path::Path::new("/Applications/Veld.app"),
+                502
+            ),
+            vec![906],
+        );
+    }
+
+    #[test]
+    fn only_the_main_process_of_the_named_bundle_counts_as_running() {
+        let pids = pids_running_from(
+            PS_OUTPUT,
+            std::path::Path::new("/Applications/Veld.app"),
+            ME,
+        );
+
+        // 901 is the app. 905 is the app with arguments — a prefix match, because
+        // argv[0] is followed by the app's own flags.
+        assert_eq!(pids, vec![901, 905]);
+
+        // 902 is Electron's renderer, under Contents/Frameworks. It dies with its
+        // parent, so counting it would report the app as running for as long as a
+        // helper took to exit.
+        assert!(!pids.contains(&902));
+
+        // 903 is the CLI that spawned this, and it carries the bundle path inside
+        // `--app-path`. Matching it is not hypothetical: unanchored, install.sh's
+        // `pgrep` guard did exactly this and made the app's self-update fail every
+        // single time by finding its own caller.
+        assert!(!pids.contains(&903));
+
+        // 904 is a *different* copy of the app. Replacing /Applications because
+        // something is running from ~/Applications would be the wrong bundle.
+        assert!(!pids.contains(&904));
+    }
+
+    #[test]
+    fn a_second_copy_is_found_by_naming_it_and_not_otherwise() {
+        assert_eq!(
+            pids_running_from(
+                PS_OUTPUT,
+                std::path::Path::new("/Users/x/Applications/Veld.app"),
+                ME,
+            ),
+            vec![904],
+        );
+        // Nothing runs from here, and "no pids" is what lets the installer
+        // proceed — so an unrelated path must come back empty rather than
+        // borrowing another bundle's answer.
+        assert!(pids_running_from(PS_OUTPUT, std::path::Path::new("/opt/Veld.app"), ME).is_empty());
+    }
+
+    #[test]
+    fn malformed_ps_lines_are_dropped_rather_than_guessed() {
+        // A non-numeric pid and a line with no command are both real `ps` output
+        // shapes (a header, a truncated read). Neither may become a pid this
+        // sends SIGTERM to.
+        let pids = pids_running_from(
+            PS_OUTPUT,
+            std::path::Path::new("/Applications/Veld.app"),
+            ME,
+        );
+        assert!(pids.iter().all(|p| *p == 901 || *p == 905));
+        assert!(
+            pids_running_from("", std::path::Path::new("/Applications/Veld.app"), ME).is_empty()
+        );
+    }
+
+    /// The bundle path is used verbatim, and that is the whole reason `ps` is read
+    /// here instead of `pgrep -f` being asked a question.
+    ///
+    /// `pgrep -f` takes a **regex**: a destination containing `+`, `.` or `(` — a
+    /// versioned directory, a user named `a.b` — matches a different set of
+    /// processes than the one asked about, in either direction. There is no
+    /// pattern to escape in a prefix comparison, so a path full of metacharacters
+    /// is just a path.
+    #[test]
+    fn regex_metacharacters_in_the_path_are_not_a_pattern() {
+        let ps = "\
+  501 601 /Users/a.b/Apps (2)/Veld.app/Contents/MacOS/Veld
+  501 602 /Users/axb/AppsX2X/Veld.app/Contents/MacOS/Veld
+";
+        assert_eq!(
+            pids_running_from(ps, std::path::Path::new("/Users/a.b/Apps (2)/Veld.app"), ME),
+            vec![601],
+        );
+    }
 
     /// The happy path of the log preparation, against a real filesystem.
     ///

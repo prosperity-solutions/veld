@@ -49,10 +49,12 @@ package manager. Finding nothing is not the same as nothing being installed —
 an AppImage lives wherever you saved it — so it says that too, and the `--json`
 output omits `installed` entirely rather than asserting `false`.
 
-**An app operation never touches the CLI.** `veld desktop install|update` runs
-the installer with `VELD_DESKTOP_ONLY=1`, which skips the CLI tarball, the binary
-swap, the service restarts and the sudo negotiation entirely — so updating the
-app cannot restart your daemon or ask for a password.
+**`veld desktop install|update` never touches the CLI.** It runs the installer
+with `VELD_DESKTOP_ONLY=1`, which skips the CLI tarball, the binary swap, the
+service restarts and the sudo negotiation entirely — so *that command* cannot
+restart your daemon or ask for a password. Note the scope: it is a property of
+these two subcommands, not of "updating the app". The app's own updater goes
+through `veld update` and deliberately does move everything (see below).
 
 | Variable | Effect |
 |---|---|
@@ -87,13 +89,44 @@ One documented cost: a custom icon lives in the file's resource fork, and
 `codesign --verify` passes, the ad-hoc signature is intact, and the binaries run
 and are launched by launchd normally.
 
-The app's own *Check for Updates…* takes the same route: it spawns
-`veld desktop update`, quits so its bundle can be replaced, and the CLI reopens
-it. Because nothing is watching a terminal on that path, the installer's output
-goes to `~/.veld/desktop-update.log` and the outcome to
+**The app's own *Check for Updates…* updates the whole release.** It offers
+*veld `<version>`* rather than a new app, spawns `veld update --wait-pid <pid>
+--relaunch --app-path <exe>` detached, quits so its bundle can be replaced, and
+the CLI moves every half and reopens it. One click, one restart, no follow-up
+trip to a terminal.
+
+Which command it spawns is a **capability** decision, not a version comparison:
+`veld desktop status --json` carries a `capabilities` array, and the app uses the
+full route only when it contains `full-update-handoff`. A CLI without it gets the
+app-only `veld desktop update --version <v>` (which needs the explicit version, or
+an older CLI reinstalls its own and re-offers the newer one forever), and the
+dialog says the CLI half still needs `veld update`. A CLI with no `veld desktop`
+at all is not handed anything — the app points at the release page instead.
+
+**A CLI under `/usr/local` withholds the capability on purpose**, however new it
+is. `install.sh` treats that as a system install and will not relocate it — a
+privileged LaunchDaemon still references `/usr/local` paths — so under
+`VELD_NON_INTERACTIVE=1` it requires `sudo -n` and exits 1 when that fails. The
+handoff is a detached child with no controlling terminal, so `sudo -n` fails there
+unless a credential is already cached. Advertising a capability the binary cannot
+deliver would turn a working app-only update into a failed full one, so those
+machines keep the app-only route from the GUI and use `veld update` in a terminal
+— where sudo can prompt — to move both halves. Deliberately *not* probed with
+`sudo -n`: this runs on the app's six-hourly update check, and a status command
+must not poke sudo on a timer.
+
+Because nothing is watching a terminal on that path, everything the handed-off
+update prints goes to `~/.veld/desktop-update.log` and the outcome to
 `~/.veld/desktop-update.json`, which the app reads when it comes back — a failed
 update reaches you as a dialog with the reason, not as an app that quietly
 reopened on the old version.
+
+That report carries a `half` field, `"app"` or `"release"`, because the retry
+advice depends on it: a full handoff can fail on the *CLI* half and never reach
+the app, and telling that user to run `veld desktop update` would move the app
+while leaving the daemon on the release that actually broke. A report with no
+`half` is read as `"app"` — the only thing that could have written one before the
+field existed.
 
 ## Updating
 
@@ -109,6 +142,27 @@ are left running** — state lives in a migrated SQLite DB, so a binary swap no
 longer risks stale state, and services keep serving throughout. In privileged
 mode the root helper is restarted via sudo (you may be prompted once for your
 password); if sudo isn't available, the helper restarts itself shortly after.
+
+**If Veld Desktop is open it is closed first, and only with your agreement.** Its
+bundle cannot be replaced while it runs, so before anything is installed the
+command asks `Close Veld Desktop, update both halves, and reopen it? [Y/n]`,
+reassuring you that terminal sessions belong to the daemon, keep running while
+the app is closed, and reattach with their scrollback. Answering yes quits it
+over an Apple Event (so `before-quit` persists the window layout, exactly as ⌘Q
+would), falling back to `SIGTERM` and never `SIGKILL`, then reopens it when the
+update is done — including when the update failed. Answering no updates the CLI
+half only. An app that will not quit (an unanswered dialog) is left alone.
+
+**Agents and scripts: this never closes the app behind your back.** The prompt is
+reached only with a TTY on stdin *and* stdout and `VELD_NON_INTERACTIVE` unset or
+empty. Anywhere else the app half is skipped with a message rather than assumed,
+and EOF on stdin counts as "no" — an answer nobody gave is not consent.
+
+There is deliberately no flag to answer it in advance, and piping in a `y` does
+not work either: a pipe is not a TTY, so that run is non-interactive and skips
+the app rather than reading the input. A script that wants the app updated should
+**quit the app itself** and then run `veld update` — with nothing running from the
+bundle there is no question to ask, and the app half proceeds normally.
 
 ## Uninstalling
 

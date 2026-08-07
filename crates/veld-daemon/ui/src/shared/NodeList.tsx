@@ -125,16 +125,15 @@ function Spark(props: { points: number[] }) {
  */
 function NodeStatsLine(props: { stats?: NodeStats; expanded: boolean; onToggle?: () => void }) {
   const s = props.stats;
-  if (!s) {
-    return (
-      <span className="node-stats">
-        <Text size="xs" c="dimmed">
-          no stats yet
-        </Text>
-      </span>
-    );
-  }
-  const body = (
+  // No live sample. That is not the same as no data: a `command` step — a build,
+  // an install — is sampled only while it runs, so the moment it succeeds its
+  // live reading goes away and its memory curve is all that is left. Offer the
+  // curve whenever the caller says this run can be graphed.
+  const body = !s ? (
+    <Text size="xs" c="dimmed">
+      {props.onToggle ? "resource history" : "no stats yet"}
+    </Text>
+  ) : (
     <>
       <Tooltip label="Memory footprint of the whole process tree (PSS / phys_footprint). Click for the breakdown.">
         <Text size="xs" ff="monospace" aria-label={`Memory ${fmtBytes(s.footprint)}`}>
@@ -183,6 +182,8 @@ function NodeCard(props: {
   node: NodeRow;
   run: RunRef;
   stats?: NodeStats;
+  /** Whether this run's recorded resource history can be charted at all. */
+  graphable: boolean;
   canAct: boolean;
   onChanged: () => void;
   /** Open this node's URL in a browser pane. Absent where there are no panes. */
@@ -194,6 +195,15 @@ function NodeCard(props: {
   const { flash, copy } = useCopyFlash();
   const note = healthNote(n);
   const bucket = statusBucket(n.status);
+  // Gating the chart on a *live* sample meant a build's curve became unreachable
+  // the instant the build finished, which is the one moment you want it. Gating
+  // instead on node status was wrong in both directions: a `command` node's row
+  // stays `pending` until its whole parallel stage is saved (only `start_server`
+  // nodes checkpoint on spawn), so a fast build in a slow stage still hid its
+  // chart; and a step too short to sample offers one with nothing in it either
+  // way. So the run is the only question asked here, and the panel says for
+  // itself when a window holds no samples.
+  const canGraph = props.graphable;
 
   const act = async (label: string, context: string, fn: () => Promise<unknown>) => {
     setBusy(label);
@@ -237,15 +247,11 @@ function NodeCard(props: {
         <NodeStatsLine
           stats={props.stats}
           expanded={expanded}
-          // Only a live, sampled node can be graphed: a historical run has no
-          // per-process rows and its aggregates are already pruned or ending.
-          onToggle={props.stats ? () => setExpanded((e) => !e) : undefined}
+          onToggle={canGraph ? () => setExpanded((e) => !e) : undefined}
         />
       </div>
 
-      {expanded && props.stats && (
-        <ResourcePanel run={props.run} nodeKey={`${n.name}:${n.variant}`} />
-      )}
+      {expanded && canGraph && <ResourcePanel run={props.run} nodeKey={`${n.name}:${n.variant}`} />}
 
       {n.url && (
         <div className="node-url-row">
@@ -328,6 +334,14 @@ export function NodeList(props: {
   nodes: NodeRow[];
   /** Stats for this run, keyed `node:variant`. */
   stats?: Record<string, NodeStats>;
+  /**
+   * Whether this run's recorded resource history can be charted.
+   *
+   * Separate from `stats` because "no live sample" and "nothing to show" are
+   * different: a finished build stops being sampled but keeps its curve, so the
+   * chart has to stay reachable after the live reading is gone.
+   */
+  graphable?: boolean;
   /** Whether node actions may fire — a stopped run has nothing to act on. */
   canAct: boolean;
   onChanged: () => void;
@@ -351,6 +365,7 @@ export function NodeList(props: {
           node={n}
           run={props.run}
           stats={props.stats?.[`${n.name}:${n.variant}`]}
+          graphable={props.graphable ?? false}
           canAct={props.canAct}
           onChanged={props.onChanged}
           onOpenPane={props.onOpenPane}

@@ -26,6 +26,13 @@
  *  there and two aliases could collapse into one host. */
 export const MAX_DERIVED_LEN = 48;
 
+/** Longest accepted display name. Mirrors `MAX_DISPLAY_NAME_LEN` in
+ *  `crates/veld-daemon/src/desktop.rs` — a courtesy bound so the dialog can stop
+ *  you before the daemon does, never the enforcement. Larger than
+ *  [`MAX_DERIVED_LEN`] because it is bounded by what fits a rail column, not by
+ *  what fits a hostname label. */
+export const MAX_DISPLAY_NAME_LEN = 80;
+
 /**
  * Letters that carry meaning a bare `-` would throw away.
  *
@@ -166,6 +173,53 @@ export function deriveBranch(name: string): string {
 }
 
 /**
+ * The one answer to "what is this worktree called on screen".
+ *
+ * The row carries two names and they are not interchangeable: `alias` is the
+ * identifier (bounded, unique per repo, the default run name, and therefore part
+ * of a hostname), `display_name` is what the user typed. Every *label* — a rail
+ * row, a menu item, a window title, a toast — goes through this; every *key* —
+ * the run name, a collision check, an API argument — keeps using `alias`
+ * directly.
+ *
+ * A function rather than `w.display_name || w.alias` at forty call sites, because
+ * the fallback is the part that gets forgotten: a surface that reads
+ * `display_name` raw renders an empty string for every worktree created before
+ * v13, and it looks fine in a dev database where you just typed a name.
+ */
+export function worktreeLabel(w: {
+  alias: string;
+  /** Optional on purpose: a UI served by a daemon older than v13 sends no such
+   *  key at all, and `just dev-ui` proxies `/api` to whatever daemon is
+   *  installed. Both `undefined` and `""` mean "render the alias". */
+  display_name?: string;
+}): string {
+  return w.display_name || w.alias;
+}
+
+/**
+ * The display name a typed create-dialog name becomes: trimmed, inner runs of
+ * whitespace collapsed, capped.
+ *
+ * Lossless in the way that matters — capitals, punctuation and non-ASCII all
+ * survive, which is the entire reason this field exists next to the alias. Only
+ * whitespace is normalised, because `Hello   test` and `Hello test` are the same
+ * name and one of them renders with a hole in it.
+ */
+export function deriveDisplayName(name: string): string {
+  // Sliced by **code point**, not by `String.prototype.slice`. That slices UTF-16
+  // code units, so a cap landing inside a surrogate pair leaves a lone high
+  // surrogate — `JSON.stringify` emits it as `\ud83d` and serde_json rejects the
+  // whole request body, so an emoji-heavy name failed as an unparseable payload
+  // rather than as a name that was too long. The daemon's own cap counts
+  // characters, so this also makes the two bounds mean the same thing.
+  return [...name.trim().replace(/\s+/g, " ")]
+    .slice(0, MAX_DISPLAY_NAME_LEN)
+    .join("")
+    .trim();
+}
+
+/**
  * Whether `alias` collides with one of `taken`, compared as slugs.
  *
  * Slug comparison, matching `Db::patch_worktree` and `unique_alias`: a worktree's
@@ -173,6 +227,9 @@ export function deriveBranch(name: string): string {
  * even though they are two strings. This is a courtesy check — it lets the dialog
  * say so before the button is pressed — and never the enforcement, which stays in
  * the daemon's transaction where a concurrent create can be seen.
+ *
+ * Deliberately about the **alias** and not the display name: two checkouts may
+ * carry the same label, because a label collides in nothing.
  */
 export function aliasCollides(alias: string, taken: string[]): boolean {
   // `alias` is already a derived (ASCII) value, so either slug function agrees on it;

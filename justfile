@@ -332,6 +332,7 @@ lint:
     # only — no dependency to install — and the drift it catches is invisible
     # to every other check in this recipe.
     just favicon
+    just topbar-height
     just shellcheck
 
 # Parse and lint `install.sh` — the one program here that `curl | bash` runs and
@@ -358,6 +359,13 @@ shellcheck:
 # nothing but this gate.
 favicon:
     ./tests/validate-favicon.sh
+
+# Assert `.topbar.electron`'s CSS height and desktop/src/main.js's TOPBAR_HEIGHT
+# agree. Same reasoning as `favicon`: bash and sed only, and the drift it catches
+# (macOS traffic lights centred against a constant that no longer matches the bar
+# they sit on) is invisible to every compiler, linter and test in the repo.
+topbar-height:
+    ./tests/validate-topbar-height.sh
 
 # Assert no CI job can run on a draft PR (AGENTS.md → CI cost convention).
 # Deliberately not folded into `lint`: this needs PyYAML, and `lint` is the

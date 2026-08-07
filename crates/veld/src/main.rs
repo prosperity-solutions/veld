@@ -421,7 +421,49 @@ enum Command {
     },
 
     /// Update Veld to the latest version.
-    Update,
+    ///
+    /// Moves both halves of the release: the CLI, daemon and helper, and — on
+    /// macOS — Veld Desktop. When the app is running it is closed first, with the
+    /// user's agreement, and reopened afterwards; its bundle cannot be replaced
+    /// while it runs.
+    Update {
+        /// Wait for this process to exit before installing anything.
+        ///
+        /// Veld Desktop's own "Update" spawns this and quits: an Electron app
+        /// reads from its own bundle while it runs, so the update has to outlive
+        /// it. Nothing is installed until the pid is gone.
+        #[arg(long, hide = true)]
+        wait_pid: Option<u32>,
+
+        /// Reopen Veld Desktop when the update is over, however it went.
+        ///
+        /// Hidden, and only meaningful with `--wait-pid`: on its own it would
+        /// *launch* an app the user never had running, which is not what the word
+        /// says and not something an update should do.
+        #[arg(long, hide = true)]
+        relaunch: bool,
+
+        /// The running app's executable (`process.execPath`), so the bundle that
+        /// gets replaced is the one the user launched rather than whichever copy
+        /// the installer would have guessed.
+        #[arg(long, hide = true)]
+        app_path: Option<std::path::PathBuf>,
+
+        /// Install this release instead of asking GitHub which is latest.
+        ///
+        /// The app passes the version it was offered, and that is not a
+        /// convenience: the app learns about releases through electron-updater's
+        /// feed while `check_update` asks `api.github.com/…/releases/latest`.
+        /// Two sources, two failure modes. Unauthenticated api.github.com is rate
+        /// limited per IP, so behind a shared NAT the handoff would abort with a
+        /// 403 on a machine that had just been told an update exists; and in the
+        /// minutes of skew after a release the API can still answer with the
+        /// version the CLI already has, which would install nothing, report
+        /// success, and re-offer the same update on the next launch — forever,
+        /// since the app's "already offered" set is per session.
+        #[arg(long, hide = true)]
+        target_version: Option<String>,
+    },
 
     /// Install, update or inspect Veld Desktop (macOS app).
     Desktop {
@@ -911,7 +953,12 @@ async fn main() {
 
         Command::Setup { command } => commands::setup::run(command).await,
 
-        Command::Update => commands::update::run().await,
+        Command::Update {
+            wait_pid,
+            relaunch,
+            app_path,
+            target_version,
+        } => commands::update::run(wait_pid, relaunch, app_path, target_version).await,
 
         Command::Desktop { command } => match command {
             // Bare `veld desktop` reports rather than installs: a command that

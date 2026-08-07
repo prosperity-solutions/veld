@@ -302,7 +302,7 @@ export function RunsMode(props: { modeSwitch: ReactNode; themeButton: ReactNode;
                the housekeeping pass does do. */
             <Text size="xs" c="dimmed">
               {hiddenCount} older environment(s) hidden — showing the last{" "}
-              {props.historyDays} day(s) (Settings → Runs).
+              {props.historyDays} day(s) (Settings → General).
             </Text>
           )}
           {shown.map(({ p, r }) => (

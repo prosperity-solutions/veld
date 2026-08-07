@@ -169,6 +169,11 @@ pub async fn run(
     orchestrator.set_foreground(foreground);
     orchestrator.set_terminal_node(terminal_sel.clone());
 
+    // Record CPU/memory for this run's `command` steps while they execute. The
+    // orchestrator holds it, so it also covers the `--oneshot` terminal node
+    // that `run_terminal` executes after the stages.
+    super::observe_command_stats(&mut orchestrator, run_name_str);
+
     // Per-run answers, above the stored ones and never written anywhere.
     if !var_answers.is_empty() {
         // `--var` is per-run by definition: nothing was written, so a later

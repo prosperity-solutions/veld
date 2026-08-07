@@ -609,6 +609,30 @@ pub async fn run_command(
     output_file: Option<&Path>,
     sink: Option<LineSink>,
 ) -> Result<CommandOutput, ProcessError> {
+    run_command_observed(command, working_dir, env, output_file, sink, None).await
+}
+
+/// [`run_command`], plus a callback handed the spawned process's PID.
+///
+/// `on_spawn` exists for one caller: the resource sampler needs a root to walk
+/// while a build or an install runs, and a step's PID is otherwise created and
+/// destroyed entirely inside this function. It fires once, immediately after a
+/// successful spawn and before any output is drained, so a step that lives two
+/// seconds is still observable.
+///
+/// **What the callback receives is a loan, not a handle.** The PID is valid only
+/// until this function returns; after that the process has been reaped and the
+/// number is eligible for reuse. Record measurements against it — never store
+/// it, never signal it, and never persist it as node state (see
+/// [`crate::stats::StepObserver`] for why that distinction is load-bearing).
+pub async fn run_command_observed(
+    command: &CommandSpec,
+    working_dir: &Path,
+    env: &HashMap<String, String>,
+    output_file: Option<&Path>,
+    sink: Option<LineSink>,
+    on_spawn: Option<Box<dyn FnOnce(u32) + Send>>,
+) -> Result<CommandOutput, ProcessError> {
     // Prepare the output file and augmented env.
     let mut env = env.clone();
     if let Some(path) = output_file {
@@ -665,6 +689,14 @@ pub async fn run_command(
             return Err(ProcessError::SpawnFailed(e));
         }
     };
+
+    // Before draining anything: a short step must be observable, and the
+    // observer only has until `child.wait()` returns to look at this PID.
+    // `id()` is `None` only once the child has been reaped, which cannot have
+    // happened yet.
+    if let (Some(on_spawn), Some(pid)) = (on_spawn, child.id()) {
+        on_spawn(pid);
+    }
 
     let stdout = child.stdout.take().expect("stdout should be piped");
     let stderr = child.stderr.take().expect("stderr should be piped");
@@ -782,12 +814,18 @@ pub async fn run_command(
 /// signal, kill the whole group, and report exit code `130` (SIGINT). This
 /// keeps interruption deterministic regardless of how the child handles
 /// signals itself.
+/// `on_spawn` is the same loan [`run_command_observed`] hands out, for the same
+/// reason: a `--oneshot` terminal node is often the longest and heaviest command
+/// in a run (an end-to-end suite), and it is spawned here rather than through
+/// `run_command`, so without this it would be the one `command` node nothing
+/// could measure.
 pub async fn run_command_streaming(
     command: &CommandSpec,
     working_dir: &Path,
     env: &HashMap<String, String>,
     output_file: Option<&Path>,
     log_target: Option<LogTarget>,
+    on_spawn: Option<Box<dyn FnOnce(u32) + Send>>,
 ) -> Result<CommandOutput, ProcessError> {
     use tokio::io::AsyncWriteExt;
 
@@ -847,6 +885,12 @@ pub async fn run_command_streaming(
     };
 
     let pid = child.id().unwrap_or(0);
+    // `unwrap_or(0)` above is this path's pre-existing convention for the kill
+    // group; 0 is not a PID a sampler may walk, so the observer is told only
+    // about a real one.
+    if let (Some(on_spawn), true) = (on_spawn, pid != 0) {
+        on_spawn(pid);
+    }
     let stdout = child.stdout.take().expect("stdout should be piped");
     let stderr = child.stderr.take().expect("stderr should be piped");
 
@@ -1433,6 +1477,7 @@ mod streaming_tests {
             &env,
             None,
             None,
+            None,
         )
         .await
         .expect("streaming run should not error on non-zero exit");
@@ -1448,6 +1493,7 @@ mod streaming_tests {
             &CommandSpec::Shell("true".to_owned()),
             &dir,
             &env,
+            None,
             None,
             None,
         )
@@ -1467,6 +1513,7 @@ mod streaming_tests {
             &CommandSpec::Shell("printf '\\377\\n'; echo 'VELD_OUTPUT foo=bar'".to_owned()),
             &dir,
             &env,
+            None,
             None,
             None,
         )

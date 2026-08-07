@@ -2,7 +2,6 @@ mod broadcaster;
 mod feedback_server;
 mod gc;
 mod monitor;
-mod procmem;
 mod share;
 mod stats;
 
