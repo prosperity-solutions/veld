@@ -23,10 +23,16 @@
  * selection rule rather than only its type.
  */
 
-/** A holder of a marker face, as `/api/repos` reports it. */
+/**
+ * A holder of a marker face, as `/api/repos` reports it.
+ *
+ * Only the presence of an entry matters here — the draw is about which faces are
+ * free — so this is deliberately narrower than `EmojiHolder`: naming a field the
+ * picker never reads would make it look load-bearing, and it is what tied this
+ * module to the alias when the label stopped being the alias.
+ */
 interface Holder {
   id: number;
-  alias: string;
 }
 
 /** `[0, 1)`, injectable so a test can choose the draw. */

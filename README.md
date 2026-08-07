@@ -362,7 +362,9 @@ Veld includes a browser-based dashboard at `https://veld.localhost` (or `https:/
 
 Open it with `veld ui` or visit the URL directly.
 
-An experimental second-generation management UI is served at `/ide` (worktree mode: import git repositories, manage `git worktree` checkouts with aliases, and drive veld runs per worktree). It is also the web core of **Veld Desktop**, an Electron shell in `desktop/` — see [desktop/ARCHITECTURE.md](desktop/ARCHITECTURE.md).
+An experimental second-generation management UI is served at `/ide` (worktree mode: import git repositories, manage `git worktree` checkouts, and drive veld runs per worktree). It is also the web core of **Veld Desktop**, an Electron shell in `desktop/` — see [desktop/ARCHITECTURE.md](desktop/ARCHITECTURE.md).
+
+The rail down the left side is the list of checkouts, grouped into **lanes** you name. **Each lane has its own "＋"**, so a new worktree is created straight into the section you want it in rather than created and then dragged. Name it whatever you like — "Hello test", "Checkout V2 (final)" — and that is what the rail shows; an identifier (`hello-test`) is derived underneath for the branch and the run name, and the dialog shows you both before it creates anything. Either can be changed later from the row's ⋮ menu, and clearing the name goes back to showing the identifier.
 
 It has **terminal panes**: real shells in the selected worktree's directory, in a dock of two tab strips you can split, reorder and drag tabs between. Dragging a tab onto a pane's **left or right edge** splits there, and dropping it anywhere else in a pane moves it into that pane — the same gesture, with the target read off where you let go. A tab strip is one keyboard stop: `←`/`→` move between its tabs (`Home`/`End` to the ends) without switching panes as they go, `Enter` switches to the focused tab, and `Delete` closes it. The shell runs in the daemon and reaches the browser over a WebSocket, so terminals work in a plain browser and not only in the Electron app.
 

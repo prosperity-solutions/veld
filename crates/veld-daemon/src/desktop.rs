@@ -537,6 +537,41 @@ fn validate_alias(alias: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
+/// Longest accepted worktree display name.
+///
+/// Not the alias's 64: this one is read out of a rail column that is 236px wide
+/// by default, so the bound is about what can be seen rather than what can be
+/// stored. Long enough for a sentence fragment ("Checkout V2 (final)"), short
+/// enough that no single row can be the reason the rail needs a horizontal
+/// scrollbar.
+const MAX_DISPLAY_NAME_LEN: usize = 80;
+
+/// Bound the free-text worktree label.
+///
+/// Unlike the alias this is not an identifier — it never reaches a hostname, a
+/// path, or a command line — so the rule is only "a human can read it in the
+/// rail": non-empty after trimming *or* empty (which clears it back to the
+/// alias), no control characters, and a length cap in **characters**, since the
+/// cap exists for legibility and one emoji is one column, not four.
+///
+/// Control characters are rejected rather than stripped, matching
+/// `valid_lane_name`: a name carrying a newline renders as invisible garbage,
+/// and silently rewriting what someone typed is worse than telling them it is
+/// not a name. Trimming, on the other hand, *is* applied by the caller — a
+/// trailing space is a typo with one obvious intent.
+fn validate_display_name(name: &str) -> Result<(), ApiError> {
+    if name.chars().count() > MAX_DISPLAY_NAME_LEN || name.chars().any(char::is_control) {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "the name must be at most {MAX_DISPLAY_NAME_LEN} characters \
+                 and cannot contain control characters"
+            ),
+        ));
+    }
+    Ok(())
+}
+
 /// The glyphs `validate_emoji` accepts, for the UI's picker. Served rather
 /// than duplicated in TypeScript so the two can never drift; static, so the
 /// picker fetches it once on open instead of riding the 5s poll.
@@ -1058,6 +1093,20 @@ struct CreateWorktreeBody {
     /// Custom alias; defaults to a slug of the branch name.
     #[serde(default)]
     alias: Option<String>,
+    /// The free-text name the rail renders. Absent (or `""`) means the rail
+    /// shows the alias — which is what the alias-only clients that predate this
+    /// field get.
+    #[serde(default)]
+    display_name: Option<String>,
+    /// The rail lane to file the new checkout under, or absent/`""` for
+    /// ungrouped.
+    ///
+    /// On the create request rather than a follow-up PATCH because the rail's
+    /// per-lane "＋" is a create *into that lane*: a two-request version has a
+    /// window in which the worktree exists in the wrong section, and a failure
+    /// between the two leaves it there for good.
+    #[serde(default)]
+    lane: Option<String>,
     /// Custom checkout path; defaults to `<repo parent>/_worktrees/<alias>`.
     #[serde(default)]
     path: Option<String>,
@@ -1075,6 +1124,12 @@ async fn create_worktree(
     validate_branch(&body.branch)?;
     if let Some(ref alias) = body.alias {
         validate_alias(alias)?;
+    }
+    // Trimmed here rather than in the client, so every caller of the API gets the
+    // same normalisation; `""` after trimming is the "no separate name" sentinel.
+    let display_name = body.display_name.as_deref().map(str::trim);
+    if let Some(name) = display_name {
+        validate_display_name(name)?;
     }
     // Both marker faces are validated up front, next to the alias, so a rejected
     // glyph cannot leave a checkout on disk that the request then reports as failed.
@@ -1121,6 +1176,20 @@ async fn create_worktree(
                     "another checkout of this repo is already called \"{alias}\" \
                      — nothing was created"
                 ),
+            ));
+        }
+    }
+
+    // Same reason as the alias pre-check above, and the same racy-by-nature
+    // caveat: `Db::patch_worktree` decides inside its transaction, but it only
+    // runs *after* `git worktree add`, so a lane that was never going to be
+    // accepted would otherwise cost a checkout on disk filed in the wrong place.
+    if let Some(lane) = body.lane.as_deref().filter(|l| !l.is_empty()) {
+        let lanes = db.list_lanes(&repo_root).map_err(db_err)?;
+        if !lanes.iter().any(|l| l.name == lane) {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "no such lane in this repo — nothing was created",
             ));
         }
     }
@@ -1185,20 +1254,31 @@ async fn create_worktree(
             )
         })
         .ok_or_else(|| db_err("created worktree missing after sync"))?;
-    // The sync assigns a marker; apply the one the dialog picked. Before the alias
-    // rename below rather than after, because that rename is the step that can lose a
-    // race and return early — and a checkout that ends up under its branch-derived
-    // alias should still be wearing the marker the user chose.
-    if body.emoji.is_some() || body.marker_color.is_some() {
-        db.patch_worktree(
-            created.id,
-            None,
-            body.emoji.as_deref(),
-            body.marker_color.as_deref(),
-            None,
-        )
-        .map_err(write_err)?;
-    }
+    // The sync assigns a marker and no lane or label; apply what the dialog chose.
+    // Before the alias rename below rather than after, because that rename is the
+    // step that can lose a race and return early — and a checkout that ends up
+    // under its branch-derived alias should still be wearing the marker, the name
+    // and the lane the user chose.
+    let dialog_choices = veld_core::db::WorktreePatch {
+        display_name,
+        emoji: body.emoji.as_deref(),
+        marker_color: body.marker_color.as_deref(),
+        lane: body.lane.as_deref(),
+        ..Default::default()
+    };
+    let created = if dialog_choices.is_empty() {
+        created
+    } else {
+        db.patch_worktree(created.id, dialog_choices)
+            .map_err(write_err)?;
+        // Re-read rather than patching the local copy field by field: the record
+        // this handler returns is what the UI renders straight away, and a
+        // hand-merged copy is one forgotten field away from a rail row that only
+        // corrects itself on the next poll.
+        db.get_worktree(created.id)
+            .map_err(db_err)?
+            .ok_or_else(|| db_err("worktree vanished after applying the dialog's choices"))?
+    };
 
     // The sync derives the alias from the branch; apply an explicit custom one.
     let created = match &body.alias {
@@ -1231,6 +1311,12 @@ async fn create_worktree(
 struct PatchWorktreeBody {
     #[serde(default)]
     alias: Option<String>,
+    /// The free-text name the rail renders. `""` clears it, taking the row back
+    /// to rendering its alias — so this field distinguishes "leave it alone"
+    /// (absent) from "there is no separate name" (empty), which is exactly the
+    /// distinction a rename dialog with a clearable field needs.
+    #[serde(default)]
+    display_name: Option<String>,
     #[serde(default)]
     emoji: Option<String>,
     /// The colour half of the marker — a literal `#rrggbb`.
@@ -1257,11 +1343,16 @@ impl PatchWorktreeBody {
     fn is_empty(&self) -> bool {
         let Self {
             alias,
+            display_name,
             emoji,
             marker_color,
             lane,
         } = self;
-        alias.is_none() && emoji.is_none() && marker_color.is_none() && lane.is_none()
+        alias.is_none()
+            && display_name.is_none()
+            && emoji.is_none()
+            && marker_color.is_none()
+            && lane.is_none()
     }
 }
 
@@ -1272,13 +1363,18 @@ async fn patch_worktree(
     if body.is_empty() {
         return Err(err(
             StatusCode::BAD_REQUEST,
-            "nothing to update: send an alias, an emoji, a marker_color, a lane, or any combination",
+            "nothing to update: send an alias, a display_name, an emoji, a marker_color, \
+             a lane, or any combination",
         ));
     }
     // Validate everything before touching the database: a request carrying a
     // good alias and a bad emoji must change neither.
     if let Some(alias) = &body.alias {
         validate_alias(alias)?;
+    }
+    let display_name = body.display_name.as_deref().map(str::trim);
+    if let Some(name) = display_name {
+        validate_display_name(name)?;
     }
     if let Some(emoji) = &body.emoji {
         validate_emoji(emoji)?;
@@ -1293,10 +1389,13 @@ async fn patch_worktree(
     let existed = db
         .patch_worktree(
             id,
-            body.alias.as_deref(),
-            body.emoji.as_deref(),
-            body.marker_color.as_deref(),
-            body.lane.as_deref(),
+            veld_core::db::WorktreePatch {
+                alias: body.alias.as_deref(),
+                display_name,
+                emoji: body.emoji.as_deref(),
+                marker_color: body.marker_color.as_deref(),
+                lane: body.lane.as_deref(),
+            },
         )
         .map_err(write_err)?;
     if !existed {

@@ -284,20 +284,25 @@ function fallbackTrayIcon() {
   return img;
 }
 
-/** @type {{at: number, marks: Map<string, {alias: string, emoji: string}>}} */
+/** @type {{at: number, marks: Map<string, {label: string, emoji: string}>}} */
 let marksCache = { at: 0, marks: new Map() };
 const MARKS_TTL_MS = 60_000;
 
 /**
- * Map every known worktree's checkout path to its emoji + alias, for labelling
- * runs by checkout rather than by project name. Empty map on any failure — the
- * tray must still render when only /api/environments answers.
+ * Map every known worktree's checkout path to its emoji + rendered name, for
+ * labelling runs by checkout rather than by project name. Empty map on any
+ * failure — the tray must still render when only /api/environments answers.
+ *
+ * The name is `display_name` when the worktree has one, falling back to the
+ * alias — the same rule the rail's `worktreeLabel` applies, spelled out here
+ * because the Electron shell shares no code with the React app. The `??` also
+ * covers an older daemon, which sends no `display_name` at all.
  *
  * Cached for a minute rather than fetched on the tray's 10s tick: `/api/repos`
- * stats and parses a veld.json per worktree, and aliases change on the order of
+ * stats and parses a veld.json per worktree, and names change on the order of
  * minutes. A newly imported checkout gets its emoji within one TTL.
  *
- * @returns {Promise<Map<string, {alias: string, emoji: string}>>}
+ * @returns {Promise<Map<string, {label: string, emoji: string}>>}
  */
 async function worktreeMarks() {
   if (Date.now() - marksCache.at < MARKS_TTL_MS) return marksCache.marks;
@@ -311,7 +316,12 @@ async function worktreeMarks() {
       const data = await res.json();
       for (const repo of data.repos ?? []) {
         for (const wt of repo.worktrees ?? []) {
-          if (wt.path) marks.set(wt.path, { alias: wt.alias, emoji: wt.emoji });
+          if (wt.path) {
+            marks.set(wt.path, {
+              label: (wt.display_name ?? "") !== "" ? wt.display_name : wt.alias,
+              emoji: wt.emoji,
+            });
+          }
         }
       }
       marksCache = { at: Date.now(), marks };
@@ -394,7 +404,7 @@ async function trayMenu() {
       if ((nameCounts.get(project) ?? 0) > 1) {
         const mark = markFor(marks, root);
         const where = mark
-          ? `${mark.emoji ? `${mark.emoji} ` : ""}${mark.alias}`
+          ? `${mark.emoji ? `${mark.emoji} ` : ""}${mark.label}`
           : shortenPath(root);
         label = `${project} (${where}) / ${run.name} — ${run.status}`;
       }

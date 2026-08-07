@@ -11,7 +11,13 @@ import {
 } from "@mantine/core";
 import { api, MAX_LANE_NAME_LEN, type EmojiHolder, type Repo } from "../api";
 import type { MarkerStyle } from "../shared/settings";
-import { aliasCollides, deriveAlias, deriveBranch } from "../shared/worktreeName";
+import {
+  aliasCollides,
+  deriveAlias,
+  deriveBranch,
+  deriveDisplayName,
+  MAX_DISPLAY_NAME_LEN,
+} from "../shared/worktreeName";
 import { randomMarker } from "../shared/markerPick";
 
 /**
@@ -167,6 +173,14 @@ export function RemoveRepoDialog(props: {
  * you stop trusting. The branch stays editable: it follows the name until you touch
  * it, and clearing it hands it back to the derivation.
  *
+ * What the name *itself* becomes is no longer lossy, though: it is stored as the
+ * worktree's `display_name` and the rail renders it verbatim. The slug is still
+ * derived and still shown, because it is the identifier the run name and hostname
+ * are built from — but it is now a receipt for something happening underneath
+ * rather than the only name the checkout will ever have. Before this, typing
+ * "Hello test" produced a rail row reading `hello-test` and no way to get the
+ * capital or the space back.
+ *
  * The marker is picked here too, rather than being a second trip through the context
  * menu after the checkout exists. A free colour and glyph are drawn at random when the
  * dialog opens and **sent explicitly**, so the checkout wears what the dialog showed;
@@ -179,12 +193,17 @@ export function NewWorktreeDialog(props: {
     branch: string;
     create_branch: boolean;
     alias?: string;
+    display_name?: string;
     emoji?: string;
     marker_color?: string;
   }) => Promise<void>;
   /** The repo's existing aliases, for the collision check. Courtesy only — the
    *  daemon's transaction is the authority (see `aliasCollides`). */
   takenAliases: string[];
+  /** Which rail section the "＋" was clicked in — `""` for ungrouped. Shown, not
+   *  editable: the click already chose it, and a second control saying the same
+   *  thing is one more thing to disagree with. */
+  lane: string;
   usedBy: Record<string, EmojiHolder[]>;
   colorUsedBy: Record<string, EmojiHolder[]>;
   /** Which marker face the rail renders, so the grids can label it. */
@@ -225,6 +244,7 @@ export function NewWorktreeDialog(props: {
   const chosen = marker;
 
   const alias = deriveAlias(name);
+  const displayName = deriveDisplayName(name);
   const derivedBranch = deriveBranch(name);
   const branch = branchEdit ?? derivedBranch;
   const collides = aliasCollides(alias, props.takenAliases);
@@ -243,6 +263,10 @@ export function NewWorktreeDialog(props: {
       // it would be. It also means a collision is a 409 that created nothing rather
       // than a silent `-2` suffix.
       alias,
+      // What the rail will show. Sent even when it happens to equal the alias:
+      // "the name is what you typed" is one rule, and a dialog that silently
+      // stops storing it once you type something already slug-shaped is two.
+      display_name: displayName,
       // Always sent when a list resolved, so the checkout wears what the dialog
       // showed. Empty only while the fetch is in flight, where the daemon's own
       // assignment is the honest fallback.
@@ -283,15 +307,32 @@ export function NewWorktreeDialog(props: {
             }
             data-autofocus
           />
-          {/* The receipt for the two lossy derivations. Rendered as soon as there is
-              anything to show, and monospace because both values are identifiers. */}
+          {/* The receipt for the lossy derivation. The rail shows the name you
+              typed, verbatim — but the *identifier* underneath it cannot hold a
+              space or a capital (it defaults the run name, which becomes a
+              hostname), so it is still worth showing before anything is created.
+              Monospace because it is an identifier. */}
           {name.trim() !== "" && (
             <Text size="xs" c="dimmed">
-              Rail name{" "}
-              <Text span ff="monospace" c={alias ? undefined : "red"}>
-                {alias || "— nothing usable in that name"}
-              </Text>
-              {alias !== name && alias !== "" ? " (letters, digits, dashes only)" : ""}
+              {alias === ""
+                ? "Nothing in that name can be used as an identifier — add a letter or a digit."
+                : null}
+              {alias !== "" && (
+                <>
+                  Shown as <b>{displayName}</b>; identified as{" "}
+                  <Text span ff="monospace">
+                    {alias}
+                  </Text>
+                </>
+              )}
+            </Text>
+          )}
+          {/* Where it lands. Stated rather than assumed: the create was started
+              from one specific rail section and a dialog that says nothing about
+              it makes the destination a thing you have to remember clicking. */}
+          {props.lane !== "" && (
+            <Text size="xs" c="dimmed">
+              Filed under <b>{props.lane}</b>.
             </Text>
           )}
           <Checkbox
@@ -485,7 +526,7 @@ export function MarkerGrids(props: {
                 const others = (props.colorUsedBy[color] ?? []).filter(
                   (h) => h.id !== props.worktreeId,
                 );
-                const taken = others.map((h) => h.alias).join(", ");
+                const taken = others.map((h) => h.label).join(", ");
                 return (
                   <button
                     key={color}
@@ -511,9 +552,13 @@ export function MarkerGrids(props: {
                     {busy === color ? (
                       <Loader size={14} />
                     ) : (
-                      <span style={{ background: color }} />
+                      /* Classed, not styled by position. `.swatch-cell > span`
+                         also matched the `.marker-taken` marker below and — being
+                         the more specific selector — inflated that 4px dot to a
+                         16px circle. */
+                      <span className="swatch-dot" style={{ background: color }} />
                     )}
-                    {taken && <span className="emoji-taken" />}
+                    {taken && <span className="marker-taken" />}
                   </button>
                 );
               })}
@@ -539,7 +584,7 @@ export function MarkerGrids(props: {
               const others = (props.usedBy[e] ?? []).filter(
                 (h) => h.id !== props.worktreeId,
               );
-              const taken = others.map((h) => h.alias).join(", ");
+              const taken = others.map((h) => h.label).join(", ");
               return (
                 <button
                   key={e}
@@ -563,7 +608,7 @@ export function MarkerGrids(props: {
                   ) : (
                     <span aria-hidden="true">{e}</span>
                   )}
-                  {taken && <span className="emoji-taken" />}
+                  {taken && <span className="marker-taken" />}
                 </button>
               );
             })}
@@ -587,7 +632,8 @@ export function MarkerGrids(props: {
 export function ChangeMarkerDialog(props: {
   current: string;
   currentColor: string;
-  alias: string;
+  /** The worktree's rendered name (`worktreeLabel`), for the dialog title. */
+  label: string;
   worktreeId: number;
   usedBy: Record<string, EmojiHolder[]>;
   colorUsedBy: Record<string, EmojiHolder[]>;
@@ -612,7 +658,7 @@ export function ChangeMarkerDialog(props: {
   };
 
   return (
-    <Modal title={`Marker for ${props.alias}`} onClose={props.onClose}>
+    <Modal title={`Marker for ${props.label}`} onClose={props.onClose}>
       <Stack gap="sm">
         <MarkerGrids
           emoji={props.current}
@@ -636,9 +682,28 @@ export function ChangeMarkerDialog(props: {
   );
 }
 
+/**
+ * Edit a worktree's two names, and bin it.
+ *
+ * Two fields because a worktree has two names and they answer different
+ * questions. **Name** is what the rail shows and is free text; **Alias** is the
+ * identifier — it defaults the run name, so it reaches a hostname, and the daemon
+ * bounds it to `[A-Za-z0-9._-]` and refuses one a sibling already holds.
+ *
+ * The Name field is clearable, and clearing it is a real operation rather than a
+ * no-op: an empty name takes the row back to rendering its alias, which is the
+ * state every checkout created before v13 is already in and the only way back to
+ * it. The placeholder says which alias it would fall back to, so "empty" never
+ * looks like "nameless".
+ */
 export function RenameWorktreeDialog(props: {
-  current: string;
-  onRename: (alias: string) => Promise<void>;
+  currentAlias: string;
+  /** The stored `display_name`, `""` when the row renders its alias. */
+  currentName: string;
+  onRename: (patch: {
+    alias: string;
+    display_name: string;
+  }) => Promise<void>;
   onDelete: (force: boolean) => Promise<void>;
   isMain: boolean;
   /**
@@ -657,10 +722,16 @@ export function RenameWorktreeDialog(props: {
   deleteFocus: boolean;
   onClose: () => void;
 }) {
-  const [alias, setAlias] = useState(props.current);
+  const [alias, setAlias] = useState(props.currentAlias);
+  const [name, setName] = useState(props.currentName);
   const [confirmDelete, setConfirmDelete] = useState(props.deleteFocus);
   const [force, setForce] = useState(false);
-  const rename = useSubmit(() => props.onRename(alias.trim()));
+  const rename = useSubmit(() =>
+    props.onRename({
+      alias: alias.trim(),
+      display_name: deriveDisplayName(name),
+    }),
+  );
   const del = useSubmit(() => props.onDelete(force));
   // Either source of a refusal: this attempt's own (a 4xx from the forced path, or
   // a rejected precondition) or the last background attempt's.
@@ -670,11 +741,20 @@ export function RenameWorktreeDialog(props: {
       <form onSubmit={rename.submit}>
         <Stack gap="sm">
           <TextInput
+            label="Name"
+            description="What the rail shows. Clear it to show the alias instead."
+            placeholder={props.currentAlias}
+            value={name}
+            maxLength={MAX_DISPLAY_NAME_LEN}
+            onChange={(e) => setName(e.currentTarget.value)}
+            data-autofocus={!props.deleteFocus}
+          />
+          <TextInput
             label="Alias"
+            description="The identifier: letters, digits, '-', '_', '.'. Defaults the run name, so it ends up in a hostname."
             value={alias}
             onChange={(e) => setAlias(e.currentTarget.value)}
             styles={{ input: { fontFamily: "var(--mantine-font-family-monospace)" } }}
-            data-autofocus={!props.deleteFocus}
           />
           <ErrorText error={rename.error} />
           <Button type="submit" loading={rename.busy} disabled={!alias.trim()}>
