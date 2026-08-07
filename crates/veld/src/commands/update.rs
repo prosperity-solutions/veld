@@ -43,6 +43,15 @@ struct DesktopPlan {
     /// nothing at all in exactly that case — which is the case a `.dmg` download
     /// launches in.
     reopen: bool,
+    /// Why the app half is not being attempted, when a caller that asked for it
+    /// deserves to hear so.
+    ///
+    /// Only the handoff sets this, and only because of how the report is read:
+    /// the app shows a dialog when `ok` is false and stays silent otherwise, so
+    /// "the app was deliberately skipped" reported as success is an app that
+    /// reopens on the old version having said nothing. A terminal run needs no
+    /// such channel — the reason was printed where the user is looking.
+    skipped: Option<String>,
 }
 
 /// The result of the update proper, in the shape the app's report needs.
@@ -75,7 +84,21 @@ pub async fn run(wait_pid: Option<u32>, relaunch: bool, app_path: Option<PathBuf
             let msg = "Veld Desktop did not quit within 30s, so nothing was updated.";
             output::print_error(msg, false);
             veld_core::setup::write_desktop_update_report(env!("CARGO_PKG_VERSION"), Err(msg));
-            // It never went away, so there is nothing to reopen.
+            // Reopen anyway when the app asked us to. "The pid did not exit" is
+            // not the same as "the app is still on screen": `wait_for_pid_exit`
+            // reads anything other than `ESRCH` as alive, so a pid this user may
+            // not signal — or one recycled into another process — times out here
+            // while the app itself is long gone. The app called `app.quit()`
+            // before spawning this, so treating a timeout as "it must still be
+            // running" is how the user ends up with no window, no update, and a
+            // report only the app could have shown them. `open` on a running app
+            // focuses it, so guessing wrong costs a Dock bounce.
+            if relaunch {
+                if let Some((app, _)) = veld_core::setup::desktop_app_status_in(app_dir.as_deref())
+                {
+                    veld_core::setup::open_desktop_app(&app);
+                }
+            }
             return 1;
         }
     }
@@ -110,8 +133,16 @@ pub async fn run(wait_pid: Option<u32>, relaunch: bool, app_path: Option<PathBuf
 /// `handoff` means the app spawned this and has already quit itself — there is
 /// nobody at a terminal to ask, and nothing to ask about.
 async fn plan_desktop(app_dir: Option<PathBuf>, handoff: bool, relaunch: bool) -> DesktopPlan {
+    // **First, before any early return.** `relaunch` means an app quit for this
+    // and is owed a window back, and that debt does not depend on whether veld
+    // then decides to update it. Setting it further down — after the platform
+    // check, after the `VELD_DESKTOP=0` check — meant an app whose inherited
+    // launchd environment happened to carry `VELD_DESKTOP=0` handed off, quit,
+    // and was never reopened. Three review angles found that independently,
+    // which is what a guard placed after its own preconditions looks like.
     let mut plan = DesktopPlan {
         app_dir,
+        reopen: relaunch,
         ..Default::default()
     };
 
@@ -128,14 +159,18 @@ async fn plan_desktop(app_dir: Option<PathBuf>, handoff: bool, relaunch: bool) -
         std::env::var("VELD_DESKTOP").as_deref(),
         Ok("0") | Ok("false") | Ok("no")
     ) {
+        // Said out loud on the handoff path rather than reported as a success:
+        // the user clicked a button offering them a new veld, and the app is
+        // about to reopen on the version it had. `VELD_DESKTOP=0` is a real
+        // answer, but it is not the answer they just gave.
+        if handoff {
+            plan.skipped = Some(
+                "VELD_DESKTOP=0 is set in this machine's environment, so the app was not updated"
+                    .to_string(),
+            );
+        }
         return plan;
     }
-
-    // The app asked for this and quit for it, so it reopens whatever happens —
-    // including the failures, and including the case below where no bundle is
-    // found yet. `relaunch` is the app's word for that, and it is the only thing
-    // that distinguishes "we closed it" from "it was never open".
-    plan.reopen = relaunch;
 
     let status = veld_core::setup::desktop_app_status_in(plan.app_dir.as_deref());
 
@@ -157,11 +192,10 @@ async fn plan_desktop(app_dir: Option<PathBuf>, handoff: bool, relaunch: bool) -
         // bundle — a second window's process, or an `--app-path` pointing at a
         // copy other than the one that handed off. Either way the bundle is in
         // use, so the CLI half proceeds and the app half does not.
-        output::print_error(
-            "Something is still running from Veld.app, so the app was left alone. The veld CLI \
-             was updated; use the app's 'Check for Updates…' once it is closed.",
-            false,
-        );
+        let reason = "another process is still running from Veld.app, so the app was left alone \
+                      — the veld CLI was updated";
+        output::print_error(reason, false);
+        plan.skipped = Some(reason.to_string());
         return plan;
     }
 
@@ -193,6 +227,11 @@ async fn plan_desktop(app_dir: Option<PathBuf>, handoff: bool, relaunch: bool) -
             plan.reopen = true;
         }
         QuitOutcome::Refused => {
+            // It was asked *and signalled* before we gave up, so it may still be
+            // on its way out and land just past the budget. Owe it a reopen: an
+            // `open` on a running app focuses it, which is harmless, while not
+            // reopening one that did quit leaves the user with nothing.
+            plan.reopen = true;
             // Something on screen is unanswered. Never force it.
             output::print_error(
                 "Veld Desktop did not quit, so the app was left alone — it may be showing a \
@@ -419,7 +458,10 @@ async fn perform(plan: &DesktopPlan) -> Outcome {
 /// means it landed — or that this run was never going to touch it.
 async fn update_desktop_if_stale(version: &str, plan: &DesktopPlan) -> Option<String> {
     if !plan.update {
-        return None;
+        // `skipped` is `None` for every path that was never going to touch the
+        // app — Linux, no handoff — and `Some` only where a caller asked for the
+        // app half and is not getting it.
+        return plan.skipped.clone();
     }
 
     let app_dir = plan.app_dir.as_deref();

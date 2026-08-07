@@ -284,3 +284,64 @@ fn a_failing_script_is_an_error_and_still_writes_its_log() {
     let written = std::fs::read_to_string(&log).unwrap();
     assert!(written.contains("the reason it failed"), "{written}");
 }
+
+/// The repo root, from this crate's manifest directory.
+fn repo_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .expect("repo root")
+}
+
+/// The capability string is a **two-language contract with no compiler between
+/// the halves**, so this is the compiler.
+///
+/// `veld desktop status --json` emits it from `crates/veld/src/commands/desktop.rs`
+/// and Veld Desktop tests for it in `desktop/src/updatePolicy.js`. Rename or
+/// mistype either side and nothing fails: the app silently drops to the app-only
+/// route, `cargo test` and `npm test` both stay green, and the entire feature
+/// disappears with no signal at all. That is precisely the failure a guard has to
+/// be *constructed* to catch rather than commented about.
+#[test]
+fn the_capability_string_means_the_same_thing_in_both_languages() {
+    const CAPABILITY: &str = "full-update-handoff";
+    let root = repo_root();
+
+    let rust = std::fs::read_to_string(root.join("crates/veld/src/commands/desktop.rs")).unwrap();
+    assert!(
+        rust.contains(&format!("\"{CAPABILITY}\"")),
+        "the CLI no longer advertises {CAPABILITY:?} — if that is intended, update \
+         desktop/src/updatePolicy.js's FULL_UPDATE_HANDOFF in the same commit",
+    );
+
+    let js = std::fs::read_to_string(root.join("desktop/src/updatePolicy.js")).unwrap();
+    assert!(
+        js.contains(&format!("FULL_UPDATE_HANDOFF = \"{CAPABILITY}\"")),
+        "the app no longer looks for {CAPABILITY:?} — if that is intended, update \
+         crates/veld/src/commands/desktop.rs's CAPABILITIES in the same commit",
+    );
+}
+
+/// Both halves must name the same log file.
+///
+/// The CLI writes it (`desktop_update_log_path`) and the app both redirects the
+/// handed-off process into it and offers to reveal it (`updateLogPath` in
+/// `desktop/src/updater.js`). Two constants, two languages, one file — and a
+/// comment in `updater.js` claims this test pins them, which it did not until it
+/// existed.
+#[test]
+fn the_handoff_log_path_means_the_same_thing_in_both_languages() {
+    let path = veld_core::setup::desktop_update_log_path().expect("a home directory");
+    assert!(
+        path.ends_with(".veld/desktop-update.log"),
+        "{}",
+        path.display()
+    );
+
+    let js = std::fs::read_to_string(repo_root().join("desktop/src/updater.js")).unwrap();
+    assert!(
+        js.contains(r#"path.join(os.homedir(), ".veld", "desktop-update.log")"#),
+        "desktop/src/updater.js no longer resolves the same log path as \
+         veld_core::setup::desktop_update_log_path",
+    );
+}

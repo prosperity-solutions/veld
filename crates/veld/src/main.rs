@@ -436,7 +436,11 @@ enum Command {
         wait_pid: Option<u32>,
 
         /// Reopen Veld Desktop when the update is over, however it went.
-        #[arg(long)]
+        ///
+        /// Hidden, and only meaningful with `--wait-pid`: on its own it would
+        /// *launch* an app the user never had running, which is not what the word
+        /// says and not something an update should do.
+        #[arg(long, hide = true)]
         relaunch: bool,
 
         /// The running app's executable (`process.execPath`), so the bundle that
@@ -938,7 +942,12 @@ async fn main() {
             wait_pid,
             relaunch,
             app_path,
-        } => commands::update::run(wait_pid, relaunch, app_path).await,
+            // `--relaunch` is the app saying "I quit for this, put me back", so it
+            // means nothing without the pid that says which app. Ignored on its
+            // own rather than honoured: `veld update --relaunch` typed by hand
+            // would otherwise open a GUI app that was never running, and would
+            // still open it after the user answered "n" to the close prompt.
+        } => commands::update::run(wait_pid, relaunch && wait_pid.is_some(), app_path).await,
 
         Command::Desktop { command } => match command {
             // Bare `veld desktop` reports rather than installs: a command that

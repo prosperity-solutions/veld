@@ -243,7 +243,42 @@ fn relaunch_app(app_dir: Option<&Path>) {
 /// `--app-path` and moves *both* halves of the release. Without it the app must
 /// fall back to `veld desktop update`, which moves the app only and leaves the
 /// CLI behind.
-const CAPABILITIES: [&str; 1] = ["full-update-handoff"];
+///
+/// Advertised **conditionally**, and the condition is the whole reason this is a
+/// capability rather than a version floor: see [`can_hand_off_full_update`].
+fn capabilities() -> Vec<&'static str> {
+    let mut caps = Vec::new();
+    if can_hand_off_full_update(&std::env::current_exe().unwrap_or_default()) {
+        caps.push("full-update-handoff");
+    }
+    caps
+}
+
+/// Whether an *unattended* full update from this binary can actually succeed.
+///
+/// It cannot when the CLI lives under `/usr/local/`. `install.sh` treats that as
+/// a system install and refuses to relocate it — a privileged LaunchDaemon still
+/// references `/usr/local` paths — so under `VELD_NON_INTERACTIVE=1` it requires
+/// `sudo -n` and exits 1 when that fails. The app's handoff is a detached child
+/// with no controlling terminal, so `sudo -n` fails there unless a credential
+/// happens to be cached: the app would quit, the whole update would fail, and the
+/// user would be told to run curl by hand.
+///
+/// So the app is told "no" and takes the app-only route it took before this
+/// existed — which works, and leaves `veld update` in a terminal (where sudo may
+/// prompt) as the way those machines move both halves. Advertising a capability
+/// this binary cannot deliver would be worse than not having it.
+///
+/// Deliberately **not** probed with `sudo -n`: this runs on the app's periodic
+/// update check, and a status command must not poke sudo every six hours.
+/// Mirrors install.sh's own `case "$EXISTING_DIR" in /usr/local/*)` test, which
+/// `tests/validate-install-contract.sh` pins.
+fn can_hand_off_full_update(exe: &Path) -> bool {
+    let Some(dir) = exe.parent() else {
+        return false;
+    };
+    !dir.starts_with("/usr/local")
+}
 
 /// `veld desktop status` -- where the app is and whether it matches this CLI.
 ///
@@ -272,14 +307,14 @@ pub async fn status(json: bool) -> i32 {
                 "version": version,
                 "cli_version": cli_version,
                 "in_sync": version.as_deref() == Some(cli_version),
-                "capabilities": CAPABILITIES,
+                "capabilities": capabilities(),
             }),
             None => serde_json::json!({
                 "installed": false,
                 "managed": true,
                 "platform": std::env::consts::OS,
                 "cli_version": cli_version,
-                "capabilities": CAPABILITIES,
+                "capabilities": capabilities(),
             }),
         };
         println!(
@@ -328,7 +363,7 @@ fn status_unmanaged(json: bool, cli_version: &str) -> i32 {
                 "platform": std::env::consts::OS,
                 "found": path.as_ref().map(|p| p.display().to_string()),
                 "cli_version": cli_version,
-                "capabilities": CAPABILITIES,
+                "capabilities": capabilities(),
             }))
             .unwrap_or_default()
         );

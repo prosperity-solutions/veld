@@ -103,6 +103,18 @@ an older CLI reinstalls its own and re-offers the newer one forever), and the
 dialog says the CLI half still needs `veld update`. A CLI with no `veld desktop`
 at all is not handed anything — the app points at the release page instead.
 
+**A CLI under `/usr/local` withholds the capability on purpose**, however new it
+is. `install.sh` treats that as a system install and will not relocate it — a
+privileged LaunchDaemon still references `/usr/local` paths — so under
+`VELD_NON_INTERACTIVE=1` it requires `sudo -n` and exits 1 when that fails. The
+handoff is a detached child with no controlling terminal, so `sudo -n` fails there
+unless a credential is already cached. Advertising a capability the binary cannot
+deliver would turn a working app-only update into a failed full one, so those
+machines keep the app-only route from the GUI and use `veld update` in a terminal
+— where sudo can prompt — to move both halves. Deliberately *not* probed with
+`sudo -n`: this runs on the app's six-hourly update check, and a status command
+must not poke sudo on a timer.
+
 Because nothing is watching a terminal on that path, everything the handed-off
 update prints goes to `~/.veld/desktop-update.log` and the outcome to
 `~/.veld/desktop-update.json`, which the app reads when it comes back — a failed

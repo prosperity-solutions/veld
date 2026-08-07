@@ -520,9 +520,17 @@ async function updateViaCli(version) {
         // lines and the install script's output alike. On this path there is no
         // terminal by construction, and `stdio: "ignore"` used to mean the only
         // record of a full-release update was whatever the script itself chose to
-        // log. `install_desktop` is invoked without a log of its own here, so it
-        // inherits these handles rather than truncating the file underneath them.
-        stdio: ["ignore", ...handoffLogHandles()],
+        // log.
+        //
+        // **Only on the full route.** `veld desktop update` opens the same file
+        // itself (`desktop.rs` → `desktop_update_log_path`, then `File::create`
+        // in `run_install_script`), so handing it these descriptors puts two
+        // independent open descriptions with independent offsets on one path: the
+        // child's truncate discards what the parent already wrote and the
+        // parent's later writes land past the child's, through output that
+        // `last_diagnostic` then reads to build the user-visible failure reason.
+        // The old route logs itself; leave it to it.
+        stdio: ["ignore", ...(full ? handoffLogHandles() : ["ignore", "ignore"])],
         // A deliberate PATH (see `SAFE_PATH`) *over* the inherited environment,
         // not instead of it. Replacing the whole environment looked safer and
         // was worse: it dropped `TMPDIR`, `HTTPS_PROXY`/`NO_PROXY` and the
