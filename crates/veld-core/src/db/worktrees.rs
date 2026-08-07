@@ -1018,11 +1018,15 @@ impl Db {
 
     /// Every trashed worktree across all repos, oldest request first.
     ///
-    /// This is how the background remover finds its work at daemon boot: the row
-    /// state *is* the durable queue, so a crash between "user clicked delete" and
-    /// "git finished" needs no separate journal to reconcile. Re-running a removal
-    /// that already succeeded is safe — git errors, the path is gone from disk, and
-    /// the caller's `git worktree prune` fallback finishes the job.
+    /// The bin's contents, **not** a work queue, and deliberately not read as one:
+    /// the background remover used to enqueue this whole list at daemon boot, which
+    /// meant every restart — including the one `veld update` performs — permanently
+    /// deleted the entire trash. Being in the bin is not a request to delete anything.
+    /// The only thing that promotes a row to a removal on its own is the retention
+    /// sweep ([`Self::expired_trashed_worktrees`]).
+    ///
+    /// Currently read only by tests; kept as the read side of the trash rather than
+    /// deleted, since it is what any future "show me the bin" caller wants.
     pub fn list_trashed_worktrees(&self) -> Result<Vec<WorktreeRecord>, DbError> {
         let conn = self.lock();
         let mut stmt = conn.prepare_cached(&format!(

@@ -1526,10 +1526,12 @@ struct DeleteQuery {
     /// Remove the checkout even with modified or untracked files
     /// (`git worktree remove --force`).
     ///
-    /// Deliberately **not** persisted with the trash state. If the daemon dies
-    /// mid-removal, recovery retries without it — a crash must not silently
-    /// upgrade a removal to one that discards uncommitted work, and forcing is a
-    /// decision worth re-taking rather than inheriting.
+    /// Deliberately **not** persisted with the trash state — a crash must not
+    /// silently upgrade a later removal to one that discards uncommitted work, and
+    /// forcing is a decision worth re-taking rather than inheriting. Nothing retries
+    /// it either: a removal interrupted by the daemon going away is not resumed at
+    /// all, forced or not, and the worktree stays in the trash for the user to ask
+    /// again (see `worktree_trash::recover`).
     #[serde(default)]
     force: bool,
 }
@@ -1573,9 +1575,9 @@ async fn delete_worktree(
     // make. In practice this is a safety net rather than a common path, because the
     // un-forced attempt that produced the refusal already stopped the runs.
     // Untrash on the error path too, not just on the refusal below. `?` here would
-    // return a 500 having already set `trashed_at`, leaving the row in "Pending
-    // removal" with nothing queued to act on it until the next daemon restart —
-    // every other exit from this function releases the row.
+    // return a 500 having already set `trashed_at`, silently binning a worktree the
+    // user asked to delete outright and giving no sign the request failed — every
+    // other exit from this function releases the row.
     let live = match db.live_run_names(FsPath::new(&wt.path)) {
         Ok(live) => live,
         Err(e) => {
