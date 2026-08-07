@@ -161,6 +161,43 @@ function versionSkew({ appVersion, daemonVersion, isPackaged }) {
   };
 }
 
+/**
+ * How long a handoff report stays meaningful.
+ *
+ * The whole exchange is seconds long: the CLI writes the outcome and the app is
+ * already relaunching. Fifteen minutes is far longer than that and still short
+ * enough that nothing ancient survives.
+ */
+const REPORT_MAX_AGE_MS = 15 * 60 * 1000;
+
+/**
+ * Whether a `desktop-update.json` describes the handoff this launch just came
+ * back from, rather than one from some earlier day.
+ *
+ * There was no such check, and the failure it allows is not hypothetical: a
+ * report left behind by a failed update sat in `~/.veld` for a day, and the next
+ * time the app started — a *different* install, of a newer version — it read the
+ * file and announced that "Veld Desktop 99.0.0 was not installed". Everything
+ * downstream of it was working correctly; the report simply had no expiry.
+ *
+ * Missing or unparseable timestamps count as stale. A report that cannot say
+ * when it was written cannot claim to be about this launch, and staying quiet is
+ * the cheaper mistake — the alternative is telling someone an update failed when
+ * nothing of the sort just happened.
+ *
+ * Clock skew is tolerated in both directions by the same margin: a timestamp
+ * slightly in the future is a machine whose clock moved, not a lie.
+ *
+ * @param {{finishedAt?: string | null, now?: number, maxAgeMs?: number}} ctx
+ * @returns {boolean}
+ */
+function reportIsFresh({ finishedAt, now = Date.now(), maxAgeMs = REPORT_MAX_AGE_MS }) {
+  if (typeof finishedAt !== "string" || !finishedAt) return false;
+  const written = Date.parse(finishedAt);
+  if (Number.isNaN(written)) return false;
+  return Math.abs(now - written) <= maxAgeMs;
+}
+
 /** The page a user lands on to pick the right artifact for their machine. */
 function releasePageUrl(version) {
   const tag = version ? `tag/v${String(version).replace(/^v/, "")}` : "latest";
@@ -221,11 +258,13 @@ function looksLikeVeldCli(output) {
 
 module.exports = {
   GITHUB_REPO,
+  REPORT_MAX_AGE_MS,
   cliCandidatePaths,
   compareVersions,
   downloadOnlyReason,
   looksLikeVeldCli,
   releasePageUrl,
+  reportIsFresh,
   updateMode,
   versionSkew,
 };
