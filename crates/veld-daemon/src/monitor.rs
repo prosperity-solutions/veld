@@ -509,7 +509,13 @@ async fn run_single_liveness_check(
                     Err(_) => Err(format!("port {port} connection timed out")),
                 }
             } else {
-                Ok(()) // No port known, skip.
+                // Absent is never zero. Reporting healthy because there is
+                // nothing to check is how a node with a port-shaped probe and
+                // no port stayed "healthy" forever — including after it died.
+                Err(
+                    "liveness probe is \"port\", but this node has no port — use \"command\""
+                        .to_owned(),
+                )
             }
         }
         "http" => {
@@ -543,15 +549,21 @@ async fn run_single_liveness_check(
                     Err(e) => Err(format!("http request failed: {e}")),
                 }
             } else {
-                Ok(()) // No port known, skip.
+                Err(
+                    "liveness probe is \"http\", but this node has no port — use \"command\""
+                        .to_owned(),
+                )
             }
         }
         other => {
-            warn!(
-                check_type = other,
-                "unknown liveness probe type — treating as healthy"
-            );
-            Ok(())
+            // A typo used to mean "always healthy", so `type: "htpp"` disabled
+            // the probe silently. `unknown-probe-type` rejects it at validate
+            // time; this is the path for a config that predates the rule.
+            warn!(check_type = other, "unknown liveness probe type");
+            Err(format!(
+                "unknown liveness probe type \"{other}\" — expected \"command\", \"http\" or \
+                 \"port\""
+            ))
         }
     }
 }

@@ -1,5 +1,6 @@
 use crate::presets::PresetDef;
 use indexmap::IndexMap;
+use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -1023,29 +1024,173 @@ impl<'de> Deserialize<'de> for PortSpec {
     }
 }
 
+/// What a named port speaks, which is what decides whether veld routes it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PortProtocol {
+    /// HTTP(S). veld mints a hostname for this port and puts a Caddy route in
+    /// front of it, so the port is reachable as a URL.
+    ///
+    /// The `Default` so a share manifest minted before per-port sharing — where
+    /// every entry was routed HTTP and carried no `protocol` — deserializes to
+    /// what it actually meant.
+    #[default]
+    Http,
+    /// A raw TCP listener. Allocated, exported as `${veld.ports.<name>}` and
+    /// `VELD_PORT_<NAME>`, and deliberately **not** routed: a raw TCP
+    /// connection carries no hostname for a proxy to demultiplex on, and every
+    /// `*.veld.localhost` name already resolves to 127.0.0.1 with no help from
+    /// veld (`veld-helper`'s DNS layer skips `.localhost` outright), so the port
+    /// number is already the whole address.
+    Tcp,
+}
+
+/// One entry of a node's `ports` map, as written.
+///
+/// `protocol` stays `Option` through parsing because its default depends on
+/// whether the entry turns out to be the *primary* port, which is not knowable
+/// until the whole map is merged. [`resolve_ports`] applies it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PortEntry {
+    pub spec: PortSpec,
+    pub protocol: Option<PortProtocol>,
+    /// Per-port hostname template, replacing the effective `url_template` for
+    /// this port. The documented way out of a hostname collision between one
+    /// node's secondary port and another node's primary.
+    pub host: Option<String>,
+    /// Who this **port** may be exposed to.
+    ///
+    /// Consent lives on the port because that is where exposure happens. A node
+    /// used to have exactly one exposed port, which made node-level consent
+    /// equivalent — but a node can now declare an app port, an ops console and a
+    /// database, and "share this node" must never come to mean all three.
+    /// Absent is *not shared*, always.
+    pub share: Option<SharePolicy>,
+}
+
+/// The long form, so the shorthand and the object form share one grammar for
+/// the port value itself.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PortEntryObject {
+    port: PortSpec,
+    #[serde(default)]
+    protocol: Option<PortProtocol>,
+    #[serde(default)]
+    host: Option<String>,
+    #[serde(default)]
+    share: Option<SharePolicy>,
+}
+
+impl Serialize for PortEntry {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        // Round-trip the shorthand as shorthand: an entry that states nothing
+        // beyond its port must not grow an object wrapper just by passing
+        // through `veld runs diff` or a graph snapshot.
+        if self.protocol.is_none() && self.host.is_none() && self.share.is_none() {
+            return self.spec.serialize(s);
+        }
+        let mut m = s.serialize_map(None)?;
+        m.serialize_entry("port", &self.spec)?;
+        if let Some(p) = &self.protocol {
+            m.serialize_entry("protocol", p)?;
+        }
+        if let Some(h) = &self.host {
+            m.serialize_entry("host", h)?;
+        }
+        if let Some(sh) = &self.share {
+            m.serialize_entry("share", sh)?;
+        }
+        m.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for PortEntry {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use serde::de::Error as _;
+        let value = serde_json::Value::deserialize(d)?;
+        if value.is_object() {
+            let obj: PortEntryObject =
+                serde_json::from_value(value).map_err(|e| D::Error::custom(e.to_string()))?;
+            return Ok(PortEntry {
+                spec: obj.port,
+                protocol: obj.protocol,
+                host: obj.host,
+                share: obj.share,
+            });
+        }
+        let spec = PortSpec::deserialize(value).map_err(|e| D::Error::custom(e.to_string()))?;
+        Ok(PortEntry {
+            spec,
+            protocol: None,
+            host: None,
+            share: None,
+        })
+    }
+}
+
 /// The name of the port `${veld.port}` refers to when a node declares several.
 pub const PRIMARY_PORT_NAME: &str = "http";
+
+/// One named port with every default applied.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedPort {
+    pub spec: PortSpec,
+    pub protocol: PortProtocol,
+    pub host: Option<String>,
+    /// Who this port may be exposed to. `None` means **not shared** — consent is
+    /// always opt-in, and nothing anywhere may widen it.
+    pub share: Option<SharePolicy>,
+}
 
 /// Resolved named ports for one node, and which of them is primary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedPorts {
-    /// Port name → spec, in declaration-independent (sorted) order.
-    pub ports: BTreeMap<String, PortSpec>,
-    /// The name `${veld.port}` aliases.
-    pub primary: String,
+    /// Port name → resolved port, in declaration-independent (sorted) order.
+    pub ports: BTreeMap<String, ResolvedPort>,
+    /// The name `${veld.port}` aliases, and the only port whose hostname is the
+    /// node's own. `None` for a node that declares no ports at all, and for one
+    /// whose ports are all `tcp` — neither has a URL.
+    pub primary: Option<String>,
+    /// True when the author declared `ports` at all — "no ports on purpose"
+    /// rather than "nothing said, so one was synthesized".
+    pub declared: bool,
+    /// No primary could be chosen, and that is not something the author asked
+    /// for. Computed in [`resolve_ports`] rather than re-derived in `validate`,
+    /// because the question is "did every entry *explicitly* say `tcp`?" and
+    /// [`ResolvedPort`] no longer records which protocols were stated versus
+    /// defaulted.
+    pub primary_ambiguous: bool,
 }
 
 impl ResolvedPorts {
-    /// Pick the primary port: the one named `http`, or the sole entry when only
-    /// one is declared. Ambiguity is a validation error rather than a guess —
-    /// silently picking alphabetically would make `${veld.port}` mean whichever
-    /// name happened to sort first.
-    fn choose_primary(ports: &BTreeMap<String, PortSpec>) -> Option<String> {
+    /// Pick the primary port. In order: the one named `http`; the sole entry
+    /// explicitly marked `protocol: "http"`; the sole entry when it states no
+    /// protocol. Anything else is `None` — ambiguity is a validation error
+    /// rather than a guess, because silently picking alphabetically would make
+    /// `${veld.port}` mean whichever name happened to sort first.
+    fn choose_primary(ports: &BTreeMap<String, PortEntry>) -> Option<String> {
         if ports.contains_key(PRIMARY_PORT_NAME) {
             return Some(PRIMARY_PORT_NAME.to_owned());
         }
+        let explicit_http: Vec<&String> = ports
+            .iter()
+            .filter(|(_, e)| e.protocol == Some(PortProtocol::Http))
+            .map(|(k, _)| k)
+            .collect();
+        if explicit_http.len() == 1 {
+            return Some(explicit_http[0].clone());
+        }
+        if !explicit_http.is_empty() {
+            return None;
+        }
         if ports.len() == 1 {
-            return ports.keys().next().cloned();
+            let (name, entry) = ports.iter().next().expect("len checked");
+            // A lone port explicitly marked `tcp` is a tcp-only node, not a
+            // primary — it must not acquire a hostname by being alone.
+            if entry.protocol.is_none() {
+                return Some(name.clone());
+            }
         }
         None
     }
@@ -1053,20 +1198,112 @@ impl ResolvedPorts {
 
 /// Resolve a node's named ports (`project` has none; node → variant, per key).
 ///
-/// Returns `None` when nothing is declared — a `start_server` with no `ports`
-/// then behaves exactly as it always has: one allocated port, reachable as
-/// `${veld.port}`.
+/// The historical default — "a long-running node with no `ports` gets one
+/// allocated port" — is materialized *here* rather than at the call site, so
+/// every consumer sees one shape and a portless node is simply a map with no
+/// entries instead of a special case each consumer has to remember.
+///
+/// The three authorings, and why the middle one exists:
+///
+/// | `ports` | result |
+/// |---|---|
+/// | absent | one auto `http` port — unchanged v3 behaviour |
+/// | `null` | no ports at all: no allocation, no `${veld.port}`, no URL, no route |
+/// | `{ … }` | that map, merged node → variant per key, `"name": null` erasing one |
+///
+/// Erasing every entry by name (`{"http": null}` over a node that declared only
+/// `http`) also lands on "no ports". It used to collapse back to "nothing
+/// declared" and silently allocate a *fresh* port, which is the opposite of what
+/// the author wrote.
 pub fn resolve_ports(
-    node: Option<&NullableMap<PortSpec>>,
-    variant: Option<&NullableMap<PortSpec>>,
-) -> Option<ResolvedPorts> {
-    let merged = merge_nullable_maps([None, node, variant])?;
-    if merged.is_empty() {
-        return None;
+    node: Option<Option<&NullableMap<PortEntry>>>,
+    variant: Option<Option<&NullableMap<PortEntry>>>,
+) -> ResolvedPorts {
+    let mut declared: Option<HashMap<String, PortEntry>> = None;
+    for layer in [node, variant] {
+        match layer {
+            // Absent: inherit whatever the outer layer said.
+            None => {}
+            // Explicit `null`: erase, and — unlike every other `explicit_null`
+            // field — suppress the synthesized default too.
+            Some(None) => declared = Some(HashMap::new()),
+            Some(Some(map)) => {
+                let mut merged = declared.take().unwrap_or_default();
+                for (k, v) in map {
+                    match v {
+                        Some(v) => {
+                            merged.insert(k.clone(), v.clone());
+                        }
+                        None => {
+                            merged.remove(k);
+                        }
+                    }
+                }
+                declared = Some(merged);
+            }
+        }
     }
-    let ports: BTreeMap<String, PortSpec> = merged.into_iter().collect();
-    let primary = ResolvedPorts::choose_primary(&ports).unwrap_or_default();
-    Some(ResolvedPorts { ports, primary })
+
+    let was_declared = declared.is_some();
+    let entries: BTreeMap<String, PortEntry> = declared
+        .map(|m| m.into_iter().collect())
+        .unwrap_or_else(|| {
+            BTreeMap::from([(
+                PRIMARY_PORT_NAME.to_owned(),
+                PortEntry {
+                    spec: PortSpec::Auto,
+                    protocol: None,
+                    host: None,
+                    share: None,
+                },
+            )])
+        });
+
+    let primary = ResolvedPorts::choose_primary(&entries);
+    // A node legitimately has no primary only when every port it declares says
+    // `tcp` outright. Anything else that lands here is the author expecting a
+    // front door veld cannot identify — two ports both marked `http`, or the
+    // historical "two ports and neither is named http". Both must be refused:
+    // the second used to be, and letting it through now would silently turn a
+    // rejected config into one that starts with no URL at all.
+    let primary_ambiguous = primary.is_none()
+        && !entries.is_empty()
+        && !entries
+            .values()
+            .all(|e| e.protocol == Some(PortProtocol::Tcp));
+    let ports = entries
+        .into_iter()
+        .map(|(name, entry)| {
+            // Default protocol: `http` for the primary, `tcp` for everything
+            // else. That asymmetry is what keeps the change invisible to
+            // existing configs — a node declaring `{"http": "auto", "debug":
+            // "auto"}` must not start minting an HTTPS route in front of its
+            // Node inspector port the first time it is run on a newer veld.
+            let protocol = entry.protocol.unwrap_or({
+                if primary.as_deref() == Some(name.as_str()) {
+                    PortProtocol::Http
+                } else {
+                    PortProtocol::Tcp
+                }
+            });
+            (
+                name,
+                ResolvedPort {
+                    spec: entry.spec,
+                    protocol,
+                    host: entry.host,
+                    share: entry.share,
+                },
+            )
+        })
+        .collect();
+
+    ResolvedPorts {
+        ports,
+        primary,
+        declared: was_declared,
+        primary_ambiguous,
+    }
 }
 
 /// Resolve `depends_on` (node → variant, per key; `null` erases).
@@ -1857,9 +2094,14 @@ pub struct NodeConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub share: Option<SharePolicy>,
 
-    /// Default named ports. Additive per key; `"name": null` erases one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ports: Option<NullableMap<PortSpec>>,
+    /// Default named ports. Additive per key; `"name": null` erases one, and
+    /// `"ports": null` declares that this node has none at all.
+    #[serde(
+        default,
+        deserialize_with = "explicit_null",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub ports: Option<Option<NullableMap<PortEntry>>>,
 
     /// Default dependencies. Additive per key; `"node": null` erases one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1987,10 +2229,17 @@ pub struct VariantConfig {
     pub files: Option<NullableMap<FileDelivery>>,
 
     /// Named ports veld allocates for this variant, additive over the
-    /// node-level map. `"name": null` erases an inherited one. Absent means the
-    /// pre-`ports` behaviour: a `start_server` gets exactly one allocated port.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ports: Option<NullableMap<PortSpec>>,
+    /// node-level map. `"name": null` erases an inherited one; `"ports": null`
+    /// declares that this variant serves nothing, which is how a `long_running`
+    /// node that is not a server (an Electron shell, a watcher, a compiler) opts
+    /// out of port allocation entirely. Absent means the pre-`ports` behaviour:
+    /// exactly one allocated port.
+    #[serde(
+        default,
+        deserialize_with = "explicit_null",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub ports: Option<Option<NullableMap<PortEntry>>>,
 
     /// Outputs declaration. **Replaces** the node-level one wholesale; `null`
     /// erases it.
@@ -2343,12 +2592,38 @@ pub fn resolve_proxy(
 // StepType enum
 // ---------------------------------------------------------------------------
 
+/// What a node's lifecycle is — and *only* its lifecycle.
+///
+/// The two primitives are "runs to completion" and "stays running". Whether a
+/// long-running node serves anything is a property of its `ports`, not of its
+/// type: `"ports": null` is a process veld supervises and never routes.
+///
+/// `start_server` is the historical spelling of `long_running` and is a
+/// permanent alias, exactly as `bash` is for `command`. It was renamed because
+/// it named the common case rather than the contract, and once a portless
+/// long-running node became legal the old name described the minority of them.
+///
+/// Configs written either way load forever, and there is deliberately **no lint
+/// rule** nagging about the old spelling: a permanent alias sets no deadline, so
+/// a warning every existing config trips and never needs to satisfy is noise.
+/// The rename is documentation, not a migration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StepType {
     #[serde(rename = "command", alias = "bash")]
     Command,
-    #[serde(rename = "start_server")]
-    StartServer,
+    #[serde(rename = "long_running", alias = "start_server")]
+    LongRunning,
+}
+
+impl StepType {
+    /// The canonical spelling, which is also what gets persisted into run
+    /// history and graph snapshots.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            StepType::Command => "command",
+            StepType::LongRunning => "long_running",
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2384,6 +2659,23 @@ pub struct HealthCheck {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port: Option<String>,
 
+    /// How long `type: "settle"` waits for the process to stay alive, in
+    /// seconds (default 3).
+    ///
+    /// `settle` is the readiness probe for a long-running node that binds no
+    /// port — an Electron shell, a watcher, a compiler. Its claim is deliberately
+    /// weak and it says so: *the process was still running N seconds after it
+    /// was spawned*. That is worth having anyway, because the check is raced
+    /// against process exit exactly as the port probe is, so a node whose
+    /// command dies immediately still fails the run instead of letting its
+    /// dependents start behind a corpse.
+    ///
+    /// Prefer `type: "command"` whenever the process publishes something
+    /// observable (a socket, a built file, a pid file). `settle` is the honest
+    /// fallback, not the recommendation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seconds: Option<u64>,
+
     /// Maximum seconds to wait for health (default 60).
     #[serde(default = "default_timeout")]
     pub timeout_seconds: u64,
@@ -2392,6 +2684,11 @@ pub struct HealthCheck {
     #[serde(default = "default_interval")]
     pub interval_ms: u64,
 }
+
+/// Default `settle` window. Long enough to catch a command that fails on
+/// startup (a missing binary, a bad flag, an occupied resource), short enough
+/// that it does not dominate a cold start.
+pub const DEFAULT_SETTLE_SECONDS: u64 = 3;
 
 // ---------------------------------------------------------------------------
 // ---------------------------------------------------------------------------
@@ -2500,7 +2797,9 @@ pub struct ResolvedVariant {
     pub liveness: Option<LivenessProbe>,
     pub depends_on: Option<HashMap<String, String>>,
     pub env: Option<HashMap<String, ConfigValue>>,
-    pub ports: Option<ResolvedPorts>,
+    /// Always present. "No ports" is an empty map with no primary, never a
+    /// `None` each consumer has to translate back into a default.
+    pub ports: ResolvedPorts,
     /// Paths (project-root-relative) to write before the process starts.
     pub files: Option<HashMap<String, FileDelivery>>,
     pub outputs: Option<Outputs>,
@@ -2508,6 +2807,10 @@ pub struct ResolvedVariant {
     pub strict_outputs: bool,
     pub skip_if: Option<CommandSpec>,
     pub on_stop: Option<CommandSpec>,
+    /// The node/variant-level `share` **as written**. Retained for diagnostics
+    /// and display only — the authoritative consent is per port, in
+    /// [`Self::ports`], where this value has already been folded into the
+    /// primary entry. Never gate an exposure on this field.
     pub share: Option<SharePolicy>,
     pub features: ResolvedFeatures,
     pub proxy: ResolvedProxy,
@@ -2570,6 +2873,28 @@ pub fn resolve_variant(
         variant.probes.as_ref().and_then(|p| p.liveness.as_ref()),
     );
 
+    // Node/variant-level `share` is **shorthand for the primary port's policy**,
+    // not a node-wide grant. That keeps every config written before per-port
+    // consent meaning exactly what it meant — such a node had one exposed port —
+    // while making it impossible for the same words to start covering an ops
+    // console or a database the author never mentioned.
+    //
+    // A port that states its own `share` wins: the more specific declaration is
+    // the one the author looked at last. Nothing here ever *widens* a port's
+    // policy; a port with no policy of its own and no primary-ness stays unshared.
+    let node_share = replace(node.share.as_ref(), variant.share.as_ref());
+    let mut ports = resolve_ports(
+        node.ports.as_ref().map(|p| p.as_ref()),
+        variant.ports.as_ref().map(|p| p.as_ref()),
+    );
+    if let Some(primary) = ports.primary.clone() {
+        if let Some(entry) = ports.ports.get_mut(&primary) {
+            if entry.share.is_none() {
+                entry.share = node_share.clone();
+            }
+        }
+    }
+
     ResolvedVariant {
         step_type: variant
             .step_type
@@ -2585,7 +2910,7 @@ pub fn resolve_variant(
             node.env.as_ref(),
             variant.env.as_ref(),
         ),
-        ports: resolve_ports(node.ports.as_ref(), variant.ports.as_ref()),
+        ports,
         files: merge_nullable_maps([None, node.files.as_ref(), variant.files.as_ref()]),
         outputs: replace(node.outputs.as_ref(), variant.outputs.as_ref()),
         sensitive_outputs: variant.sensitive_outputs.clone(),
@@ -2594,7 +2919,7 @@ pub fn resolve_variant(
         // Absent inherits the node's hook; an explicit `null` erases it. `replace`
         // is the same three-way rule already used for `outputs` and `share`.
         on_stop: replace(node.on_stop.as_ref(), variant.on_stop.as_ref()),
-        share: replace(node.share.as_ref(), variant.share.as_ref()),
+        share: node_share,
         features: resolve_features(
             project.features.as_ref(),
             node.features.as_ref(),
@@ -4309,49 +4634,197 @@ fn check_resolved_variants(config: &VeldConfig, out: &mut Vec<Finding>) {
                     "missing-step-type",
                     &loc,
                     "no \"type\" — set it on the variant, or once on the node for all \
-                     its variants. Expected \"start_server\" or \"command\"",
+                     its variants. Expected \"long_running\" or \"command\"",
                 ));
             }
 
-            // Which port `${veld.port}` means must never be a guess.
-            if let Some(ports) = &r.ports {
-                if ports.primary.is_empty() {
-                    let mut names: Vec<&str> = ports.ports.keys().map(String::as_str).collect();
-                    names.sort();
+            // Which port `${veld.port}` means must never be a guess. Only fires
+            // when the author gave nothing to disambiguate on: several ports,
+            // none named `http`, and none carrying an explicit `protocol`. A
+            // declaration that marks exactly one port `"protocol": "http"` has
+            // said which one is the front door, and a tcp-only node has
+            // legitimately no primary at all.
+            let ports = &r.ports;
+            if ports.primary_ambiguous {
+                let mut names: Vec<&str> = ports.ports.keys().map(String::as_str).collect();
+                names.sort();
+                let http_count = ports
+                    .ports
+                    .values()
+                    .filter(|p| p.protocol == PortProtocol::Http)
+                    .count();
+                let why = if http_count > 1 {
+                    "more than one is marked \"protocol\": \"http\", so veld cannot tell which \
+                     is the front door"
+                } else {
+                    "none is named \"http\" and none is marked \"protocol\": \"http\""
+                };
+                out.push(Finding::error(
+                    "ambiguous-primary-port",
+                    format!("{loc}.ports"),
+                    format!(
+                        "several ports are declared ({}) and {why}, so `${{veld.port}}` and \
+                         `${{veld.url}}` have no unambiguous meaning. Name the main one \
+                         \"{}\". If this node genuinely serves no HTTP, mark every port \
+                         \"protocol\": \"tcp\"",
+                        names.join(", "),
+                        PRIMARY_PORT_NAME
+                    ),
+                ));
+            }
+
+            // A `long_running` node with no readiness probe is reported healthy
+            // the moment its port opens — or, for a portless one, the moment it
+            // is spawned — so the graph proceeds before the process can serve.
+            // Readiness is also the *only* crash-fast in the start path: it is
+            // what races the process's own exit, so a node without one lets its
+            // dependents start behind a process that already died.
+            if r.step_type == StepType::LongRunning && r.readiness.is_none() {
+                let remedy = if r.ports.ports.is_empty() {
+                    "Add `probes.readiness` — `{ \"type\": \"command\", \"shell\": \"…\" }` \
+                     when the process publishes something observable, or \
+                     `{ \"type\": \"settle\", \"seconds\": 3 }` to accept \"it was still \
+                     running after 3s\""
+                } else {
+                    "Add `probes.readiness` — `{ \"type\": \"http\", \"path\": \"/…\" }`, or \
+                     `{ \"type\": \"port\" }` to accept the port-open check as readiness"
+                };
+                out.push(Finding::error(
+                    "long-running-needs-readiness",
+                    &loc,
+                    format!(
+                        "a `long_running` node with no readiness probe is reported healthy \
+                         before it can serve, and nothing catches it exiting on startup. \
+                         {remedy}"
+                    ),
+                ));
+            }
+
+            // A probe type nothing implements used to mean "always healthy":
+            // `{"type": "htpp"}` silently disabled the check on both the
+            // readiness and the liveness path. A typo must never be the quiet
+            // way to turn a probe off.
+            for (what, probe_type, port_name) in [
+                (
+                    "readiness",
+                    r.readiness.as_ref().map(|h| h.check_type.clone()),
+                    r.readiness.as_ref().and_then(|h| h.port.clone()),
+                ),
+                (
+                    "liveness",
+                    r.liveness.as_ref().map(|l| l.check_type.clone()),
+                    None,
+                ),
+            ] {
+                let Some(probe_type) = probe_type else {
+                    continue;
+                };
+                const KNOWN: &[&str] = &["http", "port", "command", "bash", "settle"];
+                if !KNOWN.contains(&probe_type.as_str()) {
                     out.push(Finding::error(
-                        "ambiguous-primary-port",
-                        format!("{loc}.ports"),
+                        "unknown-probe-type",
+                        format!("{loc}.probes.{what}"),
                         format!(
-                            "several ports are declared ({}) and none is named \"{}\", so \
-                             `${{veld.port}}` has no unambiguous meaning. Name the main one \
-                             \"{}\"",
-                            names.join(", "),
-                            PRIMARY_PORT_NAME,
-                            PRIMARY_PORT_NAME
+                            "unknown probe type \"{probe_type}\" — expected one of {}. An \
+                             unrecognised type would silently report healthy forever",
+                            KNOWN.join(", ")
+                        ),
+                    ));
+                    continue;
+                }
+
+                // A port-shaped probe needs a port to shape itself around. On a
+                // portless node there is nothing to connect to, and answering
+                // "healthy" is exactly the failure this rule exists to stop.
+                if matches!(probe_type.as_str(), "http" | "port") {
+                    let target_exists = match &port_name {
+                        Some(name) => r.ports.ports.contains_key(name),
+                        None => r.ports.primary.is_some(),
+                    };
+                    if !target_exists {
+                        let detail = match &port_name {
+                            Some(name) => format!("names port \"{name}\", which is not declared"),
+                            None => {
+                                "needs the primary port, and this node declares none".to_owned()
+                            }
+                        };
+                        out.push(Finding::error(
+                            "probe-needs-port",
+                            format!("{loc}.probes.{what}"),
+                            format!(
+                                "the {what} probe is \"{probe_type}\" and {detail}. Use \
+                                 \"command\"{}, or give the node a port",
+                                if what == "readiness" {
+                                    " or \"settle\""
+                                } else {
+                                    ""
+                                }
+                            ),
+                        ));
+                    }
+                }
+            }
+
+            // A node-level `share` is shorthand for the *primary* port. A node
+            // with no primary — every port `tcp`, or `"ports": null` — has
+            // nowhere to fold it, so the opt-in would grant nothing at all and
+            // say nothing about it. Silent no-ops are the failure mode per-port
+            // consent exists to remove, so name it.
+            if r.share.is_some() && r.ports.primary.is_none() {
+                let remedy = if r.ports.ports.is_empty() {
+                    "this node declares no ports, so there is nothing to expose".to_owned()
+                } else {
+                    let mut names: Vec<&str> = r.ports.ports.keys().map(String::as_str).collect();
+                    names.sort();
+                    format!(
+                        "move it onto the port you meant — this node has: {}",
+                        names.join(", ")
+                    )
+                };
+                out.push(Finding::error(
+                    "share-without-primary-port",
+                    format!("{loc}.share"),
+                    format!(
+                        "a node-level `share` is shorthand for the primary port's policy, and \
+                         this node has no primary port, so it grants nothing. {remedy}"
+                    ),
+                ));
+            }
+
+            // The `web` audience is HTTP-only, permanently. The gateway speaks
+            // HTTP/1.1 over the tunnel, and a browser cannot speak a raw
+            // protocol through it regardless — so this is not a gap to close
+            // later, it is a property of what "web" means. Caught here so the
+            // author learns at `veld lint` rather than at `veld share --web`.
+            for (name, port) in &r.ports.ports {
+                let Some(share) = &port.share else { continue };
+                if port.protocol == PortProtocol::Tcp && share.allows(ExposeMode::Web) {
+                    out.push(Finding::error(
+                        "web-share-needs-http",
+                        format!("{loc}.ports.{name}.share"),
+                        format!(
+                            "port `{name}` is `\"protocol\": \"tcp\"` but opts into `web` \
+                             sharing. The public gateway serves HTTP, and a browser cannot \
+                             speak a raw TCP protocol through it. Use `\"expose\": \
+                             [\"peer\"]`, or make the port `\"protocol\": \"http\"`"
                         ),
                     ));
                 }
             }
 
-            // A `start_server` with no readiness probe reports healthy the moment
-            // its port opens, so the graph proceeds before the service can serve.
-            //
-            // Severity is version-gated on purpose. The issue specifies this as an
-            // error, but applying it to a v1 or v2 document would break the
-            // acceptance criterion that such a config "loads and runs
-            // byte-identically, with no new warnings" — probeless `start_server`
-            // nodes are common in configs written before probes existed, and
-            // failing them at `veld start` would be a flag day. So: an error in a
-            // v3 document (which is opting into the new rules), a warning in v1/v2
-            // (surfaced by `veld lint`, never blocking a run).
-            if r.step_type == StepType::StartServer && r.readiness.is_none() {
+            // `settle` is a readiness-only concept: it claims "the process was
+            // still alive N seconds after spawn", which is a statement about
+            // startup. The monitor has no such notion, and accepting it there
+            // would be another probe that never fails.
+            if r.liveness
+                .as_ref()
+                .is_some_and(|l| l.check_type == "settle")
+            {
                 out.push(Finding::error(
-                    "start-server-needs-readiness",
-                    &loc,
-                    "a `start_server` with no readiness probe is reported healthy as soon as \
-                     its port opens, so dependents start before it can serve. Add \
-                     `probes.readiness` — `{ \"type\": \"http\", \"path\": \"/…\" }`, or \
-                     `{ \"type\": \"port\" }` to accept the port-open check as readiness",
+                    "unknown-probe-type",
+                    format!("{loc}.probes.liveness"),
+                    "\"settle\" is a readiness probe only — it describes startup, so as a \
+                     liveness check it would report healthy forever. Use \"command\"",
                 ));
             }
         }
@@ -4369,11 +4842,13 @@ fn check_resolved_variants(config: &VeldConfig, out: &mut Vec<Finding>) {
 /// [`check_builtin_names`], which reports a name that is real but not populated
 /// where it was written.
 ///
-/// One family is **not** listed here because it is per-node rather than fixed:
-/// `ports.<name>`, one per entry in the node's `ports` map (F6).
-/// [`check_builtin_names`] validates those against what the node actually
-/// declares, which gives a better error than "unknown builtin" — it can say which
-/// port names exist.
+/// Two families are **not** listed here because they are per-node rather than
+/// fixed: `ports.<name>`, one per entry in the node's `ports` map (F6), and
+/// `urls.<name>[.hostname|host|origin|scheme|port]`, one per entry whose
+/// `protocol` is `http`. [`check_builtin_names`] validates those against what the
+/// node actually declares, which gives a better error than "unknown builtin" — it
+/// can say which port names exist, and for a URL it can say the port exists but
+/// is `tcp`, which is the reason it has no hostname.
 pub const BUILTIN_VARS: &[&str] = &[
     "run",
     "run_id",
@@ -4449,7 +4924,7 @@ impl BuiltinScopeKind {
             BuiltinScopeKind::ProjectStep => "a project `setup` / `teardown` step",
             BuiltinScopeKind::Vars => "a `vars` value",
             BuiltinScopeKind::CommandNode => "a `command` node",
-            BuiltinScopeKind::ServerNode => "a `start_server` node",
+            BuiltinScopeKind::ServerNode => "a `long_running` node",
         }
     }
 
@@ -4471,13 +4946,13 @@ impl BuiltinScopeKind {
                 "reference `${{veld.{name}}}` at the use site instead of storing it in a var"
             ),
             BuiltinScopeKind::CommandNode if name == "port" || name.starts_with("ports.") => {
-                "a `command` step gets no port allocation (only a `start_server` step does). \
+                "a `command` step gets no port allocation (only a `long_running` node does). \
                  Reference another node's port as `${nodes.<node>.port}`, or change this \
-                 node's `type` to `start_server`"
+                 node's `type` to `long_running`"
                     .to_owned()
             }
             BuiltinScopeKind::CommandNode if name == "url" || name.starts_with("url.") => {
-                "a `command` step has no URL of its own (only a `start_server` step is \
+                "a `command` step has no URL of its own (only a `long_running` node is \
                  routed). Reference the server's URL as `${nodes.<node>.url}`"
                     .to_owned()
             }
@@ -4507,6 +4982,35 @@ struct BuiltinSite {
     kind: BuiltinScopeKind,
     /// Named ports this variant resolves to. Only meaningful for a server node.
     ports: Vec<String>,
+    /// The subset of `ports` with `protocol: "http"` — the only ones that get a
+    /// hostname, and so the only ones `${veld.urls.<name>}` can resolve.
+    http_ports: Vec<String>,
+}
+
+/// The pieces `${veld.url…}` and `${veld.urls.<name>…}` decompose into, mirroring
+/// the Web URL API. The empty string is the URL itself.
+const URL_PIECES: &[&str] = &["", "hostname", "host", "origin", "scheme", "port"];
+
+/// The same list, for the orchestrator test that pins "everything published
+/// under `urls.<name>` is a name this validator accepts". Publishing a piece the
+/// validator rejects (or accepting one nothing publishes) is the exact drift
+/// that shipped `urls.admin.url.hostname`.
+#[doc(hidden)]
+pub const URL_PIECES_FOR_TEST: &[&str] = URL_PIECES;
+
+/// Split a `urls.` reference (prefix already stripped) into port name and piece.
+///
+/// Splits on the **first** dot, so `admin.origin` is port `admin` piece `origin`.
+/// A port name cannot contain a dot — it is a hostname label — so this is not
+/// ambiguous.
+fn split_url_ref(rest: &str) -> Option<(&str, &str)> {
+    if rest.is_empty() {
+        return None;
+    }
+    Some(match rest.split_once('.') {
+        Some((port, piece)) => (port, piece),
+        None => (rest, ""),
+    })
 }
 
 impl BuiltinSite {
@@ -4515,20 +5019,92 @@ impl BuiltinSite {
             label: String::new(),
             kind,
             ports: Vec::new(),
+            http_ports: Vec::new(),
         }
     }
 
     fn provides(&self, name: &str) -> bool {
-        match name.strip_prefix("ports.") {
-            Some(port) => {
-                self.kind == BuiltinScopeKind::ServerNode && self.ports.iter().any(|p| p == port)
-            }
-            None => self.kind.provides(name),
+        if let Some(port) = name.strip_prefix("ports.") {
+            return self.kind == BuiltinScopeKind::ServerNode
+                && self.ports.iter().any(|p| p == port);
         }
+        if let Some(rest) = name.strip_prefix("urls.") {
+            let Some((port, piece)) = split_url_ref(rest) else {
+                return false;
+            };
+            return self.kind == BuiltinScopeKind::ServerNode
+                && self.http_ports.iter().any(|p| p == port)
+                && URL_PIECES.contains(&piece);
+        }
+        // `hosts.<name>` is every port, both protocols — a `tcp` port has a
+        // hostname and no URL, and this is the accessor that works for both.
+        if let Some(port) = name.strip_prefix("hosts.") {
+            return self.kind == BuiltinScopeKind::ServerNode
+                && self.ports.iter().any(|p| p == port);
+        }
+        self.kind.provides(name)
     }
 
     /// The remedy sentence for a name this site does not have.
     fn remedy_for(&self, name: &str) -> String {
+        if let Some(port) = name.strip_prefix("hosts.") {
+            if self.kind == BuiltinScopeKind::ServerNode {
+                if self.ports.is_empty() {
+                    return format!(
+                        "`${{veld.hosts.{port}}}` refers to a named port, but this node \
+                         declares none"
+                    );
+                }
+                let mut names = self.ports.clone();
+                names.sort();
+                return format!(
+                    "this node declares no port named `{port}`. It has: {}",
+                    names.join(", ")
+                );
+            }
+            return format!("`${{veld.{name}}}` is not available here");
+        }
+        // `urls.<port>` gets its own remedy because the reason it is missing is
+        // usually the *protocol*, not a typo — and only the config knows that.
+        if let Some(rest) = name.strip_prefix("urls.") {
+            if self.kind == BuiltinScopeKind::ServerNode {
+                if let Some((port, piece)) = split_url_ref(rest) {
+                    if !piece.is_empty() && !URL_PIECES.contains(&piece) {
+                        let pieces: Vec<&str> = URL_PIECES
+                            .iter()
+                            .copied()
+                            .filter(|p| !p.is_empty())
+                            .collect();
+                        return format!(
+                            "`{piece}` is not a URL piece. Use one of: {}, or \
+                             `${{veld.urls.{port}}}` for the whole URL",
+                            pieces.join(", ")
+                        );
+                    }
+                    if self.ports.iter().any(|p| p == port) {
+                        return format!(
+                            "port `{port}` is not `\"protocol\": \"http\"`, so veld gives it \
+                             no hostname and it has no URL. Mark it \
+                             `{{ \"port\": …, \"protocol\": \"http\" }}`, or use \
+                             `${{veld.ports.{port}}}` for the port number"
+                        );
+                    }
+                    if self.http_ports.is_empty() {
+                        return format!(
+                            "`${{veld.urls.{port}}}` refers to a named http port, but this \
+                             node has none. Use `${{veld.url}}` for the primary URL"
+                        );
+                    }
+                    let mut names = self.http_ports.clone();
+                    names.sort();
+                    return format!(
+                        "this node declares no http port named `{port}`. It has: {}",
+                        names.join(", ")
+                    );
+                }
+            }
+            return format!("`${{veld.{name}}}` is not available here");
+        }
         match name.strip_prefix("ports.") {
             Some(port) if self.kind == BuiltinScopeKind::ServerNode => {
                 if self.ports.is_empty() {
@@ -4570,7 +5146,11 @@ fn check_builtin_names(config: &VeldConfig, out: &mut Vec<Finding>) {
 
     fn check(loc: &str, s: &str, sites: &[BuiltinSite], out: &mut Vec<Finding>) {
         for name in builtin_refs(s) {
-            if !BUILTIN_VARS.contains(&name.as_str()) && !name.starts_with("ports.") {
+            if !BUILTIN_VARS.contains(&name.as_str())
+                && !name.starts_with("ports.")
+                && !name.starts_with("urls.")
+                && !name.starts_with("hosts.")
+            {
                 // Point at the namespace that almost certainly holds it: an author
                 // writing `${veld.DB_HOST}` means this node's output.
                 out.push(Finding::error(
@@ -4578,8 +5158,10 @@ fn check_builtin_names(config: &VeldConfig, out: &mut Vec<Finding>) {
                     loc,
                     format!(
                         "`${{veld.{name}}}` is not a built-in variable. `veld.*` is a closed \
-                         set ({}). If {name} is a node output, use `${{output.{name}}}` \
-                         (this node) or `${{nodes.<node>.{name}}}` (another node)",
+                         set ({}, plus `ports.<name>` and `urls.<name>` for a node's \
+                         declared ports). If {name} is a node output, use \
+                         `${{output.{name}}}` (this node) or `${{nodes.<node>.{name}}}` \
+                         (another node)",
                         BUILTIN_VARS.join(", ")
                     ),
                 ));
@@ -4662,15 +5244,23 @@ fn check_builtin_names(config: &VeldConfig, out: &mut Vec<Finding>) {
         variant: &VariantConfig,
     ) -> BuiltinSite {
         let kind = match resolve_variant(config, node, variant).step_type {
-            StepType::StartServer => BuiltinScopeKind::ServerNode,
+            StepType::LongRunning => BuiltinScopeKind::ServerNode,
             StepType::Command => BuiltinScopeKind::CommandNode,
         };
+        let resolved_ports = resolve_ports(
+            node.ports.as_ref().map(|p| p.as_ref()),
+            variant.ports.as_ref().map(|p| p.as_ref()),
+        );
         BuiltinSite {
             label: format!("{node_name}:{variant_name}"),
             kind,
-            ports: resolve_ports(node.ports.as_ref(), variant.ports.as_ref())
-                .map(|p| p.ports.keys().cloned().collect())
-                .unwrap_or_default(),
+            ports: resolved_ports.ports.keys().cloned().collect(),
+            http_ports: resolved_ports
+                .ports
+                .iter()
+                .filter(|(_, p)| p.protocol == PortProtocol::Http)
+                .map(|(name, _)| name.clone())
+                .collect(),
         }
     }
 
@@ -7177,8 +7767,9 @@ mod tests {
         }
     }
 
-    /// **error** — a `start_server` with no readiness probe. One schema version, so
-    /// one severity.
+    /// **error** — a `long_running` node with no readiness probe. One schema
+    /// version, so one severity. Written against the `start_server` spelling on
+    /// purpose: the alias must reach the same rule.
     #[test]
     fn start_server_without_readiness_is_error() {
         let v3 = findings_for(
@@ -7188,7 +7779,7 @@ mod tests {
         );
         let hit = v3
             .iter()
-            .find(|f| f.rule == "start-server-needs-readiness")
+            .find(|f| f.rule == "long-running-needs-readiness")
             .unwrap();
         assert_eq!(hit.severity, Severity::Error);
 
@@ -8184,10 +8775,10 @@ mod tests {
         );
         assert!(!env.contains_key("DROPPED"), "null erases an inherited key");
 
-        let ports = r.ports.as_ref().unwrap();
+        let ports = &r.ports;
         let names: Vec<&str> = ports.ports.keys().map(String::as_str).collect();
         assert_eq!(names, vec!["debug", "http", "metrics"]);
-        assert_eq!(ports.primary, "http");
+        assert_eq!(ports.primary.as_deref(), Some("http"));
 
         let deps = r.depends_on.as_ref().unwrap();
         assert_eq!(deps.get("db").map(String::as_str), Some("local"));
@@ -8275,7 +8866,7 @@ mod tests {
             "a",
             "inherits",
         );
-        assert_eq!(r.step_type, StepType::StartServer);
+        assert_eq!(r.step_type, StepType::LongRunning);
         assert_eq!(r.command, Some(CommandSpec::Shell("node-level".into())));
         assert_eq!(r.on_stop, Some(CommandSpec::Shell("node-stop".into())));
 
@@ -8367,9 +8958,23 @@ mod tests {
             "a",
             "dev",
         );
-        let ports = r.ports.as_ref().unwrap();
+        let ports = &r.ports;
         assert_eq!(ports.ports.len(), 2);
-        assert_eq!(ports.primary, "http", "`http` is the primary by convention");
+        assert_eq!(
+            ports.primary.as_deref(),
+            Some("http"),
+            "`http` is the primary by convention"
+        );
+        assert_eq!(
+            ports.ports["http"].protocol,
+            PortProtocol::Http,
+            "the primary defaults to http, so it keeps its route"
+        );
+        assert_eq!(
+            ports.ports["debug"].protocol,
+            PortProtocol::Tcp,
+            "a secondary port defaults to tcp, so an existing config gains no new hostname"
+        );
 
         // A single named port is the primary whatever it is called.
         let r = resolve(
@@ -8379,9 +8984,11 @@ mod tests {
             "a",
             "dev",
         );
-        assert_eq!(r.ports.as_ref().unwrap().primary, "grpc");
+        assert_eq!(r.ports.primary.as_deref(), Some("grpc"));
 
-        // No `ports` at all keeps the pre-F6 behaviour: one allocated port.
+        // No `ports` at all keeps the pre-F6 behaviour: one allocated port —
+        // now materialized as a real entry rather than an absent map every
+        // consumer had to translate back into a default.
         let r = resolve(
             r#"{"schemaVersion":"3","name":"t","nodes":{"a":{"variants":{"dev":{
                 "type":"start_server","shell":"x"
@@ -8389,7 +8996,372 @@ mod tests {
             "a",
             "dev",
         );
-        assert!(r.ports.is_none());
+        assert!(!r.ports.declared);
+        assert_eq!(r.ports.primary.as_deref(), Some(PRIMARY_PORT_NAME));
+        assert_eq!(r.ports.ports.len(), 1);
+        assert_eq!(r.ports.ports[PRIMARY_PORT_NAME].spec, PortSpec::Auto);
+        assert_eq!(
+            r.ports.ports[PRIMARY_PORT_NAME].protocol,
+            PortProtocol::Http
+        );
+    }
+
+    #[test]
+    fn explicit_null_ports_declares_a_long_running_node_that_serves_nothing() {
+        let r = resolve(
+            r#"{"schemaVersion":"3","name":"t","nodes":{"a":{"variants":{"dev":{
+                "type":"long_running","shell":"electron .","ports":null,
+                "probes":{"readiness":{"type":"settle"}}
+            }}}}}"#,
+            "a",
+            "dev",
+        );
+        assert_eq!(r.step_type, StepType::LongRunning);
+        assert!(r.ports.declared, "`null` is a declaration, not an absence");
+        assert!(r.ports.ports.is_empty());
+        assert_eq!(r.ports.primary, None, "nothing to be primary");
+    }
+
+    #[test]
+    fn a_variant_erasing_the_last_port_by_name_does_not_resurrect_one() {
+        // The map collapsing to empty used to read as "nothing declared", which
+        // sent the orchestrator down its allocate-one default — so erasing a
+        // node's only port handed the variant a *fresh* port instead of none.
+        let r = resolve(
+            r#"{"schemaVersion":"3","name":"t","nodes":{"a":{
+                "ports":{"http":"auto"},
+                "variants":{"dev":{
+                    "type":"long_running","shell":"x","ports":{"http":null},
+                    "probes":{"readiness":{"type":"settle"}}
+                }}}}}"#,
+            "a",
+            "dev",
+        );
+        assert!(r.ports.ports.is_empty());
+        assert_eq!(r.ports.primary, None);
+    }
+
+    #[test]
+    fn start_server_stays_a_permanent_alias_for_long_running() {
+        for spelling in ["start_server", "long_running"] {
+            let r = resolve(
+                &format!(
+                    r#"{{"schemaVersion":"3","name":"t","nodes":{{"a":{{"variants":{{"dev":{{
+                        "type":"{spelling}","shell":"x",
+                        "probes":{{"readiness":{{"type":"port"}}}}
+                    }}}}}}}}}}"#
+                ),
+                "a",
+                "dev",
+            );
+            assert_eq!(
+                r.step_type,
+                StepType::LongRunning,
+                "`{spelling}` must resolve to the same primitive"
+            );
+        }
+        // And the canonical spelling is what gets persisted, so run history and
+        // graph snapshots do not depend on which spelling the author used.
+        assert_eq!(StepType::LongRunning.as_str(), "long_running");
+    }
+
+    #[test]
+    fn a_port_entry_takes_a_protocol_and_round_trips_its_shorthand() {
+        let shorthand: PortEntry = serde_json::from_str(r#""auto""#).unwrap();
+        assert_eq!(shorthand.spec, PortSpec::Auto);
+        assert_eq!(shorthand.protocol, None);
+        assert_eq!(
+            serde_json::to_string(&shorthand).unwrap(),
+            r#""auto""#,
+            "a shorthand entry must not grow an object wrapper on round-trip"
+        );
+
+        let long: PortEntry = serde_json::from_str(r#"{"port":5432,"protocol":"tcp"}"#).unwrap();
+        assert_eq!(long.spec, PortSpec::Fixed(5432));
+        assert_eq!(long.protocol, Some(PortProtocol::Tcp));
+
+        assert!(
+            serde_json::from_str::<PortEntry>(r#"{"port":"auto","protcol":"tcp"}"#).is_err(),
+            "a misspelled key must not be silently ignored"
+        );
+    }
+
+    #[test]
+    fn an_explicit_http_protocol_disambiguates_the_primary() {
+        let r = resolve(
+            r#"{"schemaVersion":"3","name":"t","nodes":{"a":{"variants":{"dev":{
+                "type":"long_running","shell":"x",
+                "ports":{
+                    "api":{"port":"auto","protocol":"http"},
+                    "db":{"port":5432,"protocol":"tcp"}
+                },
+                "probes":{"readiness":{"type":"port"}}
+            }}}}}"#,
+            "a",
+            "dev",
+        );
+        assert_eq!(r.ports.primary.as_deref(), Some("api"));
+        let config: VeldConfig = serde_json::from_str(
+            r#"{"schemaVersion":"3","name":"t","nodes":{"a":{"variants":{"dev":{
+                "type":"long_running","shell":"x",
+                "ports":{
+                    "api":{"port":"auto","protocol":"http"},
+                    "db":{"port":5432,"protocol":"tcp"}
+                },
+                "probes":{"readiness":{"type":"port"}}
+            }}}}}"#,
+        )
+        .expect("fixture parses");
+        let findings = validate(&config);
+        assert!(
+            !findings.iter().any(|f| f.rule == "ambiguous-primary-port"),
+            "an explicit http port is not ambiguous"
+        );
+    }
+
+    /// Consent lives on the port. The node-level `share` is shorthand for the
+    /// **primary** port and must never widen to the rest — a node's admin
+    /// console and its database are separate decisions from its app.
+    #[test]
+    fn node_level_share_covers_the_primary_port_and_nothing_else() {
+        let r = resolve(
+            r#"{"schemaVersion":"3","name":"t","nodes":{"web":{"variants":{"dev":{
+                "type":"long_running","shell":"x",
+                "share":{"expose":["peer","web"]},
+                "ports":{
+                    "http":"auto",
+                    "admin":{"port":"auto","protocol":"http"},
+                    "pg":{"port":5432,"protocol":"tcp"}
+                },
+                "probes":{"readiness":{"type":"port"}}
+            }}}}}"#,
+            "web",
+            "dev",
+        );
+        let p = &r.ports.ports;
+        assert!(
+            p["http"]
+                .share
+                .as_ref()
+                .is_some_and(|s| s.allows(ExposeMode::Peer)),
+            "the node-level opt-in reaches the primary"
+        );
+        assert!(
+            p["admin"].share.is_none(),
+            "a secondary http port is NOT covered by a node-level share"
+        );
+        assert!(
+            p["pg"].share.is_none(),
+            "a tcp port is NOT covered by a node-level share"
+        );
+    }
+
+    /// A port's own `share` is the more specific declaration and wins; nothing
+    /// anywhere may widen a port that declared none.
+    #[test]
+    fn a_ports_own_share_wins_over_the_node_shorthand() {
+        let r = resolve(
+            r#"{"schemaVersion":"3","name":"t","nodes":{"web":{"variants":{"dev":{
+                "type":"long_running","shell":"x",
+                "share":{"expose":["web"]},
+                "ports":{
+                    "http":{"port":"auto","protocol":"http","share":{"expose":["peer"]}},
+                    "admin":{"port":"auto","protocol":"http","share":{"expose":["peer"]}}
+                },
+                "probes":{"readiness":{"type":"port"}}
+            }}}}}"#,
+            "web",
+            "dev",
+        );
+        let http = r.ports.ports["http"].share.as_ref().unwrap();
+        assert!(http.allows(ExposeMode::Peer));
+        assert!(
+            !http.allows(ExposeMode::Web),
+            "the port's own policy replaces the node shorthand, never merges with it"
+        );
+        assert!(
+            r.ports.ports["admin"]
+                .share
+                .as_ref()
+                .is_some_and(|s| s.allows(ExposeMode::Peer)),
+            "a secondary port opts in explicitly"
+        );
+    }
+
+    /// The node-level shorthand needs a primary port to land on. Without one it
+    /// silently granted nothing, which is the exact surprise per-port consent
+    /// exists to remove.
+    #[test]
+    fn a_node_level_share_with_no_primary_port_is_refused() {
+        // Every port explicitly tcp: no primary, so the shorthand has no home.
+        let findings = findings_for(
+            r#"{"schemaVersion":"3","name":"t","nodes":{"db":{"variants":{"dev":{
+                "type":"long_running","shell":"x",
+                "share":{"expose":["peer"]},
+                "ports":{
+                    "pg":{"port":5432,"protocol":"tcp"},
+                    "redis":{"port":6379,"protocol":"tcp"}
+                },
+                "probes":{"readiness":{"type":"command","shell":"true"}}
+            }}}}}"#,
+        );
+        let hit = findings
+            .iter()
+            .find(|f| f.rule == "share-without-primary-port")
+            .expect("a shorthand that grants nothing must be refused");
+        assert_eq!(hit.severity, Severity::Error);
+        assert!(
+            hit.message.contains("pg"),
+            "names the ports: {}",
+            hit.message
+        );
+
+        // A portless node likewise has nothing to expose.
+        let portless = findings_for(
+            r#"{"schemaVersion":"3","name":"t","nodes":{"w":{"variants":{"dev":{
+                "type":"long_running","shell":"x","ports":null,
+                "share":{"expose":["peer"]},
+                "probes":{"readiness":{"type":"settle"}}
+            }}}}}"#,
+        );
+        assert!(
+            portless
+                .iter()
+                .any(|f| f.rule == "share-without-primary-port"),
+            "got {portless:?}"
+        );
+
+        // Declaring it on the port instead is the fix, and is accepted.
+        let ok = findings_for(
+            r#"{"schemaVersion":"3","name":"t","nodes":{"db":{"variants":{"dev":{
+                "type":"long_running","shell":"x",
+                "ports":{"pg":{"port":5432,"protocol":"tcp","share":{"expose":["peer"]}}},
+                "probes":{"readiness":{"type":"command","shell":"true"}}
+            }}}}}"#,
+        );
+        assert!(
+            !ok.iter().any(|f| f.rule == "share-without-primary-port"),
+            "per-port consent on a tcp-only node is the supported shape, got {ok:?}"
+        );
+    }
+
+    /// The `web` audience is HTTP-only by the nature of the gateway, so the
+    /// combination has to be unwritable rather than merely unsupported.
+    #[test]
+    fn a_tcp_port_cannot_opt_into_web_sharing() {
+        let findings = findings_for(
+            r#"{"schemaVersion":"3","name":"t","nodes":{"db":{"variants":{"dev":{
+                "type":"long_running","shell":"x",
+                "ports":{"pg":{"port":5432,"protocol":"tcp","share":{"expose":["web"]}}},
+                "probes":{"readiness":{"type":"command","shell":"true"}}
+            }}}}}"#,
+        );
+        let hit = findings
+            .iter()
+            .find(|f| f.rule == "web-share-needs-http")
+            .expect("a tcp port opting into web must be refused");
+        assert_eq!(hit.severity, Severity::Error);
+
+        // `peer` on the same port is fine — that is the whole point of raw
+        // sharing, and it must not be caught by the same rule.
+        let ok = findings_for(
+            r#"{"schemaVersion":"3","name":"t","nodes":{"db":{"variants":{"dev":{
+                "type":"long_running","shell":"x",
+                "ports":{"pg":{"port":5432,"protocol":"tcp","share":{"expose":["peer"]}}},
+                "probes":{"readiness":{"type":"command","shell":"true"}}
+            }}}}}"#,
+        );
+        assert!(
+            !ok.iter().any(|f| f.rule == "web-share-needs-http"),
+            "peer sharing a tcp port is legitimate, got {ok:?}"
+        );
+    }
+
+    /// A `tcp` port has a hostname and no URL, so `${veld.hosts.<name>}` must
+    /// accept it and `${veld.urls.<name>}` must not — and the rejection has to
+    /// say *why*, since "unknown builtin" would send the author looking for a
+    /// typo when the answer is the protocol.
+    #[test]
+    fn hosts_covers_every_port_and_urls_covers_only_routed_ones() {
+        let json = r#"{"schemaVersion":"3","name":"t","nodes":{"a":{"variants":{"dev":{
+            "type":"long_running","shell":"x",
+            "ports":{"http":"auto","pg":{"port":5432,"protocol":"tcp"}},
+            "probes":{"readiness":{"type":"port"}},
+            "env":{"OK_URL":"${veld.urls.http}","OK_HOST":"${veld.hosts.pg}"}
+        }}}}}"#;
+        let cfg: VeldConfig = serde_json::from_str(json).expect("fixture parses");
+        let findings = validate(&cfg);
+        assert!(
+            !findings.iter().any(|f| f.rule == "builtin-not-in-scope"),
+            "a tcp port's `hosts.` and an http port's `urls.` are both in scope, got {findings:?}"
+        );
+
+        // The same node asking for a tcp port's URL is rejected, by protocol.
+        let bad = json.replace("${veld.hosts.pg}", "${veld.urls.pg}");
+        let cfg: VeldConfig = serde_json::from_str(&bad).expect("fixture parses");
+        let hit = validate(&cfg)
+            .into_iter()
+            .find(|f| f.rule == "builtin-not-in-scope")
+            .expect("a tcp port has no URL");
+        assert!(
+            hit.message.contains("protocol") && hit.message.contains("http"),
+            "the remedy must name the protocol, got: {}",
+            hit.message
+        );
+    }
+
+    /// A node has no primary *legitimately* only when every port says `tcp`.
+    /// Every other primary-less shape is the author expecting a front door veld
+    /// cannot identify, and must be refused — including the historical
+    /// "two ports, neither named http", which would otherwise have gone from a
+    /// rejected config to one that silently starts with no URL at all.
+    #[test]
+    fn only_an_all_tcp_node_may_have_no_primary() {
+        fn ports_case(ports: &str) -> (Option<String>, bool) {
+            let json = format!(
+                r#"{{"schemaVersion":"3","name":"t","nodes":{{"a":{{"variants":{{"dev":{{
+                    "type":"long_running","shell":"x","ports":{ports},
+                    "probes":{{"readiness":{{"type":"command","shell":"true"}}}}
+                }}}}}}}}}}"#
+            );
+            let r = resolve(&json, "a", "dev");
+            let cfg: VeldConfig = serde_json::from_str(&json).expect("fixture parses");
+            let ambiguous = validate(&cfg)
+                .iter()
+                .any(|f| f.rule == "ambiguous-primary-port");
+            (r.ports.primary.clone(), ambiguous)
+        }
+
+        // Every port explicitly tcp: no primary, no URL, and that is fine.
+        let (primary, ambiguous) = ports_case(
+            r#"{"db":{"port":5432,"protocol":"tcp"},"redis":{"port":6379,"protocol":"tcp"}}"#,
+        );
+        assert_eq!(primary, None);
+        assert!(!ambiguous, "a tcp-only node legitimately has no primary");
+
+        // Two ports both marked http: veld cannot pick, so it must not guess.
+        let (primary, ambiguous) = ports_case(
+            r#"{"api":{"port":"auto","protocol":"http"},"admin":{"port":"auto","protocol":"http"}}"#,
+        );
+        assert_eq!(primary, None);
+        assert!(ambiguous, "two http ports and no `http` name is ambiguous");
+
+        // The historical case, still an error.
+        let (primary, ambiguous) = ports_case(r#"{"a":"auto","b":"auto"}"#);
+        assert_eq!(primary, None);
+        assert!(ambiguous, "two bare ports, neither named http");
+
+        // A lone explicitly-tcp port is a tcp-only node, not a primary.
+        let (primary, ambiguous) = ports_case(r#"{"db":{"port":5432,"protocol":"tcp"}}"#);
+        assert_eq!(primary, None);
+        assert!(!ambiguous);
+
+        // A mixed pair where only one states a protocol still needs a decision.
+        let (_, ambiguous) = ports_case(r#"{"db":{"port":5432,"protocol":"tcp"},"other":"auto"}"#);
+        assert!(
+            ambiguous,
+            "one stated protocol does not name the front door"
+        );
     }
 
     #[test]

@@ -25,22 +25,47 @@ pub enum ApprovalMode {
     Auto,
 }
 
-/// One service exposed by a share. The `hostname` is the *literal* host from the
-/// origin's `NodeState.url`, shipped verbatim so the consumer reproduces the
-/// exact same URL (redirects, cookies, and CORS then work unmodified).
+/// One **port** exposed by a share. The `hostname` is the *literal* host from
+/// the origin's endpoint, shipped verbatim so the consumer reproduces the exact
+/// same URL (redirects, cookies, and CORS then work unmodified).
+///
+/// One entry per exposed port, not per node. A node may contribute several — an
+/// app port and an admin port are separate consent decisions and separate
+/// entries — or none.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SharedNode {
     /// Node name (e.g. `frontend`).
     pub node: String,
     /// Variant name (e.g. `local`).
     pub variant: String,
+    /// Which named port of that node this entry is (e.g. `http`, `admin`).
+    ///
+    /// Absent on manifests minted before per-port sharing, where a node
+    /// contributed exactly one entry and it was always the primary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port_name: Option<String>,
     /// Literal hostname to reproduce on the consumer (no scheme, no port); used
-    /// for the consumer's Caddy route match and DNS entry.
+    /// for the consumer's Caddy route match and DNS entry. Unique across a
+    /// manifest — it is the key the host's upstream allowlist is built from.
     pub hostname: String,
     /// The origin's full URL, shown to the consumer as the address to open.
     /// Valid verbatim on the consumer because both peers run the same setup mode
     /// (identical scheme + port).
-    pub url: String,
+    ///
+    /// **`None` for a `tcp` endpoint**, which has no route and therefore no URL.
+    ///
+    /// This field is deliberately *not* `#[serde(default)]`. An older consumer
+    /// deserializes `url` as a required `String`, so a manifest containing a tcp
+    /// endpoint fails to parse there and the join is refused outright. That is
+    /// the intended behaviour: a peer that cannot represent an endpoint must not
+    /// silently reproduce it as an HTTP route. Fail closed, exactly as the
+    /// gateway access ack does for an unknown audience.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// What the endpoint speaks. Absent on pre-per-port manifests, where every
+    /// entry was routed HTTP — which is why the default is `Http`.
+    #[serde(default)]
+    pub protocol: crate::config::PortProtocol,
     /// Host-local TCP port the origin's service listens on (the tunnel target
     /// the host dials).
     pub upstream_port: u16,
@@ -49,6 +74,21 @@ pub struct SharedNode {
     /// for backward compatibility with manifests minted before this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy: Option<crate::config::ResolvedProxy>,
+}
+
+impl SharedNode {
+    /// A routed endpoint the consumer reproduces behind its own Caddy.
+    pub fn is_routed(&self) -> bool {
+        self.protocol == crate::config::PortProtocol::Http
+    }
+
+    /// `node:variant#port`, the label every consent diagnostic uses.
+    pub fn label(&self) -> String {
+        match &self.port_name {
+            Some(port) => format!("{}:{}#{port}", self.node, self.variant),
+            None => format!("{}:{}", self.node, self.variant),
+        }
+    }
 }
 
 /// The set of services a host is sharing, plus lifetime metadata. Carried inside
@@ -262,6 +302,14 @@ pub struct JoinResponse {
     pub join_id: String,
     /// URLs now reachable locally on this machine.
     pub urls: Vec<String>,
+    /// `host:port` for every raw (`tcp`) endpoint reproduced locally.
+    ///
+    /// Not URLs, and the port is the **local listener's**, not the origin's — a
+    /// raw endpoint has no route to preserve the original port through, so this
+    /// is the only address that works. Absent from responses minted before
+    /// per-port sharing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub addresses: Vec<String>,
     /// Non-fatal notes (e.g. nodes skipped because a local URL already owns the
     /// hostname — the local URL always wins).
     #[serde(default)]
@@ -656,7 +704,9 @@ mod tests {
                 node: "app".to_string(),
                 variant: "host".to_string(),
                 hostname: "app.demo.irohtest.localhost".to_string(),
-                url: "https://app.demo.irohtest.localhost".to_string(),
+                port_name: None,
+                protocol: Default::default(),
+                url: Some("https://app.demo.irohtest.localhost".to_string()),
                 upstream_port: 19001,
                 proxy: None,
             }],

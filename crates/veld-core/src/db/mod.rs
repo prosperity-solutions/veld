@@ -473,6 +473,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "worktree-display-name",
         apply: migrate_v13_worktree_display_name,
     },
+    Migration {
+        version: 14,
+        name: "node-endpoints",
+        apply: migrate_v14_node_endpoints,
+    },
 ];
 
 fn migrate_v1_initial(conn: &Connection) -> rusqlite::Result<()> {
@@ -1071,6 +1076,28 @@ fn migrate_v11_pane_sessions(conn: &Connection) -> rusqlite::Result<()> {
 /// lets a `secret: true` var be overridable without veld taking custody of the
 /// secret. A plain scalar round-trips as a bare JSON string, so the common case
 /// stays readable in `sqlite3`.
+/// One JSON column holding a node's named ports, keyed by port name.
+///
+/// A node used to own exactly one hostname, so `nodes.url` was the whole story
+/// and teardown removed one DNS host and one Caddy route. With every
+/// `protocol: "http"` port getting its own hostname, a node can own several, and
+/// the stop path has to be able to find all of them from state alone — the
+/// config may have changed since the run started, which is why the URL was
+/// persisted in the first place.
+///
+/// Backfill is deliberately absent: existing rows keep `url` and get `'{}'`
+/// here, and `NodeState::hostnames()` folds `url` back in, so a run started
+/// before this migration still tears its single route down. Writing the old
+/// `url` into `urls` would have to invent a port name for it, and the only
+/// honest one ("http") is a guess about a config we no longer have.
+fn migrate_v14_node_endpoints(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        r#"
+        ALTER TABLE nodes ADD COLUMN endpoints TEXT NOT NULL DEFAULT '{}';
+        "#,
+    )
+}
+
 fn migrate_v12_var_overrides(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
         r#"

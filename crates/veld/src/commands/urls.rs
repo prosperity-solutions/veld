@@ -67,26 +67,32 @@ pub async fn run(name: Option<String>, json: bool) -> i32 {
         return 1;
     }
 
-    // Collect URLs from node states.
-    let mut url_entries: Vec<(&str, &str, &str)> = Vec::new();
+    // Collect URLs from node states — every routed http port, not just the
+    // primary, or a node's secondary hostnames would be reachable and
+    // undiscoverable.
+    let mut url_entries: Vec<(&str, &str, Option<&str>, &str)> = Vec::new();
     for ns in run_state.nodes.values() {
-        if let Some(ref url) = ns.url {
-            url_entries.push((&ns.node_name, &ns.variant, url));
+        for (port, url) in ns.routed_urls() {
+            url_entries.push((&ns.node_name, &ns.variant, port, url));
         }
     }
-    url_entries.sort_by_key(|(node, variant, _)| (*node, *variant));
+    url_entries.sort_by_key(|(node, variant, port, _)| (*node, *variant, *port));
 
     if json {
         // Same top-level shape as the stopped branch above — an agent can
         // always read `.live` and `.urls` without probing the type first.
         // (Pre-v3 this was a bare array; the object shape is part of the v3
         // output changes.)
+        // `node`, `variant` and `url` keep their meaning for every existing
+        // consumer; `port` is the new key and is null for the primary, so a
+        // single-port node's object is byte-identical apart from that field.
         let urls: Vec<serde_json::Value> = url_entries
             .iter()
-            .map(|(node, variant, url)| {
+            .map(|(node, variant, port, url)| {
                 serde_json::json!({
                     "node": node,
                     "variant": variant,
+                    "port": port,
                     "url": url,
                 })
             })
@@ -102,8 +108,12 @@ pub async fn run(name: Option<String>, json: bool) -> i32 {
     } else if url_entries.is_empty() {
         output::print_info("No URLs exposed.");
     } else {
-        for (node, variant, url) in &url_entries {
-            println!("{} {}", output::cyan(&format!("{node}:{variant}")), url,);
+        for (node, variant, port, url) in &url_entries {
+            let label = match port {
+                Some(port) => format!("{node}:{variant}#{port}"),
+                None => format!("{node}:{variant}"),
+            };
+            println!("{} {}", output::cyan(&label), url);
         }
     }
 

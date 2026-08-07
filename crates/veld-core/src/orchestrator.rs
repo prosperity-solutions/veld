@@ -114,6 +114,18 @@ pub enum OrchestratorError {
         run_name: String,
         project_root: String,
     },
+
+    #[error(
+        "{first} and {second} both resolve to hostname {hostname}, so one would silently \
+         shadow the other. A node's secondary http port is served at \
+         `<node>-<port>.…`, which can collide with a node actually named that. Rename one \
+         of them, or give the port its own `host` template."
+    )]
+    HostnameCollisionWithinRun {
+        hostname: String,
+        first: String,
+        second: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -189,22 +201,78 @@ fn planned_hostnames(
     ctx: &UrlContext,
 ) -> Result<Vec<String>, OrchestratorError> {
     let mut planned = Vec::new();
+    // hostname → the node:variant#port that claimed it first. Two entries used
+    // to be impossible by construction (node names are map keys and `{service}`
+    // is always a whole label), but fusing a port name into `{service}` makes an
+    // intra-run collision representable — so it now has to be checked rather
+    // than assumed. A template that omits `{service}` collides here too, which
+    // was already a latent hole.
+    let mut owners: HashMap<String, String> = HashMap::new();
     for sel in plan.iter().flatten() {
         let node_cfg = &config.nodes[&sel.node];
         let variant_cfg = &node_cfg.variants[&sel.variant];
         let resolved = config::resolve_variant(config, node_cfg, variant_cfg);
-        if resolved.step_type != config::StepType::StartServer {
+        if resolved.step_type != config::StepType::LongRunning {
             continue;
         }
-        // Normalised the same way the route id is, so a template carrying a literal
-        // port compares against the registry's stripped hostnames.
-        let rendered = node_hostname(config, sel, run_name, ctx)?;
-        planned.push(url::hostname_of_url(&rendered).to_owned());
+        // Every port, not just the routed ones: a `tcp` port gets a DNS entry,
+        // so it can collide with another project's hostname exactly as a routed
+        // one can — and a DNS collision is the harder one to diagnose, because
+        // nothing serves an error page.
+        for (port_name, port) in &resolved.ports.ports {
+            // Normalised the same way the route id is, so a template carrying a literal
+            // port compares against the registry's stripped hostnames.
+            let rendered = node_hostname(
+                config,
+                sel,
+                run_name,
+                ctx,
+                &service_label(&sel.node, port_name, resolved.ports.primary.as_deref()),
+                port.host.as_deref(),
+            )?;
+            let hostname = url::hostname_of_url(&rendered).to_owned();
+            let owner = format!("{}:{}#{}", sel.node, sel.variant, port_name);
+            if let Some(first) = owners.get(&hostname) {
+                return Err(OrchestratorError::HostnameCollisionWithinRun {
+                    hostname,
+                    first: first.clone(),
+                    second: owner,
+                });
+            }
+            owners.insert(hostname.clone(), owner);
+            planned.push(hostname);
+        }
     }
     Ok(planned)
 }
 
-/// The hostname a `start_server` node will be served at.
+/// The `{service}` value for one of a node's HTTP ports.
+///
+/// The primary keeps the node's own name, so a single-port node's hostname stays
+/// byte-identical to what it has always been. A secondary port is *fused into*
+/// that label rather than prefixed as a new one — `web-admin.dev.veld.localhost`,
+/// not `admin.web.dev.veld.localhost` — so every hostname a node owns is a
+/// sibling at the same depth. A wildcard TLS cert or a dnsmasq suffix rule that
+/// already covers the node then covers its extra ports too; a deeper label falls
+/// outside both.
+///
+/// The cost of fusing on `-` is that the port-hostname space and the node-hostname
+/// space stop being provably disjoint: node `web`'s `admin` port and a node
+/// actually named `web-admin` claim the same hostname. A prefix label could not
+/// collide (`.` survives neither a node name nor `slugify`), so this trades a
+/// by-construction guarantee for a runtime guard — [`planned_hostnames`] refuses
+/// the start and names both owners. The documented way out is the per-port `host`
+/// override. There is no lint rule for it: the check needs the run name and the
+/// URL context, neither of which `config::validate` has.
+fn service_label(node: &str, port_name: &str, primary: Option<&str>) -> String {
+    if primary == Some(port_name) {
+        node.to_owned()
+    } else {
+        format!("{node}-{port_name}")
+    }
+}
+
+/// The hostname one HTTP port of a `long_running` node will be served at.
 ///
 /// A free function taking `&VeldConfig` so both callers — the pre-start
 /// collision check and the port/URL pre-compute pass — derive the hostname the
@@ -215,16 +283,23 @@ fn node_hostname(
     sel: &NodeSelection,
     run_name: &str,
     ctx: &UrlContext,
+    service: &str,
+    host_override: Option<&str>,
 ) -> Result<String, OrchestratorError> {
     let node_cfg = &config.nodes[&sel.node];
     let variant_cfg = &node_cfg.variants[&sel.variant];
-    let effective_template = url::resolve_url_template(
-        &config.url_template,
-        node_cfg.url_template.as_deref(),
-        variant_cfg.url_template.as_deref(),
-    );
+    // A port's own `host` replaces the whole template rather than layering onto
+    // it: the collision it exists to resolve is usually with the very suffix the
+    // project template supplies.
+    let effective_template = host_override.unwrap_or_else(|| {
+        url::resolve_url_template(
+            &config.url_template,
+            node_cfg.url_template.as_deref(),
+            variant_cfg.url_template.as_deref(),
+        )
+    });
     let url_values = url::build_url_template_values(
-        &sel.node,
+        service,
         &sel.variant,
         run_name,
         &config.name,
@@ -421,7 +496,7 @@ fn build_graph_snapshot(
             .map(|m| m.keys().cloned().collect())
             .unwrap_or_default();
         env_keys.sort();
-        let url_template = (resolved.step_type == config::StepType::StartServer).then(|| {
+        let url_template = (resolved.step_type == config::StepType::LongRunning).then(|| {
             url::resolve_url_template(
                 &config.url_template,
                 node_cfg.url_template.as_deref(),
@@ -432,10 +507,7 @@ fn build_graph_snapshot(
         nodes.insert(
             RunState::node_key(&sel.node, &sel.variant),
             crate::state::NodeSnapshot {
-                step_type: match resolved.step_type {
-                    config::StepType::Command => "command".to_owned(),
-                    config::StepType::StartServer => "start_server".to_owned(),
-                },
+                step_type: resolved.step_type.as_str().to_owned(),
                 command,
                 cwd: variant_cfg.cwd.clone().or_else(|| node_cfg.cwd.clone()),
                 env_keys,
@@ -560,6 +632,27 @@ pub fn url_builtins(https_url: &str) -> Vec<(&'static str, String)> {
     ]
 }
 
+/// The same pieces as [`url_builtins`], re-keyed under `urls.<port>` for a named
+/// http port.
+///
+/// [`url_builtins`] returns keys that already carry the `url` prefix (`"url"`,
+/// `"url.hostname"`, …), so the port-scoped family has to *replace* that prefix
+/// rather than nest under it — building `format!("urls.{name}.{key}")` from its
+/// output yields `urls.admin.url.hostname`, which nothing resolves. That was a
+/// real bug, invisible to `veld lint` (the name is well-formed and the validator
+/// only checks the *reference*, not what the orchestrator publishes) and caught
+/// only by running an environment. Both the cross-node `all_outputs` map and the
+/// node's own `var_ctx` go through here so they cannot drift apart again.
+fn port_url_builtins(port_name: &str, https_url: &str) -> Vec<(String, String)> {
+    url_builtins(https_url)
+        .into_iter()
+        .map(|(key, value)| {
+            let suffix = key.strip_prefix("url").unwrap_or(key);
+            (format!("urls.{port_name}{suffix}"), value)
+        })
+        .collect()
+}
+
 /// Machine-readable outcome detail for a failed start.
 fn end_detail_for_error(e: &OrchestratorError) -> EndDetail {
     let mut detail = EndDetail::default();
@@ -576,26 +669,84 @@ fn end_detail_for_error(e: &OrchestratorError) -> EndDetail {
     detail
 }
 
-/// Pre-computed port and URL for a `start_server` node, resolved before
+/// A port name as it appears in an environment variable suffix
+/// (`VELD_PORT_<NAME>`, `VELD_URL_<NAME>`).
+fn env_suffix(port_name: &str) -> String {
+    port_name.to_uppercase().replace('-', "_")
+}
+
+/// One routed HTTP port: the hostname veld minted for it and the URL that
+/// hostname is reachable at.
+#[derive(Clone)]
+struct PortEndpoint {
+    /// Raw hostname (without scheme), used for DNS/Caddy configuration.
+    ///
+    /// **Every** named port gets one, whatever its protocol — naming and routing
+    /// are separate concerns, and veld has always kept `add_host` and
+    /// `add_route` apart. For a `tcp` port the hostname is the whole point: it
+    /// is registered in DNS and never routed, so `db.myapp.test:5432` reaches
+    /// the process while Caddy stays out of the path entirely. Without it a
+    /// tcp-only node on a custom apex domain would have no name at all and be
+    /// reachable only as `127.0.0.1:<port>`.
+    hostname: String,
+    /// Full `https://` URL, including the port suffix when not 443. `None` for a
+    /// `tcp` port: there is no route in front of it, so there is no URL — the
+    /// hostname plus `${veld.ports.<name>}` is the address.
+    https_url: Option<String>,
+    /// The local port this endpoint refers to. Caddy's upstream for an `http`
+    /// port; for `tcp`, simply the port the client connects to.
+    port: u16,
+}
+
+impl PortEndpoint {
+    /// A routed endpoint is one Caddy sits in front of.
+    fn is_routed(&self) -> bool {
+        self.https_url.is_some()
+    }
+}
+
+/// Pre-computed ports and URLs for a `long_running` node, resolved before
 /// any node begins execution so that all nodes can reference any other
 /// node's URL/port without requiring a dependency edge.
 struct PrecomputedServer {
-    /// The primary port — what `${veld.port}` and `VELD_PORT` resolve to, and
-    /// what Caddy proxies to. A node that declares no `ports` map has exactly
-    /// this one, as it always did.
-    port: u16,
+    /// The primary port — what `${veld.port}` and `VELD_PORT` resolve to.
+    /// `None` for a node that declares `"ports": null`: a long-running process
+    /// that serves nothing has no port, no hostname and no route.
+    port: Option<u16>,
+    /// The name of the primary port within `named_ports`, when there is one.
+    primary_name: Option<String>,
     /// Every named port from the `ports` map, including the primary, as
-    /// `${veld.ports.<name>}`. Empty when the node declares no map.
+    /// `${veld.ports.<name>}`.
     named_ports: std::collections::BTreeMap<String, u16>,
-    /// Raw hostname (without scheme), used for DNS/Caddy configuration.
-    hostname: String,
-    /// Full `https://` URL including port suffix when not 443.
-    https_url: String,
+    /// One entry per named port, keyed by port name — `tcp` included.
+    ///
+    /// Every entry gets a DNS host; only the routed ones (`protocol: "http"`)
+    /// also get a Caddy route. The primary's entry — when the node has one — is
+    /// what `${veld.url}` and the node's own `url` state field resolve to; the
+    /// other routed ones are `${veld.urls.<name>}`, and *all* of them are
+    /// `${veld.hosts.<name>}`.
+    ///
+    /// Teardown must iterate all of them. A missed one leaves a permanent
+    /// `/etc/hosts` line and, for a routed entry, a Caddy route that shadows the
+    /// hostname for every later run.
+    endpoints: std::collections::BTreeMap<String, PortEndpoint>,
     /// Held TCP listeners that reserve the ports from other processes.
     /// Taken (released) right before the child process is spawned.
     reservation: Option<crate::port::PortReservation>,
     /// Reservations for the non-primary named ports, released alongside it.
     extra_reservations: Vec<crate::port::PortReservation>,
+}
+
+impl PrecomputedServer {
+    /// The primary endpoint's URL, if this node is routed at all.
+    fn https_url(&self) -> Option<&str> {
+        self.primary_endpoint().and_then(|e| e.https_url.as_deref())
+    }
+
+    fn primary_endpoint(&self) -> Option<&PortEndpoint> {
+        let name = self.primary_name.as_deref()?;
+        self.endpoints.get(name)
+    }
 }
 
 /// Read-only context shared by all node execution tasks within a stage.
@@ -1205,73 +1356,95 @@ impl Orchestrator {
                 let node_cfg = &self.config.nodes[&sel.node];
                 let variant_cfg = &node_cfg.variants[&sel.variant];
                 let resolved = config::resolve_variant(&self.config, node_cfg, variant_cfg);
-                if resolved.step_type != config::StepType::StartServer {
+                if resolved.step_type != config::StepType::LongRunning {
                     continue;
                 }
 
                 // One allocation per declared name. A node with no `ports` map
-                // gets exactly one, exactly as before F6 — the whole point is
-                // that debug-adapter and multi-port container variants stop
-                // needing hand-picked literal ports, which silently break
-                // parallel worktrees.
+                // gets exactly one — `config::resolve_ports` materializes that
+                // default, so there is no "nothing declared" case to special-case
+                // here and a node declaring `"ports": null` simply iterates zero
+                // times. The whole point of named ports is that debug-adapter and
+                // multi-port container variants stop needing hand-picked literal
+                // ports, which silently break parallel worktrees.
+                let declared = &resolved.ports;
                 let mut named_ports = std::collections::BTreeMap::new();
                 let mut extra_reservations = Vec::new();
                 let mut primary_reservation = None;
-                match resolved.ports.as_ref() {
-                    None => {
-                        primary_reservation = Some(self.port_allocator.allocate()?);
-                    }
-                    Some(declared) => {
-                        for (name, spec) in &declared.ports {
-                            let reservation = match spec {
-                                config::PortSpec::Auto => self.port_allocator.allocate()?,
-                                config::PortSpec::Fixed(p) => {
-                                    self.port_allocator.reserve_fixed(*p)?
-                                }
-                            };
-                            named_ports.insert(name.clone(), reservation.port);
-                            if *name == declared.primary {
-                                primary_reservation = Some(reservation);
-                            } else {
-                                extra_reservations.push(reservation);
-                            }
-                        }
+                for (name, port_cfg) in &declared.ports {
+                    let reservation = match port_cfg.spec {
+                        config::PortSpec::Auto => self.port_allocator.allocate()?,
+                        config::PortSpec::Fixed(p) => self.port_allocator.reserve_fixed(p)?,
+                    };
+                    named_ports.insert(name.clone(), reservation.port);
+                    if declared.primary.as_deref() == Some(name.as_str()) {
+                        primary_reservation = Some(reservation);
+                    } else {
+                        extra_reservations.push(reservation);
                     }
                 }
-                let reservation = primary_reservation.ok_or_else(|| {
-                    // `validate` rejects an ambiguous primary before we get here;
-                    // this is the belt-and-braces path.
-                    OrchestratorError::NodeFailed {
+                // A node with ports but no primary means `validate` let an
+                // ambiguous declaration through; belt and braces.
+                if primary_reservation.is_none() && declared.primary.is_some() {
+                    return Err(OrchestratorError::NodeFailed {
                         node: sel.node.clone(),
                         variant: sel.variant.clone(),
                         reason: "cannot tell which of the declared ports is the primary — \
                                  name one of them \"http\""
                             .to_owned(),
-                    }
-                })?;
-                let port = reservation.port;
+                    });
+                }
+                let port = primary_reservation.as_ref().map(|r| r.port);
 
-                // Same function the pre-start hostname check used, so the URL a
-                // route is registered under cannot drift from the one that was
-                // checked against other projects.
-                let node_url = node_hostname(&self.config, sel, &run.name, &url_ctx)?;
-                let https_url = if self.https_port == 443 {
-                    format!("https://{node_url}")
-                } else {
-                    format!("https://{node_url}:{}", self.https_port)
-                };
+                // One hostname per named port, whatever its protocol. Same
+                // function the pre-start hostname check used, so the name a route
+                // or a DNS entry is registered under cannot drift from the one
+                // that was checked against other projects. Only `http` ports get
+                // a URL — and, later, a route.
+                let mut endpoints = std::collections::BTreeMap::new();
+                for (name, port_cfg) in &declared.ports {
+                    let port_value = named_ports[name];
+                    let hostname = node_hostname(
+                        &self.config,
+                        sel,
+                        &run.name,
+                        &url_ctx,
+                        &service_label(&sel.node, name, declared.primary.as_deref()),
+                        port_cfg.host.as_deref(),
+                    )?;
+                    let https_url = (port_cfg.protocol == config::PortProtocol::Http).then(|| {
+                        if self.https_port == 443 {
+                            format!("https://{hostname}")
+                        } else {
+                            format!("https://{hostname}:{}", self.https_port)
+                        }
+                    });
+                    endpoints.insert(
+                        name.clone(),
+                        PortEndpoint {
+                            hostname,
+                            https_url,
+                            port: port_value,
+                        },
+                    );
+                }
 
                 let key = RunState::node_key(&sel.node, &sel.variant);
                 self.debug_log(&format!(
-                    "{}:{} — pre-computed port {} → {}",
-                    sel.node, sel.variant, port, https_url
+                    "{}:{} — pre-computed {} port(s), {} routed",
+                    sel.node,
+                    sel.variant,
+                    named_ports.len(),
+                    endpoints.values().filter(|e| e.is_routed()).count()
                 ))
                 .await;
 
                 // Pre-populate all_outputs so every node can resolve
                 // ${nodes.X.url}, ${nodes.X.port}, and URL piece references.
                 let mut node_out = HashMap::new();
-                node_out.insert("port".to_owned(), port.to_string());
+                if let Some(port) = port {
+                    node_out.insert("port".to_owned(), port.to_string());
+                }
                 // Named ports are referenceable across nodes too:
                 // `${nodes.api.ports.debug}`.
                 for (name, value) in &named_ports {
@@ -1279,9 +1452,23 @@ impl Orchestrator {
                 }
                 // `url` plus the individual location pieces (mirrors the Web URL
                 // API), from the same derivation the node's own `${veld.url*}`
-                // and its `on_stop` use.
-                for (key, value) in url_builtins(&https_url) {
-                    node_out.insert(key.to_owned(), value);
+                // and its `on_stop` use. Secondary http ports get the same family
+                // under `urls.<name>`, so `${nodes.api.urls.admin.origin}` reads
+                // exactly like `${nodes.api.url.origin}`.
+                for (name, endpoint) in &endpoints {
+                    // Every port has a hostname, so `${nodes.db.hosts.pg}` is the
+                    // one accessor that works for both protocols — the piece a
+                    // connection string actually needs.
+                    node_out.insert(format!("hosts.{name}"), endpoint.hostname.clone());
+                    let Some(https_url) = &endpoint.https_url else {
+                        continue;
+                    };
+                    if declared.primary.as_deref() == Some(name.as_str()) {
+                        for (key, value) in url_builtins(https_url) {
+                            node_out.insert(key.to_owned(), value);
+                        }
+                    }
+                    node_out.extend(port_url_builtins(name, https_url));
                 }
                 all_outputs.insert(format!("{}:{}", sel.node, sel.variant), node_out.clone());
                 all_outputs
@@ -1293,10 +1480,10 @@ impl Orchestrator {
                     key,
                     PrecomputedServer {
                         port,
+                        primary_name: declared.primary.clone(),
                         named_ports,
-                        hostname: node_url,
-                        https_url,
-                        reservation: Some(reservation),
+                        endpoints,
+                        reservation: primary_reservation,
                         extra_reservations,
                     },
                 );
@@ -1587,7 +1774,7 @@ impl Orchestrator {
             return Err(OrchestratorError::NodeFailed {
                 node: sel.node.clone(),
                 variant: sel.variant.clone(),
-                reason: "--oneshot requires a command-type node (start_server never exits)"
+                reason: "--oneshot requires a command-type node (long_running never exits)"
                     .to_owned(),
             });
         }
@@ -2057,13 +2244,8 @@ impl Orchestrator {
                     }
                 }
 
-                // Remove DNS + Caddy route.
-                if let Some(ref url_str) = node_state.url {
-                    let hostname = url::hostname_of_url(url_str);
-                    let _ = self.helper_client.remove_host(hostname).await;
-                    self.remove_route_by_hostname(hostname, run_name, node_state)
-                        .await;
-                }
+                // Remove DNS + Caddy routes — one per routed http port.
+                self.remove_node_routes(run_name, node_state).await;
 
                 // Run on_stop hook if defined (skip nodes that never ran).
                 if node_state.status != NodeStatus::Pending {
@@ -2312,11 +2494,16 @@ impl Orchestrator {
     }
 
     /// Remove the DNS host and Caddy route for a node (best-effort).
+    /// Remove **every** hostname this node claimed, not just the primary.
+    ///
+    /// A node owns one hostname per `protocol: "http"` port, so iterating
+    /// `hostnames()` rather than reading `url` is load-bearing: a hostname
+    /// missed here leaves a permanent `/etc/hosts` line and a Caddy route that
+    /// shadows that name for every later run of any project.
     async fn remove_node_routes(&self, run_name: &str, node_state: &NodeState) {
-        if let Some(ref url_str) = node_state.url {
-            let hostname = url::hostname_of_url(url_str);
-            let _ = self.helper_client.remove_host(hostname).await;
-            self.remove_route_by_hostname(hostname, run_name, node_state)
+        for hostname in node_state.hostnames() {
+            let _ = self.helper_client.remove_host(&hostname).await;
+            self.remove_route_by_hostname(&hostname, run_name, node_state)
                 .await;
         }
     }
@@ -3142,7 +3329,7 @@ async fn execute_node_isolated(
     }
 
     let server_handle = match resolved.step_type {
-        StepType::StartServer => Some(
+        StepType::LongRunning => Some(
             execute_start_server_isolated(
                 &ctx,
                 &sel,
@@ -3218,18 +3405,21 @@ async fn execute_start_server_isolated(
     let variant_cfg = &node_cfg.variants[&sel.variant];
 
     let mut precomputed =
-        precomputed.expect("precomputed server info missing for start_server node");
+        precomputed.expect("precomputed server info missing for long_running node");
     let port = precomputed.port;
-    let node_url = precomputed.hostname.clone();
-    let https_url = precomputed.https_url.clone();
-    let port_reservation = precomputed
-        .reservation
-        .take()
-        .expect("port reservation already consumed — node executed twice?");
+    let https_url = precomputed.https_url().map(|s| s.to_owned());
+    // A portless node holds no primary reservation — there is nothing to reserve
+    // and nothing to release before the spawn.
+    let port_reservation = precomputed.reservation.take();
+    if port.is_some() && port_reservation.is_none() {
+        panic!("port reservation already consumed — node executed twice?");
+    }
     let extra_reservations = std::mem::take(&mut precomputed.extra_reservations);
 
-    node_state.port = Some(port);
-    var_ctx.set_builtin("port", port.to_string());
+    node_state.port = port;
+    if let Some(port) = port {
+        var_ctx.set_builtin("port", port.to_string());
+    }
     // `${veld.port}` stays the primary; each declared name is also addressable.
     for (name, value) in &precomputed.named_ports {
         var_ctx.set_builtin(&format!("ports.{name}"), value.to_string());
@@ -3237,90 +3427,147 @@ async fn execute_start_server_isolated(
             .outputs
             .insert(format!("ports.{name}"), value.to_string());
     }
-    node_state.url = Some(https_url.clone());
-    // `url` plus the individual location pieces (mirrors the Web URL API).
-    for (key, value) in url_builtins(&https_url) {
-        var_ctx.set_builtin(key, value);
+    node_state.url = https_url.clone();
+    // One entry per named port, routed or not. `url.is_some()` is the routed
+    // predicate everything downstream branches on — display, route teardown,
+    // and sharing eligibility — so "has a URL" keeps meaning "Caddy is in front
+    // of it".
+    node_state.endpoints = precomputed
+        .endpoints
+        .iter()
+        .map(|(name, e)| {
+            (
+                name.clone(),
+                crate::state::NodeEndpoint {
+                    hostname: e.hostname.clone(),
+                    url: e.https_url.clone(),
+                    port: e.port,
+                },
+            )
+        })
+        .collect();
+    // `url` plus the individual location pieces (mirrors the Web URL API), the
+    // same family per named http port under `urls.<name>`, and `hosts.<name>`
+    // for every port whatever its protocol.
+    for (name, endpoint) in &precomputed.endpoints {
+        var_ctx.set_builtin(&format!("hosts.{name}"), endpoint.hostname.clone());
+        let Some(https_url) = &endpoint.https_url else {
+            continue;
+        };
+        if precomputed.primary_name.as_deref() == Some(name.as_str()) {
+            for (key, value) in url_builtins(https_url) {
+                var_ctx.set_builtin(key, value);
+            }
+        }
+        for (key, value) in port_url_builtins(name, https_url) {
+            var_ctx.set_builtin(&key, value);
+        }
     }
 
-    emit_progress(
-        &ctx.progress_tx,
-        ProgressEvent::PortAllocated {
-            node: sel.node.clone(),
-            variant: sel.variant.clone(),
-            port,
-        },
-    );
+    if let Some(port) = port {
+        emit_progress(
+            &ctx.progress_tx,
+            ProgressEvent::PortAllocated {
+                node: sel.node.clone(),
+                variant: sel.variant.clone(),
+                port,
+            },
+        );
+    }
     debug_log_free(
         &ctx.debug_writer,
         &format!(
-            "{}:{} — using pre-computed port {} → {}",
-            sel.node, sel.variant, port, https_url
+            "{}:{} — {} port(s), {} routed",
+            sel.node,
+            sel.variant,
+            precomputed.named_ports.len(),
+            precomputed
+                .endpoints
+                .values()
+                .filter(|e| e.is_routed())
+                .count()
         ),
     )
     .await;
 
-    // Configure DNS + Caddy via helper (best-effort).
-    debug_log_free(
-        &ctx.debug_writer,
-        &format!(
-            "{}:{} — adding DNS host {} → 127.0.0.1",
-            sel.node, sel.variant, node_url
-        ),
-    )
-    .await;
-    // Normalised, because every removal path removes the DNS host by the
-    // port-stripped name: a `urlTemplate` carrying a literal port would otherwise
-    // add `host:PORT` and leave it in `/etc/hosts` forever.
-    if let Err(e) = ctx
-        .helper_client
-        .add_host(url::hostname_of_url(&node_url), "127.0.0.1")
-        .await
-    {
-        tracing::warn!(error = %e, "failed to add DNS host via helper");
-    }
-    let mut route = serde_json::json!({
-        // Keyed by hostname (#170) — see `url::run_route_id` for why that, and
-        // not the run name or the run id. Normalised through `hostname_of_url`
-        // because a `urlTemplate` can carry a literal port or path
-        // (`app.localhost:3000`) that the removal sides strip; without this the
-        // two would derive different ids and the route would be unremovable.
-        // Deliberately no legacy-id delete here: the legacy id may belong to
-        // another project's live run, which is the very collision this fixes.
-        // Teardown handles the legacy entry.
-        "route_id": url::run_route_id(url::hostname_of_url(&node_url)),
-        "hostname": &node_url,
-        "upstream": format!("localhost:{port}"),
-    });
     // Resolve per-node feature flags (variant > node > project > default).
     let features = resolved.features;
-
-    // Include feedback config so Caddy routes /__veld__/* to the daemon.
-    // The proxy routes are created whenever a feature is enabled, even if
-    // inject is false (manual injection mode — user adds script tags themselves).
-    if features.feedback_overlay || features.client_logs {
-        route["feedback_upstream"] = serde_json::json!(crate::instance::daemon_upstream());
-        route["run_name"] = serde_json::json!(&ctx.run_name);
-        route["project_root"] = serde_json::json!(ctx.project_root.to_string_lossy());
-    }
-
-    route["inject"] = serde_json::json!(features.inject);
-    route["inject_feedback_overlay"] = serde_json::json!(features.feedback_overlay);
-    route["inject_client_logs"] = serde_json::json!(features.client_logs);
-
     // Resolve client log levels (variant > node > project > default).
     let client_log_levels = resolved.client_log_levels.clone();
-    route["client_log_levels"] = serde_json::json!(client_log_levels.join(","));
-
     // Resolve reverse-proxy header rules (variant > node > project). Only sent
     // when non-empty — an absent `proxy` key means "no manipulation" to the
     // helper, so old behavior (Origin passes through) holds by default.
     let proxy = resolved.proxy.clone();
-    if !proxy.is_empty() {
-        route["proxy"] = serde_json::json!(proxy);
-    }
-    if let Err(e) = ctx.helper_client.add_route(route).await {
-        tracing::warn!(error = %e, "failed to add Caddy route via helper");
+
+    // Configure DNS and, for routed ports only, Caddy (best-effort).
+    //
+    // **Every** port gets a DNS host — naming and routing are separate, and the
+    // helper has always kept `add_host` and `add_route` apart. A `tcp` port gets
+    // the name and nothing else, which is what makes `db.myapp.test:5432` reach
+    // the process without Caddy in the path; a raw connection carries no
+    // hostname for a proxy to match on, so a route would be meaningless. On a
+    // `.localhost` domain the DNS write is a no-op the helper skips outright
+    // (RFC 6761 — the OS already wildcards it), so this costs nothing there and
+    // is the *only* way a tcp-only node is addressable on a custom apex domain.
+    for endpoint in precomputed.endpoints.values() {
+        let node_url = &endpoint.hostname;
+        debug_log_free(
+            &ctx.debug_writer,
+            &format!(
+                "{}:{} — adding DNS host {} → 127.0.0.1",
+                sel.node, sel.variant, node_url
+            ),
+        )
+        .await;
+        // Normalised, because every removal path removes the DNS host by the
+        // port-stripped name: a `urlTemplate` carrying a literal port would otherwise
+        // add `host:PORT` and leave it in `/etc/hosts` forever.
+        if let Err(e) = ctx
+            .helper_client
+            .add_host(url::hostname_of_url(node_url), "127.0.0.1")
+            .await
+        {
+            tracing::warn!(error = %e, "failed to add DNS host via helper");
+        }
+        // A `tcp` endpoint stops here: it has a name, and nothing sits in front
+        // of it.
+        if !endpoint.is_routed() {
+            continue;
+        }
+        let mut route = serde_json::json!({
+            // Keyed by hostname (#170) — see `url::run_route_id` for why that, and
+            // not the run name or the run id. Normalised through `hostname_of_url`
+            // because a `urlTemplate` can carry a literal port or path
+            // (`app.localhost:3000`) that the removal sides strip; without this the
+            // two would derive different ids and the route would be unremovable.
+            // Deliberately no legacy-id delete here: the legacy id may belong to
+            // another project's live run, which is the very collision this fixes.
+            // Teardown handles the legacy entry.
+            "route_id": url::run_route_id(url::hostname_of_url(node_url)),
+            "hostname": node_url,
+            "upstream": format!("localhost:{}", endpoint.port),
+        });
+
+        // Include feedback config so Caddy routes /__veld__/* to the daemon.
+        // The proxy routes are created whenever a feature is enabled, even if
+        // inject is false (manual injection mode — user adds script tags themselves).
+        if features.feedback_overlay || features.client_logs {
+            route["feedback_upstream"] = serde_json::json!(crate::instance::daemon_upstream());
+            route["run_name"] = serde_json::json!(&ctx.run_name);
+            route["project_root"] = serde_json::json!(ctx.project_root.to_string_lossy());
+        }
+
+        route["inject"] = serde_json::json!(features.inject);
+        route["inject_feedback_overlay"] = serde_json::json!(features.feedback_overlay);
+        route["inject_client_logs"] = serde_json::json!(features.client_logs);
+        route["client_log_levels"] = serde_json::json!(client_log_levels.join(","));
+
+        if !proxy.is_empty() {
+            route["proxy"] = serde_json::json!(proxy);
+        }
+        if let Err(e) = ctx.helper_client.add_route(route).await {
+            tracing::warn!(error = %e, "failed to add Caddy route via helper");
+        }
     }
 
     // Resolve working directory (variant > node > project root).
@@ -3360,14 +3607,28 @@ async fn execute_start_server_isolated(
     // Env keys declared `secret: true` are masked and encrypted at rest just like
     // sensitive outputs — same machinery, extended rather than duplicated.
     node_state.sensitive_keys.extend(env_secret_keys);
-    env.insert("VELD_PORT".to_owned(), port.to_string());
-    for (name, value) in &precomputed.named_ports {
-        env.insert(
-            format!("VELD_PORT_{}", name.to_uppercase().replace('-', "_")),
-            value.to_string(),
-        );
+    if let Some(port) = port {
+        env.insert("VELD_PORT".to_owned(), port.to_string());
     }
-    env.insert("VELD_URL".to_owned(), https_url.clone());
+    for (name, value) in &precomputed.named_ports {
+        env.insert(format!("VELD_PORT_{}", env_suffix(name)), value.to_string());
+    }
+    if let Some(url) = &https_url {
+        env.insert("VELD_URL".to_owned(), url.clone());
+    }
+    // Mirrors `VELD_PORT_<NAME>`: a child can find a sibling endpoint without
+    // the config threading it through `env`. `VELD_HOST_<NAME>` exists for every
+    // port — it is the piece a connection string needs and the only one a `tcp`
+    // port has — while `VELD_URL_<NAME>` is routed ports only.
+    for (name, endpoint) in &precomputed.endpoints {
+        env.insert(
+            format!("VELD_HOST_{}", env_suffix(name)),
+            endpoint.hostname.clone(),
+        );
+        if let Some(url) = &endpoint.https_url {
+            env.insert(format!("VELD_URL_{}", env_suffix(name)), url.clone());
+        }
+    }
 
     // Resolve synthetic outputs.
     //
@@ -3423,8 +3684,10 @@ async fn execute_start_server_isolated(
     }
 
     // Release every reservation immediately before spawning, so the child can
-    // bind them.
-    port_reservation.release();
+    // bind them. A portless node holds none.
+    if let Some(reservation) = port_reservation {
+        reservation.release();
+    }
     for reservation in extra_reservations {
         reservation.release();
     }
@@ -3547,7 +3810,7 @@ async fn execute_start_server_isolated(
         let probe_port = match hc.port.as_deref() {
             None => port,
             Some(name) => match precomputed.named_ports.get(name) {
-                Some(p) => *p,
+                Some(p) => Some(*p),
                 None => {
                     return Err(OrchestratorError::NodeFailed {
                         node: sel.node.clone(),
@@ -3561,28 +3824,67 @@ async fn execute_start_server_isolated(
             },
         };
 
-        // Phase 1: TCP port check.
+        // A port-shaped probe on a node that has no port is a config mistake,
+        // not something to shrug at: returning "ready" here is how a portless
+        // node used to be reported healthy forever. `validate` rejects it, and
+        // this is the belt-and-braces path for a config that reached us anyway.
+        if probe_port.is_none() && matches!(hc.check_type.as_str(), "port" | "http") {
+            return Err(OrchestratorError::NodeFailed {
+                node: sel.node.clone(),
+                variant: sel.variant.clone(),
+                reason: format!(
+                    "readiness probe is \"{}\", but this node declares no ports, so there \
+                     is nothing to probe. Use \"command\" or \"settle\", or give the node \
+                     a port",
+                    hc.check_type
+                ),
+            });
+        }
+
+        // Phase 1: prove the process got off the ground. With a port that means
+        // the TCP listener opened; without one it means the process was still
+        // alive after the settle window. Both are raced against process exit —
+        // that race is the *only* crash-fast in the start path, so neither
+        // branch may skip it.
+        let settle =
+            std::time::Duration::from_secs(hc.seconds.unwrap_or(config::DEFAULT_SETTLE_SECONDS));
         emit_progress(
             &ctx.progress_tx,
             ProgressEvent::ReadinessProbePhase {
                 node: sel.node.clone(),
                 variant: sel.variant.clone(),
                 phase: 1,
-                description: format!("waiting for port {probe_port}"),
+                description: match probe_port {
+                    Some(p) => format!("waiting for port {p}"),
+                    None => format!("waiting {}s for the process to settle", settle.as_secs()),
+                },
             },
         );
 
-        let phase1_result = tokio::select! {
-            result = health::wait_for_port(probe_port, &hc, Some(&phase1_notifier)) => result,
-            _ = wait_for_process_exit(pid) => {
-                Err(health::HealthError::PortCheckFailed(
-                    "server process exited before binding to port".into(),
-                ))
-            }
+        let phase1_result = match probe_port {
+            Some(probe_port) => tokio::select! {
+                result = health::wait_for_port(probe_port, &hc, Some(&phase1_notifier)) => result,
+                _ = wait_for_process_exit(pid) => {
+                    Err(health::HealthError::PortCheckFailed(
+                        "server process exited before binding to port".into(),
+                    ))
+                }
+            },
+            None => tokio::select! {
+                _ = tokio::time::sleep(settle) => Ok(()),
+                _ = wait_for_process_exit(pid) => {
+                    Err(health::HealthError::PortCheckFailed(
+                        "process exited during the readiness settle window".into(),
+                    ))
+                }
+            },
         };
 
         if let Err(e) = phase1_result {
-            let msg = format!("process did not bind to port {probe_port}: {e}");
+            let msg = match probe_port {
+                Some(p) => format!("process did not bind to port {p}: {e}"),
+                None => format!("process did not stay running: {e}"),
+            };
             node_state.status = NodeStatus::Failed;
             node_state.readiness_phases[0].last_error = Some(msg.clone());
             debug_log_free(
@@ -3621,15 +3923,28 @@ async fn execute_start_server_isolated(
         );
         debug_log_free(
             &ctx.debug_writer,
-            &format!("{}:{} — phase 1 passed (port open)", sel.node, sel.variant),
+            &format!(
+                "{}:{} — phase 1 passed ({})",
+                sel.node,
+                sel.variant,
+                if probe_port.is_some() {
+                    "port open"
+                } else {
+                    "process settled"
+                }
+            ),
         )
         .await;
 
         // Phase 2: depends on check type.
         let phase2_desc = match hc.check_type.as_str() {
-            "http" => format!("HTTP check on port {probe_port}"),
+            "http" => format!(
+                "HTTP check on port {}",
+                probe_port.expect("http probe without a port rejected above")
+            ),
             "command" | "bash" => "command readiness check".to_owned(),
             "port" => "port-only (no phase 2)".to_owned(),
+            "settle" => "settle-only (no phase 2)".to_owned(),
             other => format!("unknown check type: {other}"),
         };
         emit_progress(
@@ -3645,7 +3960,8 @@ async fn execute_start_server_isolated(
         let phase2_future = async {
             match hc.check_type.as_str() {
                 "http" => {
-                    let direct_url = format!("http://127.0.0.1:{probe_port}");
+                    let p = probe_port.expect("http probe without a port rejected above");
+                    let direct_url = format!("http://127.0.0.1:{p}");
                     health::wait_for_http(&direct_url, &hc, Some(&phase2_notifier)).await
                 }
                 "command" | "bash" => {
@@ -3661,7 +3977,10 @@ async fn execute_start_server_isolated(
                         Ok(())
                     }
                 }
-                _ => Ok(()), // "port" and unknown — phase 1 already covers.
+                // "port" and "settle" are fully covered by phase 1. An unknown
+                // type never reaches here — `unknown-probe-type` rejects it at
+                // validate time rather than letting a typo mean "always ready".
+                _ => Ok(()),
             }
         };
 
@@ -4930,6 +5249,48 @@ mod tests {
     /// The `${veld.url*}` family is derived from the URL alone, so the stop path
     /// — which has only `NodeState.url` — produces exactly what the start path
     /// built from `(hostname, https_port)`.
+    #[test]
+    fn port_url_builtins_replace_the_url_prefix_rather_than_nesting_under_it() {
+        let got: HashMap<String, String> =
+            port_url_builtins("admin", "https://web-admin.dev.app.localhost:18443")
+                .into_iter()
+                .collect();
+        // The bare URL, then each piece — `urls.admin.hostname`, never
+        // `urls.admin.url.hostname`, which is what naive formatting produced and
+        // which resolves to nothing at runtime.
+        assert_eq!(
+            got.get("urls.admin").map(String::as_str),
+            Some("https://web-admin.dev.app.localhost:18443")
+        );
+        assert_eq!(
+            got.get("urls.admin.hostname").map(String::as_str),
+            Some("web-admin.dev.app.localhost")
+        );
+        assert_eq!(
+            got.get("urls.admin.port").map(String::as_str),
+            Some("18443")
+        );
+        assert_eq!(
+            got.get("urls.admin.scheme").map(String::as_str),
+            Some("https")
+        );
+        assert!(
+            !got.keys().any(|k| k.contains(".url")),
+            "no key may keep the `url` prefix, got {:?}",
+            got.keys().collect::<Vec<_>>()
+        );
+        // Exactly the same shape the validator accepts, so a name that lints
+        // clean is a name the orchestrator publishes.
+        for key in got.keys() {
+            let piece = key.strip_prefix("urls.admin").unwrap();
+            let piece = piece.strip_prefix('.').unwrap_or("");
+            assert!(
+                config::URL_PIECES_FOR_TEST.contains(&piece),
+                "`{piece}` is published but not accepted by `BuiltinSite::provides`"
+            );
+        }
+    }
+
     #[test]
     fn url_builtins_round_trip_both_port_forms() {
         let by_key = |url: &str| -> HashMap<String, String> {

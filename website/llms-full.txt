@@ -67,7 +67,7 @@ cargo build --release
       "default_variant": "local",
       "variants": {
         "local": {
-          "type": "start_server",
+          "type": "long_running",
           "shell": "npm run dev -- --port ${veld.port}",
           "health_check": { "type": "http", "path": "/health", "timeout_seconds": 30 }
         }
@@ -77,7 +77,7 @@ cargo build --release
       "default_variant": "local",
       "variants": {
         "local": {
-          "type": "start_server",
+          "type": "long_running",
           "shell": "npm run dev -- --port ${veld.port}",
           "health_check": { "type": "http", "path": "/", "timeout_seconds": 30 },
           "depends_on": { "backend": "local" }
@@ -214,7 +214,7 @@ The same dock hosts browser panes: a tab that renders one of the run's URLs with
 
 A browser pane can emulate a device. The presets are size classes rather than model names — small, medium and large phone, three tablet sizes, a 14-inch laptop, a 24-inch monitor, a 27-inch widescreen — each carrying the metrics a current device of that class reports, because a list of named handsets is long, stale within a year, and never answers the question actually being asked, which is how wide. Beside them is a responsive viewport that starts at the pane's own size and is resized by dragging its edges, which is how you find the width a layout breaks at — the page reflows live as you drag, growing from its centre; any device can be dragged, and a phone dragged narrower keeps its touch events and user agent. Rotation, a mobile-user-agent toggle, an explicit custom size and touch events are all there too, so a swipe gesture or a hover-less CSS rule is testable in the pane. The large sizes are the point — a pane is small and a desktop layout is not, so a 1440-wide viewport renders at 1440 and is scaled down to fit the pane, which no browser window can do without a second monitor. Page zoom shares the same control. Both are remembered per pane and re-applied when the view is rebuilt (a session switch, a reload). DevTools opens per pane in its own detached window, since a docked inspector and an embedded view fight over the same box; touch emulation needs Chromium's debugging channel, so the pane reports whether touch is actually in force rather than assuming it is. The mobile user agent is the string only — client hints (`navigator.userAgentData`, `Sec-CH-UA`) still report the host desktop, which the menu states. A device applies once the pane has a page — an empty pane has no view to emulate against. In a plain browser the sizes work — the frame really is that many CSS pixels wide, so media queries respond — while the user agent, touch, device pixel ratio, page zoom and DevTools need the desktop app, and the menu says so. The same menu emulates the page's media features — `prefers-color-scheme`, `prefers-reduced-motion` and `forced-colors` — with no reload, since a media query is live; they ride the same debugging channel touch does, so the pane reports whether they are in force. The two reached for constantly — the responsive viewport and the page's colour scheme — also get one-click switches in the pane's toolbar beside the device button. They are shortcuts into that menu rather than new capability, so which of them appears is a setting — a global, standing choice about whether the shortcut is wanted at all, not a per-pane one. The colour scheme cycles System, Dark, Light and back, so a light-only layout bug is one click away as well, and System is the absence of an override rather than a third value — which is also what releases the debugging channel. Responsive's off is no emulation at all rather than a device picked earlier, so that switch answers one question. The colour-scheme switch reports what the pane achieved, showing as paused while something else holds Chromium's debugger, and is shown inert in a plain browser — stating why in both its tooltip and its accessible name — where the responsive switch still works.
 
-The dock holds the run's diagnostics as two more pane kinds. A Logs pane is the same viewer the dashboard has (search with ±N context lines, node filter, source filter, a picker over past runs, auto-scroll, and rendered ANSI colour — other escape sequences are dropped, a self-overwriting progress line shows only its last state, and search matches the visible text rather than the escape bytes; timestamps render in the browser's time zone by default, with the full date and both zones on hover, and a setting switches the whole view to UTC), and a Nodes pane is the per-node health table: status, failure and recovery counts, the last liveness error, URL with copy/open, variant, PID, live CPU and memory with a sparkline that expands into the scrubbable resource chart, and each node's configured actions. They are the dashboard's own two views rather than lookalikes — runs mode is a run's controls plus a Nodes|Logs switcher over the same components — so the two surfaces cannot drift. Both are scoped to the selected worktree's run, so switching worktrees re-points every open pane; both reach past runs; and both stay useful after a run ends — a crashed run's logs and last node states are what you want at that moment. The nodes view is a card per node rather than a table, so it stays readable in a narrow pane without dropping any of what it shows. Sharing is a single surface in the top bar: start or stop the peer share and the public web share for that run, copy the join link or the `veld join` command, toggle auto-accept, and read each connection's transport (direct, or relayed via a named relay, with RTT). The two share kinds are labelled for what they are — share privately (a peer tunnel, the other side needs Veld) and share to the web (a public URL, the other side needs a browser) — and an active share is a filled green button rather than a differently-worded outline. A public web share is laid out as a row per service — the URL, a copy button, a copy-link-and-QR button, a copy-QR-image button, and a QR code rendered in the row — so the shared app opens on a phone without retyping a URL; the code encodes the same link the copy button gives, password fragment included, so it carries the password wherever it is shown. Copy-link-and-QR puts the text and a PNG of the code on the clipboard together, for pasting into a chat, though which flavour the chat app uses is the app's choice. A peer share has no QR, since a join ticket is useless to a phone with no Veld. The whole surface is a modal rather than a popover, because a row per service needs the width. A pending join request is not hidden behind it — while someone waits for approval, a prompt sits above the panes naming who wants to join which run. Sharing is opt-in per service and needs a configured relay, so a run with neither is refused rather than shared, and the daemon's message says what to add to veld.json.
+The dock holds the run's diagnostics as two more pane kinds. A Logs pane is the same viewer the dashboard has (search with ±N context lines, node filter, source filter, a picker over past runs, auto-scroll, and rendered ANSI colour — other escape sequences are dropped, a self-overwriting progress line shows only its last state, and search matches the visible text rather than the escape bytes; timestamps render in the browser's time zone by default, with the full date and both zones on hover, and a setting switches the whole view to UTC), and a Nodes pane is the per-node health table: status, failure and recovery counts, the last liveness error, URL with copy/open, variant, PID, live CPU and memory with a sparkline that expands into the scrubbable resource chart, and each node's configured actions. They are the dashboard's own two views rather than lookalikes — runs mode is a run's controls plus a Nodes|Logs switcher over the same components — so the two surfaces cannot drift. Both are scoped to the selected worktree's run, so switching worktrees re-points every open pane; both reach past runs; and both stay useful after a run ends — a crashed run's logs and last node states are what you want at that moment. The nodes view is a card per node rather than a table, so it stays readable in a narrow pane without dropping any of what it shows. Sharing is a single surface in the top bar: start or stop the peer share and the public web share for that run, copy the join link or the `veld join` command, toggle auto-accept, and read each connection's transport (direct, or relayed via a named relay, with RTT). The two share kinds are labelled for what they are — share privately (a peer tunnel, the other side needs Veld) and share to the web (a public URL, the other side needs a browser) — and an active share is a filled green button rather than a differently-worded outline. A public web share is laid out as a row per service — the URL, a copy button, a copy-link-and-QR button, a copy-QR-image button, and a QR code rendered in the row — so the shared app opens on a phone without retyping a URL; the code encodes the same link the copy button gives, password fragment included, so it carries the password wherever it is shown. Copy-link-and-QR puts the text and a PNG of the code on the clipboard together, for pasting into a chat, though which flavour the chat app uses is the app's choice. A peer share has no QR, since a join ticket is useless to a phone with no Veld. The whole surface is a modal rather than a popover, because a row per service needs the width. A pending join request is not hidden behind it — while someone waits for approval, a prompt sits above the panes naming who wants to join which run. Sharing is opt-in per port and needs a configured relay, so a run with neither is refused rather than shared, and the daemon's message says what to add to veld.json.
 
 ### Environments and runs
 
@@ -228,7 +228,7 @@ veld includes a built-in feedback overlay for human-AI collaboration. When an AI
 
 ### How it works
 
-1. When a `start_server` service is running, veld can inject a feedback overlay into the served pages
+1. When a `long_running` service is running, veld can inject a feedback overlay into the served pages
 2. Humans open the feedback overlay in their browser and leave comments
 3. AI agents receive the feedback via `veld feedback next --wait`, which blocks until new feedback arrives
 4. The agent reads the structured feedback and iterates
@@ -260,7 +260,17 @@ This makes veld uniquely suited for agentic workflows where AI agents build UI a
 
 Share a running environment with a colleague so they open the **same** URLs on their own machine, over an encrypted peer-to-peer tunnel. No accounts, no Veld-hosted server. The tunnel uses iroh (QUIC with NAT hole-punching and an n0 relay fallback).
 
-Services opt in explicitly: a service is shareable only if its variant declares `share.expose` in `veld.json` (`"share": { "expose": ["peer"] }`), and `veld share` refuses anything that hasn't opted in — so what leaves your machine is explicit and auditable.
+**Consent is per port.** `share` is a field on a port entry — that is where exposure happens — and `veld share` refuses anything that hasn't declared one, so what leaves your machine is explicit and auditable:
+
+```jsonc
+"ports": {
+  "http":     { "port": "auto", "protocol": "http", "share": { "expose": ["peer", "web"] } },
+  "admin":    { "port": "auto", "protocol": "http" },                     // absent → never shared
+  "postgres": { "port": 5432,   "protocol": "tcp",  "share": { "expose": ["peer"] } }
+}
+```
+
+A `share` written on a node or a variant still works and is **defined as shorthand for the primary port's policy** — so every config written before per-port consent means exactly what it meant, while the same words can never spread to an ops console or a database the author never mentioned. A port's own `share` replaces the shorthand for that port rather than merging with it; an absent `share` is always "not shared"; nothing anywhere widens a port that declared none. A node with no primary (every port `tcp`, or `"ports": null`) has nowhere to fold the shorthand into, so it grants nothing. `veld share` names every port it excluded and why, per `node:variant#port`, so a partial share is never silent.
 
 ### How it works
 
@@ -272,6 +282,24 @@ Services opt in explicitly: a service is shareable only if its variant declares 
 The ticket is short and constant-size regardless of how many URLs the run exposes — the URL manifest is sent over the tunnel after approval, not embedded in the ticket.
 
 Both people must have veld installed and be in the **same setup mode** — both privileged (clean URLs) or both unprivileged (`:18443` in URLs) — so the URLs match.
+
+### Raw TCP sharing (peer only)
+
+A `"protocol": "tcp"` port — a database, a debugger — can be shared to the `peer` audience. It rides the same encrypted tunnel and is reproduced on the joining machine as a **bare local TCP port**: a listener spliced to the origin service, with no Caddy route in front of it, because a raw connection carries no hostname for a proxy to match on.
+
+**The port number on the consumer is their local listener's, not the origin's.** Nothing is in front of the socket to preserve `5432`, so `veld join` prints raw endpoints apart from the URLs and never as links:
+
+```
+✓ Joined — 3 endpoint(s) now reachable on this machine:
+
+    https://web.demo.acme.localhost
+    https://api-admin.demo.acme.localhost
+    api-postgres.demo.acme.localhost:49317  (tcp)
+```
+
+`--json` returns them in `addresses`; `urls` stays URLs only. Two consequences of "no route": `proxy` header rules are an HTTP concept and are not applied, and a joiner running an older veld **refuses the whole join** rather than reproducing a raw endpoint as an HTTP route — the manifest entry has no `url` and the older wire format required one. That is deliberate fail-closed behaviour; both sides upgrade.
+
+`tcp` is peer-only. **`"expose": ["web"]` requires `"protocol": "http"`** — the combination is the `web-share-needs-http` lint error, enforced again by the daemon at share time (which names the excluded port) and again by the gateway, which drops any non-routed manifest entry. The gateway speaks HTTP/1.1 over the tunnel and a browser cannot speak a raw protocol through it whatever the gateway does: that is what the `web` audience *is*, not a limitation waiting to be lifted. There is no `udp` protocol, and so no udp sharing.
 
 ### Dashboard controls
 
@@ -301,7 +329,7 @@ Traffic is end-to-end encrypted between the two velds; a relay only forwards sea
 
 ### Public web sharing
 
-`share.expose` also accepts `web`: expose a service to anyone with a browser — no Veld on the viewer's side — via a self-hosted gateway. Configure `sharing.gateway` (a URL, or `{ "url": ..., "token": ... }` where `token` is a secret source like relay tokens; the gateway requires registration auth) and run `veld share --web`. This mints a **separate** share scoped to the `web`-opted services (own capability — revoking web never touches peer shares), registers it with the gateway, and prints real public URLs of the form `https://<slug>.<gateway-domain>`. Slugs are deterministic (a hash bound to the sharing machine, service, and share capability — stable across gateway restarts) and unguessable. **Web shares are password-protected by default**: `veld share --web` generates and prints a viewer password (`--password` to choose it); the gateway shows a password page, then a per-slug session cookie (12 h, capped at the share TTL, stateless — signed with a capability-derived key, so gateway restarts don't log viewers out) keeps the viewer in. The printed one-link (`https://…/#veld-key=…`) carries the password in the URL fragment, which never reaches DNS, TLS, or server logs. Opt a service out with `"share": { "expose": ["web"], "web": { "access": "link" } }` (or `--access link` for config-silent services; explicit config wins) — then the unguessable slug is the only gate and the link must be treated as a secret. Multi-service caveat: the session cookie is per public host, so give a password-protected frontend's API nodes `"web": { "access": "link" }` or cross-origin fetches get 401s. Web shares default to a 3600s TTL (peer: 7200s). The daemon heartbeats the registration; `veld unshare` or the TTL kills the URLs. WebSockets/HMR work through the gateway; the app sees its own origin hostname in `Host` (dev-server allow-lists pass) and, in lockstep, the same host in `Origin`/`Referer` on every request including WebSocket upgrades — so a dev server that gates HMR on `Origin` (Next.js) needs its origin host in the framework's `allowedDevOrigins`, or the service's `proxy.request.remove: ["Origin"]` opt-in to drop the header. The public host arrives in `X-Forwarded-Host`, redirects between shared services are rewritten to public URLs, and origin-scoped cookie domains are made host-only. Hard-coded absolute URLs, CORS allow-lists, and OAuth redirect URIs are the operator's domain setup — Veld never rewrites bodies. The toolbar's arc menu has a top-level **Sharing** item (marked with a dot when the page is web-shared) whose submenu covers **Start/Stop sharing** (toggle a web share for the page's run from the browser), **Copy public URL** (turns the current page into its public deep link, path + query + hash preserved), and **Sharing status**. Transport detail is not shown in the toolbar — `veld shares` prints each live tunnel's transport: `direct` (full bandwidth) or `relayed via <relay>` (throughput capped by that relay — the usual cause of slow shares), and the management UI shows the same. The gateway itself (`veld-gateway`) is one stateless container: `ghcr.io/prosperity-solutions/veld-gateway`, configured entirely via env vars (`VELD_GATEWAY_DOMAIN`, `VELD_GATEWAY_TOKEN`, `VELD_GATEWAY_RELAYS`, …), needing a wildcard DNS record plus TLS (built-in cert files or an external L7 terminator).
+`share.expose` also accepts `web`: expose a service to anyone with a browser — no Veld on the viewer's side — via a self-hosted gateway. Only an `http` port can take it (see above). Configure `sharing.gateway` (a URL, or `{ "url": ..., "token": ... }` where `token` is a secret source like relay tokens; the gateway requires registration auth) and run `veld share --web`. This mints a **separate** share scoped to the `web`-opted `http` ports (own capability — revoking web never touches peer shares), registers it with the gateway, and prints real public URLs of the form `https://<slug>.<gateway-domain>`. Slugs are deterministic (a hash bound to the sharing machine, service, and share capability — stable across gateway restarts) and unguessable. **Web shares are password-protected by default**: `veld share --web` generates and prints a viewer password (`--password` to choose it); the gateway shows a password page, then a per-slug session cookie (12 h, capped at the share TTL, stateless — signed with a capability-derived key, so gateway restarts don't log viewers out) keeps the viewer in. The printed one-link (`https://…/#veld-key=…`) carries the password in the URL fragment, which never reaches DNS, TLS, or server logs. Opt a service out with `"share": { "expose": ["web"], "web": { "access": "link" } }` (or `--access link` for config-silent services; explicit config wins) — then the unguessable slug is the only gate and the link must be treated as a secret. Multi-service caveat: the session cookie is per public host, so give a password-protected frontend's API nodes `"web": { "access": "link" }` or cross-origin fetches get 401s. Web shares default to a 3600s TTL (peer: 7200s). The daemon heartbeats the registration; `veld unshare` or the TTL kills the URLs. WebSockets/HMR work through the gateway; the app sees its own origin hostname in `Host` (dev-server allow-lists pass) and, in lockstep, the same host in `Origin`/`Referer` on every request including WebSocket upgrades — so a dev server that gates HMR on `Origin` (Next.js) needs its origin host in the framework's `allowedDevOrigins`, or the service's `proxy.request.remove: ["Origin"]` opt-in to drop the header. The public host arrives in `X-Forwarded-Host`, redirects between shared services are rewritten to public URLs, and origin-scoped cookie domains are made host-only. Hard-coded absolute URLs, CORS allow-lists, and OAuth redirect URIs are the operator's domain setup — Veld never rewrites bodies. The toolbar's arc menu has a top-level **Sharing** item (marked with a dot when the page is web-shared) whose submenu covers **Start/Stop sharing** (toggle a web share for the page's run from the browser), **Copy public URL** (turns the current page into its public deep link, path + query + hash preserved), and **Sharing status**. Transport detail is not shown in the toolbar — `veld shares` prints each live tunnel's transport: `direct` (full bandwidth) or `relayed via <relay>` (throughput capped by that relay — the usual cause of slow shares), and the management UI shows the same. The gateway itself (`veld-gateway`) is one stateless container: `ghcr.io/prosperity-solutions/veld-gateway`, configured entirely via env vars (`VELD_GATEWAY_DOMAIN`, `VELD_GATEWAY_TOKEN`, `VELD_GATEWAY_RELAYS`, …), needing a wildcard DNS record plus TLS (built-in cert files or an external L7 terminator).
 
 ### Behavior
 
@@ -326,7 +354,7 @@ Traffic is end-to-end encrypted between the two velds; a relay only forwards sea
 
 ## Client-Side Log Collection
 
-Veld automatically captures browser console output from `start_server` nodes. A small script is injected into proxied HTML responses that hooks `console.log`, `console.warn`, `console.error`, `console.info`, and `console.debug`, plus `window.onerror` and `onunhandledrejection`.
+Veld automatically captures browser console output from `long_running` nodes. A small script is injected into proxied HTML responses that hooks `console.log`, `console.warn`, `console.error`, `console.info`, and `console.debug`, plus `window.onerror` and `onunhandledrejection`.
 
 Captured logs appear alongside server logs in `veld logs` and the management UI. Filter by source:
 
@@ -358,7 +386,7 @@ The management UI also provides source filter controls (All / Server / Client) i
 
 ### Feature Toggles
 
-Control which Veld capabilities are injected into `start_server` nodes' HTML responses with `features` at the project, node, or variant level (most specific wins):
+Control which Veld capabilities are injected into `long_running` nodes' HTML responses with `features` at the project, node, or variant level (most specific wins):
 
 ```json
 "features": { "feedback_overlay": false, "client_logs": true }
@@ -428,23 +456,63 @@ Variables: `${veld.name}`, `${veld.project}`, `${veld.root}`, `${veld.run}`, `${
 
 ### Step Types
 
-#### `start_server`
+A node's `type` describes its **lifecycle only** — runs to completion, or stays running. Whether it serves anything is a property of its `ports`.
 
-Starts and manages a long-lived process. Veld allocates a port, injects it as `${veld.port}`, configures DNS and Caddy routing, and monitors health.
+#### `long_running` (alias: `start_server`)
+
+Starts and supervises a long-lived process. By default Veld allocates one port, injects it as `${veld.port}`, configures DNS and Caddy routing, and monitors health.
+
+`start_server` is the historical spelling and remains a permanent alias, exactly as `bash` is for `command`. Configs written either way load forever, and there is deliberately no lint rule for the old spelling — a permanent alias sets no deadline. Veld never rewrites a config file.
 
 - Must specify exactly one of `argv` (array, spawned directly) or `shell` (string, via `sh -c`)
-- The process must bind to `${veld.port}`
+- The process must bind to `${veld.port}` (unless it declares `"ports": null`)
 - Built-in outputs: `url` (full HTTPS URL) and `port` (allocated port number)
 - Supports synthetic `outputs` as an object (key → template string, interpolated after port allocation)
-- Requires `health_check`
+- Requires a readiness probe (`probes.readiness`, or the legacy `health_check`) — always, including on a portless node
 
 ```json
 {
-  "type": "start_server",
+  "type": "long_running",
   "shell": "npm run dev -- --port ${veld.port}",
-  "health_check": { "type": "http", "path": "/health" }
+  "probes": { "readiness": { "type": "http", "path": "/health" } }
 }
 ```
+
+##### Portless: `"ports": null`
+
+A long-running process that serves nothing — an Electron shell, a file watcher, a background compiler. No port allocation, no `${veld.port}`, no URL, no Caddy route; Veld starts it, keeps it in the dependency graph, and stops it with the rest. Readiness is still required, and an `http`/`port` probe here is a `probe-needs-port` error, since there is nothing to connect to.
+
+```json
+{
+  "type": "long_running",
+  "shell": "electron .",
+  "ports": null,
+  "depends_on": { "web": "dev" },
+  "env": { "APP_URL": "${nodes.web.url}" },
+  "probes": { "readiness": { "type": "settle", "seconds": 5 } }
+}
+```
+
+##### Named ports and protocols
+
+`ports` has three authorings: **absent** means one auto-allocated `http` port (the default, unchanged); **`null`** means no ports at all; **a map** declares named ports, merged node → variant per key, with `"name": null` erasing one entry.
+
+An entry is either shorthand (`"auto"`, `5432`) or the long form `{ "port": …, "protocol": "http" | "tcp", "host": "<template>", "share": { … } }`.
+
+```json
+"ports": {
+  "http":     "auto",
+  "admin":    { "port": "auto", "protocol": "http" },
+  "postgres": { "port": 5432,   "protocol": "tcp", "share": { "expose": ["peer"] } },
+  "debug":    "auto"
+}
+```
+
+- The default protocol is **`http` for the primary port and `tcp` for every other**, so an existing multi-port config gains no new hostname.
+- An `http` port gets its own hostname and Caddy route, plus `${veld.urls.<name>}` (with `.hostname`, `.host`, `.origin`, `.scheme`, `.port`), `${nodes.<node>.urls.<name>}` and `VELD_URL_<NAME>`. Its `{service}` label is the node name for the primary and `<node>-<port>` for a secondary — `web-admin.dev.veld.localhost`, a sibling at the same depth, so a wildcard certificate covering the node covers its extra ports too. A per-port `host` template overrides that and is the documented way out of a hostname collision.
+- A `tcp` port is allocated and exported as `${veld.ports.<name>}` / `VELD_PORT_<NAME>`, and deliberately never routed: a raw TCP connection carries no hostname for a proxy to demultiplex on, and every `*.veld.localhost` name already resolves to 127.0.0.1 anyway, so the port number is the whole address.
+- `${veld.port}` is the primary — the port named `http`, the sole entry marked `"protocol": "http"`, or the sole entry when it states no protocol. Several ports with none of those is `ambiguous-primary-port`, a lint error rather than a guess.
+- A port entry carries its own `share` opt-in, because a port is where exposure happens: a node serving an app, an ops console and a database must be able to expose one without the others. A node/variant-level `share` is shorthand for the *primary* port's policy and never spreads. See [Peer-to-Peer Sharing](#peer-to-peer-sharing).
 
 #### `command`
 
@@ -467,13 +535,19 @@ Runs a shell command or script to completion. Used for setup tasks.
 
 ### Health Checks
 
-Two-phase: (1) TCP port check, (2) HTTP endpoint check. Three strategies:
+Four strategies. `http` is two-phase: (1) TCP port check, (2) HTTP endpoint check.
 
 ```json
 { "type": "http", "path": "/health", "expect_status": 200, "timeout_seconds": 30 }
 { "type": "port", "timeout_seconds": 10 }
+{ "type": "port", "port": "admin" }
 { "type": "command", "shell": "curl -sf http://localhost:${veld.port}/ready" }
+{ "type": "settle", "seconds": 3 }
 ```
+
+`http` and `port` probe the **primary** port unless `"port": "<name>"` names another from the node's `ports` map. On a node with no such port they are a `probe-needs-port` error and fail the run — they no longer silently report healthy. An unrecognised `type` is `unknown-probe-type`, for the same reason: a typo must never be the quiet way to turn a probe off.
+
+`settle` is the readiness probe for a **portless** long-running node. Its claim is deliberately weak and says so — *the process was still running `seconds` after it was spawned* (default 3) — but it is raced against process exit exactly as the port probe is, so a node whose command dies on startup still fails the run instead of letting its dependents start behind a corpse. Prefer `{ "type": "command", … }` whenever the process publishes something observable: a socket, a built file, a pid file. `settle` is readiness-only; as a liveness check it would report healthy forever, so Veld rejects it there.
 
 ### Dependencies
 
@@ -512,7 +586,7 @@ Declare `env` at the project, node, or variant level. Variables cascade: variant
 
 ### Outputs
 
-For `start_server` variants — object (synthetic templates):
+For `long_running` variants — object (synthetic templates):
 ```json
 "outputs": {
   "DATABASE_URL": "postgresql://postgres:veld@localhost:${veld.port}/app"
@@ -530,8 +604,8 @@ For `command` variants — array (captured from `$VELD_OUTPUT_FILE` or legacy `V
 
 | Variable | Value |
 |----------|-------|
-| `${veld.port}` | Allocated port (start_server only) |
-| `${veld.url}` | Full HTTPS URL (start_server only) |
+| `${veld.port}` | Allocated primary port (`long_running` with ports only) |
+| `${veld.url}` | Full HTTPS URL of the primary port (`long_running` with an http port only) |
 | `${veld.url.hostname}` | DNS name only (e.g. `app.my-run.proj.localhost`) |
 | `${veld.url.host}` | hostname:port (omits port if 443) |
 | `${veld.url.origin}` | scheme + host (same as `${veld.url}`) |
@@ -547,10 +621,14 @@ For `command` variants — array (captured from `$VELD_OUTPUT_FILE` or legacy `V
 | `${veld.username}` | OS username |
 | `${veld.node}` | This node's name |
 | `${veld.variant}` | This variant's name |
-| `${veld.ports.<name>}` | A named port from this node's `ports` map (start_server only) |
+| `${veld.ports.<name>}` | A named port from this node's `ports` map (`long_running` only) |
+| `${veld.urls.<name>}` | Full HTTPS URL of a named **http** port; also `.hostname`/`.host`/`.origin`/`.scheme`/`.port`, and `${nodes.<node>.urls.<name>}` cross-node |
 
 Availability is not uniform, and `veld lint` checks a reference against the context it sits in
-(`builtin-not-in-scope`): `port`/`url`/`url.*`/`ports.*` exist only on a `start_server` node,
+(`builtin-not-in-scope`): `port`/`url`/`url.*`/`ports.*`/`urls.*` exist only on a `long_running` node
+that actually declares the port in question — a `"ports": null` node has none of them, and
+`${veld.urls.<name>}` additionally needs that port to be `protocol: "http"`, which lint says by name
+rather than reporting an unknown built-in —
 `node`/`variant` only on a node, `run_id` not in a project `setup`/`teardown` step, and a `vars`
 value gets the run-scoped names only (a var is one value for the whole run, so compose per-node
 ones at the use site). A node's `on_stop` receives exactly what the node had, URL family included.
@@ -559,13 +637,13 @@ ones at the use site). A node's `on_stop` receives exactly what the node had, UR
 
 ```
 ${nodes.database.DATABASE_URL}   # custom output
-${nodes.backend.url}             # start_server built-in: HTTPS URL
-${nodes.backend.url.hostname}    # start_server built-in: DNS name only
-${nodes.backend.url.host}        # start_server built-in: hostname:port
-${nodes.backend.url.origin}      # start_server built-in: scheme + host
-${nodes.backend.url.scheme}      # start_server built-in: protocol scheme
-${nodes.backend.url.port}        # start_server built-in: HTTPS port
-${nodes.backend.port}            # start_server built-in: backend bind port
+${nodes.backend.url}             # long_running built-in: HTTPS URL
+${nodes.backend.url.hostname}    # long_running built-in: DNS name only
+${nodes.backend.url.host}        # long_running built-in: hostname:port
+${nodes.backend.url.origin}      # long_running built-in: scheme + host
+${nodes.backend.url.scheme}      # long_running built-in: protocol scheme
+${nodes.backend.url.port}        # long_running built-in: HTTPS port
+${nodes.backend.port}            # long_running built-in: backend bind port
 ${nodes.backend:local.url}       # qualified form (when multiple variants active)
 ```
 
@@ -657,9 +735,9 @@ selections provided".
 | `skip_if` | object | `command` only | Idempotency check (exit 0 = skip), as `{"argv": …}` / `{"shell": …}`. Alias: `verify` |
 | `probes` | object | All | `{readiness?: HealthCheck, liveness?: LivenessProbe}` — supersedes `health_check` |
 | `sensitive_outputs` | array | All | Output keys to mask and encrypt |
-| `client_log_levels` | array | `start_server` | Browser log levels override (variant > node > project) |
-| `features` | object | `start_server` | Feature toggles override (variant > node > project) |
-| `proxy` | object | `start_server` | Reverse-proxy header rules override (variant > node > project; `remove` unions, `set` merges) |
+| `client_log_levels` | array | `long_running` | Browser log levels override (variant > node > project) |
+| `features` | object | `long_running` | Feature toggles override (variant > node > project) |
+| `proxy` | object | `long_running` | Reverse-proxy header rules override (variant > node > project; `remove` unions, `set` merges) |
 | `cwd` | string | All | Working directory (relative paths resolve from project root). Cascade: variant > node. Supports `${...}` substitution. |
 | `hidden` (node-level) | boolean | All | Hide from `veld nodes` output |
 
@@ -682,7 +760,7 @@ selections provided".
       "default_variant": "docker",
       "variants": {
         "docker": {
-          "type": "start_server",
+          "type": "long_running",
           "shell": "docker run --rm -p ${veld.port}:5432 postgres:16",
           "health_check": { "type": "port", "timeout_seconds": 15 },
           "outputs": {
@@ -695,7 +773,7 @@ selections provided".
       "default_variant": "local",
       "variants": {
         "local": {
-          "type": "start_server",
+          "type": "long_running",
           "shell": "cargo run -- --port ${veld.port}",
           "health_check": { "type": "http", "path": "/health" },
           "depends_on": { "database": "docker" },
@@ -709,7 +787,7 @@ selections provided".
       "default_variant": "local",
       "variants": {
         "local": {
-          "type": "start_server",
+          "type": "long_running",
           "shell": "npm run dev -- --port ${veld.port}",
           "health_check": { "type": "http", "path": "/" },
           "depends_on": { "backend": "local" },
