@@ -397,6 +397,29 @@ are sampled by the daemon every ~5s, so they're absent (`–` / omitted) until t
 first sample lands, and go absent again shortly after a node dies or the daemon
 stops. The management UI shows the same figures live with a sparkline.
 
+**Sampling covers the start phase, and who samples depends on the step type.**
+Long-lived nodes (`start_server`) are sampled by the daemon from the moment they
+spawn — including the whole boot-up window before the node is healthy, which is
+where a dev server does most of its allocating. `command` steps (builds,
+installs, codegen) are sampled every ~2s by the `veld start` process that runs
+them, because a `command` step's process is spawned, awaited and reaped inside
+that command and its PID never exists anywhere else. `veld restart` samples the
+same way, since it re-runs the same steps. Three consequences worth knowing when
+reading the data:
+
+- A `command` node has **no live reading once it finishes** — it stops being
+  sampled the moment it exits. Its curve is still in `veld stats --history` and
+  in the dashboard chart for the retention window; that history is the only place
+  to read a build's peak.
+- A step shorter than one sampling interval is represented by the single sample
+  taken when it spawned, and a peak between two ticks isn't seen. This is a
+  sampler, not kernel accounting. **That first sample's CPU is 0% by
+  construction** — CPU is derived from the delta between two refreshes, and there
+  has only been one — so for a sub-interval step, memory is the usable figure and
+  the 0% is an artefact, not a measurement.
+- A `docker build` reports almost nothing: the work happens in
+  `dockerd`/`buildkitd`, which are not descendants of the step's process.
+
 ### Detailed resources: `veld stats`
 
 `veld status`'s `MEM` column is the tree's **footprint**, not RSS. This matters
@@ -453,27 +476,39 @@ Retention: node totals 24h, per-process rows 2h — the API reports both
 them. A by-process view over a window longer than the per-process horizon is
 legitimately empty for the older part of the range.
 
-Two escape hatches, read from **the daemon's** environment:
+Two escape hatches. **There are two samplers, so each switch has to be set in two
+places** — the daemon's service environment (for `start_server` nodes) *and* the
+shell you run `veld start` from (for `command` steps, which the CLI samples).
+Setting only one leaves the other half capturing.
 
-> A plain `export VELD_STATS_CMDLINE=off` in your shell does **not** reach them.
-> The sampler runs inside the user daemon, which is a launchd LaunchAgent (macOS)
-> or a `systemd --user` unit (Linux); neither inherits an interactive shell's
-> environment — the same reason veld has to inject `PATH` into daemon-spawned
-> commands. Set them where the service can see them, then restart the daemon
-> (the values are read once per daemon lifetime):
+> A plain `export VELD_STATS_CMDLINE=off` in your shell does **not** reach the
+> daemon. It runs as a launchd LaunchAgent (macOS) or a `systemd --user` unit
+> (Linux); neither inherits an interactive shell's environment — the same reason
+> veld has to inject `PATH` into daemon-spawned commands. And the reverse is just
+> as true: `launchctl setenv` / `systemctl --user set-environment` does **not**
+> reach an already-running interactive shell, so a terminal-launched `veld start`
+> keeps capturing its build steps' argv unless you export it there too. (A run
+> started from the dashboard or Veld Desktop inherits the daemon's environment,
+> so that half is covered by the service form alone — which is exactly how this
+> ends up looking like "works from the UI, not from my terminal".)
 >
 > ```sh
-> # macOS — set it for the session, then restart the agent so it picks it up
+> # 1. the daemon — macOS: set it, then restart the agent so it picks it up
 > launchctl setenv VELD_STATS_CMDLINE off
 > launchctl kickstart -k "gui/$(id -u)/dev.veld.daemon"
 >
-> # Linux
+> # 1. the daemon — Linux
 > systemctl --user set-environment VELD_STATS_CMDLINE=off
 > systemctl --user restart veld-daemon
+>
+> # 2. the CLI — in your shell profile, so every `veld start` sees it
+> export VELD_STATS_CMDLINE=off
 > ```
 >
-> Verify it took effect with `veld stats --processes --json`: with argv capture
-> off, every process's `cmd` is `null` while `name` still reports.
+> Verify with `veld stats --processes --json` **against a `command` node**, not a
+> server one: a server node reads the daemon's setting and will report `cmd:
+> null` even when the CLI half is still on. With argv capture off, every
+> process's `cmd` is `null` while `name` still reports.
 
 
 | variable | effect |

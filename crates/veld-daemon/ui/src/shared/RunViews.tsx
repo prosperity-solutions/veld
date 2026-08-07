@@ -155,6 +155,9 @@ export function NodesView(props: { target: RunViewTarget } & HostProps) {
         run={ref}
         nodes={nodeRows(run, selected)}
         stats={selected ? undefined : props.target.stats}
+        // The current run only: a past run's selection shows final node states,
+        // and its curve belongs to a run row this view no longer addresses.
+        graphable={!selected}
         canAct={!selected && run.status === "running"}
         onChanged={props.target.onChanged}
         // Not while reading a past run: its URLs are gone, so there is nothing to

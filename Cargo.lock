@@ -4478,6 +4478,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "veld-core",
+ "veld-stats",
 ]
 
 [[package]]
@@ -4520,7 +4521,6 @@ dependencies = [
  "reqwest 0.12.28",
  "serde",
  "serde_json",
- "sysinfo",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -4531,6 +4531,7 @@ dependencies = [
  "uuid",
  "veld-core",
  "veld-share",
+ "veld-stats",
 ]
 
 [[package]]
@@ -4594,6 +4595,19 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+ "veld-core",
+]
+
+[[package]]
+name = "veld-stats"
+version = "16.8.0"
+dependencies = [
+ "chrono",
+ "libc",
+ "sysinfo",
+ "tempfile",
+ "tokio",
+ "tracing",
  "veld-core",
 ]
 
