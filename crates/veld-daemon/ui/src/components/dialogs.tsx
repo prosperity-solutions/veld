@@ -637,7 +637,7 @@ export function ChangeMarkerDialog(props: {
         <Text size="xs" c="dimmed">
           Both halves are always saved, so you can set the one you aren&apos;t
           currently showing and it will be waiting if you switch. Which one the
-          rail renders is under Settings → Appearance.
+          rail renders is under Settings → General.
         </Text>
       </Stack>
     </Modal>
@@ -703,7 +703,7 @@ export function RenameWorktreeDialog(props: {
                 Moves the checkout to the trash. Nothing is deleted yet — it
                 stays on disk and you can restore it from the rail. It is
                 deleted for good when its retention period runs out (Settings →
-                Worktrees, off by default) or when you delete it from the trash.
+                General, off by default) or when you delete it from the trash.
                 The branch itself is always kept.
                 {force
                   ? " Forcing deletes it right now and discards uncommitted changes; it will not start if an environment is still running."

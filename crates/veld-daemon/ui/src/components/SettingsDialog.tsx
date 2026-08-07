@@ -137,9 +137,12 @@ const GROUPS: { id: GroupId; label: string; icon: ReactNode }[] = [
  * The panel scrolls, the sidebar and the footnote do not — the same inner-scroll
  * shape `NewWorktreeDialog` uses, and for the same reason: with the modal body as
  * the scroller, choosing a group would scroll the sidebar out of reach of the next
- * choice. `minHeight` keeps the modal from resizing between a two-row group and an
- * eight-row one; `maxHeight` is the shared `min(58vh, …)` so a laptop still sees the
- * bottom of the tallest panel.
+ * choice. `minHeight` is a floor, not a fixed height — it stops the two-row Browser
+ * panes group from collapsing to a modal barely taller than its own title bar. The
+ * modal does still grow between that floor and the `maxHeight` cap, which is the
+ * shared `min(58vh, …)` so a laptop sees the bottom of the tallest panel; a fixed
+ * height would stop the growth at the cost of a lot of dead space under the short
+ * groups.
  */
 const PANEL_STYLE = {
   flex: 1,
