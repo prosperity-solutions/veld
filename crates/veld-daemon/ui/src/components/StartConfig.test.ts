@@ -31,6 +31,7 @@ const wt = (over: Partial<Worktree> = {}): Worktree => ({
   path: "/wts/chk",
   branch: "feat/checkout-v2",
   alias: "chk",
+  display_name: "",
   emoji: "🦊",
   marker_color: "#008cff",
   is_main: false,

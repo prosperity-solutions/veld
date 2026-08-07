@@ -31,6 +31,25 @@ pub struct WorktreeRecord {
     pub path: String,
     pub branch: String,
     pub alias: String,
+    /// The free-text name the rail renders, or `""` to render the [`alias`]
+    /// instead.
+    ///
+    /// [`alias`]: Self::alias
+    ///
+    /// **This is a label; the alias is the identifier.** The alias defaults the
+    /// run name and so ends up in a hostname, which is why it is bounded to
+    /// `[A-Za-z0-9._-]`; this one is only ever read by a human out of a 236px
+    /// column, so it holds whatever they typed — spaces, capitals, `(final)`.
+    /// The create dialog derives the alias *from* this rather than the other way
+    /// round, because the derivation is lossy and not invertible.
+    ///
+    /// Deliberately **not unique**, unlike the alias. Uniqueness on the alias
+    /// exists to stop two checkouts of one repo minting the same hostname; two
+    /// rows sharing a label collide in nothing, and the branch renders beside it.
+    ///
+    /// `""` is the sentinel for "no separate name", not a NULL — see the v13
+    /// migration.
+    pub display_name: String,
     /// Visual identifier for dense UI (collapsed rail): one emoji from
     /// [`WORKTREE_EMOJI`]. Assigned at insert, preserved across syncs and
     /// renames.
@@ -117,6 +136,51 @@ pub const MAX_LANES_PER_REPO: usize = 32;
 /// long enough to stall the daemon's other writers.
 pub const MAX_ORDER_LEN: usize = 1024;
 
+/// The columns [`Db::patch_worktree`] may change, each `None` meaning "leave it
+/// alone".
+///
+/// A struct rather than a positional argument list, and that is the whole point
+/// of it: four of the five fields are `Option<&str>`, so a positional call is a
+/// row of interchangeable `None`s in which transposing two arguments compiles
+/// cleanly and writes the lane into the alias. Construct it with
+/// `..Default::default()` and name the field you mean.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct WorktreePatch<'a> {
+    /// The identifier — bounded, unique per repo, checked for collisions inside
+    /// the write's own transaction.
+    pub alias: Option<&'a str>,
+    /// The rendered label, or `Some("")` to clear it back to the alias. Free
+    /// text; see [`WorktreeRecord::display_name`].
+    pub display_name: Option<&'a str>,
+    pub emoji: Option<&'a str>,
+    pub marker_color: Option<&'a str>,
+    /// A lane of this worktree's repo, or `Some("")` to ungroup. Changing it
+    /// clears the manual position.
+    pub lane: Option<&'a str>,
+}
+
+impl WorktreePatch<'_> {
+    /// Whether this patch would change nothing.
+    ///
+    /// Destructured rather than field-tested, so adding a sixth field is a
+    /// compile error here instead of a patch that silently reports itself empty
+    /// and gets skipped by a caller's guard.
+    pub fn is_empty(&self) -> bool {
+        let Self {
+            alias,
+            display_name,
+            emoji,
+            marker_color,
+            lane,
+        } = self;
+        alias.is_none()
+            && display_name.is_none()
+            && emoji.is_none()
+            && marker_color.is_none()
+            && lane.is_none()
+    }
+}
+
 /// A worktree as discovered on disk (`git worktree list --porcelain`), used
 /// to sync the table with reality.
 #[derive(Debug, Clone)]
@@ -132,7 +196,7 @@ pub struct DiscoveredWorktree {
 // the TS `Worktree` interface in crates/veld-daemon/ui/src/api.ts — serde
 // flattens the new field into the API, but TS ignores unknown fields silently.
 const WT_COLS: &str = "id, repo_root, path, branch, alias, emoji, is_main, created_at, \
-     marker_color, lane, sort_position, trashed_at, trash_error";
+     marker_color, lane, sort_position, trashed_at, trash_error, display_name";
 
 fn wt_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorktreeRecord> {
     Ok(WorktreeRecord {
@@ -149,6 +213,7 @@ fn wt_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorktreeRecord> {
         sort_position: row.get(10)?,
         trashed_at: row.get(11)?,
         trash_error: row.get(12)?,
+        display_name: row.get(13)?,
     })
 }
 
@@ -158,13 +223,29 @@ fn wt_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorktreeRecord> {
 /// sorts exactly as it did before v10; then lanes in their own `position` order,
 /// resolved by a correlated subquery because `lane` stores the name. Within a
 /// group the main checkout leads, then hand-placed worktrees in their positions,
-/// then everything unplaced alias-sorted — `sort_position IS NULL` sorts the
+/// then everything unplaced label-sorted — `sort_position IS NULL` sorts the
 /// unplaced *after* the placed rather than treating NULL as position zero.
+///
+/// The final tie-break is on the **rendered label**, not on the alias: since v13
+/// a worktree can carry a `display_name` and the rail shows that instead, so an
+/// alias sort produced a list that was alphabetical by a string nothing on screen
+/// contained. `alias` follows it only to keep the order total when two rows
+/// render the same label (labels are deliberately not unique).
+///
+/// **`COLLATE NOCASE` folds ASCII only**, in every SQLite build. That did not
+/// show before v13, because `validate_alias` bounds the alias to `[A-Za-z0-9._-]`
+/// — but a label is free Unicode, so `Ärger` sorts after `Zebra` and `ärger` no
+/// longer folds with `Ärger`. Known and accepted rather than fixed here: the same
+/// collation already orders lane names two lines up and repo names in
+/// `list_repos`, both free text since they shipped, so a real fix is one change
+/// to how this database sorts human text and not a rider on a rail feature. The
+/// order stays *total* and stable either way — the alias is slug-unique per repo.
 const WT_ORDER: &str = "ORDER BY lane != '',
               COALESCE((SELECT position FROM lanes l
                         WHERE l.repo_root = worktrees.repo_root AND l.name = worktrees.lane), 0),
               lane COLLATE NOCASE,
               is_main DESC, sort_position IS NULL, sort_position,
+              COALESCE(NULLIF(display_name, ''), alias) COLLATE NOCASE,
               alias COLLATE NOCASE";
 
 impl Db {
@@ -292,8 +373,9 @@ impl Db {
                     // column listed here is overwritten from `discovered` forever —
                     // and a *user-choice* column would therefore be silently reset
                     // seconds after the user set it, having appeared to work when
-                    // tested by hand. `lane`, `sort_position`, `alias`, the marker
-                    // faces and the trash columns are all deliberately absent for
+                    // tested by hand. `lane`, `sort_position`, `alias`,
+                    // `display_name`, the marker faces and the trash columns are
+                    // all deliberately absent for
                     // that reason; they are written by `patch_worktree`,
                     // `reorder_worktrees` and the trash helpers instead. The
                     // file-header note about "touching all of them" when adding a
@@ -368,7 +450,8 @@ impl Db {
 
     /// All worktrees of a repo in rail order ([`WT_ORDER`]): ungrouped first,
     /// then lanes in their own order, main checkout leading its group, then
-    /// hand-placed worktrees, then the unplaced alias-sorted.
+    /// hand-placed worktrees, then the unplaced sorted by their rendered label
+    /// (`display_name` when set, else `alias`).
     ///
     /// Trashed worktrees are included — the rail renders them as a pending-removal
     /// group, which is what makes a background removal visible at all.
@@ -404,19 +487,30 @@ impl Db {
     /// [`DbError::AliasTaken`] when a sibling of the same repo already holds
     /// the alias.
     pub fn rename_worktree(&self, id: i64, alias: &str) -> Result<bool, DbError> {
-        self.patch_worktree(id, Some(alias), None, None, None)
+        self.patch_worktree(
+            id,
+            WorktreePatch {
+                alias: Some(alias),
+                ..Default::default()
+            },
+        )
     }
 
-    /// Update alias and/or emoji in one write, inside one transaction.
+    /// Apply a [`WorktreePatch`] in one write, inside one transaction.
     /// Returns whether the row existed.
     ///
-    /// A single `UPDATE … COALESCE` rather than two writes: applied
+    /// A single `UPDATE … COALESCE` rather than one write per field: applied
     /// separately, a row deleted between them (concurrent `sync_worktrees`
     /// prune, or `DELETE /api/worktrees/{id}`) commits the rename and then
     /// reports "not found" — a partial write the API's contract denies.
-    /// `None` leaves a column untouched; both `None` is a no-op write that
-    /// still reports whether the row exists (the HTTP layer rejects an empty
-    /// patch before reaching here).
+    /// `None` leaves a column untouched; an all-`None` patch is a no-op write
+    /// that still reports whether the row exists (the HTTP layer rejects an
+    /// empty patch before reaching here).
+    ///
+    /// `display_name` is free text and is **not** validated here — the HTTP
+    /// layer bounds it (`validate_display_name`), exactly as it does the alias.
+    /// `Some("")` is a clear, not a no-op: it takes the row back to rendering
+    /// its alias.
     ///
     /// A new alias's **slug** must be free among the row's repo siblings, the
     /// same invariant [`unique_alias`] establishes at insert.
@@ -430,14 +524,14 @@ impl Db {
     /// so duplicate aliases across repos are harmless, and rejecting them would
     /// break importing two repos that are both on `main`. Emoji stay
     /// deliberately non-unique (see [`WorktreeRecord::emoji`]).
-    pub fn patch_worktree(
-        &self,
-        id: i64,
-        alias: Option<&str>,
-        emoji: Option<&str>,
-        marker_color: Option<&str>,
-        lane: Option<&str>,
-    ) -> Result<bool, DbError> {
+    pub fn patch_worktree(&self, id: i64, patch: WorktreePatch<'_>) -> Result<bool, DbError> {
+        let WorktreePatch {
+            alias,
+            display_name,
+            emoji,
+            marker_color,
+            lane,
+        } = patch;
         // Both marker channels are validated before either is written, for the
         // same both-or-neither reason the alias is: a patch carrying a good glyph
         // and a bad colour must not half-apply.
@@ -540,8 +634,8 @@ impl Db {
         // repo-wide once anything has been dragged (`reorder_worktrees` writes array
         // indices), so a worktree carrying its old lane's position into a new one
         // almost always ties an existing member — and `WT_ORDER` then falls through
-        // to the alias, landing it somewhere in the middle rather than where "Move to
-        // lane" implied. Unplaced is the honest state for a worktree the user moved
+        // to the rendered label, landing it somewhere in the middle rather than where
+        // "Move to lane" implied. Unplaced is the honest state for a worktree the user moved
         // by menu rather than by dragging it to a position.
         let n = tx.execute(
             "UPDATE worktrees
@@ -549,12 +643,13 @@ impl Db {
                     emoji = COALESCE(?2, emoji),
                     marker_color = COALESCE(?3, marker_color),
                     lane = COALESCE(?4, lane),
+                    display_name = COALESCE(?6, display_name),
                     sort_position = CASE
                         WHEN ?4 IS NOT NULL AND ?4 != lane THEN NULL
                         ELSE sort_position
                     END
               WHERE id = ?5",
-            params![alias, emoji, marker_color, lane, id],
+            params![alias, emoji, marker_color, lane, id, display_name],
         )?;
         tx.commit()?;
         Ok(n > 0)
@@ -792,7 +887,7 @@ impl Db {
     /// one created — the bug three stores shipped in #201.
     ///
     /// Paths the caller omits are reset to `sort_position = NULL`, i.e. back to the
-    /// alias-sorted tail. That is what makes the write idempotent: the UI sends the
+    /// label-sorted tail. That is what makes the write idempotent: the UI sends the
     /// order it is displaying, and the stored order becomes exactly that.
     pub fn reorder_worktrees(&self, repo_root: &Path, order: &[String]) -> Result<(), DbError> {
         // Bounded before taking the write lock. The body is a caller-supplied array
@@ -1309,8 +1404,15 @@ mod tests {
             .find(|g| **g != other.emoji)
             .expect("curated set has more than one glyph");
         assert!(
-            db.patch_worktree(other.id, Some(&main.alias), Some(glyph), None, None)
-                .is_err()
+            db.patch_worktree(
+                other.id,
+                WorktreePatch {
+                    alias: Some(&main.alias),
+                    emoji: Some(glyph),
+                    ..Default::default()
+                }
+            )
+            .is_err()
         );
         assert_eq!(
             db.get_worktree(other.id).unwrap().unwrap().emoji,
@@ -1635,8 +1737,14 @@ mod tests {
             .find(|c| **c != wts[0].marker_color)
             .expect("palette has more than one colour");
         assert!(
-            db.patch_worktree(id, None, None, Some(chosen), None)
-                .unwrap()
+            db.patch_worktree(
+                id,
+                WorktreePatch {
+                    marker_color: Some(chosen),
+                    ..Default::default()
+                }
+            )
+            .unwrap()
         );
         // A user's explicit colour must not be clobbered by the UI's refresh poll.
         db.sync_worktrees(root, &[wt("/tmp/repoMarkerPick", "main", true)])
@@ -1646,7 +1754,13 @@ mod tests {
         for bad in ["", "#12345", "nope"] {
             assert!(
                 matches!(
-                    db.patch_worktree(id, None, None, Some(bad), None),
+                    db.patch_worktree(
+                        id,
+                        WorktreePatch {
+                            marker_color: Some(bad),
+                            ..Default::default()
+                        }
+                    ),
                     Err(DbError::InvalidColor(_))
                 ),
                 "{bad} must be rejected"
@@ -1654,8 +1768,15 @@ mod tests {
         }
         // A rejected colour must not commit the alias that travelled with it.
         assert!(
-            db.patch_worktree(id, Some("nope"), None, Some("#12345"), None)
-                .is_err()
+            db.patch_worktree(
+                id,
+                WorktreePatch {
+                    alias: Some("nope"),
+                    marker_color: Some("#12345"),
+                    ..Default::default()
+                }
+            )
+            .is_err()
         );
         assert_ne!(db.get_worktree(id).unwrap().unwrap().alias, "nope");
     }
@@ -1677,8 +1798,14 @@ mod tests {
             .find(|e| **e != wts[0].emoji)
             .expect("curated set has more than one glyph");
         assert!(
-            db.patch_worktree(id, None, Some(chosen), None, None)
-                .unwrap()
+            db.patch_worktree(
+                id,
+                WorktreePatch {
+                    emoji: Some(chosen),
+                    ..Default::default()
+                }
+            )
+            .unwrap()
         );
         assert_eq!(&db.get_worktree(id).unwrap().unwrap().emoji, chosen);
 
@@ -1701,7 +1828,13 @@ mod tests {
         for bad in ["", "🍕", "🦊🦊", "👨‍👩‍👧", "not-an-emoji"] {
             assert!(
                 matches!(
-                    db.patch_worktree(1, None, Some(bad), None, None),
+                    db.patch_worktree(
+                        1,
+                        WorktreePatch {
+                            emoji: Some(bad),
+                            ..Default::default()
+                        }
+                    ),
                     Err(DbError::InvalidEmoji(_))
                 ),
                 "{bad:?} must be rejected"
@@ -1734,16 +1867,28 @@ mod tests {
 
         // None leaves a column untouched.
         assert!(
-            db.patch_worktree(id, Some("renamed"), None, None, None)
-                .unwrap()
+            db.patch_worktree(
+                id,
+                WorktreePatch {
+                    alias: Some("renamed"),
+                    ..Default::default()
+                }
+            )
+            .unwrap()
         );
         let after = db.get_worktree(id).unwrap().unwrap();
         assert_eq!(after.alias, "renamed");
         assert_eq!(after.emoji, original.emoji);
 
         assert!(
-            db.patch_worktree(id, None, Some(glyph), None, None)
-                .unwrap()
+            db.patch_worktree(
+                id,
+                WorktreePatch {
+                    emoji: Some(glyph),
+                    ..Default::default()
+                }
+            )
+            .unwrap()
         );
         let after = db.get_worktree(id).unwrap().unwrap();
         assert_eq!(after.alias, "renamed");
@@ -1751,8 +1896,15 @@ mod tests {
 
         // Both at once.
         assert!(
-            db.patch_worktree(id, Some("both"), Some(&original.emoji), None, None)
-                .unwrap()
+            db.patch_worktree(
+                id,
+                WorktreePatch {
+                    alias: Some("both"),
+                    emoji: Some(&original.emoji),
+                    ..Default::default()
+                }
+            )
+            .unwrap()
         );
         let after = db.get_worktree(id).unwrap().unwrap();
         assert_eq!(after.alias, "both");
@@ -1760,22 +1912,222 @@ mod tests {
 
         // A rejected emoji must not commit the alias that travelled with it.
         assert!(
-            db.patch_worktree(id, Some("nope"), Some("🍕"), None, None)
-                .is_err()
+            db.patch_worktree(
+                id,
+                WorktreePatch {
+                    alias: Some("nope"),
+                    emoji: Some("🍕"),
+                    ..Default::default()
+                }
+            )
+            .is_err()
         );
         assert_eq!(db.get_worktree(id).unwrap().unwrap().alias, "both");
 
         // Neither field: a no-op write that still reports row existence.
-        assert!(db.patch_worktree(id, None, None, None, None).unwrap());
+        assert!(db.patch_worktree(id, WorktreePatch::default()).unwrap());
         let after = db.get_worktree(id).unwrap().unwrap();
         assert_eq!(after.alias, "both");
         assert_eq!(after.emoji, original.emoji);
 
         assert!(
-            !db.patch_worktree(4242, Some("x"), None, None, None)
-                .unwrap()
+            !db.patch_worktree(
+                4242,
+                WorktreePatch {
+                    alias: Some("x"),
+                    ..Default::default()
+                }
+            )
+            .unwrap()
         );
-        assert!(!db.patch_worktree(4242, None, None, None, None).unwrap());
+        assert!(!db.patch_worktree(4242, WorktreePatch::default()).unwrap());
+    }
+
+    #[test]
+    fn a_display_name_is_stored_beside_the_alias_and_clearable() {
+        let (_dir, db) = test_db();
+        let root = Path::new("/tmp/repoDN");
+        db.upsert_repo(root, "repo-dn").unwrap();
+        db.sync_worktrees(
+            root,
+            &[
+                wt("/tmp/repoDN", "main", true),
+                wt("/tmp/repoDN-hello", "hello-test", false),
+            ],
+        )
+        .unwrap();
+        let id = db
+            .get_worktree_by_path("/tmp/repoDN-hello")
+            .unwrap()
+            .unwrap()
+            .id;
+
+        // Every pre-existing row starts with the sentinel, not a NULL: the v13
+        // migration's DEFAULT is what makes the column readable as a `String`.
+        assert_eq!(db.get_worktree(id).unwrap().unwrap().display_name, "");
+
+        assert!(
+            db.patch_worktree(
+                id,
+                WorktreePatch {
+                    display_name: Some("Hello test"),
+                    ..Default::default()
+                }
+            )
+            .unwrap()
+        );
+        let after = db.get_worktree(id).unwrap().unwrap();
+        assert_eq!(after.display_name, "Hello test");
+        // The identifier is untouched — that is the entire point of two columns.
+        assert_eq!(after.alias, "hello-test");
+
+        // A label is free text and carries no uniqueness rule: two checkouts of
+        // one repo may share one, unlike their aliases.
+        let main_id = db.get_worktree_by_path("/tmp/repoDN").unwrap().unwrap().id;
+        assert!(
+            db.patch_worktree(
+                main_id,
+                WorktreePatch {
+                    display_name: Some("Hello test"),
+                    ..Default::default()
+                }
+            )
+            .unwrap()
+        );
+
+        // Renaming the alias leaves the label alone, and vice versa.
+        db.rename_worktree(id, "renamed").unwrap();
+        let after = db.get_worktree(id).unwrap().unwrap();
+        assert_eq!(after.alias, "renamed");
+        assert_eq!(after.display_name, "Hello test");
+
+        // **The discovery poll must not reset it.** `sync_worktrees` runs every
+        // few seconds and its UPDATE may list only git-derived columns; a
+        // user-choice column that leaks into that statement is overwritten
+        // seconds after the user sets it, which looks like it worked when tested
+        // by hand and is silently gone by the next poll. Both marker faces pin
+        // this and the newest user-choice column must too.
+        db.sync_worktrees(
+            root,
+            &[
+                wt("/tmp/repoDN", "main", true),
+                wt("/tmp/repoDN-hello", "hello-test", false),
+            ],
+        )
+        .unwrap();
+        let after = db.get_worktree(id).unwrap().unwrap();
+        assert_eq!(after.display_name, "Hello test");
+        assert_eq!(after.alias, "renamed");
+
+        // `Some("")` is a clear, not a no-op: it is the only way back to
+        // rendering the alias.
+        assert!(
+            db.patch_worktree(
+                id,
+                WorktreePatch {
+                    display_name: Some(""),
+                    ..Default::default()
+                }
+            )
+            .unwrap()
+        );
+        assert_eq!(db.get_worktree(id).unwrap().unwrap().display_name, "");
+    }
+
+    #[test]
+    fn the_unplaced_tail_sorts_by_the_rendered_label_in_ascii() {
+        // Scoped name on purpose. `COLLATE NOCASE` is ASCII-only, so this pins
+        // that the sort *key* is the label rather than the alias — not that the
+        // result is alphabetical for a non-ASCII label, which it is not (see the
+        // note on `WT_ORDER`, and the assertion at the end of this test).
+        //
+        // `WT_ORDER`'s final tie-break is the label, because the label is what the
+        // rail prints. Sorted by alias, this list reads as unsorted on screen.
+        let (_dir, db) = test_db();
+        let root = Path::new("/tmp/repoSort");
+        db.upsert_repo(root, "repo-sort").unwrap();
+        db.sync_worktrees(
+            root,
+            &[
+                wt("/tmp/repoSort", "main", true),
+                wt("/tmp/repoSort-a", "aaa", false),
+                wt("/tmp/repoSort-z", "zzz", false),
+            ],
+        )
+        .unwrap();
+        let a = db.get_worktree_by_path("/tmp/repoSort-a").unwrap().unwrap();
+        let z = db.get_worktree_by_path("/tmp/repoSort-z").unwrap().unwrap();
+
+        // Alias order is aaa, zzz. Label them so the label order is the exact
+        // reverse, and the rail's order must follow the labels.
+        db.patch_worktree(
+            a.id,
+            WorktreePatch {
+                display_name: Some("Omega"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        db.patch_worktree(
+            z.id,
+            WorktreePatch {
+                display_name: Some("Alpha"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let order: Vec<String> = db
+            .list_worktrees(root)
+            .unwrap()
+            .into_iter()
+            // The main checkout leads its group regardless; this is about the tail.
+            .filter(|w| !w.is_main)
+            .map(|w| w.alias)
+            .collect();
+        assert_eq!(order, vec![z.alias.clone(), a.alias.clone()]);
+
+        // Clearing both labels puts them back where their aliases say.
+        for id in [a.id, z.id] {
+            db.patch_worktree(
+                id,
+                WorktreePatch {
+                    display_name: Some(""),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+        let order: Vec<String> = db
+            .list_worktrees(root)
+            .unwrap()
+            .into_iter()
+            .filter(|w| !w.is_main)
+            .map(|w| w.alias)
+            .collect();
+        assert_eq!(order, vec![a.alias.clone(), z.alias.clone()]);
+
+        // **The exception, asserted beside the rule.** `COLLATE NOCASE` folds
+        // ASCII only, so a label outside it sorts by code point: `Ärger`
+        // (U+00C4) lands *after* `zzz` rather than at the top. Pinned so the
+        // scoped test name above stays honest, and so a future switch to a
+        // Unicode-aware collation fails here and gets read rather than being a
+        // silent reordering of everyone's rail.
+        db.patch_worktree(
+            a.id,
+            WorktreePatch {
+                display_name: Some("Ärger"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let order: Vec<String> = db
+            .list_worktrees(root)
+            .unwrap()
+            .into_iter()
+            .filter(|w| !w.is_main)
+            .map(|w| w.alias)
+            .collect();
+        assert_eq!(order, vec![z.alias, a.alias]);
     }
 
     #[test]
@@ -1858,8 +2210,14 @@ mod tests {
         .unwrap();
         db.create_lane(root, "review").unwrap();
         let id = db.get_worktree_by_path("/tmp/wt-a").unwrap().unwrap().id;
-        db.patch_worktree(id, None, None, None, Some("review"))
-            .unwrap();
+        db.patch_worktree(
+            id,
+            WorktreePatch {
+                lane: Some("review"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
 
         assert!(db.rename_lane(root, "review", "in review").unwrap());
         // The whole point of storing the NAME on the row: the rename has to carry
@@ -1888,8 +2246,14 @@ mod tests {
         .unwrap();
         db.create_lane(root, "spikes").unwrap();
         let id = db.get_worktree_by_path("/tmp/wt-a").unwrap().unwrap().id;
-        db.patch_worktree(id, None, None, None, Some("spikes"))
-            .unwrap();
+        db.patch_worktree(
+            id,
+            WorktreePatch {
+                lane: Some("spikes"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
 
         assert!(db.delete_lane(root, "spikes").unwrap());
         // No FK to cascade from — `delete_lane` clears the assignments itself, in
@@ -1908,11 +2272,26 @@ mod tests {
         let id = db.get_worktree_by_path("/tmp/badlane").unwrap().unwrap().id;
 
         assert!(matches!(
-            db.patch_worktree(id, None, None, None, Some("ghost")),
+            db.patch_worktree(
+                id,
+                WorktreePatch {
+                    lane: Some("ghost"),
+                    ..Default::default()
+                }
+            ),
             Err(DbError::UnknownLane(_))
         ));
         // Ungrouping is always legal.
-        assert!(db.patch_worktree(id, None, None, None, Some("")).unwrap());
+        assert!(
+            db.patch_worktree(
+                id,
+                WorktreePatch {
+                    lane: Some(""),
+                    ..Default::default()
+                }
+            )
+            .unwrap()
+        );
     }
 
     #[test]
@@ -1940,7 +2319,7 @@ mod tests {
             .collect();
         assert_eq!(aliases, vec!["main", "alpha", "beta", "zeta"]);
 
-        // A manual order puts placed worktrees first, unplaced alias-sorted after.
+        // A manual order puts placed worktrees first, unplaced label-sorted after.
         db.reorder_worktrees(root, &["/tmp/zeta".into(), "/tmp/beta".into()])
             .unwrap();
         let aliases: Vec<String> = db
@@ -1954,8 +2333,14 @@ mod tests {
         // A lane moves its members below every ungrouped worktree.
         db.create_lane(root, "review").unwrap();
         let zeta = db.get_worktree_by_path("/tmp/zeta").unwrap().unwrap().id;
-        db.patch_worktree(zeta, None, None, None, Some("review"))
-            .unwrap();
+        db.patch_worktree(
+            zeta,
+            WorktreePatch {
+                lane: Some("review"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let rows = db.list_worktrees(root).unwrap();
         let aliases: Vec<&str> = rows.iter().map(|w| w.alias.as_str()).collect();
         assert_eq!(aliases, vec!["main", "beta", "alpha", "zeta"]);
@@ -2176,8 +2561,14 @@ mod tests {
         .unwrap();
         db.create_lane(root, "review").unwrap();
         let id = db.get_worktree_by_path("/tmp/wt").unwrap().unwrap().id;
-        db.patch_worktree(id, None, None, None, Some("review"))
-            .unwrap();
+        db.patch_worktree(
+            id,
+            WorktreePatch {
+                lane: Some("review"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         db.reorder_worktrees(root, &["/tmp/wt".into()]).unwrap();
 
         db.trash_worktree(id).unwrap();
@@ -2205,10 +2596,13 @@ mod tests {
         let id = db.get_worktree_by_path("/tmp/wt").unwrap().unwrap().id;
         db.patch_worktree(
             id,
-            Some("chosen"),
-            Some("🦊"),
-            Some("#123456"),
-            Some("review"),
+            WorktreePatch {
+                alias: Some("chosen"),
+                emoji: Some("🦊"),
+                marker_color: Some("#123456"),
+                lane: Some("review"),
+                ..Default::default()
+            },
         )
         .unwrap();
         db.reorder_worktrees(root, &["/tmp/wt".into()]).unwrap();
@@ -2342,16 +2736,29 @@ mod tests {
         // Positions are dense repo-wide once anything has been dragged, so carrying
         // one into another lane would tie an existing member and land the worktree
         // mid-lane instead of where "Move to lane" implied.
-        db.patch_worktree(a, None, None, None, Some("review"))
-            .unwrap();
+        db.patch_worktree(
+            a,
+            WorktreePatch {
+                lane: Some("review"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let row = db.get_worktree(a).unwrap().unwrap();
         assert_eq!(row.lane, "review");
         assert_eq!(row.sort_position, None);
 
         // A patch that does NOT change the lane leaves the position alone.
         db.reorder_worktrees(root, &["/tmp/a".into()]).unwrap();
-        db.patch_worktree(a, Some("renamed"), None, None, Some("review"))
-            .unwrap();
+        db.patch_worktree(
+            a,
+            WorktreePatch {
+                alias: Some("renamed"),
+                lane: Some("review"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         assert_eq!(db.get_worktree(a).unwrap().unwrap().sort_position, Some(0));
     }
 

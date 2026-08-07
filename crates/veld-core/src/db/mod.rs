@@ -32,7 +32,8 @@ pub use settings::{DEFAULT_DETACH_GRACE_MINUTES, LogTimeZone, MAX_RUN_HISTORY_DA
 pub use var_overrides::{OverrideScope, VarOverride};
 pub use worktrees::{
     DiscoveredWorktree, LaneRecord, MAX_LANE_NAME_LEN, MAX_ORDER_LEN, RepoRecord, WORKTREE_COLORS,
-    WORKTREE_EMOJI, WorktreeRecord, default_alias, is_worktree_color, is_worktree_emoji,
+    WORKTREE_EMOJI, WorktreePatch, WorktreeRecord, default_alias, is_worktree_color,
+    is_worktree_emoji,
 };
 
 use std::path::{Path, PathBuf};
@@ -466,6 +467,11 @@ const MIGRATIONS: &[Migration] = &[
         version: 12,
         name: "machine-var-overrides",
         apply: migrate_v12_var_overrides,
+    },
+    Migration {
+        version: 13,
+        name: "worktree-display-name",
+        apply: migrate_v13_worktree_display_name,
     },
 ];
 
@@ -1079,6 +1085,30 @@ fn migrate_v12_var_overrides(conn: &Connection) -> rusqlite::Result<()> {
         );
         "#,
     )
+}
+
+/// v13: `worktrees.display_name` — the free-text name the rail renders.
+///
+/// The alias is an *identifier*: it defaults the run name, which feeds the
+/// hostname `{service}.{run}.{project}.localhost`, so it is bounded to
+/// `[A-Za-z0-9._-]` and can hold neither a space nor a capital the user meant.
+/// Before this column the create dialog slugged what you typed and then showed
+/// you the slug forever — "Hello test" went in and `hello-test` was the only
+/// name that existed anywhere.
+///
+/// Two columns rather than relaxing the alias, because the two have genuinely
+/// different rules: one has to survive DNS, the other only has to be readable in
+/// a 236px column. And rather than deriving the label back out of the slug,
+/// because that derivation is not invertible — capitals, punctuation and
+/// non-ASCII are gone by then.
+///
+/// `''` means "no separate name, render the alias", which is what every
+/// pre-existing row gets and what clearing the field returns a row to. It is a
+/// sentinel and not a NULL for the same reason `emoji` and `marker_color` are:
+/// `wt_from_row` reads a `String`, and one nullable column in that struct would
+/// make every reader handle an absence that means the same thing as `''`.
+fn migrate_v13_worktree_display_name(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch("ALTER TABLE worktrees ADD COLUMN display_name TEXT NOT NULL DEFAULT '';")
 }
 
 // ---------------------------------------------------------------------------

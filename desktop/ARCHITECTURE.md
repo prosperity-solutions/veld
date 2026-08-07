@@ -142,6 +142,28 @@ requests at runtime — branding rule.
   children, so the nested controls aren't exposed to assistive tech — the
   honest shape is `role="listbox"` on the rail with `role="option"` rows,
   deferred to a later increment.
+- **Creating a worktree happens in a lane, not beside the rail.** There is one
+  "＋" per rail section that can hold a checkout (the ungrouped section and each
+  user lane), and the toolbar's global "+" is gone in the expanded rail. The old
+  single button could only ever mean *ungrouped*, so filing a new checkout was
+  always create-then-drag; a per-section button makes the destination the thing
+  you clicked, and the lane rides on the create request rather than a follow-up
+  PATCH so the row cannot appear in the wrong section first.
+  - The ungrouped section therefore **gained a header** ("Worktrees"), since a
+    headerless section has nowhere to put a button and the default destination
+    would otherwise have been the only unreachable one. "Worktrees" and not
+    "Ungrouped" because most repos define no lane at all and that header would
+    name a state they never left.
+  - The **collapsed** rail keeps the toolbar "+", mirroring how "New lane" is
+    expanded-only: collapsed there are no headers, so it is the only place a
+    create can live. It files into the ungrouped section.
+  - `RailGroup` carries `addable` and `editable` as explicit flags rather than
+    the view deriving them from `pinned`. They are three different claims: the
+    trash takes drops but cannot be created into, and the ungrouped section is
+    unpinned and creatable but has no lane record to rename or delete.
+  - The per-lane **row count was removed** from the header. It restated what the
+    rows immediately below it already show, in a surface whose entire job is
+    showing those rows, and its slot is where the "＋" now sits.
 - **One start predicate.** `canStartWorktree` gates all four surfaces that can
   fire a run action — top bar, rail row, context menu and palette. They
   disagreed before: some checked "is anything already in flight", others "is
@@ -964,10 +986,34 @@ own veld project*. The desktop model sits one level above:
 
 - `repos` — a git repository the user imported (its main checkout root).
 - `worktrees` — checkouts of that repo (`git worktree`), each with a
-  user-editable `alias`. The main checkout itself appears as a worktree row so
-  the rail has one list.
+  user-editable `alias` and, since v13, a `display_name`. The main checkout
+  itself appears as a worktree row so the rail has one list.
 - `lanes` — user-named groups the rail renders as sections (v10). Keyed
   `(repo_root, name)` with **no surrogate id**; `worktrees.lane` stores the name.
+
+**A worktree has two names and they are not interchangeable.** `alias` is the
+*identifier*: bounded to `[A-Za-z0-9._-]`, unique among the repo's checkouts, and
+the default run name — which is what puts it inside the hostname
+`{service}.{run}.{project}.localhost`. `display_name` (v13) is the *label*: free
+text, not unique, and what every surface renders — the rail row, the window title,
+menu items, the tray. `worktreeLabel(w)` in `ui/src/shared/worktreeName.ts` is the
+one place the fallback (`display_name || alias`) is spelled, and the Electron main
+process repeats the rule by hand in `worktreeMarks()` because it shares no code
+with the React app. Anything that is a *key* — the run name, the collision check,
+an API argument — keeps using the alias directly.
+
+The two exist separately rather than the alias simply being relaxed, because
+their rules genuinely differ: one has to survive DNS, the other only has to be
+readable in a 236px column. Deriving the label back out of the slug was the
+alternative and is not possible — the derivation drops capitals, punctuation and
+non-ASCII, so `Hello test` and `hello-test` are indistinguishable by then. `''` is
+the "no separate name" sentinel (a NULL would make every reader handle an absence
+meaning the same thing), which is the state every pre-v13 row is in and the state
+clearing the field returns a row to.
+
+`WT_ORDER`'s final tie-break sorts on the **label**, not the alias, since the
+label is the string on screen; the alias follows it so the order stays total when
+two rows render the same label.
 
 v10 also puts four columns on `worktrees`: `lane` and `sort_position` (rail
 organisation — stored *on the row* so nothing points at a worktree, which is what
@@ -995,6 +1041,7 @@ CREATE TABLE worktrees (
   emoji      TEXT NOT NULL DEFAULT '',  -- v6: stable visual identifier
   is_main    INTEGER NOT NULL DEFAULT 0,-- 1 = the repo's main checkout
   created_at TEXT NOT NULL
+  -- v13 adds: display_name TEXT NOT NULL DEFAULT ''  ('' = render the alias)
 );
 ```
 
@@ -1038,8 +1085,8 @@ on mutations, JSON errors, `202 Accepted` for fire-and-forget CLI spawns.
 | `GET /api/repos` | Pure DB read: repos with their worktrees, each worktree annotated with `has_veld_config`, `presets`, and `nodes` (startable nodes with variants + default variant — the custom-selection source). Each repo also carries its `lanes` (name + position). `presets` are full records (`name`, `key`, `pinned`, `label`, `when_to_use`, `group`, `selections`, `is_default`) in display order, produced by `veld_core::presets::resolve` — the same resolver the CLI picker uses, so a preset's key means the same thing in both surfaces. Ordering is the resolver's, never a sort here. **`presets` is `null` when the config exists but did not parse**, which is not the same as `[]` (declares none): a client comparing a run's recorded preset against an empty list concludes the preset was deleted, so a mid-edit `veld.json` made every healthy run read "preset dev (no longer defined)". Each entry also carries `expansion`, a three-state answer to what the preset expands to *now* — `{state:"ok", tokens}` (comparable to `RunInfo.started_from.selections`; empty tokens is a real answer), `{state:"failed"}` (exists, does not expand — what `veld status` calls "cannot be expanded — see `veld lint`"), or `{state:"skipped"}` (past this listing's per-poll expansion cap, so nothing is known and nothing is wrong). The three are separate because folding any two makes a surface state something false, and expansion is recursion over a config that arrives with a checked-out branch — hence the cap on an ungated, polled GET. (run state is NOT joined here — the UI joins `/api/environments` client-side by path). `available` is only the cheap directory-exists check; git reconciliation lives in `POST /api/repos/refresh` below. |
 | `POST /api/repos/import` `{path}` | Accepts any directory inside the repo; resolves the main checkout via `git worktree list --porcelain`, derives the name, registers it, and syncs the worktree rows. Idempotent. |
 | `DELETE /api/repos` `{root}` | Unregisters (never touches the filesystem). |
-| `POST /api/worktrees` `{repo_root, branch, alias?, path?, create_branch?, emoji?, marker_color?}` | `git worktree add`. Default path: `<repo_parent>/_worktrees/<alias>`. An explicit `alias` a sibling already holds is a `409`. The check runs *before* `git worktree add`, so the common case creates nothing; it is a plain read though, so a create that races another one (or a sibling on disk not yet synced) still 409s on the authoritative check after the checkout exists — what survives then is a registered worktree under its branch-derived alias, not an orphan. `emoji`/`marker_color` are the create dialog's marker pick, validated up front and applied after the sync assigns its own — *before* the alias rename, so a checkout that loses the alias race still wears the marker the user chose. Omit them and the daemon assigns. |
-| `PATCH /api/worktrees/{id}` `{alias?, emoji?, marker_color?, lane?}` | Partial update, DB only. Every field optional (alias-only callers stay wire-compatible); an empty patch is a `400` and an unknown field a `422` (`deny_unknown_fields` — with everything optional, a client typo would otherwise be a silent `200`). Both columns are written in one `UPDATE … COALESCE`, so the pair can't half-apply. An alias a sibling checkout of the same repo already holds is a `409`: `unique_alias` establishes that invariant at insert and the rename path must not be a hole in it, since the alias becomes the default run name. The check and the write share one transaction, so two concurrent renames can't both win. Cross-repo duplicate aliases stay legal — forbidding them would break importing two repos that are both on `main`. `emoji` is checked against the curated set — an allowlist rather than a "one grapheme?" test, which keeps the rail uniform and leaves no room for a multi-codepoint or zero-width payload; the rule lives in `veld_core::db::is_worktree_emoji`, beside the constant, so no caller can bypass it. |
+| `POST /api/worktrees` `{repo_root, branch, alias?, display_name?, lane?, path?, create_branch?, emoji?, marker_color?}` | `git worktree add`. Default path: `<repo_parent>/_worktrees/<alias>`. An explicit `alias` a sibling already holds is a `409`. The check runs *before* `git worktree add`, so the common case creates nothing; it is a plain read though, so a create that races another one (or a sibling on disk not yet synced) still 409s on the authoritative check after the checkout exists — what survives then is a registered worktree under its branch-derived alias, not an orphan. `lane` is pre-checked the same way and for the same reason (a `400` that created nothing beats a checkout filed in the wrong section), with `Db::patch_worktree`'s transaction still the authority. `display_name` is trimmed server-side and bounded by `validate_display_name`: ≤80 **characters** (not bytes), nothing that misrenders its neighbours (`is_forbidden` — control characters, U+2028/U+2029, bidi overrides and isolates, BOM), and at least one **visible** character. That last clause is the one a per-character blocklist cannot express and the one that matters: `""` means "render the alias", so a non-empty name of nothing but zero-width characters would render blank everywhere while defeating the sentinel. Zero-width joiners *beside* a visible character stay legal — they are the glue in emoji like `👩‍💻` and are orthographically required in Persian and Hindi. `emoji`/`marker_color` are the create dialog's marker pick, validated up front. The name and the marker are applied in one `patch_worktree` after the sync assigns its own, and *before* the alias rename, so a checkout that loses the alias race still wears them. **The lane is a deliberate second write**: it is the only one of the four validated inside `patch_worktree`'s transaction, so folding it in made that write fallible and a lane deleted mid-flight discarded the name and marker with it. Omit the marker and the daemon assigns. |
+| `PATCH /api/worktrees/{id}` `{alias?, display_name?, emoji?, marker_color?, lane?}` | Partial update, DB only. Every field optional (alias-only callers stay wire-compatible); an empty patch is a `400` and an unknown field a `422` (`deny_unknown_fields` — with everything optional, a client typo would otherwise be a silent `200`). Every column is written in one `UPDATE … COALESCE`, so a multi-field patch can't half-apply. An alias a sibling checkout of the same repo already holds is a `409`: `unique_alias` establishes that invariant at insert and the rename path must not be a hole in it, since the alias becomes the default run name. The check and the write share one transaction, so two concurrent renames can't both win. Cross-repo duplicate aliases stay legal — forbidding them would break importing two repos that are both on `main`. **`display_name` carries no such rule** — it is a label, two checkouts sharing one collide in nothing, and `""` is a *clear* rather than a no-op (the only way back to rendering the alias). `emoji` is checked against the curated set — an allowlist rather than a "one grapheme?" test, which keeps the rail uniform and leaves no room for a multi-codepoint or zero-width payload; the rule lives in `veld_core::db::is_worktree_emoji`, beside the constant, so no caller can bypass it. The Rust side takes a `WorktreePatch` struct rather than five positional `Option<&str>`s, because four of them are the same type and a transposed pair would write the lane into the alias and still compile. |
 | `GET /api/worktree-emoji` | The curated glyph list, for the picker. Served rather than duplicated in TypeScript, because the same constant is the server-side allowlist; the picker fetches it once on open instead of riding the 5s poll. |
 | `DELETE /api/worktrees/{id}?force=` | **Moves the worktree to the trash and returns `202`.** Nothing is deleted: `worktrees.trashed_at` is set, the checkout stays on disk, and no work is queued — which is why the request is fast. With `?force=true` it instead deletes **inline** (`204`/`422`), because the user is answering a refusal they have already been shown, and refuses with `409` if a run is still live since the forced path does not stop runs. Never touches the main checkout (`Db::trash_worktree` enforces that). Prunes git bookkeeping if the checkout was already gone. |
 | `POST /api/worktrees/{id}/restore` | Takes it out of the trash. A real undo for the whole retention period; `409` once a deletion has actually started (past that point the directory is going and no write brings it back, so refusing is the honest answer), `404` if the row is already gone. The check and the write share one lock, so a deletion cannot start between them. |

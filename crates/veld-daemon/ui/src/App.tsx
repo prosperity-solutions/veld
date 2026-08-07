@@ -58,6 +58,7 @@ import {
   type WorktreeStatus,
 } from "./model";
 import { startOriginLabel } from "./shared/startOrigin";
+import { worktreeLabel } from "./shared/worktreeName";
 import { LogoMark } from "./components/LogoMark";
 import {
   ActionIcon,
@@ -858,7 +859,7 @@ function AppInner(props: {
           // focus — it is what you find when you come back, and the greyed
           // rail row (`elsewhere`) is what warns you before you click.
           if (result?.reason === "shown-elsewhere") {
-            notifyRedirect(`${w.alias} is open in another window — switched to it`);
+            notifyRedirect(`${worktreeLabel(w)} is open in another window — switched to it`);
           }
           return false;
         }
@@ -1175,7 +1176,7 @@ function AppInner(props: {
       // Name the worktree: actions fire from the rail, the context menu and the
       // palette on ANY row, so an unattributed message leaves the user guessing
       // which one failed.
-      notifyError(`${label} failed on ${w.alias}`, e);
+      notifyError(`${label} failed on ${worktreeLabel(w)}`, e);
     }
   };
 
@@ -1254,7 +1255,7 @@ function AppInner(props: {
       // which rejects exactly this case, so this should be unreachable. If a
       // future caller skips the guard, say what's wrong instead of no-opping.
       notifyError(
-        `Start ${w.alias}`,
+        `Start ${worktreeLabel(w)}`,
         "nothing to start — no presets or startable nodes in its veld.json.",
       );
       return;
@@ -1430,7 +1431,10 @@ function AppInner(props: {
   const [dialog, setDialog] = useState<
     | { kind: "none" }
     | { kind: "import" }
-    | { kind: "new-worktree" }
+    /** `lane` is where the new checkout is filed — `""` for ungrouped. Carried
+     *  on the dialog state because the rail now has one create button per
+     *  section, so "which lane" is decided by the click, not by the dialog. */
+    | { kind: "new-worktree"; lane: string }
     | { kind: "sharing" }
     | { kind: "rename"; worktree: Worktree; deleteFocus?: boolean }
     | { kind: "marker"; worktree: Worktree }
@@ -1480,7 +1484,7 @@ function AppInner(props: {
     const color: Record<string, EmojiHolder[]> = {};
     const repo = repos.find((r) => r.root === activeRepoRoot);
     for (const w of repo?.worktrees ?? []) {
-      const holder = { id: w.id, alias: w.alias };
+      const holder = { id: w.id, label: worktreeLabel(w) };
       if (w.emoji) (emoji[w.emoji] ??= []).push(holder);
       if (w.marker_color) (color[w.marker_color] ??= []).push(holder);
     }
@@ -1707,7 +1711,7 @@ function AppInner(props: {
     try {
       await api.patchWorktree(w.id, { lane });
     } catch (e) {
-      notifyError(`Could not move ${w.alias}`, e);
+      notifyError(`Could not move ${worktreeLabel(w)}`, e);
     }
     await refresh();
   };
@@ -2308,12 +2312,23 @@ function AppInner(props: {
       heldTabs.current = true;
       const active = activeTab(layout, layout.focused);
       const label = active ? paneTabLabel(layout, active) : "Veld";
-      const title = worktree ? `${label} — ${worktree.alias}` : label;
+      const title = worktree ? `${label} — ${worktreeLabel(worktree)}` : label;
       void desktopWindow.setTitle(title).catch(() => {});
       return;
     }
     if (heldTabs.current) void desktopWindow.close().catch(() => {});
-  }, [chromeless, layout, layouts, worktree?.id, worktree?.alias, repoList, activeWtKey]);
+    // `display_name` alongside `alias`: the title renders `worktreeLabel`, so a
+    // rename that only touches the label must still retitle the window.
+  }, [
+    chromeless,
+    layout,
+    layouts,
+    worktree?.id,
+    worktree?.alias,
+    worktree?.display_name,
+    repoList,
+    activeWtKey,
+  ]);
 
   // Terminals live outside React (see panes/terminalHost.ts), so nothing
   // unmounts them. The layouts are the whole record of which should exist;
@@ -2485,7 +2500,7 @@ function AppInner(props: {
     const fresh = failed.filter((_, i) => !acked.includes(keys[i]));
     for (const w of fresh) {
       notifyError(
-        `Could not delete ${w.alias}`,
+        `Could not delete ${worktreeLabel(w)}`,
         new Error(`${w.trash_error} — it is still in the rail.`),
       );
     }
@@ -2505,7 +2520,7 @@ function AppInner(props: {
     try {
       await api.dismissTrashError(w.id);
     } catch (e) {
-      notifyError(`Could not dismiss the error on ${w.alias}`, e);
+      notifyError(`Could not dismiss the error on ${worktreeLabel(w)}`, e);
     }
     await refresh();
   };
@@ -2522,9 +2537,9 @@ function AppInner(props: {
         next.add(w.id);
         return next;
       });
-      notifyDone(`Deleting ${w.alias}`);
+      notifyDone(`Deleting ${worktreeLabel(w)}`);
     } catch (e) {
-      notifyError(`Could not delete ${w.alias}`, e);
+      notifyError(`Could not delete ${worktreeLabel(w)}`, e);
     }
     await refresh();
   };
@@ -2553,7 +2568,7 @@ function AppInner(props: {
   const restoreWorktree = async (w: Worktree) => {
     try {
       await api.restoreWorktree(w.id);
-      notifyDone(`Restored ${w.alias}`);
+      notifyDone(`Restored ${worktreeLabel(w)}`);
     } catch (e) {
       // 404 is the expected failure — the worker got there first — and saying so is
       // better than a generic error for a race the design admits to. Anything else
@@ -2562,8 +2577,8 @@ function AppInner(props: {
       const gone = e instanceof Error && /not found|already removed/i.test(e.message);
       notifyError(
         gone
-          ? `${w.alias} has already been deleted`
-          : `Could not restore ${w.alias}`,
+          ? `${worktreeLabel(w)} has already been deleted`
+          : `Could not restore ${worktreeLabel(w)}`,
         e,
       );
     }
@@ -2584,7 +2599,7 @@ function AppInner(props: {
     try {
       await api.deleteWorktree(w.id, false);
     } catch (e) {
-      notifyError(`Could not move ${w.alias} to the trash`, e);
+      notifyError(`Could not move ${worktreeLabel(w)} to the trash`, e);
     }
     await refresh();
   };
@@ -2621,7 +2636,7 @@ function AppInner(props: {
       items.push({
         id: `wt:${w.id}`,
         group: "Worktrees",
-        label: w.alias,
+        label: worktreeLabel(w),
         // The status rides the hint as *text* rather than as a dot beside the
         // marker — the palette has no run control to move the state onto, and the
         // dot was the same two-circles-read-as-one collision the rail had.
@@ -2637,7 +2652,10 @@ function AppInner(props: {
         hint: PALETTE_STATUS[wtStatus]
           ? `${w.branch} · ${PALETTE_STATUS[wtStatus]}`
           : w.branch,
-        alt: [w.branch],
+        // The alias joins the branch as an alternate haystack: the label is the
+        // display name now, so a worktree named "Hello test" would otherwise be
+        // unreachable by typing the `hello-test` its run and hostname use.
+        alt: [w.branch, w.alias],
         mark: { emoji: w.emoji, marker_color: w.marker_color },
         run: () => void selectWorktree(w),
       });
@@ -2653,20 +2671,20 @@ function AppInner(props: {
         items.push({
           id: "run:stop",
           group: "Run",
-          label: `Stop ${w.alias}`,
+          label: `Stop ${worktreeLabel(w)}`,
           run: () => stopWorktree(w),
         });
         items.push({
           id: "run:restart",
           group: "Run",
-          label: `Restart ${w.alias}`,
+          label: `Restart ${worktreeLabel(w)}`,
           run: () => restartWorktree(w),
         });
       } else if (!running && canStartWorktree(w)) {
         items.push({
           id: "run:start",
           group: "Run",
-          label: `Start ${w.alias}`,
+          label: `Start ${worktreeLabel(w)}`,
           run: () => startWorktree(w),
         });
       }
@@ -2683,7 +2701,7 @@ function AppInner(props: {
         items.push({
           id: "run:config-vars",
           group: "Run",
-          label: `Values for this machine (${w.alias})`,
+          label: `Values for this machine (${worktreeLabel(w)})`,
           alt: ["vars", "machine", "override", "config set", "configurable"],
           run: () => setDialog({ kind: "config-vars", project: w.path }),
         });
@@ -2694,7 +2712,7 @@ function AppInner(props: {
         items.push({
           id: "run:start-another",
           group: "Run",
-          label: `Start another run in ${w.alias} (${anotherNameFor(w)})`,
+          label: `Start another run in ${worktreeLabel(w)} (${anotherNameFor(w)})`,
           alt: ["second", "parallel", "new environment"],
           run: () => startWorktree(w, anotherNameFor(w)),
         });
@@ -2740,7 +2758,7 @@ function AppInner(props: {
           items.push({
             id: "share:start",
             group: "Run",
-            label: `Share ${w.alias} privately`,
+            label: `Share ${worktreeLabel(w)} privately`,
             hint: "peer to peer — copies the join link",
             alt: ["share", "invite", "join", "peer", "private"],
             run: () =>
@@ -2761,7 +2779,7 @@ function AppInner(props: {
           items.push({
             id: "share:stop",
             group: "Run",
-            label: `Stop the private share of ${w.alias}`,
+            label: `Stop the private share of ${worktreeLabel(w)}`,
             run: () => shareAction("stop sharing", () => api.stopShare(share.id)),
           });
         }
@@ -2769,7 +2787,7 @@ function AppInner(props: {
           items.push({
             id: "share:web",
             group: "Run",
-            label: `Share ${w.alias} to the web`,
+            label: `Share ${worktreeLabel(w)} to the web`,
             alt: ["public", "gateway", "tunnel"],
             run: () => shareAction("web share", () => api.startShare(ref, { web: true })),
           });
@@ -2778,7 +2796,7 @@ function AppInner(props: {
           items.push({
             id: `share:web-stop:${web.id}`,
             group: "Run",
-            label: `Stop the public web share of ${w.alias}`,
+            label: `Stop the public web share of ${worktreeLabel(w)}`,
             hint: web.public_urls[0]?.public_url,
             run: () => shareAction("stop web share", () => api.stopShare(web.id)),
           });
@@ -2791,7 +2809,9 @@ function AppInner(props: {
         id: "wt:new",
         group: "Worktree",
         label: "New worktree…",
-        run: () => setDialog({ kind: "new-worktree" }),
+        // Ungrouped: the palette has no lane in hand, and inventing one would
+        // file a checkout somewhere the user never pointed at.
+        run: () => setDialog({ kind: "new-worktree", lane: "" }),
       });
     }
     if (worktree) {
@@ -2799,20 +2819,20 @@ function AppInner(props: {
       items.push({
         id: "wt:rename",
         group: "Worktree",
-        label: `Rename ${w.alias}…`,
+        label: `Rename ${worktreeLabel(w)}…`,
         run: () => setDialog({ kind: "rename", worktree: w }),
       });
       items.push({
         id: "wt:marker",
         group: "Worktree",
-        label: `Change marker for ${w.alias}…`,
+        label: `Change marker for ${worktreeLabel(w)}…`,
         hint: w.emoji,
         run: () => setDialog({ kind: "marker", worktree: w }),
       });
       items.push({
         id: "wt:copy-path",
         group: "Worktree",
-        label: `Copy path of ${w.alias}`,
+        label: `Copy path of ${worktreeLabel(w)}`,
         hint: w.path,
         alt: [w.path],
         run: () => void navigator.clipboard.writeText(w.path),
@@ -2821,7 +2841,7 @@ function AppInner(props: {
         items.push({
           id: "wt:remove",
           group: "Worktree",
-          label: `Remove worktree ${w.alias}…`,
+          label: `Remove worktree ${worktreeLabel(w)}…`,
           run: () =>
             setDialog({ kind: "rename", worktree: w, deleteFocus: true }),
         });
@@ -2865,7 +2885,7 @@ function AppInner(props: {
         group: "Panes",
         label: "New terminal",
         alt: ["shell", "pty"],
-        hint: worktree?.alias,
+        hint: worktree ? worktreeLabel(worktree) : undefined,
         run: () =>
           setLayout(
             addTabToFocused(layout, {
@@ -2882,7 +2902,9 @@ function AppInner(props: {
           group: "Panes",
           label: `New ${spec.label} pane`,
           alt: [spec.id],
-          hint: spec.description ?? worktree?.alias,
+          hint:
+            spec.description ??
+            (worktree ? worktreeLabel(worktree) : undefined),
           run: () => setLayout(addTabToFocused(layout, configPaneTab(spec))),
         });
       }
@@ -3011,8 +3033,8 @@ function AppInner(props: {
     <Tooltip
       label={
         configVarsNone
-          ? `${worktree.alias} doesn’t ask you for any values`
-          : `Values for this machine — ${worktree.alias}`
+          ? `${worktreeLabel(worktree)} doesn’t ask you for any values`
+          : `Values for this machine — ${worktreeLabel(worktree)}`
       }
     >
       <span style={{ display: "inline-flex" }}>
@@ -3315,7 +3337,11 @@ function AppInner(props: {
         // to a different window, and taking its shells on the way.
         <div className="center-page">
           <p>Every worktree is already open in another window.</p>
-          <Button size="md" variant="default" onClick={() => setDialog({ kind: "new-worktree" })}>
+          <Button
+            size="md"
+            variant="default"
+            onClick={() => setDialog({ kind: "new-worktree", lane: "" })}
+          >
             Create a worktree
           </Button>
         </div>
@@ -3336,7 +3362,7 @@ function AppInner(props: {
             onToggle={() => setRailWide((v) => !v)}
             onWidth={(w) => setRailWidthRaw(String(w))}
             onSelect={(w) => void selectWorktree(w)}
-            onAdd={() => setDialog({ kind: "new-worktree" })}
+            onAdd={(lane) => setDialog({ kind: "new-worktree", lane })}
             onMenu={(e, w) => worktreeMenu(w)(e)}
             onStart={startWorktree}
             onStop={stopWorktree}
@@ -3390,14 +3416,29 @@ function AppInner(props: {
         <NewWorktreeDialog
           onClose={closeDialog}
           takenAliases={worktrees.map((w) => w.alias)}
+          lane={dialog.lane}
           usedBy={markerUsedBy.emoji}
           colorUsedBy={markerUsedBy.color}
           markerStyle={markerStyle(settings ?? {})}
           onCreate={async (body) => {
-            const created = await api.createWorktree({
-              repo_root: repo.root,
-              ...body,
-            });
+            let created: Worktree;
+            try {
+              created = await api.createWorktree({
+                repo_root: repo.root,
+                lane: dialog.lane,
+                ...body,
+              });
+            } catch (e) {
+              // A create can fail *after* `git worktree add` has succeeded — the
+              // alias rename losing a race, or the lane vanishing mid-flight.
+              // The dialog reports the error and stays open, but without this the
+              // row it did create stayed invisible until the next 5s poll, and
+              // pressing Create again hit "<path> already exists" with no way
+              // forward. Refresh first, so what exists is on screen while the
+              // user reads why the rest did not.
+              await refresh();
+              throw e;
+            }
             await refresh();
             setActiveWtKey(String(created.id));
             closeDialog();
@@ -3419,7 +3460,13 @@ function AppInner(props: {
       )}
       {dialog.kind === "rename" && (
         <RenameWorktreeDialog
-          current={dialog.worktree.alias}
+          currentAlias={dialog.worktree.alias}
+          /* `?? ""` because the field can genuinely be absent: `api.ts` types it
+             as the current daemon's contract, but `just dev-ui` proxies /api to
+             a locally *installed* daemon, which may predate v13 and send no such
+             key. Without this the dialog crashed on `undefined.trim()` at save
+             time — `worktreeLabel` already tolerates the same skew. */
+          currentName={dialog.worktree.display_name ?? ""}
           isMain={dialog.worktree.is_main}
           /* Read off the LIVE row, not the one captured when the dialog opened: a
              background removal can fail while it is open, and the force affordance
@@ -3429,8 +3476,8 @@ function AppInner(props: {
           }
           deleteFocus={dialog.deleteFocus ?? false}
           onClose={closeDialog}
-          onRename={async (alias) => {
-            await api.patchWorktree(dialog.worktree.id, { alias });
+          onRename={async (patch) => {
+            await api.patchWorktree(dialog.worktree.id, patch);
             await refresh();
             closeDialog();
           }}
@@ -3445,7 +3492,7 @@ function AppInner(props: {
         <ChangeMarkerDialog
           current={dialog.worktree.emoji}
           currentColor={dialog.worktree.marker_color}
-          alias={dialog.worktree.alias}
+          label={worktreeLabel(dialog.worktree)}
           worktreeId={dialog.worktree.id}
           usedBy={markerUsedBy.emoji}
           colorUsedBy={markerUsedBy.color}
@@ -4108,7 +4155,8 @@ function Rail(props: {
   onToggle: () => void;
   onWidth: (w: number) => void;
   onSelect: (w: Worktree) => void;
-  onAdd: () => void;
+  /** Open the create dialog, filing the result into `lane` (`""` = ungrouped). */
+  onAdd: (lane: string) => void;
   onMenu: (e: React.MouseEvent, w: Worktree) => void;
   onStart: (w: Worktree) => void;
   onStop: (w: Worktree) => void;
@@ -4238,13 +4286,49 @@ function Rail(props: {
               <div
                 className="lane-head"
                 onContextMenu={
-                  group.pinned
-                    ? undefined
-                    : (e) => props.onLaneMenu(e, group.lane)
+                  group.editable
+                    ? (e) => props.onLaneMenu(e, group.lane)
+                    : undefined
                 }
               >
                 <span className="lane-name">{group.label}</span>
-                <span className="lane-count">{group.worktrees.length}</span>
+                {/* Creating happens *into a lane*, and this is the whole of the
+                    rail's create affordance: the single "+" that used to sit in
+                    the toolbar could only ever mean "ungrouped", so filing a new
+                    checkout was always create-then-drag. One button per section
+                    that can hold a worktree removes the second step and makes the
+                    destination the thing you clicked.
+
+                    Always visible for the same two reasons `.lane-edit` is (see
+                    its note): a hover-revealed control discovers nothing, and it
+                    cannot be reached by keyboard. */}
+                {group.addable && (
+                  <button
+                    type="button"
+                    className="lane-edit"
+                    /* Described by the *lane*, not by the header text, because
+                       `UNGROUPED_LABEL` is itself a legal lane name — a repo with
+                       a lane called "Worktrees" would otherwise give two sections
+                       byte-identical accessible names, which a screen reader
+                       cannot tell apart at all. */
+                    title={
+                      group.lane === ""
+                        ? "New worktree, not in a lane"
+                        : `New worktree in ${group.lane}`
+                    }
+                    aria-label={
+                      group.lane === ""
+                        ? "New worktree, not in a lane"
+                        : `New worktree in lane ${group.lane}`
+                    }
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      props.onAdd(group.lane);
+                    }}
+                  >
+                    <IconPlus size={12} />
+                  </button>
+                )}
                 {/* The trash's own action, in the place a lane keeps its menu:
                     emptying it is the only thing the section as a whole can do. */}
                 {group.key === TRASH_LANE && (
@@ -4263,9 +4347,9 @@ function Rail(props: {
                 )}
                 {/* Right-click alone is not an affordance — nothing on screen says
                     the header has a menu. The same ⋮ the rows carry, so the two read
-                    as the same gesture. Not on a pinned section: the trash has no
-                    lane to rename or delete. */}
-                {!group.pinned && (
+                    as the same gesture. Only on a real lane: the trash and the
+                    ungrouped section have nothing to rename or delete. */}
+                {group.editable && (
                   <button
                     type="button"
                     className="lane-edit"
@@ -4289,7 +4373,14 @@ function Rail(props: {
                 be dropped here. */}
             {props.wide && canDropOn(group) && group.worktrees.length === 0 && (
               <div className="lane-empty">
-                {dragPath ? "Drop here" : "Empty — drag a worktree in"}
+                {dragPath
+                  ? "Drop here"
+                  : group.addable
+                    ? // Both ways in, named. An empty lane is exactly where
+                      // someone reaches for "＋", and the placeholder used to
+                      // offer only the drag.
+                      "Empty — drag one in, or ＋"
+                    : "Empty — drag a worktree in"}
               </div>
             )}
             {group.worktrees.map((w, index) => {
@@ -4381,14 +4472,14 @@ function Rail(props: {
                   className={`wt-row${props.active?.id === w.id ? " active" : ""}${props.wide ? "" : " slim"}${away ? " away" : ""}${trashed ? " trashed" : ""}${deletingRow ? " deleting" : ""}${w.trash_error ? " failed-remove" : ""}${dragPath === w.path ? " dragging" : ""}`}
                   title={
                     deletingRow
-                      ? `${w.alias} — being deleted, cannot be restored`
+                      ? `${worktreeLabel(w)} — being deleted, cannot be restored`
                       : trashed
-                        ? `${w.alias} — in the trash, still on disk`
+                        ? `${worktreeLabel(w)} — in the trash, still on disk`
                         : w.trash_error
-                          ? `${w.alias} — could not be deleted: ${w.trash_error}`
+                          ? `${worktreeLabel(w)} — could not be deleted: ${w.trash_error}`
                           : away
-                            ? `${w.alias} — ${w.branch}${stateNote} (open in another window)`
-                            : `${w.alias} — ${w.branch}${stateNote}`
+                            ? `${worktreeLabel(w)} — ${w.branch}${stateNote} (open in another window)`
+                            : `${worktreeLabel(w)} — ${w.branch}${stateNote}`
                   }
                   /* Pending removals are not draggable: they are leaving, so a
                      position for them means nothing. */
@@ -4445,7 +4536,12 @@ function Rail(props: {
                     />
                   )}
                   <WorktreeMark settings={props.settings} worktree={w} />
-                  {props.wide && <span className="wt-alias">{w.alias}</span>}
+                  {/* The name the user typed, verbatim — spaces, capitals and all.
+                      The slug they never chose is still one line down, because the
+                      branch is derived from the same input and usually *is* it. */}
+                  {props.wide && (
+                    <span className="wt-alias">{worktreeLabel(w)}</span>
+                  )}
                   {props.wide && (
                     <span className="wt-branch">
                       {/* The branch column carries the removal failure, because
@@ -4499,10 +4595,10 @@ function Rail(props: {
                       className={`wt-alert ${alertStatus}`}
                       title={
                         alertStatus === "recovering"
-                          ? `${w.alias} — veld is restarting a node that keeps failing its liveness probe. Open node health.`
-                          : `${w.alias} — the run failed. Open node health.`
+                          ? `${worktreeLabel(w)} — veld is restarting a node that keeps failing its liveness probe. Open node health.`
+                          : `${worktreeLabel(w)} — the run failed. Open node health.`
                       }
-                      aria-label={`Node health for ${w.alias}`}
+                      aria-label={`Node health for ${worktreeLabel(w)}`}
                       onClick={(e) => {
                         // The row selects on click; without this the affordance
                         // would fire the row's plain selection as well.
@@ -4521,10 +4617,10 @@ function Rail(props: {
                         pending
                           ? `${pending}…`
                           : running
-                            ? `Stop ${w.alias}`
-                            : `Start ${w.alias}`
+                            ? `Stop ${worktreeLabel(w)}`
+                            : `Start ${worktreeLabel(w)}`
                       }
-                      aria-label={running ? `Stop ${w.alias}` : `Start ${w.alias}`}
+                      aria-label={running ? `Stop ${worktreeLabel(w)}` : `Start ${worktreeLabel(w)}`}
                       // Mirrors the context menu and the palette. Without the
                       // start guard the button looked live but its click hit a
                       // no-op for a worktree with no presets and no nodes.
@@ -4564,7 +4660,7 @@ function Rail(props: {
                       type="button"
                       className="wt-edit"
                       title="Worktree menu"
-                      aria-label={`Menu for ${w.alias}`}
+                      aria-label={`Menu for ${worktreeLabel(w)}`}
                       onClick={(e) => {
                         e.stopPropagation();
                         props.onMenu(e, w);
@@ -4577,8 +4673,8 @@ function Rail(props: {
                     <button
                       type="button"
                       className="wt-edit"
-                      title={`Restore ${w.alias}`}
-                      aria-label={`Restore ${w.alias}`}
+                      title={`Restore ${worktreeLabel(w)}`}
+                      aria-label={`Restore ${worktreeLabel(w)}`}
                       onClick={(e) => {
                         e.stopPropagation();
                         props.onRestore(w);
@@ -4626,15 +4722,24 @@ function Rail(props: {
             <IconFolderPlus size={14} />
           </ActionIcon>
         )}
-        <ActionIcon
-          size="sm"
-          variant="subtle"
-          color="gray"
-          title="New worktree"
-          onClick={props.onAdd}
-        >
-          <IconPlus size={14} />
-        </ActionIcon>
+        {/* Collapsed only, mirroring "New lane" above it — and for the same
+            reason, inverted. Expanded, every section that can hold a worktree
+            carries its own "＋" and a toolbar button would be a second way to do
+            the same thing whose destination is not visible. Collapsed, there are
+            no headers at all, so this is the only place a create can live; it
+            files into the ungrouped section, which is where the old toolbar
+            button always put things anyway. */}
+        {!props.wide && (
+          <ActionIcon
+            size="sm"
+            variant="subtle"
+            color="gray"
+            title="New worktree"
+            onClick={() => props.onAdd("")}
+          >
+            <IconPlus size={14} />
+          </ActionIcon>
+        )}
       </div>
       <div className="rail-list" onDragEnd={endDrag}>
         {scroll.map((group) => renderGroup(group))}

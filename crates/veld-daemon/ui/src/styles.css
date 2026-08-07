@@ -512,19 +512,17 @@ select:focus {
   text-transform: uppercase;
   user-select: none;
 }
+/* Takes the slack, so the header's controls sit on the rows' right edge.
+ *
+ * `margin-right: auto` used to belong to the row count that sat here. The count
+ * was removed: it restated something the rows immediately below it already say,
+ * in a rail whose whole job is showing you those rows. */
 .lane-name {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   min-width: 0;
-}
-.lane-count {
-  flex: none;
-  margin-left: auto;
-  /* Aligned with the rows' ⋮ column, so the count and the run controls below it
-     sit on the same right edge instead of a few pixels apart. */
-  color: var(--faint);
-  font-variant-numeric: tabular-nums;
+  margin-right: auto;
 }
 
 /* The lane menu button.
@@ -863,7 +861,7 @@ select:focus {
    41FFFC) land low-contrast on a white panel. Only the ring is strengthened — the
    fill is used exactly as given. */
 body[data-theme="light"] .wt-dot,
-body[data-theme="light"] .swatch-cell > span {
+body[data-theme="light"] .swatch-cell > .swatch-dot {
   box-shadow: inset 0 0 0 1px rgb(0 0 0 / 0.45);
 }
 
@@ -882,6 +880,13 @@ body[data-theme="light"] .swatch-cell > span {
 }
 
 .swatch-cell {
+  /* The containing block for `.marker-taken`, which this grid renders too.
+     Without it that dot resolved against the nearest positioned ancestor — the
+     modal — and every "in use" colour put a 16px grey circle in the dialog's
+     bottom-right corner, on top of the footer, instead of on its swatch. Only
+     the *glyph* cell had been given a containing block, so the bug appeared for
+     one of the two grids that share the marker. */
+  position: relative;
   width: 30px;
   height: 30px;
   flex: none;
@@ -908,7 +913,13 @@ body[data-theme="light"] .swatch-cell > span {
   outline-offset: 1px;
 }
 
-.swatch-cell > span {
+/* The swatch itself, addressed by class rather than as "the span inside a
+   swatch cell". The positional selector also matched `.marker-taken` — and beat
+   it on specificity (`.class > type` over a bare `.class`), so a colour another
+   checkout already holds rendered its 4px advisory dot as a 16px filled circle.
+   A second child arriving in this button must not be able to inherit the
+   swatch's appearance by standing in the right place. */
+.swatch-cell > .swatch-dot {
   width: 16px;
   height: 16px;
   border-radius: 50%;
@@ -2973,7 +2984,7 @@ body[data-theme="light"] .swatch-cell > span {
 }
 
 /* Marks a glyph another worktree already uses — advisory, not a block. */
-.emoji-taken {
+.marker-taken {
   position: absolute;
   right: 4px;
   bottom: 4px;

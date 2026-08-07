@@ -420,7 +420,7 @@ export interface RailGroup {
   key: string;
   /** The value to write to `worktrees.lane` for a worktree dropped here. */
   lane: string;
-  /** Header text, or `null` for a section that has none (main, ungrouped). */
+  /** Header text, or `null` for a section that has none (the main checkout). */
   label: string | null;
   /**
    * Fixed position — not draggable, not a drop target.
@@ -430,6 +430,24 @@ export interface RailGroup {
    * separated by a divider; it just takes no part in ordering.
    */
   pinned: boolean;
+  /**
+   * Whether the header offers "New worktree", creating into [`lane`].
+   *
+   * The rail's only create affordance since §22 — one per section that can hold
+   * a new checkout, instead of a single "+" at the top whose destination was
+   * "wherever ungrouped is". Not derived from `pinned` in the view: "you can drop
+   * here" and "you can create here" are two claims, and the trash satisfies the
+   * first while emphatically failing the second.
+   */
+  addable: boolean;
+  /**
+   * Whether the header offers the ⋮ lane menu (rename / reorder / delete).
+   *
+   * Only a real user-made lane has one. The ungrouped section is not pinned and
+   * does take drops, but there is no lane behind it to rename or delete — which
+   * is why this cannot be spelled `!pinned`.
+   */
+  editable: boolean;
   worktrees: Worktree[];
 }
 
@@ -451,6 +469,23 @@ export const TRASH_LANE = "\u0000trash";
  * name, so a repo lane can never collide with it.
  */
 export const DELETING_LANE = "\u0000deleting";
+
+/**
+ * Header for the section that holds every worktree the user has not filed into a
+ * lane.
+ *
+ * It gained a header at all for one reason: the rail's create affordance moved
+ * *into* the lane headers, and a headerless section has nowhere to put one — so
+ * the default destination for a new worktree would have been the only section you
+ * could not create into.
+ *
+ * "Worktrees" rather than "Ungrouped" because most repos never define a lane at
+ * all, and for them this section is the whole rail. A header reading "Ungrouped"
+ * there names a state the user never left and reads as something to go and fix;
+ * "Worktrees" is merely mildly redundant once lanes exist, which is the cheaper
+ * of the two wrongs.
+ */
+export const UNGROUPED_LABEL = "Worktrees";
 
 /**
  * Split a repo's worktrees into rail sections: ungrouped first, then each lane in
@@ -487,13 +522,27 @@ export function railGroups(worktrees: Worktree[], lanes: Lane[]): RailGroup[] {
   const main = ungrouped.filter((w) => w.is_main);
   const groups: RailGroup[] = [];
   if (main.length > 0) {
-    groups.push({ key: "main", lane: "", label: null, pinned: true, worktrees: main });
+    groups.push({
+      key: "main",
+      lane: "",
+      label: null,
+      pinned: true,
+      // The one headerless section, and so the one that could not carry a "＋"
+      // even if creating "into the main checkout" meant anything. It holds
+      // exactly one row by construction.
+      addable: false,
+      editable: false,
+      worktrees: main,
+    });
   }
   groups.push({
     key: "",
     lane: "",
-    label: null,
+    label: UNGROUPED_LABEL,
     pinned: false,
+    addable: true,
+    // Not a lane: there is nothing here to rename or delete.
+    editable: false,
     worktrees: ungrouped.filter((w) => !w.is_main),
   });
   for (const l of lanes) {
@@ -502,6 +551,8 @@ export function railGroups(worktrees: Worktree[], lanes: Lane[]): RailGroup[] {
       lane: l.name,
       label: l.name,
       pinned: false,
+      addable: true,
+      editable: true,
       worktrees: live.filter((w) => w.lane === l.name),
     });
   }
@@ -511,6 +562,8 @@ export function railGroups(worktrees: Worktree[], lanes: Lane[]): RailGroup[] {
       lane: DELETING_LANE,
       label: "Deleting",
       pinned: true,
+      addable: false,
+      editable: false,
       worktrees: deleting,
     });
   }
@@ -521,6 +574,8 @@ export function railGroups(worktrees: Worktree[], lanes: Lane[]): RailGroup[] {
     lane: TRASH_LANE,
     label: "Trash",
     pinned: true,
+    addable: false,
+    editable: false,
     worktrees: trashed,
   });
   return groups;

@@ -107,7 +107,31 @@ export interface Worktree {
   repo_root: string;
   path: string;
   branch: string;
+  /**
+   * The identifier: `[A-Za-z0-9._-]`, unique among the repo's checkouts, and the
+   * default run name — which is why it is bounded, since the run name reaches a
+   * hostname. Use it as a key, not as a label; `worktreeLabel(w)` is the label.
+   */
   alias: string;
+  /**
+   * What the rail renders, or `""` to render the `alias` instead.
+   *
+   * Free text — this is the thing the user actually typed into the create
+   * dialog's Name field, spaces and capitals intact, while the alias is the
+   * lossy slug derived from it. Not unique, deliberately: two rows sharing a
+   * label collide in nothing, and the branch renders beside it.
+   *
+   * **Optional because it can genuinely be absent, not as a convenience.** A
+   * daemon older than schema v13 has no such column and sends no such key, and
+   * `just dev-ui` proxies `/api` to whatever daemon is *installed* — so the dev
+   * loop is exactly that pairing. Typed as required, `w.display_name.trim()`
+   * compiled clean and crashed there; the `?` is what makes the type checker ask.
+   *
+   * Read it through `worktreeLabel(w)` rather than testing it inline, so
+   * "which name does this surface show" has exactly one answer, and so the
+   * absent case is handled in one place instead of at every call site.
+   */
+  display_name?: string;
   /**
    * One-glyph identifier from a curated animal set. Unique *when assigned*
    * — the picker lets the user choose a glyph another worktree already holds,
@@ -359,10 +383,16 @@ export interface Preset {
   is_default: boolean;
 }
 
-/** A worktree holding a given emoji — id, because aliases repeat across repos. */
+/**
+ * A worktree holding a given emoji — id, because names repeat across repos.
+ *
+ * `label` is the rendered name (`worktreeLabel`), not the alias: this exists to
+ * be printed in "already used by …", and printing a slug the user has never seen
+ * beside the name they chose reads as a different worktree.
+ */
 export interface EmojiHolder {
   id: number;
-  alias: string;
+  label: string;
 }
 
 export interface NodeOption {
@@ -820,6 +850,14 @@ export const api = {
     branch: string;
     create_branch: boolean;
     alias?: string;
+    /** What the rail shows. Omit (or send `""`) to render the alias. */
+    display_name?: string;
+    /**
+     * The lane to file it under — sent with the create, not patched after, so a
+     * "＋" in a lane header cannot produce a worktree that shows up in the wrong
+     * section first (or stays there if the follow-up fails).
+     */
+    lane?: string;
     emoji?: string;
     marker_color?: string;
   }) =>
@@ -828,16 +866,19 @@ export const api = {
       body: JSON.stringify(body),
     }),
   /**
-   * Partial update — any combination of alias, emoji, marker_color and lane.
+   * Partial update — any combination of alias, display_name, emoji, marker_color
+   * and lane.
    *
    * Lane assignment rides here rather than on its own endpoint because
    * `Db::patch_worktree` is the one owner of worktree-row edits. Send `lane: ""`
-   * to ungroup.
+   * to ungroup, and `display_name: ""` to go back to rendering the alias — for
+   * both, omitting the key means "leave it alone" and sending `""` is a change.
    */
   patchWorktree: (
     id: number,
     patch: {
       alias?: string;
+      display_name?: string;
       emoji?: string;
       marker_color?: string;
       lane?: string;
