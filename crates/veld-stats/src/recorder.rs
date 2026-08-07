@@ -45,10 +45,12 @@ pub const COMMAND_SAMPLE_INTERVAL_SECS: u64 = 2;
 
 /// Samples the `command` steps of one run, for as long as it is kept alive.
 ///
-/// Install it on the orchestrator with `Orchestrator::with_step_observer`. Drop
-/// it to stop sampling — the background task is aborted, which is also what
-/// happens if the CLI exits, and no cleanup is owed because nothing was
-/// persisted.
+/// Install it on the orchestrator with `Orchestrator::with_step_observer`, which
+/// takes an `Arc` and clones it into every node execution context — so sampling
+/// stops when the **last** of those goes, i.e. when the orchestrator is dropped
+/// at the end of the command. Do not hand a caller a clone and tell them
+/// dropping it stops sampling; it doesn't. No cleanup is owed either way,
+/// because nothing was persisted.
 pub struct CommandStatsRecorder {
     /// `node_key` → root PID of the step currently running for that node.
     ///
@@ -102,12 +104,33 @@ impl StepObserver for CommandStatsRecorder {
     }
 }
 
+/// Two passes are never taken closer together than this; a wake that lands
+/// inside the gap is **delayed to its end, not dropped**.
+///
+/// `sysinfo` refuses to recompute the CPU denominator inside its own
+/// `MINIMUM_CPU_UPDATE_INTERVAL` (200ms) — on Linux it keeps the previous
+/// `/proc/stat` pair, on macOS it reuses `prev_time_interval` — so a pass taken
+/// right after another reports a CPU figure understated by roughly the ratio of
+/// the two gaps. A whole stage of parallel `command` steps registers within
+/// milliseconds of each other, so without this every parallel stage paid for a
+/// second machine-wide process scan to produce that.
+///
+/// **Delaying rather than skipping is the whole point, and this was got wrong
+/// once.** Skipping cost a step shorter than one interval its only sample: the
+/// wake is what guarantees a 1-second `npm ci` appears at all, and a version of
+/// this that `continue`d instead of sleeping silently dropped such steps from
+/// the data entirely. Coverage of a short step beats the CPU precision of a
+/// long one.
+const MIN_RESAMPLE_GAP: Duration = Duration::from_millis(500);
+
 /// The sampling task: one [`StatsCollector`] for the whole run, one pass per
 /// tick over whatever steps are registered at that moment.
 ///
 /// The collector is persistent because `sysinfo` derives CPU usage from the
 /// delta between two refreshes of the same process — a fresh collector per pass
-/// would report 0% forever.
+/// would report 0% forever. It is moved in and out of `spawn_blocking` rather
+/// than borrowed, because a pass is genuinely blocking work (see below) and the
+/// collector must still outlive it.
 async fn sample_loop(
     db: Db,
     project_root: std::path::PathBuf,
@@ -118,34 +141,77 @@ async fn sample_loop(
     let mut interval = tokio::time::interval(Duration::from_secs(COMMAND_SAMPLE_INTERVAL_SECS));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut collector = StatsCollector::new();
+    let mut last_pass: Option<tokio::time::Instant> = None;
 
     loop {
         tokio::select! {
             _ = interval.tick() => {}
             _ = wake.notified() => {
-                // Re-phase the schedule to the sample we just took. Without
-                // this, a step registering late in a tick produces two refreshes
-                // milliseconds apart, and `sysinfo` derives CPU from the delta
-                // between them — so the pair reports either a scheduling-noise
-                // spike or a spurious 0, and `cpu_peak` deliberately keeps the
-                // maximum, which makes the artifact the number the chart
-                // highlights.
+                // Re-phase the schedule to the sample about to be taken, so the
+                // next tick is a full interval away rather than whatever was
+                // left of the current one.
                 interval.reset();
             }
         }
-        sample_pass(&db, &project_root, &run_name, &roots, &mut collector);
+        if let Some(earliest) = last_pass.map(|t| t + MIN_RESAMPLE_GAP) {
+            if earliest > tokio::time::Instant::now() {
+                tokio::time::sleep_until(earliest).await;
+            }
+        }
+        last_pass = Some(tokio::time::Instant::now());
+
+        // A pass is blocking work on two counts: a machine-wide `sysinfo`
+        // refresh plus a per-process memory probe, and a synchronous rusqlite
+        // transaction. The second matters most — every `Db` clone shares one
+        // `Arc<Mutex<Connection>>` (see `veld_core::db::Db`), and this process's
+        // other user of it is the orchestrator's per-node spawn checkpoint. Left
+        // on a runtime worker, a 2s sampler would park that worker and hold that
+        // mutex during exactly the phase the checkpoint path is busiest.
+        let (db2, root2, name2, roots2) = (
+            db.clone(),
+            project_root.clone(),
+            run_name.clone(),
+            Arc::clone(&roots),
+        );
+        collector = match tokio::task::spawn_blocking(move || {
+            let sampled = sample_pass(&db2, &root2, &name2, &roots2, &mut collector);
+            (collector, sampled)
+        })
+        .await
+        {
+            // A pass that found nothing registered never touched the process
+            // table, so it must not start the rate-limit clock — otherwise the
+            // idle tick that happens to precede a step's registration delays
+            // that step's first sample for no reason.
+            Ok((c, sampled)) => {
+                if !sampled {
+                    last_pass = None;
+                }
+                c
+            }
+            // The pass panicked and took the collector with it. Sampling
+            // continues with a fresh one; its first CPU reading is 0%, as after
+            // any first refresh.
+            Err(e) => {
+                debug!("command-step stats pass failed for '{run_name}': {e}");
+                StatsCollector::new()
+            }
+        };
     }
 }
 
 /// One pass. Observational only: a write failure is logged and the next tick
 /// tries again — a run must never fail because its memory graph didn't.
+///
+/// Returns whether the process table was actually refreshed, which is what the
+/// caller's rate limiter must be measured from.
 fn sample_pass(
     db: &Db,
     project_root: &std::path::Path,
     run_name: &str,
     roots: &Mutex<HashMap<String, u32>>,
     collector: &mut StatsCollector,
-) {
+) -> bool {
     // Copy out under the lock: the refresh below is a machine-wide scan and the
     // orchestrator registers steps from other tasks while it runs.
     let current: Vec<(String, u32)> = match roots.lock() {
@@ -156,14 +222,14 @@ fn sample_pass(
         // an unexplained gap in a chart.
         Err(e) => {
             debug!("command-step stats sampling stopped for '{run_name}': {e}");
-            return;
+            return false;
         }
     };
     // Nothing registered — skip the process-table refresh entirely. Between
     // stages, and for a run made only of `start_server` nodes, this is every
     // tick, and a scan of every process on the machine is not free.
     if current.is_empty() {
-        return;
+        return false;
     }
 
     collector.refresh();
@@ -175,17 +241,30 @@ fn sample_pass(
         // refresh and now, or exited before its first sample. Not an error, and
         // deliberately not recorded as a zero — an absent sample is a gap, and
         // "wasn't sampling" must not render like "used no memory".
-        if let Some(tree) = collector.sample_tree(pid, sampled_at) {
-            samples.push((key.clone(), tree.total));
-            trees.push((key, tree.processes));
+        let Some(tree) = collector.sample_tree(pid, sampled_at) else {
+            continue;
+        };
+        // A tree that reports no memory at all is a **zombie root**: the step's
+        // process has exited but the CLI has not reached its `wait()` yet, so it
+        // is still in the process table with nothing mapped. A live process
+        // always has resident pages — `samples_this_process_with_real_platform_detail`
+        // asserts exactly that. Recording it would write the "used no memory"
+        // sample the paragraph above exists to prevent, at the end of every
+        // build, which is the worst possible place for it.
+        if tree.total.memory_bytes == 0 {
+            continue;
         }
+        samples.push((key.clone(), tree.total));
+        trees.push((key, tree.processes));
     }
     if samples.is_empty() {
-        return;
+        // The refresh still happened, so the rate limit still applies.
+        return true;
     }
     if let Err(e) = db.record_node_stats(project_root, run_name, &samples, &trees) {
         debug!("could not record command-step stats for run '{run_name}': {e}");
     }
+    true
 }
 
 #[cfg(test)]
@@ -247,6 +326,67 @@ mod tests {
             first_seen,
             "no further samples after the step finished"
         );
+    }
+
+    /// **A step shorter than the tick interval must still be recorded.** This is
+    /// what the wake-up exists for, and it is the case a review fix broke once:
+    /// rate-limiting the wake by *skipping* it, rather than delaying it, dropped
+    /// every short step from the data — invisibly, because a missing sample and
+    /// a step that used no memory look identical downstream.
+    ///
+    /// The step here lives well under `COMMAND_SAMPLE_INTERVAL_SECS`, and a
+    /// second step registers immediately after it so the rate limiter is
+    /// actually engaged, exactly as a parallel stage would.
+    #[tokio::test]
+    async fn a_step_shorter_than_the_interval_is_still_sampled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Db::open_at(&tmp.path().join("veld.db")).unwrap();
+        let project_root = tmp.path().join("proj");
+        db.save_run(&project_root, "proj", &RunState::new("dev", "proj"))
+            .unwrap();
+
+        let mut sibling = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg("sleep 20")
+            .spawn()
+            .unwrap();
+        let recorder =
+            CommandStatsRecorder::start(db.clone(), project_root.clone(), "dev".to_owned());
+
+        // A long step registers first and is sampled, which starts the
+        // rate-limit clock. This is the ordinary shape of a stage, and it is
+        // what makes the next registration land inside the window.
+        recorder.step_started("slow:local", sibling.id().unwrap());
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        assert!(
+            db.latest_node_stats(&project_root, "dev")
+                .unwrap()
+                .contains_key("slow:local"),
+            "precondition: the first step must have been sampled, or this test \
+             is not exercising the rate limiter at all"
+        );
+
+        // Now a step far shorter than the tick interval, registering inside the
+        // rate-limit window. It must still be sampled — delayed to the end of
+        // the window, never skipped to the next tick, which it would not live
+        // to see.
+        let mut short = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg("sleep 1")
+            .spawn()
+            .unwrap();
+        recorder.step_started("quick:local", short.id().unwrap());
+        tokio::time::sleep(Duration::from_millis(900)).await;
+        let _ = short.kill().await;
+
+        let latest = db.latest_node_stats(&project_root, "dev").unwrap();
+        assert!(
+            latest.contains_key("quick:local"),
+            "a sub-interval step registering inside the rate-limit window must \
+             still produce a sample; got keys {:?}",
+            latest.keys().collect::<Vec<_>>()
+        );
+        let _ = sibling.kill().await;
     }
 
     /// Dropping the recorder must stop the task; otherwise a `veld stop` or a

@@ -36,20 +36,26 @@ use crate::output;
 ///
 /// The daemon samples what has a persisted PID, which is only the `start_server`
 /// nodes. A `command` step's process is spawned, awaited and reaped inside *this*
-/// process, so if this process does not measure it, nothing can. The returned
-/// handle must be held for the lifetime of the run: dropping it stops sampling.
-#[must_use = "sampling stops when the recorder is dropped — hold it for the run"]
+/// process, so if this process does not measure it, nothing can.
+///
+/// **The orchestrator owns the recorder, so sampling ends when it does** — which
+/// is the end of the command, and is why nothing is returned here. An earlier
+/// version handed back a guard whose docs promised that dropping it stopped
+/// sampling; it did not, because `with_step_observer` keeps an `Arc` of its own
+/// and clones it into every node execution context. A handle that has to be held
+/// but cannot enforce it is a footgun with a `#[must_use]` on it — and
+/// `let _ = …` silences that anyway.
 pub fn observe_command_stats(
     orchestrator: &mut veld_core::orchestrator::Orchestrator,
     run_name: &str,
-) -> std::sync::Arc<veld_stats::CommandStatsRecorder> {
-    let recorder = std::sync::Arc::new(veld_stats::CommandStatsRecorder::start(
-        orchestrator.db.clone(),
-        orchestrator.project_root.clone(),
-        run_name.to_owned(),
+) {
+    orchestrator.with_step_observer(std::sync::Arc::new(
+        veld_stats::CommandStatsRecorder::start(
+            orchestrator.db.clone(),
+            orchestrator.project_root.clone(),
+            run_name.to_owned(),
+        ),
     ));
-    orchestrator.with_step_observer(recorder.clone());
-    recorder
 }
 
 /// Clean up the Spoon left behind by the Hammerspoon menu bar integration veld

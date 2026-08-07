@@ -195,12 +195,15 @@ function NodeCard(props: {
   const { flash, copy } = useCopyFlash();
   const note = healthNote(n);
   const bucket = statusBucket(n.status);
-  // A node that got as far as spawning has recorded history, whether or not it
-  // is being sampled right now — which is the normal state of a build once it
-  // finishes. Gating the chart on a *live* sample, as this did, meant the one
-  // curve worth looking at was unreachable the instant it was complete.
-  const everRan = n.status !== "pending" && n.status !== "skipped";
-  const canGraph = props.graphable && (props.stats != null || everRan);
+  // Gating the chart on a *live* sample meant a build's curve became unreachable
+  // the instant the build finished, which is the one moment you want it. Gating
+  // instead on node status was wrong in both directions: a `command` node's row
+  // stays `pending` until its whole parallel stage is saved (only `start_server`
+  // nodes checkpoint on spawn), so a fast build in a slow stage still hid its
+  // chart; and a step too short to sample offers one with nothing in it either
+  // way. So the run is the only question asked here, and the panel says for
+  // itself when a window holds no samples.
+  const canGraph = props.graphable;
 
   const act = async (label: string, context: string, fn: () => Promise<unknown>) => {
     setBusy(label);

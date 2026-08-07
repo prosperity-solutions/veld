@@ -55,6 +55,13 @@ use serde::{Deserialize, Serialize};
 /// on this crate and have no business linking a machine-wide process scanner.
 /// The `veld` binary injects `veld_stats::CommandStatsRecorder`.
 ///
+/// **Scope: node steps only.** Project-level `setup`/`teardown` steps and
+/// `skip_if` probes deliberately do not report here, because a sample is stored
+/// against a `node_key` and they have none. Do not "extend" this to them by
+/// inventing a key — `Db::record_node_stats` writes whatever string it is given,
+/// so the result would be rows no reader ever asks for. Giving them their own
+/// identity in the stats schema is a separate change.
+///
 /// Synchronous on purpose — it is called from the orchestrator's spawn path,
 /// which checkpoints without an `.await` point so the sequence stays
 /// cancellation-safe. An implementation must not block.
