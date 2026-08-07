@@ -897,18 +897,35 @@ mod tests {
         let no_handoff = plan(false);
         unsafe { std::env::remove_var("VELD_DESKTOP") };
 
+        // Platform-independent, and deliberately asserted on every platform: the
+        // debt is created by the struct literal, so this is what fails when a new
+        // early return is added above it — on whichever runner gets there first.
         assert!(
             opted_out.reopen,
             "an app that handed off and quit must be reopened even when VELD_DESKTOP=0 \
              means veld will not update it",
         );
         assert!(!opted_out.update);
+        assert!(!no_handoff.reopen);
+
+        // macOS only, and the scope is the finding rather than a convenience:
+        // off macOS `plan_desktop` returns at the platform check *above* the
+        // `VELD_DESKTOP` branch, so there is no opt-out to report and `skipped`
+        // is correctly `None`. Asserting it everywhere claimed an invariant the
+        // code does not hold — which is how this test passed locally and failed
+        // on CI's Linux runner.
+        #[cfg(target_os = "macos")]
         assert!(
             opted_out.skipped.is_some(),
-            "a skipped app half must reach the report, or the app reopens on the old \
-             version having said nothing",
+            "on macOS a skipped app half must reach the report, or the app reopens on \
+             the old version having said nothing",
         );
-        assert!(!no_handoff.reopen);
+        #[cfg(not(target_os = "macos"))]
+        assert!(
+            opted_out.skipped.is_none(),
+            "off macOS veld never manages the app, so there is nothing to report as \
+             skipped",
+        );
     }
 
     #[test]

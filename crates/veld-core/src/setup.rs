@@ -2819,8 +2819,15 @@ mod tests {
             .unwrap();
         let started = std::time::Instant::now();
         assert!(!rt.block_on(super::wait_for_pid_exit(0, Duration::from_secs(30))));
-        // Returned on the guard, not by exhausting the budget.
-        assert!(started.elapsed() < Duration::from_secs(1));
+        // Returned on the guard, not by exhausting the budget. Bounded well below
+        // the budget rather than near zero: the claim is "it did not poll for 30
+        // seconds", and a tighter bound would only add a way for a loaded CI
+        // runner to fail a test about something other than timing.
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "took {:?} — pid 0 should be refused before any polling",
+            started.elapsed(),
+        );
 
         // Anything that would wrap into a negative `Pid` is a group too.
         assert!(!rt.block_on(super::wait_for_pid_exit(u32::MAX, Duration::from_secs(30))));
