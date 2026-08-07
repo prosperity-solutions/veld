@@ -73,7 +73,7 @@ const REPOS_URL = `${BASE_URL}/api/repos`;
  * them, so without this they sit at `hiddenInset`'s default and read as
  * misaligned against the bar's own controls. Keep in sync with that stylesheet.
  */
-const TOPBAR_HEIGHT = 42;
+const TOPBAR_HEIGHT = 40;
 const TRAFFIC_LIGHT_SIZE = 12;
 
 /** @type {Tray | null} */

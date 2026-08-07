@@ -161,6 +161,15 @@ jobs:
         run: |
           chmod +x tests/validate-favicon.sh
           ./tests/validate-favicon.sh
+      # Same again: `.topbar.electron`'s height and desktop/src/main.js's
+      # TOPBAR_HEIGHT are the same number in two languages, tied together only by
+      # this gate. `TOPBAR_HEIGHT` has one consumer (the traffic-light `y`), so
+      # drift stays green everywhere and ships as OS window buttons sitting off
+      # the bar they are supposed to be centred in.
+      - name: Electron top bar height matches the shell constant
+        run: |
+          chmod +x tests/validate-topbar-height.sh
+          ./tests/validate-topbar-height.sh
       # `install.sh` is the largest program in this repo that nothing checked.
       # It is what `curl | bash` runs, what `veld update` runs, and now what
       # Veld Desktop's own updater ends up in — and until this step it was
