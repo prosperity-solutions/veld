@@ -6,11 +6,12 @@
 //! figure. Descendants that reparent away (a daemonizing double-fork ends up
 //! under init/launchd) fall outside the tree and are not counted.
 //!
-//! Sampling lives in the daemon's stats sampler (see `veld-daemon`'s
-//! `StatsCollector`, which owns the cross-platform `sysinfo` probing and the
-//! per-platform memory detail); this crate only defines the shared data types
-//! and their persistence in [`crate::db`]. Keeping the types here means the CLI
-//! can read stored samples without pulling in `sysinfo`.
+//! Sampling lives in `veld-stats` (`StatsCollector`, which owns the
+//! cross-platform `sysinfo` probing and the per-platform memory detail); this
+//! crate only defines the shared data types, the [`StepObserver`] seam, and
+//! their persistence in [`crate::db`]. Keeping all of that here means the CLI,
+//! the helper and the gateway can read stored samples without any of them
+//! pulling in `sysinfo`.
 //!
 //! # Why there is more than one memory number
 //!
@@ -31,6 +32,40 @@ use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+
+/// Told when a `command` step's process starts and stops, so something outside
+/// the orchestrator can measure it while it runs.
+///
+/// This exists because a `command` step — a build, an install, codegen — is
+/// spawned by the CLI, awaited, and forgotten. Its PID lives only inside the
+/// task that owns it, so the daemon's sampler (which reads PIDs out of the
+/// database) cannot see the most expensive part of a run.
+///
+/// **The seam passes the PID out; it does not persist it, and no implementation
+/// may.** [`crate::state::NodeState::pid`] is read by `veld stop`, the health
+/// monitor, the GC and the orphan reaper as a claim that the node has a process
+/// *now*; a finished build's PID stored there would make a run that is still
+/// coming up look like one that spawned and died, and would eventually have
+/// `veld stop` signal whatever recycled the number. A resource sample is the
+/// opposite kind of fact — "at time T this tree looked like this" — and stays
+/// true after the process is gone.
+///
+/// It is a trait, and not simply a sampler in this crate, so that `veld-core`
+/// stays free of `sysinfo`: `veld-helper` (privileged) and `veld-gateway` depend
+/// on this crate and have no business linking a machine-wide process scanner.
+/// The `veld` binary injects `veld_stats::CommandStatsRecorder`.
+///
+/// Synchronous on purpose — it is called from the orchestrator's spawn path,
+/// which checkpoints without an `.await` point so the sequence stays
+/// cancellation-safe. An implementation must not block.
+pub trait StepObserver: Send + Sync {
+    /// A `command` step for `node_key` (`"node:variant"`) has spawned, with
+    /// `pid` as the root of its process tree.
+    fn step_started(&self, node_key: &str, pid: u32);
+    /// That step's process has exited. Always called if `step_started` was,
+    /// including on the error path.
+    fn step_finished(&self, node_key: &str);
+}
 
 /// A sample older than this many seconds is treated as absent by readers.
 /// The daemon's stats sampler runs on its own ~5s timer (`SAMPLE_INTERVAL_SECS`

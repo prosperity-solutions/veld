@@ -486,7 +486,14 @@ async fn get_stats() -> Result<Json<StatsResponse>, StatusCode> {
     let mut projects: HashMap<String, HashMap<String, HashMap<String, NodeStats>>> = HashMap::new();
     for entry in registry.projects.values() {
         for (run_name, run_info) in &entry.runs {
-            if run_info.status != RunStatus::Running {
+            // `Starting` counts: a run holds that status while its builds run
+            // and its servers boot, which is the part of a run whose resource
+            // use is most worth watching. Excluding it made the UI show
+            // "no stats yet" for the entire start phase even once samples for it
+            // existed. Freshness below still hides anything that stopped being
+            // sampled, so a `Starting` run that is stuck reads as absent, not
+            // frozen.
+            if !matches!(run_info.status, RunStatus::Starting | RunStatus::Running) {
                 continue;
             }
             let latest = match db.latest_node_stats(&entry.project_root, run_name) {

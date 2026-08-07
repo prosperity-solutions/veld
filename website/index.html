@@ -250,14 +250,14 @@
        (span 2) exists to absorb the slack when the raw count doesn't divide.
        The invariant: (feature cells + 1 for each `cell-wide`) mod 3 == 0, with
        the joke bar spanning the full 3 after them.
-       Currently 18 cells, none wide → 6 full rows + [joke bar full width]. When
-       the next feature lands, 19 doesn't divide — put `cell-wide` back on the
-       last cell to make it 20... which also doesn't; add two, or leave one out. */
+       Currently 20 cells, the last one wide → 21 slots = 7 full rows, + [joke
+       bar full width]. When the next feature lands, 22 slots don't divide —
+       drop `cell-wide` off the last cell (21 + span 3 = 24) or add two. */
     .grid .cell-wide { grid-column: span 2; }
     /* Spans exactly the columns the feature cells leave over, so the grid has no
-       gray gap. 19 cells + span 2 = 21 = 7 full rows; changing the cell count
-       means changing this number. */
-    .grid .cell-next { grid-column: span 2; background: color-mix(in srgb, var(--accent-ink) 6%, var(--bg)); }
+       gray gap. 20 cells + 1 for the wide one = 21, + span 3 = 24 = 8 full rows;
+       changing the cell count means changing this number. */
+    .grid .cell-next { grid-column: span 3; background: color-mix(in srgb, var(--accent-ink) 6%, var(--bg)); }
     @media (max-width: 760px) {
       /* 2 columns: span 3 would overflow, and the wide cell should just fill a row. */
       .grid .cell-wide, .grid .cell-next { grid-column: 1 / -1; }
@@ -432,9 +432,10 @@ veld share <span class="kw">--web</span>
         <div class="cell"><h3>Scripts &amp; agents love it</h3><p>Every command has a <code>--json</code> mode for CI, scripts, and coding agents.</p></div>
         <div class="cell"><h3>A dashboard in your browser</h3><p>See health, per-service memory &amp; CPU, tail logs, search, browse past runs, and stop/restart — all at <code>veld.localhost</code>.</p></div>
         <div class="cell"><h3>Memory numbers that are actually true</h3><p>Adding up a process tree&rsquo;s memory double-counts everything its processes share, so Veld reports the real footprint instead. Expand a service for a scrubbable graph of memory or CPU &mdash; by memory type, or by which subprocess is eating it.</p></div>
+        <div class="cell"><h3>What your build actually costs</h3><p>Measuring starts when the run does, not when it finishes. Your build steps and installs are graphed while they run, and a dev server&rsquo;s startup ramp is recorded &mdash; so &ldquo;why does this need 12&nbsp;GB&rdquo; is a question you can answer.</p></div>
         <div class="cell"><h3>Browser errors in your terminal</h3><p>Captures the app's console logs and crashes so you can read them from the CLI.</p></div>
         <div class="cell"><h3>Share with a teammate</h3><p>Send a colleague an encrypted link; they open the same URLs on their machine. No accounts, no server.</p></div>
-        <div class="cell"><h3>Or share with anyone</h3><p><code>veld share --web</code> gives you a real public URL — the other person doesn't need Veld at all.</p></div>
+        <div class="cell cell-wide"><h3>Or share with anyone</h3><p><code>veld share --web</code> gives you a real public URL — the other person doesn't need Veld at all.</p></div>
         <div class="cell cell-next">
           <div class="next-line">
             <span class="next-prompt">$ claude</span>

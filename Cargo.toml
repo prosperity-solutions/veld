@@ -5,6 +5,7 @@ members = [
     "crates/veld-helper",
     "crates/veld-daemon",
     "crates/veld-share",
+    "crates/veld-stats",
     "crates/veld-gateway",
 ]
 resolver = "2"
@@ -22,6 +23,7 @@ publish = false
 [workspace.dependencies]
 veld-core = { path = "crates/veld-core" }
 veld-share = { path = "crates/veld-share" }
+veld-stats = { path = "crates/veld-stats" }
 iroh = "1"
 iroh-tickets = "1"
 serde = { version = "1", features = ["derive"] }

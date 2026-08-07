@@ -609,6 +609,30 @@ pub async fn run_command(
     output_file: Option<&Path>,
     sink: Option<LineSink>,
 ) -> Result<CommandOutput, ProcessError> {
+    run_command_observed(command, working_dir, env, output_file, sink, None).await
+}
+
+/// [`run_command`], plus a callback handed the spawned process's PID.
+///
+/// `on_spawn` exists for one caller: the resource sampler needs a root to walk
+/// while a build or an install runs, and a step's PID is otherwise created and
+/// destroyed entirely inside this function. It fires once, immediately after a
+/// successful spawn and before any output is drained, so a step that lives two
+/// seconds is still observable.
+///
+/// **What the callback receives is a loan, not a handle.** The PID is valid only
+/// until this function returns; after that the process has been reaped and the
+/// number is eligible for reuse. Record measurements against it — never store
+/// it, never signal it, and never persist it as node state (see
+/// [`crate::stats::StepObserver`] for why that distinction is load-bearing).
+pub async fn run_command_observed(
+    command: &CommandSpec,
+    working_dir: &Path,
+    env: &HashMap<String, String>,
+    output_file: Option<&Path>,
+    sink: Option<LineSink>,
+    on_spawn: Option<Box<dyn FnOnce(u32) + Send>>,
+) -> Result<CommandOutput, ProcessError> {
     // Prepare the output file and augmented env.
     let mut env = env.clone();
     if let Some(path) = output_file {
@@ -665,6 +689,14 @@ pub async fn run_command(
             return Err(ProcessError::SpawnFailed(e));
         }
     };
+
+    // Before draining anything: a short step must be observable, and the
+    // observer only has until `child.wait()` returns to look at this PID.
+    // `id()` is `None` only once the child has been reaped, which cannot have
+    // happened yet.
+    if let (Some(on_spawn), Some(pid)) = (on_spawn, child.id()) {
+        on_spawn(pid);
+    }
 
     let stdout = child.stdout.take().expect("stdout should be piped");
     let stderr = child.stderr.take().expect("stderr should be piped");

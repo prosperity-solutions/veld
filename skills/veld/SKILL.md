@@ -397,6 +397,25 @@ are sampled by the daemon every ~5s, so they're absent (`–` / omitted) until t
 first sample lands, and go absent again shortly after a node dies or the daemon
 stops. The management UI shows the same figures live with a sparkline.
 
+**Sampling covers the start phase, and who samples depends on the step type.**
+Long-lived nodes (`start_server`) are sampled by the daemon from the moment they
+spawn — including the whole boot-up window before the node is healthy, which is
+where a dev server does most of its allocating. `command` steps (builds,
+installs, codegen) are sampled every ~2s by the `veld start` process that runs
+them, because a `command` step's process is spawned, awaited and reaped inside
+that command and its PID never exists anywhere else. Two consequences worth
+knowing when reading the data:
+
+- A `command` node has **no live reading once it finishes** — it stops being
+  sampled the moment it exits. Its curve is still in `veld stats --history` and
+  in the dashboard chart for the retention window; that history is the only place
+  to read a build's peak.
+- A step shorter than one sampling interval is represented by the single sample
+  taken when it spawned, and a peak between two ticks isn't seen. This is a
+  sampler, not kernel accounting.
+- A `docker build` reports almost nothing: the work happens in
+  `dockerd`/`buildkitd`, which are not descendants of the step's process.
+
 ### Detailed resources: `veld stats`
 
 `veld status`'s `MEM` column is the tree's **footprint**, not RSS. This matters

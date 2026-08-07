@@ -461,8 +461,9 @@ export function ResourcePanel(props: { run: RunRef; nodeKey: string }) {
 
       {noData ? (
         <Text size="xs" c="dimmed">
-          No samples in this window. The daemon samples every 5s while a run is
-          up; totals are kept for{" "}
+          No samples in this window. Long-running services are sampled every 5s
+          by the daemon, and build/install steps every 2s while they run; totals
+          are kept for{" "}
           {formatDuration(data?.retention_secs ?? ASSUMED_RETENTION_SECS)} and
           per-process detail for{" "}
           {formatDuration(

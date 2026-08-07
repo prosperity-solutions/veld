@@ -4,6 +4,7 @@ use veld_core::orchestrator::Orchestrator;
 use veld_core::progress::ProgressEvent;
 use veld_core::url::generate_run_name;
 
+use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use crate::output::{self, is_tty};
@@ -168,6 +169,20 @@ pub async fn run(
     orchestrator.set_debug(_debug);
     orchestrator.set_foreground(foreground);
     orchestrator.set_terminal_node(terminal_sel.clone());
+
+    // Record CPU/memory for this run's `command` steps while they execute.
+    //
+    // The daemon samples every node whose PID was persisted, which is only the
+    // `start_server` ones; a build or an install is spawned by this process,
+    // awaited, and forgotten, so nothing outside this process ever knows its
+    // PID. Kept alive for the whole command so it covers `--oneshot`'s terminal
+    // node too, and dropped with it — the sampling task stops with the run.
+    let stats_recorder = Arc::new(veld_stats::CommandStatsRecorder::start(
+        orchestrator.db.clone(),
+        project_root.clone(),
+        run_name_str.to_owned(),
+    ));
+    orchestrator.with_step_observer(stats_recorder.clone());
 
     // Per-run answers, above the stored ones and never written anywhere.
     if !var_answers.is_empty() {
