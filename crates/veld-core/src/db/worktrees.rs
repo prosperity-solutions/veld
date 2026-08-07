@@ -231,6 +231,15 @@ fn wt_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorktreeRecord> {
 /// alias sort produced a list that was alphabetical by a string nothing on screen
 /// contained. `alias` follows it only to keep the order total when two rows
 /// render the same label (labels are deliberately not unique).
+///
+/// **`COLLATE NOCASE` folds ASCII only**, in every SQLite build. That did not
+/// show before v13, because `validate_alias` bounds the alias to `[A-Za-z0-9._-]`
+/// — but a label is free Unicode, so `Ärger` sorts after `Zebra` and `ärger` no
+/// longer folds with `Ärger`. Known and accepted rather than fixed here: the same
+/// collation already orders lane names two lines up and repo names in
+/// `list_repos`, both free text since they shipped, so a real fix is one change
+/// to how this database sorts human text and not a rider on a rail feature. The
+/// order stays *total* and stable either way — the alias is slug-unique per repo.
 const WT_ORDER: &str = "ORDER BY lane != '',
               COALESCE((SELECT position FROM lanes l
                         WHERE l.repo_root = worktrees.repo_root AND l.name = worktrees.lane), 0),
@@ -2026,7 +2035,12 @@ mod tests {
     }
 
     #[test]
-    fn the_unplaced_tail_sorts_by_the_rendered_label() {
+    fn the_unplaced_tail_sorts_by_the_rendered_label_in_ascii() {
+        // Scoped name on purpose. `COLLATE NOCASE` is ASCII-only, so this pins
+        // that the sort *key* is the label rather than the alias — not that the
+        // result is alphabetical for a non-ASCII label, which it is not (see the
+        // note on `WT_ORDER`, and the assertion at the end of this test).
+        //
         // `WT_ORDER`'s final tie-break is the label, because the label is what the
         // rail prints. Sorted by alias, this list reads as unsorted on screen.
         let (_dir, db) = test_db();
@@ -2090,7 +2104,30 @@ mod tests {
             .filter(|w| !w.is_main)
             .map(|w| w.alias)
             .collect();
-        assert_eq!(order, vec![a.alias, z.alias]);
+        assert_eq!(order, vec![a.alias.clone(), z.alias.clone()]);
+
+        // **The exception, asserted beside the rule.** `COLLATE NOCASE` folds
+        // ASCII only, so a label outside it sorts by code point: `Ärger`
+        // (U+00C4) lands *after* `zzz` rather than at the top. Pinned so the
+        // scoped test name above stays honest, and so a future switch to a
+        // Unicode-aware collation fails here and gets read rather than being a
+        // silent reordering of everyone's rail.
+        db.patch_worktree(
+            a.id,
+            WorktreePatch {
+                display_name: Some("Ärger"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let order: Vec<String> = db
+            .list_worktrees(root)
+            .unwrap()
+            .into_iter()
+            .filter(|w| !w.is_main)
+            .map(|w| w.alias)
+            .collect();
+        assert_eq!(order, vec![z.alias, a.alias]);
     }
 
     #[test]

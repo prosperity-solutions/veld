@@ -3380,11 +3380,24 @@ function AppInner(props: {
           colorUsedBy={markerUsedBy.color}
           markerStyle={markerStyle(settings ?? {})}
           onCreate={async (body) => {
-            const created = await api.createWorktree({
-              repo_root: repo.root,
-              lane: dialog.lane,
-              ...body,
-            });
+            let created: Worktree;
+            try {
+              created = await api.createWorktree({
+                repo_root: repo.root,
+                lane: dialog.lane,
+                ...body,
+              });
+            } catch (e) {
+              // A create can fail *after* `git worktree add` has succeeded — the
+              // alias rename losing a race, or the lane vanishing mid-flight.
+              // The dialog reports the error and stays open, but without this the
+              // row it did create stayed invisible until the next 5s poll, and
+              // pressing Create again hit "<path> already exists" with no way
+              // forward. Refresh first, so what exists is on screen while the
+              // user reads why the rest did not.
+              await refresh();
+              throw e;
+            }
             await refresh();
             setActiveWtKey(String(created.id));
             closeDialog();
@@ -3407,7 +3420,12 @@ function AppInner(props: {
       {dialog.kind === "rename" && (
         <RenameWorktreeDialog
           currentAlias={dialog.worktree.alias}
-          currentName={dialog.worktree.display_name}
+          /* `?? ""` because the field can genuinely be absent: `api.ts` types it
+             as the current daemon's contract, but `just dev-ui` proxies /api to
+             a locally *installed* daemon, which may predate v13 and send no such
+             key. Without this the dialog crashed on `undefined.trim()` at save
+             time — `worktreeLabel` already tolerates the same skew. */
+          currentName={dialog.worktree.display_name ?? ""}
           isMain={dialog.worktree.is_main}
           /* Read off the LIVE row, not the one captured when the dialog opened: a
              background removal can fail while it is open, and the force affordance

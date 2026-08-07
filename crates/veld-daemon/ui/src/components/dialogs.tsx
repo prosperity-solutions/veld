@@ -16,7 +16,6 @@ import {
   deriveAlias,
   deriveBranch,
   deriveDisplayName,
-  MAX_DISPLAY_NAME_LEN,
 } from "../shared/worktreeName";
 import { randomMarker } from "../shared/markerPick";
 
@@ -299,7 +298,6 @@ export function NewWorktreeDialog(props: {
             label="Name"
             placeholder="Checkout V2"
             value={name}
-            maxLength={MAX_DISPLAY_NAME_LEN}
             onChange={(e) => setName(e.currentTarget.value)}
             /* Both blocking states go on `error`, not only the collision. An
                unusable name disables Create exactly as a collision does, so
@@ -700,9 +698,10 @@ export function RenameWorktreeDialog(props: {
   currentAlias: string;
   /** The stored `display_name`, `""` when the row renders its alias. */
   currentName: string;
+  /** Only the fields the user actually changed; an absent key is "leave it". */
   onRename: (patch: {
-    alias: string;
-    display_name: string;
+    alias?: string;
+    display_name?: string;
   }) => Promise<void>;
   onDelete: (force: boolean) => Promise<void>;
   isMain: boolean;
@@ -726,12 +725,26 @@ export function RenameWorktreeDialog(props: {
   const [name, setName] = useState(props.currentName);
   const [confirmDelete, setConfirmDelete] = useState(props.deleteFocus);
   const [force, setForce] = useState(false);
-  const rename = useSubmit(() =>
-    props.onRename({
-      alias: alias.trim(),
-      display_name: deriveDisplayName(name),
-    }),
-  );
+  const rename = useSubmit(() => {
+    // **Only the fields that changed.** Both values are a snapshot taken when
+    // the dialog opened, and this app runs up to eight windows against one
+    // daemon — so sending both unconditionally means opening Edit here, renaming
+    // in another window, then changing only the Alias reverts the other window's
+    // rename with a value that was already stale when it was read. Omitting an
+    // untouched field turns that into the no-op it should be, because the
+    // daemon's `COALESCE` leaves an absent column alone.
+    const patch: { alias?: string; display_name?: string } = {};
+    if (alias.trim() !== props.currentAlias) patch.alias = alias.trim();
+    const derived = deriveDisplayName(name);
+    if (derived !== props.currentName) patch.display_name = derived;
+    // An empty patch is a 400 ("nothing to update"), and it is also just a Save
+    // with nothing typed — close rather than report a rejection for it.
+    if (patch.alias === undefined && patch.display_name === undefined) {
+      props.onClose();
+      return Promise.resolve();
+    }
+    return props.onRename(patch);
+  });
   const del = useSubmit(() => props.onDelete(force));
   // Either source of a refusal: this attempt's own (a 4xx from the forced path, or
   // a rejected precondition) or the last background attempt's.
@@ -745,7 +758,6 @@ export function RenameWorktreeDialog(props: {
             description="What the rail shows. Clear it to show the alias instead."
             placeholder={props.currentAlias}
             value={name}
-            maxLength={MAX_DISPLAY_NAME_LEN}
             onChange={(e) => setName(e.currentTarget.value)}
             data-autofocus={!props.deleteFocus}
           />

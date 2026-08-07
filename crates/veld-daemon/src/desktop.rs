@@ -569,35 +569,77 @@ const MAX_DISPLAY_NAME_LEN: usize = 80;
 /// of default-ignorables and bidi controls, it does not move between Unicode
 /// revisions in any way that matters here, and a dependency for one predicate on
 /// one field is the more expensive answer.
+///
+/// **This set includes the zero-width joiner and non-joiner, and they are
+/// deliberately *not* rejected** — see [`is_forbidden`]. U+200D is the glue in
+/// every multi-person, profession and flag emoji (`👩‍💻` is U+1F469 U+200D
+/// U+1F4BB), and U+200C is orthographically required in Persian and Hindi. They
+/// belong here because they contribute no glyph *on their own*, which is what
+/// this predicate answers.
 fn is_invisible(c: char) -> bool {
-    matches!(c,
-        '\u{00AD}'                  // soft hyphen
-        | '\u{061C}'                // arabic letter mark
-        | '\u{180E}'                // mongolian vowel separator
-        | '\u{200B}'..='\u{200F}'   // zero-width space/non-joiner/joiner, LRM, RLM
-        | '\u{2028}' | '\u{2029}'   // line separator, paragraph separator
-        | '\u{202A}'..='\u{202E}'   // bidi embedding and override
-        | '\u{2060}'..='\u{2064}'   // word joiner, invisible operators
-        | '\u{2066}'..='\u{2069}'   // bidi isolates
-        | '\u{FEFF}'                // zero-width no-break space / BOM
-        | '\u{FFF9}'..='\u{FFFB}'   // interlinear annotation
-    )
+    c.is_control()
+        || c.is_whitespace()
+        || matches!(c,
+            '\u{00AD}'                  // soft hyphen
+            | '\u{061C}'                // arabic letter mark
+            | '\u{180E}'                // mongolian vowel separator
+            | '\u{200B}'..='\u{200F}'   // zero-width space/non-joiner/joiner, LRM, RLM
+            | '\u{202A}'..='\u{202E}'   // bidi embedding and override
+            | '\u{2060}'..='\u{2064}'   // word joiner, invisible operators
+            | '\u{2066}'..='\u{2069}'   // bidi isolates
+            | '\u{FEFF}'                // zero-width no-break space / BOM
+            | '\u{FFF9}'..='\u{FFFB}'   // interlinear annotation
+        )
+}
+
+/// Characters rejected outright, because they do not merely fail to render —
+/// they change how the characters *around* them render.
+///
+/// `char::is_control` alone is not enough: it reports only category Cc
+/// (U+0000–1F, U+007F–9F), so every one of the rest of these passes it.
+/// U+2028/U+2029 are forced line breaks that `white-space: nowrap` does not
+/// suppress, so `"prod\u{2028}rm -rf"` shows in the rail as `prod`; U+202E
+/// reverses the label, so `"\u{202E}tset olleH"` displays as `Hello test`.
+///
+/// Deliberately narrower than [`is_invisible`]: a merely invisible character is
+/// harmless *beside a visible one* and sometimes required (see that function's
+/// note on U+200D). What is never acceptable is a name made of nothing else,
+/// which [`validate_display_name`] checks separately.
+fn is_forbidden(c: char) -> bool {
+    c.is_control()
+        || matches!(c,
+            '\u{2028}' | '\u{2029}'     // line separator, paragraph separator
+            | '\u{202A}'..='\u{202E}'   // bidi embedding and override
+            | '\u{2066}'..='\u{2069}'   // bidi isolates
+            | '\u{FEFF}'                // zero-width no-break space / BOM
+            | '\u{FFF9}'..='\u{FFFB}'   // interlinear annotation
+        )
 }
 
 /// Bound the free-text worktree label.
 ///
 /// Unlike the alias this is not an identifier — it never reaches a hostname, a
 /// path, or a command line — so the rule is only "a human can read it in the
-/// rail": empty (which clears it back to the alias) or something legible, no
-/// control or invisible characters (see [`is_invisible`]), and a length cap in
-/// **characters**, since the cap exists for legibility and one emoji is one
-/// column, not four.
+/// rail". Three clauses:
 ///
-/// Rejected rather than stripped, matching `valid_lane_name`: a name that
-/// renders as invisible garbage is not a name, and silently rewriting what
-/// someone typed is worse than telling them so. Trimming, on the other hand,
-/// *is* applied by the caller — a trailing space is a typo with one obvious
-/// intent.
+/// 1. A length cap in **characters**, since the cap exists for legibility and
+///    one emoji is one column, not four.
+/// 2. Nothing from [`is_forbidden`], which changes how its neighbours render.
+/// 3. **At least one visible character**, unless the name is empty.
+///
+/// Clause 3 is the one that matters and the one a per-character blocklist cannot
+/// express. `""` is the sentinel meaning "render the alias", and `worktreeLabel`
+/// falls back on exactly `""` — so a name of one zero-width space is *non-empty
+/// and unrenderable at once*, and the rail row, the palette entry, the window
+/// title and the tray item all come out blank with nothing identifying the
+/// checkout. Requiring a visible character closes that without having to guess
+/// which invisible characters someone might legitimately want in the middle of a
+/// name.
+///
+/// Rejected rather than stripped, matching `valid_lane_name`: silently rewriting
+/// what someone typed is worse than telling them it is not a name. Trimming, on
+/// the other hand, *is* applied by the caller — a trailing space is a typo with
+/// one obvious intent.
 fn validate_display_name(name: &str) -> Result<(), ApiError> {
     if name.chars().count() > MAX_DISPLAY_NAME_LEN {
         return Err(err(
@@ -605,10 +647,16 @@ fn validate_display_name(name: &str) -> Result<(), ApiError> {
             format!("the name must be at most {MAX_DISPLAY_NAME_LEN} characters"),
         ));
     }
-    if name.chars().any(|c| c.is_control() || is_invisible(c)) {
+    if name.chars().any(is_forbidden) {
         return Err(err(
             StatusCode::BAD_REQUEST,
-            "the name cannot contain control or zero-width characters",
+            "the name cannot contain control characters or text-direction overrides",
+        ));
+    }
+    if !name.is_empty() && name.chars().all(is_invisible) {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "the name must contain at least one visible character",
         ));
     }
     Ok(())
@@ -2030,21 +2078,11 @@ mod tests {
     }
 
     #[test]
-    fn display_name_validation_rejects_what_renders_as_nothing() {
-        // `char::is_control` is Cc only, so each of these passed it. The failure
-        // is not cosmetic: `worktreeLabel` falls back to the alias on `""` alone,
-        // so a name that is non-empty and invisible is a rail row, a window title
-        // and a tray item with nothing on them identifying the checkout.
+    fn display_name_validation_rejects_characters_that_misrender_their_neighbours() {
+        // `char::is_control` is Cc only, so every one of these but the first two
+        // passed it. Each changes how the characters *around* it render.
         assert!(validate_display_name("a\nb").is_err(), "newline");
         assert!(validate_display_name("a\tb").is_err(), "tab");
-        assert!(
-            validate_display_name("\u{200B}").is_err(),
-            "zero-width space"
-        );
-        assert!(
-            validate_display_name("a\u{200D}b").is_err(),
-            "zero-width joiner"
-        );
         assert!(
             validate_display_name("a\u{2028}b").is_err(),
             "line separator"
@@ -2062,9 +2100,46 @@ mod tests {
             "bidi isolate"
         );
         assert!(validate_display_name("\u{FEFF}name").is_err(), "BOM");
+    }
+
+    #[test]
+    fn display_name_validation_requires_one_visible_character() {
+        // The rule is "the name renders as *something*", not a blocklist of every
+        // invisible character. `worktreeLabel` falls back to the alias on exactly
+        // `""`, so a non-empty name of nothing but zero-width characters is a rail
+        // row, a window title and a tray item that come out blank with nothing
+        // identifying the checkout.
+        assert!(validate_display_name("").is_ok(), "the clear sentinel");
         assert!(
-            validate_display_name("soft\u{00AD}hyphen").is_err(),
-            "soft hyphen"
+            validate_display_name("\u{200B}").is_err(),
+            "zero-width space"
+        );
+        assert!(validate_display_name("\u{200D}").is_err(), "lone joiner");
+        assert!(
+            validate_display_name("\u{00AD}\u{200B}").is_err(),
+            "two of them"
+        );
+
+        // **A zero-width joiner beside a visible character is legal, and must stay
+        // so.** It is the glue in every multi-person, profession and flag emoji, so
+        // rejecting it 400s a name the user can see perfectly well — on the one
+        // free-text field this whole feature exists to provide.
+        assert!(
+            validate_display_name("\u{1F469}\u{200D}\u{1F4BB} dashboard").is_ok(),
+            "profession emoji"
+        );
+        assert!(
+            validate_display_name("\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}").is_ok(),
+            "family emoji"
+        );
+        assert!(
+            validate_display_name("\u{1F3F3}\u{FE0F}\u{200D}\u{1F308} pride").is_ok(),
+            "flag emoji"
+        );
+        // U+200C is orthographically required in Persian and Hindi.
+        assert!(
+            validate_display_name("\u{645}\u{6CC}\u{200C}\u{62E}").is_ok(),
+            "zero-width non-joiner"
         );
 
         // Visible whitespace and punctuation stay legal — the rule is "renders as
@@ -2073,7 +2148,7 @@ mod tests {
             validate_display_name("a\u{00A0}b").is_ok(),
             "no-break space"
         );
-        assert!(validate_display_name("→ ✓ (!)").is_ok());
+        assert!(validate_display_name("\u{2192} \u{2713} (!)").is_ok());
     }
 
     #[test]
