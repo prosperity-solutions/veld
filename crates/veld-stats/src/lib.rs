@@ -96,8 +96,9 @@ const CMD_MAX_CHARS: usize = 160;
 /// usually the only way to tell two `node` children apart — so it stays on by
 /// default and gains an off switch, rather than the reverse.
 ///
-/// Cached: the sampler asks once per process per 5s and the answer cannot change
-/// within a daemon's life.
+/// Cached: a sampler asks once per process per tick, and the answer cannot
+/// change within the life of the process doing the sampling — which is the
+/// daemon for `start_server` nodes and the CLI for `command` steps.
 fn cmdline_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| match std::env::var("VELD_STATS_CMDLINE") {

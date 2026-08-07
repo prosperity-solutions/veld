@@ -89,18 +89,27 @@ impl Drop for CommandStatsRecorder {
     }
 }
 
+/// Take the roots map, recovering it if a previous holder panicked.
+///
+/// Poisoning is the wrong failure mode for this map: every critical section is a
+/// single `insert` or `remove` on a plain `HashMap`, so a panic cannot leave it
+/// logically half-written, and a mutex never un-poisons. Treating a poisoned
+/// lock as unusable would end sampling for the rest of the run — silently, since
+/// the symptom downstream is a gap in a chart that looks like idle time.
+fn lock_roots(
+    roots: &Mutex<HashMap<String, u32>>,
+) -> std::sync::MutexGuard<'_, HashMap<String, u32>> {
+    roots.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 impl StepObserver for CommandStatsRecorder {
     fn step_started(&self, node_key: &str, pid: u32) {
-        if let Ok(mut roots) = self.roots.lock() {
-            roots.insert(node_key.to_owned(), pid);
-        }
+        lock_roots(&self.roots).insert(node_key.to_owned(), pid);
         self.wake.notify_one();
     }
 
     fn step_finished(&self, node_key: &str) {
-        if let Ok(mut roots) = self.roots.lock() {
-            roots.remove(node_key);
-        }
+        lock_roots(&self.roots).remove(node_key);
     }
 }
 
@@ -214,17 +223,10 @@ fn sample_pass(
 ) -> bool {
     // Copy out under the lock: the refresh below is a machine-wide scan and the
     // orchestrator registers steps from other tasks while it runs.
-    let current: Vec<(String, u32)> = match roots.lock() {
-        Ok(r) => r.iter().map(|(k, v)| (k.clone(), *v)).collect(),
-        // A poisoned lock means a panic while the map was held, and it never
-        // un-poisons — so this is where sampling stops for the rest of the run.
-        // Say so once rather than going quiet, since the symptom downstream is
-        // an unexplained gap in a chart.
-        Err(e) => {
-            debug!("command-step stats sampling stopped for '{run_name}': {e}");
-            return false;
-        }
-    };
+    let current: Vec<(String, u32)> = lock_roots(roots)
+        .iter()
+        .map(|(k, v)| (k.clone(), *v))
+        .collect();
     // Nothing registered — skip the process-table refresh entirely. Between
     // stages, and for a run made only of `start_server` nodes, this is every
     // tick, and a scan of every process on the machine is not free.

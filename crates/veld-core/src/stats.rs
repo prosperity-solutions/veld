@@ -9,9 +9,12 @@
 //! Sampling lives in `veld-stats` (`StatsCollector`, which owns the
 //! cross-platform `sysinfo` probing and the per-platform memory detail); this
 //! crate only defines the shared data types, the [`StepObserver`] seam, and
-//! their persistence in [`crate::db`]. Keeping all of that here means the CLI,
-//! the helper and the gateway can read stored samples without any of them
-//! pulling in `sysinfo`.
+//! their persistence in [`crate::db`]. Keeping all of that here is what lets
+//! `veld-helper` (privileged) and `veld-gateway` depend on this crate without
+//! either of them linking a machine-wide process scanner. The `veld` CLI *does*
+//! link `sysinfo`, through `veld-stats` — it samples the `command` steps it
+//! runs — so it is not on that list; the seam exists so `veld-core` does not put
+//! it on the helper's and the gateway's behalf.
 //!
 //! # Why there is more than one memory number
 //!

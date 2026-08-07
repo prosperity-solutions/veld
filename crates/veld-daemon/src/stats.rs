@@ -84,10 +84,20 @@ async fn sample_once(collector: &mut StatsCollector) -> anyhow::Result<()> {
             let mut trees = Vec::new();
             for (key, node_state) in &run_state.nodes {
                 if let Some(pid) = node_state.pid {
+                    // `is_alive` is `kill(pid, 0)`, which also succeeds for a
+                    // *defunct* process — so it is not enough on its own. A
+                    // zombie is still in sysinfo's table with nothing mapped,
+                    // and a tree reporting no memory at all is exactly that: a
+                    // live process always has resident pages. Recording it would
+                    // write a "used no memory" sample for a node that had simply
+                    // ended, which the whole absent-is-not-zero rule exists to
+                    // prevent. The CLI-side sampler drops the same case.
                     if veld_core::process::is_alive(pid) {
                         if let Some(tree) = collector.sample_tree(pid, sampled_at) {
-                            samples.push((key.clone(), tree.total));
-                            trees.push((key.clone(), tree.processes));
+                            if tree.total.memory_bytes > 0 {
+                                samples.push((key.clone(), tree.total));
+                                trees.push((key.clone(), tree.processes));
+                            }
                         }
                     }
                 }
