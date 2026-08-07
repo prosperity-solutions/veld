@@ -1742,11 +1742,30 @@ async fn run_install_script(
             .ok_or_else(|| std::io::Error::other("no parent"))
     }) {
         let inherited = std::env::var_os("PATH").unwrap_or_default();
-        let mut parts: Vec<PathBuf> = std::env::split_paths(&inherited).collect();
+        // Empty components dropped, and that is not tidying. `split_paths("")`
+        // yields one *empty* entry, and an empty PATH element means the current
+        // working directory — so an unset or empty PATH would come out as
+        // `:<exe dir>` and have the install script resolve `curl`, `tar` and
+        // `sudo` from whatever directory it happened to be spawned in.
+        let mut parts: Vec<PathBuf> = std::env::split_paths(&inherited)
+            .filter(|p| !p.as_os_str().is_empty())
+            .collect();
         parts.push(dir);
-        if let Ok(joined) = std::env::join_paths(parts) {
-            cmd.env("PATH", joined);
-        }
+        match std::env::join_paths(parts) {
+            Ok(joined) => cmd.env("PATH", joined),
+            // Only reachable if a directory on PATH — or this binary's own —
+            // contains a colon, which `join_paths` cannot express. Leaving the
+            // inherited PATH would silently reintroduce the wrong-install-dir bug
+            // this block exists to prevent, so say so rather than carry on
+            // quietly: the log is the only place anyone will see it.
+            Err(e) => {
+                eprintln!(
+                    "Warning: could not extend PATH for the installer ({e}); it may install to \
+                     the default location rather than beside this binary."
+                );
+                &mut cmd
+            }
+        };
     }
 
     for (key, value) in extra_env {

@@ -301,15 +301,21 @@ test("a CLI that advertises the handoff updates the whole release", () => {
   assert.equal(full, true);
   assert.deepEqual(args, [
     "update",
+    // The release the app was offered, from the feed that offered it. Without
+    // it the CLI asks api.github.com — a second source, rate-limited per IP and
+    // briefly out of step with the feed after a release.
+    "--target-version",
+    "16.8.0",
     "--wait-pid",
     "99",
     "--relaunch",
     "--app-path",
     "/Users/x/Applications/Veld.app/Contents/MacOS/Veld",
   ]);
-  // `veld update` resolves the release itself, so pinning a version here would
-  // be a second opinion about which release is current — and the flag does not
-  // exist on that subcommand.
+  // Spelled differently from the app-only route's `--version` on purpose: the
+  // two mean different things ("install this release" vs "install this app
+  // build"), and a CLI old enough to know only the latter must reject this
+  // outright rather than half-understand it.
   assert.equal(args.includes("--version"), false);
 });
 

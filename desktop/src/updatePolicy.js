@@ -296,9 +296,11 @@ function capabilitiesFrom(stdout) {
  *
  * - `veld update …` when the CLI advertises `full-update-handoff`. This moves the
  *   CLI, the daemon, the helper *and* the app from one release, which is what the
- *   user asked for when they clicked a button offering them a new veld. No
- *   `--version`: `veld update` resolves the release itself, and a CLI that
- *   updates itself first cannot get stuck re-offering a version it is behind.
+ *   user asked for when they clicked a button offering them a new veld. The
+ *   version travels as `--target-version`, spelled differently from the older
+ *   route's `--version` because it means something different — "install this
+ *   release" rather than "install this app build" — and because an older CLI must
+ *   reject it outright rather than half-understand it.
  * - `veld desktop update --version …` otherwise. The app half only — the older
  *   CLI's whole vocabulary — and `--version` is required there for exactly the
  *   loop the newer path cannot have: an older CLI would otherwise reinstall its
@@ -313,7 +315,21 @@ function capabilitiesFrom(stdout) {
 function handoffCommand({ capabilities = [], version, pid, execPath }) {
   const full = capabilities.includes(FULL_UPDATE_HANDOFF);
   const args = full
-    ? ["update", "--wait-pid", String(pid), "--relaunch", "--app-path", execPath]
+    ? [
+        "update",
+        // The release the user was just offered, from the feed that offered it.
+        // Without this the CLI asks `api.github.com/…/releases/latest` — a
+        // second source, rate-limited per IP and briefly out of step with the
+        // feed after a release — so a handoff could abort on a 403 or install
+        // nothing and re-offer the same version forever.
+        "--target-version",
+        version,
+        "--wait-pid",
+        String(pid),
+        "--relaunch",
+        "--app-path",
+        execPath,
+      ]
     : [
         "desktop",
         "update",

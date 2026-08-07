@@ -303,22 +303,47 @@ fn repo_root() -> PathBuf {
 /// disappears with no signal at all. That is precisely the failure a guard has to
 /// be *constructed* to catch rather than commented about.
 #[test]
-fn the_capability_string_means_the_same_thing_in_both_languages() {
-    const CAPABILITY: &str = "full-update-handoff";
+fn every_advertised_capability_has_a_consumer_in_the_app() {
     let root = repo_root();
-
     let rust = std::fs::read_to_string(root.join("crates/veld/src/commands/desktop.rs")).unwrap();
+    let js = std::fs::read_to_string(root.join("desktop/src/updatePolicy.js")).unwrap();
+
+    // Every `caps.push("…")` in `capabilities()`, rather than one hardcoded
+    // string. The difference matters for the *next* capability, not this one: a
+    // test that names `full-update-handoff` protects only the capability that
+    // already shipped, and the person adding the second one gets no signal at all.
+    let advertised: Vec<&str> = rust
+        .match_indices("caps.push(\"")
+        .filter_map(|(i, m)| {
+            let rest = &rust[i + m.len()..];
+            rest.find('"').map(|end| &rest[..end])
+        })
+        .collect();
+
     assert!(
-        rust.contains(&format!("\"{CAPABILITY}\"")),
-        "the CLI no longer advertises {CAPABILITY:?} — if that is intended, update \
-         desktop/src/updatePolicy.js's FULL_UPDATE_HANDOFF in the same commit",
+        !advertised.is_empty(),
+        "no `caps.push(\"…\")` found in crates/veld/src/commands/desktop.rs — if \
+         `capabilities()` was rewritten, rewrite this test with it rather than \
+         deleting it: it is the only thing tying the two languages together",
     );
 
-    let js = std::fs::read_to_string(root.join("desktop/src/updatePolicy.js")).unwrap();
+    for capability in advertised {
+        assert!(
+            js.contains(&format!("\"{capability}\"")),
+            "the CLI advertises {capability:?} but desktop/src/updatePolicy.js never \
+             mentions it. A capability with no consumer is dead weight the app will \
+             never act on; add the constant there, or stop advertising it here.",
+        );
+    }
+
+    // And the one the app keys its whole update route on, in the direction the
+    // loop above cannot check: renamed in JS alone, the app silently falls back
+    // to the app-only command with every suite green.
     assert!(
-        js.contains(&format!("FULL_UPDATE_HANDOFF = \"{CAPABILITY}\"")),
-        "the app no longer looks for {CAPABILITY:?} — if that is intended, update \
-         crates/veld/src/commands/desktop.rs's CAPABILITIES in the same commit",
+        js.contains(r#"FULL_UPDATE_HANDOFF = "full-update-handoff""#),
+        "desktop/src/updatePolicy.js no longer looks for \"full-update-handoff\" — if \
+         that is intended, update `capabilities()` in \
+         crates/veld/src/commands/desktop.rs in the same commit",
     );
 }
 

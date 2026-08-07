@@ -448,6 +448,21 @@ enum Command {
         /// the installer would have guessed.
         #[arg(long, hide = true)]
         app_path: Option<std::path::PathBuf>,
+
+        /// Install this release instead of asking GitHub which is latest.
+        ///
+        /// The app passes the version it was offered, and that is not a
+        /// convenience: the app learns about releases through electron-updater's
+        /// feed while `check_update` asks `api.github.com/…/releases/latest`.
+        /// Two sources, two failure modes. Unauthenticated api.github.com is rate
+        /// limited per IP, so behind a shared NAT the handoff would abort with a
+        /// 403 on a machine that had just been told an update exists; and in the
+        /// minutes of skew after a release the API can still answer with the
+        /// version the CLI already has, which would install nothing, report
+        /// success, and re-offer the same update on the next launch — forever,
+        /// since the app's "already offered" set is per session.
+        #[arg(long, hide = true)]
+        target_version: Option<String>,
     },
 
     /// Install, update or inspect Veld Desktop (macOS app).
@@ -942,12 +957,8 @@ async fn main() {
             wait_pid,
             relaunch,
             app_path,
-            // `--relaunch` is the app saying "I quit for this, put me back", so it
-            // means nothing without the pid that says which app. Ignored on its
-            // own rather than honoured: `veld update --relaunch` typed by hand
-            // would otherwise open a GUI app that was never running, and would
-            // still open it after the user answered "n" to the close prompt.
-        } => commands::update::run(wait_pid, relaunch && wait_pid.is_some(), app_path).await,
+            target_version,
+        } => commands::update::run(wait_pid, relaunch, app_path, target_version).await,
 
         Command::Desktop { command } => match command {
             // Bare `veld desktop` reports rather than installs: a command that

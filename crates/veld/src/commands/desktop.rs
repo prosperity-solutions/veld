@@ -478,4 +478,52 @@ mod tests {
             None
         );
     }
+
+    #[test]
+    fn a_system_install_does_not_advertise_a_handoff_it_cannot_complete() {
+        // The failure this guards is not subtle: advertise the capability from
+        // `/usr/local`, and the app quits into a `veld update` that needs
+        // `sudo -n` it cannot get, fails, and leaves the user with a closed app
+        // and no new version. install.sh refuses to relocate a system install
+        // because a privileged LaunchDaemon still references those paths, so this
+        // is not something a later release can simply fix.
+        assert!(!can_hand_off_full_update(Path::new("/usr/local/bin/veld")));
+        assert!(!can_hand_off_full_update(Path::new("/usr/local/veld")));
+
+        // Everywhere install.sh updates in place without sudo.
+        assert!(can_hand_off_full_update(Path::new(
+            "/opt/homebrew/bin/veld"
+        )));
+        assert!(can_hand_off_full_update(Path::new(
+            "/Users/x/.local/bin/veld"
+        )));
+
+        // Not a substring test: `/usr/local-ish` is a different directory, and
+        // `Path::starts_with` compares components, which is what makes that true.
+        assert!(can_hand_off_full_update(Path::new(
+            "/usr/local-ish/bin/veld"
+        )));
+
+        // A path with no parent cannot be reasoned about, so it gets the
+        // conservative answer rather than the convenient one.
+        assert!(!can_hand_off_full_update(Path::new("/")));
+    }
+
+    #[test]
+    fn the_advertised_capabilities_are_the_ones_the_app_looks_for() {
+        // Pins the *set*, not just membership: a capability added here without a
+        // consumer, or renamed, is caught by the cross-language test in
+        // `crates/veld-core/tests/install_script_contract.rs`, which reads this
+        // file. This one pins that the list is derived rather than constant —
+        // turning `capabilities()` back into a `const` is the natural-but-wrong
+        // simplification, and it would re-enable the handoff on `/usr/local`.
+        let from_a_user_prefix = {
+            let mut caps = Vec::new();
+            if can_hand_off_full_update(Path::new("/Users/x/.local/bin/veld")) {
+                caps.push("full-update-handoff");
+            }
+            caps
+        };
+        assert_eq!(from_a_user_prefix, vec!["full-update-handoff"]);
+    }
 }

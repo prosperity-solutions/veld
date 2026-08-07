@@ -70,9 +70,21 @@ struct Outcome {
 /// while it runs — so it spawns this detached, quits, and lets the CLI move
 /// *both* halves and reopen it. That is why this is `veld update` and not
 /// `veld desktop update`: one release, one command, both halves, one restart.
-pub async fn run(wait_pid: Option<u32>, relaunch: bool, app_path: Option<PathBuf>) -> i32 {
+pub async fn run(
+    wait_pid: Option<u32>,
+    relaunch: bool,
+    app_path: Option<PathBuf>,
+    target_version: Option<String>,
+) -> i32 {
     let handoff = wait_pid.is_some();
+    let relaunch = honour_relaunch(relaunch, wait_pid);
     let app_dir = app_path.as_deref().and_then(super::desktop::bundle_dir_of);
+    // The version the app was offered, when it named one. Reported back even on
+    // the paths that install nothing, so the dialog the user eventually sees
+    // names the release they clicked on rather than the one the CLI happens to be.
+    let reported_version = target_version
+        .clone()
+        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
 
     // Before anything is installed: the app must actually be gone. A pid that has
     // not exited is a process still reading the bundle we are about to replace,
@@ -83,7 +95,7 @@ pub async fn run(wait_pid: Option<u32>, relaunch: bool, app_path: Option<PathBuf
         if !veld_core::setup::wait_for_pid_exit(pid, QUIT_TIMEOUT).await {
             let msg = "Veld Desktop did not quit within 30s, so nothing was updated.";
             output::print_error(msg, false);
-            veld_core::setup::write_desktop_update_report(env!("CARGO_PKG_VERSION"), Err(msg));
+            veld_core::setup::write_desktop_update_report(&reported_version, Err(msg));
             // Reopen anyway when the app asked us to. "The pid did not exit" is
             // not the same as "the app is still on screen": `wait_for_pid_exit`
             // reads anything other than `ESRCH` as alive, so a pid this user may
@@ -104,7 +116,7 @@ pub async fn run(wait_pid: Option<u32>, relaunch: bool, app_path: Option<PathBuf
     }
 
     let plan = plan_desktop(app_dir, handoff, relaunch).await;
-    let outcome = perform(&plan).await;
+    let outcome = perform(&plan, target_version.as_deref()).await;
 
     // Written before the app is reopened, and that ordering is load-bearing for
     // the same reason it is in `veld desktop update`: the app reads this during
@@ -219,6 +231,13 @@ async fn plan_desktop(app_dir: Option<PathBuf>, handoff: bool, relaunch: bool) -
     }
 
     output::print_info("Asking Veld Desktop to quit...");
+    // Said before it disappears, because the gap is longer than it looks: the CLI
+    // half runs first — a tarball, the service restarts, up to 45s each waiting
+    // for the helper and the daemon to come back on the new binary — and only
+    // then the app. Someone who reopens the app from the Dock in that window
+    // trips the installer's running-app guard, and the run ends with the CLI
+    // updated and the app not.
+    output::print_info("It reopens when the update finishes — leave it closed until then.");
     match veld_core::setup::quit_desktop_app(path, QUIT_TIMEOUT).await {
         QuitOutcome::Quit | QuitOutcome::NotRunning => {
             plan.update = true;
@@ -309,13 +328,47 @@ fn consent(line: Option<&str>) -> bool {
     matches!(line.trim().to_lowercase().as_str(), "" | "y" | "yes")
 }
 
+/// Whether `--relaunch` means anything on this invocation.
+///
+/// It is the app saying "I quit for this, put me back", so it means nothing
+/// without the pid that says *which* app quit. Honouring it alone would make
+/// `veld update --relaunch` **launch** a GUI app that was never running — and,
+/// worse, launch it after the user answered "n" to the close prompt.
+fn honour_relaunch(relaunch: bool, wait_pid: Option<u32>) -> bool {
+    relaunch && wait_pid.is_some()
+}
+
+/// Which release to install, without asking GitHub twice.
+///
+/// `Ok(Some(v))` — install `v`. `Ok(None)` — already current. The caller's
+/// remaining arms are unchanged, so a named target flows through exactly the
+/// path a discovered one does.
+async fn resolve_target(
+    current: &str,
+    target_version: Option<&str>,
+) -> Result<Option<String>, anyhow::Error> {
+    match target_version {
+        // Named by the app, from the feed it was actually offered. No API call:
+        // see the flag's own doc comment for the two ways asking again goes
+        // wrong. Equality rather than `is_newer`, deliberately — a target older
+        // than this binary is a downgrade the app asked for by name, and
+        // refusing it here would leave the app looping on an offer nothing can
+        // satisfy.
+        Some(target) if target != current => Ok(Some(target.to_string())),
+        Some(_) => Ok(None),
+        None => veld_core::setup::check_update().await,
+    }
+}
+
 /// The update itself, once the app question is settled.
-async fn perform(plan: &DesktopPlan) -> Outcome {
+async fn perform(plan: &DesktopPlan, target_version: Option<&str>) -> Outcome {
     let current = env!("CARGO_PKG_VERSION");
     output::print_info(&format!("Current version: {current}"));
-    output::print_info("Checking for updates...");
+    if target_version.is_none() {
+        output::print_info("Checking for updates...");
+    }
 
-    match veld_core::setup::check_update().await {
+    match resolve_target(current, target_version).await {
         Ok(Some(new_version)) => {
             // Running environments are NOT stopped for an update. State lives in
             // a single SQLite DB with a forward-only migration system, so a
@@ -485,6 +538,14 @@ async fn update_desktop_if_stale(version: &str, plan: &DesktopPlan) -> Option<St
         // is the one replaced rather than a second copy appearing in
         // `/Applications`. `None` leaves the script its own search.
         app_dir: plan.app_dir.clone(),
+        // Passed on so `install.sh`'s `cleanup` EXIT/INT/TERM trap reopens the
+        // app too, which is a *second* net rather than a duplicate of the one in
+        // `run`. The statement in `run` is an ordinary line of Rust: a Ctrl-C, a
+        // SIGTERM or a panic during the ~113 MB download skips it, and on this
+        // route the app has already been closed — so without this the interrupted
+        // case ends with no window at all. `open` on a running app focuses it, so
+        // both firing is harmless, which is the same argument `run` already makes.
+        relaunch: plan.reopen,
         ..Default::default()
     };
     let result = veld_core::setup::install_desktop(version, &opts)
@@ -769,7 +830,71 @@ async fn wait_for_helper_version(
 
 #[cfg(test)]
 mod tests {
-    use super::consent;
+    use super::{DesktopPlan, consent, honour_relaunch, plan_desktop};
+
+    /// `plan_desktop` reads the process environment, which is global.
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn plan(relaunch: bool) -> DesktopPlan {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(plan_desktop(None, true, relaunch))
+    }
+
+    /// The invariant three review angles found broken independently: an app that
+    /// quit for this update is owed a window back on **every** path out of
+    /// `plan_desktop`, including the ones that decide not to touch it.
+    ///
+    /// `VELD_DESKTOP=0` is the early return that had the bug — an ambient value in
+    /// the app's inherited launchd environment meant it quit and never came back.
+    /// Adding any new early return above the struct literal reintroduces it, and
+    /// this is what fails when someone does. The same call also pins that the skip
+    /// is *reported* rather than passed off as success, since the app shows a
+    /// dialog only when the report says the update failed.
+    #[test]
+    fn an_app_that_quit_for_this_is_reopened_even_when_it_is_not_updated() {
+        // One guard for the whole test. Taking it twice would deadlock on the
+        // second call — `let _guard = …` shadows the binding without dropping it,
+        // and this mutex is not reentrant.
+        let _guard = env_lock();
+        // SAFETY: the lock above is held for the duration of this test.
+        unsafe { std::env::set_var("VELD_DESKTOP", "0") };
+        let opted_out = plan(true);
+        // And the debt is only owed when an app actually quit for this.
+        let no_handoff = plan(false);
+        unsafe { std::env::remove_var("VELD_DESKTOP") };
+
+        assert!(
+            opted_out.reopen,
+            "an app that handed off and quit must be reopened even when VELD_DESKTOP=0 \
+             means veld will not update it",
+        );
+        assert!(!opted_out.update);
+        assert!(
+            opted_out.skipped.is_some(),
+            "a skipped app half must reach the report, or the app reopens on the old \
+             version having said nothing",
+        );
+        assert!(!no_handoff.reopen);
+    }
+
+    #[test]
+    fn relaunch_without_a_pid_is_not_a_reason_to_launch_anything() {
+        // `--relaunch` means "I quit for this, put me back". On its own it would
+        // *start* a GUI app that was never running — including right after the
+        // user answered "n" to the close prompt.
+        assert!(honour_relaunch(true, Some(4321)));
+        assert!(!honour_relaunch(true, None));
+        assert!(!honour_relaunch(false, Some(4321)));
+        assert!(!honour_relaunch(false, None));
+    }
 
     #[test]
     fn a_bare_enter_agrees_and_anything_unrecognised_does_not() {
