@@ -364,8 +364,9 @@ impl Db {
                     // column listed here is overwritten from `discovered` forever —
                     // and a *user-choice* column would therefore be silently reset
                     // seconds after the user set it, having appeared to work when
-                    // tested by hand. `lane`, `sort_position`, `alias`, the marker
-                    // faces and the trash columns are all deliberately absent for
+                    // tested by hand. `lane`, `sort_position`, `alias`,
+                    // `display_name`, the marker faces and the trash columns are
+                    // all deliberately absent for
                     // that reason; they are written by `patch_worktree`,
                     // `reorder_worktrees` and the trash helpers instead. The
                     // file-header note about "touching all of them" when adding a
@@ -440,7 +441,8 @@ impl Db {
 
     /// All worktrees of a repo in rail order ([`WT_ORDER`]): ungrouped first,
     /// then lanes in their own order, main checkout leading its group, then
-    /// hand-placed worktrees, then the unplaced alias-sorted.
+    /// hand-placed worktrees, then the unplaced sorted by their rendered label
+    /// (`display_name` when set, else `alias`).
     ///
     /// Trashed worktrees are included — the rail renders them as a pending-removal
     /// group, which is what makes a background removal visible at all.
@@ -623,8 +625,8 @@ impl Db {
         // repo-wide once anything has been dragged (`reorder_worktrees` writes array
         // indices), so a worktree carrying its old lane's position into a new one
         // almost always ties an existing member — and `WT_ORDER` then falls through
-        // to the alias, landing it somewhere in the middle rather than where "Move to
-        // lane" implied. Unplaced is the honest state for a worktree the user moved
+        // to the rendered label, landing it somewhere in the middle rather than where
+        // "Move to lane" implied. Unplaced is the honest state for a worktree the user moved
         // by menu rather than by dragging it to a position.
         let n = tx.execute(
             "UPDATE worktrees
@@ -876,7 +878,7 @@ impl Db {
     /// one created — the bug three stores shipped in #201.
     ///
     /// Paths the caller omits are reset to `sort_position = NULL`, i.e. back to the
-    /// alias-sorted tail. That is what makes the write idempotent: the UI sends the
+    /// label-sorted tail. That is what makes the write idempotent: the UI sends the
     /// order it is displaying, and the stored order becomes exactly that.
     pub fn reorder_worktrees(&self, repo_root: &Path, order: &[String]) -> Result<(), DbError> {
         // Bounded before taking the write lock. The body is a caller-supplied array
@@ -1990,6 +1992,24 @@ mod tests {
         assert_eq!(after.alias, "renamed");
         assert_eq!(after.display_name, "Hello test");
 
+        // **The discovery poll must not reset it.** `sync_worktrees` runs every
+        // few seconds and its UPDATE may list only git-derived columns; a
+        // user-choice column that leaks into that statement is overwritten
+        // seconds after the user sets it, which looks like it worked when tested
+        // by hand and is silently gone by the next poll. Both marker faces pin
+        // this and the newest user-choice column must too.
+        db.sync_worktrees(
+            root,
+            &[
+                wt("/tmp/repoDN", "main", true),
+                wt("/tmp/repoDN-hello", "hello-test", false),
+            ],
+        )
+        .unwrap();
+        let after = db.get_worktree(id).unwrap().unwrap();
+        assert_eq!(after.display_name, "Hello test");
+        assert_eq!(after.alias, "renamed");
+
         // `Some("")` is a clear, not a no-op: it is the only way back to
         // rendering the alias.
         assert!(
@@ -2262,7 +2282,7 @@ mod tests {
             .collect();
         assert_eq!(aliases, vec!["main", "alpha", "beta", "zeta"]);
 
-        // A manual order puts placed worktrees first, unplaced alias-sorted after.
+        // A manual order puts placed worktrees first, unplaced label-sorted after.
         db.reorder_worktrees(root, &["/tmp/zeta".into(), "/tmp/beta".into()])
             .unwrap();
         let aliases: Vec<String> = db

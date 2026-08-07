@@ -35,6 +35,25 @@ describe("deriveDisplayName", () => {
     expect(capped).toBe(capped.trim());
   });
 
+  it("caps by code point, so a surrogate pair is never cut in half", () => {
+    // `String.prototype.slice` cuts UTF-16 code units. A cap landing inside a
+    // pair leaves a lone high surrogate, `JSON.stringify` emits it as `\ud83d`,
+    // and serde_json rejects the entire request body — so the failure surfaced
+    // as an unparseable payload rather than as "that name is too long", with
+    // nothing created. The daemon counts characters, so this also makes the
+    // client's courtesy bound mean the same thing as the real one.
+    const capped = deriveDisplayName("😀".repeat(MAX_DISPLAY_NAME_LEN + 20));
+    expect([...capped]).toHaveLength(MAX_DISPLAY_NAME_LEN);
+    expect(JSON.stringify(capped)).not.toMatch(/\\u[dD][89abAB]/);
+    // Round-trips, which a lone surrogate does not.
+    expect(JSON.parse(JSON.stringify(capped))).toBe(capped);
+
+    // The boundary case: one leading ASCII char makes the cap land exactly
+    // between the two halves of an emoji.
+    const straddle = deriveDisplayName("a" + "😀".repeat(MAX_DISPLAY_NAME_LEN));
+    expect(JSON.parse(JSON.stringify(straddle))).toBe(straddle);
+  });
+
   it("collapses a whitespace-only name to nothing", () => {
     // `""` is the "no separate name" sentinel, so this is how typing spaces into
     // the rename dialog gets you back to the alias rather than to a blank row.

@@ -299,11 +299,18 @@ export function NewWorktreeDialog(props: {
             label="Name"
             placeholder="Checkout V2"
             value={name}
+            maxLength={MAX_DISPLAY_NAME_LEN}
             onChange={(e) => setName(e.currentTarget.value)}
+            /* Both blocking states go on `error`, not only the collision. An
+               unusable name disables Create exactly as a collision does, so
+               rendering it as dimmed prose below the field made the one thing
+               stopping you the quietest thing on screen. */
             error={
               collides
                 ? "This repo already has a checkout with that name"
-                : null
+                : name.trim() !== "" && alias === ""
+                  ? "Nothing in that name can be used as an identifier — add a letter or a digit"
+                  : null
             }
             data-autofocus
           />
@@ -312,19 +319,12 @@ export function NewWorktreeDialog(props: {
               space or a capital (it defaults the run name, which becomes a
               hostname), so it is still worth showing before anything is created.
               Monospace because it is an identifier. */}
-          {name.trim() !== "" && (
+          {alias !== "" && (
             <Text size="xs" c="dimmed">
-              {alias === ""
-                ? "Nothing in that name can be used as an identifier — add a letter or a digit."
-                : null}
-              {alias !== "" && (
-                <>
-                  Shown as <b>{displayName}</b>; identified as{" "}
-                  <Text span ff="monospace">
-                    {alias}
-                  </Text>
-                </>
-              )}
+              Shown as <b>{displayName}</b>; identified as{" "}
+              <Text span ff="monospace">
+                {alias}
+              </Text>
             </Text>
           )}
           {/* Where it lands. Stated rather than assumed: the create was started

@@ -4246,8 +4246,21 @@ function Rail(props: {
                   <button
                     type="button"
                     className="lane-edit"
-                    title={`New worktree in ${group.label}`}
-                    aria-label={`New worktree in ${group.label}`}
+                    /* Described by the *lane*, not by the header text, because
+                       `UNGROUPED_LABEL` is itself a legal lane name — a repo with
+                       a lane called "Worktrees" would otherwise give two sections
+                       byte-identical accessible names, which a screen reader
+                       cannot tell apart at all. */
+                    title={
+                      group.lane === ""
+                        ? "New worktree, not in a lane"
+                        : `New worktree in ${group.lane}`
+                    }
+                    aria-label={
+                      group.lane === ""
+                        ? "New worktree, not in a lane"
+                        : `New worktree in lane ${group.lane}`
+                    }
                     onClick={(e) => {
                       e.stopPropagation();
                       props.onAdd(group.lane);

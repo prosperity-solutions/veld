@@ -1071,6 +1071,22 @@ fn migrate_v11_pane_sessions(conn: &Connection) -> rusqlite::Result<()> {
 /// lets a `secret: true` var be overridable without veld taking custody of the
 /// secret. A plain scalar round-trips as a bare JSON string, so the common case
 /// stays readable in `sqlite3`.
+fn migrate_v12_var_overrides(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        r#"
+        CREATE TABLE var_overrides (
+            project_id TEXT NOT NULL,
+            scope      TEXT NOT NULL,
+            scope_key  TEXT NOT NULL,
+            name       TEXT NOT NULL,
+            value      TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (project_id, scope, scope_key, name)
+        );
+        "#,
+    )
+}
+
 /// v13: `worktrees.display_name` — the free-text name the rail renders.
 ///
 /// The alias is an *identifier*: it defaults the run name, which feeds the
@@ -1093,22 +1109,6 @@ fn migrate_v11_pane_sessions(conn: &Connection) -> rusqlite::Result<()> {
 /// make every reader handle an absence that means the same thing as `''`.
 fn migrate_v13_worktree_display_name(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch("ALTER TABLE worktrees ADD COLUMN display_name TEXT NOT NULL DEFAULT '';")
-}
-
-fn migrate_v12_var_overrides(conn: &Connection) -> rusqlite::Result<()> {
-    conn.execute_batch(
-        r#"
-        CREATE TABLE var_overrides (
-            project_id TEXT NOT NULL,
-            scope      TEXT NOT NULL,
-            scope_key  TEXT NOT NULL,
-            name       TEXT NOT NULL,
-            value      TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            PRIMARY KEY (project_id, scope, scope_key, name)
-        );
-        "#,
-    )
 }
 
 // ---------------------------------------------------------------------------

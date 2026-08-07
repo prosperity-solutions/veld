@@ -206,7 +206,16 @@ export function worktreeLabel(w: {
  * name and one of them renders with a hole in it.
  */
 export function deriveDisplayName(name: string): string {
-  return name.trim().replace(/\s+/g, " ").slice(0, MAX_DISPLAY_NAME_LEN).trim();
+  // Sliced by **code point**, not by `String.prototype.slice`. That slices UTF-16
+  // code units, so a cap landing inside a surrogate pair leaves a lone high
+  // surrogate — `JSON.stringify` emits it as `\ud83d` and serde_json rejects the
+  // whole request body, so an emoji-heavy name failed as an unparseable payload
+  // rather than as a name that was too long. The daemon's own cap counts
+  // characters, so this also makes the two bounds mean the same thing.
+  return [...name.trim().replace(/\s+/g, " ")]
+    .slice(0, MAX_DISPLAY_NAME_LEN)
+    .join("")
+    .trim();
 }
 
 /**

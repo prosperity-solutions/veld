@@ -546,27 +546,69 @@ fn validate_alias(alias: &str) -> Result<(), ApiError> {
 /// scrollbar.
 const MAX_DISPLAY_NAME_LEN: usize = 80;
 
+/// Characters that are neither control characters nor visible.
+///
+/// **`char::is_control` is not enough, and the gap has teeth.** It reports only
+/// Unicode category Cc (U+0000–1F, U+007F–9F), so every zero-width and
+/// bidirectional-formatting character passes it. Three consequences, all of them
+/// reachable by pasting a name copied out of an issue title or a branch name:
+///
+/// - **A name of one U+200B defeats the `''` sentinel.** It is not empty, so
+///   `worktreeLabel` renders it instead of falling back to the alias, and the
+///   rail row, the palette entry, the window title and the tray item all come out
+///   *blank* — a checkout with nothing on screen identifying it. JavaScript's
+///   `\s` does not match U+200B either, so the create dialog's own whitespace
+///   collapsing does not catch it first.
+/// - **U+2028/U+2029 are real line breaks**, which is precisely what the rule
+///   below says it rejects. `white-space: nowrap` suppresses soft wraps, not
+///   forced ones, so `"prod\u{2028}rm -rf"` renders in the rail as `prod`.
+/// - **U+202E reverses the rendered label**, so `"\u{202E}tset olleH"` displays
+///   as `Hello test`.
+///
+/// An explicit list rather than a Unicode-category crate: this is the whole set
+/// of default-ignorables and bidi controls, it does not move between Unicode
+/// revisions in any way that matters here, and a dependency for one predicate on
+/// one field is the more expensive answer.
+fn is_invisible(c: char) -> bool {
+    matches!(c,
+        '\u{00AD}'                  // soft hyphen
+        | '\u{061C}'                // arabic letter mark
+        | '\u{180E}'                // mongolian vowel separator
+        | '\u{200B}'..='\u{200F}'   // zero-width space/non-joiner/joiner, LRM, RLM
+        | '\u{2028}' | '\u{2029}'   // line separator, paragraph separator
+        | '\u{202A}'..='\u{202E}'   // bidi embedding and override
+        | '\u{2060}'..='\u{2064}'   // word joiner, invisible operators
+        | '\u{2066}'..='\u{2069}'   // bidi isolates
+        | '\u{FEFF}'                // zero-width no-break space / BOM
+        | '\u{FFF9}'..='\u{FFFB}'   // interlinear annotation
+    )
+}
+
 /// Bound the free-text worktree label.
 ///
 /// Unlike the alias this is not an identifier — it never reaches a hostname, a
 /// path, or a command line — so the rule is only "a human can read it in the
-/// rail": non-empty after trimming *or* empty (which clears it back to the
-/// alias), no control characters, and a length cap in **characters**, since the
-/// cap exists for legibility and one emoji is one column, not four.
+/// rail": empty (which clears it back to the alias) or something legible, no
+/// control or invisible characters (see [`is_invisible`]), and a length cap in
+/// **characters**, since the cap exists for legibility and one emoji is one
+/// column, not four.
 ///
-/// Control characters are rejected rather than stripped, matching
-/// `valid_lane_name`: a name carrying a newline renders as invisible garbage,
-/// and silently rewriting what someone typed is worse than telling them it is
-/// not a name. Trimming, on the other hand, *is* applied by the caller — a
-/// trailing space is a typo with one obvious intent.
+/// Rejected rather than stripped, matching `valid_lane_name`: a name that
+/// renders as invisible garbage is not a name, and silently rewriting what
+/// someone typed is worse than telling them so. Trimming, on the other hand,
+/// *is* applied by the caller — a trailing space is a typo with one obvious
+/// intent.
 fn validate_display_name(name: &str) -> Result<(), ApiError> {
-    if name.chars().count() > MAX_DISPLAY_NAME_LEN || name.chars().any(char::is_control) {
+    if name.chars().count() > MAX_DISPLAY_NAME_LEN {
         return Err(err(
             StatusCode::BAD_REQUEST,
-            format!(
-                "the name must be at most {MAX_DISPLAY_NAME_LEN} characters \
-                 and cannot contain control characters"
-            ),
+            format!("the name must be at most {MAX_DISPLAY_NAME_LEN} characters"),
+        ));
+    }
+    if name.chars().any(|c| c.is_control() || is_invisible(c)) {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "the name cannot contain control or zero-width characters",
         ));
     }
     Ok(())
@@ -1257,28 +1299,43 @@ async fn create_worktree(
     // The sync assigns a marker and no lane or label; apply what the dialog chose.
     // Before the alias rename below rather than after, because that rename is the
     // step that can lose a race and return early — and a checkout that ends up
-    // under its branch-derived alias should still be wearing the marker, the name
-    // and the lane the user chose.
-    let dialog_choices = veld_core::db::WorktreePatch {
+    // under its branch-derived alias should still be wearing the marker and the
+    // name the user chose.
+    //
+    // **The lane is deliberately a second write.** Every other field here is
+    // already validated and cannot make `patch_worktree` fail, but the lane is
+    // checked against the `lanes` table inside that transaction — so folding it in
+    // made the whole patch fallible, and a lane deleted between the pre-check
+    // above and this call discarded the name and the marker along with it while
+    // returning an error that reads like the pre-check's "nothing was created".
+    // Split, the failure costs only the thing that actually failed.
+    let named = veld_core::db::WorktreePatch {
         display_name,
         emoji: body.emoji.as_deref(),
         marker_color: body.marker_color.as_deref(),
-        lane: body.lane.as_deref(),
         ..Default::default()
     };
-    let created = if dialog_choices.is_empty() {
-        created
-    } else {
-        db.patch_worktree(created.id, dialog_choices)
-            .map_err(write_err)?;
-        // Re-read rather than patching the local copy field by field: the record
-        // this handler returns is what the UI renders straight away, and a
-        // hand-merged copy is one forgotten field away from a rail row that only
-        // corrects itself on the next poll.
-        db.get_worktree(created.id)
-            .map_err(db_err)?
-            .ok_or_else(|| db_err("worktree vanished after applying the dialog's choices"))?
-    };
+    if !named.is_empty() {
+        db.patch_worktree(created.id, named).map_err(write_err)?;
+    }
+    if let Some(lane) = body.lane.as_deref().filter(|l| !l.is_empty()) {
+        db.patch_worktree(
+            created.id,
+            veld_core::db::WorktreePatch {
+                lane: Some(lane),
+                ..Default::default()
+            },
+        )
+        .map_err(write_err)?;
+    }
+    // Re-read rather than patching the local copy field by field: the record this
+    // handler returns is what the UI renders straight away, and a hand-merged copy
+    // is one forgotten field away from a rail row that only corrects itself on the
+    // next poll.
+    let created = db
+        .get_worktree(created.id)
+        .map_err(db_err)?
+        .ok_or_else(|| db_err("worktree vanished after applying the dialog's choices"))?;
 
     // The sync derives the alias from the branch; apply an explicit custom one.
     let created = match &body.alias {
@@ -1955,6 +2012,68 @@ mod tests {
         assert!(validate_alias("..").is_err());
         assert!(validate_alias("a/b").is_err());
         assert!(validate_alias("").is_err());
+    }
+
+    #[test]
+    fn display_name_validation_bounds_characters_not_bytes() {
+        // Empty is legal and load-bearing: it is the "no separate name" sentinel,
+        // and the only way back to rendering the alias.
+        assert!(validate_display_name("").is_ok());
+        assert!(validate_display_name("Checkout V2 (final)").is_ok());
+
+        // **Characters, not bytes.** `len()` here would pass every ASCII case
+        // above and silently give a German or Japanese name a third of the cap.
+        assert!(validate_display_name(&"ü".repeat(MAX_DISPLAY_NAME_LEN)).is_ok());
+        assert!(validate_display_name(&"😀".repeat(MAX_DISPLAY_NAME_LEN)).is_ok());
+        assert!(validate_display_name(&"x".repeat(MAX_DISPLAY_NAME_LEN)).is_ok());
+        assert!(validate_display_name(&"x".repeat(MAX_DISPLAY_NAME_LEN + 1)).is_err());
+    }
+
+    #[test]
+    fn display_name_validation_rejects_what_renders_as_nothing() {
+        // `char::is_control` is Cc only, so each of these passed it. The failure
+        // is not cosmetic: `worktreeLabel` falls back to the alias on `""` alone,
+        // so a name that is non-empty and invisible is a rail row, a window title
+        // and a tray item with nothing on them identifying the checkout.
+        assert!(validate_display_name("a\nb").is_err(), "newline");
+        assert!(validate_display_name("a\tb").is_err(), "tab");
+        assert!(
+            validate_display_name("\u{200B}").is_err(),
+            "zero-width space"
+        );
+        assert!(
+            validate_display_name("a\u{200D}b").is_err(),
+            "zero-width joiner"
+        );
+        assert!(
+            validate_display_name("a\u{2028}b").is_err(),
+            "line separator"
+        );
+        assert!(
+            validate_display_name("a\u{2029}b").is_err(),
+            "paragraph separator"
+        );
+        assert!(
+            validate_display_name("\u{202E}tset olleH").is_err(),
+            "bidi override"
+        );
+        assert!(
+            validate_display_name("\u{2066}x\u{2069}").is_err(),
+            "bidi isolate"
+        );
+        assert!(validate_display_name("\u{FEFF}name").is_err(), "BOM");
+        assert!(
+            validate_display_name("soft\u{00AD}hyphen").is_err(),
+            "soft hyphen"
+        );
+
+        // Visible whitespace and punctuation stay legal — the rule is "renders as
+        // something", not "is alphanumeric".
+        assert!(
+            validate_display_name("a\u{00A0}b").is_ok(),
+            "no-break space"
+        );
+        assert!(validate_display_name("→ ✓ (!)").is_ok());
     }
 
     #[test]
