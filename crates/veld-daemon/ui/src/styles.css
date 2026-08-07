@@ -222,45 +222,100 @@ select:focus {
 
 /* ---- top bar ------------------------------------------------------------ */
 
+/* Tighter than it reads: 26px controls in a 42px bar leave 8px of air above and
+   below, and 9px between them. The bar is the app's densest row — every pixel it
+   does not use is a pixel of pane. */
 .topbar {
   flex: none;
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 0 12px;
-  height: 46px;
+  gap: 9px;
+  padding: 0 10px;
+  height: 42px;
   background: var(--panel2);
   border-bottom: 1px solid var(--border);
   position: relative;
 }
 
-/* Electron shell: the bar doubles as the frameless window's title bar. */
+/* Electron shell: the bar doubles as the frameless window's title bar.
+ *
+ * `TOPBAR_HEIGHT` in `desktop/src/main.js` mirrors this height and centers the
+ * traffic lights against it — change one and change the other, or the OS-drawn
+ * buttons sit off the bar's own controls. The inset is what clears those
+ * buttons: 13px origin + three 12px lights on a 20px pitch ends at 65px, so 78
+ * leaves them the same 13px of air the rest of the bar uses. */
 .topbar.electron {
-  height: 42px;
-  padding-left: 84px; /* traffic-light inset */
+  height: 40px;
+  padding-left: 78px; /* traffic-light inset */
   -webkit-app-region: drag;
 }
 .topbar.electron > * {
   -webkit-app-region: no-drag;
 }
 
-.wordmark {
-  height: 15px;
-  flex: none;
-  display: block;
+/* One control height for the whole bar.
+ *
+ * Left to Mantine's own defaults the row staggers: a `compact-sm` Button is
+ * 26px, an `md` ActionIcon 28px, an `xs` input 30px — three heights in a strip
+ * of controls that all do the same kind of job. 26px is the Share button's,
+ * which is the size the bar was designed around.
+ *
+ * The `!important`s are load-bearing rather than lazy: Mantine derives
+ * `--button-height`, `--ai-size` and `--input-height` from the `size` prop and
+ * writes them as *inline* styles on the control, and an inline custom property
+ * beats any selector we can write. Overriding the var (not `height`) keeps
+ * every value Mantine computes from it — padding, line-height, section widths —
+ * consistent with the new box.
+ *
+ * Scoped to `.topbar` so dialogs and panes keep Mantine's sizing; menus and
+ * dropdowns portal to `body`, so their contents are outside this too. */
+.topbar {
+  --topbar-control-h: 26px;
 }
-.wordmark path {
-  fill: var(--text);
+.topbar .mantine-Button-root {
+  --button-height: var(--topbar-control-h) !important;
 }
-.wordmark path:last-child {
-  fill: var(--accent);
+.topbar .mantine-ActionIcon-root {
+  --ai-size: var(--topbar-control-h) !important;
+}
+.topbar .mantine-Input-wrapper {
+  --input-height: var(--topbar-control-h) !important;
+}
+/* One type size and one weight for the whole bar, matching the fields.
+ *
+ * Mantine's `compact-sm` button is 14px medium, its `xs` input 12px regular, so
+ * the two widest labels — the start preset and Share — came out both larger and
+ * heavier than the project they sit beside, and read as the loudest things on
+ * screen. Weight is the bar's scarcest signal and it is spent on the filled
+ * green active-share state instead. `--button-fz` again rather than `font-size`,
+ * because Mantine writes it inline from the `size` prop. */
+.topbar .mantine-Button-root {
+  --button-fz: 12px !important;
+}
+.topbar .mantine-Button-root,
+.topbar .mantine-Input-input {
+  font-weight: 400;
+}
+
+/* SegmentedControl has no height var — its box is the root's 4px padding plus
+   the labels' own. Both have to give for it to reach 26px: the root's padding
+   is halved and the labels drop their vertical padding, centering in what the
+   root's `align-items: stretch` hands them. */
+.topbar .mantine-SegmentedControl-root {
+  height: var(--topbar-control-h);
+  padding: 2px;
+}
+.topbar .mantine-SegmentedControl-label {
+  display: flex;
+  align-items: center;
+  padding-block: 0;
 }
 
 .topbar .sep {
   width: 1px;
-  height: 26px;
+  height: var(--topbar-control-h);
   background: var(--border);
-  margin: 0 2px;
+  margin: 0 1px;
 }
 
 .btn {
@@ -2691,25 +2746,73 @@ body[data-theme="light"] .swatch-cell > span {
   padding: 12px 0;
 }
 
-/* ---- logo / mode switch ----------------------------------------------------- */
+/* ---- mode switch ------------------------------------------------------------ */
 
-.logo-switch {
-  display: grid;
-  align-items: center;
+/* The bar's first control, in both modes. `flex: none` because the bar is a
+   flex row and this must not be what gives when it gets crowded — it is the
+   only way out of the mode you are in. */
+.topbar .mode-switch-slot {
+  display: flex;
   flex: none;
 }
 
-/* Both layers share the grid cell — the wider one reserves the space, the
-   crossfade never shifts the bar. */
-.ls-layer {
+/* A shade smaller than the rest of the bar on purpose: the label is a *state*
+   ("you are in the IDE"), not one of the bar's verbs. `.mantine-Button-root` is
+   in the selector only to outrank the bar-wide 12px rule on specificity rather
+   than on source order — two `!important` declarations of equal weight are
+   settled by whichever comes last in the file, which is not a thing to leave a
+   reader to work out. */
+.topbar .mode-switch.mantine-Button-root {
+  --button-fz: 11px !important;
+}
+
+/* Both states share one grid cell, so the wider of them (mark + label) sets the
+   button's width once and the swap glyph crossfades inside it. Nothing in the
+   bar moves as the pointer crosses — which is the whole reason for the grid
+   rather than swapping the contents out. */
+.topbar .mode-switch .mantine-Button-label {
+  display: grid;
+  align-items: center;
+  justify-items: center;
+}
+.topbar .mode-switch .ms-layer {
   grid-area: 1 / 1;
   display: flex;
   align-items: center;
-  opacity: 0;
-  transition: opacity 0.18s ease;
+  gap: 9px;
+  transition: opacity 0.15s ease;
 }
-.ls-layer.show {
+.topbar .mode-switch .ms-hover {
+  opacity: 0;
+}
+/* `.hovered` is a React class, not `:hover` — see ModeSwitch. `:focus-visible`
+   stays a real pseudo-class: a keyboard user gets no pointer and would
+   otherwise never see that the control does anything. */
+.topbar .mode-switch.hovered .ms-rest,
+.topbar .mode-switch:focus-visible .ms-rest {
+  opacity: 0;
+}
+.topbar .mode-switch.hovered .ms-hover,
+.topbar .mode-switch:focus-visible .ms-hover {
   opacity: 1;
+}
+
+/* The mark takes the theme tokens rather than logo.svg's baked-in white and
+   #C4F56A — see components/LogoMark.tsx and docs/branding.md. The dot hangs one
+   unit below the V's foot in the source geometry, so the box is square and the
+   glyph is not re-cropped here — which is also why it sits a shade lower than
+   the cap height of the label beside it. */
+.logo-mark {
+  height: 12px;
+  width: 12px;
+  flex: none;
+  display: block;
+}
+.logo-mark path:first-child {
+  fill: var(--text);
+}
+.logo-mark path:last-child {
+  fill: var(--accent);
 }
 
 /* ---- centered / empty states ------------------------------------------------ */
@@ -2872,9 +2975,3 @@ body[data-theme="light"] .swatch-cell > span {
   font-weight: 700;
 }
 
-/* Monospace form controls (project switcher etc.) — hard override, not the
-   Mantine variable, so the input value is mono regardless of slot styling. */
-.mono-field input,
-.mono-field select {
-  font-family: "JetBrains Mono Variable", ui-monospace, monospace;
-}

@@ -58,7 +58,7 @@ import {
   type WorktreeStatus,
 } from "./model";
 import { startOriginLabel } from "./shared/startOrigin";
-import { Wordmark } from "./components/Wordmark";
+import { LogoMark } from "./components/LogoMark";
 import {
   ActionIcon,
   Button,
@@ -406,42 +406,72 @@ function useUrlSelection(): {
 }
 
 /**
- * The Runs|IDE switcher hides behind the wordmark: hover reveals it, unhover
- * restores the logo. The switcher stays rendered (visibility:hidden) so the
- * bar reserves its width and nothing shifts on hover.
+ * The Runs|IDE switcher, first control in both top bars.
+ *
+ * It used to hide behind the wordmark and appear on hover. That made the one
+ * control that moves between the app's two modes invisible until the pointer
+ * happened to cross it — a logo where a button belongs. The wordmark is gone
+ * from this bar entirely rather than moved: the bar is dense, and the brand is
+ * carried by the favicon, the window/app icon and the daemon's own pages.
+ *
+ * At rest it is the mark plus the mode you are **in** — `V IDE`. Under the
+ * pointer both are replaced by the swap glyph, and only the tooltip names the
+ * mode a click reaches. A button that reads "Runs" while showing the IDE has to
+ * be read as an instruction rather than a state, and the two readings are
+ * indistinguishable at a glance; this way the resting state answers "where am
+ * I", which is the question a bar is for, and the hover state answers "and what
+ * happens if I press it".
+ *
+ * The two states are layered in one grid cell, so the wider of them fixes the
+ * button's width and nothing in the bar moves as the pointer crosses it.
  */
-function LogoModeSwitch(props: {
+function ModeSwitch(props: {
   mode: string;
   onMode: (m: string) => void;
-  /** Hover state lives in the parent: this component remounts when the mode
-   *  switches bars, and a local state reset would flash the logo mid-hover. */
+  /**
+   * Hover state, owned by the parent.
+   *
+   * Not a `:hover` rule and not local state, both of which replay the crossfade
+   * after a click: switching mode moves this control from one bar to the other,
+   * React unmounts it and mounts a new one, and the fresh node starts at the
+   * resting state and animates back to hover under a pointer that never moved.
+   * Held above the two bars, the new node mounts already hovered — and an
+   * element whose first computed style *is* the end state does not transition.
+   */
   hover: boolean;
   onHover: (h: boolean) => void;
 }) {
-  const { hover, onHover: setHover } = props;
   const other = props.mode === "ide" ? "runs" : "ide";
-  const otherLabel = other === "runs" ? "Runs" : "IDE";
+  const label = (m: string) => (m === "runs" ? "Runs" : "IDE");
   return (
+    // The pointer listeners sit outside the Tooltip rather than on the Button:
+    // Mantine clones its child and passes the child's own handlers through
+    // floating-ui's prop merger, which is one indirection too many to rely on
+    // for the control that has to keep working to leave a mode.
     <div
-      className="logo-switch"
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
+      className="mode-switch-slot"
+      onMouseEnter={() => props.onHover(true)}
+      onMouseLeave={() => props.onHover(false)}
     >
-      <div className={`ls-layer${hover ? " show" : ""}`}>
-        <Tooltip label={`Switch to ${otherLabel}`}>
-          <Button
-            size="compact-xs"
-            variant="default"
-            leftSection={<IconArrowsExchange size={13} />}
-            onClick={() => props.onMode(other)}
-          >
-            {otherLabel}
-          </Button>
-        </Tooltip>
-      </div>
-      <div className={`ls-layer${hover ? "" : " show"}`} style={{ pointerEvents: "none" }}>
-        <Wordmark />
-      </div>
+      <Tooltip label={`Switch to ${label(other)}`}>
+        <Button
+          size="compact-sm"
+          variant="default"
+          className={`mode-switch${props.hover ? " hovered" : ""}`}
+          onClick={() => props.onMode(other)}
+        >
+          <span className="ms-layer ms-rest">
+            <LogoMark />
+            {label(props.mode)}
+          </span>
+          {/* Hidden from the accessibility tree: the button's name is the mode
+              it shows plus the tooltip, and a second glyph in there would
+              announce a decoration as if it were content. */}
+          <span className="ms-layer ms-hover" aria-hidden="true">
+            <IconArrowsExchange size={14} />
+          </span>
+        </Button>
+      </Tooltip>
     </div>
   );
 }
@@ -2552,11 +2582,11 @@ function AppInner(props: {
     await refresh();
   };
 
-  // Hover lives here so the crossfade survives LogoModeSwitch remounting
-  // when it moves between the runs and IDE bars.
+  // Above both bars so the crossfade survives ModeSwitch remounting as it moves
+  // between them — see the component's own note.
   const [switchHover, setSwitchHover] = useState(false);
   const modeSwitch = (
-    <LogoModeSwitch
+    <ModeSwitch
       mode={mode}
       onMode={setMode}
       hover={switchHover}
@@ -3578,7 +3608,7 @@ function RunSelect(props: {
         <Button
           size="compact-sm"
           variant="default"
-          className="mono-field run-select"
+          className="run-select"
           title={tooltip}
           leftSection={
             <span
@@ -3746,10 +3776,11 @@ function TopBar(props: {
             label: r.available ? r.name : `${r.name} (unavailable)`,
           }))}
           comboboxProps={{ width: 240, position: "bottom-start" }}
-          className="mono-field"
-          styles={{
-            option: { fontFamily: "var(--mantine-font-family-monospace)" },
-          }}
+          /* Not monospace, unlike the start preset beside it: a project's name
+             is a name, where the preset carries a `node:variant` path whose
+             punctuation is worth fixed-width. The dropdown options lost the
+             mono override with the field, so the closed and open states cannot
+             disagree. */
         />
       )}
       <Menu position="bottom-start" width={200}>
