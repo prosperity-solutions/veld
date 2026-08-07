@@ -49,6 +49,25 @@ function windowSeed() {
   }
 }
 
+/**
+ * Whether this window is in native full screen as the page starts.
+ *
+ * Synchronous for the same reason `windowSeed` is, though the stake is cosmetic
+ * rather than structural: the top bar holds a 90px inset for the traffic lights,
+ * full screen removes them, and a state that lands one tick late shows an empty
+ * gutter on every reload taken in full screen. Changes arrive on
+ * `veld:window:fullscreen`.
+ */
+function windowFullScreen() {
+  try {
+    return ipcRenderer.sendSync("veld:window:fullscreen") === true;
+  } catch {
+    // An older shell without the channel: not full screen, which is the state
+    // every window had before this existed.
+    return false;
+  }
+}
+
 /** Subscribe to a main→renderer channel, returning an unsubscribe. */
 function on(channel, fn) {
   const listener = (_event, payload) => fn(payload);
@@ -83,6 +102,11 @@ contextBridge.exposeInMainWorld("veldDesktop", {
      *  then may the page restore that slot's durable layout — see `readLayouts`. */
     restored: fromArgv("--veld-window-restored=") === "1",
     seed: windowSeed(),
+    /** Native full screen at page start, and every change after it. The top bar
+     *  gives back its traffic-light inset in full screen — macOS moves those
+     *  buttons out of the content area, and no CSS in the page can see that. */
+    fullScreen: windowFullScreen(),
+    onFullScreen: (fn) => on("veld:window:fullscreen", fn),
     /** Open another full window. With no payload it inherits the app-wide last
      *  selection (what ⌘N does); with one it opens on that worktree. */
     newWindow: (payload) => ipcRenderer.invoke("veld:window:new", payload ?? {}),

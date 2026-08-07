@@ -72,9 +72,19 @@ const REPOS_URL = `${BASE_URL}/api/repos`;
  * light. Together they place the buttons, which the OS draws — no CSS can move
  * them, so without this they sit at `hiddenInset`'s default and read as
  * misaligned against the bar's own controls. Keep in sync with that stylesheet.
+ *
+ * **14, not the 12 every older recipe on the internet says.** macOS 26 (Tahoe)
+ * grew the window buttons: measured off a 2× screenshot of this app's own bar,
+ * the circles are 14pt across on a 23pt pitch, where Big Sur through Sequoia
+ * drew 12pt on 20pt. `trafficLightPosition` maps straight onto the circle's
+ * top-left corner (both axes — verified against `x: 13` in the same shot), so
+ * the size is the *only* thing the centring depends on, and a stale 12 put the
+ * lights 1.5px below the bar's own controls. On a pre-Tahoe system the same
+ * number costs 1px in the other direction, which is the cheaper error to carry
+ * than a version check over a value Electron does not expose.
  */
 const TOPBAR_HEIGHT = 40;
-const TRAFFIC_LIGHT_SIZE = 12;
+const TRAFFIC_LIGHT_SIZE = 14;
 
 /** @type {Tray | null} */
 let tray = null;

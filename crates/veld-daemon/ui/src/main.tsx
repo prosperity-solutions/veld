@@ -10,6 +10,12 @@ import "./styles.css";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./App";
+import { watchFullScreen } from "./shell";
+
+// Before the first render: the top bar's traffic-light inset is a CSS rule keyed
+// off `<body data-fullscreen>`, and a page that boots in full screen would
+// otherwise paint one frame with a 90px gutter for buttons macOS is not drawing.
+watchFullScreen();
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
