@@ -182,9 +182,10 @@ veld stop --name dev
 | `veld unshare [SHARE_ID] [--json]` | Stop hosting a share (defaults to the sole active share) |
 | `veld leave [JOIN_ID] [--json]` | Disconnect from a joined share (defaults to the sole active join) |
 | `veld ui` | Open the management dashboard in the browser |
-| `veld desktop [status] [--json]` | Where Veld Desktop is installed and whether it matches the CLI |
+| `veld update` | Update the whole release — CLI, daemon, helper, and on macOS Veld Desktop. Asks before closing a running app and reopens it afterwards; a non-interactive run leaves it alone |
+| `veld desktop [status] [--json]` | Where Veld Desktop is installed and whether it matches the CLI. `--json` also lists what this CLI can be asked to do (`capabilities`) |
 | `veld desktop install` | Install the Mac app (macOS). Skips the Gatekeeper detour a browser download gets, since curl sets no quarantine flag |
-| `veld desktop update [--relaunch]` | Update the installed app to this CLI's version. `veld update` does this on its own when the app is installed |
+| `veld desktop update [--relaunch]` | Update the installed app *only*, to this CLI's version. `veld update` covers this — reach for it when you want the app half on its own |
 | `veld gc` | Clean up stale state and logs |
 | `veld setup [unprivileged\|privileged]` | One-time system setup |
 | `veld config [--path] [--files] [--why <pointer>] [--json]` | Print the config. `--files`: each `include` glob, the files it matched, and the nodes each defines. `--why`: one effective value and where it was defined (a `secret` is described, never printed) |
@@ -497,7 +498,20 @@ On macOS **the installer brings it with the CLI** — `curl -fsSL https://veld.o
 
 Installing it this way is also what **skips the Gatekeeper detour.** A build downloaded in a browser carries `com.apple.quarantine`, and that flag is what makes macOS refuse the first launch of an app that is not notarized. curl does not set it, so an app installed by veld simply opens. `veld desktop status` says what is installed and whether it matches the CLI.
 
-The app's own *Check for Updates…* hands the job to the CLI too: Veld quits, the CLI swaps the bundle, the app reopens on the new version — an app cannot replace its own bundle while running. Updating the app is only ever an *app* operation: it never reinstalls the CLI, restarts your daemon, or asks for a password. It needs a CLI new enough to have `veld desktop`; against an older one the app points you at the release page instead of quitting into a command that does not exist. And because nothing is watching a terminal while the app is gone, the installer's output lands in `~/.veld/desktop-update.log` and the app tells you on the way back if it did not work, rather than reopening on the old version in silence. On Linux the AppImage still updates itself and a `.deb` still belongs to your package manager.
+The app's own *Check for Updates…* hands the job to the CLI, and hands it the **whole release**: the dialog offers *veld 16.8.0*, not a new app, and *Quit and Update veld* runs `veld update` — CLI, daemon, helper and app, from one tag, in one restart. An app cannot replace its own bundle while running, so it quits, the CLI does the work, and the app reopens on the new version. This is why there is no second trip to a terminal afterwards, and no "your CLI is behind" notice a minute later: both halves move together or neither does.
+
+It needs a CLI that advertises it can do it — `veld desktop status --json` reports a `capabilities` list, and `full-update-handoff` is the one that matters. Two things withhold it: a CLI too old to have the flags, and **a CLI installed under `/usr/local`**. The second is not a version problem: `install.sh` refuses to relocate a system install (a privileged LaunchDaemon still points at `/usr/local` paths), so it needs `sudo`, and the app's handoff is a detached process with no terminal for sudo to prompt on. Rather than quit into an update that would fail, those machines get the app-only `veld desktop update` — exactly what they got before — and the dialog says *run `veld update` afterwards to move the rest of the release*. From a terminal, where sudo **can** prompt, `veld update` moves both halves for them normally. Against a CLI with no `veld desktop` at all the app points you at the release page rather than quitting into a command that does not exist. Because nothing is watching a terminal while the app is gone, everything the update says lands in `~/.veld/desktop-update.log`, and the app tells you on the way back if it did not work rather than reopening on the old version in silence. On Linux the AppImage still updates itself and a `.deb` still belongs to your package manager.
+
+**From a terminal it works the other way round.** `veld update` with the app open used to print an error and skip it — the bundle cannot be swapped under a running app — so it now asks first:
+
+```
+ℹ Veld Desktop is running, and its bundle cannot be replaced while it is.
+  Nothing is lost: terminal sessions belong to the daemon, keep running while the
+  app is closed, and reattach with their scrollback when it reopens.
+  Close Veld Desktop, update both halves, and reopen it? [Y/n]
+```
+
+Yes closes it politely — an Apple Event first, so `before-quit` persists your window layout exactly as ⌘Q would, falling back to `SIGTERM`, never `SIGKILL` — updates everything, and reopens it. Say no and only the CLI half moves. An app showing an unanswered dialog is left alone rather than forced. A **non-interactive** run (no TTY, or `VELD_NON_INTERACTIVE`) never closes your app without being asked: it skips the app half and says so, which is what keeps a scripted or agent-driven `veld update` from taking a window off your screen.
 
 You can also download the `.dmg` (macOS) or `.AppImage` / `.deb` (Linux x64) from the [latest release](https://github.com/prosperity-solutions/veld/releases/latest) — `checksums.txt` on the same page has a SHA-256 for every artifact. The app ships with every veld release and carries the same version number as the CLI — one tag, one version, so the app and the daemon it talks to are halves of the same thing. When they drift apart the app says so and names the fix.
 

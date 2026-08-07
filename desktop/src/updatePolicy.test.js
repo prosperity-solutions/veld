@@ -2,11 +2,15 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 
 const {
+  FULL_UPDATE_HANDOFF,
   REPORT_MAX_AGE_MS,
+  capabilitiesFrom,
   cliCandidatePaths,
   compareVersions,
   downloadOnlyReason,
+  handoffCommand,
   looksLikeVeldCli,
+  primaryAction,
   releasePageUrl,
   reportIsFresh,
   updateMode,
@@ -239,4 +243,104 @@ test("a handoff report expires, so yesterday's failure is not announced today", 
 
   assert.equal(typeof REPORT_MAX_AGE_MS, "number");
   assert.ok(REPORT_MAX_AGE_MS > 0);
+});
+
+test("a CLI that advertises nothing gets the app-only command", () => {
+  const ctx = { version: "16.8.0", pid: 4321, execPath: "/Applications/Veld.app/Contents/MacOS/Veld" };
+
+  // No capabilities key, unparseable output, a non-array, non-string members —
+  // every one of these must land on the command an older CLI understands. The
+  // failure being avoided is spawning `veld update --wait-pid` at a CLI that
+  // rejects the flag, exits 2, and leaves the user with no window at all.
+  for (const stdout of [
+    undefined,
+    null,
+    "",
+    "not json",
+    "{}",
+    '{"capabilities": "full-update-handoff"}',
+    '{"capabilities": null}',
+    '{"capabilities": [42, {"a": 1}]}',
+  ]) {
+    const capabilities = capabilitiesFrom(stdout);
+    assert.deepEqual(capabilities, [], `capabilities from ${JSON.stringify(stdout)}`);
+    const { args, full } = handoffCommand({ capabilities, ...ctx });
+    assert.equal(full, false);
+    assert.deepEqual(args, [
+      "desktop",
+      "update",
+      // Required on this path and only this path: without it an older CLI
+      // reinstalls its own version, relaunches, is offered the newer one again,
+      // and never converges.
+      "--version",
+      "16.8.0",
+      "--wait-pid",
+      "4321",
+      "--relaunch",
+      "--app-path",
+      "/Applications/Veld.app/Contents/MacOS/Veld",
+    ]);
+  }
+});
+
+test("a CLI that advertises the handoff updates the whole release", () => {
+  const stdout = JSON.stringify({
+    installed: true,
+    version: "16.7.1",
+    capabilities: [FULL_UPDATE_HANDOFF, "some-future-thing"],
+  });
+  const capabilities = capabilitiesFrom(stdout);
+  assert.deepEqual(capabilities, [FULL_UPDATE_HANDOFF, "some-future-thing"]);
+
+  const { args, full } = handoffCommand({
+    capabilities,
+    version: "16.8.0",
+    pid: 99,
+    execPath: "/Users/x/Applications/Veld.app/Contents/MacOS/Veld",
+  });
+  assert.equal(full, true);
+  assert.deepEqual(args, [
+    "update",
+    // The release the app was offered, from the feed that offered it. Without
+    // it the CLI asks api.github.com — a second source, rate-limited per IP and
+    // briefly out of step with the feed after a release.
+    "--target-version",
+    "16.8.0",
+    "--wait-pid",
+    "99",
+    "--relaunch",
+    "--app-path",
+    "/Users/x/Applications/Veld.app/Contents/MacOS/Veld",
+  ]);
+  // Spelled differently from the app-only route's `--version` on purpose: the
+  // two mean different things ("install this release" vs "install this app
+  // build"), and a CLI old enough to know only the latter must reject this
+  // outright rather than half-understand it.
+  assert.equal(args.includes("--version"), false);
+});
+
+test("the button never promises more than the mode can deliver", () => {
+  // Only the full handoff may name the CLI: every other route moves the app
+  // alone, and a label that says "veld" would be a claim nothing behind it honours.
+  assert.equal(
+    primaryAction({ viaCli: true, canInstall: false, full: true }),
+    "Quit and Update veld",
+  );
+  assert.equal(
+    primaryAction({ viaCli: true, canInstall: false, full: false }),
+    "Quit and Update",
+  );
+  assert.equal(
+    primaryAction({ viaCli: false, canInstall: true, full: false }),
+    "Download and Install",
+  );
+  assert.equal(
+    primaryAction({ viaCli: false, canInstall: false, full: false }),
+    "Open Release Page",
+  );
+  // `full` is meaningless without the CLI route, and must not leak into it.
+  assert.equal(
+    primaryAction({ viaCli: false, canInstall: true, full: true }),
+    "Download and Install",
+  );
 });

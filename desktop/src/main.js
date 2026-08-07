@@ -677,3 +677,24 @@ app.on("window-all-closed", () => {
   // Keep the tray alive on macOS (standard behavior); quit elsewhere.
   if (process.platform !== "darwin") app.quit();
 });
+
+/**
+ * A `SIGTERM` is a polite request to quit, so answer it politely.
+ *
+ * `veld update` closes the app before replacing its bundle. It asks over an Apple
+ * Event first — which is Automation-TCC-gated and can be denied — and falls back
+ * to this signal. Node's default disposition would end the process on the spot:
+ * `before-quit` never runs, so the window layout, the persisted window set and a
+ * detached window's tabs are all lost, for an update that was meant to cost
+ * nothing. Turning it into `app.quit()` makes the fallback path identical to ⌘Q.
+ *
+ * `SIGINT` for the same reason on the one path that has it: an unpackaged
+ * `npm start` in a terminal, where ⌃C should not abandon window state either.
+ *
+ * Not `SIGKILL`-adjacent and deliberately not defensive about repeat signals:
+ * `app.quit()` is idempotent, and a second SIGTERM arriving mid-teardown is a
+ * caller that has already decided to wait.
+ */
+for (const signal of ["SIGTERM", "SIGINT"]) {
+  process.on(signal, () => app.quit());
+}
