@@ -30,21 +30,42 @@ const MACOS_SIGNED = false;
  *   swap, and `APPIMAGE` in the environment is how the running process knows it
  *   *is* one (a .deb install has no such variable, and nothing in it a process
  *   may replace without the package manager).
+ * - `"cli"` — hand the update to the veld CLI, which quits this app, replaces the
+ *   bundle and reopens it. macOS only, and only when the CLI is actually present.
+ *   It works where the app cannot replace *itself*: Squirrel.Mac accepts only a
+ *   replacement carrying the running app's signature, which an ad-hoc build does
+ *   not have — while the CLI installs the same release the installer does, with
+ *   curl, which never sets `com.apple.quarantine`, so Gatekeeper is not consulted
+ *   at all. It also keeps the app and the CLI on one version, which is the shape
+ *   the release already promises.
  * - `"download"` — check and tell the user, but hand the install to them. macOS
- *   is here because Squirrel.Mac verifies that the replacement carries the same
- *   code signature as the running app, and veld has no Developer ID yet (issue
- *   #167 §10); the .deb is here because its files belong to dpkg.
+ *   lands here only with no CLI to delegate to, because Squirrel.Mac verifies that
+ *   the replacement carries the same code signature as the running app and veld
+ *   has no Developer ID yet (issue #167 §10); the .deb is here because its files
+ *   belong to dpkg.
  *
- * The macOS half flips with `MACOS_SIGNED` above, once signing lands.
+ * The macOS *self*-install half flips with `MACOS_SIGNED` above, once signing
+ * lands. `"cli"` outranks it either way: same-version-as-the-CLI is worth more
+ * than Squirrel's delta downloads, and it is the one route that works whether or
+ * not the build is signed.
  *
- * @param {{platform: string, isPackaged: boolean, env?: Record<string, string | undefined>, macSigned?: boolean}} ctx
- * @returns {"off" | "install" | "download"}
+ * @param {{platform: string, isPackaged: boolean, env?: Record<string, string | undefined>, macSigned?: boolean, cli?: string | null}} ctx
+ * @returns {"off" | "install" | "download" | "cli"}
  */
-function updateMode({ platform, isPackaged, env = {}, macSigned = MACOS_SIGNED }) {
+function updateMode({
+  platform,
+  isPackaged,
+  env = {},
+  macSigned = MACOS_SIGNED,
+  cli = null,
+}) {
   if (!isPackaged) return "off";
-  // Unsigned → Squirrel.Mac rejects the swap after the download, so there is
-  // nothing to gain by starting one.
-  if (platform === "darwin") return macSigned ? "install" : "download";
+  if (platform === "darwin") {
+    if (cli) return "cli";
+    // Unsigned → Squirrel.Mac rejects the swap after the download, so there is
+    // nothing to gain by starting one.
+    return macSigned ? "install" : "download";
+  }
   if (platform === "linux") return env.APPIMAGE ? "install" : "download";
   return "download";
 }
@@ -146,10 +167,64 @@ function releasePageUrl(version) {
   return `https://github.com/${GITHUB_REPO}/releases/${tag}`;
 }
 
+/**
+ * Where to look for the veld CLI, in the order the app is willing to trust.
+ *
+ * A GUI app has no usable PATH — a launchd-started one gets a bare service PATH
+ * — so `which veld` is not a question that can be asked. These are the
+ * directories `install.sh` writes to, in the order it prefers them, so the app
+ * resolves the same binary the installer last wrote.
+ *
+ * **This order is not a security boundary, and an earlier version of this
+ * comment claimed it was.** The claim was that root-owned prefixes are probed
+ * before the user-writable one — but on Apple Silicon `/opt/homebrew/bin` is
+ * `drwxrwxr-x <user>:admin`, i.e. writable by the same user as `~/.local/bin`,
+ * and it is ranked above it. More to the point, anything that can write a file
+ * into *any* of these directories can already replace the real veld binary, so
+ * no ordering of them buys a defence. What the order actually buys is agreement
+ * with `install.sh`: prefer a system prefix, fall back to `$HOME`. Do not
+ * reintroduce a security argument here without changing the mechanism.
+ *
+ * @param {{home: string}} ctx
+ * @returns {string[]}
+ */
+function cliCandidatePaths({ home }) {
+  return [
+    "/usr/local/bin/veld",
+    "/opt/homebrew/bin/veld",
+    `${home}/.local/bin/veld`,
+  ];
+}
+
+/**
+ * Whether `veld --version` output came from the veld CLI.
+ *
+ * Being executable and being named `veld` is not the same as being veld. Be
+ * precise about what this buys, because the obvious reading is wrong: the check
+ * is performed *by running the candidate*, so it cannot stop a bogus binary from
+ * executing — by the time this sees any output, it has already run. What it
+ * stops is the second, worse execution: without it, a wrong binary would be
+ * re-spawned **detached**, unbounded, with the app quitting behind it. With it,
+ * a wrong binary gets one 2-second, `PATH`-restricted, output-inspected run and
+ * is then discarded.
+ *
+ * The CLI prints `veld <semver>` (clap's `--version`), so that is what this
+ * accepts — and nothing that merely mentions the word.
+ *
+ * @param {string | null | undefined} output
+ * @returns {boolean}
+ */
+function looksLikeVeldCli(output) {
+  if (typeof output !== "string") return false;
+  return /^veld\s+v?\d+\.\d+\.\d+/i.test(output.trim());
+}
+
 module.exports = {
   GITHUB_REPO,
+  cliCandidatePaths,
   compareVersions,
   downloadOnlyReason,
+  looksLikeVeldCli,
   releasePageUrl,
   updateMode,
   versionSkew,

@@ -2,8 +2,10 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 
 const {
+  cliCandidatePaths,
   compareVersions,
   downloadOnlyReason,
+  looksLikeVeldCli,
   releasePageUrl,
   updateMode,
   versionSkew,
@@ -30,6 +32,40 @@ test("macOS is download-only until the app is signed", () => {
   assert.equal(
     updateMode({ platform: "linux", isPackaged: true, env: {}, macSigned: true }),
     "download",
+  );
+});
+
+test("the veld CLI takes the macOS update when there is one to take it", () => {
+  const cli = "/Users/x/.local/bin/veld";
+  assert.equal(updateMode({ platform: "darwin", isPackaged: true, cli }), "cli");
+  // Outranks Squirrel even once the app is signed: the CLI is what keeps the app
+  // and the CLI on one version, which is what the release promises.
+  assert.equal(
+    updateMode({ platform: "darwin", isPackaged: true, cli, macSigned: true }),
+    "cli",
+  );
+  // No CLI on the machine → unchanged behaviour, both sides of the signing switch.
+  assert.equal(updateMode({ platform: "darwin", isPackaged: true }), "download");
+  assert.equal(
+    updateMode({ platform: "darwin", isPackaged: true, cli: null, macSigned: true }),
+    "install",
+  );
+  // An unpackaged run has no bundle to replace, CLI or not.
+  assert.equal(updateMode({ platform: "darwin", isPackaged: false, cli }), "off");
+  // macOS only: the Linux AppImage already replaces itself, and a .deb belongs to
+  // the package manager whatever else is installed.
+  assert.equal(
+    updateMode({ platform: "linux", isPackaged: true, env: {}, cli }),
+    "download",
+  );
+  assert.equal(
+    updateMode({
+      platform: "linux",
+      isPackaged: true,
+      env: { APPIMAGE: "/opt/Veld.AppImage" },
+      cli,
+    }),
+    "install",
   );
 });
 
@@ -127,4 +163,36 @@ test("releasePageUrl points at the tag, or at latest without one", () => {
     releasePageUrl(undefined),
     "https://github.com/prosperity-solutions/veld/releases/latest",
   );
+});
+
+test("CLI candidates are the installer's own directories, system prefix first", () => {
+  // Scoped deliberately. An earlier version of this test asserted the order was
+  // a *trust* boundary — "the user-writable candidate must be last" — which is
+  // false: /opt/homebrew/bin is drwxrwxr-x <user>:admin on Apple Silicon and
+  // ranks above ~/.local/bin, and anything able to write to any of these can
+  // replace the real veld anyway. What the order genuinely pins is agreement
+  // with install.sh, so that the app resolves the binary the installer wrote.
+  assert.deepEqual(cliCandidatePaths({ home: "/Users/x" }), [
+    "/usr/local/bin/veld",
+    "/opt/homebrew/bin/veld",
+    "/Users/x/.local/bin/veld",
+  ]);
+});
+
+test("looksLikeVeldCli accepts the CLI's own --version and nothing looser", () => {
+  // What `veld --version` actually prints (clap).
+  assert.equal(looksLikeVeldCli("veld 16.6.0"), true);
+  assert.equal(looksLikeVeldCli("  veld 16.6.0\n"), true);
+  assert.equal(looksLikeVeldCli("veld v16.6.0"), true);
+
+  // The point of the check: being executable and being named `veld` is not the
+  // same as being veld, and this is the only thing standing between the two.
+  assert.equal(looksLikeVeldCli("veld"), false);
+  assert.equal(looksLikeVeldCli("veldctl 1.2.3"), false);
+  assert.equal(looksLikeVeldCli("this is not veld 1.2.3"), false);
+  assert.equal(looksLikeVeldCli("bash: veld: command not found"), false);
+  assert.equal(looksLikeVeldCli(""), false);
+  for (const junk of [null, undefined, {}, 12, ["veld 1.0.0"]]) {
+    assert.equal(looksLikeVeldCli(junk), false, `${JSON.stringify(junk)} is not veld`);
+  }
 });

@@ -17,11 +17,21 @@
 // laptop is offline more often than a release is broken). A check the user asked
 // for reports every outcome, including "you're up to date".
 
+const { execFile, spawn } = require("node:child_process");
+const fs = require("node:fs");
+const os = require("node:os");
+const { promisify } = require("node:util");
+const path = require("node:path");
+
+const execFileAsync = promisify(execFile);
+
 const { Notification, app, dialog, shell } = require("electron");
 const { autoUpdater } = require("electron-updater");
 
 const {
+  cliCandidatePaths,
   downloadOnlyReason,
+  looksLikeVeldCli,
   releasePageUrl,
   updateMode,
   versionSkew,
@@ -31,7 +41,117 @@ const {
 const FIRST_CHECK_DELAY_MS = 15_000;
 const CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
-/** @type {"off" | "install" | "download"} */
+/**
+ * The PATH the CLI is handed, rather than the one this process happens to have.
+ *
+ * A launchd-started app's PATH is whatever launchd felt like; a Finder-started
+ * one inherits from `loginwindow`. `install.sh` reads the environment it is given
+ * — it is where `curl`, `ditto`, `shasum` and `PlistBuddy` come from — so leaving
+ * that to chance is leaving the install to chance. Everything the desktop path of
+ * the script uses lives in these four directories.
+ */
+const SAFE_PATH = "/usr/bin:/bin:/usr/sbin:/sbin";
+
+/** Where `veld desktop update` leaves word about how it went. */
+const updateReportPath = () =>
+  path.join(os.homedir(), ".veld", "desktop-update.json");
+
+/**
+ * Where the veld CLI is, if this machine has one.
+ *
+ * A GUI app does not inherit the shell's PATH — a launchd-started app gets a bare
+ * one — so `which veld` is not a question that can be asked here. These are the
+ * directories `install.sh` writes to, which is the same reasoning the daemon's
+ * own PATH handling uses: look where the installer puts things, not where a login
+ * shell would have found them.
+ *
+ * Resolved lazily and re-resolved per check, never at startup: the probes below
+ * spawn processes, and a session outlives a `veld update` that moves the CLI.
+ *
+ * Two claims worth reading precisely, both of which live in `updatePolicy.js`
+ * with tests: the candidate order matches `install.sh`'s own preference and is
+ * **not** a trust boundary (anything able to write to any of these can replace
+ * the real veld), and the `--version` check cannot stop a wrong binary from
+ * running — it is performed by running it — but it does stop one from being
+ * re-spawned detached with the app quitting behind it.
+ *
+ * @type {string | null}
+ */
+let cliPath = null;
+
+/**
+ * Whether `candidate` is really the veld CLI.
+ *
+ * Asynchronous, like every probe here: these run on the main thread, and a
+ * candidate that hangs would freeze the window rather than just the check.
+ *
+ * @param {string} candidate
+ * @returns {Promise<boolean>}
+ */
+async function isVeldCli(candidate) {
+  try {
+    fs.accessSync(candidate, fs.constants.X_OK);
+  } catch {
+    return false;
+  }
+  try {
+    const { stdout } = await execFileAsync(candidate, ["--version"], {
+      encoding: "utf8",
+      timeout: 2000,
+      // A bare launchd PATH is enough for `--version`, and an inherited one
+      // would let the environment decide what a subprocess of this resolves to.
+      env: { PATH: SAFE_PATH },
+    });
+    return looksLikeVeldCli(stdout);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Whether this veld can actually carry out the handoff.
+ *
+ * Being veld is not enough: `veld desktop` is newer than the app, and the two
+ * halves do come apart — a `.dmg` download, or a `veld update` that failed after
+ * the app half. Such a CLI exits 2 on an unknown subcommand, and by then the app
+ * has already quit for it, so the user is left with no window, no relaunch and
+ * no report. That is the precise failure this file exists to eliminate, and it
+ * was reachable on the one path where the app is already gone.
+ *
+ * A capability probe rather than a version floor, deliberately: the release that
+ * introduces `veld desktop` is not knowable while writing this, and a hardcoded
+ * number would be a second thing to keep in step. `desktop status` reads a plist
+ * and nothing else — no daemon, no database, no network — so asking is free.
+ *
+ * @param {string} candidate
+ * @returns {Promise<boolean>}
+ */
+async function cliHandlesDesktop(candidate) {
+  try {
+    await execFileAsync(candidate, ["desktop", "status", "--json"], {
+      encoding: "utf8",
+      // Longer than the `--version` probe: this one shells out to PlistBuddy.
+      timeout: 5000,
+      env: { PATH: SAFE_PATH },
+    });
+    return true;
+  } catch {
+    // Non-zero exit (clap's 2 for an unknown subcommand), or a timeout.
+    return false;
+  }
+}
+
+/** @returns {Promise<string | null>} */
+async function findCli() {
+  for (const candidate of cliCandidatePaths({ home: app.getPath("home") })) {
+    if ((await isVeldCli(candidate)) && (await cliHandlesDesktop(candidate))) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+/** @type {"off" | "install" | "download" | "cli"} */
 let mode = "off";
 /** Versions already offered this session, so a periodic check can't re-ask. */
 const offered = new Set();
@@ -62,10 +182,23 @@ let onQuitCancelled = null;
 function initUpdater(opts = {}) {
   onSkewChange = opts.onSkewChange ?? null;
   onQuitCancelled = opts.onQuitCancelled ?? null;
+  // Deliberately does NOT resolve the CLI here. `findCli` spawns up to three
+  // candidates × two probes, and this runs inside `whenReady`, before the first
+  // window exists — to answer a question nothing needs for another fifteen
+  // seconds. It used to do it synchronously, which on the pathological path put
+  // twenty seconds of `execFileSync` in front of the user's window; the probes
+  // are async now, but the right fix is still not to ask yet.
+  //
+  // `updateMode` returns `"off"` exactly when the build is unpackaged, which
+  // depends on `isPackaged` alone — so a provisional call with `cli: null` gets
+  // the one answer this function acts on right, and `checkForUpdates` resolves
+  // properly before it needs the rest.
+  cliPath = null;
   mode = updateMode({
     platform: process.platform,
     isPackaged: app.isPackaged,
     env: process.env,
+    cli: null,
   });
 
   // Every download in this file is one the user agreed to in a dialog first —
@@ -107,6 +240,11 @@ function initUpdater(opts = {}) {
     void promptRestart(info?.version);
   });
 
+  // Before the mode gate: an unpackaged dev run is `"off"`, but a report can
+  // only have been written by a packaged one, and a failure the user never hears
+  // about is the failure mode this whole file is about.
+  void reportPreviousCliUpdate();
+
   if (mode === "off") return;
 
   setTimeout(() => void checkForUpdates({ manual: false }), FIRST_CHECK_DELAY_MS);
@@ -123,6 +261,21 @@ function initUpdater(opts = {}) {
  *   reports outcomes an automatic one swallows.
  */
 async function checkForUpdates({ manual }) {
+  // Re-resolve per check rather than once per session. A session outlives a
+  // `veld update` that moves the CLI, and a first launch before the CLI exists
+  // (the app installed first, from a .dmg) would otherwise stay in `"download"`
+  // mode for as long as the app is open — telling the user, wrongly, that it
+  // cannot update itself.
+  if (mode !== "off") {
+    cliPath = await findCli();
+    mode = updateMode({
+      platform: process.platform,
+      isPackaged: app.isPackaged,
+      env: process.env,
+      cli: cliPath,
+    });
+  }
+
   if (mode === "off") {
     if (manual) {
       await dialog.showMessageBox({
@@ -181,19 +334,36 @@ async function checkForUpdates({ manual }) {
 
 async function offerUpdate(version) {
   const canInstall = mode === "install";
+  const viaCli = mode === "cli";
+
+  let detail;
+  if (viaCli) {
+    // Says what actually happens, because it is unusual: the app closes *before*
+    // the download, and something outside it does the work.
+    detail = `You're on ${app.getVersion()}. Veld quits, the veld CLI installs the update, and the app reopens — the CLI and the app move to the same version together.`;
+  } else if (canInstall) {
+    detail = `You're on ${app.getVersion()}. Downloading takes a moment; the app restarts to apply it.`;
+  } else {
+    detail = `You're on ${app.getVersion()}. ${downloadOnlyReason({ platform: process.platform })} The release page has the download.\n\nUpdate the veld CLI separately with \`veld update\`.`;
+  }
+
   const { response } = await dialog.showMessageBox({
     type: "info",
     message: `Veld Desktop ${version} is available.`,
-    detail: canInstall
-      ? `You're on ${app.getVersion()}. Downloading takes a moment; the app restarts to apply it.`
-      : `You're on ${app.getVersion()}. ${downloadOnlyReason({ platform: process.platform })} The release page has the download.\n\nUpdate the veld CLI separately with \`veld update\`.`,
-    buttons: canInstall
-      ? ["Download and Install", "Later"]
-      : ["Open Release Page", "Later"],
+    detail,
+    buttons:
+      canInstall || viaCli
+        ? [viaCli ? "Quit and Update" : "Download and Install", "Later"]
+        : ["Open Release Page", "Later"],
     defaultId: 0,
     cancelId: 1,
   });
   if (response !== 0) return;
+
+  if (viaCli) {
+    await updateViaCli(version);
+    return;
+  }
 
   if (!canInstall) {
     await shell.openExternal(releasePageUrl(version));
@@ -211,6 +381,180 @@ async function offerUpdate(version) {
       buttons: ["OK"],
     });
   }
+}
+
+/**
+ * Hand the update to the veld CLI and get out of its way.
+ *
+ * The order is the whole design. An Electron app reads from its own bundle while
+ * it runs — the asar, the framework dylibs — so the bundle cannot be replaced
+ * underneath it. So this spawns the CLI *detached*, tells it which pid to wait
+ * for, and quits: the CLI outlives the app, waits for the process to actually be
+ * gone, swaps the bundle and reopens it.
+ *
+ * Detached and with its streams let go, or the child would die with its parent
+ * and take the update with it — the app is the parent, and the app is about to
+ * quit on purpose.
+ */
+async function updateViaCli(version) {
+  // Re-resolved, not the value from `initUpdater`: a session lasts days, and
+  // `veld update` moving the CLI from `~/.local/bin` to `/usr/local/bin` (or
+  // an uninstall) between then and now would have this spawn a path that is no
+  // longer there — or, worse, one something else has since put back.
+  cliPath = await findCli();
+  if (!cliPath) {
+    mode = updateMode({
+      platform: process.platform,
+      isPackaged: app.isPackaged,
+      env: process.env,
+      cli: cliPath,
+    });
+    await dialog.showMessageBox({
+      type: "warning",
+      message: "The veld CLI is no longer installed.",
+      detail:
+        "Veld Desktop updates through the CLI. Reinstall it with\n\ncurl -fsSL https://veld.oss.life.li/get | bash",
+      buttons: ["OK"],
+    });
+    return;
+  }
+
+  // Nothing has been consumed yet, but a report left by a *previous* update
+  // would be read as this one's the moment the app comes back. Clear it before
+  // handing over, so an absent report means "the CLI never got that far".
+  try {
+    fs.rmSync(updateReportPath(), { force: true });
+  } catch {
+    // A report we cannot clear is not a reason to refuse the update.
+  }
+
+  /** @type {import("node:child_process").ChildProcess} */
+  let child;
+  try {
+    child = spawn(
+      cliPath,
+      [
+        "desktop",
+        "update",
+        // The version the user was just offered, not whatever the CLI happens to
+        // be. An older CLI would otherwise reinstall its own version, relaunch,
+        // be offered the newer one again, and loop — forever, since `offered` is
+        // per-session and the session just restarted.
+        "--version",
+        version,
+        "--wait-pid",
+        String(process.pid),
+        "--relaunch",
+        // Which bundle to replace. Without it the installer picks
+        // `/Applications`, and an app running from anywhere else gets a second
+        // copy written there while the one in the Dock stays stale.
+        "--app-path",
+        process.execPath,
+      ],
+      {
+        detached: true,
+        stdio: "ignore",
+        // A deliberate PATH (see `SAFE_PATH`) *over* the inherited environment,
+        // not instead of it. Replacing the whole environment looked safer and
+        // was worse: it dropped `TMPDIR`, `HTTPS_PROXY`/`NO_PROXY` and the
+        // locale, so the installer would fail to download behind a corporate
+        // proxy on the one path where nobody is watching a terminal — while the
+        // same `veld desktop update` typed into a shell worked. Nothing here
+        // needs to filter `VELD_*` either: `run_install_script` clears the
+        // handoff variables itself and sets the rest explicitly, which is where
+        // that belongs, and the CLI is the same binary the user runs by hand.
+        env: { ...process.env, PATH: SAFE_PATH },
+      },
+    );
+  } catch (err) {
+    await dialog.showMessageBox({
+      type: "warning",
+      message: "The update could not be started.",
+      detail: `${String(err?.message ?? err)}\n\nRun \`veld update\` in a terminal instead.`,
+      buttons: ["OK"],
+    });
+    return;
+  }
+
+  // Quit only once the child is actually running. `spawn` reports an
+  // asynchronous failure (ENOENT between the check above and the exec) through
+  // `error`, and the old code called `app.quit()` immediately — so the app was
+  // already tearing down before the event could arrive, and a failed handoff
+  // took the window with it and said nothing.
+  await new Promise((resolve) => {
+    let settled = false;
+    const done = (fn) => {
+      if (settled) return;
+      settled = true;
+      fn();
+      resolve();
+    };
+    child.once("spawn", () =>
+      done(() => {
+        child.unref();
+        notify(
+          "Updating Veld Desktop",
+          `Installing ${version} — the app will reopen.`,
+        );
+        // Not `quitAndInstall`: nothing here goes through Squirrel. A plain quit
+        // is what the CLI is waiting for.
+        app.quit();
+      }),
+    );
+    child.once("error", (err) =>
+      done(() => {
+        void dialog.showMessageBox({
+          type: "warning",
+          message: "The update could not be started.",
+          detail: `${String(err?.message ?? err)}\n\nRun \`veld update\` in a terminal instead.`,
+          buttons: ["OK"],
+        });
+      }),
+    );
+  });
+}
+
+/**
+ * Tell the user how the last CLI-handed update went, now that there is a window
+ * to tell them in.
+ *
+ * The handoff is one-way by construction — the app quits so its bundle can be
+ * replaced — so the CLI leaves a note instead. Read once and deleted: a report
+ * still sitting there on the next launch would re-announce a failure the user has
+ * already seen and acted on.
+ */
+async function reportPreviousCliUpdate() {
+  const reportPath = updateReportPath();
+  /** @type {{version?: string, ok?: boolean, error?: string, log?: string} | null} */
+  let report = null;
+  try {
+    report = JSON.parse(fs.readFileSync(reportPath, "utf8"));
+  } catch {
+    return; // No note, or an unreadable one. Either way there is nothing to say.
+  }
+  try {
+    fs.rmSync(reportPath, { force: true });
+  } catch {
+    // Reported once is the intent; a file we cannot delete would repeat it, and
+    // that is still better than staying silent about a failed update.
+  }
+  // A success needs no dialog: the user asked for an update and is looking at
+  // it. `app.getVersion()` is the receipt.
+  if (!report || report.ok !== false) return;
+
+  const buttons = report.log ? ["Show Log", "Close"] : ["Close"];
+  const { response } = await dialog.showMessageBox({
+    type: "warning",
+    message: `Veld Desktop ${report.version ?? ""} was not installed.`.replace(
+      /\s+/g,
+      " ",
+    ),
+    detail: `${report.error ?? "The veld CLI did not say why."}\n\nYou are still on ${app.getVersion()}. Run \`veld desktop update\` in a terminal to retry.`,
+    buttons,
+    defaultId: 0,
+    cancelId: buttons.length - 1,
+  });
+  if (report.log && response === 0) shell.showItemInFolder(report.log);
 }
 
 async function promptRestart(version) {
