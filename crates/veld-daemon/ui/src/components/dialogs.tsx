@@ -22,6 +22,14 @@ import { randomMarker } from "../shared/markerPick";
 export function Modal(props: {
   title: string;
   onClose: () => void;
+  /**
+   * Width, for the one dialog that is not a form. 560 is the handoff's dialog
+   * width and stays the default; settings opts out because it is a two-column
+   * surface, where 560 leaves a group panel narrower than the help text under
+   * every control. Mantine caps this at the viewport, so a wide value degrades
+   * to a full-width modal on a small screen rather than overflowing.
+   */
+  size?: number | string;
   children: ReactNode;
 }) {
   return (
@@ -30,7 +38,7 @@ export function Modal(props: {
       onClose={props.onClose}
       title={props.title}
       yOffset={88}
-      size={560}
+      size={props.size ?? 560}
       radius="lg"
       overlayProps={{ backgroundOpacity: 0.42 }}
     >

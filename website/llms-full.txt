@@ -336,7 +336,7 @@ veld logs --source internal        # Liveness probe & recovery logs
 veld logs --source all             # All sources (default)
 ```
 
-Log lines are stored in UTC — Veld orders and interleaves them by comparing those timestamp strings — and shown in your local time zone. `--utc` prints the stored value verbatim, `--local` forces local, and either overrides the `logs.timeZone` setting (Settings → Logs, `local` by default) for one command. `--json` always emits UTC, so a parser has exactly one format to handle.
+Log lines are stored in UTC — Veld orders and interleaves them by comparing those timestamp strings — and shown in your local time zone. `--utc` prints the stored value verbatim, `--local` forces local, and either overrides the `logs.timeZone` setting (Settings → General, `local` by default) for one command. `--json` always emits UTC, so a parser has exactly one format to handle.
 
 Every step's output is collected, not just a server's: a `command` node (a
 `docker build`, a `pnpm install`) logs to that node's stream, and project
