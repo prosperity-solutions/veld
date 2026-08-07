@@ -458,15 +458,22 @@ function ModeSwitch(props: {
           size="compact-sm"
           variant="default"
           className={`mode-switch${props.hover ? " hovered" : ""}`}
+          // Both halves, because the visible text carries only the first and the
+          // tooltip carries neither: Mantine's Tooltip is `role="tooltip"`, which
+          // floating-ui wires as `aria-describedby` and only while it is open, so
+          // it is never part of the accessible name. Without this a screen reader
+          // announces "IDE, button" — the state, with nothing saying the control
+          // leaves it — where before this change it announced the destination.
+          aria-label={`${label(props.mode)}, switch to ${label(other)}`}
           onClick={() => props.onMode(other)}
         >
           <span className="ms-layer ms-rest">
             <LogoMark />
             {label(props.mode)}
           </span>
-          {/* Hidden from the accessibility tree: the button's name is the mode
-              it shows plus the tooltip, and a second glyph in there would
-              announce a decoration as if it were content. */}
+          {/* Hidden from the accessibility tree: the `aria-label` above is the
+              button's whole name, and a glyph in here would append a decoration
+              to it as if it were content. */}
           <span className="ms-layer ms-hover" aria-hidden="true">
             <IconArrowsExchange size={14} />
           </span>

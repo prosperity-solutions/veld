@@ -55,10 +55,14 @@
         "description": "Claude Code in this worktree, in auto permission mode",
         "icon": "robot",
         "requires_bin": ["claude"],
-        // `--permission-mode auto`, and deliberately no
-        // `--dangerously-skip-permissions` pane beside it: this repo offers one
-        // Claude pane, and it is the one that still asks before doing something
-        // it should ask about.
+        // This moved in both directions, so read it as both. Against the pane
+        // that is gone (`--dangerously-skip-permissions`) it is a tightening:
+        // the one Claude pane this repo offers still stops and asks. Against
+        // what *this* pane used to be — no mode flag at all, i.e. the CLI's own
+        // default — `auto` is a loosening, chosen deliberately because a pane a
+        // contributor keeps for a whole session is worth fewer prompts. What
+        // `auto` gates is the CLI's business and is not documented here; check
+        // `claude --help` for the current set rather than trusting this comment.
         //
         // `--session-id` creates the conversation under an id veld chose, which
         // is what makes the `resume` below able to name it after a reboot.

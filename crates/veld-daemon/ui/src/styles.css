@@ -222,9 +222,9 @@ select:focus {
 
 /* ---- top bar ------------------------------------------------------------ */
 
-/* Tighter than it reads: 26px controls in a 42px bar leave 8px of air above and
-   below, and 9px between them. The bar is the app's densest row — every pixel it
-   does not use is a pixel of pane. */
+/* Tighter than it reads: 26px controls, 9px between them, in a bar that is 42px
+   in a browser tab and 40px in the Electron shell. The bar is the app's densest
+   row — every pixel it does not use is a pixel of pane. */
 .topbar {
   flex: none;
   display: flex;
@@ -242,8 +242,11 @@ select:focus {
  * `TOPBAR_HEIGHT` in `desktop/src/main.js` mirrors this height and centers the
  * traffic lights against it — change one and change the other, or the OS-drawn
  * buttons sit off the bar's own controls. The inset is what clears those
- * buttons: 13px origin + three 12px lights on a 20px pitch ends at 65px, so 78
- * leaves them the same 13px of air the rest of the bar uses. */
+ * buttons: `windows.js` puts the leftmost at x=13, and three 12px lights on
+ * macOS's 20px pitch end at 65px, so 78 leaves them on the right the same 13px
+ * they get on their left. That is the lights' own metric, not the bar's — the
+ * bar uses 10px of padding and 9px between controls, so retuning those is not a
+ * reason to move this. */
 .topbar.electron {
   height: 40px;
   padding-left: 78px; /* traffic-light inset */
@@ -268,7 +271,18 @@ select:focus {
  * consistent with the new box.
  *
  * Scoped to `.topbar` so dialogs and panes keep Mantine's sizing; menus and
- * dropdowns portal to `body`, so their contents are outside this too. */
+ * dropdowns portal to `body`, so their contents are outside this too. `.chip`
+ * (the "no veld config" / "repository unavailable" label) is also deliberately
+ * outside it: it is the bar's one non-Mantine element and the only thing in
+ * there that is not a control, so it keeps its smaller pill shape.
+ *
+ * **This is an enumeration, and an under-filled one fails silently** — a control
+ * whose size var is missing here just renders at Mantine's own metrics, and
+ * nothing in `just lint` or `just test` can see it. It has been under-filled
+ * once already (SegmentedControl, below). When you add a control to either bar,
+ * audit rather than assume:
+ * `git grep -a -oE '<(Button|ActionIcon|Select|SegmentedControl|[A-Z][A-Za-z]+)' -- src/App.tsx src/runs/RunsMode.tsx`
+ * and check every component that renders inside a `.topbar` against this block. */
 .topbar {
   --topbar-control-h: 26px;
 }
@@ -283,17 +297,24 @@ select:focus {
 }
 /* One type size and one weight for the whole bar, matching the fields.
  *
- * Mantine's `compact-sm` button is 14px medium, its `xs` input 12px regular, so
- * the two widest labels — the start preset and Share — came out both larger and
- * heavier than the project they sit beside, and read as the loudest things on
- * screen. Weight is the bar's scarcest signal and it is spent on the filled
- * green active-share state instead. `--button-fz` again rather than `font-size`,
- * because Mantine writes it inline from the `size` prop. */
+ * Mantine's `compact-sm` button is 14px medium, its `xs` input 12px regular, and
+ * its SegmentedControl label is medium (600) too, so the widest labels — the
+ * start preset, Share, and the Active|History switcher — came out both larger
+ * and heavier than the project they sit beside, and read as the loudest things
+ * on screen. Nothing here earns weight: the one state worth spotting without
+ * reading (a live share) is marked by fill and colour instead, so it stays
+ * legible with every label at 400. `--button-fz` again rather than `font-size`,
+ * because Mantine writes it inline from the `size` prop.
+ *
+ * All three selectors are required. The list is easy to under-fill — the
+ * SegmentedControl was missed on the first pass, leaving Runs mode's switcher
+ * the only bold text in either bar, in the view the app opens on. */
 .topbar .mantine-Button-root {
   --button-fz: 12px !important;
 }
 .topbar .mantine-Button-root,
-.topbar .mantine-Input-input {
+.topbar .mantine-Input-input,
+.topbar .mantine-SegmentedControl-label {
   font-weight: 400;
 }
 
