@@ -421,7 +421,30 @@ enum Command {
     },
 
     /// Update Veld to the latest version.
-    Update,
+    ///
+    /// Moves both halves of the release: the CLI, daemon and helper, and — on
+    /// macOS — Veld Desktop. When the app is running it is closed first, with the
+    /// user's agreement, and reopened afterwards; its bundle cannot be replaced
+    /// while it runs.
+    Update {
+        /// Wait for this process to exit before installing anything.
+        ///
+        /// Veld Desktop's own "Update" spawns this and quits: an Electron app
+        /// reads from its own bundle while it runs, so the update has to outlive
+        /// it. Nothing is installed until the pid is gone.
+        #[arg(long, hide = true)]
+        wait_pid: Option<u32>,
+
+        /// Reopen Veld Desktop when the update is over, however it went.
+        #[arg(long)]
+        relaunch: bool,
+
+        /// The running app's executable (`process.execPath`), so the bundle that
+        /// gets replaced is the one the user launched rather than whichever copy
+        /// the installer would have guessed.
+        #[arg(long, hide = true)]
+        app_path: Option<std::path::PathBuf>,
+    },
 
     /// Install, update or inspect Veld Desktop (macOS app).
     Desktop {
@@ -911,7 +934,11 @@ async fn main() {
 
         Command::Setup { command } => commands::setup::run(command).await,
 
-        Command::Update => commands::update::run().await,
+        Command::Update {
+            wait_pid,
+            relaunch,
+            app_path,
+        } => commands::update::run(wait_pid, relaunch, app_path).await,
 
         Command::Desktop { command } => match command {
             // Bare `veld desktop` reports rather than installs: a command that

@@ -163,7 +163,7 @@ pub async fn install(
 /// script's own search than to install into a directory nobody named. A relative
 /// path is refused for the same reason: the script runs from wherever the CLI
 /// happened to be spawned, which under launchd is `/`.
-fn bundle_dir_of(exe: &Path) -> Option<PathBuf> {
+pub(crate) fn bundle_dir_of(exe: &Path) -> Option<PathBuf> {
     let bundle = exe
         .ancestors()
         .find(|p| p.file_name().is_some_and(|n| n == "Veld.app"))?;
@@ -231,6 +231,20 @@ fn relaunch_app(app_dir: Option<&Path>) {
         .status();
 }
 
+/// What this CLI can be asked to do, for a caller that cannot know its version.
+///
+/// The app already runs `veld desktop status --json` as a capability probe before
+/// it hands anything over, so the answer travels on a call that was being made
+/// anyway. A **list**, not a boolean per feature: the app tests for membership, an
+/// older CLI omits the key entirely, and adding the next capability does not
+/// change the shape either side parses.
+///
+/// `full-update-handoff` — `veld update` accepts `--wait-pid`/`--relaunch`/
+/// `--app-path` and moves *both* halves of the release. Without it the app must
+/// fall back to `veld desktop update`, which moves the app only and leaves the
+/// CLI behind.
+const CAPABILITIES: [&str; 1] = ["full-update-handoff"];
+
 /// `veld desktop status` -- where the app is and whether it matches this CLI.
 ///
 /// Two different questions, depending on the platform, and conflating them was a
@@ -258,12 +272,14 @@ pub async fn status(json: bool) -> i32 {
                 "version": version,
                 "cli_version": cli_version,
                 "in_sync": version.as_deref() == Some(cli_version),
+                "capabilities": CAPABILITIES,
             }),
             None => serde_json::json!({
                 "installed": false,
                 "managed": true,
                 "platform": std::env::consts::OS,
                 "cli_version": cli_version,
+                "capabilities": CAPABILITIES,
             }),
         };
         println!(
@@ -312,6 +328,7 @@ fn status_unmanaged(json: bool, cli_version: &str) -> i32 {
                 "platform": std::env::consts::OS,
                 "found": path.as_ref().map(|p| p.display().to_string()),
                 "cli_version": cli_version,
+                "capabilities": CAPABILITIES,
             }))
             .unwrap_or_default()
         );

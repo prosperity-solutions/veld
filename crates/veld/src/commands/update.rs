@@ -1,11 +1,277 @@
 use std::io::IsTerminal;
+use std::path::PathBuf;
+use std::time::Duration;
 
+use veld_core::setup::QuitOutcome;
 use veld_core::state::RunStatus;
 
 use crate::output;
 
+/// How long the app gets to quit — whether it was asked over an Apple Event, sent
+/// a `SIGTERM`, or told us its own pid and quit on its own.
+///
+/// Generous on purpose: `before-quit` persists window layout and hands back a
+/// detached window's tabs, and a machine under load can take seconds over it.
+/// Every path that runs out of this budget leaves the bundle alone rather than
+/// forcing the issue.
+const QUIT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// What this run intends to do about Veld Desktop, decided *before* anything is
+/// installed.
+///
+/// The ordering is the point. Working out whether the app is running — and
+/// closing it, with the user's agreement — has to happen while nothing has moved
+/// yet, so that a "no, leave it open" answer costs nothing and a failure here
+/// aborts before the first byte is written.
+#[derive(Debug, Default)]
+struct DesktopPlan {
+    /// Install/update the app as part of this run.
+    update: bool,
+    /// The bundle to replace, when the caller named one (the app passing its own).
+    app_dir: Option<PathBuf>,
+    /// Whether this run owes the user a reopened app, because it took one off
+    /// screen. Set on every path that did, including the ones that then failed —
+    /// an update that ends with no app is worse than one that ends with an old
+    /// app.
+    ///
+    /// A flag rather than the path, and that is a fix rather than a
+    /// simplification. The bundle is resolved *after* the update, because the
+    /// path is not always known before it: an app running translocated has its
+    /// `--app-path` dropped (see `bundle_dir_of`), so the installer places it in
+    /// `/Applications` and the only correct answer to "what do I reopen" exists
+    /// once that has happened. Holding a path decided beforehand meant reopening
+    /// nothing at all in exactly that case — which is the case a `.dmg` download
+    /// launches in.
+    reopen: bool,
+}
+
+/// The result of the update proper, in the shape the app's report needs.
+struct Outcome {
+    code: i32,
+    /// The version this run was aiming at.
+    version: String,
+    /// What to tell the app went wrong, if anything did.
+    error: Option<String>,
+}
+
 /// `veld update` -- update Veld to the latest version.
-pub async fn run() -> i32 {
+///
+/// `wait_pid`, `relaunch` and `app_path` are the app handing its own update over.
+/// It cannot update itself in place — an Electron app reads from its own bundle
+/// while it runs — so it spawns this detached, quits, and lets the CLI move
+/// *both* halves and reopen it. That is why this is `veld update` and not
+/// `veld desktop update`: one release, one command, both halves, one restart.
+pub async fn run(wait_pid: Option<u32>, relaunch: bool, app_path: Option<PathBuf>) -> i32 {
+    let handoff = wait_pid.is_some();
+    let app_dir = app_path.as_deref().and_then(super::desktop::bundle_dir_of);
+
+    // Before anything is installed: the app must actually be gone. A pid that has
+    // not exited is a process still reading the bundle we are about to replace,
+    // and the honest response is to install nothing at all — the app is about to
+    // reopen and would otherwise come back half-swapped.
+    if let Some(pid) = wait_pid {
+        output::print_info(&format!("Waiting for Veld Desktop (pid {pid}) to quit..."));
+        if !veld_core::setup::wait_for_pid_exit(pid, QUIT_TIMEOUT).await {
+            let msg = "Veld Desktop did not quit within 30s, so nothing was updated.";
+            output::print_error(msg, false);
+            veld_core::setup::write_desktop_update_report(env!("CARGO_PKG_VERSION"), Err(msg));
+            // It never went away, so there is nothing to reopen.
+            return 1;
+        }
+    }
+
+    let plan = plan_desktop(app_dir, handoff, relaunch).await;
+    let outcome = perform(&plan).await;
+
+    // Written before the app is reopened, and that ordering is load-bearing for
+    // the same reason it is in `veld desktop update`: the app reads this during
+    // startup, so it has to be on disk before the launch it belongs to.
+    if handoff {
+        veld_core::setup::write_desktop_update_report(
+            &outcome.version,
+            outcome.error.as_deref().map_or(Ok(()), Err),
+        );
+    }
+
+    // Resolved now rather than before the update: see `DesktopPlan::reopen`. If
+    // nothing is found there is nothing to open, which is the honest outcome of
+    // an install that did not place a bundle.
+    if plan.reopen {
+        if let Some((app, _)) = veld_core::setup::desktop_app_status_in(plan.app_dir.as_deref()) {
+            veld_core::setup::open_desktop_app(&app);
+        }
+    }
+
+    outcome.code
+}
+
+/// Decide what happens to the app, and close it if it is in the way.
+///
+/// `handoff` means the app spawned this and has already quit itself — there is
+/// nobody at a terminal to ask, and nothing to ask about.
+async fn plan_desktop(app_dir: Option<PathBuf>, handoff: bool, relaunch: bool) -> DesktopPlan {
+    let mut plan = DesktopPlan {
+        app_dir,
+        ..Default::default()
+    };
+
+    // Quiet everywhere else: on Linux the AppImage updates itself and a .deb
+    // belongs to the package manager, so there is no app here for veld to move.
+    if std::env::consts::OS != "macos" {
+        return plan;
+    }
+
+    // `VELD_DESKTOP=0` is documented as the opt-out for "a CI box or a server
+    // that wants no Dock icon". Checked before anything else, so a machine that
+    // asked for no app is never asked to close one either.
+    if matches!(
+        std::env::var("VELD_DESKTOP").as_deref(),
+        Ok("0") | Ok("false") | Ok("no")
+    ) {
+        return plan;
+    }
+
+    // The app asked for this and quit for it, so it reopens whatever happens —
+    // including the failures, and including the case below where no bundle is
+    // found yet. `relaunch` is the app's word for that, and it is the only thing
+    // that distinguishes "we closed it" from "it was never open".
+    plan.reopen = relaunch;
+
+    let status = veld_core::setup::desktop_app_status_in(plan.app_dir.as_deref());
+
+    // Nothing installed: the app half of this release is a fresh install, and
+    // there is no window to close.
+    let Some((path, _)) = &status else {
+        plan.update = true;
+        return plan;
+    };
+
+    let running = veld_core::setup::desktop_app_pids(path);
+    if running.is_empty() {
+        plan.update = true;
+        return plan;
+    }
+
+    if handoff {
+        // The pid we waited for is gone, yet something is still running from this
+        // bundle — a second window's process, or an `--app-path` pointing at a
+        // copy other than the one that handed off. Either way the bundle is in
+        // use, so the CLI half proceeds and the app half does not.
+        output::print_error(
+            "Something is still running from Veld.app, so the app was left alone. The veld CLI \
+             was updated; use the app's 'Check for Updates…' once it is closed.",
+            false,
+        );
+        return plan;
+    }
+
+    if !attended() {
+        // An agent or a script is driving this. Closing someone's desktop app
+        // without being asked is not a thing an unattended command may do, so
+        // this reports the app half as skipped and moves on.
+        output::print_info(
+            "Veld Desktop is running and this is a non-interactive run, so the app was left \
+             alone. Quit it and re-run `veld update`, or use the app's own 'Check for Updates…'.",
+        );
+        return plan;
+    }
+
+    if !ask_to_close_desktop() {
+        output::print_info(
+            "Leaving Veld Desktop alone. The CLI is still updated; the app catches up on the \
+             next `veld update` or from its own 'Check for Updates…'.",
+        );
+        return plan;
+    }
+
+    output::print_info("Asking Veld Desktop to quit...");
+    match veld_core::setup::quit_desktop_app(path, QUIT_TIMEOUT).await {
+        QuitOutcome::Quit | QuitOutcome::NotRunning => {
+            plan.update = true;
+            // We took it off screen, so putting it back is this run's job — on
+            // every exit path, not only the successful one.
+            plan.reopen = true;
+        }
+        QuitOutcome::Refused => {
+            // Something on screen is unanswered. Never force it.
+            output::print_error(
+                "Veld Desktop did not quit, so the app was left alone — it may be showing a \
+                 dialog. The veld CLI is still updated.",
+                false,
+            );
+        }
+    }
+    plan
+}
+
+/// Whether there is a human at a terminal to answer a question.
+///
+/// Both halves matter, and `VELD_NON_INTERACTIVE` is read the way `install.sh`
+/// reads it (`[ -n ... ]`): unset or empty stays interactive, any non-empty value
+/// — including `0` — means non-interactive.
+fn attended() -> bool {
+    let forced_off = std::env::var("VELD_NON_INTERACTIVE")
+        .map(|v| !v.is_empty())
+        .unwrap_or(false);
+    std::io::stdin().is_terminal() && std::io::stdout().is_terminal() && !forced_off
+}
+
+/// Ask permission to close the app, and say what it costs — which is close to
+/// nothing, and the user has no way of knowing that.
+///
+/// Terminal sessions are the thing worth naming: they belong to the daemon, not
+/// to the app window, and the daemon replays each session's scrollback when a
+/// pane reattaches (`crates/veld-daemon/src/pty/holder.rs`). So a command still
+/// running keeps running, and comes back with its output intact.
+///
+/// Defaults to yes on a bare Enter. The user typed `veld update`; closing an app
+/// for a moment is within what that asked for, and the destructive-sounding half
+/// of the question is the part that is not actually destructive.
+fn ask_to_close_desktop() -> bool {
+    use std::io::{BufRead, Write};
+
+    println!();
+    output::print_info("Veld Desktop is running, and its bundle cannot be replaced while it is.");
+    println!(
+        "  {}",
+        output::dim(
+            "Nothing is lost: terminal sessions belong to the daemon, keep running while the \
+             app is closed, and reattach with their scrollback when it reopens."
+        )
+    );
+    print!("  Close Veld Desktop, update both halves, and reopen it? [Y/n] ");
+    let _ = std::io::stdout().flush();
+
+    let mut line = String::new();
+    let read = std::io::stdin().lock().read_line(&mut line).unwrap_or(0);
+    if read == 0 {
+        // Newline of our own: `read_line` returning 0 means EOF, so the cursor is
+        // still sitting after the prompt.
+        println!();
+    }
+    consent(if read == 0 { None } else { Some(line.as_str()) })
+}
+
+/// What the typed answer means.
+///
+/// Split from the prompt because the prompt cannot be tested and this must be:
+/// it is the gate in front of closing someone's running application.
+///
+/// A bare Enter is yes — the question was asked with `[Y/n]` and the user typed
+/// `veld update`. **EOF is not**: `None` is nobody answering, which happens when
+/// stdin is a closed pipe rather than the terminal `attended()` believed it to
+/// be, and an answer nobody gave cannot be consent. Anything unrecognised is also
+/// no, for the same reason — this branch closes an app, so it takes agreement
+/// rather than the absence of refusal.
+fn consent(line: Option<&str>) -> bool {
+    let Some(line) = line else {
+        return false;
+    };
+    matches!(line.trim().to_lowercase().as_str(), "" | "y" | "yes")
+}
+
+/// The update itself, once the app question is settled.
+async fn perform(plan: &DesktopPlan) -> Outcome {
     let current = env!("CARGO_PKG_VERSION");
     output::print_info(&format!("Current version: {current}"));
     output::print_info("Checking for updates...");
@@ -78,12 +344,25 @@ pub async fn run() -> i32 {
                     // `update_desktop_if_stale` names, an installer skipping a
                     // *running* app, is far likelier on a real version bump than
                     // on a no-op update.
-                    update_desktop_if_stale(&new_version).await;
-                    0
+                    let error = update_desktop_if_stale(&new_version, plan).await;
+                    Outcome {
+                        // The app half not landing does not fail the update: the
+                        // CLI moved, the services restarted, and the app is the
+                        // half a user can also fix by hand. It is *reported*
+                        // rather than swallowed — through the return code's
+                        // sibling, so the app's own report still names it.
+                        code: 0,
+                        version: new_version,
+                        error,
+                    }
                 }
                 Err(e) => {
                     output::print_error(&format!("Update failed: {e}"), false);
-                    1
+                    Outcome {
+                        code: 1,
+                        version: new_version,
+                        error: Some(format!("the update failed: {e}")),
+                    }
                 }
             }
         }
@@ -101,12 +380,20 @@ pub async fn run() -> i32 {
             // after the last update. Without this, `veld update` would report
             // success while leaving a stale app in /Applications and never mention
             // it — the CLI half moves, the app half silently does not.
-            update_desktop_if_stale(current).await;
-            0
+            let error = update_desktop_if_stale(current, plan).await;
+            Outcome {
+                code: 0,
+                version: current.to_string(),
+                error,
+            }
         }
         Err(e) => {
             output::print_error(&format!("Update check failed: {e}"), false);
-            1
+            Outcome {
+                code: 1,
+                version: current.to_string(),
+                error: Some(format!("the update check failed: {e}")),
+            }
         }
     }
 }
@@ -122,29 +409,24 @@ pub async fn run() -> i32 {
 ///
 /// macOS only, and quiet elsewhere: `desktop_app_status` reports nothing on Linux,
 /// where the AppImage updates itself and a .deb belongs to the package manager.
-async fn update_desktop_if_stale(version: &str) {
-    if std::env::consts::OS != "macos" {
-        return;
+///
+/// The platform and `VELD_DESKTOP=0` checks are not repeated here: `plan_desktop`
+/// makes both decisions before anything is installed, and `plan.update` is their
+/// answer. Two places deciding the same thing is how the opt-out came to be
+/// honoured on one path and not the other.
+///
+/// Returns the reason the app half did not land, for the app's own report. `None`
+/// means it landed — or that this run was never going to touch it.
+async fn update_desktop_if_stale(version: &str, plan: &DesktopPlan) -> Option<String> {
+    if !plan.update {
+        return None;
     }
 
-    // `VELD_DESKTOP=0` is documented as the opt-out for "a CI box or a server
-    // that wants no Dock icon" — and it was honoured by the install script only,
-    // which this path deliberately no longer relies on for the app half. Without
-    // this check the opt-out held for the install and then quietly failed on the
-    // first `veld update`, putting an app on exactly the machines that asked not
-    // to have one. `veld desktop install` is unaffected: naming the command is a
-    // stronger statement than an environment variable.
-    if matches!(
-        std::env::var("VELD_DESKTOP").as_deref(),
-        Ok("0") | Ok("false") | Ok("no")
-    ) {
-        return;
-    }
-
-    let existing = veld_core::setup::desktop_app_status();
+    let app_dir = plan.app_dir.as_deref();
+    let existing = veld_core::setup::desktop_app_status_in(app_dir);
     if let Some((_, installed)) = &existing {
         if installed.as_deref() == Some(version) {
-            return;
+            return None;
         }
     }
 
@@ -156,32 +438,44 @@ async fn update_desktop_if_stale(version: &str) {
         )),
         None => output::print_info(&format!("Installing Veld Desktop {version}...")),
     }
-    let opts = veld_core::setup::DesktopInstall::default();
-    if let Err(e) = veld_core::setup::install_desktop(version, &opts)
+    let opts = veld_core::setup::DesktopInstall {
+        // The bundle the caller named, so an app running from `~/Applications`
+        // is the one replaced rather than a second copy appearing in
+        // `/Applications`. `None` leaves the script its own search.
+        app_dir: plan.app_dir.clone(),
+        ..Default::default()
+    };
+    let result = veld_core::setup::install_desktop(version, &opts)
         .await
-        .and_then(|()| match veld_core::setup::desktop_app_status() {
-            Some((_, v)) if v.as_deref() == Some(version) => Ok(()),
-            // Same reason `veld desktop install` checks: the published install
-            // script may predate the desktop section entirely and exit 0.
-            _ => Err(anyhow::anyhow!(
-                "the install script ran but did not update the app"
-            )),
-        })
-    {
-        // Not fatal: the CLI is fine, and the app is the half the user can also
-        // fix by hand. Say so rather than failing an update that succeeded.
-        //
-        // "Run 'veld desktop update' to retry" is wrong advice for the most
-        // common cause by far — the app was open, so the installer skipped it,
-        // and the retry skips it for exactly as long. Name quitting first.
-        output::print_error(
-            &format!(
-                "Could not install Veld Desktop: {e}. If Veld Desktop is open, quit it and run \
-                 'veld desktop update' — or let the app update itself from its own \
-                 'Check for Updates…'."
-            ),
-            false,
+        .and_then(
+            |()| match veld_core::setup::desktop_app_status_in(app_dir) {
+                Some((_, v)) if v.as_deref() == Some(version) => Ok(()),
+                // Same reason `veld desktop install` checks: the published install
+                // script may predate the desktop section entirely and exit 0.
+                _ => Err(anyhow::anyhow!(
+                    "the install script ran but did not update the app"
+                )),
+            },
         );
+
+    match result {
+        Ok(()) => None,
+        Err(e) => {
+            // Not fatal: the CLI is fine, and the app is the half the user can
+            // also fix by hand. Say so rather than failing an update that
+            // succeeded.
+            //
+            // No "quit the app first" advice any more, and its absence is the
+            // point: this path now runs only once the app is *already* closed,
+            // so a failure here is a download, a checksum or a destination —
+            // never the running-app skip that advice was written for.
+            let reason = format!("Could not install Veld Desktop: {e}");
+            output::print_error(
+                &format!("{reason}. The veld CLI was updated; run `veld update` again to retry."),
+                false,
+            );
+            Some(reason)
+        }
     }
 }
 
@@ -428,5 +722,29 @@ async fn wait_for_helper_version(
             return false;
         }
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::consent;
+
+    #[test]
+    fn a_bare_enter_agrees_and_anything_unrecognised_does_not() {
+        for yes in ["", "\n", "y", "Y\n", "yes", "  YES  \n"] {
+            assert!(consent(Some(yes)), "{yes:?} should agree");
+        }
+        for no in ["n", "N\n", "no", "later", "q", "?", "yeah"] {
+            assert!(!consent(Some(no)), "{no:?} should not agree");
+        }
+    }
+
+    #[test]
+    fn nobody_answering_is_not_agreement() {
+        // `None` is EOF: stdin was a closed pipe, not the terminal `attended()`
+        // took it for. This gate closes a running application, so the absence of
+        // an answer must read as "no" — the opposite default from the bare Enter
+        // a human at a prompt gives.
+        assert!(!consent(None));
     }
 }

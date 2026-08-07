@@ -256,13 +256,106 @@ function looksLikeVeldCli(output) {
   return /^veld\s+v?\d+\.\d+\.\d+/i.test(output.trim());
 }
 
+/**
+ * The capability the CLI advertises when `veld update` can carry the whole
+ * release — both halves — on the app's behalf.
+ */
+const FULL_UPDATE_HANDOFF = "full-update-handoff";
+
+/**
+ * What the CLI said it can do, from `veld desktop status --json`.
+ *
+ * Defensive to the point of pedantry because the parse happens on the path that
+ * decides *which command to spawn with the app about to quit*: unparseable
+ * output, a missing key, a `capabilities` that is a string rather than an array,
+ * or non-string members all resolve to "advertises nothing", which selects the
+ * older command that every shipped CLI understands. The failure mode being
+ * avoided is spawning `veld update --wait-pid` at a CLI that rejects the flag,
+ * exits 2, and leaves the user with no window and no update.
+ *
+ * @param {string | null | undefined} stdout
+ * @returns {string[]}
+ */
+function capabilitiesFrom(stdout) {
+  if (typeof stdout !== "string") return [];
+  let parsed;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    return [];
+  }
+  if (!parsed || !Array.isArray(parsed.capabilities)) return [];
+  return parsed.capabilities.filter((c) => typeof c === "string");
+}
+
+/**
+ * The command that hands this app's update to the CLI.
+ *
+ * Two shapes, and which one is chosen is a compatibility question rather than a
+ * preference:
+ *
+ * - `veld update …` when the CLI advertises `full-update-handoff`. This moves the
+ *   CLI, the daemon, the helper *and* the app from one release, which is what the
+ *   user asked for when they clicked a button offering them a new veld. No
+ *   `--version`: `veld update` resolves the release itself, and a CLI that
+ *   updates itself first cannot get stuck re-offering a version it is behind.
+ * - `veld desktop update --version …` otherwise. The app half only — the older
+ *   CLI's whole vocabulary — and `--version` is required there for exactly the
+ *   loop the newer path cannot have: an older CLI would otherwise reinstall its
+ *   *own* version, relaunch, be offered the newer one again, and never converge.
+ *
+ * `--app-path` and `--wait-pid` are on both: which bundle to replace, and the
+ * process that must be gone before anything touches it.
+ *
+ * @param {{capabilities?: string[], version: string, pid: number, execPath: string}} ctx
+ * @returns {{args: string[], full: boolean}}
+ */
+function handoffCommand({ capabilities = [], version, pid, execPath }) {
+  const full = capabilities.includes(FULL_UPDATE_HANDOFF);
+  const args = full
+    ? ["update", "--wait-pid", String(pid), "--relaunch", "--app-path", execPath]
+    : [
+        "desktop",
+        "update",
+        "--version",
+        version,
+        "--wait-pid",
+        String(pid),
+        "--relaunch",
+        "--app-path",
+        execPath,
+      ];
+  return { args, full };
+}
+
+/**
+ * The label on the button that does the thing.
+ *
+ * Kept beside `updateMode` rather than in the dialog, because it is the same
+ * decision wearing a different hat: each mode can do exactly one thing, and the
+ * label is a promise about which. "Quit and Update veld" is reserved for the one
+ * route that moves the CLI too — everything else says the app.
+ *
+ * @param {{viaCli: boolean, canInstall: boolean, full: boolean}} ctx
+ * @returns {string}
+ */
+function primaryAction({ viaCli, canInstall, full }) {
+  if (viaCli) return full ? "Quit and Update veld" : "Quit and Update";
+  if (canInstall) return "Download and Install";
+  return "Open Release Page";
+}
+
 module.exports = {
+  FULL_UPDATE_HANDOFF,
   GITHUB_REPO,
   REPORT_MAX_AGE_MS,
+  capabilitiesFrom,
   cliCandidatePaths,
   compareVersions,
   downloadOnlyReason,
+  handoffCommand,
   looksLikeVeldCli,
+  primaryAction,
   releasePageUrl,
   reportIsFresh,
   updateMode,
