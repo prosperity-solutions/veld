@@ -691,6 +691,10 @@
             "host": {
               "type": "string",
               "description": "Hostname template for this port, replacing `url_template` entirely. Speaks the same {single-brace} language \u2014 {service}, {variant}, {run}, {project}, {branch}, {worktree}, {username}, {hostname}, and the {a ?? b} fallback \u2014 NOT ${...}, which is the command/env language. Inside a `host`, {service} is the port's own label: the node name for a primary port, `<node>-<port>` for a secondary one. Applies to both protocols: an `http` port's Caddy route is registered under it, a `tcp` port's DNS entry is. The documented way out of a hostname collision \u2014 a node's secondary port is named `<node>-<port>.\u2026`, which can clash with a node actually named that."
+            },
+            "share": {
+              "$ref": "#/$defs/share",
+              "description": "Who this PORT may be exposed to. Consent lives on the port because that is where exposure happens \u2014 a node may offer its app port and withhold its ops console and its database. Absent means NOT SHARED, always. A node/variant-level `share` is shorthand for the primary port's policy and never spreads to the others; a port's own `share` replaces it. `\"expose\": [\"web\"]` requires `\"protocol\": \"http\"`, because the public gateway serves HTTP and a browser cannot speak a raw protocol through it."
             }
           }
         }

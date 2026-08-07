@@ -4765,6 +4765,32 @@ fn check_resolved_variants(config: &VeldConfig, out: &mut Vec<Finding>) {
                 }
             }
 
+            // A node-level `share` is shorthand for the *primary* port. A node
+            // with no primary — every port `tcp`, or `"ports": null` — has
+            // nowhere to fold it, so the opt-in would grant nothing at all and
+            // say nothing about it. Silent no-ops are the failure mode per-port
+            // consent exists to remove, so name it.
+            if r.share.is_some() && r.ports.primary.is_none() {
+                let remedy = if r.ports.ports.is_empty() {
+                    "this node declares no ports, so there is nothing to expose".to_owned()
+                } else {
+                    let mut names: Vec<&str> = r.ports.ports.keys().map(String::as_str).collect();
+                    names.sort();
+                    format!(
+                        "move it onto the port you meant — this node has: {}",
+                        names.join(", ")
+                    )
+                };
+                out.push(Finding::error(
+                    "share-without-primary-port",
+                    format!("{loc}.share"),
+                    format!(
+                        "a node-level `share` is shorthand for the primary port's policy, and \
+                         this node has no primary port, so it grants nothing. {remedy}"
+                    ),
+                ));
+            }
+
             // The `web` audience is HTTP-only, permanently. The gateway speaks
             // HTTP/1.1 over the tunnel, and a browser cannot speak a raw
             // protocol through it regardless — so this is not a gap to close
@@ -9159,6 +9185,63 @@ mod tests {
                 .as_ref()
                 .is_some_and(|s| s.allows(ExposeMode::Peer)),
             "a secondary port opts in explicitly"
+        );
+    }
+
+    /// The node-level shorthand needs a primary port to land on. Without one it
+    /// silently granted nothing, which is the exact surprise per-port consent
+    /// exists to remove.
+    #[test]
+    fn a_node_level_share_with_no_primary_port_is_refused() {
+        // Every port explicitly tcp: no primary, so the shorthand has no home.
+        let findings = findings_for(
+            r#"{"schemaVersion":"3","name":"t","nodes":{"db":{"variants":{"dev":{
+                "type":"long_running","shell":"x",
+                "share":{"expose":["peer"]},
+                "ports":{
+                    "pg":{"port":5432,"protocol":"tcp"},
+                    "redis":{"port":6379,"protocol":"tcp"}
+                },
+                "probes":{"readiness":{"type":"command","shell":"true"}}
+            }}}}}"#,
+        );
+        let hit = findings
+            .iter()
+            .find(|f| f.rule == "share-without-primary-port")
+            .expect("a shorthand that grants nothing must be refused");
+        assert_eq!(hit.severity, Severity::Error);
+        assert!(
+            hit.message.contains("pg"),
+            "names the ports: {}",
+            hit.message
+        );
+
+        // A portless node likewise has nothing to expose.
+        let portless = findings_for(
+            r#"{"schemaVersion":"3","name":"t","nodes":{"w":{"variants":{"dev":{
+                "type":"long_running","shell":"x","ports":null,
+                "share":{"expose":["peer"]},
+                "probes":{"readiness":{"type":"settle"}}
+            }}}}}"#,
+        );
+        assert!(
+            portless
+                .iter()
+                .any(|f| f.rule == "share-without-primary-port"),
+            "got {portless:?}"
+        );
+
+        // Declaring it on the port instead is the fix, and is accepted.
+        let ok = findings_for(
+            r#"{"schemaVersion":"3","name":"t","nodes":{"db":{"variants":{"dev":{
+                "type":"long_running","shell":"x",
+                "ports":{"pg":{"port":5432,"protocol":"tcp","share":{"expose":["peer"]}}},
+                "probes":{"readiness":{"type":"command","shell":"true"}}
+            }}}}}"#,
+        );
+        assert!(
+            !ok.iter().any(|f| f.rule == "share-without-primary-port"),
+            "per-port consent on a tcp-only node is the supported shape, got {ok:?}"
         );
     }
 

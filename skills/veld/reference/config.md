@@ -238,13 +238,14 @@ Three authorings, and they are three different things:
 | `{ … }` | that map, merged node → variant per key; `"name": null` erases one entry (erasing them all lands on "no ports", not back on the default) |
 
 An entry is either shorthand (`"auto"`, `5432`) or the long form
-`{ "port": …, "protocol": "http" | "tcp", "host": "<template>" }`:
+`{ "port": …, "protocol": "http" | "tcp", "host": "<template>", "share": { … } }`:
 
 ```jsonc
 "ports": {
   "http":     "auto",                                  // primary  → protocol "http"
   "admin":    { "port": "auto", "protocol": "http" },  // own hostname: api-admin.<run>.…
-  "postgres": { "port": 5432,   "protocol": "tcp" },
+  "postgres": { "port": 5432,   "protocol": "tcp",
+                "share": { "expose": ["peer"] } },     // consent lives on the PORT
   "debug":    "auto"                                   // secondary → protocol "tcp"
 }
 ```
@@ -262,10 +263,16 @@ routed: a raw TCP connection carries no hostname to demultiplex on, and
 
 `${veld.port}` stays the primary — the one named `http`, the sole entry marked
 `"protocol": "http"`, or the sole entry when it states no protocol. Several ports
-with none of those is `ambiguous-primary-port` (error). A delivered file is
-created with its mode (default `0600`), never chmod-ed afterwards. It is **not**
-removed when the run ends — git-ignore the path. veld warns at start if a `secret`
-file is not ignored.
+with none of those is `ambiguous-primary-port` (error).
+
+Each port also carries its own **sharing consent** — see [Sharing](#sharing). A
+node/variant-level `share` is shorthand for the *primary* port's policy and never
+spreads to the others, so a node can serve an app port, an ops console and a
+database and expose only the one it named.
+
+A delivered file is created with its mode (default `0600`), never chmod-ed
+afterwards. It is **not** removed when the run ends — git-ignore the path. veld
+warns at start if a `secret` file is not ignored.
 
 ## Presets
 
@@ -592,14 +599,29 @@ real `//` comment.
 
 ## Sharing
 
-A service is shareable only if its variant declares `share.expose` — `veld share` refuses anything that hasn't opted in.
+**Consent is per port.** `share` is a field on a port entry — that is where exposure happens, and the only place a config grants it. `veld share` refuses everything else, naming candidates as `node:variant#port`.
 
-```json
+```jsonc
 {
   "sharing": { "relays": "public" },
   "nodes": {
+    "api": {
+      "variants": {
+        "dev": {
+          "type": "long_running",
+          "shell": "api --port ${veld.port} --admin ${veld.ports.admin}",
+          "ports": {
+            "http":     { "port": "auto", "protocol": "http", "share": { "expose": ["peer", "web"] } },
+            "admin":    { "port": "auto", "protocol": "http" },                      // never shared
+            "postgres": { "port": 5432,   "protocol": "tcp",  "share": { "expose": ["peer"] } }
+          },
+          "probes": { "readiness": { "type": "port" } }
+        }
+      }
+    },
     "frontend": {
       "variants": {
+        // Node/variant-level `share` still works: shorthand for the PRIMARY port only.
         "local": { "type": "long_running", "argv": ["npm", "run", "dev"], "share": { "expose": ["peer"] } }
       }
     }
@@ -612,7 +634,10 @@ A service is shareable only if its variant declares `share.expose` — `veld sha
   - **Join side:** a joiner auto-uses the ticket's relay(s) (a custom-relay share is never joined over public relays). For a token-gated relay the token resolves by priority (highest first): prompt-entered > ticket-embedded > local cache (the central veld database, `<data_dir>/veld/veld.db`, 0600) > `VELD_SHARE_RELAY`+`VELD_SHARE_RELAY_TOKEN` (attached only to the matching ticket relay). If none works, the joiner is prompted (browser overlay / `veld join` terminal; `--json` returns `needs_relay_token` instead) and the entered token is cached; a wrong token re-prompts.
 - `sharing.dangerouslyEmbedRelayTokensInTicket` — **DANGER, default false.** Embeds the resolved relay token(s) in the share ticket so joiners need no token setup. Ships the relay secret in every share link (Slack, email, history) — disposable per-project tokens only, never a shared org secret. camelCase (à la React's `dangerouslySetInnerHTML`) to flag the danger.
 - `sharing.gateway` — the public web gateway `veld share --web` registers with: a bare URL, or `{ "url": ..., "token": ... }` where `token` is a secret source (same forms as relay tokens) for the gateway's required registration auth. Env override: `VELD_SHARE_GATEWAY` + `VELD_SHARE_GATEWAY_TOKEN` on the daemon. The gateway is a self-hosted container (`ghcr.io/prosperity-solutions/veld-gateway`); operator guide: `docs/gateway.md`.
-- `share.expose` — `peer` (Veld-to-Veld via `veld share`, verbatim URL) and/or `web` (any browser via `veld share --web` + the gateway; real public URL, best-effort fidelity). Empty list or absent = not shareable. Peer and web are separate shares with separate capabilities — revoking one never touches the other.
+- `share.expose` — `peer` (Veld-to-Veld via `veld share`) and/or `web` (any browser via `veld share --web` + the gateway; real public URL, best-effort fidelity). Empty list or absent = not shareable. Peer and web are separate shares with separate capabilities — revoking one never touches the other.
+- **Where `share` is written, and how it resolves.** On the port entry. A node/variant-level `share` is *defined* as shorthand for the **primary** port's policy, so every config written before per-port consent means exactly what it meant — and the same words can never spread to an ops console or a database the author never mentioned. A port's own `share` **replaces** the shorthand for that port (no merge; the more specific declaration wins), an absent `share` is always "not shared", and nothing anywhere widens a port that declared none. A node with no primary (all-`tcp`, or `"ports": null`) has nowhere to fold the shorthand into, so it grants nothing.
+- **`web` requires `"protocol": "http"`** — lint rule `web-share-needs-http` (error). The gateway speaks HTTP/1.1 over the tunnel and a browser cannot speak a raw protocol through it: that is what the `web` audience *is*, not a limitation to be lifted. Enforced three times — `veld lint`/`veld start`, the daemon at share time (which names the excluded port instead of dropping it silently), and the gateway, which discards any non-routed manifest entry.
+- **Raw `tcp` sharing is `peer`-only, and the joiner's port differs from yours.** A `tcp` port opted into `peer` rides the same encrypted iroh tunnel and is reproduced on the joining machine as a bare local TCP port — no Caddy route, since a raw connection carries no hostname to match on. Nothing preserves the origin's port number, so the address is the joiner's local listener: `veld join` prints it as `host:port  (tcp)` apart from the URLs, and `--json` returns it in `addresses` (URLs stay in `urls`). Quote the printed address, never the origin's `veld.json` port. `proxy` header rules are an HTTP concept and do not apply. A joiner on an older veld **refuses the entire join** when the manifest carries a tcp endpoint (the old wire format required `url`) — deliberate fail-closed behaviour, so a peer that cannot represent an endpoint never reproduces it as an HTTP route. There is no `udp`.
 - `share.web.access` — viewer access for the public URL: `"password"` (**default, also when absent** — the gateway shows a password page; `veld share --web` generates and prints the share password, `--password` chooses it, and the printed `#veld-key=…` one-link carries it in the URL fragment) or `"link"` (anyone with the URL; the unguessable slug is the only gate — treat the link as a secret). An explicit config value always wins over the `--access` CLI flag; the flag only covers config-silent services. Multi-service caveat: the viewer session cookie is per public host, so a password-protected API called cross-origin from the frontend gets 401s — give API nodes `"web": { "access": "link" }`.
 
 ## Proxy

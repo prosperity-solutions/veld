@@ -1030,9 +1030,9 @@ whatever it would have removed has been left behind.
 
 ## Sharing
 
-Sharing has two config surfaces: an environment-wide `sharing` block (relays and the public gateway) and a per-variant `share` opt-in. A service is shareable **only** if its variant declares `share` — `veld share` refuses any service that hasn't opted in. This makes what leaves your machine explicit and auditable.
+Sharing has two config surfaces: an environment-wide `sharing` block (relays and the public gateway) and a `share` opt-in on each **port** you want exposed. A port is shareable **only** if it declares `share` (directly, or via the node-level shorthand below) — `veld share` refuses everything else. This makes what leaves your machine explicit and auditable.
 
-> **Behavior change:** earlier versions shared every URL-bearing service in a run. Now nothing is shared until its variant declares `share.expose`; `veld share` errors (listing the candidate `node:variant`s) until you opt one in.
+> **Behavior change:** earlier versions shared every URL-bearing service in a run. Now nothing is shared until a port declares `share.expose`; `veld share` errors (listing the candidate `node:variant#port`s) until you opt one in.
 
 ```json
 {
@@ -1142,18 +1142,66 @@ The gateway itself is one self-hosted container — see the [gateway operator gu
 
 ### `share.expose`
 
-The audiences a variant may be shared to. A list; an empty list (or an absent `share` block) means the service is never shareable.
+The audiences a **port** may be shared to. A list; an empty list (or an absent `share` block) means the port is never shareable.
 
-| Value  | Audience          | URL fidelity                       | Command |
-|--------|-------------------|------------------------------------|---------|
-| `peer` | Other Veld users  | Verbatim — exact origin URL reproduced | `veld share` |
-| `web`  | Any browser (no Veld needed) | Best-effort — real public URL minted by the gateway, origin `Host` preserved toward the app, redirects/cookies adapted (see the [operator guide](gateway.md)) | `veld share --web` |
+| Value  | Audience          | Requires | URL fidelity                       | Command |
+|--------|-------------------|----------|------------------------------------|---------|
+| `peer` | Other Veld users  | `http` or `tcp` | Verbatim — exact origin URL reproduced (`http`); a bare local TCP port (`tcp`, see below) | `veld share` |
+| `web`  | Any browser (no Veld needed) | **`http` only** | Best-effort — real public URL minted by the gateway, origin `Host` preserved toward the app, redirects/cookies adapted (see the [operator guide](gateway.md)) | `veld share --web` |
 
 ```json
 "share": { "expose": ["peer", "web"] }
 ```
 
-The two audiences are independent shares with independent capabilities: `veld share` serves the `peer`-opted services, `veld share --web` mints a separate share of the `web`-opted ones and registers it with the gateway — revoking one never touches the other. Sharing only ever exposes services with a URL, so `share` is meaningful on `long_running` variants; on a `command` variant it is accepted but inert (nothing to share).
+The two audiences are independent shares with independent capabilities: `veld share` serves the `peer`-opted ports, `veld share --web` mints a separate share of the `web`-opted ones and registers it with the gateway — revoking one never touches the other. Sharing only ever exposes something a port listens on, so `share` is meaningful on `long_running` variants; on a `command` variant it is accepted but inert (nothing to share).
+
+#### Where `share` is written
+
+On the port entry, which is where exposure happens. A node-level (or variant-level) `share` is **shorthand for the primary port's policy** and never spreads to any other port — see [Consent is per port](#consent-is-per-port) for the full resolution rules:
+
+```jsonc
+"api": { "variants": { "dev": {
+  "type": "long_running",
+  "shell": "api --port ${veld.port} --admin ${veld.ports.admin}",
+  "ports": {
+    "http":     { "port": "auto", "protocol": "http", "share": { "expose": ["peer", "web"] } },
+    "admin":    { "port": "auto", "protocol": "http" },                     // ops console: never shared
+    "postgres": { "port": 5432,   "protocol": "tcp",  "share": { "expose": ["peer"] } }
+  },
+  "probes": { "readiness": { "type": "port" } }
+}}}
+```
+
+`veld share` names every port it excluded and why, so a partial share is never silent: one line for the ports with no opt-in for this audience (`api:dev#admin`), another for the ports that opted into the *other* audience only, and a third for `tcp` ports dropped from a `--web` share. The `--node` filter narrows *within* the opted-in set and can never widen it.
+
+#### `web` requires `protocol: "http"`
+
+The gateway speaks HTTP/1.1 over the tunnel, and a browser cannot speak a raw protocol through it whatever the gateway does. `"expose": ["web"]` on a `tcp` port is therefore **`web-share-needs-http`, a lint error** — not a limitation waiting to be lifted, but a statement of what "web" means. Three gates enforce it: `veld lint` (and `veld start`) rejects the config, the daemon refuses the port at share time and says why, and the gateway drops any non-routed entry it is somehow handed.
+
+A database you want a colleague to reach goes to the `peer` audience instead.
+
+#### Raw `tcp` sharing (peer only)
+
+A `tcp` port opted into `peer` is carried over the same encrypted iroh tunnel as an HTTP one and reproduced on the joining machine as a **bare local TCP port** — a listener spliced to the origin, with no Caddy route in front of it (a raw connection carries no hostname to match a route on).
+
+**The port number on the consumer is their local listener's, not yours.** Nothing is in front of the socket to preserve the original number, so the joiner must use the address `veld join` prints and not the one from your `veld.json`:
+
+```
+✓ Joined — 3 endpoint(s) now reachable on this machine:
+
+    https://web.demo.acme.localhost
+    https://api-admin.demo.acme.localhost
+    api-postgres.demo.acme.localhost:49317  (tcp)
+```
+
+Raw endpoints print as `host:port  (tcp)`, listed apart from URLs for exactly that reason — shown as a URL, `5432` would send someone to a port nothing is listening on. In `--json` they arrive in `addresses`, a separate field from `urls`.
+
+Two consequences of "no route" worth knowing:
+
+- **No TLS, no header rules.** `proxy` rules are an HTTP concept and are not applied (they already were not on the peer path). The tunnel itself is end-to-end encrypted; what the local listener hands your client is whatever the origin service speaks.
+- **A joiner running an older Veld refuses the whole join.** A manifest carrying a `tcp` endpoint has no `url` for it, and an older consumer parses `url` as required — so it fails to deserialize the manifest and joins nothing. That is deliberate and fail-closed: a peer that cannot represent an endpoint must not silently reproduce it as an HTTP route. Both sides upgrade, or neither shares.
+
+There is no `udp` audience because there is no `udp` protocol — see [`protocol`](#protocol).
 
 ### `share.web.access`
 
@@ -1638,6 +1686,7 @@ element no shell ever sees (inert text — a mistake, but not an exposure).
 | `unknown-probe-type` | A probe `type` Veld does not implement — including `settle` written as a *liveness* probe. A typo used to mean "always healthy" on both paths | **error** |
 | `probe-needs-port` | A `port` or `http` probe on a node with no such port: it names a port that is not declared, or needs the primary on a node that has none | **error** |
 | `ambiguous-primary-port` | Two or more ports, none named `http` and none marked `"protocol": "http"`, so `${veld.port}` has no unambiguous meaning | **error** |
+| `web-share-needs-http` | A `"protocol": "tcp"` port opting into the `web` audience. The gateway serves HTTP and a browser cannot speak a raw protocol through it, so the share would silently drop the port the author asked to publish | **error** |
 | `unknown-var` | `${vars.x}` naming a var that is not declared, listing the declared names | **error** |
 | `vars-cannot-nest` | A var referencing another var | **error** |
 | `machine-var-empty-choices` | `"choices": []` on a machine var — no value could satisfy it, including the declared default | **error** |
@@ -1715,10 +1764,10 @@ An entry is either the scalar shorthand — unchanged — or the long form:
 
 ```jsonc
 "ports": {
-  "http":     "auto",                                   // shorthand: the port, nothing else
-  "admin":    { "port": "auto", "protocol": "http" },
+  "http":     { "port": "auto", "protocol": "http", "share": { "expose": ["peer"] } },
+  "admin":    { "port": "auto", "protocol": "http" },   // no `share` → never shared
   "postgres": { "port": 5432,   "protocol": "tcp" },
-  "debug":    "auto"
+  "debug":    "auto"                                    // shorthand: the port, nothing else
 }
 ```
 
@@ -1727,6 +1776,7 @@ An entry is either the scalar shorthand — unchanged — or the long form:
 | `port` | `"auto"` or a fixed number. Exactly what the shorthand says. |
 | `protocol` | `"http"` or `"tcp"`. Decides whether Veld *routes* the port. Both get a hostname. |
 | `host` | A `url_template` for **this port only**, replacing the effective one wholesale. |
+| `share` | Who this **port** may be exposed to — see [Consent is per port](#consent-is-per-port). Absent means never shared. |
 
 **Every port gets a hostname and a DNS entry. Only `http` gets a Caddy route.**
 Naming and routing are separate concerns, and Veld's helper has always kept
@@ -1757,9 +1807,6 @@ depends on your domain:
   exist *only* because Veld writes an `/etc/hosts` or dnsmasq entry. Without one,
   a `tcp` port has no name at all and is reachable only as `127.0.0.1:<port>`.
   This is the case the DNS entry exists for.
-
-`udp` is not a value, on purpose. It would change no behaviour anywhere in Veld,
-and a schema field that does nothing is worse than no field.
 
 `udp` is not a value, on purpose. It would change no behaviour anywhere in Veld,
 and a schema field that does nothing is worse than no field.
@@ -1856,6 +1903,53 @@ family under its own name — see
 Asking for the URL of a `tcp` port is a lint error that says *why* — that the port
 exists but has no hostname because of its protocol — rather than reporting an
 unknown built-in.
+
+### Consent is per port
+
+`share` is a field on a **port entry**. That is where exposure happens, and it is
+the only place a config can grant it:
+
+```jsonc
+"ports": {
+  "http":     { "port": "auto", "protocol": "http", "share": { "expose": ["peer", "web"] } },
+  "admin":    { "port": "auto", "protocol": "http" },                      // never shared
+  "postgres": { "port": 5432,   "protocol": "tcp",  "share": { "expose": ["peer"] } }
+}
+```
+
+A node used to have exactly one exposed port, which made "share this node" and
+"share this port" the same sentence. It is not the same sentence any more: the
+node above declares an app port, an ops console and a database, and a node-wide
+grant would hand a colleague all three. **An absent `share` is never shared** —
+consent is opt-in, and nothing anywhere widens a port that declared none.
+
+#### The node-level shorthand
+
+`share` on a node or a variant still works, and is **defined as shorthand for the
+primary port's policy**:
+
+```jsonc
+"web": { "variants": { "dev": {
+  "type": "long_running",
+  "shell": "vite --port ${veld.port}",
+  "share": { "expose": ["peer"] }        // === "ports": { "http": { …, "share": … } }
+}}}
+```
+
+Every config written before per-port consent therefore means exactly what it
+meant — such a node had one exposed port, and that port is the primary. What the
+shorthand can never do is spread: it lands on the primary and stops there, so
+adding a `postgres` port to the node above shares nothing new.
+
+Two resolution rules, and neither of them can widen a port:
+
+- **A port's own `share` replaces the shorthand for that port.** It does not
+  merge — the more specific declaration is the one the author looked at last.
+- **The shorthand reaches the primary only, and only if the primary states
+  nothing.** A node with no primary (every port `tcp`, or `"ports": null`) has
+  nowhere to fold it into, so a node-level `share` there grants nothing.
+
+For everything the two audiences mean, see [Sharing](#sharing).
 
 ---
 

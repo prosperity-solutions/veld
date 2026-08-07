@@ -514,14 +514,14 @@ veld share <span class="kw">--web</span>
       <h2>Hand it to someone<span class="dot">.</span></h2>
       <p class="section-sub">Two ways to share what you're running. Both opt-in, both encrypted.</p>
       <div class="comp-list">
-        <div class="comp"><div class="name">To a teammate</div><p>Veld-to-Veld over iroh. Your colleague opens the <em>same</em> URLs on their own machine — no redeploy, no staging server.</p></div>
+        <div class="comp"><div class="name">To a teammate</div><p>Veld-to-Veld over iroh. Your colleague opens the <em>same</em> URLs on their own machine — and a database port you share turns up as a local port on theirs. No redeploy, no staging server.</p></div>
         <div class="comp"><div class="name">To anyone, on the web</div><p>Expose a service to anyone with a browser — no Veld required. A self-hosted <code>veld-gateway</code> mints a real public URL.</p></div>
       </div>
       <div class="grid" style="margin-top:4px;">
         <div class="cell"><h3>End-to-end encrypted</h3><p>Traffic flows through an encrypted P2P tunnel (iroh / QUIC). A relay only forwards sealed bytes — it never sees your URLs or content.</p></div>
         <div class="cell"><h3>Password-protected by default</h3><p>Web shares get a generated password out of the box. Send the URL and password over different channels, or use the one-link that hides the password in the URL fragment.</p></div>
         <div class="cell"><h3>You approve every join</h3><p>Peer shares are gated by a capability token <em>and</em> your explicit approval. Nothing connects without your say-so.</p></div>
-        <div class="cell"><h3>Opt-in per service</h3><p>A service is only shareable if its config says so. What leaves your machine is explicit and auditable — nothing is exposed by accident.</p></div>
+        <div class="cell"><h3>Opt-in per port</h3><p>Consent sits on the port, not the service — share an app and withhold its admin console. What leaves your machine is explicit and auditable, and nothing is exposed by accident.</p></div>
         <div class="cell"><h3>Your relays, your rules</h3><p>Keep traffic on infrastructure you control with self-hosted relays (one Docker container). The free public relays are great for dev and testing; for production, run your own. Your call, per project.</p></div>
         <div class="cell"><h3>No accounts, no lock-in</h3><p>No sign-up, no Veld-hosted server. Shares live in your daemon and expire on a TTL; stop the run and they're gone.</p></div>
       </div>

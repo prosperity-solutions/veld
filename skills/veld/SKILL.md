@@ -166,13 +166,46 @@ Share a running environment with a colleague so they open the **same** URLs on
 their own machine, over an encrypted P2P tunnel (iroh: QUIC + NAT hole-punching
 + n0 relay fallback). No accounts, no Veld-hosted server.
 
-**Opt-in is required.** A service is shareable only if its variant declares
-`share.expose` in `veld.json`; `veld share` errors on anything that hasn't opted
-in. Add `"share": { "expose": ["peer"] }` to the variant(s) you want to share.
+**Opt-in is required, and it is per PORT.** `share` is a field on a port entry —
+that is where exposure happens, and it is the only place consent is granted.
+`veld share` errors on anything that hasn't opted in, listing candidates as
+`node:variant#port`.
+
+```jsonc
+"ports": {
+  "http":     { "port": "auto", "protocol": "http", "share": { "expose": ["peer", "web"] } },
+  "admin":    { "port": "auto", "protocol": "http" },                     // absent → NEVER shared
+  "postgres": { "port": 5432,   "protocol": "tcp",  "share": { "expose": ["peer"] } }
+}
+```
+
+A node/variant-level `"share": { "expose": ["peer"] }` still works and is
+**defined as shorthand for the PRIMARY port's policy** — it never spreads to the
+node's other ports, so every pre-existing config means exactly what it meant. A
+port's own `share` replaces the shorthand for that port (it does not merge), and
+absent is always "not shared": nothing anywhere widens a port that declared none.
+So **do not** add a node-level `share` when the user asks to share one port of a
+multi-port node — put it on that port. And a node with no primary (all-`tcp`, or
+`"ports": null`) has nowhere to fold the shorthand into, so it grants nothing.
+
+**`"expose": ["web"]` requires `"protocol": "http"`** — lint rule
+`web-share-needs-http` (error). The gateway speaks HTTP/1.1 and a browser cannot
+speak a raw protocol through it; this is what `web` *means*, not a gap to be
+lifted later. A database goes to `peer`.
+
+**Raw `tcp` sharing is peer-only, and the joiner's port number is different from
+yours.** A `tcp` port opted into `peer` is reproduced on the joining machine as a
+bare local TCP port with no Caddy route, so nothing preserves the original number.
+`veld join` prints these separately from URLs as `host:port  (tcp)`, and `--json`
+puts them in `addresses` (URLs stay in `urls`). Tell the user to use the printed
+address — never the origin's port from `veld.json`. There is no `udp`.
+A joiner on an older veld refuses the *whole* join when the manifest carries a
+tcp endpoint (its `url` is absent and the old wire format required it) — that is
+deliberate fail-closed behaviour, not a bug; both sides must upgrade.
 
 ```sh
 veld share my-feature                       # print a join URL to send (plus a veld join command)
-veld share my-feature --node frontend       # share only specific nodes (repeatable)
+veld share my-feature --node frontend       # narrow to specific nodes (repeatable; never widens consent)
 veld share my-feature --ttl 3600            # TTL in seconds (default 7200)
 veld share my-feature --approve first        # first|manual|auto (default: manual, or first with --json)
 veld join veldshare_… --label alice         # terminal join by ticket; blocks until the host approves
@@ -224,8 +257,8 @@ true` to embed it in the ticket (DANGER: relay secret then rides in every share
 link — disposable tokens only). Stopping the run (`veld stop`) auto-unshares its
 shares, and a consumer's join self-tears-down when the tunnel closes.
 
-**Public web sharing** (`veld share --web`): exposes services whose variant has
-`web` in `share.expose` to anyone with a browser — no Veld on the viewer's side.
+**Public web sharing** (`veld share --web`): exposes the `http` ports that have
+`web` in their `share.expose` to anyone with a browser — no Veld on the viewer's side.
 Requires `sharing.gateway` in config (a URL, or `{ "url", "token" }` where
 `token` is a secret source like relay tokens; the org's self-hosted
 `veld-gateway` container serves the public URLs — see docs/gateway.md). The
@@ -613,6 +646,9 @@ step's stdin is `/dev/null` — one that prompts fails on EOF instead of hanging
 - **`veld status`/`veld urls` on a stopped environment** — `status` still works and shows the last run's outcome, but hides the URL column (routes are torn down); `urls` errors outright instead of printing dead links
 - **`veld urls --json` shape** — `{ "urls": [{node, variant, url}...], "live": bool }` (no longer a bare array; stopped environments add `"ended_at"`); check `.live` first, then read `.urls`
 - **`--json`** — most commands accept it for machine-readable output, prefer it when parsing results
+- **Sharing consent is per port, and the node-level `share` is only the primary's** — `share` on a node/variant is *defined* as shorthand for the primary port's policy and never spreads; a port with no `share` of its own is never shared, and a port that has one ignores the shorthand entirely. To share a second port, write `share` on **that port**. A node with no primary (all-`tcp`, or `"ports": null`) folds the shorthand into nothing. `veld share` lists what it excluded and why, per `node:variant#port`
+- **`web` needs `protocol: "http"`; raw `tcp` is peer-only** — `"expose": ["web"]` on a tcp port is the `web-share-needs-http` lint error, because the gateway serves HTTP and a browser can't speak a raw protocol through it. That is permanent. Share a database or debugger port with `"expose": ["peer"]` instead. There is no `udp` protocol and no udp sharing
+- **A joined `tcp` endpoint's port is the joiner's, not the origin's** — nothing routes a raw port, so the local listener binds whatever it gets. `veld join` prints these as `host:port  (tcp)` below the URLs (`addresses` in `--json`, separate from `urls`); quote *that* address to the user, never the port from the origin's `veld.json`. A joiner running an older veld refuses the whole join rather than mis-reproducing a tcp endpoint as an HTTP route — fail-closed by design, so upgrade both sides
 - **Sharing needs matching setup modes** — both people must have veld installed and be in the *same* mode (both privileged → clean URLs, or both unprivileged → `:18443` in URLs), or the shared URLs won't match
 - **Local URL wins on collision** — if the joiner already runs the same environment, their local URL is kept; that shared node is skipped and reported as a warning
 - **`--approve manual` vs `first`** — manual (interactive default) needs `veld approve <REQ_ID>` (or the dashboard) per join; first (default with `--json`) auto-pins the first token-valid joiner and rejects the rest

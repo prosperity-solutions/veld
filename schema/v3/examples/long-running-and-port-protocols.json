@@ -30,10 +30,15 @@
         "dev": {
           "type": "long_running",
           "shell": "api --port ${veld.port} --admin ${veld.ports.admin}",
+          // Consent is per port. `http` is offered to peers and the web; the
+          // ops console and the database are not shared at all, and the node
+          // has no way to say otherwise in one stroke. `postgres` opts into
+          // peer sharing only — `web` would be a lint error, because the
+          // gateway serves HTTP and a browser cannot speak postgres.
           "ports": {
-            "http": "auto",
+            "http": { "port": "auto", "protocol": "http", "share": { "expose": ["peer", "web"] } },
             "admin": { "port": "auto", "protocol": "http" },
-            "postgres": { "port": 5432, "protocol": "tcp" },
+            "postgres": { "port": 5432, "protocol": "tcp", "share": { "expose": ["peer"] } },
             "debug": "auto"
           },
           "env": {
