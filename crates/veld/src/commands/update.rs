@@ -76,6 +76,12 @@ pub async fn run(
     app_path: Option<PathBuf>,
     target_version: Option<String>,
 ) -> i32 {
+    // Pid 0 is dropped rather than waited on, and it is not a theoretical input:
+    // `kill(0, signal)` addresses the *caller's own process group*, so
+    // `wait_for_pid_exit(0, …)` never sees `ESRCH`, spins the whole 30s budget,
+    // and then reports that Veld Desktop did not quit — about a process that
+    // never existed. Treated as "no pid was given", which is what it means.
+    let wait_pid = wait_pid.filter(|pid| *pid != 0);
     let handoff = wait_pid.is_some();
     let relaunch = honour_relaunch(relaunch, wait_pid);
     let app_dir = app_path.as_deref().and_then(super::desktop::bundle_dir_of);
@@ -95,7 +101,11 @@ pub async fn run(
         if !veld_core::setup::wait_for_pid_exit(pid, QUIT_TIMEOUT).await {
             let msg = "Veld Desktop did not quit within 30s, so nothing was updated.";
             output::print_error(msg, false);
-            veld_core::setup::write_desktop_update_report(&reported_version, Err(msg));
+            veld_core::setup::write_desktop_update_report(
+                &reported_version,
+                Err(msg),
+                veld_core::setup::UpdateHalf::Release,
+            );
             // Reopen anyway when the app asked us to. "The pid did not exit" is
             // not the same as "the app is still on screen": `wait_for_pid_exit`
             // reads anything other than `ESRCH` as alive, so a pid this user may
@@ -125,6 +135,7 @@ pub async fn run(
         veld_core::setup::write_desktop_update_report(
             &outcome.version,
             outcome.error.as_deref().map_or(Ok(()), Err),
+            veld_core::setup::UpdateHalf::Release,
         );
     }
 
@@ -572,6 +583,21 @@ async fn update_desktop_if_stale(version: &str, plan: &DesktopPlan) -> Option<St
             // point: this path now runs only once the app is *already* closed,
             // so a failure here is a download, a checksum or a destination —
             // never the running-app skip that advice was written for.
+            //
+            // The script's own last complaint is lifted out of the log, the same
+            // way `veld desktop update` does it (`desktop.rs`). Without this the
+            // full route reports "install script exited with code 1" where the
+            // route it replaces said "checksum verification failed" — the
+            // information is on disk either way, because the app hands this
+            // process an fd on that log, but nobody reads a log they were not
+            // told about.
+            let detail = veld_core::setup::desktop_update_log_path()
+                .as_deref()
+                .and_then(super::desktop::last_diagnostic);
+            let e = match detail {
+                Some(reason) => format!("{reason} ({e})"),
+                None => format!("{e}"),
+            };
             let reason = format!("Could not install Veld Desktop: {e}");
             output::print_error(
                 &format!("{reason}. The veld CLI was updated; run `veld update` again to retry."),
@@ -883,6 +909,41 @@ mod tests {
              version having said nothing",
         );
         assert!(!no_handoff.reopen);
+    }
+
+    #[test]
+    fn a_named_target_is_installed_without_asking_github() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        // Named and different → install it. No network call happens on this
+        // arm, which is the point: the app already learned the release from
+        // electron-updater's feed, and asking `api.github.com` a second time is
+        // both rate-limited per IP and briefly out of step after a release.
+        assert_eq!(
+            rt.block_on(super::resolve_target("16.7.1", Some("16.8.0")))
+                .unwrap(),
+            Some("16.8.0".to_string()),
+        );
+
+        // Named and equal → nothing to install. The app half still runs, which
+        // is how a lagging app catches up to a current CLI.
+        assert_eq!(
+            rt.block_on(super::resolve_target("16.8.0", Some("16.8.0")))
+                .unwrap(),
+            None,
+        );
+
+        // A target *older* than this binary is honoured rather than refused:
+        // the app asked for it by name, and rejecting it here would leave the
+        // app looping on an offer nothing can satisfy.
+        assert_eq!(
+            rt.block_on(super::resolve_target("16.8.0", Some("16.7.1")))
+                .unwrap(),
+            Some("16.7.1".to_string()),
+        );
     }
 
     #[test]

@@ -625,14 +625,21 @@ async function reportPreviousCliUpdate() {
   // duly announced that a version it had never tried to install had failed.
   if (!reportIsFresh({ finishedAt: report.finished_at })) return;
 
+  // What failed decides both sentences. A `veld update` handoff can fail on the
+  // *CLI* half — the download, the check, the service restart — and never reach
+  // the app at all; telling that user to run `veld desktop update` would move
+  // the app and leave the daemon on the release that actually broke. Reports
+  // written before `half` existed came only from the app-only command, so
+  // treating a missing field as `"app"` is the right reading of an old file.
+  const wholeRelease = report.half === "release";
   const buttons = report.log ? ["Show Log", "Close"] : ["Close"];
   const { response } = await dialog.showMessageBox({
     type: "warning",
-    message: `Veld Desktop ${report.version ?? ""} was not installed.`.replace(
-      /\s+/g,
-      " ",
-    ),
-    detail: `${report.error ?? "The veld CLI did not say why."}\n\nYou are still on ${app.getVersion()}. Run \`veld desktop update\` in a terminal to retry.`,
+    message: (wholeRelease
+      ? `veld ${report.version ?? ""} was not installed.`
+      : `Veld Desktop ${report.version ?? ""} was not installed.`
+    ).replace(/\s+/g, " "),
+    detail: `${report.error ?? "The veld CLI did not say why."}\n\nYou are still on ${app.getVersion()}. Run \`${wholeRelease ? "veld update" : "veld desktop update"}\` in a terminal to retry.`,
     buttons,
     defaultId: 0,
     cancelId: buttons.length - 1,

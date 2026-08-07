@@ -133,6 +133,9 @@ pub async fn install(
         veld_core::setup::write_desktop_update_report(
             &version,
             outcome.as_ref().map(|_| ()).map_err(|e| e.as_str()),
+            // This command only ever installs the app, so a failure here is
+            // always retried with `veld desktop update`.
+            veld_core::setup::UpdateHalf::App,
         );
     }
 
@@ -200,7 +203,7 @@ pub(crate) fn bundle_dir_of(exe: &Path) -> Option<PathBuf> {
 /// `mv: … Read-only file system` and no prefix at all. Preferring a prefixed
 /// line and *settling* for any line is the difference between telling the user
 /// their disk is full and telling them "exited with code 1".
-fn last_diagnostic(log: &Path) -> Option<String> {
+pub(crate) fn last_diagnostic(log: &Path) -> Option<String> {
     let text = std::fs::read_to_string(log).ok()?;
     let clamp = |l: &str| -> String {
         // Long enough for any line the script emits, short enough that a runaway

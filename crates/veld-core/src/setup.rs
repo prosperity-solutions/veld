@@ -2062,6 +2062,13 @@ async fn wait_for_exit(bundle: &std::path::Path, timeout: Duration) -> bool {
 /// Returns false on timeout, which the caller must treat as "do not touch the
 /// bundle" — an app that has not exited is still reading from it.
 pub async fn wait_for_pid_exit(pid: u32, timeout: Duration) -> bool {
+    // `kill(0, …)` means "my own process group", and `kill(-n, …)` means a group
+    // too — neither is a process this can wait for, and both would poll until the
+    // timeout and then claim the app never quit. Callers filter 0 already; this
+    // is the same answer stated where the pid is actually used.
+    if pid == 0 || pid > i32::MAX as u32 {
+        return false;
+    }
     let target = nix::unistd::Pid::from_raw(pid as i32);
     let start = std::time::Instant::now();
     loop {
@@ -2147,7 +2154,30 @@ pub fn desktop_update_report_path() -> Option<PathBuf> {
 ///
 /// Best-effort by design: a report that cannot be written must not turn a
 /// successful install into a failed one.
-pub fn write_desktop_update_report(version: &str, result: Result<(), &str>) {
+/// Which half of the release a handed-off update was working on when it failed.
+///
+/// The app's dialog and its retry advice differ, and getting it wrong is worse
+/// than saying nothing: telling someone whose *CLI* update failed to run
+/// `veld desktop update` would move the app and leave the daemon on the release
+/// that actually broke.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpdateHalf {
+    /// Veld Desktop only — `veld desktop install|update`.
+    App,
+    /// The whole release, through `veld update`.
+    Release,
+}
+
+impl UpdateHalf {
+    fn as_str(self) -> &'static str {
+        match self {
+            UpdateHalf::App => "app",
+            UpdateHalf::Release => "release",
+        }
+    }
+}
+
+pub fn write_desktop_update_report(version: &str, result: Result<(), &str>, half: UpdateHalf) {
     let Some(path) = desktop_update_report_path() else {
         return;
     };
@@ -2159,6 +2189,10 @@ pub fn write_desktop_update_report(version: &str, result: Result<(), &str>) {
         "ok": result.is_ok(),
         "error": result.err(),
         "log": desktop_update_log_path().map(|p| p.display().to_string()),
+        // Absent in reports written before this field existed, which the app
+        // reads as the app-only half — correct, since that was the only thing
+        // that could write one.
+        "half": half.as_str(),
         "finished_at": chrono::Utc::now().to_rfc3339(),
     });
     let _ = std::fs::write(&path, payload.to_string());
@@ -2743,6 +2777,8 @@ fn hang_up_terminal_holders(veld_dir: &Path) {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::{
         first_existing_file, init_lua_loads_veld_spoon, install_script_override_from,
         linux_desktop_candidates, parse_launchctl_pid, parse_systemd_main_pid, pids_running_from,
@@ -2766,6 +2802,29 @@ mod tests {
   501 notapid /Applications/Veld.app/Contents/MacOS/Veld
   501   907
 ";
+
+    /// Pid 0 is a process *group*, not a process.
+    ///
+    /// `kill(0, sig)` addresses the caller's own group and always succeeds, so
+    /// polling it for `ESRCH` never terminates early: the caller would spend its
+    /// whole 30s budget and then report that Veld Desktop had not quit — about a
+    /// process that never existed. Asserted rather than commented, because the
+    /// natural simplification is to delete the guard as a redundant check on a
+    /// value "the app never sends".
+    #[test]
+    fn pid_zero_is_not_a_process_to_wait_for() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let started = std::time::Instant::now();
+        assert!(!rt.block_on(super::wait_for_pid_exit(0, Duration::from_secs(30))));
+        // Returned on the guard, not by exhausting the budget.
+        assert!(started.elapsed() < Duration::from_secs(1));
+
+        // Anything that would wrap into a negative `Pid` is a group too.
+        assert!(!rt.block_on(super::wait_for_pid_exit(u32::MAX, Duration::from_secs(30))));
+    }
 
     #[test]
     fn another_users_copy_of_the_app_is_not_this_users_problem() {
