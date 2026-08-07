@@ -11,13 +11,28 @@
 //! work at all — awaiting `git worktree remove` on a large checkout was what froze
 //! the UI in the first place.
 //!
-//! **The row is the queue.** No job table, no journal. `trashed_at` is both the
-//! durable record of intent and the retention clock, so a daemon that dies
-//! mid-removal recovers by re-reading trashed rows at boot ([`recover`]) — and
-//! re-running a removal that already succeeded is safe, because git fails, the path
-//! is gone from disk, and the `git worktree prune` fallback finishes the job. A
-//! separate queue would be a second claim about which worktrees exist and could drift
-//! from the rows it describes; a flag on the row cannot disagree with itself.
+//! **The row records the bin, not a queue.** `trashed_at` is the durable record that
+//! the user binned this checkout, and the retention clock. It is deliberately *not*
+//! also a work item, because those two readings disagree about the case that matters:
+//! at boot, "in the bin" and "queued for removal" look identical on the row, and
+//! [`recover`] used to resume every trashed row — so restarting the daemon (a `veld
+//! update` does exactly that) permanently deleted the whole trash, with
+//! `worktree.trashRetentionDays` at its default `0` meaning *keep until I empty it*.
+//! The setting was read correctly by the sweep and bypassed entirely by recovery.
+//!
+//! So **boot recovery is the retention sweep and nothing else** ([`recover`]). Every
+//! other removal is queued by the request that asked for it, in the daemon that
+//! received it. Two candidates for keeping more than that were tried and rejected, both
+//! recorded in [`recover`]: inferring an interrupted removal from the filesystem, which
+//! cannot work because git leaves no reliable trace of one, and a durable
+//! "removal started" flag, which would identify one honestly and then retry it in the
+//! one mode a half-deleted checkout refuses.
+//!
+//! The cost, stated: a *Delete permanently* interrupted by the daemon going away does
+//! not resume. The worktree stays in the bin — where, if git had got partway through,
+//! the checkout is damaged and the next delete surfaces git's refusal. That is worse
+//! than a clean resume and much better than the alternative it replaces, which was
+//! deleting every worktree in the bin on every restart.
 //!
 //! **Nothing here moves a directory.** Relocating the checkout instead of leaving it
 //! in place would be O(1) and tempting, and it would bypass every safety check
@@ -27,10 +42,10 @@
 //!
 //! **A failure the user could act on is never silent.** Any step that fails after the
 //! row has been read takes the worktree back out of the trash with the reason on it
-//! (`worktrees.trash_error`), which the rail renders and announces once. The two
-//! exceptions leave nothing to report: a database this worker cannot open or read,
-//! which is logged and leaves the row in the trash for [`recover`] to retry at the
-//! next daemon start.
+//! (`worktrees.trash_error`), which the rail renders and announces once. The one
+//! exception leaves nothing to report: a database this worker cannot open or read,
+//! which is logged and leaves the row exactly where the user put it — in the bin,
+//! with the checkout untouched.
 
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -122,17 +137,22 @@ impl Drop for DeletingGuard {
 
 /// Ask the worker to process a trashed worktree now.
 ///
-/// Best-effort by design: the row is already marked, so a send that finds no
-/// worker (or a dropped receiver) only delays the removal to the next daemon
-/// start, which [`recover`] handles. It never loses the request.
+/// Best-effort, and the request is genuinely dropped if no worker is listening or the
+/// daemon exits before the queue drains. That is the safe direction and the deliberate
+/// one: what is lost is a *deletion* that never started, and the worktree is still in
+/// the bin with its checkout intact for the user to ask again. The alternative —
+/// treating the trash flag as a standing instruction to delete — is the bug this
+/// module was rewritten to remove. The retention sweep is the only thing that
+/// re-raises a removal on its own, and [`recover`] runs it at boot for exactly that
+/// reason.
 pub fn enqueue(worktree_id: i64) {
     if let Some(tx) = QUEUE.get() {
         let _ = tx.send(worktree_id);
     }
 }
 
-/// Start the worker and re-enqueue anything left trashed by a previous run of
-/// the daemon.
+/// Start the worker and run the retention sweep once — which is all a restart does.
+/// An interrupted removal is deliberately not resumed; see [`recover`].
 pub fn spawn() {
     let (tx, mut rx) = mpsc::unbounded_channel::<i64>();
     if QUEUE.set(tx).is_err() {
@@ -153,37 +173,63 @@ pub fn spawn() {
         // The real reason is that removals are a handful of deliberate clicks plus a
         // capped timer, so one at a time is the simplest thing that cannot spawn
         // unboundedly. The cost is head-of-line blocking: one worktree whose teardown
-        // hits STOP_TIMEOUT delays the queue behind it while the rail shows "Pending
-        // removal". If removals ever become a stream, spawn per id — there is no
-        // ordering constraint to preserve.
+        // hits STOP_TIMEOUT delays the queue behind it while the rail still shows it
+        // in the Trash lane. If removals ever become a stream, spawn per id — there
+        // is no ordering constraint to preserve.
         while let Some(id) = rx.recv().await {
             process(id).await;
         }
     });
 }
 
-/// Re-enqueue every trashed worktree — the crash-recovery path.
+/// Resume what a previous daemon left for this one — which is the retention sweep,
+/// and nothing else.
 ///
-/// Called once when the worker starts. The GC pass enqueues expired trash the same
-/// way, as does an explicit "delete now", so every removal takes this one path.
-fn recover() {
-    let db = match Db::open() {
-        Ok(db) => db,
+/// Called once when the worker starts. Returns how many removals it queued, so the
+/// decision is observable to a test rather than only to the log.
+///
+/// **It deliberately does not resume an interrupted `git worktree remove`.** The
+/// filesystem does not carry the signal that would be needed to find one: git deletes
+/// the checkout with `remove_dir_recursively`, which walks the directory in readdir
+/// order, so `.git` is just another entry and its absence proves nothing. Measured on
+/// git 2.50.1 — killing `git worktree remove` on a 3,600-file checkout left `.git` in
+/// place 8 times out of 8. Anything keyed on "is this half-removed?" would therefore
+/// both miss the real interruption and fire on states that are not one, and the only
+/// repair available at that point is an `rm -rf` outside git. That is a bad trade
+/// against the failure it would prevent, which is a checkout sitting in the bin.
+///
+/// A durable "removal started" flag would identify one honestly, and is still the
+/// wrong answer: the retry it buys runs un-forced (`DeleteQuery::force` is deliberately
+/// not persisted, so a crash cannot silently upgrade a removal to one that discards
+/// uncommitted work), and un-forced is exactly what a half-deleted checkout refuses —
+/// git reads the missing files as modifications. The user would get the worktree
+/// ejected from the bin carrying "contains modified or untracked files", which is the
+/// behaviour this fix exists to stop.
+///
+/// So an interrupted removal stays in the trash and the user asks again. See the
+/// module header for what that costs.
+fn recover() -> usize {
+    match Db::open() {
+        Ok(db) => recover_with(&db),
         Err(e) => {
             warn!("worktree trash: cannot open database for recovery: {e}");
-            return;
+            0
         }
-    };
-    match db.list_trashed_worktrees() {
-        Ok(rows) if !rows.is_empty() => {
-            info!("worktree trash: resuming {} pending removal(s)", rows.len());
-            for wt in rows {
-                enqueue(wt.id);
-            }
-        }
-        Ok(_) => {}
-        Err(e) => warn!("worktree trash: cannot list pending removals: {e}"),
     }
+}
+
+/// [`recover`] against an already-open database.
+///
+/// Split out so the test can pass its own `Db` rather than pointing `VELD_DB_PATH` at
+/// a temporary one: that variable is process-global, this binary's tests run in
+/// parallel, and a test whose subject is *deleting worktrees* is the last one that
+/// should be able to reach a database it did not create.
+fn recover_with(db: &Db) -> usize {
+    let queued = purge_expired_trash(db);
+    if queued > 0 {
+        info!("worktree trash: {queued} expired removal(s) queued at startup");
+    }
+    queued
 }
 
 /// Work one trashed worktree: stop its runs, `git worktree remove`, drop the row.
@@ -291,6 +337,16 @@ async fn delete_checkout(
         // git finished but before the row was dropped. Prune git's bookkeeping and
         // treat it as done; this is what makes retrying a half-finished deletion
         // idempotent.
+        //
+        // Narrow on purpose. It is tempting to widen this to "git can no longer see a
+        // working tree here" and `rm -rf` the remains, because a checkout whose `.git`
+        // has gone missing is one `git worktree remove` refuses forever, with `--force`
+        // too (measured, git 2.50.1). Resist it: the files are all still there, git has
+        // merely lost the ability to classify them, so the widened arm deletes
+        // uncommitted work in the one path that exists to protect it — and it cannot
+        // even be reached by the interruption it would be written for, since git
+        // deletes in readdir order and leaves `.git` in place (see `recover`). That
+        // state is rare, recoverable by hand, and not worth an unbounded `rm` here.
         Err(_) if !FsPath::new(&wt.path).exists() => {
             let _ = super::desktop::git(&repo_root, &["worktree", "prune"]).await;
         }
@@ -385,8 +441,10 @@ async fn stop_runs(db: &Db, path: &str) -> Result<(), String> {
 /// The GC scheduler is spawned before the server that calls [`spawn`], and tokio's
 /// `interval` fires its first tick immediately, so the first pass after a daemon
 /// start can run before `QUEUE` exists and every `enqueue` here is a no-op. That is
-/// harmless rather than a lost purge: [`recover`] re-enqueues every trashed row when
-/// the worker does start, expired ones included, so the delay is milliseconds.
+/// harmless rather than a lost purge: [`recover`] calls this function again once the
+/// worker exists, so the delay is milliseconds. That call is the *only* reason the
+/// first tick can be dropped safely — recovery no longer re-enqueues trashed rows
+/// wholesale, so nothing else would pick the expired ones up before the next tick.
 ///
 /// This is the **only** thing that deletes a checkout the user has not asked about
 /// twice, and it is opt-in: `worktree.trashRetentionDays` defaults to zero, which
@@ -460,6 +518,52 @@ mod tests {
             "`git worktree remove` must be spawned from exactly one place \
              (`delete_checkout`); a second call site is a second unguarded deletion \
              path, which is the defect rounds 1-3 each found a different half of"
+        );
+    }
+
+    /// **The reported bug.** Restarting the daemon — which every `veld update` does —
+    /// queues no removals while `worktree.trashRetentionDays` is at its default `0`,
+    /// so a worktree the user binned and left alone is still there afterwards. Before
+    /// the fix `recover` enqueued every row with a non-empty `trashed_at` and the whole
+    /// bin went with the restart.
+    ///
+    /// Asserts on the **return value**, not on the row: `enqueue` is a no-op with no
+    /// worker running, so a test that only checked the row survived would have passed
+    /// against the buggy code too. Verified by reintroducing the bug — it fails.
+    #[test]
+    fn a_daemon_restart_queues_no_removals_while_the_trash_is_kept_forever() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = Db::open_at(&dir.path().join("t.db")).unwrap();
+        let root = FsPath::new("/tmp/repo-trash-recover");
+        db.upsert_repo(root, "repo").unwrap();
+        let wts = db
+            .sync_worktrees(
+                root,
+                &[veld_core::db::DiscoveredWorktree {
+                    path: "/tmp/repo-trash-recover/wt".into(),
+                    branch: "feature".into(),
+                    is_main: false,
+                }],
+            )
+            .unwrap();
+        let id = wts.iter().find(|w| !w.is_main).unwrap().id;
+        db.trash_worktree(id).unwrap();
+        assert_eq!(db.list_trashed_worktrees().unwrap().len(), 1);
+
+        // The default: keep until I empty it.
+        assert!(
+            db.trash_retention().is_none(),
+            "this test is only meaningful while 0 is the default"
+        );
+        assert_eq!(
+            recover_with(&db),
+            0,
+            "a restart must not queue the removal of a worktree the user only binned"
+        );
+        assert_eq!(
+            db.list_trashed_worktrees().unwrap().len(),
+            1,
+            "and the row is still in the bin"
         );
     }
 

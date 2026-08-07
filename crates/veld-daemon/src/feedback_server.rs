@@ -144,10 +144,11 @@ pub async fn run_feedback_server(share_manager: Arc<crate::share::manager::Share
     // than on the first terminal so a machine that cannot have them says so in the
     // startup log, and so `$VELD_SHIM_DIR` is usable from the first shell.
     pty::prepare_shims();
-    // Worktree removals recorded but not finished by a previous daemon resume
-    // here — `worktrees.trashed_at` is the durable record, so a crash mid-removal
-    // costs a restart, not a stuck row. Started for the same reason the reaper is
-    // (not inside `routes()`), so building a router in a test starts no worker.
+    // The worker that empties the worktree trash. Starting it also runs the retention
+    // sweep once — which is the *whole* of what a restart resumes, deliberately: the
+    // trash flag is not a work queue, and reading it as one is what used to delete
+    // every binned worktree on every restart. Started for the same reason the reaper
+    // is (not inside `routes()`), so building a router in a test starts no worker.
     worktree_trash::spawn();
 
     let addr = SocketAddr::from(([127, 0, 0, 1], veld_core::instance::daemon_port()));
