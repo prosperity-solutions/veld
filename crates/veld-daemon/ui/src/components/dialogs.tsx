@@ -323,6 +323,12 @@ export function NewWorktreeDialog(props: {
               <Text span ff="monospace">
                 {alias}
               </Text>
+              {/* Why the two differ, on the screen where they first differ. The
+                  old single-name receipt carried this and dropping it left a
+                  first-time creator watching their name change with no reason
+                  given — the rule now lives only in the *rename* dialog, which
+                  is a different screen they have not seen yet. */}
+              {alias !== displayName ? " (letters, digits and dashes only)" : ""}
             </Text>
           )}
           {/* Where it lands. Stated rather than assumed: the create was started

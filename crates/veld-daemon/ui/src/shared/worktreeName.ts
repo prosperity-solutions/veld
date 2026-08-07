@@ -189,11 +189,12 @@ export function deriveBranch(name: string): string {
  */
 export function worktreeLabel(w: {
   alias: string;
+  /** Optional on purpose: a UI served by a daemon older than v13 sends no such
+   *  key at all, and `just dev-ui` proxies `/api` to whatever daemon is
+   *  installed. Both `undefined` and `""` mean "render the alias". */
   display_name?: string;
 }): string {
-  // `?? ""` and not just `||`: this is called with rows from the daemon, and a
-  // build talking to an older daemon gets `undefined` here rather than `""`.
-  return (w.display_name ?? "") !== "" ? (w.display_name as string) : w.alias;
+  return w.display_name || w.alias;
 }
 
 /**

@@ -576,6 +576,12 @@ const MAX_DISPLAY_NAME_LEN: usize = 80;
 /// U+1F4BB), and U+200C is orthographically required in Persian and Hindi. They
 /// belong here because they contribute no glyph *on their own*, which is what
 /// this predicate answers.
+///
+/// It **overlaps [`is_forbidden`] on purpose** rather than being the complement
+/// of it. Those ranges are unreachable through the one caller today, which
+/// checks `is_forbidden` first — but this predicate answers "does this character
+/// render as anything", and a version that answered "yes" for U+2028 in order to
+/// avoid the overlap would be wrong the moment anything else called it.
 fn is_invisible(c: char) -> bool {
     c.is_control()
         || c.is_whitespace()
