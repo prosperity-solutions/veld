@@ -1,5 +1,6 @@
 pub mod action;
 pub mod config;
+pub mod desktop;
 pub mod doctor;
 pub mod feedback;
 pub mod gc;

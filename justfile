@@ -332,12 +332,40 @@ lint:
     # only — no dependency to install — and the drift it catches is invisible
     # to every other check in this recipe.
     just favicon
+    just topbar-height
+    just shellcheck
+
+# Parse and lint `install.sh` — the one program here that `curl | bash` runs and
+# that no compiler, test or linter reads. `--severity=warning` is where the file
+# sits clean; the remaining `info` diagnostics are deliberate. Mirrors the
+# `schema` job's step, so a local run catches what CI would.
+shellcheck:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    bash -n install.sh
+    bash -n tests/validate-install-contract.sh
+    if command -v shellcheck >/dev/null 2>&1; then
+      shellcheck --severity=warning install.sh tests/validate-install-contract.sh
+    else
+      echo "shellcheck not installed — skipping (brew install shellcheck). CI runs it."
+    fi
+    # Neither `bash -n` nor shellcheck can see the thing that actually breaks:
+    # a variable renamed on one side of the CLI/install.sh boundary. Both halves
+    # stay individually valid while every app update quietly reinstalls the CLI.
+    ./tests/validate-install-contract.sh
 
 # Assert every surface's inlined favicon still matches website/favicon.svg
 # (docs/branding.md). Five copies across HTML, Rust, and JS, tied together by
 # nothing but this gate.
 favicon:
     ./tests/validate-favicon.sh
+
+# Assert `.topbar.electron`'s CSS height and desktop/src/main.js's TOPBAR_HEIGHT
+# agree. Same reasoning as `favicon`: bash and sed only, and the drift it catches
+# (macOS traffic lights centred against a constant that no longer matches the bar
+# they sit on) is invisible to every compiler, linter and test in the repo.
+topbar-height:
+    ./tests/validate-topbar-height.sh
 
 # Assert no CI job can run on a draft PR (AGENTS.md → CI cost convention).
 # Deliberately not folded into `lint`: this needs PyYAML, and `lint` is the

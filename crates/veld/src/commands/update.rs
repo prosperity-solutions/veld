@@ -72,6 +72,13 @@ pub async fn run() -> i32 {
                     output::print_info("Restarting services with new binaries...");
                     restart_services(&new_version, helper_dead_privileged).await;
                     super::remove_legacy_hammerspoon().await;
+                    // On this branch too, not only the "already latest" one. The
+                    // CLI install runs with `VELD_DESKTOP=0`, so the app half is
+                    // this call and nothing else — and the case the comment on
+                    // `update_desktop_if_stale` names, an installer skipping a
+                    // *running* app, is far likelier on a real version bump than
+                    // on a no-op update.
+                    update_desktop_if_stale(&new_version).await;
                     0
                 }
                 Err(e) => {
@@ -89,12 +96,92 @@ pub async fn run() -> i32 {
             // `veld update` after this one is installed clears it. Idempotent
             // and silent on a machine that never had the Spoon.
             super::remove_legacy_hammerspoon().await;
+            // The app can lag the CLI even when the CLI is current: the installer
+            // skips an app that is running, and someone may have installed the app
+            // after the last update. Without this, `veld update` would report
+            // success while leaving a stale app in /Applications and never mention
+            // it — the CLI half moves, the app half silently does not.
+            update_desktop_if_stale(current).await;
             0
         }
         Err(e) => {
             output::print_error(&format!("Update check failed: {e}"), false);
             1
         }
+    }
+}
+
+/// Bring Veld Desktop to `version`, installing it if this machine has none.
+///
+/// The app and the CLI are two halves of one release, so an update moves both —
+/// the same reason the install script installs the app by default. This is the
+/// *only* thing that moves the app half: `perform_update` runs the script with
+/// `VELD_DESKTOP=0`, so both arms of `veld update` come through here and the app
+/// is downloaded once, not twice. It also covers the case its own name is about —
+/// an installer that skipped a *running* app.
+///
+/// macOS only, and quiet elsewhere: `desktop_app_status` reports nothing on Linux,
+/// where the AppImage updates itself and a .deb belongs to the package manager.
+async fn update_desktop_if_stale(version: &str) {
+    if std::env::consts::OS != "macos" {
+        return;
+    }
+
+    // `VELD_DESKTOP=0` is documented as the opt-out for "a CI box or a server
+    // that wants no Dock icon" — and it was honoured by the install script only,
+    // which this path deliberately no longer relies on for the app half. Without
+    // this check the opt-out held for the install and then quietly failed on the
+    // first `veld update`, putting an app on exactly the machines that asked not
+    // to have one. `veld desktop install` is unaffected: naming the command is a
+    // stronger statement than an environment variable.
+    if matches!(
+        std::env::var("VELD_DESKTOP").as_deref(),
+        Ok("0") | Ok("false") | Ok("no")
+    ) {
+        return;
+    }
+
+    let existing = veld_core::setup::desktop_app_status();
+    if let Some((_, installed)) = &existing {
+        if installed.as_deref() == Some(version) {
+            return;
+        }
+    }
+
+    match &existing {
+        Some((path, installed)) => output::print_info(&format!(
+            "Veld Desktop at {} is {} — updating it to {version}.",
+            path.display(),
+            installed.as_deref().unwrap_or("an unknown version"),
+        )),
+        None => output::print_info(&format!("Installing Veld Desktop {version}...")),
+    }
+    let opts = veld_core::setup::DesktopInstall::default();
+    if let Err(e) = veld_core::setup::install_desktop(version, &opts)
+        .await
+        .and_then(|()| match veld_core::setup::desktop_app_status() {
+            Some((_, v)) if v.as_deref() == Some(version) => Ok(()),
+            // Same reason `veld desktop install` checks: the published install
+            // script may predate the desktop section entirely and exit 0.
+            _ => Err(anyhow::anyhow!(
+                "the install script ran but did not update the app"
+            )),
+        })
+    {
+        // Not fatal: the CLI is fine, and the app is the half the user can also
+        // fix by hand. Say so rather than failing an update that succeeded.
+        //
+        // "Run 'veld desktop update' to retry" is wrong advice for the most
+        // common cause by far — the app was open, so the installer skipped it,
+        // and the retry skips it for exactly as long. Name quitting first.
+        output::print_error(
+            &format!(
+                "Could not install Veld Desktop: {e}. If Veld Desktop is open, quit it and run \
+                 'veld desktop update' — or let the app update itself from its own \
+                 'Check for Updates…'."
+            ),
+            false,
+        );
     }
 }
 
