@@ -22,6 +22,14 @@ import { randomMarker } from "../shared/markerPick";
 export function Modal(props: {
   title: string;
   onClose: () => void;
+  /**
+   * Width, for the one dialog that is not a form. 560 is the handoff's dialog
+   * width and stays the default; settings opts out because it is a two-column
+   * surface, where 560 leaves a group panel narrower than the help text under
+   * every control. Mantine caps this at the viewport, so a wide value degrades
+   * to a full-width modal on a small screen rather than overflowing.
+   */
+  size?: number | string;
   children: ReactNode;
 }) {
   return (
@@ -30,7 +38,7 @@ export function Modal(props: {
       onClose={props.onClose}
       title={props.title}
       yOffset={88}
-      size={560}
+      size={props.size ?? 560}
       radius="lg"
       overlayProps={{ backgroundOpacity: 0.42 }}
     >
@@ -629,7 +637,7 @@ export function ChangeMarkerDialog(props: {
         <Text size="xs" c="dimmed">
           Both halves are always saved, so you can set the one you aren&apos;t
           currently showing and it will be waiting if you switch. Which one the
-          rail renders is under Settings → Appearance.
+          rail renders is under Settings → General.
         </Text>
       </Stack>
     </Modal>
@@ -695,7 +703,7 @@ export function RenameWorktreeDialog(props: {
                 Moves the checkout to the trash. Nothing is deleted yet — it
                 stays on disk and you can restore it from the rail. It is
                 deleted for good when its retention period runs out (Settings →
-                Worktrees, off by default) or when you delete it from the trash.
+                General, off by default) or when you delete it from the trash.
                 The branch itself is always kept.
                 {force
                   ? " Forcing deletes it right now and discards uncommitted changes; it will not start if an environment is still running."
