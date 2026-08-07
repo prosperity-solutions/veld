@@ -1737,14 +1737,22 @@ impl Orchestrator {
             node: sel.node.clone(),
             variant: sel.variant.clone(),
         };
+        // The terminal node is a `command` step like any other — it is simply
+        // executed here rather than in the stage loop — so it is sampled like
+        // any other. It is also usually the heaviest thing in a `--oneshot` run
+        // (an end-to-end suite), which makes it the last node that should have
+        // been left unmeasured.
+        let observed = ObservedStep::new(self.step_observer.clone(), key.clone());
         let result = process::run_command_streaming(
             &resolved_cmd,
             &working_dir,
             &env,
             Some(&output_file),
             Some(log_target),
+            observed.on_spawn(),
         )
         .await?;
+        drop(observed);
 
         // Persist the terminal node's final state. Undeclared outputs are
         // ignored (not fatal): the node has already produced its result and its
@@ -3878,9 +3886,13 @@ async fn execute_command_isolated(
     // Registered for the life of the step and deregistered by the guard's
     // `Drop`, so the `?` below — and a cancelled stage — cannot leave the
     // sampler walking a tree that has exited.
+    // `RunState::node_key`, never a hand-rolled `format!`: this string has to
+    // match the key the daemon's sampler writes under, and a second spelling of
+    // it would fail as "sampling silently stopped working" rather than as a
+    // compile error.
     let observed = ObservedStep::new(
         ctx.step_observer.clone(),
-        format!("{}:{}", sel.node, sel.variant),
+        RunState::node_key(&sel.node, &sel.variant),
     );
     let result = process::run_command_observed(
         &resolved_cmd,
@@ -4234,13 +4246,72 @@ mod tests {
         );
     }
 
-    /// No observer installed is the normal case (`veld stop`, `veld restart`,
-    /// every test), and it must cost nothing — including not handing
-    /// `run_command_observed` a callback that would fire into nowhere.
+    /// No observer installed is the normal case (`veld stop`, every test), and
+    /// it must cost nothing — including not handing `run_command_observed` a
+    /// callback that would fire into nowhere.
     #[test]
     fn without_an_observer_a_step_yields_no_callback() {
         let step = ObservedStep::new(None, "build:local".to_owned());
         assert!(step.on_spawn().is_none());
+    }
+
+    /// The guard is built *before* the spawn, so a step that never spawns
+    /// reports `step_finished` with no matching `step_started`. Implementations
+    /// are told to be idempotent ([`stats::StepObserver`]); this pins that the
+    /// unpaired call is a case they actually have to handle.
+    #[test]
+    fn a_step_that_never_spawns_still_reports_finished() {
+        let obs = Arc::new(RecordingObserver::default());
+        drop(ObservedStep::new(
+            Some(obs.clone()),
+            "build:local".to_owned(),
+        ));
+        assert_eq!(obs.events(), vec!["stop build:local"]);
+    }
+
+    /// Both spawn paths must hand the observer a PID: `run_command` for a staged
+    /// `command` node, and `run_command_streaming` for the `--oneshot` terminal
+    /// node. The terminal node is skipped by the stage loop and executed by
+    /// `run_terminal`, so it took a second seam — and it is usually the heaviest
+    /// command in the run it belongs to, which is what made missing it worth a
+    /// test rather than a comment.
+    #[tokio::test]
+    async fn both_spawn_paths_report_the_step_to_the_observer() {
+        let dir = std::env::temp_dir();
+        let env = HashMap::new();
+        let cmd = config::CommandSpec::Shell("true".to_owned());
+
+        for path in ["run_command", "run_command_streaming"] {
+            let obs = Arc::new(RecordingObserver::default());
+            {
+                let step = ObservedStep::new(Some(obs.clone()), "e2e:local".to_owned());
+                let on_spawn = step.on_spawn();
+                if path == "run_command" {
+                    process::run_command_observed(&cmd, &dir, &env, None, None, on_spawn)
+                        .await
+                        .expect("step runs");
+                } else {
+                    process::run_command_streaming(&cmd, &dir, &env, None, None, on_spawn)
+                        .await
+                        .expect("step runs");
+                }
+            }
+            let events = obs.events();
+            assert_eq!(
+                events.len(),
+                2,
+                "{path}: one start and one stop, got {events:?}"
+            );
+            assert!(
+                events[0].starts_with("start e2e:local "),
+                "{path}: the observer must be given the step's pid, got {events:?}"
+            );
+            assert_ne!(
+                events[0], "start e2e:local 0",
+                "{path}: 0 is not a pid a sampler may walk"
+            );
+            assert_eq!(events[1], "stop e2e:local");
+        }
     }
 
     /// **The disjointness invariant between the two stats producers.**
@@ -4255,20 +4326,34 @@ mod tests {
     /// `is_reapable_orphan` would see a finished build as "spawned then died"
     /// and reap a run that is still coming up, and `veld stop` would eventually
     /// signal whatever recycled the number.
+    ///
+    /// **What this actually pins, and what it does not.** It scans *this file* —
+    /// the only one that spawns a run's processes — for every spelling of
+    /// assigning a live PID (`x.pid = Some(…)` and the struct-literal
+    /// `pid: Some(…)`), and requires exactly one. It cannot see a PID persisted
+    /// from another module, so it is a tripwire on the path a future change is
+    /// overwhelmingly likely to take, not a proof. Scoped in the name for that
+    /// reason.
     #[test]
-    fn only_the_start_server_path_ever_persists_a_node_pid() {
+    fn only_one_site_in_this_module_persists_a_live_node_pid() {
         let src = include_str!("orchestrator.rs");
+        // Assembled at runtime so this test's own source does not contain the
+        // literals it searches for and match itself.
+        let some = "Some";
+        let assign = format!(".pid = {some}(");
+        let field = format!("pid: {some}(");
         let assignments: Vec<&str> = src
             .lines()
             .map(str::trim)
-            .filter(|l| l.starts_with("node_state.pid = Some("))
+            .filter(|l| (l.contains(&assign) || l.contains(&field)) && !l.starts_with("//"))
             .collect();
         assert_eq!(
             assignments.len(),
             1,
-            "exactly one site may persist a node PID (the start_server spawn); \
-             found {assignments:?}. If this is a `command` step's PID, it must not \
-             be persisted — see stats::StepObserver."
+            "exactly one site in the orchestrator may persist a live node PID \
+             (the start_server spawn); found {assignments:?}. If one of these is a \
+             `command` step's PID, it must not be persisted — see \
+             veld_core::stats::StepObserver for why."
         );
     }
 

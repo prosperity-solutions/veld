@@ -64,13 +64,45 @@ pub trait StepObserver: Send + Sync {
     fn step_started(&self, node_key: &str, pid: u32);
     /// That step's process has exited. Always called if `step_started` was,
     /// including on the error path.
+    ///
+    /// **May also arrive unpaired, so it must be idempotent.** The guard that
+    /// calls it is constructed *before* the spawn, so a step that fails to spawn
+    /// at all finishes without ever having started.
     fn step_finished(&self, node_key: &str);
+}
+
+/// Whether a run in this state has processes worth sampling — **the one
+/// definition**, called by the daemon's sampler and by the `/api/stats` handler.
+///
+/// `Starting` counts, and that is the point: a run holds that status from before
+/// its first stage until every node is healthy, which is the entire window in
+/// which builds run and dev servers allocate their way up. Gating on `Running`
+/// alone made the most interesting part of a run's resource profile the one part
+/// nothing recorded.
+///
+/// `Stopping` is excluded — what a tree does while being torn down is noise, and
+/// a sample taken there mostly races the kill. `Crashed`, `Stopped` and `Failed`
+/// are history.
+///
+/// It lives here, in `veld-core`, rather than beside either caller because the
+/// two must agree: a writer more permissive than the reader fills the database
+/// with rows the API refuses to return, and the reverse shows a node as "no
+/// stats yet" while samples for it are being written. This repo has already paid
+/// for that shape once — see [`NODE_STATS_RETENTION_SECS`], which documents three
+/// unrelated literals drifting with no test failing.
+pub fn is_sampled(status: crate::state::RunStatus) -> bool {
+    matches!(
+        status,
+        crate::state::RunStatus::Starting | crate::state::RunStatus::Running
+    )
 }
 
 /// A sample older than this many seconds is treated as absent by readers.
 /// The daemon's stats sampler runs on its own ~5s timer (`SAMPLE_INTERVAL_SECS`
 /// in `veld-daemon`, deliberately decoupled from the liveness-probe loop so
-/// slow probes can't stretch the gap), so a reading older than a few intervals
+/// slow probes can't stretch the gap) and the CLI samples `command` steps at
+/// ~2s (`COMMAND_SAMPLE_INTERVAL_SECS` in `veld-stats`), so this must stay above
+/// the *slower* of the two. A reading older than a few intervals
 /// means sampling stopped — the node's process died or the daemon isn't
 /// running — and the last value is no longer live. Three intervals of slack
 /// absorbs a skipped tick without flapping.
@@ -559,6 +591,24 @@ pub struct ProcessSeries {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The gate that makes start-phase sampling possible, over **every**
+    /// `RunStatus` variant — a status added later without a decision here would
+    /// otherwise silently inherit "not sampled".
+    ///
+    /// `Starting` is the status a run holds while its builds run and its servers
+    /// boot, so excluding it (as this did before start-phase stats) blinds both
+    /// the sampler and `/api/stats` to the whole start phase.
+    #[test]
+    fn only_a_starting_or_running_run_is_sampled() {
+        use crate::state::RunStatus;
+        assert!(is_sampled(RunStatus::Starting));
+        assert!(is_sampled(RunStatus::Running));
+        assert!(!is_sampled(RunStatus::Stopping));
+        assert!(!is_sampled(RunStatus::Stopped));
+        assert!(!is_sampled(RunStatus::Failed));
+        assert!(!is_sampled(RunStatus::Crashed));
+    }
 
     #[test]
     fn metric_round_trips_through_str() {

@@ -179,6 +179,10 @@ pub async fn run(name: Option<String>, debug: bool) -> i32 {
     // — which is exactly the stranding case: a later `veld stop` reads only the
     // store, cannot resolve the var, and then skips *every* `${vars.*}` teardown
     // step rather than just that one.
+    // A restart re-runs every `command` step — the builds included — so it is
+    // sampled exactly like a fresh start. Without this the rebuild is a hole in
+    // the middle of the run's curve.
+    let _stats_recorder = super::observe_command_stats(&mut orchestrator, run_name);
     let stranded = orchestrator.flag_answers_needed_at_teardown(&selections);
     if !stranded.is_empty() {
         eprintln!(

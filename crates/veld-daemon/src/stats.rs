@@ -20,27 +20,13 @@ use std::time::Duration;
 
 use tracing::{debug, warn};
 use veld_core::db::Db;
-use veld_core::state::RunStatus;
+use veld_core::stats::is_sampled;
 use veld_stats::StatsCollector;
 
 /// Interval between resource-stats samples (seconds). Kept at/under
 /// `veld_core::stats::STALE_AFTER_SECS` so a healthy sampler always refreshes a
 /// node's stats before its last sample ages out.
 const SAMPLE_INTERVAL_SECS: u64 = 5;
-
-/// Whether a run in this state has processes worth sampling.
-///
-/// `Starting` counts, and that is the point: a run is `Starting` from before its
-/// first stage until every node is healthy, which is the entire window in which
-/// a dev server allocates its way up to a steady state and a build runs. Gating
-/// on `Running` alone made the most interesting part of a run's resource
-/// profile the one part nothing recorded.
-///
-/// `Stopping` is excluded — what a tree does while being torn down is noise, and
-/// a sample taken there mostly races the kill.
-fn is_sampled(status: RunStatus) -> bool {
-    matches!(status, RunStatus::Starting | RunStatus::Running)
-}
 
 /// Periodically sample CPU/memory for every live run's node process trees
 /// and append them to the `node_stats` table. Runs as its own daemon task,
@@ -113,22 +99,4 @@ async fn sample_once(collector: &mut StatsCollector) -> anyhow::Result<()> {
     }
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The gate that makes start-phase sampling possible. `Starting` is the
-    /// status a run holds while its builds run and its servers boot, so
-    /// excluding it — as this did until start-phase stats were added — blinds
-    /// the sampler to the whole start phase.
-    #[test]
-    fn a_starting_run_is_sampled_and_a_finished_one_is_not() {
-        assert!(is_sampled(RunStatus::Starting));
-        assert!(is_sampled(RunStatus::Running));
-        assert!(!is_sampled(RunStatus::Stopping));
-        assert!(!is_sampled(RunStatus::Stopped));
-        assert!(!is_sampled(RunStatus::Failed));
-    }
 }

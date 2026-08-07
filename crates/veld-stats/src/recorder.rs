@@ -122,7 +122,16 @@ async fn sample_loop(
     loop {
         tokio::select! {
             _ = interval.tick() => {}
-            _ = wake.notified() => {}
+            _ = wake.notified() => {
+                // Re-phase the schedule to the sample we just took. Without
+                // this, a step registering late in a tick produces two refreshes
+                // milliseconds apart, and `sysinfo` derives CPU from the delta
+                // between them — so the pair reports either a scheduling-noise
+                // spike or a spurious 0, and `cpu_peak` deliberately keeps the
+                // maximum, which makes the artifact the number the chart
+                // highlights.
+                interval.reset();
+            }
         }
         sample_pass(&db, &project_root, &run_name, &roots, &mut collector);
     }
@@ -141,7 +150,14 @@ fn sample_pass(
     // orchestrator registers steps from other tasks while it runs.
     let current: Vec<(String, u32)> = match roots.lock() {
         Ok(r) => r.iter().map(|(k, v)| (k.clone(), *v)).collect(),
-        Err(_) => return,
+        // A poisoned lock means a panic while the map was held, and it never
+        // un-poisons — so this is where sampling stops for the rest of the run.
+        // Say so once rather than going quiet, since the symptom downstream is
+        // an unexplained gap in a chart.
+        Err(e) => {
+            debug!("command-step stats sampling stopped for '{run_name}': {e}");
+            return;
+        }
     };
     // Nothing registered — skip the process-table refresh entirely. Between
     // stages, and for a run made only of `start_server` nodes, this is every

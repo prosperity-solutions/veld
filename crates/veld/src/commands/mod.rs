@@ -27,6 +27,31 @@ pub mod version;
 
 use crate::output;
 
+/// Record CPU/memory for the `command` steps an orchestrator is about to run.
+///
+/// **Every command that executes a run's graph must call this**, not just
+/// `veld start` — `veld restart` re-runs the same builds and installs, into the
+/// same run name, so leaving it out puts a hole in the middle of a node's curve
+/// that reads as a sampling bug rather than as an unsupported path.
+///
+/// The daemon samples what has a persisted PID, which is only the `start_server`
+/// nodes. A `command` step's process is spawned, awaited and reaped inside *this*
+/// process, so if this process does not measure it, nothing can. The returned
+/// handle must be held for the lifetime of the run: dropping it stops sampling.
+#[must_use = "sampling stops when the recorder is dropped — hold it for the run"]
+pub fn observe_command_stats(
+    orchestrator: &mut veld_core::orchestrator::Orchestrator,
+    run_name: &str,
+) -> std::sync::Arc<veld_stats::CommandStatsRecorder> {
+    let recorder = std::sync::Arc::new(veld_stats::CommandStatsRecorder::start(
+        orchestrator.db.clone(),
+        orchestrator.project_root.clone(),
+        run_name.to_owned(),
+    ));
+    orchestrator.with_step_observer(recorder.clone());
+    recorder
+}
+
 /// Clean up the Spoon left behind by the Hammerspoon menu bar integration veld
 /// used to ship, and report what it did.
 ///

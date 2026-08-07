@@ -68,8 +68,24 @@ const CMD_MAX_CHARS: usize = 160;
 /// Whether to record each process's full argv. Off via `VELD_STATS_CMDLINE=off`
 /// (also `0`/`false`/`no`); the process *name* is always recorded.
 ///
+/// **Read from whichever process is doing the sampling, and there are now two.**
+/// The daemon reads it from its service environment (launchd/systemd); the CLI
+/// reads it from the user's shell. A user who wants argv capture off has to turn
+/// it off in both places — the docs in `README.md` and `skills/veld/SKILL.md` say
+/// so, and the verification step there points at a `command` node for exactly
+/// this reason. Do not "simplify" this into one lookup without giving the CLI a
+/// way to see the service environment, which it has none of.
+///
 /// The switch exists because argv is a genuinely new data class here, not just
-/// more of the same. veld's own config rules forbid putting a secret on a command
+/// more of the same. Note the asymmetry the CLI producer adds: veld's config
+/// rules make a veld-resolved secret on a command line an **error**, but a
+/// shell-expanded `$SECRET` in a step's `shell` is only a **warning** and an
+/// ambient `$AWS_SECRET_ACCESS_KEY` is ungoverned — and migrations, seeds and
+/// private-registry installs are `command` steps, where a `start_server` node is
+/// usually `npm run dev`. Same risk class, newly applied to the class veld's own
+/// lint stops short of rejecting.
+///
+/// veld's own config rules forbid putting a secret on a command
 /// line *because the OS process table is world-readable* — but that premise is
 /// platform-specific: on macOS `KERN_PROCARGS2` restricts argv to the owning uid,
 /// so a node's arguments are not readable by another local user today. Recording

@@ -274,9 +274,16 @@ and several were paid for in this codebase already.
   there makes a run that is still legitimately coming up look like one that
   spawned and died, and eventually has `veld stop` signal whatever recycled the
   number. A sample is the opposite kind of fact — "at time T this tree looked like
-  this" — and stays true afterwards. `only_the_start_server_path_ever_persists_a_node_pid`
-  pins it by counting the assignment sites, because nothing in the type system
-  does. The sampling code lives in its own crate rather than in `veld-core` for a
+  this" — and stays true afterwards.
+  `only_one_site_in_this_module_persists_a_live_node_pid` is a tripwire, not a
+  proof: it counts every spelling of a live-PID assignment in `orchestrator.rs`
+  (the only module that spawns a run's processes) and requires exactly one, but
+  it cannot see a PID persisted from elsewhere. Nothing in the type system
+  enforces this, so treat the rule as the guarantee and the test as the reminder.
+  Every command that executes a run's graph must install the recorder — use
+  `commands::observe_command_stats`, which both `veld start` and `veld restart`
+  call; a command that runs the graph without it puts an unexplained hole in a
+  node's curve. The sampling code lives in its own crate rather than in `veld-core` for a
   second reason: `veld-helper` (privileged) and `veld-gateway` depend on
   `veld-core`, and neither should link a machine-wide process scanner — hence the
   sysinfo-free `veld_core::stats::StepObserver` seam that the CLI implements.
