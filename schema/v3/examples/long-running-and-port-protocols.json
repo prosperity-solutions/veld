@@ -47,13 +47,24 @@
     },
 
     // A port whose derived hostname would collide gets its own template.
+    //
+    // `host` replaces `url_template`, so it speaks the same {single-brace}
+    // language — {service}, {variant}, {run}, {project}, {branch}, {worktree},
+    // {username}, {hostname}, and the {a ?? b} fallback. NOT ${...}: that is the
+    // command/env language, and ${vars.x} here is a start-time error.
+    // Inside a `host`, {service} is the port's own label — the node name for a
+    // primary port, `<node>-<port>` for a secondary one.
     "docs": {
       "variants": {
         "dev": {
           "type": "long_running",
           "shell": "docs-server --port ${veld.port}",
           "ports": {
-            "http": { "port": "auto", "protocol": "http", "host": "handbook.demo.localhost" }
+            "http": {
+              "port": "auto",
+              "protocol": "http",
+              "host": "handbook.{branch ?? run}.{project}.localhost"
+            }
           },
           "probes": { "readiness": { "type": "http", "path": "/index.html" } }
         }

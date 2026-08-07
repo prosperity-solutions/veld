@@ -272,13 +272,19 @@ pub async fn join(ticket: String, label: Option<String>, remember: bool, json: b
                 serde_json::to_string_pretty(&resp).unwrap_or_default()
             );
         } else {
+            let total = resp.urls.len() + resp.addresses.len();
             output::print_success(&format!(
-                "Joined — {} URL(s) now reachable on this machine:",
-                resp.urls.len()
+                "Joined — {total} endpoint(s) now reachable on this machine:"
             ));
             println!();
             for url in &resp.urls {
                 println!("    {}", output::cyan(url));
+            }
+            // Raw endpoints are addresses, not URLs, and the port is this
+            // machine's listener rather than the origin's — printing them as
+            // URLs would send someone to a port nothing is listening on.
+            for addr in &resp.addresses {
+                println!("    {}  {}", output::cyan(addr), output::dim("(tcp)"));
             }
             for w in &resp.warnings {
                 println!("  {} {}", output::yellow("!"), w);

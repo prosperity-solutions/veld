@@ -3391,20 +3391,23 @@ async fn execute_start_server_isolated(
             .insert(format!("ports.{name}"), value.to_string());
     }
     node_state.url = https_url.clone();
-    // Two maps, no overlap: `urls` is the routed http ports (display, sharing,
-    // route teardown), `tcp_hosts` is the named-but-unrouted ones (DNS teardown
-    // only). Splitting them keeps "a URL means Caddy is in front of it" true,
-    // which several consumers rely on.
-    node_state.urls = precomputed
+    // One entry per named port, routed or not. `url.is_some()` is the routed
+    // predicate everything downstream branches on — display, route teardown,
+    // and sharing eligibility — so "has a URL" keeps meaning "Caddy is in front
+    // of it".
+    node_state.endpoints = precomputed
         .endpoints
         .iter()
-        .filter_map(|(name, e)| e.https_url.clone().map(|u| (name.clone(), u)))
-        .collect();
-    node_state.tcp_hosts = precomputed
-        .endpoints
-        .iter()
-        .filter(|(_, e)| !e.is_routed())
-        .map(|(name, e)| (name.clone(), e.hostname.clone()))
+        .map(|(name, e)| {
+            (
+                name.clone(),
+                crate::state::NodeEndpoint {
+                    hostname: e.hostname.clone(),
+                    url: e.https_url.clone(),
+                    port: e.port,
+                },
+            )
+        })
         .collect();
     // `url` plus the individual location pieces (mirrors the Web URL API), the
     // same family per named http port under `urls.<name>`, and `hosts.<name>`

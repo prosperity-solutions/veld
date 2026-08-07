@@ -469,7 +469,7 @@ const MIGRATIONS: &[Migration] = &[
     },
     Migration {
         version: 13,
-        name: "node-per-port-urls",
+        name: "node-endpoints",
         apply: migrate_v13_node_urls,
     },
 ];
@@ -1070,7 +1070,7 @@ fn migrate_v11_pane_sessions(conn: &Connection) -> rusqlite::Result<()> {
 /// lets a `secret: true` var be overridable without veld taking custody of the
 /// secret. A plain scalar round-trips as a bare JSON string, so the common case
 /// stays readable in `sqlite3`.
-/// Two JSON columns holding a node's named hostnames, keyed by port name.
+/// One JSON column holding a node's named ports, keyed by port name.
 ///
 /// A node used to own exactly one hostname, so `nodes.url` was the whole story
 /// and teardown removed one DNS host and one Caddy route. With every
@@ -1087,8 +1087,7 @@ fn migrate_v11_pane_sessions(conn: &Connection) -> rusqlite::Result<()> {
 fn migrate_v13_node_urls(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
         r#"
-        ALTER TABLE nodes ADD COLUMN urls TEXT NOT NULL DEFAULT '{}';
-        ALTER TABLE nodes ADD COLUMN tcp_hosts TEXT NOT NULL DEFAULT '{}';
+        ALTER TABLE nodes ADD COLUMN endpoints TEXT NOT NULL DEFAULT '{}';
         "#,
     )
 }

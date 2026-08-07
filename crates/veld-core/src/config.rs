@@ -1025,11 +1025,16 @@ impl<'de> Deserialize<'de> for PortSpec {
 }
 
 /// What a named port speaks, which is what decides whether veld routes it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PortProtocol {
     /// HTTP(S). veld mints a hostname for this port and puts a Caddy route in
     /// front of it, so the port is reachable as a URL.
+    ///
+    /// The `Default` so a share manifest minted before per-port sharing — where
+    /// every entry was routed HTTP and carried no `protocol` — deserializes to
+    /// what it actually meant.
+    #[default]
     Http,
     /// A raw TCP listener. Allocated, exported as `${veld.ports.<name>}` and
     /// `VELD_PORT_<NAME>`, and deliberately **not** routed: a raw TCP
@@ -1049,10 +1054,18 @@ pub enum PortProtocol {
 pub struct PortEntry {
     pub spec: PortSpec,
     pub protocol: Option<PortProtocol>,
-    /// Per-port `url_template` override. Only meaningful for an `http` port,
-    /// and the documented way out of a hostname collision between one node's
-    /// secondary port and another node's primary.
+    /// Per-port hostname template, replacing the effective `url_template` for
+    /// this port. The documented way out of a hostname collision between one
+    /// node's secondary port and another node's primary.
     pub host: Option<String>,
+    /// Who this **port** may be exposed to.
+    ///
+    /// Consent lives on the port because that is where exposure happens. A node
+    /// used to have exactly one exposed port, which made node-level consent
+    /// equivalent — but a node can now declare an app port, an ops console and a
+    /// database, and "share this node" must never come to mean all three.
+    /// Absent is *not shared*, always.
+    pub share: Option<SharePolicy>,
 }
 
 /// The long form, so the shorthand and the object form share one grammar for
@@ -1065,6 +1078,8 @@ struct PortEntryObject {
     protocol: Option<PortProtocol>,
     #[serde(default)]
     host: Option<String>,
+    #[serde(default)]
+    share: Option<SharePolicy>,
 }
 
 impl Serialize for PortEntry {
@@ -1072,7 +1087,7 @@ impl Serialize for PortEntry {
         // Round-trip the shorthand as shorthand: an entry that states nothing
         // beyond its port must not grow an object wrapper just by passing
         // through `veld runs diff` or a graph snapshot.
-        if self.protocol.is_none() && self.host.is_none() {
+        if self.protocol.is_none() && self.host.is_none() && self.share.is_none() {
             return self.spec.serialize(s);
         }
         let mut m = s.serialize_map(None)?;
@@ -1082,6 +1097,9 @@ impl Serialize for PortEntry {
         }
         if let Some(h) = &self.host {
             m.serialize_entry("host", h)?;
+        }
+        if let Some(sh) = &self.share {
+            m.serialize_entry("share", sh)?;
         }
         m.end()
     }
@@ -1098,6 +1116,7 @@ impl<'de> Deserialize<'de> for PortEntry {
                 spec: obj.port,
                 protocol: obj.protocol,
                 host: obj.host,
+                share: obj.share,
             });
         }
         let spec = PortSpec::deserialize(value).map_err(|e| D::Error::custom(e.to_string()))?;
@@ -1105,6 +1124,7 @@ impl<'de> Deserialize<'de> for PortEntry {
             spec,
             protocol: None,
             host: None,
+            share: None,
         })
     }
 }
@@ -1118,6 +1138,9 @@ pub struct ResolvedPort {
     pub spec: PortSpec,
     pub protocol: PortProtocol,
     pub host: Option<String>,
+    /// Who this port may be exposed to. `None` means **not shared** — consent is
+    /// always opt-in, and nothing anywhere may widen it.
+    pub share: Option<SharePolicy>,
 }
 
 /// Resolved named ports for one node, and which of them is primary.
@@ -1231,6 +1254,7 @@ pub fn resolve_ports(
                     spec: PortSpec::Auto,
                     protocol: None,
                     host: None,
+                    share: None,
                 },
             )])
         });
@@ -1268,6 +1292,7 @@ pub fn resolve_ports(
                     spec: entry.spec,
                     protocol,
                     host: entry.host,
+                    share: entry.share,
                 },
             )
         })
@@ -2782,6 +2807,10 @@ pub struct ResolvedVariant {
     pub strict_outputs: bool,
     pub skip_if: Option<CommandSpec>,
     pub on_stop: Option<CommandSpec>,
+    /// The node/variant-level `share` **as written**. Retained for diagnostics
+    /// and display only — the authoritative consent is per port, in
+    /// [`Self::ports`], where this value has already been folded into the
+    /// primary entry. Never gate an exposure on this field.
     pub share: Option<SharePolicy>,
     pub features: ResolvedFeatures,
     pub proxy: ResolvedProxy,
@@ -2844,6 +2873,28 @@ pub fn resolve_variant(
         variant.probes.as_ref().and_then(|p| p.liveness.as_ref()),
     );
 
+    // Node/variant-level `share` is **shorthand for the primary port's policy**,
+    // not a node-wide grant. That keeps every config written before per-port
+    // consent meaning exactly what it meant — such a node had one exposed port —
+    // while making it impossible for the same words to start covering an ops
+    // console or a database the author never mentioned.
+    //
+    // A port that states its own `share` wins: the more specific declaration is
+    // the one the author looked at last. Nothing here ever *widens* a port's
+    // policy; a port with no policy of its own and no primary-ness stays unshared.
+    let node_share = replace(node.share.as_ref(), variant.share.as_ref());
+    let mut ports = resolve_ports(
+        node.ports.as_ref().map(|p| p.as_ref()),
+        variant.ports.as_ref().map(|p| p.as_ref()),
+    );
+    if let Some(primary) = ports.primary.clone() {
+        if let Some(entry) = ports.ports.get_mut(&primary) {
+            if entry.share.is_none() {
+                entry.share = node_share.clone();
+            }
+        }
+    }
+
     ResolvedVariant {
         step_type: variant
             .step_type
@@ -2859,10 +2910,7 @@ pub fn resolve_variant(
             node.env.as_ref(),
             variant.env.as_ref(),
         ),
-        ports: resolve_ports(
-            node.ports.as_ref().map(|p| p.as_ref()),
-            variant.ports.as_ref().map(|p| p.as_ref()),
-        ),
+        ports,
         files: merge_nullable_maps([None, node.files.as_ref(), variant.files.as_ref()]),
         outputs: replace(node.outputs.as_ref(), variant.outputs.as_ref()),
         sensitive_outputs: variant.sensitive_outputs.clone(),
@@ -2871,7 +2919,7 @@ pub fn resolve_variant(
         // Absent inherits the node's hook; an explicit `null` erases it. `replace`
         // is the same three-way rule already used for `outputs` and `share`.
         on_stop: replace(node.on_stop.as_ref(), variant.on_stop.as_ref()),
-        share: replace(node.share.as_ref(), variant.share.as_ref()),
+        share: node_share,
         features: resolve_features(
             project.features.as_ref(),
             node.features.as_ref(),
@@ -4714,6 +4762,27 @@ fn check_resolved_variants(config: &VeldConfig, out: &mut Vec<Finding>) {
                             ),
                         ));
                     }
+                }
+            }
+
+            // The `web` audience is HTTP-only, permanently. The gateway speaks
+            // HTTP/1.1 over the tunnel, and a browser cannot speak a raw
+            // protocol through it regardless — so this is not a gap to close
+            // later, it is a property of what "web" means. Caught here so the
+            // author learns at `veld lint` rather than at `veld share --web`.
+            for (name, port) in &r.ports.ports {
+                let Some(share) = &port.share else { continue };
+                if port.protocol == PortProtocol::Tcp && share.allows(ExposeMode::Web) {
+                    out.push(Finding::error(
+                        "web-share-needs-http",
+                        format!("{loc}.ports.{name}.share"),
+                        format!(
+                            "port `{name}` is `\"protocol\": \"tcp\"` but opts into `web` \
+                             sharing. The public gateway serves HTTP, and a browser cannot \
+                             speak a raw TCP protocol through it. Use `\"expose\": \
+                             [\"peer\"]`, or make the port `\"protocol\": \"http\"`"
+                        ),
+                    ));
                 }
             }
 
@@ -9021,6 +9090,107 @@ mod tests {
         assert!(
             !findings.iter().any(|f| f.rule == "ambiguous-primary-port"),
             "an explicit http port is not ambiguous"
+        );
+    }
+
+    /// Consent lives on the port. The node-level `share` is shorthand for the
+    /// **primary** port and must never widen to the rest — a node's admin
+    /// console and its database are separate decisions from its app.
+    #[test]
+    fn node_level_share_covers_the_primary_port_and_nothing_else() {
+        let r = resolve(
+            r#"{"schemaVersion":"3","name":"t","nodes":{"web":{"variants":{"dev":{
+                "type":"long_running","shell":"x",
+                "share":{"expose":["peer","web"]},
+                "ports":{
+                    "http":"auto",
+                    "admin":{"port":"auto","protocol":"http"},
+                    "pg":{"port":5432,"protocol":"tcp"}
+                },
+                "probes":{"readiness":{"type":"port"}}
+            }}}}}"#,
+            "web",
+            "dev",
+        );
+        let p = &r.ports.ports;
+        assert!(
+            p["http"]
+                .share
+                .as_ref()
+                .is_some_and(|s| s.allows(ExposeMode::Peer)),
+            "the node-level opt-in reaches the primary"
+        );
+        assert!(
+            p["admin"].share.is_none(),
+            "a secondary http port is NOT covered by a node-level share"
+        );
+        assert!(
+            p["pg"].share.is_none(),
+            "a tcp port is NOT covered by a node-level share"
+        );
+    }
+
+    /// A port's own `share` is the more specific declaration and wins; nothing
+    /// anywhere may widen a port that declared none.
+    #[test]
+    fn a_ports_own_share_wins_over_the_node_shorthand() {
+        let r = resolve(
+            r#"{"schemaVersion":"3","name":"t","nodes":{"web":{"variants":{"dev":{
+                "type":"long_running","shell":"x",
+                "share":{"expose":["web"]},
+                "ports":{
+                    "http":{"port":"auto","protocol":"http","share":{"expose":["peer"]}},
+                    "admin":{"port":"auto","protocol":"http","share":{"expose":["peer"]}}
+                },
+                "probes":{"readiness":{"type":"port"}}
+            }}}}}"#,
+            "web",
+            "dev",
+        );
+        let http = r.ports.ports["http"].share.as_ref().unwrap();
+        assert!(http.allows(ExposeMode::Peer));
+        assert!(
+            !http.allows(ExposeMode::Web),
+            "the port's own policy replaces the node shorthand, never merges with it"
+        );
+        assert!(
+            r.ports.ports["admin"]
+                .share
+                .as_ref()
+                .is_some_and(|s| s.allows(ExposeMode::Peer)),
+            "a secondary port opts in explicitly"
+        );
+    }
+
+    /// The `web` audience is HTTP-only by the nature of the gateway, so the
+    /// combination has to be unwritable rather than merely unsupported.
+    #[test]
+    fn a_tcp_port_cannot_opt_into_web_sharing() {
+        let findings = findings_for(
+            r#"{"schemaVersion":"3","name":"t","nodes":{"db":{"variants":{"dev":{
+                "type":"long_running","shell":"x",
+                "ports":{"pg":{"port":5432,"protocol":"tcp","share":{"expose":["web"]}}},
+                "probes":{"readiness":{"type":"command","shell":"true"}}
+            }}}}}"#,
+        );
+        let hit = findings
+            .iter()
+            .find(|f| f.rule == "web-share-needs-http")
+            .expect("a tcp port opting into web must be refused");
+        assert_eq!(hit.severity, Severity::Error);
+
+        // `peer` on the same port is fine — that is the whole point of raw
+        // sharing, and it must not be caught by the same rule.
+        let ok = findings_for(
+            r#"{"schemaVersion":"3","name":"t","nodes":{"db":{"variants":{"dev":{
+                "type":"long_running","shell":"x",
+                "ports":{"pg":{"port":5432,"protocol":"tcp","share":{"expose":["peer"]}}},
+                "probes":{"readiness":{"type":"command","shell":"true"}}
+            }}}}}"#,
+        );
+        assert!(
+            !ok.iter().any(|f| f.rule == "web-share-needs-http"),
+            "peer sharing a tcp port is legitimate, got {ok:?}"
         );
     }
 

@@ -144,7 +144,7 @@ fn load_nodes(conn: &Connection, run_row: i64) -> Result<HashMap<String, NodeSta
     let mut stmt = conn.prepare_cached(
         "SELECT node_key, node_name, variant, status, pid, port, url, outputs,
                 readiness_phases, recovery_count, consecutive_failures,
-                last_liveness_error, sensitive_keys, urls, tcp_hosts
+                last_liveness_error, sensitive_keys, endpoints
          FROM nodes WHERE run_row = ?1",
     )?;
     let rows = stmt.query_map([run_row], |row| {
@@ -152,8 +152,7 @@ fn load_nodes(conn: &Connection, run_row: i64) -> Result<HashMap<String, NodeSta
         let outputs_json: String = row.get(7)?;
         let phases_json: String = row.get(8)?;
         let sensitive_json: String = row.get(12)?;
-        let urls_json: String = row.get(13)?;
-        let tcp_hosts_json: String = row.get(14)?;
+        let endpoints_json: String = row.get(13)?;
         let status: String = row.get(3)?;
         Ok((
             key,
@@ -164,8 +163,7 @@ fn load_nodes(conn: &Connection, run_row: i64) -> Result<HashMap<String, NodeSta
                 pid: row.get(4)?,
                 port: row.get(5)?,
                 url: row.get(6)?,
-                urls: serde_json::from_str(&urls_json).unwrap_or_default(),
-                tcp_hosts: serde_json::from_str(&tcp_hosts_json).unwrap_or_default(),
+                endpoints: serde_json::from_str(&endpoints_json).unwrap_or_default(),
                 outputs: serde_json::from_str(&outputs_json).unwrap_or_default(),
                 readiness_phases: serde_json::from_str::<Vec<ReadinessPhase>>(&phases_json)
                     .unwrap_or_default(),
@@ -483,8 +481,8 @@ impl Db {
                 "INSERT INTO nodes (run_row, node_key, node_name, variant, status, pid, port, url,
                                     outputs, readiness_phases, recovery_count,
                                     consecutive_failures, last_liveness_error, sensitive_keys,
-                                    urls, tcp_hosts)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                                    endpoints)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             )?;
             for (key, node) in &run.nodes {
                 let mut node = node.clone();
@@ -504,8 +502,7 @@ impl Db {
                     node.consecutive_failures,
                     node.last_liveness_error,
                     serde_json::to_string(&node.sensitive_keys)?,
-                    serde_json::to_string(&node.urls)?,
-                    serde_json::to_string(&node.tcp_hosts)?,
+                    serde_json::to_string(&node.endpoints)?,
                 ])?;
             }
         }
@@ -754,13 +751,15 @@ impl Db {
             })?
             .collect::<Result<_, _>>()?;
 
-        // Both columns: `url` is the primary, `urls` carries every routed http
+        // Both columns: `url` is the primary, `endpoints` carries every named
         // port. The registry feeds `claimed_hostname`, which is what stops two
-        // projects serving the same hostname — so a secondary port missing here
-        // is a collision nothing detects.
+        // projects serving the same hostname — so a port missing here is a
+        // collision nothing detects. Unrouted (`tcp`) endpoints count too: they
+        // own a DNS entry, and a DNS collision is the harder one to diagnose
+        // because nothing serves an error page.
         let mut url_stmt = conn.prepare_cached(
-            "SELECT node_key, url, urls FROM nodes WHERE run_row = ?1
-             AND (url IS NOT NULL OR urls != '{}')",
+            "SELECT node_key, url, endpoints FROM nodes WHERE run_row = ?1
+             AND (url IS NOT NULL OR endpoints != '{}')",
         )?;
 
         let mut registry = GlobalRegistry::default();
@@ -774,17 +773,20 @@ impl Db {
                 ))
             })?;
             for row in per_node {
-                let (node_key, primary, urls_json) = row?;
+                let (node_key, primary, endpoints_json) = row?;
                 if let Some(primary) = primary {
                     urls.insert(node_key.clone(), primary);
                 }
                 // Keyed `node_key#port` so a secondary never collides with the
                 // primary's entry. Only the values are read (by
-                // `claimed_hostname`); the key just has to be unique.
-                let per_port: HashMap<String, String> =
-                    serde_json::from_str(&urls_json).unwrap_or_default();
-                for (port_name, url) in per_port {
-                    urls.insert(format!("{node_key}#{port_name}"), url);
+                // `claimed_hostname`); the key just has to be unique. The
+                // *hostname* is what matters, so an unrouted endpoint
+                // contributes its bare hostname.
+                let per_port: std::collections::BTreeMap<String, crate::state::NodeEndpoint> =
+                    serde_json::from_str(&endpoints_json).unwrap_or_default();
+                for (port_name, endpoint) in per_port {
+                    let value = endpoint.url.unwrap_or(endpoint.hostname);
+                    urls.insert(format!("{node_key}#{port_name}"), value);
                 }
             }
             let entry = registry

@@ -1725,20 +1725,41 @@ An entry is either the scalar shorthand — unchanged — or the long form:
 | Field | Meaning |
 |---|---|
 | `port` | `"auto"` or a fixed number. Exactly what the shorthand says. |
-| `protocol` | `"http"` or `"tcp"`. Decides whether Veld routes the port. |
+| `protocol` | `"http"` or `"tcp"`. Decides whether Veld *routes* the port. Both get a hostname. |
 | `host` | A `url_template` for **this port only**, replacing the effective one wholesale. |
 
-An **`http`** port gets its own hostname and a Caddy route in front of it, so it
-is reachable as a URL and has a `${veld.urls.<name>}` family.
+**Every port gets a hostname and a DNS entry. Only `http` gets a Caddy route.**
+Naming and routing are separate concerns, and Veld's helper has always kept
+`add_host` and `add_route` apart.
 
-A **`tcp`** port is allocated, reserved, and exported — `${veld.ports.<name>}`,
-`VELD_PORT_<NAME>`, `${nodes.<node>.ports.<name>}` — and deliberately **never
-routed**. Not an omission: a raw TCP connection carries no hostname for a proxy
-to demultiplex on, so there is nothing for Caddy to match a route against. And
-every `*.veld.localhost` name already resolves to 127.0.0.1 without any help from
-Veld — `veld-helper`'s DNS layer skips `.localhost` domains outright — so for a
-raw listener the port number is already the whole address. A route would add
-nothing but a certificate that no `psql` will present a hostname to.
+An **`http`** port gets the hostname, a Caddy route in front of it, and a
+`${veld.urls.<name>}` family — so it is reachable as a URL.
+
+A **`tcp`** port gets the hostname and nothing else. It is allocated, reserved
+and exported — `${veld.hosts.<name>}`, `${veld.ports.<name>}`,
+`VELD_HOST_<NAME>`, `VELD_PORT_<NAME>`, `${nodes.<node>.ports.<name>}` — and
+deliberately **never routed**. Not an omission: a raw TCP connection carries no
+hostname for a proxy to demultiplex on, so there is nothing for Caddy to match a
+route against, and a route would add nothing but a certificate no `psql` will
+ever present a hostname to. The address is the name plus the port:
+
+```jsonc
+"env": { "DATABASE_URL": "postgres://app@${veld.hosts.pg}:${veld.ports.pg}/app" }
+```
+
+The DNS half is what makes that name resolve, and whether it does anything
+depends on your domain:
+
+- On **`.localhost`** it is a no-op Veld skips outright — the OS wildcards every
+  `*.localhost` name (RFC 6761), so `pg.anything.veld.localhost:5432` already
+  worked and always did.
+- On a **custom apex domain** (`{service}.myapp.test`, privileged mode) hostnames
+  exist *only* because Veld writes an `/etc/hosts` or dnsmasq entry. Without one,
+  a `tcp` port has no name at all and is reachable only as `127.0.0.1:<port>`.
+  This is the case the DNS entry exists for.
+
+`udp` is not a value, on purpose. It would change no behaviour anywhere in Veld,
+and a schema field that does nothing is worse than no field.
 
 `udp` is not a value, on purpose. It would change no behaviour anywhere in Veld,
 and a schema field that does nothing is worse than no field.

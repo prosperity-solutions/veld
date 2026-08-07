@@ -123,6 +123,31 @@ pub struct ReadinessPhase {
 // Node state
 // ---------------------------------------------------------------------------
 
+/// One named port of a running node, as the rest of veld sees it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeEndpoint {
+    /// The hostname veld minted for this port. Every port has one, whatever its
+    /// protocol — a `tcp` port's hostname is registered in DNS and never routed.
+    pub hostname: String,
+    /// The `https://` URL, when this port is routed (`protocol: "http"`).
+    /// `None` for a `tcp` port: nothing is in front of it, so the address is
+    /// `hostname` plus [`Self::port`].
+    ///
+    /// **This is the routed predicate.** Sharing, display and route teardown all
+    /// branch on it, so "has a URL" must keep meaning "Caddy is in front of it".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// The local TCP port. Caddy's upstream when routed; the port a client
+    /// connects to directly when not.
+    pub port: u16,
+}
+
+impl NodeEndpoint {
+    pub fn is_routed(&self) -> bool {
+        self.url.is_some()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeState {
     pub node_name: String,
@@ -133,25 +158,22 @@ pub struct NodeState {
     /// The primary HTTP port's URL. `None` for a `command` node and for a
     /// `long_running` node that declares `"ports": null` or only `tcp` ports.
     pub url: Option<String>,
-    /// Every routed HTTP port, keyed by port name — the primary included, so
-    /// this is the complete list and `url` is a convenience view of one entry.
+    /// Every named port this node claimed, keyed by port name — the primary
+    /// included, so this is the complete list and `url`/`port` are convenience
+    /// views of one entry.
+    ///
+    /// One map rather than a routed one and an unrouted one: the sharing layer
+    /// needs the *port number* alongside the hostname for every endpoint it may
+    /// expose, and splitting the two meant that number lived only in `outputs`
+    /// as a string. `NodeEndpoint::url` being `Some` is what "routed" means.
     ///
     /// **Teardown must iterate this, not `url`.** Each entry owns a DNS host and
-    /// a Caddy route; a hostname missed at stop time leaves a permanent
-    /// `/etc/hosts` line and a route that shadows that name for every later run.
-    /// Absent on rows written before multi-port routing, which is exactly the
-    /// single-`url` case, so `hostnames()` folds `url` back in.
+    /// (when routed) a Caddy route; a hostname missed at stop time leaves a
+    /// permanent `/etc/hosts` line and a route that shadows that name for every
+    /// later run. Absent on rows written before multi-port routing, which is
+    /// exactly the single-`url` case, so `hostnames()` folds `url` back in.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub urls: BTreeMap<String, String>,
-    /// Named `tcp` ports: port name → hostname.
-    ///
-    /// Disjoint from [`Self::urls`] by construction — a port is routed or it is
-    /// not. A `tcp` port gets a DNS entry and no Caddy route, so it needs
-    /// tearing down too, but it must never be displayed or shared as a URL:
-    /// "this node has a `url`" means "Caddy is in front of it", and several
-    /// consumers depend on that staying true.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub tcp_hosts: BTreeMap<String, String>,
+    pub endpoints: BTreeMap<String, NodeEndpoint>,
     pub outputs: HashMap<String, String>,
     /// Readiness probe phase tracking (renamed from `health_phases` in v7).
     #[serde(default, alias = "health_phases")]
@@ -179,8 +201,7 @@ impl NodeState {
             pid: None,
             port: None,
             url: None,
-            urls: BTreeMap::new(),
-            tcp_hosts: BTreeMap::new(),
+            endpoints: BTreeMap::new(),
             outputs: HashMap::new(),
             readiness_phases: Vec::new(),
             recovery_count: 0,
@@ -205,7 +226,8 @@ impl NodeState {
         if let Some(primary) = &self.url {
             out.push((None, primary.as_str()));
         }
-        for (name, url) in &self.urls {
+        for (name, endpoint) in &self.endpoints {
+            let Some(url) = &endpoint.url else { continue };
             if Some(url) == self.url.as_ref() {
                 continue;
             }
@@ -217,16 +239,13 @@ impl NodeState {
     /// Every hostname this node claimed, port-stripped and deduplicated — the
     /// one list teardown, GC and the collision check must all walk.
     ///
-    /// Folds `url` in rather than trusting `urls` alone, so a run persisted
-    /// before multi-port routing still tears its single route down.
+    /// Includes unrouted (`tcp`) endpoints, which own a DNS entry and no route,
+    /// and folds `url` in rather than trusting `endpoints` alone, so a run
+    /// persisted before multi-port routing still tears its single route down.
     pub fn hostnames(&self) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
-        for u in self
-            .urls
-            .values()
-            .chain(self.url.iter())
-            .chain(self.tcp_hosts.values())
-        {
+        let from_endpoints = self.endpoints.values().map(|e| e.hostname.as_str());
+        for u in from_endpoints.chain(self.url.as_deref()) {
             let host = crate::url::hostname_of_url(u).to_owned();
             if !out.contains(&host) {
                 out.push(host);
