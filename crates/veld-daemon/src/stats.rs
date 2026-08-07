@@ -86,17 +86,30 @@ async fn sample_once(collector: &mut StatsCollector) -> anyhow::Result<()> {
                 if let Some(pid) = node_state.pid {
                     // `is_alive` is `kill(pid, 0)`, which also succeeds for a
                     // *defunct* process — so it is not enough on its own. A
-                    // zombie is still in sysinfo's table with nothing mapped,
-                    // and a tree reporting no memory at all is exactly that: a
-                    // live process always has resident pages. Recording it would
-                    // write a "used no memory" sample for a node that had simply
-                    // ended, which the whole absent-is-not-zero rule exists to
-                    // prevent. The CLI-side sampler drops the same case.
+                    // zombie is still in sysinfo's table with nothing mapped, so
+                    // a tree reporting no memory at all is treated as one, and
+                    // dropped: recording it would write a "used no memory"
+                    // sample for a node that had simply ended, which the whole
+                    // absent-is-not-zero rule exists to prevent. The CLI-side
+                    // sampler drops the same case.
+                    //
+                    // It is a heuristic, not a proof — `sysinfo` also reports
+                    // zero when it cannot read a process at all (on macOS a
+                    // failed `proc_pidinfo` yields a zeroed struct), which for a
+                    // node owned by another uid would blank its chart on every
+                    // tick. Hence the log: a permanently empty graph must be
+                    // diagnosable, and "wrote a wrong zero" is not the better
+                    // failure.
                     if veld_core::process::is_alive(pid) {
                         if let Some(tree) = collector.sample_tree(pid, sampled_at) {
                             if tree.total.memory_bytes > 0 {
                                 samples.push((key.clone(), tree.total));
                                 trees.push((key.clone(), tree.processes));
+                            } else {
+                                debug!(
+                                    "node '{key}' of run '{run_name}' is alive but reports no \
+                                     memory — treating as exited/unreadable, not as zero"
+                                );
                             }
                         }
                     }

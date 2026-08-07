@@ -59,8 +59,9 @@ pub struct CommandStatsRecorder {
     /// synchronous trait callable from the orchestrator's spawn path.
     roots: Arc<Mutex<HashMap<String, u32>>>,
     /// Rings the sampler between ticks, so a step that spawns just after a tick
-    /// still gets one sample instead of waiting a whole interval — which for a
-    /// short step is the difference between a data point and none.
+    /// is sampled within [`MIN_RESAMPLE_GAP`] instead of waiting a whole
+    /// interval — which for a step of a second or two is the difference between
+    /// a data point and none.
     wake: Arc<tokio::sync::Notify>,
     task: tokio::task::JoinHandle<()>,
 }
@@ -99,7 +100,12 @@ impl Drop for CommandStatsRecorder {
 fn lock_roots(
     roots: &Mutex<HashMap<String, u32>>,
 ) -> std::sync::MutexGuard<'_, HashMap<String, u32>> {
-    roots.lock().unwrap_or_else(|e| e.into_inner())
+    roots.lock().unwrap_or_else(|e| {
+        // Recovered, not ignored: the poison is evidence of a panic somewhere
+        // that nothing else here would record.
+        debug!("recovered a poisoned command-step roots lock");
+        e.into_inner()
+    })
 }
 
 impl StepObserver for CommandStatsRecorder {
@@ -125,11 +131,18 @@ impl StepObserver for CommandStatsRecorder {
 /// second machine-wide process scan to produce that.
 ///
 /// **Delaying rather than skipping is the whole point, and this was got wrong
-/// once.** Skipping cost a step shorter than one interval its only sample: the
-/// wake is what guarantees a 1-second `npm ci` appears at all, and a version of
-/// this that `continue`d instead of sleeping silently dropped such steps from
-/// the data entirely. Coverage of a short step beats the CPU precision of a
-/// long one.
+/// once.** Skipping cost a step shorter than one *interval* its only sample: the
+/// wake is what makes a 1-second `npm ci` appear at all, and a version of this
+/// that `continue`d instead of sleeping dropped such steps from the data
+/// entirely. Coverage of a short step beats the CPU precision of a long one.
+///
+/// What delaying buys is a bound, not a guarantee: a step is still missed
+/// entirely if it exits within the *remaining* gap, i.e. it lived under 500ms
+/// and registered just after another pass. Shrinking this constant shrinks that
+/// window, but not below `sysinfo`'s own 200ms floor, under which the CPU figure
+/// stops meaning anything. Sub-500ms steps are not what this feature is for —
+/// nobody profiles a build that finishes in a third of a second — and a missing
+/// sample reads as a gap, which is the honest rendering of "too quick to see".
 const MIN_RESAMPLE_GAP: Duration = Duration::from_millis(500);
 
 /// The sampling task: one [`StatsCollector`] for the whole run, one pass per
@@ -248,11 +261,12 @@ fn sample_pass(
         };
         // A tree that reports no memory at all is a **zombie root**: the step's
         // process has exited but the CLI has not reached its `wait()` yet, so it
-        // is still in the process table with nothing mapped. A live process
-        // always has resident pages — `samples_this_process_with_real_platform_detail`
-        // asserts exactly that. Recording it would write the "used no memory"
-        // sample the paragraph above exists to prevent, at the end of every
-        // build, which is the worst possible place for it.
+        // is still in the process table with nothing mapped. Recording it would
+        // write the "used no memory" sample the paragraph above exists to
+        // prevent, at the end of every build, which is the worst possible place
+        // for it. (Zero is also what `sysinfo` reports for a process it cannot
+        // read at all — which for a step this process spawned itself does not
+        // arise, but see the daemon's copy of this guard.)
         if tree.total.memory_bytes == 0 {
             continue;
         }
