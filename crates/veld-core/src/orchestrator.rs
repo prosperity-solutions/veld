@@ -214,10 +214,11 @@ fn planned_hostnames(
         if resolved.step_type != config::StepType::LongRunning {
             continue;
         }
+        // Every port, not just the routed ones: a `tcp` port gets a DNS entry,
+        // so it can collide with another project's hostname exactly as a routed
+        // one can — and a DNS collision is the harder one to diagnose, because
+        // nothing serves an error page.
         for (port_name, port) in &resolved.ports.ports {
-            if port.protocol != config::PortProtocol::Http {
-                continue;
-            }
             // Normalised the same way the route id is, so a template carrying a literal
             // port compares against the registry's stripped hostnames.
             let rendered = node_hostname(
@@ -676,13 +677,31 @@ fn env_suffix(port_name: &str) -> String {
 /// One routed HTTP port: the hostname veld minted for it and the URL that
 /// hostname is reachable at.
 #[derive(Clone)]
-struct HttpEndpoint {
+struct PortEndpoint {
     /// Raw hostname (without scheme), used for DNS/Caddy configuration.
+    ///
+    /// **Every** named port gets one, whatever its protocol — naming and routing
+    /// are separate concerns, and veld has always kept `add_host` and
+    /// `add_route` apart. For a `tcp` port the hostname is the whole point: it
+    /// is registered in DNS and never routed, so `db.myapp.test:5432` reaches
+    /// the process while Caddy stays out of the path entirely. Without it a
+    /// tcp-only node on a custom apex domain would have no name at all and be
+    /// reachable only as `127.0.0.1:<port>`.
     hostname: String,
-    /// Full `https://` URL including port suffix when not 443.
-    https_url: String,
-    /// The local port Caddy proxies this hostname to.
-    upstream_port: u16,
+    /// Full `https://` URL, including the port suffix when not 443. `None` for a
+    /// `tcp` port: there is no route in front of it, so there is no URL — the
+    /// hostname plus `${veld.ports.<name>}` is the address.
+    https_url: Option<String>,
+    /// The local port this endpoint refers to. Caddy's upstream for an `http`
+    /// port; for `tcp`, simply the port the client connects to.
+    port: u16,
+}
+
+impl PortEndpoint {
+    /// A routed endpoint is one Caddy sits in front of.
+    fn is_routed(&self) -> bool {
+        self.https_url.is_some()
+    }
 }
 
 /// Pre-computed ports and URLs for a `long_running` node, resolved before
@@ -698,14 +717,18 @@ struct PrecomputedServer {
     /// Every named port from the `ports` map, including the primary, as
     /// `${veld.ports.<name>}`.
     named_ports: std::collections::BTreeMap<String, u16>,
-    /// One entry per `protocol: "http"` port, keyed by port name. The primary's
-    /// entry — when the node has one — is what `${veld.url}` and the node's own
-    /// `url` state field resolve to; the rest are `${veld.urls.<name>}`.
+    /// One entry per named port, keyed by port name — `tcp` included.
     ///
-    /// Every entry gets its own DNS host and its own Caddy route, so teardown
-    /// must iterate all of them. A missed one leaves a permanent `/etc/hosts`
-    /// line and a route that shadows the hostname for every later run.
-    http_endpoints: std::collections::BTreeMap<String, HttpEndpoint>,
+    /// Every entry gets a DNS host; only the routed ones (`protocol: "http"`)
+    /// also get a Caddy route. The primary's entry — when the node has one — is
+    /// what `${veld.url}` and the node's own `url` state field resolve to; the
+    /// other routed ones are `${veld.urls.<name>}`, and *all* of them are
+    /// `${veld.hosts.<name>}`.
+    ///
+    /// Teardown must iterate all of them. A missed one leaves a permanent
+    /// `/etc/hosts` line and, for a routed entry, a Caddy route that shadows the
+    /// hostname for every later run.
+    endpoints: std::collections::BTreeMap<String, PortEndpoint>,
     /// Held TCP listeners that reserve the ports from other processes.
     /// Taken (released) right before the child process is spawned.
     reservation: Option<crate::port::PortReservation>,
@@ -716,12 +739,12 @@ struct PrecomputedServer {
 impl PrecomputedServer {
     /// The primary endpoint's URL, if this node is routed at all.
     fn https_url(&self) -> Option<&str> {
-        self.primary_endpoint().map(|e| e.https_url.as_str())
+        self.primary_endpoint().and_then(|e| e.https_url.as_deref())
     }
 
-    fn primary_endpoint(&self) -> Option<&HttpEndpoint> {
+    fn primary_endpoint(&self) -> Option<&PortEndpoint> {
         let name = self.primary_name.as_deref()?;
-        self.http_endpoints.get(name)
+        self.endpoints.get(name)
     }
 }
 
@@ -1345,16 +1368,14 @@ impl Orchestrator {
                 }
                 let port = primary_reservation.as_ref().map(|r| r.port);
 
-                // One hostname and one route per `http` port. Same function the
-                // pre-start hostname check used, so the URL a route is registered
-                // under cannot drift from the one that was checked against other
-                // projects.
-                let mut http_endpoints = std::collections::BTreeMap::new();
+                // One hostname per named port, whatever its protocol. Same
+                // function the pre-start hostname check used, so the name a route
+                // or a DNS entry is registered under cannot drift from the one
+                // that was checked against other projects. Only `http` ports get
+                // a URL — and, later, a route.
+                let mut endpoints = std::collections::BTreeMap::new();
                 for (name, port_cfg) in &declared.ports {
-                    if port_cfg.protocol != config::PortProtocol::Http {
-                        continue;
-                    }
-                    let upstream_port = named_ports[name];
+                    let port_value = named_ports[name];
                     let hostname = node_hostname(
                         &self.config,
                         sel,
@@ -1363,17 +1384,19 @@ impl Orchestrator {
                         &service_label(&sel.node, name, declared.primary.as_deref()),
                         port_cfg.host.as_deref(),
                     )?;
-                    let https_url = if self.https_port == 443 {
-                        format!("https://{hostname}")
-                    } else {
-                        format!("https://{hostname}:{}", self.https_port)
-                    };
-                    http_endpoints.insert(
+                    let https_url = (port_cfg.protocol == config::PortProtocol::Http).then(|| {
+                        if self.https_port == 443 {
+                            format!("https://{hostname}")
+                        } else {
+                            format!("https://{hostname}:{}", self.https_port)
+                        }
+                    });
+                    endpoints.insert(
                         name.clone(),
-                        HttpEndpoint {
+                        PortEndpoint {
                             hostname,
                             https_url,
-                            upstream_port,
+                            port: port_value,
                         },
                     );
                 }
@@ -1384,7 +1407,7 @@ impl Orchestrator {
                     sel.node,
                     sel.variant,
                     named_ports.len(),
-                    http_endpoints.len()
+                    endpoints.values().filter(|e| e.is_routed()).count()
                 ))
                 .await;
 
@@ -1404,13 +1427,20 @@ impl Orchestrator {
                 // and its `on_stop` use. Secondary http ports get the same family
                 // under `urls.<name>`, so `${nodes.api.urls.admin.origin}` reads
                 // exactly like `${nodes.api.url.origin}`.
-                for (name, endpoint) in &http_endpoints {
+                for (name, endpoint) in &endpoints {
+                    // Every port has a hostname, so `${nodes.db.hosts.pg}` is the
+                    // one accessor that works for both protocols — the piece a
+                    // connection string actually needs.
+                    node_out.insert(format!("hosts.{name}"), endpoint.hostname.clone());
+                    let Some(https_url) = &endpoint.https_url else {
+                        continue;
+                    };
                     if declared.primary.as_deref() == Some(name.as_str()) {
-                        for (key, value) in url_builtins(&endpoint.https_url) {
+                        for (key, value) in url_builtins(https_url) {
                             node_out.insert(key.to_owned(), value);
                         }
                     }
-                    node_out.extend(port_url_builtins(name, &endpoint.https_url));
+                    node_out.extend(port_url_builtins(name, https_url));
                 }
                 all_outputs.insert(format!("{}:{}", sel.node, sel.variant), node_out.clone());
                 all_outputs
@@ -1424,7 +1454,7 @@ impl Orchestrator {
                         port,
                         primary_name: declared.primary.clone(),
                         named_ports,
-                        http_endpoints,
+                        endpoints,
                         reservation: primary_reservation,
                         extra_reservations,
                     },
@@ -3361,20 +3391,35 @@ async fn execute_start_server_isolated(
             .insert(format!("ports.{name}"), value.to_string());
     }
     node_state.url = https_url.clone();
+    // Two maps, no overlap: `urls` is the routed http ports (display, sharing,
+    // route teardown), `tcp_hosts` is the named-but-unrouted ones (DNS teardown
+    // only). Splitting them keeps "a URL means Caddy is in front of it" true,
+    // which several consumers rely on.
     node_state.urls = precomputed
-        .http_endpoints
+        .endpoints
         .iter()
-        .map(|(name, e)| (name.clone(), e.https_url.clone()))
+        .filter_map(|(name, e)| e.https_url.clone().map(|u| (name.clone(), u)))
         .collect();
-    // `url` plus the individual location pieces (mirrors the Web URL API), and
-    // the same family per named http port under `urls.<name>`.
-    for (name, endpoint) in &precomputed.http_endpoints {
+    node_state.tcp_hosts = precomputed
+        .endpoints
+        .iter()
+        .filter(|(_, e)| !e.is_routed())
+        .map(|(name, e)| (name.clone(), e.hostname.clone()))
+        .collect();
+    // `url` plus the individual location pieces (mirrors the Web URL API), the
+    // same family per named http port under `urls.<name>`, and `hosts.<name>`
+    // for every port whatever its protocol.
+    for (name, endpoint) in &precomputed.endpoints {
+        var_ctx.set_builtin(&format!("hosts.{name}"), endpoint.hostname.clone());
+        let Some(https_url) = &endpoint.https_url else {
+            continue;
+        };
         if precomputed.primary_name.as_deref() == Some(name.as_str()) {
-            for (key, value) in url_builtins(&endpoint.https_url) {
+            for (key, value) in url_builtins(https_url) {
                 var_ctx.set_builtin(key, value);
             }
         }
-        for (key, value) in port_url_builtins(name, &endpoint.https_url) {
+        for (key, value) in port_url_builtins(name, https_url) {
             var_ctx.set_builtin(&key, value);
         }
     }
@@ -3396,7 +3441,11 @@ async fn execute_start_server_isolated(
             sel.node,
             sel.variant,
             precomputed.named_ports.len(),
-            precomputed.http_endpoints.len()
+            precomputed
+                .endpoints
+                .values()
+                .filter(|e| e.is_routed())
+                .count()
         ),
     )
     .await;
@@ -3410,11 +3459,17 @@ async fn execute_start_server_isolated(
     // helper, so old behavior (Origin passes through) holds by default.
     let proxy = resolved.proxy.clone();
 
-    // Configure DNS + Caddy via helper (best-effort), once per routed HTTP port.
-    // A `tcp` port gets neither: a raw connection carries no hostname for Caddy
-    // to match on, and `*.veld.localhost` already resolves to 127.0.0.1 without
-    // any DNS entry from us.
-    for endpoint in precomputed.http_endpoints.values() {
+    // Configure DNS and, for routed ports only, Caddy (best-effort).
+    //
+    // **Every** port gets a DNS host — naming and routing are separate, and the
+    // helper has always kept `add_host` and `add_route` apart. A `tcp` port gets
+    // the name and nothing else, which is what makes `db.myapp.test:5432` reach
+    // the process without Caddy in the path; a raw connection carries no
+    // hostname for a proxy to match on, so a route would be meaningless. On a
+    // `.localhost` domain the DNS write is a no-op the helper skips outright
+    // (RFC 6761 — the OS already wildcards it), so this costs nothing there and
+    // is the *only* way a tcp-only node is addressable on a custom apex domain.
+    for endpoint in precomputed.endpoints.values() {
         let node_url = &endpoint.hostname;
         debug_log_free(
             &ctx.debug_writer,
@@ -3434,6 +3489,11 @@ async fn execute_start_server_isolated(
         {
             tracing::warn!(error = %e, "failed to add DNS host via helper");
         }
+        // A `tcp` endpoint stops here: it has a name, and nothing sits in front
+        // of it.
+        if !endpoint.is_routed() {
+            continue;
+        }
         let mut route = serde_json::json!({
             // Keyed by hostname (#170) — see `url::run_route_id` for why that, and
             // not the run name or the run id. Normalised through `hostname_of_url`
@@ -3445,7 +3505,7 @@ async fn execute_start_server_isolated(
             // Teardown handles the legacy entry.
             "route_id": url::run_route_id(url::hostname_of_url(node_url)),
             "hostname": node_url,
-            "upstream": format!("localhost:{}", endpoint.upstream_port),
+            "upstream": format!("localhost:{}", endpoint.port),
         });
 
         // Include feedback config so Caddy routes /__veld__/* to the daemon.
@@ -3516,13 +3576,18 @@ async fn execute_start_server_isolated(
     if let Some(url) = &https_url {
         env.insert("VELD_URL".to_owned(), url.clone());
     }
-    // Mirrors `VELD_PORT_<NAME>`: one variable per routed http port, so a child
-    // can find a sibling origin without the config threading it through `env`.
-    for (name, endpoint) in &precomputed.http_endpoints {
+    // Mirrors `VELD_PORT_<NAME>`: a child can find a sibling endpoint without
+    // the config threading it through `env`. `VELD_HOST_<NAME>` exists for every
+    // port — it is the piece a connection string needs and the only one a `tcp`
+    // port has — while `VELD_URL_<NAME>` is routed ports only.
+    for (name, endpoint) in &precomputed.endpoints {
         env.insert(
-            format!("VELD_URL_{}", env_suffix(name)),
-            endpoint.https_url.clone(),
+            format!("VELD_HOST_{}", env_suffix(name)),
+            endpoint.hostname.clone(),
         );
+        if let Some(url) = &endpoint.https_url {
+            env.insert(format!("VELD_URL_{}", env_suffix(name)), url.clone());
+        }
     }
 
     // Resolve synthetic outputs.

@@ -686,11 +686,11 @@
                 "http",
                 "tcp"
               ],
-              "description": "`http` gets its own hostname and a Caddy route, so the port is reachable as a URL. `tcp` is allocated and exported but never routed: a raw TCP connection carries no hostname for a proxy to match on, and every *.veld.localhost name already resolves to 127.0.0.1 without help, so the port number is already the whole address. Default: `http` for the primary port, `tcp` for every other \u2014 that asymmetry is what keeps an existing multi-port config from suddenly minting an HTTPS route in front of its debugger port."
+              "description": "Every port gets a hostname and a DNS entry either way \u2014 naming and routing are separate concerns. `http` additionally gets a Caddy route, so it is reachable as a URL. `tcp` gets the name and nothing else: a raw TCP connection carries no hostname for a proxy to match on, so `db.myapp.test:5432` reaches the process directly with Caddy out of the path. On a .localhost domain the DNS entry is a no-op the helper skips (the OS already wildcards it); on a custom apex domain it is the only way a tcp port is addressable by name at all. Default: `http` for the primary port, `tcp` for every other \u2014 that asymmetry is what keeps an existing multi-port config from suddenly minting an HTTPS route in front of its debugger port."
             },
             "host": {
               "type": "string",
-              "description": "Hostname template for this port, replacing `url_template` entirely (same {placeholder} language). The documented way out of a hostname collision \u2014 a node's secondary http port is served at `<node>-<port>.\u2026`, which can clash with a node actually named that."
+              "description": "Hostname template for this port, replacing `url_template` entirely (same {placeholder} language). Applies to both protocols: an `http` port's Caddy route is registered under it, a `tcp` port's DNS entry is. The documented way out of a hostname collision \u2014 a node's secondary port is named `<node>-<port>.\u2026`, which can clash with a node actually named that."
             }
           }
         }
@@ -698,7 +698,7 @@
     },
     "portsMap": {
       "type": "object",
-      "description": "Named ports veld allocates, referenced as ${veld.ports.<name>} and exported as VELD_PORT_<NAME>. ${veld.port} remains the primary \u2014 the one named `http`, the sole entry, or the one explicitly marked `\"protocol\": \"http\"`. Every http port also gets its own hostname, ${veld.urls.<name>} and VELD_URL_<NAME>. Omit the key entirely for the historical behaviour (one allocated http port); set it to null for a long-running node that serves nothing.",
+      "description": "Named ports veld allocates, referenced as ${veld.ports.<name>} and exported as VELD_PORT_<NAME>. ${veld.port} remains the primary \u2014 the one named `http`, the sole entry, or the one explicitly marked `\"protocol\": \"http\"`. Every port gets its own hostname, ${veld.hosts.<name>} and VELD_HOST_<NAME>; the routed (http) ones additionally get ${veld.urls.<name>} and VELD_URL_<NAME>. Omit the key entirely for the historical behaviour (one allocated http port); set it to null for a long-running node that serves nothing.",
       "additionalProperties": {
         "oneOf": [
           {

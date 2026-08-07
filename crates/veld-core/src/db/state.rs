@@ -144,7 +144,7 @@ fn load_nodes(conn: &Connection, run_row: i64) -> Result<HashMap<String, NodeSta
     let mut stmt = conn.prepare_cached(
         "SELECT node_key, node_name, variant, status, pid, port, url, outputs,
                 readiness_phases, recovery_count, consecutive_failures,
-                last_liveness_error, sensitive_keys, urls
+                last_liveness_error, sensitive_keys, urls, tcp_hosts
          FROM nodes WHERE run_row = ?1",
     )?;
     let rows = stmt.query_map([run_row], |row| {
@@ -153,6 +153,7 @@ fn load_nodes(conn: &Connection, run_row: i64) -> Result<HashMap<String, NodeSta
         let phases_json: String = row.get(8)?;
         let sensitive_json: String = row.get(12)?;
         let urls_json: String = row.get(13)?;
+        let tcp_hosts_json: String = row.get(14)?;
         let status: String = row.get(3)?;
         Ok((
             key,
@@ -164,6 +165,7 @@ fn load_nodes(conn: &Connection, run_row: i64) -> Result<HashMap<String, NodeSta
                 port: row.get(5)?,
                 url: row.get(6)?,
                 urls: serde_json::from_str(&urls_json).unwrap_or_default(),
+                tcp_hosts: serde_json::from_str(&tcp_hosts_json).unwrap_or_default(),
                 outputs: serde_json::from_str(&outputs_json).unwrap_or_default(),
                 readiness_phases: serde_json::from_str::<Vec<ReadinessPhase>>(&phases_json)
                     .unwrap_or_default(),
@@ -481,8 +483,8 @@ impl Db {
                 "INSERT INTO nodes (run_row, node_key, node_name, variant, status, pid, port, url,
                                     outputs, readiness_phases, recovery_count,
                                     consecutive_failures, last_liveness_error, sensitive_keys,
-                                    urls)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                                    urls, tcp_hosts)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             )?;
             for (key, node) in &run.nodes {
                 let mut node = node.clone();
@@ -503,6 +505,7 @@ impl Db {
                     node.last_liveness_error,
                     serde_json::to_string(&node.sensitive_keys)?,
                     serde_json::to_string(&node.urls)?,
+                    serde_json::to_string(&node.tcp_hosts)?,
                 ])?;
             }
         }

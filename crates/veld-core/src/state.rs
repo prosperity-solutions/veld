@@ -143,6 +143,15 @@ pub struct NodeState {
     /// single-`url` case, so `hostnames()` folds `url` back in.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub urls: BTreeMap<String, String>,
+    /// Named `tcp` ports: port name → hostname.
+    ///
+    /// Disjoint from [`Self::urls`] by construction — a port is routed or it is
+    /// not. A `tcp` port gets a DNS entry and no Caddy route, so it needs
+    /// tearing down too, but it must never be displayed or shared as a URL:
+    /// "this node has a `url`" means "Caddy is in front of it", and several
+    /// consumers depend on that staying true.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tcp_hosts: BTreeMap<String, String>,
     pub outputs: HashMap<String, String>,
     /// Readiness probe phase tracking (renamed from `health_phases` in v7).
     #[serde(default, alias = "health_phases")]
@@ -171,6 +180,7 @@ impl NodeState {
             port: None,
             url: None,
             urls: BTreeMap::new(),
+            tcp_hosts: BTreeMap::new(),
             outputs: HashMap::new(),
             readiness_phases: Vec::new(),
             recovery_count: 0,
@@ -211,7 +221,12 @@ impl NodeState {
     /// before multi-port routing still tears its single route down.
     pub fn hostnames(&self) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
-        for u in self.urls.values().chain(self.url.iter()) {
+        for u in self
+            .urls
+            .values()
+            .chain(self.url.iter())
+            .chain(self.tcp_hosts.values())
+        {
             let host = crate::url::hostname_of_url(u).to_owned();
             if !out.contains(&host) {
                 out.push(host);

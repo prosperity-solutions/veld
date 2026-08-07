@@ -20,7 +20,11 @@
     // Several ports, two protocols. `admin` is explicitly http, so it gets its
     // own hostname — api-admin.<run>.demo.localhost, a sibling of the primary
     // rather than a deeper label, so an existing wildcard cert still covers it.
-    // `postgres` and `debug` are tcp: allocated and exported, never routed.
+    //
+    // `postgres` and `debug` are tcp. They get a hostname and a DNS entry too —
+    // naming and routing are separate — but no Caddy route, because a raw TCP
+    // connection carries no hostname to match on. So the address is
+    // api-postgres.<run>.demo.localhost:5432, reached directly.
     "api": {
       "variants": {
         "dev": {
@@ -33,7 +37,9 @@
             "debug": "auto"
           },
           "env": {
-            "ADMIN_ORIGIN": "${veld.urls.admin.origin}"
+            // A routed port has a URL; every port has a hostname.
+            "ADMIN_ORIGIN": "${veld.urls.admin.origin}",
+            "DATABASE_URL": "postgres://app@${veld.hosts.postgres}:${veld.ports.postgres}/app"
           },
           "probes": { "readiness": { "type": "port" } }
         }

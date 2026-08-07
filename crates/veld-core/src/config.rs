@@ -4941,11 +4941,34 @@ impl BuiltinSite {
                 && self.http_ports.iter().any(|p| p == port)
                 && URL_PIECES.contains(&piece);
         }
+        // `hosts.<name>` is every port, both protocols — a `tcp` port has a
+        // hostname and no URL, and this is the accessor that works for both.
+        if let Some(port) = name.strip_prefix("hosts.") {
+            return self.kind == BuiltinScopeKind::ServerNode
+                && self.ports.iter().any(|p| p == port);
+        }
         self.kind.provides(name)
     }
 
     /// The remedy sentence for a name this site does not have.
     fn remedy_for(&self, name: &str) -> String {
+        if let Some(port) = name.strip_prefix("hosts.") {
+            if self.kind == BuiltinScopeKind::ServerNode {
+                if self.ports.is_empty() {
+                    return format!(
+                        "`${{veld.hosts.{port}}}` refers to a named port, but this node \
+                         declares none"
+                    );
+                }
+                let mut names = self.ports.clone();
+                names.sort();
+                return format!(
+                    "this node declares no port named `{port}`. It has: {}",
+                    names.join(", ")
+                );
+            }
+            return format!("`${{veld.{name}}}` is not available here");
+        }
         // `urls.<port>` gets its own remedy because the reason it is missing is
         // usually the *protocol*, not a typo — and only the config knows that.
         if let Some(rest) = name.strip_prefix("urls.") {
@@ -5031,6 +5054,7 @@ fn check_builtin_names(config: &VeldConfig, out: &mut Vec<Finding>) {
             if !BUILTIN_VARS.contains(&name.as_str())
                 && !name.starts_with("ports.")
                 && !name.starts_with("urls.")
+                && !name.starts_with("hosts.")
             {
                 // Point at the namespace that almost certainly holds it: an author
                 // writing `${veld.DB_HOST}` means this node's output.
@@ -8997,6 +9021,39 @@ mod tests {
         assert!(
             !findings.iter().any(|f| f.rule == "ambiguous-primary-port"),
             "an explicit http port is not ambiguous"
+        );
+    }
+
+    /// A `tcp` port has a hostname and no URL, so `${veld.hosts.<name>}` must
+    /// accept it and `${veld.urls.<name>}` must not — and the rejection has to
+    /// say *why*, since "unknown builtin" would send the author looking for a
+    /// typo when the answer is the protocol.
+    #[test]
+    fn hosts_covers_every_port_and_urls_covers_only_routed_ones() {
+        let json = r#"{"schemaVersion":"3","name":"t","nodes":{"a":{"variants":{"dev":{
+            "type":"long_running","shell":"x",
+            "ports":{"http":"auto","pg":{"port":5432,"protocol":"tcp"}},
+            "probes":{"readiness":{"type":"port"}},
+            "env":{"OK_URL":"${veld.urls.http}","OK_HOST":"${veld.hosts.pg}"}
+        }}}}}"#;
+        let cfg: VeldConfig = serde_json::from_str(json).expect("fixture parses");
+        let findings = validate(&cfg);
+        assert!(
+            !findings.iter().any(|f| f.rule == "builtin-not-in-scope"),
+            "a tcp port's `hosts.` and an http port's `urls.` are both in scope, got {findings:?}"
+        );
+
+        // The same node asking for a tcp port's URL is rejected, by protocol.
+        let bad = json.replace("${veld.hosts.pg}", "${veld.urls.pg}");
+        let cfg: VeldConfig = serde_json::from_str(&bad).expect("fixture parses");
+        let hit = validate(&cfg)
+            .into_iter()
+            .find(|f| f.rule == "builtin-not-in-scope")
+            .expect("a tcp port has no URL");
+        assert!(
+            hit.message.contains("protocol") && hit.message.contains("http"),
+            "the remedy must name the protocol, got: {}",
+            hit.message
         );
     }
 
