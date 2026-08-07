@@ -8,9 +8,9 @@
 # traffic lights on top of it. No CSS can move those buttons: their position is
 # set once at window creation from `TOPBAR_HEIGHT` in desktop/src/main.js, which
 # desktop/src/windows.js turns into `trafficLightPosition.y` — the value that
-# centres a 12px light against the bar. So the same number lives in a stylesheet
-# and in a main-process constant, in two languages, with nothing tying them
-# together.
+# centres a light of `TRAFFIC_LIGHT_SIZE` against the bar. So the same number
+# lives in a stylesheet and in a main-process constant, in two languages, with
+# nothing tying them together.
 #
 # Drift here is invisible to every other check in the repo: `TOPBAR_HEIGHT` has
 # exactly one consumer, so tsc, biome, clippy and the node suites all stay green
@@ -20,9 +20,9 @@
 #
 # Deliberately narrow: it checks the one pair that produces a visible defect.
 # The traffic-light inset (`padding-left` on `.topbar.electron`) is arithmetic
-# over `x: 13`, `TRAFFIC_LIGHT_SIZE` and macOS's own 20px button pitch — that
-# last number is the OS's and exists nowhere in this repo, so a gate over it
-# would be asserting a constant against itself.
+# over `x: 13`, `TRAFFIC_LIGHT_SIZE` and macOS's own button pitch (23px on
+# macOS 26) — that last number is the OS's and exists nowhere in this repo, so a
+# gate over it would be asserting a constant against itself.
 
 set -euo pipefail
 

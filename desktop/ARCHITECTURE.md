@@ -126,7 +126,12 @@ requests at runtime — branding rule.
   is on screen (runs mode does its own). Push/SSE is a later increment.
 - Detects the Electron shell via a `?shell=electron` query param to render the
   native-title-bar layout (drag region, traffic-light inset padding) instead of
-  the browser-build header row.
+  the browser-build header row. In native full screen macOS moves the traffic
+  lights out of the content area, so the shell mirrors that state onto
+  `<body data-fullscreen>` (preload `window.fullScreen` + `onFullScreen`,
+  applied by `watchFullScreen` in `shell.ts`) and the bar drops the inset. No
+  CSS can detect it: `:fullscreen` is the element API and
+  `display-mode: fullscreen` never matches an Electron window.
 - The v1 dashboard at `/` is untouched until the runs-mode rebuild reaches
   parity and takes it over.
 
