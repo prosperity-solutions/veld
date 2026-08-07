@@ -33,7 +33,8 @@ No port numbers. No manual wiring. Just clean, stable, human-readable URLs.
 - **`argv` or `shell`** — one vocabulary everywhere veld runs something. `argv` is spawned directly, so an interpolated value containing spaces or globs can never change the argument count; `shell` is the permanently-supported escape hatch
 - **Value sources and secrets** — read a value from the environment, a file, or a command's stdout, and mark it `secret`. Veld carries a *pointer* and a flag, never custody: a secret reaches the process's environment or a file (`files:`) and is refused in a command line, where it would land in the process table
 - **Machine-overridable vars** — some values in a committed config are facts about the *laptop*, not the project: which of two installed container runtimes to use, a memory ceiling a 16 GB machine and a 64 GB machine disagree about, the path to a locally installed tool. A var declares `machine: { default, choices, description, prompt }` and each developer answers it once with `veld config set` — stored in Veld's database, **shared across every worktree of the repo** rather than asked again in each one, narrowable to one checkout with `--worktree`. A var with no default stops the run *before anything spawns*, asks when there is a terminal (or a UI), and otherwise refuses with the exact command — it never resolves a default nobody chose and never persists a guess
-- **Named ports** — `"ports": { "http": "auto", "debug": "auto" }` for debug adapters and multi-port containers, so nothing needs a hand-picked literal port that breaks parallel worktrees
+- **Named ports, with protocols** — `"ports": { "http": "auto", "admin": { "port": "auto", "protocol": "http" }, "debug": "auto" }` for debug adapters and multi-port containers, so nothing needs a hand-picked literal port that breaks parallel worktrees. Every `http` port gets its own hostname (`web-admin.dev.veld.localhost`); a `tcp` port is allocated and exported (`VELD_PORT_DEBUG`) but never routed, because a raw TCP connection carries no hostname to route on
+- **Supervise a process that serves nothing** — `"ports": null` on a `long_running` node: an Electron shell, a file watcher, a background compiler. No port, no URL, no route — just a process veld starts, keeps in the graph, and stops with the rest. Readiness is still required; `{ "type": "settle", "seconds": 3 }` accepts "it was still running after 3s" when there is nothing better to probe
 - **Structured output** — all commands support `--json` for scripting and CI
 - **Browser dashboard** — management UI at `https://veld.localhost` with service health, logs, search, stop/restart
 - **Every step's output is collected** — `command` nodes (a `docker build`, a `pnpm install`) log to their node's stream exactly like servers do, and project `setup`/`teardown` steps to the run's; nothing a step prints is thrown away. Lines also stream into `veld start`'s progress output as they arrive, instead of scribbling over it
@@ -103,7 +104,7 @@ cargo build --release
       "default_variant": "local",
       "variants": {
         "local": {
-          "type": "start_server",
+          "type": "long_running",
           "argv": ["npm", "run", "dev", "--", "--port", "${veld.port}"],
           "probes": { "readiness": { "type": "http", "path": "/health", "timeout_seconds": 30 } }
         }
@@ -113,7 +114,7 @@ cargo build --release
       "default_variant": "local",
       "variants": {
         "local": {
-          "type": "start_server",
+          "type": "long_running",
           "argv": ["npm", "run", "dev", "--", "--port", "${veld.port}"],
           "probes": { "readiness": { "type": "http", "path": "/", "timeout_seconds": 30 } },
           "depends_on": { "backend": "local" },
@@ -197,8 +198,33 @@ veld stop --name dev
 
 ### Step types
 
-- **`start_server`** — long-running process. Veld allocates a port (`${veld.port}`), starts the process, and runs health checks.
+A node's `type` describes its **lifecycle only** — whether it runs to completion or stays running. Whether it serves anything is a property of its `ports`.
+
+- **`long_running`** — a process veld supervises for the life of the run. By default veld allocates one port (`${veld.port}`), starts the process, and gates the graph on a readiness probe, which is mandatory. Declare `"ports": null` for a long-running process that serves nothing — an Electron shell, a file watcher, a background compiler — and it gets no port, no URL and no route. (`start_server` is the historical spelling and remains a permanent alias, exactly as `bash` is for `command`. Configs written either way load forever, and nothing nags you about the old one: a permanent alias sets no deadline, so there is deliberately no lint rule for it.)
 - **`command`** — runs a command to completion. Can emit outputs by writing `key=value` lines to `$VELD_OUTPUT_FILE` (preferred) or via `VELD_OUTPUT key=value` on stdout (legacy, discouraged). Optional `skip_if` command for idempotency.
+
+### Ports and protocols
+
+`ports` has three authorings:
+
+```jsonc
+// absent  → one auto-allocated http port. The default, unchanged.
+// null    → no ports at all: no allocation, no ${veld.port}, no URL, no route.
+"ports": null
+
+// a map   → named ports, shorthand or long form. `"name": null` erases one entry.
+"ports": {
+  "http":     "auto",                                   // primary → protocol "http"
+  "admin":    { "port": "auto", "protocol": "http" },   // its own hostname
+  "postgres": { "port": 5432,   "protocol": "tcp" },    // allocated, exported, never routed
+  "debug":    "auto"                                    // secondary → protocol "tcp"
+}
+```
+
+- **The default protocol is `http` for the primary port and `tcp` for every other**, so an existing multi-port config gains no new hostname the first time it runs on a newer veld.
+- An **`http`** port gets a hostname and a Caddy route. The primary's `{service}` is the node name; a secondary's is `<node>-<port>` — `web-admin.dev.veld.localhost`, a sibling of the node's own hostname at the same depth, so a wildcard cert that already covers the node covers its extra ports too. Per-port `"host": "<template>"` overrides the template, which is the way out of a collision.
+- A **`tcp`** port is allocated and exported as `${veld.ports.<name>}` / `VELD_PORT_<NAME>`, and deliberately not routed: a raw TCP connection carries no hostname for a proxy to demultiplex on, and every `*.veld.localhost` name already resolves to 127.0.0.1 anyway, so the port number is the whole address.
+- `${veld.port}` is the primary — the port named `http`, the sole entry marked `"protocol": "http"`, or the sole entry when it states no protocol. Several ports with none of those is `ambiguous-primary-port`, a `veld lint` error rather than a guess.
 
 ### Setup & teardown
 
@@ -223,14 +249,20 @@ Setup steps that fail (non-zero exit) abort startup with the `failureMessage` if
 ```json
 { "type": "http", "path": "/health", "expect_status": 200, "timeout_seconds": 30 }
 { "type": "port", "timeout_seconds": 10 }
+{ "type": "port", "port": "admin" }
 { "type": "command", "argv": ["curl", "-sf", "http://localhost:${veld.port}/ready"] }
+{ "type": "settle", "seconds": 3 }
 ```
+
+`http` and `port` probe the primary port unless `"port": "<name>"` names another. On a node with no such port they are a `probe-needs-port` lint error and fail the run rather than reporting healthy — an unknown `type` likewise (`unknown-probe-type`), because a typo must never be the quiet way to turn a probe off.
+
+**`settle`** is the readiness probe for a portless `long_running` node. Its claim is deliberately weak and it says so: *the process was still running `seconds` after it was spawned* (default 3). That is worth having anyway, because it is raced against process exit exactly as the port probe is, so a node whose command dies on startup still fails the run instead of letting its dependents start behind a corpse. Prefer `{ "type": "command", … }` whenever the process publishes something observable — a socket, a built file, a pid file. `settle` is readiness only; as a liveness check it would report healthy forever, so veld rejects it there.
 
 ### URL template variables
 
 | Variable | Description |
 |----------|-------------|
-| `{service}` | Node name |
+| `{service}` | Node name — for a node's *secondary* `http` port, `<node>-<port>` |
 | `{run}` | Run name |
 | `{project}` | Project name from veld.json |
 | `{branch}` | Current git branch (slugified) |
@@ -242,7 +274,7 @@ Fallback operator: `{branch ?? run}` uses the first non-empty value.
 
 ### Client-side log levels
 
-Veld automatically captures browser `console.log`, `console.warn`, `console.error`, unhandled exceptions, and promise rejections from `start_server` nodes. Configure which levels to capture with `client_log_levels` at the project, node, or variant level (most specific wins):
+Veld automatically captures browser `console.log`, `console.warn`, `console.error`, unhandled exceptions, and promise rejections from `long_running` nodes. Configure which levels to capture with `client_log_levels` at the project, node, or variant level (most specific wins):
 
 ```json
 "client_log_levels": ["log", "warn", "error"]
@@ -254,7 +286,7 @@ View client logs with `veld logs --source client` or filter by source in the man
 
 ### Feature toggles
 
-Control which Veld capabilities are injected into `start_server` nodes' HTML responses with `features` at the project, node, or variant level (most specific wins):
+Control which Veld capabilities are injected into `long_running` nodes' HTML responses with `features` at the project, node, or variant level (most specific wins):
 
 ```json
 "features": {
@@ -310,7 +342,7 @@ Declare `env` at the project, node, or variant level. Variables cascade: variant
 
 Commands, env values, and output templates support `${veld.port}`, `${veld.url}`, `${veld.run}`, `${veld.root}`, `${nodes.backend.url}`, `${nodes.backend.port}`, etc.
 
-For `start_server` nodes, individual URL location pieces are also available (mirrors the Web URL API):
+For `long_running` nodes with an `http` port, individual URL location pieces are also available (mirrors the Web URL API):
 
 | Variable | Example | Description |
 |----------|---------|-------------|
@@ -322,9 +354,11 @@ For `start_server` nodes, individual URL location pieces are also available (mir
 
 These are also available as cross-node references: `${nodes.backend.url.hostname}`, `${nodes.backend.url.host}`, etc., and in the node's own `on_stop` hook — so a container named after `${veld.url.hostname}` in `argv` is removed by the identical string at teardown.
 
-Ports and URLs for all `start_server` nodes are pre-computed before execution, so `${nodes.X.url}` works everywhere — even across nodes with no dependency relationship. Frontend can reference backend's URL and backend can reference frontend's URL without a cycle.
+`${veld.url}` is the **primary** port's URL. Every *other* `http` port has the same family under its own name — `${veld.urls.<name>}` plus `.hostname`, `.host`, `.origin`, `.scheme`, `.port`, cross-node as `${nodes.<node>.urls.<name>.origin}`, and in the environment as `VELD_URL_<NAME>`. A `tcp` port has a `${veld.ports.<name>}` but no URL, and `veld lint` says so by name rather than reporting an unknown built-in.
 
-Availability is not uniform — a `command` node has no port or URL of its own, a project `setup` step belongs to no node, and a `vars` value is one value for the whole run. `veld lint` reports a real built-in written where it is not populated (`builtin-not-in-scope`) rather than letting the run fail with `unknown built-in variable`. See [Availability](docs/configuration.md#availability).
+Ports and URLs for all `long_running` nodes are pre-computed before execution, so `${nodes.X.url}` works everywhere — even across nodes with no dependency relationship. Frontend can reference backend's URL and backend can reference frontend's URL without a cycle.
+
+Availability is not uniform — a `command` node has no port or URL of its own, nor does a `long_running` node that declared `"ports": null`, a project `setup` step belongs to no node, and a `vars` value is one value for the whole run. `veld lint` reports a real built-in written where it is not populated (`builtin-not-in-scope`) rather than letting the run fail with `unknown built-in variable`. See [Availability](docs/configuration.md#availability).
 
 ## Architecture
 
@@ -513,7 +547,7 @@ Share a running environment with a colleague so they open the **same** URLs on t
   "nodes": {
     "frontend": {
       "variants": {
-        "local": { "type": "start_server", "argv": ["npm", "run", "dev"], "share": { "expose": ["peer"] } }
+        "local": { "type": "long_running", "argv": ["npm", "run", "dev"], "share": { "expose": ["peer"] } }
       }
     }
   }
@@ -558,7 +592,7 @@ Point the environment at your org's gateway and opt services into the `web` audi
   "nodes": {
     "frontend": {
       "variants": {
-        "local": { "type": "start_server", "argv": ["npm", "run", "dev"], "share": { "expose": ["peer", "web"] } }
+        "local": { "type": "long_running", "argv": ["npm", "run", "dev"], "share": { "expose": ["peer", "web"] } }
       }
     }
   }

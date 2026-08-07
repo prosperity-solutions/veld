@@ -575,7 +575,7 @@ fn generate_veld_json(
         node.push_str("      \"default_variant\": \"local\",\n");
         node.push_str("      \"variants\": {\n");
         node.push_str("        \"local\": {\n");
-        node.push_str("          \"type\": \"start_server\",\n");
+        node.push_str("          \"type\": \"long_running\",\n");
         // `shell` rather than `argv`: a detected dev-server command is a string we
         // did not write and cannot safely tokenize (it may well contain a pipe or
         // `&&`). `shell` is always correct; the author can tighten it to `argv`.

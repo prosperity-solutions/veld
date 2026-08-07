@@ -144,7 +144,7 @@ fn load_nodes(conn: &Connection, run_row: i64) -> Result<HashMap<String, NodeSta
     let mut stmt = conn.prepare_cached(
         "SELECT node_key, node_name, variant, status, pid, port, url, outputs,
                 readiness_phases, recovery_count, consecutive_failures,
-                last_liveness_error, sensitive_keys
+                last_liveness_error, sensitive_keys, urls
          FROM nodes WHERE run_row = ?1",
     )?;
     let rows = stmt.query_map([run_row], |row| {
@@ -152,6 +152,7 @@ fn load_nodes(conn: &Connection, run_row: i64) -> Result<HashMap<String, NodeSta
         let outputs_json: String = row.get(7)?;
         let phases_json: String = row.get(8)?;
         let sensitive_json: String = row.get(12)?;
+        let urls_json: String = row.get(13)?;
         let status: String = row.get(3)?;
         Ok((
             key,
@@ -162,6 +163,7 @@ fn load_nodes(conn: &Connection, run_row: i64) -> Result<HashMap<String, NodeSta
                 pid: row.get(4)?,
                 port: row.get(5)?,
                 url: row.get(6)?,
+                urls: serde_json::from_str(&urls_json).unwrap_or_default(),
                 outputs: serde_json::from_str(&outputs_json).unwrap_or_default(),
                 readiness_phases: serde_json::from_str::<Vec<ReadinessPhase>>(&phases_json)
                     .unwrap_or_default(),
@@ -478,8 +480,9 @@ impl Db {
             let mut stmt = tx.prepare_cached(
                 "INSERT INTO nodes (run_row, node_key, node_name, variant, status, pid, port, url,
                                     outputs, readiness_phases, recovery_count,
-                                    consecutive_failures, last_liveness_error, sensitive_keys)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                                    consecutive_failures, last_liveness_error, sensitive_keys,
+                                    urls)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             )?;
             for (key, node) in &run.nodes {
                 let mut node = node.clone();
@@ -499,6 +502,7 @@ impl Db {
                     node.consecutive_failures,
                     node.last_liveness_error,
                     serde_json::to_string(&node.sensitive_keys)?,
+                    serde_json::to_string(&node.urls)?,
                 ])?;
             }
         }
@@ -747,17 +751,39 @@ impl Db {
             })?
             .collect::<Result<_, _>>()?;
 
+        // Both columns: `url` is the primary, `urls` carries every routed http
+        // port. The registry feeds `claimed_hostname`, which is what stops two
+        // projects serving the same hostname — so a secondary port missing here
+        // is a collision nothing detects.
         let mut url_stmt = conn.prepare_cached(
-            "SELECT node_key, url FROM nodes WHERE run_row = ?1 AND url IS NOT NULL",
+            "SELECT node_key, url, urls FROM nodes WHERE run_row = ?1
+             AND (url IS NOT NULL OR urls != '{}')",
         )?;
 
         let mut registry = GlobalRegistry::default();
         for (run_row, root, project_name, run_name, run_id, status) in rows {
-            let urls: HashMap<String, String> = url_stmt
-                .query_map([run_row], |r| {
-                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-                })?
-                .collect::<Result<_, _>>()?;
+            let mut urls: HashMap<String, String> = HashMap::new();
+            let per_node = url_stmt.query_map([run_row], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })?;
+            for row in per_node {
+                let (node_key, primary, urls_json) = row?;
+                if let Some(primary) = primary {
+                    urls.insert(node_key.clone(), primary);
+                }
+                // Keyed `node_key#port` so a secondary never collides with the
+                // primary's entry. Only the values are read (by
+                // `claimed_hostname`); the key just has to be unique.
+                let per_port: HashMap<String, String> =
+                    serde_json::from_str(&urls_json).unwrap_or_default();
+                for (port_name, url) in per_port {
+                    urls.insert(format!("{node_key}#{port_name}"), url);
+                }
+            }
             let entry = registry
                 .projects
                 .entry(root.clone())

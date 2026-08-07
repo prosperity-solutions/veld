@@ -121,7 +121,7 @@ pub async fn run(
         if !is_command {
             output::print_error(
                 &format!(
-                    "--oneshot requires a command-type node; '{}:{}' is a start_server (it never \
+                    "--oneshot requires a command-type node; '{}:{}' is long_running (it never \
                      exits, so it cannot be the terminal node).",
                     sel.node, sel.variant
                 ),
@@ -396,8 +396,29 @@ fn print_start_receipt(run_state: &veld_core::state::RunState) {
             NodeStatus::Failed => output::red("failed"),
             _ => output::dim(&format!("{:?}", ns.status).to_lowercase()),
         };
-        let url = ns.url.as_deref().unwrap_or("-").to_owned();
-        summary_rows.push(vec![label, status, url]);
+        // One row per routed http port. A node with a single port (or none)
+        // still produces exactly one row, so the common case is unchanged;
+        // a node with a secondary http port gets a `node:variant#port` row
+        // rather than a hostname that serves but is never printed.
+        let routed = ns.routed_urls();
+        if routed.is_empty() {
+            summary_rows.push(vec![label, status, "-".to_owned()]);
+        } else {
+            for (i, (port, url)) in routed.iter().enumerate() {
+                let label = match port {
+                    Some(port) => format!("{}:{}#{port}", ns.node_name, ns.variant),
+                    None => label.clone(),
+                };
+                // The status belongs to the node, not to each of its ports —
+                // repeating it would read as several nodes.
+                let status = if i == 0 {
+                    status.clone()
+                } else {
+                    String::new()
+                };
+                summary_rows.push(vec![label, status, (*url).to_owned()]);
+            }
+        }
     }
 
     output::print_table(&["Node", "Status", "URL"], &summary_rows);
@@ -431,11 +452,11 @@ fn print_start_receipt(run_state: &veld_core::state::RunState) {
     }
 
     // Summary line.
-    let url_count = run_state
+    let url_count: usize = run_state
         .nodes
         .values()
-        .filter(|ns| ns.url.is_some())
-        .count();
+        .map(|ns| ns.routed_urls().len())
+        .sum();
     println!();
     if url_count > 0 {
         output::print_success(&format!(
@@ -1674,7 +1695,7 @@ fn find_non_localhost_domains(
             continue;
         };
 
-        if resolved.step_type != StepType::StartServer {
+        if resolved.step_type != StepType::LongRunning {
             continue;
         }
 

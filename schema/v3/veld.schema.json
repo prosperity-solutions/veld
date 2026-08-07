@@ -34,7 +34,7 @@
     },
     "url_template": {
       "type": "string",
-      "description": "Hostname template for start_server nodes. Uses {variable} \u2014 single braces \u2014 not ${variable}.",
+      "description": "Hostname template for a long_running node's http ports. Uses {variable} \u2014 single braces \u2014 not ${variable}. {service} is the node name for its primary port and `<node>-<port>` for a secondary http port, so every hostname a node owns is a sibling at the same depth.",
       "default": "{service}.{run}.{project}.localhost"
     },
     "vars": {
@@ -664,13 +664,45 @@
         }
       ]
     },
+    "portEntry": {
+      "description": "One named port. The shorthand (\"auto\" or a number) is the port itself; the object form adds a protocol and an optional hostname override.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/portSpec"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "port"
+          ],
+          "properties": {
+            "port": {
+              "$ref": "#/$defs/portSpec"
+            },
+            "protocol": {
+              "type": "string",
+              "enum": [
+                "http",
+                "tcp"
+              ],
+              "description": "`http` gets its own hostname and a Caddy route, so the port is reachable as a URL. `tcp` is allocated and exported but never routed: a raw TCP connection carries no hostname for a proxy to match on, and every *.veld.localhost name already resolves to 127.0.0.1 without help, so the port number is already the whole address. Default: `http` for the primary port, `tcp` for every other \u2014 that asymmetry is what keeps an existing multi-port config from suddenly minting an HTTPS route in front of its debugger port."
+            },
+            "host": {
+              "type": "string",
+              "description": "Hostname template for this port, replacing `url_template` entirely (same {placeholder} language). The documented way out of a hostname collision \u2014 a node's secondary http port is served at `<node>-<port>.\u2026`, which can clash with a node actually named that."
+            }
+          }
+        }
+      ]
+    },
     "portsMap": {
       "type": "object",
-      "description": "Named ports veld allocates, referenced as ${veld.ports.<name>} and exported as VELD_PORT_<NAME>. ${veld.port} remains the primary \u2014 the one named `http`, or the sole entry. Omit entirely for the historical behaviour: one allocated port.",
+      "description": "Named ports veld allocates, referenced as ${veld.ports.<name>} and exported as VELD_PORT_<NAME>. ${veld.port} remains the primary \u2014 the one named `http`, the sole entry, or the one explicitly marked `\"protocol\": \"http\"`. Every http port also gets its own hostname, ${veld.urls.<name>} and VELD_URL_<NAME>. Omit the key entirely for the historical behaviour (one allocated http port); set it to null for a long-running node that serves nothing.",
       "additionalProperties": {
         "oneOf": [
           {
-            "$ref": "#/$defs/portSpec"
+            "$ref": "#/$defs/portEntry"
           },
           {
             "type": "null",
@@ -683,6 +715,17 @@
           "http": "auto",
           "debug": "auto",
           "metrics": "auto"
+        },
+        {
+          "http": "auto",
+          "admin": {
+            "port": "auto",
+            "protocol": "http"
+          },
+          "postgres": {
+            "port": 5432,
+            "protocol": "tcp"
+          }
         }
       ]
     },
@@ -774,9 +817,10 @@
       "type": "string",
       "enum": [
         "command",
+        "long_running",
         "start_server"
       ],
-      "description": "`command` runs to completion; `start_server` stays running and gets an allocated port and a URL. These are the only two primitives."
+      "description": "`command` runs to completion; `long_running` stays running. These are the only two primitives — the type describes lifecycle only. Whether a long-running node serves anything is a property of its `ports`: it gets one allocated port and a URL by default, and `\"ports\": null` declares a supervised process that serves nothing (an Electron shell, a watcher, a compiler). `start_server` is the historical spelling of `long_running` and remains a permanent alias, exactly as `bash` is for `command`; configs written either way load forever."
     },
     "clientLogLevels": {
       "type": "array",
@@ -852,8 +896,16 @@
           "enum": [
             "http",
             "port",
-            "command"
-          ]
+            "command",
+            "settle"
+          ],
+          "description": "`settle` is READINESS ONLY, and is the probe for a long-running node that binds no port: it waits `seconds` and claims only that the process was still alive afterwards. Weak on purpose — but it is raced against process exit exactly as the port probe is, so a command that dies on startup still fails the run instead of letting dependents start behind a corpse. Prefer `command` whenever the process publishes something observable."
+        },
+        "seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 3,
+          "description": "For type settle: how long the process must stay alive to count as ready."
         },
         "path": {
           "type": "string",
@@ -1077,7 +1129,15 @@
           "$ref": "#/$defs/envMap"
         },
         "ports": {
-          "$ref": "#/$defs/portsMap"
+          "oneOf": [
+            {
+              "$ref": "#/$defs/portsMap"
+            },
+            {
+              "type": "null",
+              "description": "This node declares no ports: no allocation, no ${veld.port}, no URL, no Caddy route. How a long-running process that serves nothing (an Electron shell, a watcher, a compiler) opts out. Needs a readiness probe of type `command` or `settle`."
+            }
+          ]
         },
         "files": {
           "$ref": "#/$defs/filesMap"
@@ -1142,7 +1202,15 @@
           "$ref": "#/$defs/envMap"
         },
         "ports": {
-          "$ref": "#/$defs/portsMap"
+          "oneOf": [
+            {
+              "$ref": "#/$defs/portsMap"
+            },
+            {
+              "type": "null",
+              "description": "This node declares no ports: no allocation, no ${veld.port}, no URL, no Caddy route. How a long-running process that serves nothing (an Electron shell, a watcher, a compiler) opts out. Needs a readiness probe of type `command` or `settle`."
+            }
+          ]
         },
         "files": {
           "$ref": "#/$defs/filesMap"

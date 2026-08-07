@@ -685,7 +685,7 @@ mod tests {
             share: None,
         };
         let api_variant = VariantConfig {
-            step_type: Some(StepType::StartServer),
+            step_type: Some(StepType::LongRunning),
             cmd: crate::config::CommandKeys {
                 shell: Some("echo api".into()),
                 ..Default::default()
@@ -710,7 +710,7 @@ mod tests {
             share: None,
         };
         let frontend_variant = VariantConfig {
-            step_type: Some(StepType::StartServer),
+            step_type: Some(StepType::LongRunning),
             cmd: crate::config::CommandKeys {
                 shell: Some("echo fe".into()),
                 ..Default::default()

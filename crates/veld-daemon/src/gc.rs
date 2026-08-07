@@ -369,21 +369,25 @@ async fn cleanup_routes_and_dns(run: &RunState, run_name: &str, helper: &HelperC
         // recorded URL. An entry added just before a kill, with no URL persisted,
         // is therefore unreachable here — it is overwritten by the next start of
         // the same environment, since the id is a pure function of the hostname.
-        let Some(ref url_str) = ns.url else { continue };
         // `veld_core::url` owns both the hostname extraction and the id format,
         // so this cannot drift from the orchestrator's construction side (#170).
         // Note the port is stripped here too — the previous version removed the
         // DNS host as `host:18443` whenever the helper wasn't on 443.
-        let hostname = veld_core::url::hostname_of_url(url_str);
-        let route_id = veld_core::url::run_route_id(hostname);
-        if helper.remove_route(&route_id).await.is_ok() {
-            debug!("removed Caddy route: {route_id}");
-            cleaned += 1;
-        }
+        //
+        // Iterated, not read off `url`: a node owns one hostname per routed
+        // http port, and a hostname missed by GC is a permanent /etc/hosts line
+        // plus a route that shadows that name for every later run.
+        for hostname in ns.hostnames() {
+            let route_id = veld_core::url::run_route_id(&hostname);
+            if helper.remove_route(&route_id).await.is_ok() {
+                debug!("removed Caddy route: {route_id}");
+                cleaned += 1;
+            }
 
-        // Remove DNS host entry.
-        if helper.remove_host(hostname).await.is_ok() {
-            debug!("removed DNS entry: {hostname}");
+            // Remove DNS host entry.
+            if helper.remove_host(&hostname).await.is_ok() {
+                debug!("removed DNS entry: {hostname}");
+            }
         }
     }
     cleaned

@@ -175,10 +175,38 @@ pub async fn run(name: Option<String>, show_outputs: bool, json: bool) -> i32 {
                 cpu_str,
                 mem_str,
             ];
-            if live {
-                row.push(ns.url.clone().unwrap_or_default());
+            if !live {
+                rows.push(row);
+                continue;
             }
+            // Every routed http port gets its own row. Not newline-joined into
+            // one cell: `print_table` measures cells as single lines, so an
+            // embedded newline breaks the column alignment for the whole table.
+            // A node with one URL (or none) still produces exactly one row.
+            let routed = ns.routed_urls();
+            let Some(((first_port, first_url), rest)) = routed.split_first() else {
+                row.push(String::new());
+                rows.push(row);
+                continue;
+            };
+            debug_assert!(first_port.is_none(), "routed_urls puts the primary first");
+            row.push((*first_url).to_owned());
             rows.push(row);
+            for (port, url) in rest {
+                // Leading cells blank: the node's identity and stats belong to
+                // the node, and repeating them would read as several nodes.
+                rows.push(vec![
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                    match port {
+                        Some(port) => format!("{url}  ({port})"),
+                        None => (*url).to_owned(),
+                    },
+                ]);
+            }
         }
 
         // Routes are torn down with the run — a non-live run's URLs are dead,

@@ -1,0 +1,99 @@
+{
+  "$schema": "../veld.schema.json",
+  "schemaVersion": "3",
+  "name": "long-running-and-port-protocols",
+  "url_template": "{service}.{run}.demo.localhost",
+
+  "nodes": {
+    // The default shape, unchanged: no `ports` key means one auto-allocated
+    // http port, reachable at web.<run>.demo.localhost.
+    "web": {
+      "variants": {
+        "dev": {
+          "type": "long_running",
+          "shell": "vite --port ${veld.port}",
+          "probes": { "readiness": { "type": "http", "path": "/" } }
+        }
+      }
+    },
+
+    // Several ports, two protocols. `admin` is explicitly http, so it gets its
+    // own hostname — api-admin.<run>.demo.localhost, a sibling of the primary
+    // rather than a deeper label, so an existing wildcard cert still covers it.
+    // `postgres` and `debug` are tcp: allocated and exported, never routed.
+    "api": {
+      "variants": {
+        "dev": {
+          "type": "long_running",
+          "shell": "api --port ${veld.port} --admin ${veld.ports.admin}",
+          "ports": {
+            "http": "auto",
+            "admin": { "port": "auto", "protocol": "http" },
+            "postgres": { "port": 5432, "protocol": "tcp" },
+            "debug": "auto"
+          },
+          "env": {
+            "ADMIN_ORIGIN": "${veld.urls.admin.origin}"
+          },
+          "probes": { "readiness": { "type": "port" } }
+        }
+      }
+    },
+
+    // A port whose derived hostname would collide gets its own template.
+    "docs": {
+      "variants": {
+        "dev": {
+          "type": "long_running",
+          "shell": "docs-server --port ${veld.port}",
+          "ports": {
+            "http": { "port": "auto", "protocol": "http", "host": "handbook.demo.localhost" }
+          },
+          "probes": { "readiness": { "type": "http", "path": "/index.html" } }
+        }
+      }
+    },
+
+    // The portless case: a supervised process that serves nothing. `settle`
+    // only claims the process was still alive after 5s — but it is raced
+    // against process exit, so a command that dies on startup fails the run.
+    "electron": {
+      "depends_on": { "web": "dev" },
+      "variants": {
+        "dev": {
+          "type": "long_running",
+          "shell": "electron .",
+          "ports": null,
+          "env": { "APP_URL": "${nodes.web.url}" },
+          "probes": { "readiness": { "type": "settle", "seconds": 5 } }
+        }
+      }
+    },
+
+    // A watcher, readied by something observable rather than by a timer.
+    "codegen": {
+      "variants": {
+        "watch": {
+          "type": "long_running",
+          "shell": "codegen --watch --out ./generated",
+          "ports": null,
+          "probes": {
+            "readiness": { "type": "command", "shell": "test -f ./generated/index.ts" },
+            "liveness": { "type": "command", "shell": "test -d ./generated" }
+          }
+        }
+      }
+    },
+
+    // `start_server` remains a permanent alias for `long_running`.
+    "legacy": {
+      "variants": {
+        "dev": {
+          "type": "start_server",
+          "shell": "serve --port ${veld.port}",
+          "probes": { "readiness": { "type": "port" } }
+        }
+      }
+    }
+  }
+}

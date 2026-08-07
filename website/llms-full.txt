@@ -67,7 +67,7 @@ cargo build --release
       "default_variant": "local",
       "variants": {
         "local": {
-          "type": "start_server",
+          "type": "long_running",
           "shell": "npm run dev -- --port ${veld.port}",
           "health_check": { "type": "http", "path": "/health", "timeout_seconds": 30 }
         }
@@ -77,7 +77,7 @@ cargo build --release
       "default_variant": "local",
       "variants": {
         "local": {
-          "type": "start_server",
+          "type": "long_running",
           "shell": "npm run dev -- --port ${veld.port}",
           "health_check": { "type": "http", "path": "/", "timeout_seconds": 30 },
           "depends_on": { "backend": "local" }
@@ -228,7 +228,7 @@ veld includes a built-in feedback overlay for human-AI collaboration. When an AI
 
 ### How it works
 
-1. When a `start_server` service is running, veld can inject a feedback overlay into the served pages
+1. When a `long_running` service is running, veld can inject a feedback overlay into the served pages
 2. Humans open the feedback overlay in their browser and leave comments
 3. AI agents receive the feedback via `veld feedback next --wait`, which blocks until new feedback arrives
 4. The agent reads the structured feedback and iterates
@@ -324,7 +324,7 @@ Traffic is end-to-end encrypted between the two velds; a relay only forwards sea
 
 ## Client-Side Log Collection
 
-Veld automatically captures browser console output from `start_server` nodes. A small script is injected into proxied HTML responses that hooks `console.log`, `console.warn`, `console.error`, `console.info`, and `console.debug`, plus `window.onerror` and `onunhandledrejection`.
+Veld automatically captures browser console output from `long_running` nodes. A small script is injected into proxied HTML responses that hooks `console.log`, `console.warn`, `console.error`, `console.info`, and `console.debug`, plus `window.onerror` and `onunhandledrejection`.
 
 Captured logs appear alongside server logs in `veld logs` and the management UI. Filter by source:
 
@@ -356,7 +356,7 @@ The management UI also provides source filter controls (All / Server / Client) i
 
 ### Feature Toggles
 
-Control which Veld capabilities are injected into `start_server` nodes' HTML responses with `features` at the project, node, or variant level (most specific wins):
+Control which Veld capabilities are injected into `long_running` nodes' HTML responses with `features` at the project, node, or variant level (most specific wins):
 
 ```json
 "features": { "feedback_overlay": false, "client_logs": true }
@@ -426,23 +426,62 @@ Variables: `${veld.name}`, `${veld.project}`, `${veld.root}`, `${veld.run}`, `${
 
 ### Step Types
 
-#### `start_server`
+A node's `type` describes its **lifecycle only** — runs to completion, or stays running. Whether it serves anything is a property of its `ports`.
 
-Starts and manages a long-lived process. Veld allocates a port, injects it as `${veld.port}`, configures DNS and Caddy routing, and monitors health.
+#### `long_running` (alias: `start_server`)
+
+Starts and supervises a long-lived process. By default Veld allocates one port, injects it as `${veld.port}`, configures DNS and Caddy routing, and monitors health.
+
+`start_server` is the historical spelling and remains a permanent alias, exactly as `bash` is for `command`. Configs written either way load forever, and there is deliberately no lint rule for the old spelling — a permanent alias sets no deadline. Veld never rewrites a config file.
 
 - Must specify exactly one of `argv` (array, spawned directly) or `shell` (string, via `sh -c`)
-- The process must bind to `${veld.port}`
+- The process must bind to `${veld.port}` (unless it declares `"ports": null`)
 - Built-in outputs: `url` (full HTTPS URL) and `port` (allocated port number)
 - Supports synthetic `outputs` as an object (key → template string, interpolated after port allocation)
-- Requires `health_check`
+- Requires a readiness probe (`probes.readiness`, or the legacy `health_check`) — always, including on a portless node
 
 ```json
 {
-  "type": "start_server",
+  "type": "long_running",
   "shell": "npm run dev -- --port ${veld.port}",
-  "health_check": { "type": "http", "path": "/health" }
+  "probes": { "readiness": { "type": "http", "path": "/health" } }
 }
 ```
+
+##### Portless: `"ports": null`
+
+A long-running process that serves nothing — an Electron shell, a file watcher, a background compiler. No port allocation, no `${veld.port}`, no URL, no Caddy route; Veld starts it, keeps it in the dependency graph, and stops it with the rest. Readiness is still required, and an `http`/`port` probe here is a `probe-needs-port` error, since there is nothing to connect to.
+
+```json
+{
+  "type": "long_running",
+  "shell": "electron .",
+  "ports": null,
+  "depends_on": { "web": "dev" },
+  "env": { "APP_URL": "${nodes.web.url}" },
+  "probes": { "readiness": { "type": "settle", "seconds": 5 } }
+}
+```
+
+##### Named ports and protocols
+
+`ports` has three authorings: **absent** means one auto-allocated `http` port (the default, unchanged); **`null`** means no ports at all; **a map** declares named ports, merged node → variant per key, with `"name": null` erasing one entry.
+
+An entry is either shorthand (`"auto"`, `5432`) or the long form `{ "port": …, "protocol": "http" | "tcp", "host": "<template>" }`.
+
+```json
+"ports": {
+  "http":     "auto",
+  "admin":    { "port": "auto", "protocol": "http" },
+  "postgres": { "port": 5432,   "protocol": "tcp" },
+  "debug":    "auto"
+}
+```
+
+- The default protocol is **`http` for the primary port and `tcp` for every other**, so an existing multi-port config gains no new hostname.
+- An `http` port gets its own hostname and Caddy route, plus `${veld.urls.<name>}` (with `.hostname`, `.host`, `.origin`, `.scheme`, `.port`), `${nodes.<node>.urls.<name>}` and `VELD_URL_<NAME>`. Its `{service}` label is the node name for the primary and `<node>-<port>` for a secondary — `web-admin.dev.veld.localhost`, a sibling at the same depth, so a wildcard certificate covering the node covers its extra ports too. A per-port `host` template overrides that and is the documented way out of a hostname collision.
+- A `tcp` port is allocated and exported as `${veld.ports.<name>}` / `VELD_PORT_<NAME>`, and deliberately never routed: a raw TCP connection carries no hostname for a proxy to demultiplex on, and every `*.veld.localhost` name already resolves to 127.0.0.1 anyway, so the port number is the whole address.
+- `${veld.port}` is the primary — the port named `http`, the sole entry marked `"protocol": "http"`, or the sole entry when it states no protocol. Several ports with none of those is `ambiguous-primary-port`, a lint error rather than a guess.
 
 #### `command`
 
@@ -465,13 +504,19 @@ Runs a shell command or script to completion. Used for setup tasks.
 
 ### Health Checks
 
-Two-phase: (1) TCP port check, (2) HTTP endpoint check. Three strategies:
+Four strategies. `http` is two-phase: (1) TCP port check, (2) HTTP endpoint check.
 
 ```json
 { "type": "http", "path": "/health", "expect_status": 200, "timeout_seconds": 30 }
 { "type": "port", "timeout_seconds": 10 }
+{ "type": "port", "port": "admin" }
 { "type": "command", "shell": "curl -sf http://localhost:${veld.port}/ready" }
+{ "type": "settle", "seconds": 3 }
 ```
+
+`http` and `port` probe the **primary** port unless `"port": "<name>"` names another from the node's `ports` map. On a node with no such port they are a `probe-needs-port` error and fail the run — they no longer silently report healthy. An unrecognised `type` is `unknown-probe-type`, for the same reason: a typo must never be the quiet way to turn a probe off.
+
+`settle` is the readiness probe for a **portless** long-running node. Its claim is deliberately weak and says so — *the process was still running `seconds` after it was spawned* (default 3) — but it is raced against process exit exactly as the port probe is, so a node whose command dies on startup still fails the run instead of letting its dependents start behind a corpse. Prefer `{ "type": "command", … }` whenever the process publishes something observable: a socket, a built file, a pid file. `settle` is readiness-only; as a liveness check it would report healthy forever, so Veld rejects it there.
 
 ### Dependencies
 
@@ -510,7 +555,7 @@ Declare `env` at the project, node, or variant level. Variables cascade: variant
 
 ### Outputs
 
-For `start_server` variants — object (synthetic templates):
+For `long_running` variants — object (synthetic templates):
 ```json
 "outputs": {
   "DATABASE_URL": "postgresql://postgres:veld@localhost:${veld.port}/app"
@@ -528,8 +573,8 @@ For `command` variants — array (captured from `$VELD_OUTPUT_FILE` or legacy `V
 
 | Variable | Value |
 |----------|-------|
-| `${veld.port}` | Allocated port (start_server only) |
-| `${veld.url}` | Full HTTPS URL (start_server only) |
+| `${veld.port}` | Allocated primary port (`long_running` with ports only) |
+| `${veld.url}` | Full HTTPS URL of the primary port (`long_running` with an http port only) |
 | `${veld.url.hostname}` | DNS name only (e.g. `app.my-run.proj.localhost`) |
 | `${veld.url.host}` | hostname:port (omits port if 443) |
 | `${veld.url.origin}` | scheme + host (same as `${veld.url}`) |
@@ -545,10 +590,14 @@ For `command` variants — array (captured from `$VELD_OUTPUT_FILE` or legacy `V
 | `${veld.username}` | OS username |
 | `${veld.node}` | This node's name |
 | `${veld.variant}` | This variant's name |
-| `${veld.ports.<name>}` | A named port from this node's `ports` map (start_server only) |
+| `${veld.ports.<name>}` | A named port from this node's `ports` map (`long_running` only) |
+| `${veld.urls.<name>}` | Full HTTPS URL of a named **http** port; also `.hostname`/`.host`/`.origin`/`.scheme`/`.port`, and `${nodes.<node>.urls.<name>}` cross-node |
 
 Availability is not uniform, and `veld lint` checks a reference against the context it sits in
-(`builtin-not-in-scope`): `port`/`url`/`url.*`/`ports.*` exist only on a `start_server` node,
+(`builtin-not-in-scope`): `port`/`url`/`url.*`/`ports.*`/`urls.*` exist only on a `long_running` node
+that actually declares the port in question — a `"ports": null` node has none of them, and
+`${veld.urls.<name>}` additionally needs that port to be `protocol: "http"`, which lint says by name
+rather than reporting an unknown built-in —
 `node`/`variant` only on a node, `run_id` not in a project `setup`/`teardown` step, and a `vars`
 value gets the run-scoped names only (a var is one value for the whole run, so compose per-node
 ones at the use site). A node's `on_stop` receives exactly what the node had, URL family included.
@@ -557,13 +606,13 @@ ones at the use site). A node's `on_stop` receives exactly what the node had, UR
 
 ```
 ${nodes.database.DATABASE_URL}   # custom output
-${nodes.backend.url}             # start_server built-in: HTTPS URL
-${nodes.backend.url.hostname}    # start_server built-in: DNS name only
-${nodes.backend.url.host}        # start_server built-in: hostname:port
-${nodes.backend.url.origin}      # start_server built-in: scheme + host
-${nodes.backend.url.scheme}      # start_server built-in: protocol scheme
-${nodes.backend.url.port}        # start_server built-in: HTTPS port
-${nodes.backend.port}            # start_server built-in: backend bind port
+${nodes.backend.url}             # long_running built-in: HTTPS URL
+${nodes.backend.url.hostname}    # long_running built-in: DNS name only
+${nodes.backend.url.host}        # long_running built-in: hostname:port
+${nodes.backend.url.origin}      # long_running built-in: scheme + host
+${nodes.backend.url.scheme}      # long_running built-in: protocol scheme
+${nodes.backend.url.port}        # long_running built-in: HTTPS port
+${nodes.backend.port}            # long_running built-in: backend bind port
 ${nodes.backend:local.url}       # qualified form (when multiple variants active)
 ```
 
@@ -655,9 +704,9 @@ selections provided".
 | `skip_if` | object | `command` only | Idempotency check (exit 0 = skip), as `{"argv": …}` / `{"shell": …}`. Alias: `verify` |
 | `probes` | object | All | `{readiness?: HealthCheck, liveness?: LivenessProbe}` — supersedes `health_check` |
 | `sensitive_outputs` | array | All | Output keys to mask and encrypt |
-| `client_log_levels` | array | `start_server` | Browser log levels override (variant > node > project) |
-| `features` | object | `start_server` | Feature toggles override (variant > node > project) |
-| `proxy` | object | `start_server` | Reverse-proxy header rules override (variant > node > project; `remove` unions, `set` merges) |
+| `client_log_levels` | array | `long_running` | Browser log levels override (variant > node > project) |
+| `features` | object | `long_running` | Feature toggles override (variant > node > project) |
+| `proxy` | object | `long_running` | Reverse-proxy header rules override (variant > node > project; `remove` unions, `set` merges) |
 | `cwd` | string | All | Working directory (relative paths resolve from project root). Cascade: variant > node. Supports `${...}` substitution. |
 | `hidden` (node-level) | boolean | All | Hide from `veld nodes` output |
 
@@ -680,7 +729,7 @@ selections provided".
       "default_variant": "docker",
       "variants": {
         "docker": {
-          "type": "start_server",
+          "type": "long_running",
           "shell": "docker run --rm -p ${veld.port}:5432 postgres:16",
           "health_check": { "type": "port", "timeout_seconds": 15 },
           "outputs": {
@@ -693,7 +742,7 @@ selections provided".
       "default_variant": "local",
       "variants": {
         "local": {
-          "type": "start_server",
+          "type": "long_running",
           "shell": "cargo run -- --port ${veld.port}",
           "health_check": { "type": "http", "path": "/health" },
           "depends_on": { "database": "docker" },
@@ -707,7 +756,7 @@ selections provided".
       "default_variant": "local",
       "variants": {
         "local": {
-          "type": "start_server",
+          "type": "long_running",
           "shell": "npm run dev -- --port ${veld.port}",
           "health_check": { "type": "http", "path": "/" },
           "depends_on": { "backend": "local" },

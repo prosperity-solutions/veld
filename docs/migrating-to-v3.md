@@ -223,7 +223,7 @@ Declare a field once for every variant of a node. Any variant may override it.
 
 ```jsonc
 "api": {
-  "type": "start_server",
+  "type": "long_running",
   "probes": { "readiness": { "type": "http", "path": "/healthz" } },
   "env": { "API_URL": "${vars.remote_api}" },
   "variants": {
@@ -299,6 +299,10 @@ answer it before the project starts.
 A node with no `ports` map behaves exactly as before. This exists so
 debug-adapter variants and multi-port containers stop needing hand-picked literal
 ports, which silently break parallel worktrees.
+
+Named ports have since grown a `protocol`, and `ports` has since grown a third
+authoring — see
+[Added since v3 shipped](#added-since-v3-shipped-nothing-here-is-a-migration).
 
 ### Value sources and `secret`
 
@@ -412,6 +416,153 @@ or if a preset list has grown past what a newcomer can identify:
 `veld lint` reports a duplicate or zero `key`, a `default_preset` naming nothing,
 and — once, at eight or more presets with no metadata at all — a notice suggesting
 the object form.
+
+---
+
+## Added since v3 shipped (nothing here is a migration)
+
+**You do not have to change anything.** Everything in this section is additive
+*within* `schemaVersion: "3"`. There is no v4, no new spelling to adopt by a
+deadline, and no config that loads today and stops loading tomorrow. Read it as a
+menu, not a checklist — then read the [two behaviour
+changes](#two-behaviour-changes-worth-a-veld-lint) at the end, which are the only
+part that can move under a config you do not touch.
+
+### `start_server` is now spelled `long_running`
+
+Both spellings load, forever, exactly as `bash` still loads as an alias for
+`command`. Nothing rewrites your file, and `veld lint` does not flag the old one.
+
+```jsonc
+"type": "start_server"    // still correct, not deprecated
+"type": "long_running"    // canonical — what veld's messages say and what run history records
+```
+
+The rename is about what the field *means*. A node's type has only ever decided
+**lifecycle** — runs to completion, or stays running. `start_server` named the
+common case instead of the contract, and once a long-running node was allowed to
+have no ports at all, "server" described the minority of them.
+
+### `"ports": null` — a long-running node that serves nothing
+
+The reason the rename happened. A supervised process with no ports: no
+allocation, no `${veld.port}`, no URL, no DNS host, no Caddy route.
+
+```jsonc
+"electron": {
+  "depends_on": { "web": "dev" },
+  "variants": { "dev": {
+    "type": "long_running",
+    "shell": "electron .",
+    "ports": null,
+    "env": { "APP_URL": "${nodes.web.url}" },
+    "probes": { "readiness": { "type": "settle", "seconds": 5 } }
+  }}
+}
+```
+
+This is the Electron shell, the file watcher, the background compiler — anything
+veld should start, keep, report on and stop with the run, but that nobody
+connects to. Before, these had to be given a port they never bound, or run
+outside veld entirely.
+
+`ports` now has three authorings, and only the middle one is new:
+
+| `ports` | Meaning |
+|---|---|
+| absent | one auto-allocated `http` port — **unchanged** |
+| `null` | no ports at all |
+| `{ … }` | that map, merged node → variant per key, `"name": null` erasing one entry |
+
+### `protocol` on a named port
+
+The scalar shorthand is unchanged and is not going anywhere. The long form adds
+two fields:
+
+```jsonc
+"ports": {
+  "http":     "auto",                                   // shorthand — exactly as before
+  "admin":    { "port": "auto", "protocol": "http" },   // gets its own hostname
+  "postgres": { "port": 5432,   "protocol": "tcp" },    // allocated + exported, never routed
+  "debug":    "auto"
+}
+```
+
+- **`http`** mints a hostname for that port and registers a Caddy route, so it is
+  reachable as a URL and has a `${veld.urls.<name>}` family (plus `.hostname`,
+  `.host`, `.origin`, `.scheme`, `.port`; `VELD_URL_<NAME>` in the environment;
+  `${nodes.<node>.urls.<name>}` across nodes). `${veld.url}` still means the
+  primary, permanently.
+- **`tcp`** is allocated and exported — `${veld.ports.<name>}`,
+  `VELD_PORT_<NAME>` — and deliberately never routed. A raw TCP connection
+  carries no hostname for a proxy to match on, and every `*.veld.localhost` name
+  already resolves to 127.0.0.1 without veld's help, so the port number is
+  already the whole address.
+- **`host`** overrides the `url_template` for one port, replacing it wholesale.
+
+**Your existing multi-port nodes gain nothing and lose nothing.** The default is
+`http` for the primary port and `tcp` for every other, and that asymmetry is the
+whole point: it is what stops a `{"http": "auto", "debug": "auto"}` node from
+suddenly minting an HTTPS route in front of its Node inspector the first time it
+runs on a newer veld. A secondary port that *should* be a URL has to say so.
+
+One thing to know if you adopt a secondary `http` port: it is served at
+`<node>-<port>.…` — `web-admin.dev.veld.localhost`, a sibling of the node's own
+hostname rather than a deeper label, so a wildcard cert or dnsmasq rule that
+already covers the node covers it too. If that collides with a node genuinely
+named `web-admin`, `veld start` refuses before spawning anything and names both
+owners; the way out is `host` on the port.
+
+### The `settle` readiness probe
+
+For a long-running node that binds no port. Readiness stays **mandatory** on
+`long_running` — `"ports": null` does not exempt a node from proving it started.
+
+```jsonc
+"probes": { "readiness": { "type": "settle", "seconds": 3 } }
+```
+
+Its claim is deliberately weak and it says so: *the process was still running N
+seconds after it was spawned*. That is worth having anyway, because it is raced
+against process exit exactly as the port probe is — a command that dies on
+startup still fails the run rather than letting dependents start behind a corpse.
+
+Prefer `command` whenever the process publishes something observable — a socket,
+a built file, a pid file:
+
+```jsonc
+"probes": { "readiness": { "type": "command", "shell": "test -f ./generated/index.ts" } }
+```
+
+`settle` is the honest fallback, not the recommendation, and it is readiness
+only: as a liveness probe it would report healthy forever, so veld rejects it
+there.
+
+### Two behaviour changes worth a `veld lint`
+
+These are the only items here that can affect a config you do not edit. Both are
+the same fix: a check that could not run used to answer "healthy", and now
+answers "no".
+
+1. **A probe that cannot check anything now fails instead of passing.** An
+   unknown `type` — `{"type": "htpp"}` — used to mean "always healthy" on both
+   the readiness and the liveness path, so a typo was the silent way to turn a
+   probe off. So did a `port` or `http` probe on a node with no such port.
+   Both are now errors: `unknown-probe-type` and `probe-needs-port` at lint time,
+   and a real failure at runtime. If `veld lint` reports one, that probe has
+   never checked anything — decide what it should have checked.
+
+2. **A variant that erases its last port no longer gets a fresh one.** A variant
+   writing `"ports": { "http": null }` over a node that declared only `http` now
+   has zero ports. It used to collapse back to "nothing declared" and silently
+   allocate a *new* port, which is the opposite of what the author wrote. If you
+   have such a variant and it genuinely wanted a port, declare one; if it wanted
+   none, it now needs a `command` or `settle` readiness probe.
+
+`ambiguous-primary-port` also became *more permissive*: it fires only when there
+are two or more ports, none named `http`, and none carrying an explicit
+`protocol`. Marking exactly one port `"protocol": "http"` now answers the
+question the rule was asking.
 
 ---
 
