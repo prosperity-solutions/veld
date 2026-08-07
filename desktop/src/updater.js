@@ -33,6 +33,7 @@ const {
   downloadOnlyReason,
   looksLikeVeldCli,
   releasePageUrl,
+  reportIsFresh,
   updateMode,
   versionSkew,
 } = require("./updatePolicy");
@@ -541,6 +542,10 @@ async function reportPreviousCliUpdate() {
   // A success needs no dialog: the user asked for an update and is looking at
   // it. `app.getVersion()` is the receipt.
   if (!report || report.ok !== false) return;
+  // …and neither does a report about some earlier day's handoff. One left behind
+  // by a failed update was read a day later by a different, newer install, which
+  // duly announced that a version it had never tried to install had failed.
+  if (!reportIsFresh({ finishedAt: report.finished_at })) return;
 
   const buttons = report.log ? ["Show Log", "Close"] : ["Close"];
   const { response } = await dialog.showMessageBox({

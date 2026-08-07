@@ -2,11 +2,13 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 
 const {
+  REPORT_MAX_AGE_MS,
   cliCandidatePaths,
   compareVersions,
   downloadOnlyReason,
   looksLikeVeldCli,
   releasePageUrl,
+  reportIsFresh,
   updateMode,
   versionSkew,
 } = require("./updatePolicy");
@@ -195,4 +197,46 @@ test("looksLikeVeldCli accepts the CLI's own --version and nothing looser", () =
   for (const junk of [null, undefined, {}, 12, ["veld 1.0.0"]]) {
     assert.equal(looksLikeVeldCli(junk), false, `${JSON.stringify(junk)} is not veld`);
   }
+});
+
+test("a handoff report expires, so yesterday's failure is not announced today", () => {
+  const now = Date.parse("2026-08-07T05:00:00Z");
+
+  // The report the app just came back from.
+  assert.equal(
+    reportIsFresh({ finishedAt: "2026-08-07T04:59:55Z", now }),
+    true,
+    "a report written five seconds ago is this launch's",
+  );
+
+  // The bug this exists for, with the real values off the machine it happened
+  // on: a failed 99.0.0 handoff left a report in ~/.veld, and the next launch —
+  // a different install, a day later, running 16.7.0 — announced it.
+  assert.equal(
+    reportIsFresh({ finishedAt: "2026-08-06T14:45:59.044305+00:00", now }),
+    false,
+    "a report from the previous day must never be announced",
+  );
+
+  // Boundaries.
+  assert.equal(reportIsFresh({ finishedAt: "2026-08-07T04:46:00Z", now }), true);
+  assert.equal(reportIsFresh({ finishedAt: "2026-08-07T04:44:00Z", now }), false);
+
+  // Clock skew is tolerated the same amount in both directions: a stamp slightly
+  // in the future is a machine whose clock moved, not a lie.
+  assert.equal(reportIsFresh({ finishedAt: "2026-08-07T05:05:00Z", now }), true);
+  assert.equal(reportIsFresh({ finishedAt: "2026-09-01T00:00:00Z", now }), false);
+
+  // A report that cannot say when it was written cannot claim to be about this
+  // launch. Staying quiet is the cheaper mistake.
+  for (const junk of [undefined, null, "", "not a date", 12, {}, []]) {
+    assert.equal(
+      reportIsFresh({ finishedAt: junk, now }),
+      false,
+      `finished_at ${JSON.stringify(junk)} must not count as fresh`,
+    );
+  }
+
+  assert.equal(typeof REPORT_MAX_AGE_MS, "number");
+  assert.ok(REPORT_MAX_AGE_MS > 0);
 });
