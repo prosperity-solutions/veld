@@ -280,9 +280,6 @@ export function StartConfig(props: {
         rightSection={<IconChevronDown size={12} />}
         onClick={() => setOpened(true)}
         title="What ▶ will start next — not what is running now"
-        styles={{
-          label: { fontFamily: "var(--mantine-font-family-monospace)" },
-        }}
       >
         Start: {startSelectionLabel(sel, w)}
       </Button>

@@ -26,6 +26,75 @@ veld setup privileged
 veld doctor
 ```
 
+## Veld Desktop (macOS app)
+
+Installed by default alongside the CLI — the two are halves of one release. Set
+`VELD_DESKTOP=0` before the install script to skip it (CI boxes, servers).
+
+```bash
+veld desktop status      # where it is, and whether it matches the CLI
+veld desktop install     # get it on a machine that skipped it
+veld desktop update      # bring it to this CLI's version
+```
+
+Arriving through the CLI rather than a `.dmg` download is what avoids the
+Gatekeeper prompt: a browser marks a download with `com.apple.quarantine` and
+macOS then refuses the first launch of an app that is not notarized, while curl
+sets no such flag. macOS only — on Linux the AppImage updates itself and a `.deb`
+belongs to the package manager.
+
+On Linux `veld desktop status` therefore **reports rather than manages**: it
+names the `.deb`'s binary if it finds one and says the version belongs to your
+package manager. Finding nothing is not the same as nothing being installed —
+an AppImage lives wherever you saved it — so it says that too, and the `--json`
+output omits `installed` entirely rather than asserting `false`.
+
+**An app operation never touches the CLI.** `veld desktop install|update` runs
+the installer with `VELD_DESKTOP_ONLY=1`, which skips the CLI tarball, the binary
+swap, the service restarts and the sudo negotiation entirely — so updating the
+app cannot restart your daemon or ask for a password.
+
+| Variable | Effect |
+|---|---|
+| `VELD_DESKTOP=0` | Skip the app. The opt-out for a CI box or a server |
+| `VELD_DESKTOP_ONLY=1` | Install *only* the app: no CLI, no services, no sudo. macOS only |
+| `VELD_DESKTOP_DIR=<dir>` | Where the app lives. When set it is the **only** location consulted, by the installer and by `veld desktop status` |
+| `VELD_BINARY_ICONS=0` | Leave the CLI/daemon/helper with the generic executable icon (see below) |
+
+**`veld uninstall` removes the app too**, and `veld doctor` reports it — where it
+is, which version, and whether it matches the CLI.
+
+**If the app cannot find a CLI that understands `veld desktop`**, it falls back
+to pointing you at the release page rather than handing over to a CLI that would
+exit with an unknown-subcommand error after the app had already quit. Update the
+CLI (`curl -fsSL https://veld.oss.life.li/get | bash`) and the in-app updater
+starts working again.
+
+**The binaries get the app's icon.** On macOS the installer copies the installed
+app's `.icns` onto `veld`, `veld-daemon` and `veld-helper`, because an
+authorization prompt raised on their behalf — 1Password's "Allow veld-daemon to
+get CLI access", a sudo sheet — otherwise shows a generic `exec` tile, i.e. asks
+the user to approve access to their secrets on behalf of something they cannot
+identify. The icon comes from the installed app, so a machine with
+`VELD_DESKTOP=0` simply skips this; `VELD_BINARY_ICONS=0` skips it explicitly.
+This runs on a full install (`curl | bash` or `veld update`), not on
+`veld desktop install|update` — those are app-only by design and must not touch
+binaries a root helper is among. A machine that installed the app on its own
+therefore keeps the generic icon until its next `veld update`.
+
+One documented cost: a custom icon lives in the file's resource fork, and
+`codesign --verify --strict` rejects a Mach-O carrying one. Plain
+`codesign --verify` passes, the ad-hoc signature is intact, and the binaries run
+and are launched by launchd normally.
+
+The app's own *Check for Updates…* takes the same route: it spawns
+`veld desktop update`, quits so its bundle can be replaced, and the CLI reopens
+it. Because nothing is watching a terminal on that path, the installer's output
+goes to `~/.veld/desktop-update.log` and the outcome to
+`~/.veld/desktop-update.json`, which the app reads when it comes back — a failed
+update reaches you as a dialog with the reason, not as an app that quietly
+reopened on the old version.
+
 ## Updating
 
 ```bash
@@ -33,7 +102,9 @@ veld update
 ```
 
 This downloads the latest release and restarts the background services
-(helper + daemon) onto the new binaries automatically. **Running environments
+(helper + daemon) onto the new binaries automatically. On macOS it moves Veld
+Desktop to the same version as well, installing it if this machine has none —
+`VELD_DESKTOP=0` opts out. **Running environments
 are left running** — state lives in a migrated SQLite DB, so a binary swap no
 longer risks stale state, and services keep serving throughout. In privileged
 mode the root helper is restarted via sudo (you may be prompted once for your

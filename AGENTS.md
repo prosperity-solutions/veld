@@ -327,8 +327,10 @@ and several were paid for in this codebase already.
 - **Every user-facing HTML surface carries the Veld brand.** Any HTML a Veld
   binary serves to a browser — management UI, gateway pages (index, login,
   404), overlays, error pages, and every future surface — must follow
-  [docs/branding.md](docs/branding.md): embedded `veld.` wordmark (accent-green
-  dot), the dark product token palette, self-contained assets (inline CSS,
+  [docs/branding.md](docs/branding.md): an embedded mark, CSS-coloured with the
+  accent-green dot — the `veld.` wordmark, or the `V.` icon mark on the narrow
+  all-controls chrome that doc enumerates (today only `/ide`'s 40–42px top bar) —
+  the dark product token palette, self-contained assets (inline CSS,
   data-URI favicon — the one mark from `website/favicon.svg`, which
   `tests/validate-favicon.sh` (in `just lint`) pins across every surface that
   inlines it — no external requests), and no enumerable share/run

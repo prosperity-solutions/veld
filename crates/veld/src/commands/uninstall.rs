@@ -33,8 +33,14 @@ pub async fn run() -> i32 {
     }
 
     if output::is_tty() {
+        // Names the app explicitly: the installer puts it in /Applications by
+        // default, so for most macOS users it is the part of this they can
+        // actually see, and "cached state" does not cover a Dock icon.
+        let app = veld_core::setup::desktop_app_status()
+            .map(|(p, _)| format!(", and {}", p.display()))
+            .unwrap_or_default();
         eprintln!(
-            "{} This will remove Veld, its daemons, certificates and cached state.",
+            "{} This will remove Veld, its daemons, certificates and cached state{app}.",
             output::yellow("Warning:"),
         );
         eprint!("Continue? [y/N] ");
