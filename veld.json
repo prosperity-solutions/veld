@@ -42,18 +42,45 @@
     //            conversation and two panes never collide.
     //   codex  — mints its own id and cannot be told one, so the pane carries
     //            no token and leans on the tool's own "most recent session".
+    //
+    // Both are offered in **auto mode only**. There used to be a second Claude
+    // pane running `--dangerously-skip-permissions`; it is gone on purpose, so
+    // that the panes this repo hands a contributor are the ones that still stop
+    // and ask. Run the unsandboxed variant from a plain terminal if you want it.
     "panes": [
       {
         "id": "claude",
         "type": "terminal",
-        "label": "Claude",
-        "description": "Claude Code in this worktree",
+        "label": "Claude - auto",
+        "description": "Claude Code in this worktree, in auto permission mode",
         "icon": "robot",
         "requires_bin": ["claude"],
+        // `--permission-mode auto`, and deliberately no
+        // `--dangerously-skip-permissions` pane beside it: this repo offers one
+        // Claude pane, and it is the one that still asks before doing something
+        // it should ask about.
+        //
         // `--session-id` creates the conversation under an id veld chose, which
         // is what makes the `resume` below able to name it after a reboot.
-        "argv": ["claude", "--session-id", "${veld.pane.token}"],
-        "resume": { "argv": ["claude", "--resume", "${veld.pane.token}"] },
+        "argv": [
+          "claude",
+          "--permission-mode",
+          "auto",
+          "--session-id",
+          "${veld.pane.token}"
+        ],
+        // Repeated on resume: the pane's label promises auto mode, and a
+        // resumed session that quietly came back in a different one would make
+        // that label a lie for the rest of the conversation.
+        "resume": {
+          "argv": [
+            "claude",
+            "--resume",
+            "${veld.pane.token}",
+            "--permission-mode",
+            "auto"
+          ]
+        },
         "auto_resume": true
       },
       {
@@ -71,32 +98,36 @@
         // the same session, because "the most recent one" is a single answer.
         "id": "codex",
         "type": "terminal",
-        "label": "Codex",
-        "description": "Codex CLI in this worktree",
+        "label": "Codex - auto",
+        "description": "Codex CLI in this worktree, in auto mode",
         "icon": "robot",
         "requires_bin": ["codex"],
-        "argv": ["codex"],
-        "resume": { "argv": ["codex", "resume", "--last"] },
+        // Codex has no `--permission-mode`; its "Auto" preset is these two
+        // flags — write inside the workspace freely, ask before stepping
+        // outside it. Spelled out rather than left to `~/.codex/config.toml`,
+        // so the pane's label describes what it actually starts.
+        "argv": [
+          "codex",
+          "--sandbox",
+          "workspace-write",
+          "--ask-for-approval",
+          "on-request"
+        ],
+        "resume": {
+          "argv": [
+            "codex",
+            "resume",
+            "--last",
+            "--sandbox",
+            "workspace-write",
+            "--ask-for-approval",
+            "on-request"
+          ]
+        },
         // Left off deliberately, so the two agent panes differ in this too:
         // Claude resumes itself when Veld Desktop restarts, Codex waits for a
         // click. Flip it to true if you prefer the other trade.
         "auto_resume": false
-      },
-      {
-        // A second mode is a second pane, not a variant — see
-        // docs/configuration.md#there-are-no-pane-variants.
-        "id": "claude-yolo",
-        "type": "terminal",
-        "label": "Claude (skip permissions)",
-        "icon": "bolt",
-        "requires_bin": ["claude"],
-        "argv": [
-          "claude",
-          "--dangerously-skip-permissions",
-          "--session-id",
-          "${veld.pane.token}"
-        ],
-        "resume": { "argv": ["claude", "--resume", "${veld.pane.token}"] }
       },
       {
         // The third shape: one-shot. No resume, no token, an emoji instead of
