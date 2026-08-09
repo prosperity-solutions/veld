@@ -959,12 +959,17 @@ function AppInner(props: {
        * silently reverting whatever the user had just done, and unmounting (and
        * hanging up) any terminal they had opened in the meantime.
        */
-      onReady: () => {
-        // What to ask for: the worktree this client holds, or — if it never got
-        // one because the boot claim ran before the socket was up — the one it
-        // has selected. Not the selection after a *yield*: that worktree belongs
-        // to somebody else now, and asking again would take it back off them.
-        const wanted = shownRef.current ?? (grantedRef.current ? null : selectedRef.current);
+      onReady: (sameEpoch) => {
+        // What to ask for. The worktree this client holds, first. Otherwise the
+        // selection — but only when asking again cannot take a worktree off
+        // somebody: either this client was never granted anything (the boot
+        // claim ran before the socket was up), or the daemon **restarted**, in
+        // which case its registry is empty and nobody holds anything. Without
+        // the second case a window that had yielded sat empty for good: the boot
+        // effect is keyed on a selection that has not changed, and nothing else
+        // re-acquires.
+        const mayAskAgain = !grantedRef.current || !sameEpoch;
+        const wanted = shownRef.current ?? (mayAskAgain ? selectedRef.current : null);
         if (wanted === null) return;
         void acquireRef.current(wanted);
       },
@@ -1052,6 +1057,11 @@ function AppInner(props: {
     }
     setActiveRepoRoot(w.repo_root);
     setActiveWtKey(String(w.id));
+    // Both, and `grantedRef` is not redundant: it is what stops a reconnect
+    // asking for a worktree this client *yielded* (where `shownId` is also
+    // null), and a click can be the only grant this client ever gets — it
+    // supersedes a boot claim without changing the selection.
+    grantedRef.current = true;
     setShownId(w.id);
     return true;
   };
@@ -2316,9 +2326,19 @@ function AppInner(props: {
    * Held in a ref because the socket's handlers are registered once, at boot, and
    * would otherwise close over the first render's state forever.
    */
-  const acquireRef = useRef<(preferred: number) => Promise<void>>(async () => {});
-  acquireRef.current = async (preferred: number) => {
+  const acquireRef = useRef<(preferred: number, live?: () => boolean) => Promise<void>>(
+    async () => {},
+  );
+  acquireRef.current = async (preferred: number, live: () => boolean = () => true) => {
+    // **Checked before every write, not once at the end.** Each claim in here
+    // can block for the daemon's acknowledgement timeout, so a hunt is easily
+    // still running when the user clicks a row and is granted it — and without
+    // this the hunt then lands on its own candidate and moves the window off the
+    // worktree they just picked, releasing it for nothing after another client
+    // had already been made to yield it.
+    if (!live()) return;
     const mine = await channel.claim(preferred, false);
+    if (!live()) return;
     if (mine.ok) {
       grantedRef.current = true;
       setShownId(preferred);
@@ -2332,6 +2352,7 @@ function AppInner(props: {
     // "stay put", which is what the old shell's `.catch(() => null)` did for the
     // same failures.
     if (mine.reason !== "shown_elsewhere") return;
+    if (!live()) return;
     // **Refused, so this window must show something else.** Ignoring the answer
     // was the hole that made the whole ownership model a suggestion: `⌘N` opens
     // on the last-selected worktree by design, which is the one the window you
@@ -2343,6 +2364,7 @@ function AppInner(props: {
     for (const candidate of worktreesRef.current) {
       if (candidate.id === preferred) continue;
       const free = await channel.claim(candidate.id, false);
+      if (!live()) return;
       // Same rule inside the hunt: overtaken, or never asked, means stop — not
       // try the next one.
       if (!free.ok && free.reason !== "shown_elsewhere") return;
@@ -2357,7 +2379,7 @@ function AppInner(props: {
     }
     // Every worktree in this repo is already on screen somewhere. Say so rather
     // than showing a set of panes that belongs to another client.
-    setClaimBlocked(true);
+    if (live()) setClaimBlocked(true);
   };
 
   /**
@@ -2377,12 +2399,10 @@ function AppInner(props: {
     if (chromeless || !worktree) return;
     let cancelled = false;
     const id = worktree.id;
-    void (async () => {
-      await acquireRef.current(id);
-      // The selection moved on while this was waiting out somebody's yield; the
-      // effect for the new one owns the outcome.
-      if (cancelled) return;
-    })();
+    // Also false once this client has been granted something *else* — a rail
+    // click during a hunt is granted through `selectWorktree`, which the hunt
+    // must not then overwrite.
+    void acquireRef.current(id, () => !cancelled && shownRef.current === null);
     return () => {
       cancelled = true;
     };

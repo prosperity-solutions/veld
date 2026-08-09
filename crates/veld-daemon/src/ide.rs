@@ -86,6 +86,20 @@ const YIELD_ACK: Duration = Duration::from_millis(1500);
 /// because nothing else needs one — see the module docs.
 const RECONNECT_GRACE: Duration = Duration::from_secs(6);
 
+/// A claim's grace must outlast the client's worst-case return.
+///
+/// Made load-bearing by the expiry timer: an orphan used to survive until
+/// somebody claimed, and now certainly dies at [`RECONNECT_GRACE`]. So the
+/// client's slowest reconnect — `MAX_RETRY_MS` (5s) in `ui/src/ide/channel.ts`,
+/// plus a ticket POST and a WebSocket upgrade — has to fit inside it, or a
+/// reload routinely loses its worktree to whoever is next in the rail. Stated
+/// here because the two constants live in different languages and nothing else
+/// would connect them.
+const _: () = assert!(
+    RECONNECT_GRACE.as_millis() > 5_000,
+    "must outlast MAX_RETRY_MS"
+);
+
 /// Cap on the worktrees one client may report holding.
 ///
 /// A client holds the panes of the worktrees it has *visited* (they stay
@@ -389,6 +403,13 @@ struct Hello {
     /// any other client (see [`ClientInfo`]) — not a registry. Putting an id
     /// back into a broadcast breaks this, which is what the
     /// `the_claims_broadcast_never_carries_a_client_id` test is for.
+    ///
+    /// One case the "nothing is connected under it" rule does not cover, stated
+    /// because it reads as if it did: a tab duplicated while the original's
+    /// socket happens to be *down* (a network blip, not a reload) resumes the
+    /// original's id and is handed its claims, with no yield asked of the
+    /// original — which is still mounted. [`RECONNECT_GRACE`] is what bounds it,
+    /// and it is one-shot, because the duplicate stores the id it was given.
     #[serde(default)]
     resume: Option<String>,
     kind: ClientKind,
@@ -481,9 +502,9 @@ enum ServerMsg {
 /// acknowledgement arrives on.
 type PendingYield = (String, u64, oneshot::Receiver<()>);
 
-/// What a granted claim leaves for [`claim`]'s async half: the sequence number
-/// that decides whether it is still current, and the yields to wait out.
-type GrantedClaim = (u64, Vec<PendingYield>);
+/// What a granted claim leaves for [`claim`]'s async half: the yields to wait
+/// out before answering.
+type GrantedClaim = Vec<PendingYield>;
 
 /// One entry of the claims table, as one client sees it.
 ///
@@ -671,10 +692,19 @@ impl Registry {
     fn begin_claim(
         &mut self,
         client_id: &str,
+        conn: u64,
         worktree_id: i64,
         request_id: u64,
         focus_holder: bool,
+        seq: u64,
     ) -> Option<GrantedClaim> {
+        // **The socket that asked must still be the one registered.** A claim is
+        // spawned, so it can be polled after its own read loop has exited, or
+        // after a *newer* socket resumed this identity — and recording a claim
+        // for a client that is gone leaves an entry nothing ever removes.
+        if self.clients.get(client_id).is_none_or(|c| c.conn != conn) {
+            return None;
+        }
         let _ = self.expire_orphans(Instant::now());
 
         // An orphan is not a holder: nothing is attached behind a closed socket,
@@ -720,8 +750,14 @@ impl Registry {
         // everyone, and the one it took is now spoken for.
         self.broadcast();
 
-        let seq = NEXT_CLAIM_SEQ.fetch_add(1, Ordering::Relaxed);
-        self.claim_seq.insert(client_id.to_owned(), seq);
+        // **The highest seq wins, not the last writer.** These arrive in frame
+        // order but *run* in scheduler order, so a plain insert let whichever
+        // task happened to run second install its number — and the earlier frame
+        // then owned the outcome. Keeping the maximum makes the rule "a later
+        // claim from this client supersedes this one" true regardless of how the
+        // two were scheduled.
+        let current = self.claim_seq.entry(client_id.to_owned()).or_insert(seq);
+        *current = (*current).max(seq);
 
         // Every *other* client still holding this worktree's panes has to let go
         // before this one attaches, or the two would trade its shells.
@@ -754,7 +790,7 @@ impl Registry {
                 c.pending.remove(&yield_id);
             }
         }
-        Some((seq, waits))
+        Some(waits)
     }
 
     /// Release every claim and hold belonging to a client that switched away or
@@ -945,10 +981,21 @@ async fn serve_channel(socket: WebSocket, minted: String) {
                 request_id,
                 focus_holder,
             }) => {
+                // **The sequence number is taken here, in frame order.** Taking
+                // it inside the spawned task made it scheduler order instead:
+                // tokio parks a task spawned from a worker in its LIFO slot and
+                // polls that first, so two claims read from one socket in a
+                // single poll run second-then-first — the earlier claim takes
+                // the lower number and the *later* one is answered `superseded`.
+                // For which the UI says nothing, deliberately, so the user's
+                // second click simply vanishes. Two frames land in one poll at
+                // boot every time, because releasing the parked `whenReady`
+                // waiters writes them together.
+                let seq = NEXT_CLAIM_SEQ.fetch_add(1, Ordering::Relaxed);
                 let id = client_id.clone();
-                tokio::spawn(
-                    async move { claim(&id, worktree_id, request_id, focus_holder).await },
-                );
+                tokio::spawn(async move {
+                    claim(&id, conn, worktree_id, request_id, focus_holder, seq).await;
+                });
             }
             Ok(msg) => handle(&client_id, msg).await,
             Err(e) => debug!(client = %client_id, "ide channel: unreadable message: {e}"),
@@ -961,11 +1008,10 @@ async fn serve_channel(socket: WebSocket, minted: String) {
 
 async fn handle(client_id: &str, msg: ClientMsg) {
     match msg {
-        ClientMsg::Claim {
-            worktree_id,
-            request_id,
-            focus_holder,
-        } => claim(client_id, worktree_id, request_id, focus_holder).await,
+        // Intercepted in the read loop, which is where its sequence number is
+        // taken — see there. Unreachable, and left as an explicit arm so adding
+        // a variant does not silently route through a `_`.
+        ClientMsg::Claim { .. } => {}
         ClientMsg::Holds { worktree_ids } => {
             let mut reg = REGISTRY.lock().await;
             if let Some(client) = reg.clients.get_mut(client_id) {
@@ -1044,10 +1090,17 @@ async fn forget(worktree_ids: Vec<i64>) {
 /// and the greyed rail row in every other client true from that moment. Then
 /// waits for the previous holders to let go, because the caller attaches to the
 /// PTY sessions its layout names on the strength of this answer.
-async fn claim(client_id: &str, worktree_id: i64, request_id: u64, focus_holder: bool) {
-    let Some((answer, waits)) = ({
+async fn claim(
+    client_id: &str,
+    conn: u64,
+    worktree_id: i64,
+    request_id: u64,
+    focus_holder: bool,
+    seq: u64,
+) {
+    let Some(waits) = ({
         let mut reg = REGISTRY.lock().await;
-        reg.begin_claim(client_id, worktree_id, request_id, focus_holder)
+        reg.begin_claim(client_id, conn, worktree_id, request_id, focus_holder, seq)
     }) else {
         // Refused; `begin_claim` has already told both sides.
         return;
@@ -1094,8 +1147,13 @@ async fn claim(client_id: &str, worktree_id: i64, request_id: u64, focus_holder:
     // be granted it. Answers do not even come back in call order: a claim with a
     // silent holder waits out `YIELD_ACK` while one with no holder returns at
     // once.
-    let superseded = reg.claim_seq.get(client_id) != Some(&answer);
-    if let Some(me) = reg.clients.get(client_id) {
+    let superseded = reg.claim_seq.get(client_id) != Some(&seq);
+    // **Only to the socket that asked.** A client id outlives its connection —
+    // that is what makes a reload keep its claims — and `request_id` restarts at
+    // 1 in every page instance, so answering by id alone let a reload's *new*
+    // page have its first claim resolved by the *old* page's in-flight one. The
+    // new page then acted on an answer to a question it never asked.
+    if let Some(me) = reg.clients.get(client_id).filter(|c| c.conn == conn) {
         let _ = me.tx.send(ServerMsg::ClaimResult {
             request_id,
             ok: !superseded,
@@ -1171,15 +1229,17 @@ mod tests {
     /// A client in the registry, plus the queue its socket would be draining.
     struct Fake {
         id: String,
+        conn: u64,
         rx: mpsc::UnboundedReceiver<ServerMsg>,
     }
 
     fn connect(reg: &mut Registry, id: &str, kind: ClientKind) -> Fake {
         let (tx, rx) = mpsc::unbounded_channel();
+        let conn = NEXT_CONN.fetch_add(1, Ordering::Relaxed);
         reg.clients.insert(
             id.to_owned(),
             Client {
-                conn: NEXT_CONN.fetch_add(1, Ordering::Relaxed),
+                conn,
                 info: ClientInfo {
                     kind,
                     label: id.to_owned(),
@@ -1191,8 +1251,29 @@ mod tests {
         );
         Fake {
             id: id.to_owned(),
+            conn,
             rx,
         }
+    }
+
+    /// `begin_claim` with the two arguments the read loop supplies: the socket
+    /// that asked, and a sequence number taken in frame order.
+    fn claim_for(
+        reg: &mut Registry,
+        who: &Fake,
+        worktree_id: i64,
+        request_id: u64,
+        focus_holder: bool,
+    ) -> Option<GrantedClaim> {
+        let seq = NEXT_CLAIM_SEQ.fetch_add(1, Ordering::Relaxed);
+        reg.begin_claim(
+            &who.id,
+            who.conn,
+            worktree_id,
+            request_id,
+            focus_holder,
+            seq,
+        )
     }
 
     /// Everything queued for this client so far, so a test can assert on what a
@@ -1224,7 +1305,7 @@ mod tests {
     fn a_free_worktree_is_granted_and_recorded_before_any_wait() {
         let mut reg = Registry::default();
         let a = connect(&mut reg, "a", ClientKind::Electron);
-        let granted = reg.begin_claim(&a.id, 7, 1, true);
+        let granted = claim_for(&mut reg, &a, 7, 1, true);
         assert!(granted.is_some());
         assert_eq!(reg.claims.get(&7).map(String::as_str), Some("a"));
     }
@@ -1237,9 +1318,9 @@ mod tests {
         let mut reg = Registry::default();
         let a = connect(&mut reg, "a", ClientKind::Electron);
         let mut b = connect(&mut reg, "b", ClientKind::Browser);
-        reg.begin_claim(&a.id, 7, 1, true).unwrap();
+        claim_for(&mut reg, &a, 7, 1, true).unwrap();
 
-        assert!(reg.begin_claim(&b.id, 7, 2, true).is_none());
+        assert!(claim_for(&mut reg, &b, 7, 2, true).is_none());
         assert_eq!(
             reg.claims.get(&7).map(String::as_str),
             Some("a"),
@@ -1260,8 +1341,8 @@ mod tests {
         let mut reg = Registry::default();
         let a = connect(&mut reg, "a", ClientKind::Browser);
         let mut b = connect(&mut reg, "b", ClientKind::Electron);
-        reg.begin_claim(&a.id, 7, 1, true).unwrap();
-        reg.begin_claim(&b.id, 7, 2, true);
+        claim_for(&mut reg, &a, 7, 1, true).unwrap();
+        claim_for(&mut reg, &b, 7, 2, true);
         assert_eq!(
             claim_results(&drain(&mut b))[0].2,
             Some(ClientKind::Browser)
@@ -1273,16 +1354,16 @@ mod tests {
         let mut reg = Registry::default();
         let mut a = connect(&mut reg, "a", ClientKind::Electron);
         let b = connect(&mut reg, "b", ClientKind::Electron);
-        reg.begin_claim(&a.id, 7, 1, true).unwrap();
+        claim_for(&mut reg, &a, 7, 1, true).unwrap();
         let _ = drain(&mut a);
 
-        reg.begin_claim(&b.id, 7, 2, false);
+        claim_for(&mut reg, &b, 7, 2, false);
         assert!(
             !drain(&mut a).iter().any(|m| matches!(m, ServerMsg::Focus)),
             "a client surveying what it may display must not yank windows forward"
         );
 
-        reg.begin_claim(&b.id, 7, 3, true);
+        claim_for(&mut reg, &b, 7, 3, true);
         assert!(drain(&mut a).iter().any(|m| matches!(m, ServerMsg::Focus)));
     }
 
@@ -1292,8 +1373,8 @@ mod tests {
     fn reclaiming_your_own_worktree_is_granted() {
         let mut reg = Registry::default();
         let a = connect(&mut reg, "a", ClientKind::Electron);
-        reg.begin_claim(&a.id, 7, 1, true).unwrap();
-        assert!(reg.begin_claim(&a.id, 7, 2, true).is_some());
+        claim_for(&mut reg, &a, 7, 1, true).unwrap();
+        assert!(claim_for(&mut reg, &a, 7, 2, true).is_some());
     }
 
     /// One *displayed* worktree per client: switching away frees the old one for
@@ -1304,10 +1385,10 @@ mod tests {
         let mut reg = Registry::default();
         let a = connect(&mut reg, "a", ClientKind::Electron);
         let b = connect(&mut reg, "b", ClientKind::Electron);
-        reg.begin_claim(&a.id, 7, 1, true).unwrap();
-        reg.begin_claim(&a.id, 8, 2, true).unwrap();
+        claim_for(&mut reg, &a, 7, 1, true).unwrap();
+        claim_for(&mut reg, &a, 8, 2, true).unwrap();
         assert!(!reg.claims.contains_key(&7));
-        assert!(reg.begin_claim(&b.id, 7, 3, true).is_some());
+        assert!(claim_for(&mut reg, &b, 7, 3, true).is_some());
     }
 
     /// Holding a worktree's panes is not the same as showing it: a claim asks
@@ -1322,7 +1403,7 @@ mod tests {
         holds(&mut reg, "c", &[7, 9]);
         holds(&mut reg, "a", &[7]);
 
-        let (_, waits) = reg.begin_claim(&a.id, 7, 1, true).unwrap();
+        let waits = claim_for(&mut reg, &a, 7, 1, true).unwrap();
         assert_eq!(waits.len(), 2, "both other holders, and not the claimer");
         for f in [&mut b, &mut c] {
             assert!(
@@ -1339,7 +1420,7 @@ mod tests {
         let mut reg = Registry::default();
         let a = connect(&mut reg, "a", ClientKind::Electron);
         connect(&mut reg, "b", ClientKind::Electron);
-        let (_, waits) = reg.begin_claim(&a.id, 7, 1, true).unwrap();
+        let waits = claim_for(&mut reg, &a, 7, 1, true).unwrap();
         assert!(waits.is_empty());
     }
 
@@ -1352,7 +1433,7 @@ mod tests {
         let b = connect(&mut reg, "b", ClientKind::Electron);
         holds(&mut reg, "b", &[7]);
         drop(b.rx);
-        let (_, waits) = reg.begin_claim(&a.id, 7, 1, true).unwrap();
+        let waits = claim_for(&mut reg, &a, 7, 1, true).unwrap();
         assert!(waits.is_empty());
         assert!(
             reg.clients["b"].pending.is_empty(),
@@ -1370,7 +1451,7 @@ mod tests {
     fn a_disconnect_orphans_a_claim_and_a_reconnect_takes_it_back() {
         let mut reg = Registry::default();
         let a = connect(&mut reg, "a", ClientKind::Electron);
-        reg.begin_claim(&a.id, 7, 1, true).unwrap();
+        claim_for(&mut reg, &a, 7, 1, true).unwrap();
 
         reg.clients.remove("a");
         reg.orphaned.insert(
@@ -1409,7 +1490,7 @@ mod tests {
             },
         );
 
-        assert!(reg.begin_claim(&b.id, 7, 1, true).is_some());
+        assert!(claim_for(&mut reg, &b, 7, 1, true).is_some());
         assert_eq!(reg.claims.get(&7).map(String::as_str), Some("b"));
         assert!(
             reg.orphaned.is_empty(),
@@ -1492,7 +1573,7 @@ mod tests {
     fn forgetting_a_worktree_drops_its_claim_its_orphan_and_every_hold() {
         let mut reg = Registry::default();
         let a = connect(&mut reg, "a", ClientKind::Electron);
-        reg.begin_claim(&a.id, 7, 1, true).unwrap();
+        claim_for(&mut reg, &a, 7, 1, true).unwrap();
         holds(&mut reg, "a", &[7, 9]);
         reg.orphaned.insert(
             9,
@@ -1534,7 +1615,7 @@ mod tests {
         // about the fixture happening to reuse it.
         reg.clients.get_mut(&a.id).unwrap().info.label = "Window 1".to_owned();
         connect(&mut reg, "b", ClientKind::Browser);
-        reg.begin_claim(&a.id, 7, 1, true).unwrap();
+        claim_for(&mut reg, &a, 7, 1, true).unwrap();
         let json = serde_json::to_string(&ServerMsg::Claims {
             claims: reg.view_for("b"),
         })
@@ -1552,7 +1633,7 @@ mod tests {
         let mut reg = Registry::default();
         let a = connect(&mut reg, "a", ClientKind::Electron);
         connect(&mut reg, "b", ClientKind::Browser);
-        reg.begin_claim(&a.id, 7, 1, true).unwrap();
+        claim_for(&mut reg, &a, 7, 1, true).unwrap();
         assert!(reg.view_for("a")[0].mine);
         assert!(!reg.view_for("b")[0].mine);
     }
@@ -1582,6 +1663,50 @@ mod tests {
         // …and says nothing when there was nothing to release, so a broadcast is
         // not sent on every claim for no reason.
         assert!(!reg.expire_orphans(Instant::now()));
+    }
+
+    /// **Frame order decides the winner, not scheduler order.**
+    ///
+    /// The sequence number is taken in the read loop and passed in, because a
+    /// claim is spawned: tokio parks a task spawned from a worker in its LIFO
+    /// slot and polls that first, so two claims read in one poll run
+    /// second-then-first. Taken inside the task, the *earlier* frame got the
+    /// lower number and the later one was answered `superseded` — for which the
+    /// UI deliberately says nothing, so the user's second click vanished.
+    #[test]
+    fn the_later_claim_wins_however_the_two_are_scheduled() {
+        let mut reg = Registry::default();
+        let a = connect(&mut reg, "a", ClientKind::Electron);
+        // Frame order: 7 then 8. Handed to `begin_claim` in the opposite order,
+        // which is what a LIFO-slot schedule produces.
+        let first = NEXT_CLAIM_SEQ.fetch_add(1, Ordering::Relaxed);
+        let second = NEXT_CLAIM_SEQ.fetch_add(1, Ordering::Relaxed);
+        reg.begin_claim(&a.id, a.conn, 8, 2, false, second).unwrap();
+        reg.begin_claim(&a.id, a.conn, 7, 1, false, first).unwrap();
+        assert_eq!(
+            reg.claim_seq.get("a"),
+            Some(&second),
+            "the later frame owns the outcome whichever ran first"
+        );
+    }
+
+    /// A claim is spawned, so it can be polled after its own socket is gone —
+    /// or after a newer socket resumed the identity. Recording one then leaves
+    /// an entry nothing removes, and answers a page that never asked.
+    #[test]
+    fn a_claim_from_a_socket_that_has_been_replaced_is_dropped() {
+        let mut reg = Registry::default();
+        let a = connect(&mut reg, "a", ClientKind::Electron);
+        let stale = a.conn;
+        // The page reloaded: same identity, new socket.
+        let a2 = connect(&mut reg, "a", ClientKind::Electron);
+        assert_ne!(stale, a2.conn);
+        let seq = NEXT_CLAIM_SEQ.fetch_add(1, Ordering::Relaxed);
+        assert!(reg.begin_claim("a", stale, 7, 1, false, seq).is_none());
+        assert!(
+            reg.claims.is_empty(),
+            "and records nothing for a dead socket"
+        );
     }
 
     /// A claim waits for every holder at once. Sequentially, `holds` being

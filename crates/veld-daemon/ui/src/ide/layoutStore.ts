@@ -146,6 +146,10 @@ function isEmpty(layout: PaneLayout): boolean {
  * during the first render white-screens the app.
  */
 export async function readLayout(worktreeId: number): Promise<PaneLayout | null> {
+  // The boot sweep takes an entry out of the old store before it pushes it, so
+  // reading past a sweep in flight would find nothing and seed a default over
+  // the layout being moved.
+  if (adopting) await adopting.catch(() => {});
   const doc = await api.paneLayout(worktreeId);
   // Anything queued was composed against the layout this read replaces — see
   // `cancelPendingWrite`. Cancelled *before* the version moves, so there is no
@@ -201,7 +205,22 @@ export async function readLayout(worktreeId: number): Promise<PaneLayout | null>
  * a row already exists, and that row is the one in use — keeping the old copy
  * would only leave it to resurrect dead session ids at some later boot.
  */
-export async function adoptLegacyLayouts(): Promise<void> {
+let adopting: Promise<void> | null = null;
+
+/**
+ * Start the boot sweep, once, and expose it for anything that must not race it.
+ *
+ * [`readLayout`] awaits it: the sweep removes an entry from the old store
+ * *before* pushing it, so a read that interleaved would find the entry already
+ * taken, return `null`, and let the app seed a default over the layout being
+ * adopted.
+ */
+export function adoptLegacyLayouts(): Promise<void> {
+  adopting ??= sweepLegacyLayouts();
+  return adopting;
+}
+
+async function sweepLegacyLayouts(): Promise<void> {
   let ids: number[];
   try {
     const raw = localStorage.getItem(LEGACY_WORKTREE_KEY);
@@ -364,13 +383,18 @@ export function flushPendingOnUnload(): void {
     if (!layout) continue;
     const version = versions.get(worktreeId) ?? 0;
     const payload = isEmpty(layout) ? null : layout;
-    // **Assume it landed.** `pagehide` also fires on the way *into* the
-    // bfcache, and a page restored from there would otherwise hold a version one
-    // behind and lose its next save to a 409 it caused itself.
-    versions.set(worktreeId, version + (payload === null ? 0 : 1));
-    written.delete(worktreeId);
+    // **The version is not advanced, and that is deliberate.** Assuming the
+    // write landed was the first version of this and it recreated the very
+    // defect the version exists to catch: a keepalive PUT that 409s is
+    // unobservable, so guessing `version + 1` can land on exactly what the
+    // *winner* wrote — after which this client's next save is accepted and
+    // replaces panes another client is attached to. Left where it is, that save
+    // loses its version check and adopts, which is the correct outcome. The cost
+    // is one wasted round trip on a page restored from the bfcache; the
+    // alternative was a silent clobber.
+    //
     // Not through `api`, which cannot express `keepalive`. Two things this
-    // cannot promise, both accepted rather than papered over: a conflict is
+    // cannot promise, both stated rather than papered over: a conflict is
     // unobservable (the page is going away, and whoever holds the worktree next
     // re-reads), and the Fetch spec caps *all* in-flight keepalive bodies at
     // 64 KiB — well past any real layout, but a pathological one is dropped

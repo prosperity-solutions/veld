@@ -130,15 +130,25 @@ contextBridge.exposeInMainWorld("veldDesktop", {
     // boundary anywhere in `/ide` that is a white screen rather than a degraded
     // feature.
     //
-    // Each answers the way that leaves an old bundle *working*, minus the
-    // arbitration it can no longer take part in: it shows what it shows, it is
-    // never asked to yield, and nothing greys out. Which is exactly what that
-    // bundle did before slots and claims existed. Delete these once no shipped
-    // `/ide` calls them — not before.
-    /** @deprecated The daemon arbitrates. Always granted here. */
-    claimWorktree: () => Promise.resolve({ ok: true }),
-    /** @deprecated Nothing is known to be elsewhere, so nothing greys out. */
-    claimedElsewhere: () => Promise.resolve([]),
+    // **`claimWorktree` still arbitrates, and answering a blanket `{ok:true}`
+    // would have been worse than deleting nothing.** That older bundle keeps its
+    // main-window layouts in one `localStorage` key *shared between windows*, so
+    // the claim is the only thing standing between two windows and one set of
+    // terminal ids — and a second attach takes a session over. Granting
+    // unconditionally would have made `⌘N` on the last-selected worktree open a
+    // second copy of it and have the two trade every shell, which is the exact
+    // failure the whole feature exists to remove. So it answers from `showing`,
+    // the map this process already keeps for drop routing.
+    //
+    // What that bundle does *not* get is the yield handshake — no window is ever
+    // asked to release panes it holds but is not showing. That is the behaviour
+    // it had before yields existed, which is the honest degradation.
+    /** @deprecated Arbitrated against this process's own windows only; the
+     *  daemon does it properly for a current bundle. */
+    claimWorktree: (worktreeId, focusHolder = true) =>
+      ipcRenderer.invoke("veld:window:legacy-claim", { worktreeId, focusHolder }),
+    /** @deprecated Which worktrees another window of this app is showing. */
+    claimedElsewhere: () => ipcRenderer.invoke("veld:window:legacy-elsewhere"),
     /** @deprecated Never fires; returns the unsubscribe its callers expect. */
     onClaimsChanged: () => () => {},
     /** @deprecated The daemon learns this over the control socket. */

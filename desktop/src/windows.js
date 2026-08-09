@@ -1078,6 +1078,60 @@ function registerWindowIpc(ipcMain) {
   });
 
   /**
+   * Ask to show a worktree — **for an `/ide` bundle older than this shell only.**
+   *
+   * A current bundle asks the daemon, which arbitrates across browser tabs too.
+   * This exists because that older bundle keeps its main-window layouts in one
+   * `localStorage` key shared between windows, so without an answer here two
+   * windows render one worktree's panes and trade every shell in it. Answering a
+   * blanket yes would have been worse than not stubbing at all.
+   *
+   * `showing` is the same map drop routing uses; the older bundle populates it
+   * through this call rather than through `veld:window:shows`, which it does not
+   * know about. No yield handshake — see the preload comment.
+   */
+  ipcMain.handle("veld:window:legacy-claim", (event, payload) => {
+    const record = recordFor(senderWindow(event));
+    if (!record) return { ok: false, reason: "no-window" };
+    if (record.kind !== "main") return { ok: true };
+    const worktreeId = safeWorktreeId(payload?.worktreeId);
+    if (worktreeId === null) return { ok: false, reason: "invalid" };
+    pruneShowing();
+    const holderId = showing.get(worktreeId);
+    if (holderId !== undefined && holderId !== record.id) {
+      const holder = allRecords().find(
+        (r) => r.id === holderId && !r.win.isDestroyed() && !r.closing,
+      );
+      if (holder) {
+        // Only a deliberate pick raises the other window; a window working out
+        // what it may display asks about several in a row.
+        if (payload?.focusHolder !== false) {
+          if (holder.win.isMinimized()) holder.win.restore();
+          holder.win.show();
+          holder.win.focus();
+        }
+        return { ok: false, reason: "shown-elsewhere" };
+      }
+      showing.delete(worktreeId);
+    }
+    releaseClaimsIn(showing, record.id);
+    showing.set(worktreeId, record.id);
+    return { ok: true };
+  });
+
+  /** Which worktrees another window of this app is showing — older bundles. */
+  ipcMain.handle("veld:window:legacy-elsewhere", (event) => {
+    const record = recordFor(senderWindow(event));
+    if (!record) return [];
+    pruneShowing();
+    const ids = [];
+    for (const [worktreeId, id] of showing) {
+      if (id !== record.id) ids.push(worktreeId);
+    }
+    return ids;
+  });
+
+  /**
    * Bring this window to the front.
    *
    * The daemon decides *who* is wanted — somebody clicked a worktree this window

@@ -46,6 +46,28 @@ test("the bridge keeps stubs for the ownership API an older /ide still calls", (
   }
 });
 
+/**
+ * …and `claimWorktree` must still *arbitrate*, not answer a blanket yes.
+ *
+ * The bundle that calls it keeps its main-window layouts in one `localStorage`
+ * key shared between windows, so the claim is the only thing between two windows
+ * and one set of terminal ids — and a second PTY attach takes the session over.
+ * A stub that always grants would make `⌘N` open a second copy of the
+ * last-selected worktree and have the two trade every shell.
+ */
+test("the legacy claim stub asks the main process rather than granting", () => {
+  assert.match(
+    preload,
+    /claimWorktree:[^\n]*\n?[^\n]*ipcRenderer\.invoke\("veld:window:legacy-claim"/,
+    "claimWorktree must route to the shell's own arbitration",
+  );
+  assert.match(
+    preload,
+    /claimedElsewhere:[^\n]*ipcRenderer\.invoke\("veld:window:legacy-elsewhere"/,
+    "claimedElsewhere must report what other windows show",
+  );
+});
+
 test("the bridge exposes what the current /ide needs", () => {
   for (const name of ["showsWorktree", "focusSelf"]) {
     assert.match(preload, new RegExp(`\\b${name}\\s*:`), `preload.js must expose ${name}`);
