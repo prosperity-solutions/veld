@@ -253,7 +253,7 @@ fn endpoint_infos(ns: &NodeState) -> Vec<EndpointInfo> {
             hostname: e.hostname.clone(),
             url: e.url.clone(),
             port: e.port,
-            primary: e.url.is_some() && e.url == ns.url,
+            primary: ns.is_primary(e),
         })
         .collect();
     // Primary first; the rest keep the map's name order.

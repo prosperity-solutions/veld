@@ -2786,8 +2786,20 @@ ${nodes.backend.url.scheme}        # long_running built-in: protocol scheme
 ${nodes.backend.url.port}          # long_running built-in: HTTPS port
 ${nodes.backend.port}              # long_running built-in: allocated primary port (rarely needed)
 ${nodes.backend.ports.debug}       # a named port, whatever its protocol
+${nodes.backend.hosts.pg}          # a named port's hostname, whatever its protocol
 ${nodes.backend.urls.admin}        # a named http port's URL — .hostname/.host/.origin/… too
 ${nodes.frontend.url}              # works even if frontend runs AFTER this node
+```
+
+`hosts.` and `ports.` are the pair to reach for across nodes when the port is
+raw TCP: it has a hostname and a port number and no URL, so this is how another
+node addresses it.
+
+```jsonc
+// db declares { "ports": { "pg": { "port": 5432, "protocol": "tcp" } } }
+"api": { "variants": { "dev": {
+  "env": { "DATABASE_URL": "postgres://app@${nodes.db.hosts.pg}:${nodes.db.ports.pg}/app" }
+}}}
 ```
 
 #### Execution-order outputs (available to downstream nodes only)

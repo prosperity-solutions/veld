@@ -673,7 +673,22 @@ fn build_manifest(
         // the upgrade to per-port endpoints has an empty map and a populated
         // `url`, and reading the map alone refused the whole run as having
         // nothing to share.
+        //
+        // Such a row records no port *name*, so the fallback calls its single
+        // entry `http` — but consent is looked up by name in the config, where
+        // the node's one port may be called `grpc`. Rename the synthesised entry
+        // to whatever the config says its primary is, or an opted-in node is
+        // refused and the diagnostic names a port the config does not contain.
+        let legacy_primary = ns.endpoints.is_empty().then(|| {
+            config
+                .resolved(&ns.node_name, &ns.variant)
+                .and_then(|r| r.ports.primary.clone())
+        });
         for (port_name, endpoint) in &ns.endpoints_or_legacy() {
+            let port_name = match &legacy_primary {
+                Some(Some(primary)) => primary.as_str(),
+                _ => port_name.as_str(),
+            };
             had_url_bearing = true;
             if let Some(filter) = nodes_filter {
                 if !filter.iter().any(|n| n == &ns.node_name) {
@@ -709,7 +724,7 @@ fn build_manifest(
             nodes.push(SharedNode {
                 node: ns.node_name.clone(),
                 variant: ns.variant.clone(),
-                port_name: Some(port_name.clone()),
+                port_name: Some(port_name.to_owned()),
                 hostname,
                 url: endpoint.url.clone(),
                 protocol: if endpoint.is_routed() {

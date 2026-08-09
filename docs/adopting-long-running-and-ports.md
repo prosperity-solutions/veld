@@ -113,7 +113,19 @@ three fields:
   one to know about, because on a secondary port it is already `<node>-<port>`.
 
 Every port gets a **hostname**, whatever its protocol — naming and routing are
-separate concerns, and `tcp` uses the name without the route.
+separate concerns, and `tcp` uses the name without the route. That is what
+another node addresses a raw port by:
+
+```jsonc
+// db declares { "ports": { "pg": { "port": 5432, "protocol": "tcp" } } }
+"api": { "variants": { "dev": {
+  "env": { "DATABASE_URL": "postgres://app@${nodes.db.hosts.pg}:${nodes.db.ports.pg}/app" }
+}}}
+```
+
+`${veld.hosts.<name>}` is the same value for the node's *own* ports. Both are
+pre-computed before any node starts, so no `depends_on` edge is needed to read
+them — that is unchanged from `${nodes.<node>.url}`.
 
 **Your existing multi-port nodes gain no new URL.** The default is `http` for the
 primary port and `tcp` for every other, and that asymmetry is the whole point: it
@@ -156,6 +168,12 @@ a built file, a pid file:
 `settle` is the honest fallback, not the recommendation, and it is readiness
 only: as a liveness probe it would report healthy forever, so veld rejects it
 there.
+
+`seconds` is named for `settle`, where it is the whole check, but it sets the
+settle window for **any** readiness probe on a portless node — that window is
+what races the process's own exit, and a `command` probe on a portless node
+needs it just as much. It is ignored where the node has a port, because
+readiness then waits for the listener instead.
 
 ## Consent moved to the port
 
@@ -216,6 +234,11 @@ The first two are the same fix: a check that could not run used to answer
    Both are now errors: `unknown-probe-type` and `probe-needs-port` at lint time,
    and a real failure at runtime. If `veld lint` reports one, that probe has
    never checked anything — decide what it should have checked.
+
+   Run `veld lint` *before* restarting the daemon, not after. An environment
+   that is already running keeps running across `veld update`, and a *liveness*
+   probe of this shape flips from permanently healthy to permanently failing —
+   with recovery restarts behind it — the next time the daemon reads it.
 
 2. **A variant that erases its last port no longer gets a fresh one.** A variant
    writing `"ports": { "http": null }` over a node that declared only `http` now

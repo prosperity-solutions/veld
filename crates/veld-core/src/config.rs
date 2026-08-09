@@ -1132,6 +1132,18 @@ impl<'de> Deserialize<'de> for PortEntry {
 /// The name of the port `${veld.port}` refers to when a node declares several.
 pub const PRIMARY_PORT_NAME: &str = "http";
 
+/// Characters a port name may contain — see the `port-name` rule in [`validate`].
+///
+/// `_` is allowed even though a DNS label may not contain one, because
+/// `slugify` maps it on the way to a hostname and configs predating the naming
+/// rules use it. What is refused is what breaks *silently*: `.` (a deeper
+/// hostname label, and the separator the `urls.<port>.<piece>` namespace splits
+/// on), whitespace, and `#` (the separator in every `node:variant#port` consent
+/// diagnostic).
+fn port_name_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '-' || c == '_'
+}
+
 /// One named port with every default applied.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedPort {
@@ -2633,6 +2645,21 @@ impl StepType {
             StepType::LongRunning => "long_running",
         }
     }
+
+    /// Parse a persisted spelling back, aliases included.
+    ///
+    /// Run history and graph snapshots store [`StepType::as_str`], so a database
+    /// written before the rename holds `start_server` where a later one holds
+    /// `long_running` **for the same unchanged config**. Anything comparing two
+    /// snapshots has to come back through here, or it reports a change nobody
+    /// made the first time a diff spans the upgrade.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "command" | "bash" => Some(StepType::Command),
+            "long_running" | "start_server" => Some(StepType::LongRunning),
+            _ => None,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2822,11 +2849,15 @@ pub struct ResolvedVariant {
     pub strict_outputs: bool,
     pub skip_if: Option<CommandSpec>,
     pub on_stop: Option<CommandSpec>,
-    /// The node/variant-level `share` **as written**. Retained for diagnostics
-    /// and display only — the authoritative consent is per port, in
-    /// [`Self::ports`], where this value has already been folded into the
-    /// primary entry. Never gate an exposure on this field.
-    pub share: Option<SharePolicy>,
+    /// The node/variant-level `share` **as written**, for diagnostics and
+    /// display only.
+    ///
+    /// Named for what it is rather than `share`, because the name is the guard:
+    /// the authoritative consent is per port, in [`Self::ports`], where this
+    /// value has already been folded into the primary entry — and a field called
+    /// `share`, of the same type, sitting one level up from the real one is an
+    /// invitation to gate an exposure on it. Nothing may.
+    pub share_as_written: Option<SharePolicy>,
     pub features: ResolvedFeatures,
     pub proxy: ResolvedProxy,
     pub client_log_levels: Vec<String>,
@@ -2934,7 +2965,7 @@ pub fn resolve_variant(
         // Absent inherits the node's hook; an explicit `null` erases it. `replace`
         // is the same three-way rule already used for `outputs` and `share`.
         on_stop: replace(node.on_stop.as_ref(), variant.on_stop.as_ref()),
-        share: node_share,
+        share_as_written: node_share,
         features: resolve_features(
             project.features.as_ref(),
             node.features.as_ref(),
@@ -4653,6 +4684,47 @@ fn check_resolved_variants(config: &VeldConfig, out: &mut Vec<Finding>) {
                 ));
             }
 
+            // A port name is not a label any more — it is a DNS label
+            // (`<node>-<port>.…`), an environment-variable suffix
+            // (`VELD_PORT_<NAME>`), a segment of the `veld.ports.`/`hosts.`/
+            // `urls.` namespace, and the `#`-separated half of every consent
+            // diagnostic. A name that breaks any of those breaks it *silently*:
+            // a dot mints a deeper hostname than the wildcard cert covers and
+            // makes `${veld.urls.a.b}` permanently unresolvable, and a space or
+            // a `#` is handed to DNS and to the label parser verbatim.
+            for name in r.ports.ports.keys() {
+                if name.is_empty() || !name.chars().all(port_name_char) {
+                    out.push(Finding::error(
+                        "port-name",
+                        format!("{loc}.ports.{name}"),
+                        format!(
+                            "\"{name}\" is not a usable port name. A port name becomes a DNS \
+                             label, an environment-variable suffix and part of \
+                             `${{veld.ports.<name>}}`, so it may contain only letters, \
+                             digits, `-` and `_`"
+                        ),
+                    ));
+                }
+            }
+            // Two names that differ only in case or in `-` versus `_` collapse to
+            // one `VELD_PORT_<NAME>` (see `env_suffix`), and the map order — not
+            // the author — decides which one the process receives.
+            let mut by_env: BTreeMap<String, &str> = BTreeMap::new();
+            for name in r.ports.ports.keys() {
+                let suffix = name.to_ascii_uppercase().replace('-', "_");
+                if let Some(first) = by_env.insert(suffix.clone(), name.as_str()) {
+                    out.push(Finding::error(
+                        "port-name-collision",
+                        format!("{loc}.ports.{name}"),
+                        format!(
+                            "ports \"{first}\" and \"{name}\" both export as \
+                             `VELD_PORT_{suffix}` (names are upper-cased and `-` becomes \
+                             `_`), so one would silently win. Rename one"
+                        ),
+                    ));
+                }
+            }
+
             // Which port `${veld.port}` means must never be a guess. Only fires
             // when the author gave nothing to disambiguate on: several ports,
             // none named `http`, and none carrying an explicit `protocol`. A
@@ -4785,7 +4857,7 @@ fn check_resolved_variants(config: &VeldConfig, out: &mut Vec<Finding>) {
             // nowhere to fold it, so the opt-in would grant nothing at all and
             // say nothing about it. Silent no-ops are the failure mode per-port
             // consent exists to remove, so name it.
-            if r.share.is_some() && r.ports.primary.is_none() {
+            if r.share_as_written.is_some() && r.ports.primary.is_none() {
                 let remedy = if r.ports.ports.is_empty() {
                     "this node declares no ports, so there is nothing to expose".to_owned()
                 } else {
@@ -8894,7 +8966,7 @@ mod tests {
             "a",
             "dev",
         );
-        let share = r.share.as_ref().unwrap();
+        let share = r.share_as_written.as_ref().unwrap();
         assert!(share.allows(ExposeMode::Peer));
         assert!(
             !share.allows(ExposeMode::Web),
@@ -8915,7 +8987,10 @@ mod tests {
             "a",
             "dev",
         );
-        assert!(r.share.is_none(), "\"share\": null must erase it");
+        assert!(
+            r.share_as_written.is_none(),
+            "\"share\": null must erase it"
+        );
     }
 
     /// **Merge table: `type`, `on_stop`, and the command replace.** A variant that
@@ -9483,6 +9558,52 @@ mod tests {
         assert_eq!(lint_case(named_http_but_tcp, "${veld.url}").len(), 1);
     }
 
+    /// A port name is a DNS label, an env-var suffix, a builtin namespace
+    /// segment and half of every consent diagnostic — so the names that break
+    /// those have to be refused where they are written, not discovered as a
+    /// hostname nobody can resolve.
+    #[test]
+    fn port_names_that_break_a_hostname_or_an_env_var_are_refused() {
+        fn rules(ports: &str) -> Vec<String> {
+            let json = format!(
+                r#"{{"schemaVersion":"3","name":"t","nodes":{{"a":{{"variants":{{"dev":{{
+                    "type":"long_running","shell":"x","ports":{ports},
+                    "probes":{{"readiness":{{"type":"command","shell":"true"}}}}
+                }}}}}}}}}}"#
+            );
+            let cfg: VeldConfig = serde_json::from_str(&json).expect("fixture parses");
+            validate(&cfg)
+                .iter()
+                .filter(|f| f.rule.starts_with("port-name"))
+                .map(|f| f.rule.to_string())
+                .collect()
+        }
+
+        // Ordinary names stay legal, `_` included — configs predate the rule.
+        assert!(rules(r#"{"http":"auto"}"#).is_empty());
+        assert!(rules(r#"{"http":"auto","admin-ui":"auto","my_port":"auto"}"#).is_empty());
+
+        // A dot mints a deeper hostname label than the node's wildcard covers,
+        // and `${veld.urls.a.b}` splits on it and can never resolve.
+        assert_eq!(rules(r#"{"a.b":"auto"}"#), ["port-name"]);
+        // A space reaches DNS and Caddy verbatim.
+        assert_eq!(rules(r#"{"we ird":"auto"}"#), ["port-name"]);
+        // `#` is the separator in every `node:variant#port` consent label.
+        assert_eq!(rules(r#"{"a#b":"auto"}"#), ["port-name"]);
+        assert_eq!(rules(r#"{"":"auto"}"#), ["port-name"]);
+
+        // Two names that collapse to one environment variable: the map order,
+        // not the author, would decide which value the process receives.
+        assert_eq!(
+            rules(r#"{"a-b":"auto","a_b":"auto"}"#),
+            ["port-name-collision"]
+        );
+        assert_eq!(
+            rules(r#"{"admin":"auto","Admin":"auto"}"#),
+            ["port-name-collision"]
+        );
+    }
+
     /// Everything downstream — `NodeState.url`, `routed_urls()`'s primary-first
     /// ordering, `endpoint_infos`' by-value primary match — assumes a primary is
     /// a port with a URL. Nothing else enforces it, so this does.
@@ -9767,7 +9888,11 @@ mod tests {
         let gateway = sharing.gateway.expect("gateway parsed");
         assert_eq!(gateway.url, "https://share.acme.internal");
         assert_eq!(gateway.token, None);
-        let share = cfg.resolved("web", "local").unwrap().share.unwrap();
+        let share = cfg
+            .resolved("web", "local")
+            .unwrap()
+            .share_as_written
+            .unwrap();
         assert!(share.allows(ExposeMode::Peer));
         assert!(!share.allows(ExposeMode::Web));
     }

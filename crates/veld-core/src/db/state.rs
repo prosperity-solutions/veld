@@ -786,9 +786,9 @@ impl Db {
                         hostnames.push(host);
                     }
                     // Display keys, so only routed ports appear — and the
-                    // primary is already in under its bare node key. Matched by
-                    // value, exactly as `NodeState::routed_urls` does it, so the
-                    // two never disagree about which port is the primary.
+                    // primary is already in under its bare node key. The
+                    // primary-by-value rule is `NodeState::is_primary`; spelled
+                    // out here only because this reads columns, not a NodeState.
                     let Some(url) = &endpoint.url else { continue };
                     if Some(url) == primary.as_ref() {
                         continue;

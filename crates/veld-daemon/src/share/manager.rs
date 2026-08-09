@@ -978,7 +978,12 @@ impl ShareManager {
                     .manifest
                     .nodes
                     .iter()
-                    .filter(|n| !n.is_routed())
+                    // `!is_routed()` alone would also match a malformed entry
+                    // (claims http, carries no URL) and print it as a raw
+                    // address. A host never mints one — but this predicate is
+                    // the kind that gets copied to the join side, where they
+                    // do arrive.
+                    .filter(|n| !n.is_routed() && !n.is_malformed())
                     .map(|n| format!("{}:{}", n.hostname, n.upstream_port))
                     .collect(),
             })

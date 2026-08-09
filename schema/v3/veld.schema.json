@@ -702,6 +702,10 @@
     },
     "portsMap": {
       "type": "object",
+      "propertyNames": {
+        "pattern": "^[A-Za-z0-9_-]+$",
+        "description": "A port name becomes a DNS label (<node>-<port>.\u2026), an environment-variable suffix (VELD_PORT_<NAME>) and a segment of ${veld.ports.<name>} \u2014 so a dot, whitespace or `#` breaks one of those silently. `veld lint` reports the same thing as `port-name`."
+      },
       "description": "Named ports veld allocates, referenced as ${veld.ports.<name>} and exported as VELD_PORT_<NAME>. ${veld.port} remains the primary \u2014 the one named `http`, the sole entry, or the one explicitly marked `\"protocol\": \"http\"`. Every port gets its own hostname, ${veld.hosts.<name>} and VELD_HOST_<NAME>; the routed (http) ones additionally get ${veld.urls.<name>} and VELD_URL_<NAME>. Omit the key entirely for the historical behaviour (one allocated http port); set it to null for a long-running node that serves nothing.",
       "additionalProperties": {
         "oneOf": [
@@ -909,7 +913,7 @@
           "type": "integer",
           "minimum": 1,
           "default": 3,
-          "description": "For type settle: how long the process must stay alive to count as ready."
+          "description": "How long a PORTLESS node's process must stay alive to count as ready. Named for type settle, where it is the whole check, but it sets the settle window for any readiness probe on a node with no port \u2014 that window is what races the process's own exit. Ignored where the node has a port, since readiness then waits for the listener."
         },
         "path": {
           "type": "string",

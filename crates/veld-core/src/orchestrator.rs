@@ -1469,7 +1469,10 @@ impl Orchestrator {
                     // Every port has a hostname, so `${nodes.db.hosts.pg}` is the
                     // one accessor that works for both protocols — the piece a
                     // connection string actually needs.
-                    node_out.insert(format!("hosts.{name}"), endpoint.hostname.clone());
+                    node_out.insert(
+                        format!("hosts.{name}"),
+                        url::hostname_of_url(&endpoint.hostname).to_owned(),
+                    );
                     let Some(https_url) = &endpoint.https_url else {
                         continue;
                     };
@@ -3477,8 +3480,17 @@ async fn execute_start_server_isolated(
     // `url` plus the individual location pieces (mirrors the Web URL API), the
     // same family per named http port under `urls.<name>`, and `hosts.<name>`
     // for every port whatever its protocol.
+    //
+    // Port-stripped, because `hosts.<name>` is the *name* — it is what the DNS
+    // entry and the route are registered under, and `${veld.ports.<name>}` is
+    // the number beside it. A `url_template` carrying a literal port would
+    // otherwise make the same reference mean `app.localhost:3000` here and
+    // `app.localhost` in the node's own `on_stop`, which rehydrates it stripped.
     for (name, endpoint) in &precomputed.endpoints {
-        var_ctx.set_builtin(&format!("hosts.{name}"), endpoint.hostname.clone());
+        var_ctx.set_builtin(
+            &format!("hosts.{name}"),
+            url::hostname_of_url(&endpoint.hostname).to_owned(),
+        );
         let Some(https_url) = &endpoint.https_url else {
             continue;
         };

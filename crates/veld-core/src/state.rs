@@ -262,12 +262,26 @@ impl NodeState {
         }
         for (name, endpoint) in &self.endpoints {
             let Some(url) = &endpoint.url else { continue };
-            if Some(url) == self.url.as_ref() {
+            if self.is_primary(endpoint) {
                 continue;
             }
             out.push((Some(name.as_str()), url.as_str()));
         }
         out
+    }
+
+    /// Whether this endpoint is the node's primary — the one `${veld.url}` means
+    /// and the one [`NodeState::url`] repeats.
+    ///
+    /// Matched **by value**, because the primary's *name* is not recorded: a row
+    /// written before per-port endpoints has a `url` and no map, and every
+    /// display has to keep working on it. That is a rule three surfaces depend on
+    /// — this method exists so it is written once. A same-URL tie is impossible
+    /// upstream (`planned_hostnames` refuses two ports resolving to one hostname
+    /// within a run), and if it ever became possible, the first entry winning is
+    /// the same answer every caller would reach independently.
+    pub fn is_primary(&self, endpoint: &NodeEndpoint) -> bool {
+        endpoint.url.is_some() && endpoint.url == self.url
     }
 
     /// Every raw (`tcp`) endpoint this node serves, as `(port name, host:port)`.

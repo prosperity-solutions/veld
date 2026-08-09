@@ -508,7 +508,20 @@ fn diff_snapshots(
         );
         push("cwd", &o.cwd, &n.cwd);
         push("url_template", &o.url_template, &n.url_template);
-        if o.step_type != n.step_type {
+        // Compared through the parsed type, not as strings: snapshots taken
+        // before the rename recorded `start_server` and later ones record
+        // `long_running` for the same unchanged config, and a tool whose whole
+        // job is "what changed since it worked" must not report a change nobody
+        // made. An unparseable value falls back to a string compare rather than
+        // silently reading as equal.
+        let same_type = match (
+            veld_core::config::StepType::parse(&o.step_type),
+            veld_core::config::StepType::parse(&n.step_type),
+        ) {
+            (Some(a), Some(b)) => a == b,
+            _ => o.step_type == n.step_type,
+        };
+        if !same_type {
             fields.push(FieldChange {
                 field: "type".to_owned(),
                 from: Some(o.step_type.clone()),
@@ -662,6 +675,40 @@ mod tests {
         // Same provenance on both sides is not a difference.
         new.var_overrides = Some(vec![vo("default")]);
         assert!(diff_snapshots(&old, &new).var_overrides_changed.is_empty());
+    }
+
+    /// **The rename is not a config change.** Snapshots taken before it recorded
+    /// `start_server`; later ones record `long_running` for the same unchanged
+    /// config. Comparing the strings made the first `veld runs diff` spanning the
+    /// upgrade report a type change on every long-running node in the project —
+    /// in the one tool whose entire job is answering "what changed since it
+    /// worked". A real change between the two types still reports.
+    #[test]
+    fn diff_does_not_invent_a_type_change_across_the_step_type_rename() {
+        let mut old_node = node("serve", &[]);
+        old_node.step_type = "start_server".into();
+        let mut new_node = node("serve", &[]);
+        new_node.step_type = "long_running".into();
+
+        let d = diff_snapshots(
+            &snap("same", &[("web:local", old_node.clone())]),
+            &snap("same", &[("web:local", new_node.clone())]),
+        );
+        assert!(
+            d.changed.is_empty(),
+            "an alias is not a change: {} node(s) reported",
+            d.changed.len()
+        );
+
+        // A genuine type change is still reported.
+        let mut became_command = new_node.clone();
+        became_command.step_type = "command".into();
+        let d = diff_snapshots(
+            &snap("same", &[("web:local", old_node)]),
+            &snap("same", &[("web:local", became_command)]),
+        );
+        assert_eq!(d.changed.len(), 1);
+        assert_eq!(d.changed[0].fields[0].field, "type");
     }
 
     /// A var only one run recorded shows as declared-on-one-side, rather than
