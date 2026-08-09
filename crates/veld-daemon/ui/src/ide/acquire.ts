@@ -42,14 +42,25 @@ export interface AcquireDeps {
    *  click behind it, and a refusal that yanked a window forward would be a
    *  window manager answering a question nobody asked. */
   claim(worktreeId: number, focusHolder: boolean): Promise<ClaimResult>;
-  /** Give one back, having been granted it and then not wanted it. */
-  release(worktreeId: number): void;
+  /** Give one back, having been granted it and then not wanted it. `seq` names
+   *  the claim, so a late release cannot give away one taken since. */
+  release(worktreeId: number, seq: number): void;
   /** What else this client could show, newest list available. */
   candidates(): AcquireTarget[];
   /** Render this worktree — selection *and* the granted marker, together. */
   show(target: AcquireTarget): void;
   /** Every worktree is on screen somewhere else. */
   blocked(): void;
+  /**
+   * This worktree was refused, so this client is not showing it.
+   *
+   * Its own step because the refusal case is where the pre-extraction code did
+   * it and the extraction dropped it — and `preferred` being the worktree this
+   * client currently shows is the *normal* case on a reconnect. Left set, three
+   * things read it as a grant: the shell's drop routing, the re-arm after a
+   * refused click, and a later grant that drags the visible selection with it.
+   */
+  notGranted(worktreeId: number): void;
   /** False once something newer has started. See `acquireGenRef` in `App.tsx`. */
   live(): boolean;
 }
@@ -71,13 +82,14 @@ export async function acquireWorktree(
     // Granted, then cancelled: hand it straight back rather than sitting on a
     // worktree this client is not going to show.
     if (!deps.live()) {
-      deps.release(preferred.id);
+      deps.release(preferred.id, mine.seq ?? 0);
       return;
     }
     deps.show(preferred);
     return;
   }
   if (mine.reason !== "shown_elsewhere" || !deps.live()) return;
+  deps.notGranted(preferred.id);
 
   // **Refused, so this client must show something else.** Ignoring the answer
   // was the hole that made the whole ownership model a suggestion: a new window
@@ -90,7 +102,7 @@ export async function acquireWorktree(
     const free = await deps.claim(candidate.id, false);
     if (free.ok) {
       if (!deps.live()) {
-        deps.release(candidate.id);
+        deps.release(candidate.id, free.seq ?? 0);
         return;
       }
       deps.show(candidate);

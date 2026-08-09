@@ -58,6 +58,9 @@ export interface ClaimResult {
   reason?: string;
   /** Who has it, when the reason is `shown_elsewhere`. */
   holder?: ClientInfo;
+  /** Identifies a *granted* claim, so it can be given back by name — see
+   *  `release`. Absent on a refusal, which has nothing to give back. */
+  seq?: number;
 }
 
 /**
@@ -309,6 +312,7 @@ class Channel {
           ok: msg.ok === true,
           reason: typeof msg.reason === "string" ? msg.reason : undefined,
           holder: (msg.holder as ClientInfo | null) ?? undefined,
+          seq: typeof msg.seq === "number" ? msg.seq : undefined,
         });
         return;
       }
@@ -415,9 +419,14 @@ class Channel {
    * claiming something else or by disconnecting — so a client granted a worktree
    * it then decided not to show held it for the life of its socket, greyed out
    * in every other client's rail as shown by a window that is showing nothing.
+   *
+   * `seq` names the claim being given back. A release is handled inline while a
+   * claim is spawned, so one sent *after* a claim can be processed before it —
+   * and a cancelled acquire's late grant would otherwise erase the worktree a
+   * newer acquire had just been granted.
    */
-  release(worktreeId: number): void {
-    this.send({ type: "release", worktree_id: worktreeId });
+  release(worktreeId: number, seq: number): void {
+    this.send({ type: "release", worktree_id: worktreeId, seq });
   }
 
   /** These worktrees are gone — rowids are reused, so a stale claim would grey

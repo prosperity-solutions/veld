@@ -456,7 +456,20 @@ enum ClientMsg {
     /// client's rail as shown by a window that is showing nothing, and focusing
     /// that window when clicked. Two review angles found the same hole
     /// independently.
-    Release { worktree_id: i64 },
+    Release {
+        worktree_id: i64,
+        /// The `seq` of the claim being given back, from its [`ServerMsg::ClaimResult`].
+        ///
+        /// **Without it a release can erase a newer claim of the same client.**
+        /// A `Claim` is spawned while a `Release` is handled inline, so a release
+        /// sent *after* a claim can be processed before it — and the ordinary
+        /// sequence reaches that: a cancelled acquire's grant arrives late and
+        /// releases the very worktree a newer acquire has just been granted. The
+        /// client then shows a worktree the registry records as free, and the
+        /// next client to ask is granted it with no refusal. Naming the claim
+        /// makes a stale release a no-op the same way a stale claim already is.
+        seq: u64,
+    },
 }
 
 fn yes() -> bool {
@@ -492,6 +505,9 @@ enum ServerMsg {
     ClaimResult {
         request_id: u64,
         ok: bool,
+        /// Identifies the granted claim, for [`ClientMsg::Release`]. Absent on a
+        /// refusal, which has nothing to give back.
+        seq: Option<u64>,
         /// `shown_elsewhere` or `superseded`; absent on success.
         reason: Option<&'static str>,
         /// Who has it, when the answer is `shown_elsewhere`. What the client
@@ -735,6 +751,7 @@ impl Registry {
                 let _ = me.tx.send(ServerMsg::ClaimResult {
                     request_id,
                     ok: false,
+                    seq: None,
                     reason: Some("superseded"),
                     holder: None,
                 });
@@ -768,6 +785,7 @@ impl Registry {
                 let _ = me.tx.send(ServerMsg::ClaimResult {
                     request_id,
                     ok: false,
+                    seq: None,
                     reason: Some("shown_elsewhere"),
                     holder: info,
                 });
@@ -822,6 +840,36 @@ impl Registry {
             }
         }
         Some(waits)
+    }
+
+    /// Give one worktree back. Returns whether anything changed.
+    ///
+    /// Two guards, and each closes a different hole. **Ownership**, because a
+    /// client releasing somebody else's claim would be `Forget` without the
+    /// database check behind it. And **the claim's `seq`**, because a release is
+    /// handled inline while a claim is spawned — so a release sent after a claim
+    /// can be processed before it, and a cancelled acquire's late grant would
+    /// otherwise erase the worktree a newer acquire had just been granted.
+    fn release(&mut self, client_id: &str, worktree_id: i64, seq: u64) -> bool {
+        if !self
+            .claims
+            .get(&worktree_id)
+            .is_some_and(|o| o == client_id)
+        {
+            return false;
+        }
+        // A refused claim never writes `claim_seq`, so a genuine release — whose
+        // claim *was* granted — always matches unless something newer has since
+        // been granted to this client.
+        if self
+            .claim_seq
+            .get(client_id)
+            .is_some_and(|current| *current > seq)
+        {
+            return false;
+        }
+        self.claims.remove(&worktree_id);
+        true
     }
 
     /// Release every claim and hold belonging to a client that switched away or
@@ -1061,12 +1109,9 @@ async fn handle(client_id: &str, msg: ClientMsg) {
             }
         }
         ClientMsg::Forget { worktree_ids } => forget(worktree_ids).await,
-        ClientMsg::Release { worktree_id } => {
+        ClientMsg::Release { worktree_id, seq } => {
             let mut reg = REGISTRY.lock().await;
-            // Only its own. A client cannot release a worktree it never held —
-            // that would be `Forget` without the database check behind it.
-            if reg.claims.get(&worktree_id).is_some_and(|o| o == client_id) {
-                reg.claims.remove(&worktree_id);
+            if reg.release(client_id, worktree_id, seq) {
                 reg.broadcast();
             }
         }
@@ -1197,6 +1242,7 @@ async fn claim(
         let _ = me.tx.send(ServerMsg::ClaimResult {
             request_id,
             ok: !superseded,
+            seq: (!superseded).then_some(seq),
             reason: superseded.then_some("superseded"),
             holder: None,
         });
@@ -1705,6 +1751,11 @@ mod tests {
         assert!(!reg.expire_orphans(Instant::now()));
     }
 
+    /// The `seq` of the claim `who` was last granted.
+    fn granted_seq(reg: &Registry, who: &Fake) -> u64 {
+        *reg.claim_seq.get(&who.id).expect("granted")
+    }
+
     /// A claim taken and then not wanted has to be givable back, or it is held
     /// for the life of the socket — greyed out in every other client's rail as
     /// shown by a window that is showing nothing.
@@ -1714,27 +1765,54 @@ mod tests {
         let a = connect(&mut reg, "a", ClientKind::Electron);
         let b = connect(&mut reg, "b", ClientKind::Electron);
         claim_for(&mut reg, &a, 7, 1, true).unwrap();
+        let seq = granted_seq(&reg, &a);
 
-        reg.claims.remove(&7);
+        assert!(reg.release(&a.id, 7, seq));
         assert!(reg.claims.is_empty());
         // …and it is free for somebody else immediately.
         assert!(claim_for(&mut reg, &b, 7, 2, true).is_some());
     }
 
-    /// …but only its own: releasing is not a way to revoke another client's
-    /// claim, which is the hole `Forget` needed a database check to close.
+    /// Only its own: releasing is not a way to revoke another client's claim,
+    /// which is the hole `Forget` needed a database check to close.
     #[test]
     fn releasing_a_worktree_another_client_holds_does_nothing() {
         let mut reg = Registry::default();
         let a = connect(&mut reg, "a", ClientKind::Electron);
-        connect(&mut reg, "b", ClientKind::Electron);
+        let b = connect(&mut reg, "b", ClientKind::Electron);
         claim_for(&mut reg, &a, 7, 1, true).unwrap();
+        let seq = granted_seq(&reg, &a);
 
-        // The guard `Release` applies, spelled out here because the handler is
-        // async and this is the whole of its rule.
-        let is_mine = reg.claims.get(&7).is_some_and(|o| o == "b");
-        assert!(!is_mine, "b must not be able to release a's worktree");
+        assert!(
+            !reg.release(&b.id, 7, seq),
+            "b must not release a's worktree"
+        );
         assert_eq!(reg.claims.get(&7).map(String::as_str), Some("a"));
+    }
+
+    /// **And not a claim it has since re-taken.** A release is handled inline
+    /// while a claim is spawned, so a release sent *after* a claim can be
+    /// processed before it — and a cancelled acquire's late grant would
+    /// otherwise erase the worktree a newer acquire had just been granted,
+    /// leaving the client showing a worktree the registry records as free.
+    #[test]
+    fn a_release_naming_a_superseded_claim_is_ignored() {
+        let mut reg = Registry::default();
+        let a = connect(&mut reg, "a", ClientKind::Electron);
+        claim_for(&mut reg, &a, 7, 1, true).unwrap();
+        let stale = granted_seq(&reg, &a);
+        // The same client claims again — a newer acquire, same worktree.
+        claim_for(&mut reg, &a, 7, 2, true).unwrap();
+
+        assert!(!reg.release(&a.id, 7, stale));
+        assert_eq!(
+            reg.claims.get(&7).map(String::as_str),
+            Some("a"),
+            "a late release must not give away a claim that has been renewed"
+        );
+        // The current one still releases.
+        let current = granted_seq(&reg, &a);
+        assert!(reg.release(&a.id, 7, current));
     }
 
     /// **Frame order decides the winner, not scheduler order.**

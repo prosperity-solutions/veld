@@ -1069,7 +1069,14 @@ function AppInner(props: {
       // refused click can leave this client having cancelled its own acquire and
       // acquired nothing, with the boot effect keyed on a selection that did not
       // change. Re-arm, unless something was granted in the meantime.
-      if (shownRef.current === null && worktreeRef.current) {
+      //
+      // **Only when somebody else has it.** `superseded` means a *later* request
+      // from this client owns the outcome, so re-arming there starts an acquire
+      // whose claim outranks the one still in flight — and that one is then
+      // refused as superseded, which the UI deliberately says nothing about. The
+      // user's second click would vanish, which is the symptom two earlier
+      // rounds of this review already removed once.
+      if (result.reason === "shown_elsewhere" && shownRef.current === null && worktreeRef.current) {
         void acquireRef.current(worktreeRef.current);
       }
       return false;
@@ -2336,23 +2343,6 @@ function AppInner(props: {
   }, [chromeless, shownId]);
 
   /**
-   * Claim the worktree this window resolved to on its own, without a click.
-   *
-   * `selectWorktree` covers the rail; this covers boot, a restored `?wt=`, and
-   * the fallback that lands on the first repo — all of which put a worktree on
-   * screen without anyone choosing it. Without it the first window to open
-   * claims nothing, and the second one is free to show the same worktree.
-   *
-   * **Keyed on the selection, never on the worktree list.** `worktrees` gets a new
-   * identity on every 5s poll (`repoList` is replaced, so `repos` → `repo` →
-   * `worktrees` are all new), so having it in the deps re-claimed the same worktree
-   * every five seconds for the life of the window. That was invisible churn while a
-   * claim was synchronous; it stopped being invisible once a claim could be
-   * *superseded*, because the poll's claim then overtook a rail click that was
-   * waiting on a holder and the click was silently dropped. The hunt below reads
-   * the list through a ref, where a five-second-old candidate list is harmless.
-   */
-  /**
    * Take a worktree, or the next free one — the single path by which this client
    * comes to be showing anything.
    *
@@ -2371,7 +2361,7 @@ function AppInner(props: {
     const gen = ++acquireGenRef.current;
     return acquireWorktree(preferred, {
       claim: (id, focusHolder) => channel.claim(id, focusHolder),
-      release: (id) => channel.release(id),
+      release: (id, seq) => channel.release(id, seq),
       candidates: () => worktreesRef.current,
       show: (target) => {
         grantedRef.current = true;
@@ -2381,6 +2371,9 @@ function AppInner(props: {
         setClaimBlocked(false);
       },
       blocked: () => setClaimBlocked(true),
+      // Refused, so this client is not showing it — and `preferred` is the
+      // worktree it *was* showing whenever a reconnect asks for it back.
+      notGranted: (id) => setShownId((cur) => (cur === id ? null : cur)),
       // **A generation, not a condition about the current state.** The first
       // attempt asked "is anything shown yet", and that was wrong in a way worth
       // recording: nothing nulls `shownId` when the *selection* changes without a
@@ -2393,24 +2386,6 @@ function AppInner(props: {
       live: () => acquireGenRef.current === gen,
     });
   };
-
-  /**
-   * Claim the worktree this window resolved to on its own, without a click.
-   *
-   * `selectWorktree` covers the rail; this covers boot, a restored `?wt=`, and
-   * the fallback that lands on the first repo — all of which put a worktree on
-   * screen without anyone choosing it. Without it the first window to open
-   * claims nothing, and the second one is free to show the same worktree.
-   *
-   * **Keyed on the selection, never on the worktree list.** `worktrees` gets a new
-   * identity on every 5s poll (`repoList` is replaced, so `repos` → `repo` →
-   * `worktrees` are all new), so having it in the deps re-claimed the same worktree
-   * every five seconds for the life of the window. That was invisible churn while a
-   * claim was synchronous; it stopped being invisible once a claim could be
-   * *superseded*, because the poll's claim then overtook a rail click that was
-   * waiting on a holder and the click was silently dropped. The hunt below reads
-   * the list through a ref, where a five-second-old candidate list is harmless.
-   */
 
   /**
    * Claim the worktree this window resolved to on its own, without a click.
