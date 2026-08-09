@@ -3751,14 +3751,19 @@ function AppInner(props: {
                 startWorktree(worktree, anotherNameFor(worktree))
               }
               onSelect={setSelectedRunName}
-              // A selector with nothing to switch between is disabled: shown
-              // greyed (or hidden, per `ui.hideDisabledActions`).
-              disabled={runs.length < 2}
+              // Disabled when the selector has nothing to offer: fewer than two
+              // runs *and* no other run to start. A single **running** run still
+              // stays enabled when `canStartAnother` — a coding agent's run under
+              // a non-auto name is exactly that case — so "start another run"
+              // (the auto/alias name) stays reachable from the menu.
+              disabled={runs.length < 2 && !canStartAnother(worktree)}
             />
           ) : null
         }
         runSelectDisabled={
-          !worktree || !canRunWorktreeNow(worktree) || runs.length < 2
+          !worktree ||
+          !canRunWorktreeNow(worktree) ||
+          (runs.length < 2 && !canStartAnother(worktree))
         }
         urls={urls}
         sharing={sharingSurface}
