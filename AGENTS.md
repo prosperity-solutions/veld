@@ -314,7 +314,13 @@ and several were paid for in this codebase already.
   | `just dev-db-reset` | Wipe the bootstrap dev DBs for a fresh-install path (per-run DBs are untouched) |
 
   Two files, both in `.veld-dev/`: `veld.db` belongs to the `just dev` instance,
-  and `veld-cargo.db` is what a plain `cargo run`/`cargo test` gets. They are split
+  and `veld-cargo.db` is what a plain `cargo run`/`cargo test` gets — **as long
+  as `VELD_DB_PATH` is unset**, because `Db::path_override` consults it before
+  the backstop. It is not always unset: a terminal opened inside the dev stack's
+  own `/ide` inherits the `dev-daemon` node's value, so a `cargo test` there
+  wrote the database a running dev daemon owns. `.cargo/config.toml` blanks the
+  instance variables for everything cargo runs, and
+  `a_cargo_test_never_inherits_another_instances_identity` is the tripwire. They are split
   on purpose — sharing one meant `cargo test --workspace` wrote the database a
   running dev daemon owned, and a `cargo test` between `dev-db-from-real` and
   `just dev` silently migrated the snapshot to head so the rehearsal verified

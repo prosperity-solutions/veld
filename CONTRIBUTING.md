@@ -53,10 +53,13 @@ environment, started and supervised by your *installed* instance, and that
 instance is also what owns Caddy, DNS and the helper:
 
 ```sh
-curl -fsSL https://veld.oss.life.li/get | sh
-veld setup            # unprivileged by default; no sudo
+curl -fsSL https://veld.oss.life.li/get | bash
+veld setup unprivileged     # no sudo; `veld setup` alone only prints status
 veld --version
 ```
+
+`bash`, not `sh`: the installer uses `set -o pipefail` and `[[ ]]`, and on a
+Linux box where `/bin/sh` is dash it dies on its first line.
 
 Already have one? Make sure it is current — this repo's `veld.json` uses config
 features from the latest release, and an older binary fails to parse the **whole

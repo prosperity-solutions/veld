@@ -304,7 +304,7 @@
       // `on_stop` here would empty the whole map and the hook would run blind.
       // That is not hypothetical: it is the bug `scripts/dev/link.sh` documents
       // fixing, which is why THAT node's env is builtins-only. Add an `on_stop`
-      // to this node and you must move these two out of `env` first.
+      // to this node and you must move that entry out of `env` first.
       "env": {
         "VELD_DEV_ROOT": "${veld.root}",
         "VELD_DEV_RUN": "${veld.run}",

@@ -32,3 +32,40 @@ pub(crate) fn process_state_guard() -> MutexGuard<'static, ()> {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
+
+#[cfg(test)]
+mod tests {
+    /// `.cargo/config.toml` blanks the instance variables for anything cargo
+    /// runs, and this is the tripwire that says so out loud.
+    ///
+    /// Without it, a `cargo test` inherits whatever instance its terminal
+    /// belongs to. That is not hypothetical: a terminal opened inside the dev
+    /// stack's own `/ide` carries the `dev-daemon` node's `VELD_DB_PATH`
+    /// (nothing calls `env_clear` between the daemon and a PTY holder), and
+    /// `Db::path_override` consults it *before* the `veld-cargo.db` backstop
+    /// whose entire job is stopping this. The tests then migrate the database a
+    /// running dev daemon owns.
+    ///
+    /// Deliberately asserts the *environment*, not a resolved path: the
+    /// backstop has its own test, and what is fragile here is the config file
+    /// continuing to exist and continuing to say `force = true`.
+    #[test]
+    fn a_cargo_test_never_inherits_another_instances_identity() {
+        let _guard = super::process_state_guard();
+        for key in [
+            "VELD_DB_PATH",
+            "VELD_DAEMON_PORT",
+            "VELD_DAEMON_SOCK",
+            "VELD_PTY_DIR",
+        ] {
+            assert_eq!(
+                std::env::var(key).unwrap_or_default(),
+                "",
+                "{key} reached a cargo test. Is `.cargo/config.toml` still \
+                 present, and does it still set this with `force = true`? \
+                 Without it, running the suite from a dev-stack terminal writes \
+                 that instance's database."
+            );
+        }
+    }
+}

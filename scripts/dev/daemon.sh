@@ -31,13 +31,16 @@ export VELD_DAEMON_SOCK="$HOME/.veld/dev-$port.sock"
 # `pty-` prefix is load-bearing: `veld uninstall` finds every instance's holders
 # by it.
 #
-# A DIGEST of the run, not the run itself, because this path is the numerator of
-# the same 104-byte budget the header is about. A run name slugs to at most 48
-# characters, and `<home>/.veld/pty-dv-<48>/<16 hex>.sock` is 103 bytes for a
-# 19-character home — one byte inside the limit, and over it for any home longer
-# than that. The digest caps the run's contribution at 10 characters, and stays
-# stable across restarts, which is the property the directory needs.
-# Keyed on the project root TOO, not the run name alone. A run name is unique
+# A DIGEST of `<root>|<run>`, and both halves earn their place.
+#
+# A digest rather than the name, because this path is the numerator of the same
+# 104-byte budget the header is about: a run name slugs to at most 48 characters,
+# and `<home>/.veld/pty-dv-<48>/<16 hex>.sock` is 103 bytes for a 19-character
+# home — one byte inside the limit, and over it for any longer home. The digest
+# caps the contribution at 10 characters and is stable across restarts, which is
+# the property the directory needs.
+#
+# Keyed on the project root as well as the run, because a run name is unique
 # within a project and nowhere else — `generate_run_name` yields the worktree
 # folder for a linked worktree and the branch for a main checkout, and `--name`
 # is free-form — so two checkouts can hold the same live run name. Sharing one

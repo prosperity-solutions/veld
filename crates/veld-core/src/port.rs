@@ -377,6 +377,11 @@ mod tests {
     /// has to be structural, not a side effect of the daemon being up.
     #[test]
     fn the_daemon_port_is_never_handed_to_a_node() {
+        // `reserve_fixed` reaches `daemon_port()`, which reads the environment
+        // — so this needs the shared guard exactly as the others do. Left out
+        // once, and the assertion below cannot flip, so the race would never
+        // have failed loudly.
+        let _guard = port_guard();
         assert!(
             (PORT_RANGE_START..=PORT_RANGE_END).contains(&crate::instance::DEFAULT_DAEMON_PORT),
             "if the daemon port ever moves out of the range, this exclusion is dead \

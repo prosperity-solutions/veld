@@ -28,7 +28,11 @@ dev_daemon_port := "19898"
 # separates instances exactly as much as the port and the dashboard hostname
 # already do — two worktrees cannot both be the dev instance either way.
 dev_daemon_sock := env("HOME") + "/.veld/dev-" + dev_daemon_port + ".sock"
-# Clear the per-node variables veld injects, for every BOOTSTRAP recipe.
+# Clear the per-node variables veld injects, for the bootstrap recipes that
+# RUN something against an instance — `dev`, `dev-daemon`, `dev-ui`,
+# `dev-desktop`, `dev-desktop-embedded`. The install/restore and dev-db recipes
+# do not take it: they address the system install or an explicit path, and
+# neither reads these.
 #
 # These recipes are most useful from a terminal inside the dev stack's own /ide
 # — that is the documented escape hatch — and such a terminal inherits the
@@ -40,7 +44,19 @@ dev_daemon_sock := env("HOME") + "/.veld/dev-" + dev_daemon_port + ".sock"
 # name promises. Assignment to empty, because a recipe cannot unset a variable;
 # `env_nonempty` on the Rust side and `||` in vite.config.ts both read empty as
 # absent.
-clear_stack_env := "VELD_PORT= VELD_URL= VELD_PROXY_ORIGINS="
+#
+# `VELD_PTY_DIR` is here for a sharper reason than the rest: a bootstrap daemon
+# that inherits it binds its holders in — and writes its `shims/` into — the
+# RUNNING stack's holder directory, so two daemons with different databases
+# adopt each other's terminal sessions. That is verbatim the hazard the
+# root-keyed digest in `scripts/dev/daemon.sh` exists to prevent. Safe to clear
+# here because no recipe using this variable sets it.
+#
+# `VELD_DAEMON_PORT` is deliberately NOT in this list: `dev` and `dev-daemon`
+# assign it just before the prefix, and a later assignment on the same command
+# line wins, so including it would blank the port those recipes exist to set.
+# `dev-ui` clears it on its own line instead.
+clear_stack_env := "VELD_PORT= VELD_URL= VELD_PROXY_ORIGINS= VELD_PTY_DIR="
 # The INSTANCE variables, cleared for recipes that must never address whichever
 # instance the surrounding terminal belongs to.
 #
@@ -605,7 +621,11 @@ desktop-package: desktop-deps
 # upgrade (see `allowed_origins` in crates/veld-daemon/src/pty.rs). Deliberate —
 # a dev server must not be able to open a shell through the installed daemon.
 dev-ui: ui-deps
-    cd crates/veld-daemon/ui && {{clear_stack_env}} npm run dev
+    # VELD_DAEMON_PORT too: inherited from a stack pane it would proxy /api to
+    # the RUN's dev daemon rather than the `just dev-daemon` on 19898 this
+    # recipe tells you to start — pointing the bootstrap tier at the very
+    # daemon it exists to work around.
+    cd crates/veld-daemon/ui && {{clear_stack_env}} VELD_DAEMON_PORT= npm run dev
 
 # Electron shell pointed at the vite dev server (start `just dev-ui` first).
 dev-desktop: desktop-deps

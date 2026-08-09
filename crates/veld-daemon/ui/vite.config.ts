@@ -12,7 +12,10 @@ declare const process: { env: Record<string, string | undefined> };
 // during development the installed daemon usually doesn't carry the desktop
 // endpoints yet. Point at another instance with VELD_DAEMON_PORT; the `dev-ui`
 // node in the repo's veld.json sets it to `${nodes.dev-daemon.port}`.
-const daemonPort = process.env.VELD_DAEMON_PORT ?? "19898";
+// `||` for the same reason as `devPort` below: `just dev-ui` clears this by
+// assigning empty, and `"" ?? "19898"` is `""` — which would proxy /api to
+// `http://127.0.0.1:` and fail every request with no useful message.
+const daemonPort = process.env.VELD_DAEMON_PORT || "19898";
 
 // Two ways this server gets started, and only one of them can pick a constant:
 //

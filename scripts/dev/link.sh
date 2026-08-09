@@ -32,7 +32,19 @@ if [ "${1:-}" = "--remove" ]; then
     # Only ours. A same-named run in another checkout owns a wrapper naming a
     # different root, and deleting that would reintroduce exactly the
     # last-writer-wins failure this script replaced.
-    if [ -f "$wrapper" ] && ! grep -q "^# veld-dev-root: $root\$" "$wrapper"; then
+    #
+    # `-F` and `-x`, not a pattern: `$root` is an absolute path interpolated
+    # into the expression, and a checkout under a directory containing `[`
+    # makes grep abort on an unbalanced bracket — whereupon `! grep` is true and
+    # the script cheerfully reports that its OWN wrapper belongs to someone
+    # else. (`.` in a path is a wildcard too, wrong in the other direction.)
+    #
+    # A wrapper with NO marker line predates this check, so it is ours by
+    # elimination — refusing it would strand exactly the stale wrapper this
+    # file exists to remove, with no way back except a successful start.
+    if [ -f "$wrapper" ] &&
+        grep -q '^# veld-dev-root: ' "$wrapper" &&
+        ! grep -qxF "# veld-dev-root: $root" "$wrapper"; then
         echo "Left $wrapper alone — it belongs to another checkout." >&2
         exit 0
     fi
@@ -66,18 +78,23 @@ export VELD_DB_PATH="$dir/veld.db"
 export VELD_DAEMON_PORT="$port"
 export VELD_DAEMON_SOCK="\$HOME/.veld/dev-$port.sock"
 
-# Refuse rather than mislead. This wrapper carries a port that was allocated to
-# one run; if that run crashed, nothing removed this file (the \`on_stop\` hook
-# runs only on a deliberate \`veld stop\`), and every command below would address
-# a dead instance — reporting an empty environment, which reads as "my work
-# vanished" rather than "the stack is down".
+# Warn, but do NOT refuse. This wrapper carries a port that was allocated to one
+# run; if that run crashed, nothing removed this file, because the \`on_stop\`
+# hook runs only on a deliberate \`veld stop\`. Saying so turns "my environments
+# vanished" into "the stack is down".
+#
+# Refusing outright was the first version and it was wrong: most of what you
+# reach for after a crash needs no daemon at all. \`stop\` tolerates a dead one
+# explicitly, \`logs\`, \`runs\` and \`doctor\` read the database, and nothing
+# auto-spawns a daemon — so a hard exit here blocked the cleanup commands in
+# exactly the situation the check was written for.
+#
 # bash's own /dev/tcp rather than \`nc\`, which is not everywhere and comes in
 # incompatible flavours. Every mainstream bash build enables it.
 if ! (exec 3<>/dev/tcp/127.0.0.1/"\$VELD_DAEMON_PORT") 2>/dev/null; then
-    echo "veld-dev-$run: nothing is listening on port \$VELD_DAEMON_PORT." >&2
-    echo "  That run is not up. Start it with: veld start --preset dev-keep" >&2
-    echo "  (in $root)" >&2
-    exit 1
+    echo "veld-dev-$run: nothing is listening on port \$VELD_DAEMON_PORT — that run is not up." >&2
+    echo "  Commands that need the daemon will come back empty. Restart it with:" >&2
+    echo "    (cd $root && veld start --preset dev-keep)" >&2
 fi
 
 exec "$root/target/debug/veld" "\$@"
