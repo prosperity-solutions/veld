@@ -10,7 +10,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -19,6 +19,18 @@ const WATCHDOG_INTERVAL: Duration = Duration::from_secs(15);
 
 /// How often to check whether the helper's own binary changed on disk.
 const BINARY_WATCH_INTERVAL: Duration = Duration::from_secs(10);
+
+/// How long to wait for a candidate binary to answer `--version` before treating
+/// it as unrunnable.
+///
+/// Generous enough that a first exec slowed by Gatekeeper is not mistaken for a
+/// broken binary, and bounded by the other end: `restart` runs the whole of
+/// [`restart_blocker`] inline, so the caller's round-trip is a service query
+/// (`SERVICE_QUERY_TIMEOUT`, 5s) *plus* this, and `veld-core`'s `SEND_TIMEOUT`
+/// gives it 15s in total including connect, write and read. 6s leaves that budget
+/// intact; a larger value would surface a slow check to the caller as a dead
+/// helper rather than as the refusal it is.
+const BINARY_EXEC_CHECK_TIMEOUT: Duration = Duration::from_secs(6);
 
 struct HelperConfig {
     socket_path: PathBuf,
@@ -291,30 +303,96 @@ async fn watch_own_binary() {
             // don't exit mid-swap.
             tokio::time::sleep(Duration::from_secs(2)).await;
             if binary_signature(&exe) == current {
-                // Binding the system socket does not prove launchd/systemd is
-                // behind us: a helper spawned directly (e.g. by setup's
-                // fallback path) also binds it, and if that one exits nothing
-                // relaunches it — every URL goes dark until the next
-                // `veld setup`. Only exit when the service manager reports
-                // *this* pid as the managed instance. Keep polling on failure:
-                // the query can fail transiently, and the binary still differs
-                // from baseline, so a later tick gets another chance to exit.
-                if service_manager_owns_us().await {
-                    info!(
-                        "helper binary changed on disk — exiting so launchd relaunches the new version"
-                    );
-                    std::process::exit(0);
+                // Keep polling when something blocks the exit: the checks can
+                // fail transiently (a bounded service query timing out, a write
+                // still in flight), and the binary still differs from baseline,
+                // so a later tick gets another chance to exit.
+                match restart_blocker().await {
+                    // Re-stat *after* the gate, not only before it. The gate
+                    // takes real time (a service query plus an exec), and the
+                    // write sequence this debounce exists for is cp + chmod +
+                    // xattr + codesign — so a 2s lull before `codesign` can let
+                    // a valid-but-unsigned file pass the exec check and be
+                    // rewritten underneath us. Requiring the signature to be
+                    // unchanged across the whole gate closes that window: if it
+                    // moved, this tick's evidence is stale and the next one
+                    // starts over.
+                    None if binary_signature(&exe) == current => {
+                        info!(
+                            "helper binary changed on disk — exiting so launchd relaunches the new version"
+                        );
+                        std::process::exit(0);
+                    }
+                    None => {
+                        debug!("binary changed again while checking it — re-checking next tick");
+                    }
+                    Some(reason) => {
+                        if ticks_since_warn == 0 {
+                            warn!(
+                                reason,
+                                "helper binary changed on disk, but restarting onto it is unsafe \
+                                 — staying alive on the old binary. Run `veld setup` if this \
+                                 persists."
+                            );
+                        }
+                        ticks_since_warn = (ticks_since_warn + 1) % REWARN_TICKS;
+                    }
                 }
-                if ticks_since_warn == 0 {
-                    warn!(
-                        "helper binary changed on disk, but this helper is not managed by a \
-                         service manager — staying alive on the old binary. Run `veld setup` \
-                         to restart onto the new version."
-                    );
-                }
-                ticks_since_warn = (ticks_since_warn + 1) % REWARN_TICKS;
             }
         }
+    }
+}
+
+/// Why exiting for a relaunch would be unsafe right now, or `None` when it is
+/// safe. Shared by the binary watcher and the `restart` command so both stop for
+/// the same reasons — the `restart` caller gets the string back and can fall
+/// back instead of guessing why nothing happened.
+///
+/// Both checks are "refuse unless proven safe": a query that fails or times out
+/// blocks the exit, because staying on an old binary is recoverable and exiting
+/// into a hole is not.
+pub(crate) async fn restart_blocker() -> Option<String> {
+    if !service_manager_owns_us().await {
+        return Some(
+            "this helper is not managed by a service manager, so nothing would relaunch it".into(),
+        );
+    }
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(e) => return Some(format!("could not resolve own executable path: {e}")),
+    };
+    if !binary_executes(&exe).await {
+        return Some(format!(
+            "the binary at {} does not execute yet",
+            exe.display()
+        ));
+    }
+    None
+}
+
+/// Whether `path` runs — checked by executing it with `--version`, which prints
+/// and exits without binding the socket or touching Caddy.
+///
+/// This is the guard the size/mtime debounce could not provide. `veld update`
+/// writes the binary with cp + chmod + xattr + codesign, and the signature can
+/// go quiet *between* those steps; a watcher that trusted it exited onto a file
+/// launchd then failed to exec, leaving it to crash-loop against `KeepAlive`
+/// with no helper running at all (observed in the field: one such episode
+/// produced 2432 consecutive `cannot execute binary file` lines). Asking the
+/// kernel to actually exec the thing is the only check that cannot be fooled by
+/// a plausible-looking stat.
+async fn binary_executes(path: &Path) -> bool {
+    let run = tokio::process::Command::new(path)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    match tokio::time::timeout(BINARY_EXEC_CHECK_TIMEOUT, run).await {
+        Ok(Ok(status)) => status.success(),
+        // Spawn failed (ENOEXEC on a half-written file is exactly this) or the
+        // check hung — either way, not proven good.
+        Ok(Err(_)) | Err(_) => false,
     }
 }
 
@@ -370,11 +448,29 @@ async fn handle_connection(
             continue;
         }
 
-        let response = state.handle_request(&line).await;
-        let mut response_json = serde_json::to_string(&response)
+        let handled = state.handle_request(&line).await;
+        let mut response_json = serde_json::to_string(&handled.response)
             .unwrap_or_else(|e| format!(r#"{{"ok":false,"error":"serialization error: {e}"}}"#));
         response_json.push('\n');
-        writer.write_all(response_json.as_bytes()).await?;
+        let written = writer.write_all(response_json.as_bytes()).await;
+
+        if handled.exit_after_reply {
+            // The decision was made before this write and does not depend on it.
+            // Propagating a write error here with `?` would skip `signal_exit`
+            // entirely — and the caller most likely to drop the socket is one
+            // whose own send timeout expired while the safety gate ran, so the
+            // helper would have passed every check, decided to restart, and then
+            // silently not. The reply is best-effort; the exit is not.
+            //
+            // Flush before signalling, never after: the signal ends the accept
+            // loop and the process, and anything still buffered here would die
+            // with it. Once these bytes are in the kernel's socket buffer the
+            // peer reads them whether or not we are still alive.
+            let _ = writer.flush().await;
+            state.signal_exit();
+            return Ok(());
+        }
+        written?;
     }
 
     Ok(())

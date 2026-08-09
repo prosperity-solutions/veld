@@ -10,6 +10,12 @@ use tokio::net::UnixStream;
 /// The helper bounds its own Caddy admin calls at ~10s, so this leaves margin
 /// for a slow-but-working helper while still guaranteeing a caller (e.g. the
 /// daemon's GC task) can never block forever on a wedged helper after sleep.
+///
+/// [`HelperCommand::Restart`] is the tightest consumer and the one to check
+/// before shrinking this: the helper answers it only after a service-manager
+/// query (5s) and an exec check (`BINARY_EXEC_CHECK_TIMEOUT`, 6s), so its worst
+/// case is ~11s plus connect/write/read. Cutting this below that turns a slow
+/// refusal into an apparent dead helper.
 const SEND_TIMEOUT: Duration = Duration::from_secs(15);
 
 // ---------------------------------------------------------------------------
@@ -67,6 +73,19 @@ pub enum HelperError {
 // Protocol types
 // ---------------------------------------------------------------------------
 
+/// The wire name of [`HelperCommand::Restart`].
+///
+/// A constant rather than two string literals because the two halves live in
+/// different crates with nothing between them: `veld-core` emits it, and
+/// `veld-helper`'s dispatch matches on it (a `&'static str` const is a legal
+/// match pattern, so the compiler ties them rather than a test asserting they
+/// agree). A typo on either side would otherwise degrade in silence — the helper
+/// would answer `unknown command`, the CLI would ignore it as "an old helper",
+/// and the update would fall back to a 45s wait and a sudo prompt with every test
+/// still green. The older commands predate this and are still paired literals;
+/// new ones should follow this shape.
+pub const RESTART: &str = "restart";
+
 /// Wire format: `{"command": "<name>", "args": {…}}`.
 ///
 /// We implement [`Serialize`] manually so that the enum serialises into the
@@ -96,6 +115,14 @@ pub enum HelperCommand {
     CaddyStop,
     Status,
     Shutdown,
+    /// Exit so the service manager relaunches the helper onto a freshly
+    /// installed binary, leaving Caddy running. Unlike [`Self::Shutdown`] this
+    /// keeps every live URL served across the swap — it is how an unprivileged
+    /// `veld update` restarts the *root* helper without sudo.
+    ///
+    /// Helpers older than 16.14 answer `unknown command: restart`; callers must
+    /// treat that as "fall back to the binary watcher", not as a failure.
+    Restart,
 }
 
 impl Serialize for HelperCommand {
@@ -129,6 +156,7 @@ impl Serialize for HelperCommand {
             }
             HelperCommand::Status => ("status", serde_json::Value::Object(Default::default())),
             HelperCommand::Shutdown => ("shutdown", serde_json::Value::Object(Default::default())),
+            HelperCommand::Restart => (RESTART, serde_json::Value::Object(Default::default())),
         };
 
         let mut map = serializer.serialize_map(Some(2))?;
@@ -278,6 +306,14 @@ impl HelperClient {
 
     pub async fn shutdown(&self) -> Result<HelperResponse, HelperError> {
         self.send(&HelperCommand::Shutdown).await
+    }
+
+    /// Ask the helper to exit so its service manager relaunches it on the binary
+    /// now on disk. See [`HelperCommand::Restart`] for why this is not
+    /// `shutdown`, and why a `CommandError` here is a fallback signal rather
+    /// than a failure.
+    pub async fn restart(&self) -> Result<HelperResponse, HelperError> {
+        self.send(&HelperCommand::Restart).await
     }
 
     /// Connect to the helper, trying system socket first, then user socket.

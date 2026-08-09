@@ -1425,6 +1425,82 @@ pub async fn launchd_job_pid(domain: &str, label: &str) -> Option<u32> {
     parse_launchctl_pid(&String::from_utf8_lossy(&out.stdout))
 }
 
+/// The program path the service manager reports for the privileged helper.
+///
+/// Not `paths::lib_dir()`, and the difference is load-bearing: `lib_dir()` prefers
+/// `~/.local/lib/veld` whenever that directory merely *exists*, while a privileged
+/// install writes `/usr/local/lib/veld` and the plist/unit pins whichever absolute
+/// path `veld setup` chose. On a machine carrying both, guessing gets you the
+/// binary the root service does **not** run — so anything reasoning about "the
+/// binary that is about to be relaunched" has to ask the service manager.
+///
+/// `None` means "could not tell", never "there isn't one": callers must treat it
+/// as unknown rather than as an answer.
+pub async fn privileged_helper_program() -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        let out = tokio::time::timeout(
+            SERVICE_QUERY_TIMEOUT,
+            Command::new("launchctl")
+                .args(["print", &format!("system/{HELPER_LABEL_MACOS}")])
+                .stdin(std::process::Stdio::null())
+                .output(),
+        )
+        .await
+        .ok()?
+        .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        parse_launchctl_program(&String::from_utf8_lossy(&out.stdout))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let out = tokio::time::timeout(
+            SERVICE_QUERY_TIMEOUT,
+            Command::new("systemctl")
+                .args(["show", "-p", "ExecStart", "--value", HELPER_SERVICE_LINUX])
+                .stdin(std::process::Stdio::null())
+                .output(),
+        )
+        .await
+        .ok()?
+        .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        parse_systemd_exec_start(&String::from_utf8_lossy(&out.stdout))
+    }
+}
+
+/// Extract the `program = <path>` line from `launchctl print` output.
+///
+/// A job declared with `ProgramArguments` reports both `program` and an `arguments`
+/// block; `program` is the executable, which is the one thing we want — the
+/// argument vector also contains `--caddy-bin <path>`, and matching the wrong line
+/// would hand back Caddy.
+pub fn parse_launchctl_program(output: &str) -> Option<PathBuf> {
+    output.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix("program = ")
+            .map(|rest| PathBuf::from(rest.trim()))
+            .filter(|p| p.is_absolute())
+    })
+}
+
+/// Extract the executable from `systemctl show -p ExecStart --value`.
+///
+/// The value is a property list, not a command line —
+/// `{ path=/usr/local/lib/veld/veld-helper ; argv[]=... }` — so the executable is
+/// the `path=` field. Falling back to "first token of argv" would return the
+/// literal `{`.
+pub fn parse_systemd_exec_start(output: &str) -> Option<PathBuf> {
+    let rest = output.split("path=").nth(1)?;
+    let path = rest.split([' ', ';', '\n']).next()?.trim();
+    let path = PathBuf::from(path);
+    path.is_absolute().then_some(path)
+}
+
 /// The pid launchd reports for a system-domain job, if the job exists and is
 /// running.
 pub async fn macos_job_pid(label: &str) -> Option<u32> {
@@ -1546,12 +1622,38 @@ pub fn is_newer(latest: &str, current: &str) -> bool {
 ///
 /// The CLI half only. `VELD_DESKTOP=0` is explicit rather than left to the
 /// script's default, because the default is now "install the app too" and this
-/// is not the code path that decides that — `update_desktop_if_stale` is, and it
+/// is not the code path that decides that — `run_desktop_step` is, and it
 /// runs afterwards with a version of its own. Leaving it implicit would also let
 /// an ambient `VELD_DESKTOP` in the caller's environment decide whether a GUI app
 /// gets installed.
-pub async fn perform_update(version: &str) -> Result<(), anyhow::Error> {
-    run_install_script(version, &[("VELD_DESKTOP".into(), "0".into())], None).await
+pub async fn perform_update(version: &str, verbose: bool) -> Result<(), anyhow::Error> {
+    let mut env: Vec<(String, String)> = vec![("VELD_DESKTOP".into(), "0".into())];
+    env.extend(embedded_env(verbose));
+    run_install_script(version, &env, None).await
+}
+
+/// The output/ownership variables for a script run made from inside a veld
+/// command. See `install.sh`'s header for what each one means.
+///
+/// `VELD_EMBEDDED` is **unconditionally 1**, `--verbose` or not, because it does
+/// not only mean "be quiet": it is also what leaves the privileged helper restart
+/// to the CLI, which can do it over the helper's own socket without sudo and then
+/// verify the version flipped. Folding verbosity into it had `--verbose` re-enable
+/// the script's `sudo launchctl kill` — a debug flag bouncing a root service, and
+/// two actors racing to restart it.
+///
+/// `VELD_VERBOSE` therefore carries the output half on its own, and is set to
+/// empty rather than omitted when off. That matters: both values are inherited by
+/// anything the script re-executes, and an omitted variable could be filled in by
+/// an ambient one from the user's launchd session.
+fn embedded_env(verbose: bool) -> Vec<(String, String)> {
+    vec![
+        ("VELD_EMBEDDED".into(), "1".into()),
+        (
+            "VELD_VERBOSE".into(),
+            if verbose { "1".into() } else { String::new() },
+        ),
+    ]
 }
 
 /// What `install_desktop` needs to know. A struct rather than five positional
@@ -1576,6 +1678,14 @@ pub struct DesktopInstall {
     /// no streams, so without this every word the installer says is discarded —
     /// including the reason it failed.
     pub log: Option<PathBuf>,
+    /// Let the install script narrate for itself instead of leaving the output
+    /// to the calling command. `veld update --verbose` sets it; see
+    /// [`embedded_env`].
+    ///
+    /// Defaults to `false`, and that default is the one that matters: a caller
+    /// that forgets this field gets the quiet script, which is right for every
+    /// caller there is.
+    pub verbose: bool,
 }
 
 /// Install or update Veld Desktop, the macOS app.
@@ -1608,6 +1718,7 @@ pub async fn install_desktop(version: &str, opts: &DesktopInstall) -> Result<(),
             dir.to_string_lossy().into_owned(),
         ));
     }
+    env.extend(embedded_env(opts.verbose));
     run_install_script(version, &env, opts.log.as_deref()).await
 }
 
@@ -2777,8 +2888,8 @@ mod tests {
 
     use super::{
         first_existing_file, init_lua_loads_veld_spoon, install_script_override_from,
-        linux_desktop_candidates, parse_launchctl_pid, parse_systemd_main_pid, pids_running_from,
-        remove_spoon_files,
+        linux_desktop_candidates, parse_launchctl_pid, parse_launchctl_program,
+        parse_systemd_exec_start, parse_systemd_main_pid, pids_running_from, remove_spoon_files,
     };
 
     /// This user, in the fixture below.
@@ -3170,6 +3281,37 @@ mod tests {
     #[test]
     fn launchctl_pid_zero_is_not_running() {
         assert_eq!(parse_launchctl_pid("\tpid = 0\n"), None);
+    }
+
+    /// `program` and not the first argument: a job declared with
+    /// `ProgramArguments` reports an `arguments` block too, and ours carries
+    /// `--caddy-bin <path>` — so a parser that matched the wrong line would hand
+    /// back Caddy and have the caller declare the *helper* broken.
+    #[test]
+    fn launchctl_program_is_the_executable_not_an_argument() {
+        let out = "system/dev.veld.helper = {\n\tactive count = 1\n\tpath = /Library/LaunchDaemons/dev.veld.helper.plist\n\tprogram = /Users/x/.local/lib/veld/veld-helper\n\targuments = {\n\t\t/Users/x/.local/lib/veld/veld-helper\n\t\t--caddy-bin\n\t\t/Users/x/.local/lib/veld/caddy\n\t}\n\tpid = 48490\n}\n";
+        assert_eq!(
+            parse_launchctl_program(out),
+            Some(std::path::PathBuf::from(
+                "/Users/x/.local/lib/veld/veld-helper"
+            ))
+        );
+        // No job, no answer — never a guess.
+        assert_eq!(parse_launchctl_program("Could not find service\n"), None);
+        // A relative path is not something to relaunch onto.
+        assert_eq!(parse_launchctl_program("\tprogram = veld-helper\n"), None);
+    }
+
+    /// `ExecStart` is a property list, so the executable is the `path=` field.
+    /// Taking the first token would return the literal `{`.
+    #[test]
+    fn systemd_exec_start_is_the_path_field() {
+        let out = "{ path=/usr/local/lib/veld/veld-helper ; argv[]=/usr/local/lib/veld/veld-helper --caddy-bin /usr/local/lib/veld/caddy ; ignore_errors=no }\n";
+        assert_eq!(
+            parse_systemd_exec_start(out),
+            Some(std::path::PathBuf::from("/usr/local/lib/veld/veld-helper"))
+        );
+        assert_eq!(parse_systemd_exec_start(""), None);
     }
 
     #[test]

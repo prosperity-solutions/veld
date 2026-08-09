@@ -79,6 +79,9 @@ pub async fn install(
         relaunch,
         app_dir: app_dir.clone(),
         log,
+        // This command prints its own "Installing Veld Desktop …" and its own
+        // result, so the script stays quiet here too.
+        verbose: false,
     };
 
     let outcome = match veld_core::setup::install_desktop(&version, &opts).await {

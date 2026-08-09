@@ -4,23 +4,18 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
   MAX_WINDOWS,
-  answersYields,
   canOpenAnother,
   dropDelivery,
-  forgetWorktrees,
   handBackTarget,
   handBackTransfers,
   isSuffix,
   nextListenerState,
   nextSuffix,
-  othersHolding,
   ownsWorktree,
   parseWindowList,
   parseWindowRecord,
   releaseClaims,
-  releaseHolds,
   restoreBudget,
-  setHolds,
   safeBounds,
   serializeWindowList,
   slotFor,
@@ -320,86 +315,22 @@ test("a serialized list round-trips through the parser", () => {
 // Worktree ownership
 // ---------------------------------------------------------------------------
 
-test("setHolds records exactly what a window holds, and nothing it dropped", () => {
-  const holders = new Map();
-  setHolds(holders, 1, [7, 9]);
-  setHolds(holders, 2, [9]);
-  assert.deepEqual([...holders.get(7)], [1]);
-  assert.deepEqual([...holders.get(9)].sort(), [1, 2]);
-
-  // A window reports its whole set each time, so a worktree it no longer holds
-  // has to disappear — otherwise it would keep being asked to yield panes it
-  // gave up long ago, and worse, keep being counted as a place they still are.
-  setHolds(holders, 1, [7]);
-  assert.deepEqual([...holders.get(9)], [2]);
-
-  // An emptied set is deleted rather than left as an empty husk, so
-  // `othersHolding` never has to distinguish "nobody" from "an empty entry".
-  setHolds(holders, 2, []);
-  assert.equal(holders.has(9), false);
-});
-
-test("othersHolding excludes the window that is claiming", () => {
-  const holders = new Map();
-  setHolds(holders, 1, [7]);
-  setHolds(holders, 2, [7]);
-  setHolds(holders, 3, [8]);
-  // The claimer must not be told to let go of what it is taking.
-  assert.deepEqual(othersHolding(holders, 7, 1), [2]);
-  assert.deepEqual(othersHolding(holders, 7, 2), [1]);
-  // Nobody else holds it, and nobody holds it at all — both are "no yields".
-  assert.deepEqual(othersHolding(holders, 8, 3), []);
-  assert.deepEqual(othersHolding(holders, 99, 1), []);
-});
-
-test("releaseHolds forgets a window entirely", () => {
-  const holders = new Map();
-  setHolds(holders, 1, [7, 8]);
-  setHolds(holders, 2, [8]);
-  releaseHolds(holders, 1);
-  assert.equal(holders.has(7), false, "a set with only the dead window goes");
-  assert.deepEqual([...holders.get(8)], [2], "a shared one keeps the survivor");
-});
-
-test("forgetWorktrees drops a deleted worktree from both maps, whoever held it", () => {
-  // Worktree rowids are reused (`INTEGER PRIMARY KEY`, no AUTOINCREMENT), so a
-  // claim left on a deleted worktree greys out whichever one is created next and
-  // focuses a window that is showing something else.
-  const claims = new Map([
-    [7, 1],
-    [8, 2],
-  ]);
-  const holders = new Map();
-  setHolds(holders, 1, [7, 8]);
-  setHolds(holders, 2, [8]);
-
-  forgetWorktrees(claims, holders, [8]);
-  assert.deepEqual([...claims], [[7, 1]], "the claim goes, whichever window had it");
-  assert.equal(holders.has(8), false, "and so does every hold on it");
-  assert.deepEqual([...holders.get(7)], [1], "an unrelated worktree is untouched");
-
-  forgetWorktrees(claims, holders, [99]);
-  assert.deepEqual([...claims], [[7, 1]], "an unknown worktree changes nothing");
-  forgetWorktrees(claims, holders, []);
-  assert.deepEqual([...claims], [[7, 1]], "and neither does an empty list");
-});
-
-test("ownsWorktree reads the claim for a main window and the field for a detached one", () => {
-  const claims = new Map([[7, 1]]);
+test("ownsWorktree reads the display map for a main window and the field for a detached one", () => {
+  const showing = new Map([[7, 1]]);
   const main = { id: 1, kind: "main", worktreeId: 42 };
   const other = { id: 2, kind: "main", worktreeId: 7 };
   const dock = { id: 3, kind: "detached", worktreeId: 8 };
 
-  assert.equal(ownsWorktree(main, 7, claims), true, "the window showing it");
+  assert.equal(ownsWorktree(main, 7, showing), true, "the window displaying it");
   // The trap: `worktreeId` on a *main* window is what it was opened for, not
   // what it shows now. Reading it there routes a drop at a window that moved on.
-  assert.equal(ownsWorktree(main, 42, claims), false);
-  assert.equal(ownsWorktree(other, 7, claims), false, "wanting it is not holding it");
-  // A detached window never claims — it is a satellite of its origin's claim —
-  // so the field is the only thing that says which dock it is. Matching on the
-  // claim alone made a detached window impossible to drop onto.
-  assert.equal(ownsWorktree(dock, 8, claims), true);
-  assert.equal(ownsWorktree(dock, 7, claims), false);
+  assert.equal(ownsWorktree(main, 42, showing), false);
+  assert.equal(ownsWorktree(other, 7, showing), false, "wanting it is not showing it");
+  // A detached window never reports what it displays — it is a satellite of its
+  // origin — so the field is the only thing that says which dock it is. Matching
+  // on the map alone made a detached window impossible to drop onto.
+  assert.equal(ownsWorktree(dock, 8, showing), true);
+  assert.equal(ownsWorktree(dock, 7, showing), false);
 });
 
 test("dropDelivery queues only for a window that said its listener is gone", () => {
@@ -436,19 +367,6 @@ test("nextListenerState demotes a live listener only on a real document swap", (
   assert.equal(nextListenerState("gone", swap), "gone");
 });
 
-test("answersYields waits only on a reported listener, unlike dropDelivery", () => {
-  assert.equal(answersYields("ready"), true);
-  assert.equal(answersYields("gone"), false);
-  // The asymmetry is the point, and it is deliberate. A drop may be *pushed* at a
-  // window that never reported, because an older /ide bundle answers `drop-here`
-  // perfectly well — there the report only buys latency. A yield cannot: an older
-  // bundle has no `yielded` channel at all, so waiting on one would make every
-  // handover on a daemon-older-than-shell install cost the full timeout. Not
-  // waiting is exactly what that build did.
-  assert.equal(answersYields("unknown"), false);
-  assert.equal(dropDelivery("unknown"), "send");
-  assert.equal(answersYields(undefined), false);
-});
 
 test("handBackTransfers carries a queue on from any window, its own tabs only from a dock", () => {
   const carried = [{ worktreeId: 7, tabs: [{ id: "t1" }] }];

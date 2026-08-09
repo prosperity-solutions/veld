@@ -95,6 +95,7 @@ pub async fn run(
     target_version: Option<String>,
     console: bool,
     force: bool,
+    verbose: bool,
 ) -> i32 {
     // Pid 0 is dropped rather than waited on, and it is not a theoretical input:
     // `kill(0, signal)` addresses the *caller's own process group*, so
@@ -184,6 +185,7 @@ pub async fn run(
             app_path.as_deref(),
             target_version.as_deref(),
             force,
+            verbose,
         )
         .await
         {
@@ -229,9 +231,9 @@ pub async fn run(
                 wait_pid,
                 relaunch,
                 app_dir,
-                handoff,
                 &reported_version,
                 target_version,
+                verbose,
             )
             .await;
         }
@@ -242,9 +244,9 @@ pub async fn run(
         wait_pid,
         relaunch,
         app_dir,
-        handoff,
         &reported_version,
         target_version,
+        verbose,
     )
     .await
 }
@@ -260,10 +262,14 @@ async fn run_locked(
     wait_pid: Option<u32>,
     relaunch: bool,
     app_dir: Option<PathBuf>,
-    handoff: bool,
     reported_version: &str,
     target_version: Option<String>,
+    verbose: bool,
 ) -> i32 {
+    // Derived rather than passed: it is exactly `wait_pid.is_some()`, and a
+    // parameter that restates another parameter is a parameter that can
+    // disagree with it.
+    let handoff = wait_pid.is_some();
     // Before anything is installed: the app must actually be gone. A pid that has
     // not exited is a process still reading the bundle we are about to replace,
     // and the honest response is to install nothing at all — the app is about to
@@ -298,7 +304,7 @@ async fn run_locked(
     }
 
     let plan = plan_desktop(app_dir, handoff, relaunch).await;
-    let outcome = perform(&plan, target_version.as_deref(), guard.as_mut()).await;
+    let outcome = perform(&plan, target_version.as_deref(), guard.as_mut(), verbose).await;
 
     // Written before the app is reopened, and that ordering is load-bearing for
     // the same reason it is in `veld desktop update`: the app reads this during
@@ -642,6 +648,7 @@ fn console_args(
     app_path: Option<&std::path::Path>,
     target_version: Option<&str>,
     force: bool,
+    verbose: bool,
 ) -> Vec<String> {
     let mut args = vec!["update".to_string()];
     if let Some(v) = target_version {
@@ -662,6 +669,12 @@ fn console_args(
     if force {
         args.push("--force".into());
     }
+    // Without this, `veld update --console --verbose` opens a window that runs
+    // quietly — the one place the raw installer stream is hardest to get at any
+    // other way, since the window is the whole point of the handoff.
+    if verbose {
+        args.push("--verbose".into());
+    }
     args
 }
 
@@ -675,12 +688,13 @@ async fn hand_over_to_console(
     app_path: Option<&std::path::Path>,
     target_version: Option<&str>,
     force: bool,
+    verbose: bool,
 ) -> ConsoleHandoff {
     let Ok(exe) = std::env::current_exe() else {
         return ConsoleHandoff::Failed("this binary's own path is unknown".into());
     };
 
-    let args = console_args(wait_pid, relaunch, app_path, target_version, force);
+    let args = console_args(wait_pid, relaunch, app_path, target_version, force, verbose);
 
     // Captured before the launch, so a lock taken *after* this instant is the
     // only thing the handshake below will accept.
@@ -831,6 +845,7 @@ async fn perform(
     plan: &DesktopPlan,
     target_version: Option<&str>,
     mut guard: Option<&mut UpdateGuard>,
+    verbose: bool,
 ) -> Outcome {
     // Each of these is also the stall clock being reset. A phase that stops
     // moving for `PHASE_TIMEOUT` is what lets a *later* update reclaim a run
@@ -846,10 +861,12 @@ async fn perform(
     }
 
     let current = env!("CARGO_PKG_VERSION");
-    output::print_info(&format!("Current version: {current}"));
     phase!(Phase::Checking);
     if target_version.is_none() {
-        output::print_info("Checking for updates...");
+        // The current version is not announced separately: the header below
+        // prints it beside the new one, where it means something, and on the
+        // already-latest path `resolve_target`'s own line names it.
+        output::print_info(&format!("Checking for updates ({current} installed)..."));
     }
 
     match resolve_target(current, target_version).await {
@@ -865,7 +882,6 @@ async fn perform(
             // `veld start`/`veld restart`.
             let running = find_running_environments();
             if !running.is_empty() {
-                println!();
                 output::print_info(&format!(
                     "{} environment(s) are running and will keep serving during the update:",
                     running.len()
@@ -880,17 +896,32 @@ async fn perform(
                 println!();
             }
 
-            output::print_info(&format!("New version available: {current} → {new_version}"));
             if let Some(g) = guard.as_deref_mut() {
                 g.set_version(&new_version);
             }
 
-            // After install, privileged mode restarts the root helper via sudo
-            // (see restart_services), with the helper's own binary-change
-            // watcher + launchd/systemd KeepAlive as the no-sudo fallback. Both
-            // recovery paths require the service to still be REGISTERED: a sudo
-            // restart of a nonexistent job fails, and the watcher only helps a
-            // job launchd already knows about. So a job that is entirely GONE is
+            // Decided once, up front, because the step counter and the step
+            // itself must read the same answer — see `desktop_step`.
+            let desktop = desktop_step(&new_version, plan);
+            let steps = Steps::new(&desktop);
+
+            println!();
+            output::print_info(&format!(
+                "{} {current} → {}",
+                output::bold("veld"),
+                output::bold(&new_version)
+            ));
+            println!();
+
+            // After install, privileged mode restarts the root helper without
+            // sudo (see restart_services): a `restart` request over the helper's
+            // own socket, with its binary-change watcher + launchd/systemd
+            // KeepAlive as the fallback, and sudo offered only if both fail.
+            // Every one of those paths requires the service to still be
+            // REGISTERED: the helper cannot be asked to restart if it is not
+            // running, the watcher only helps a job launchd already knows about,
+            // and a sudo restart of a nonexistent job fails. So a job that is
+            // entirely GONE is
             // the one case the update genuinely can't self-apply — it needs
             // `veld setup privileged` to re-register the LaunchDaemon. Check for
             // that BEFORE installing so it's reported as the pre-existing
@@ -908,25 +939,45 @@ async fn perform(
                 );
             }
 
-            output::print_info("Installing update...");
+            steps.print(&format!("Installing veld {new_version}"));
             phase!(Phase::Installing);
 
-            match veld_core::setup::perform_update(&new_version).await {
+            match veld_core::setup::perform_update(&new_version, verbose).await {
                 Ok(()) => {
-                    output::print_success(&format!("Updated to {new_version}."));
                     cleanup_stale_binaries();
-                    output::print_info("Restarting services with new binaries...");
+                    steps.print("Restarting services");
                     phase!(Phase::RestartingServices);
-                    restart_services(&new_version, helper_dead_privileged).await;
+                    let services_healthy =
+                        restart_services(&new_version, helper_dead_privileged).await;
                     super::remove_legacy_hammerspoon().await;
                     phase!(Phase::UpdatingApp);
                     // On this branch too, not only the "already latest" one. The
                     // CLI install runs with `VELD_DESKTOP=0`, so the app half is
                     // this call and nothing else — and the case the comment on
-                    // `update_desktop_if_stale` names, an installer skipping a
+                    // `run_desktop_step` names, an installer skipping a
                     // *running* app, is far likelier on a real version bump than
                     // on a no-op update.
-                    let error = update_desktop_if_stale(&new_version, plan).await;
+                    let error = run_desktop_step(&new_version, &desktop, &steps, verbose).await;
+                    // Last, and that ordering is the point: the old code printed
+                    // "Updated to X" before the service restarts and the ~113 MB
+                    // app download, so the command announced it was finished and
+                    // then ran for another ten seconds.
+                    //
+                    // A green tick only when the run earned one. Moving the banner
+                    // to the end put it *underneath* any "veld-helper did not pick
+                    // up the new binary" printed by the restart step — so on
+                    // exactly the machines this change is about, a half-applied
+                    // update would have closed with an unqualified success.
+                    println!();
+                    if services_healthy {
+                        output::print_success(&format!("Updated to {new_version}."));
+                    } else {
+                        output::print_info(&format!(
+                            "Binaries updated to {new_version}, but a service above did not come \
+                             back on it. Run `veld doctor`."
+                        ));
+                    }
+                    print_install_summary(plan);
                     Outcome {
                         // The app half not landing does not fail the update: the
                         // CLI moved, the services restarted, and the app is the
@@ -940,6 +991,15 @@ async fn perform(
                 }
                 Err(e) => {
                     output::print_error(&format!("Update failed: {e}"), false);
+                    if !verbose {
+                        println!(
+                            "  {}",
+                            output::dim(
+                                "Re-run with `veld update --verbose` to see the installer's \
+                                 own output."
+                            )
+                        );
+                    }
                     Outcome {
                         code: 1,
                         version: new_version,
@@ -963,7 +1023,12 @@ async fn perform(
             // success while leaving a stale app in /Applications and never mention
             // it — the CLI half moves, the app half silently does not.
             phase!(Phase::UpdatingApp);
-            let error = update_desktop_if_stale(current, plan).await;
+            // The app is the only thing moving on this branch, so it is step 1
+            // of 1 — `Steps` counts what this run will actually do rather than
+            // what the full path would.
+            let desktop = desktop_step(current, plan);
+            let steps = Steps::app_only(&desktop);
+            let error = run_desktop_step(current, &desktop, &steps, verbose).await;
             Outcome {
                 code: 0,
                 version: current.to_string(),
@@ -978,6 +1043,155 @@ async fn perform(
                 error: Some(format!("the update check failed: {e}")),
             }
         }
+    }
+}
+
+/// The numbered-step printer for one update run.
+///
+/// The denominator is computed before the first step rather than hard-coded,
+/// because the app step is conditional: a Linux box, `VELD_DESKTOP=0`, or an app
+/// already on the new version all make it two steps rather than three. A fixed
+/// `[n/3]` would have been a small, constant lie.
+struct Steps {
+    total: usize,
+    done: std::cell::Cell<usize>,
+}
+
+impl Steps {
+    fn new(desktop: &DesktopStep) -> Self {
+        // Install and restart always happen; the app step is the variable one.
+        Self::with_total(2 + usize::from(!matches!(desktop, DesktopStep::Skip(_))))
+    }
+
+    /// The already-latest branch, where the app is the only half that can move.
+    fn app_only(desktop: &DesktopStep) -> Self {
+        Self::with_total(usize::from(!matches!(desktop, DesktopStep::Skip(_))))
+    }
+
+    fn with_total(total: usize) -> Self {
+        Self {
+            total,
+            done: std::cell::Cell::new(0),
+        }
+    }
+
+    fn print(&self, label: &str) {
+        let n = self.done.get() + 1;
+        self.done.set(n);
+        println!(
+            "  {} {label}",
+            output::dim(&format!("[{n}/{}]", self.total))
+        );
+    }
+
+    /// Indent a detail line under the step it belongs to.
+    fn detail(msg: &str) {
+        println!("        {msg}");
+    }
+
+    /// A service that came back on the expected version. Named rather than
+    /// ticked alone: "veld-helper 16.13.0" is the fact a user might want to
+    /// check, where "restarted and healthy" only asserts it.
+    fn service_ok(name: &str, version: &str) {
+        Self::detail(&format!(
+            "{} {name:<12} {}",
+            output::checkmark(),
+            output::dim(version)
+        ));
+    }
+}
+
+/// What the app half of this update will do, decided once and read twice.
+///
+/// Split out because the step counter and the step itself must agree, and the
+/// alternative is two predicates that stay in step until one of them is edited —
+/// which is exactly how the `VELD_DESKTOP=0` opt-out came to be honoured on one
+/// path and not the other.
+enum DesktopStep {
+    /// Nothing to do. Carries the reason, for the app's own report: `None` for
+    /// every path that was never going to touch the app (Linux, no handoff, an
+    /// app already current), `Some` only where a caller asked for the app half
+    /// and is not getting it.
+    Skip(Option<String>),
+    /// No bundle on this machine yet.
+    Install {
+        app_dir: Option<PathBuf>,
+        reopen: bool,
+    },
+    /// Replace the bundle at `path`, currently on `installed`.
+    Update {
+        app_dir: Option<PathBuf>,
+        reopen: bool,
+        path: PathBuf,
+        installed: Option<String>,
+    },
+}
+
+impl DesktopStep {
+    fn reopen(&self) -> bool {
+        match self {
+            DesktopStep::Skip(_) => false,
+            DesktopStep::Install { reopen, .. } | DesktopStep::Update { reopen, .. } => *reopen,
+        }
+    }
+}
+
+/// Decide what the app half will do, without doing any of it.
+///
+/// The platform and `VELD_DESKTOP=0` checks are not repeated here: `plan_desktop`
+/// makes both decisions before anything is installed, and `plan.update` is their
+/// answer.
+fn desktop_step(version: &str, plan: &DesktopPlan) -> DesktopStep {
+    if !plan.update {
+        return DesktopStep::Skip(plan.skipped.clone());
+    }
+    match veld_core::setup::desktop_app_status_in(plan.app_dir.as_deref()) {
+        Some((_, installed)) if installed.as_deref() == Some(version) => DesktopStep::Skip(None),
+        Some((path, installed)) => DesktopStep::Update {
+            app_dir: plan.app_dir.clone(),
+            reopen: plan.reopen,
+            path,
+            installed,
+        },
+        None => DesktopStep::Install {
+            app_dir: plan.app_dir.clone(),
+            reopen: plan.reopen,
+        },
+    }
+}
+
+/// Where the update left everything, printed once at the very end.
+///
+/// This is the summary `install.sh` used to print — from the middle of the run,
+/// before the service restarts and the app half had happened. Reading the paths
+/// back from `veld_core::paths` rather than from the script's stdout also means
+/// it says where things *are*, not where a script said it was putting them.
+fn print_install_summary(plan: &DesktopPlan) {
+    let lib = veld_core::paths::lib_dir();
+    println!();
+    // Only rows that are actually there. `lib_dir()` prefers `~/.local/lib/veld`
+    // whenever that directory merely *exists*, while the installer writes
+    // `/usr/local/lib/veld` for a `/usr/*` install — so on a machine carrying
+    // both, printing unconditionally would name three binaries this update never
+    // touched. The banner this replaced printed the script's real `$LIB_DIR`;
+    // stat'ing is how that stays true without threading the path back.
+    let row = |label: &str, path: &std::path::Path| {
+        if path.exists() {
+            println!("  {label:<14} {}", output::dim(&path.display().to_string()));
+        }
+    };
+    if let Ok(exe) = std::env::current_exe() {
+        row("veld", &exe);
+    }
+    for name in ["veld-helper", "veld-daemon", "caddy"] {
+        row(name, &lib.join(name));
+    }
+    // The caller's bundle, not a fresh guess: `desktop_app_status_in(None)`
+    // searches `/Applications` first, so on a machine with a second copy in
+    // `~/Applications` the summary would name the bundle this run did *not*
+    // touch. Every other app decision in the run reads `plan.app_dir`.
+    if let Some((path, _)) = veld_core::setup::desktop_app_status_in(plan.app_dir.as_deref()) {
+        row("Veld Desktop", &path);
     }
 }
 
@@ -1000,35 +1214,42 @@ async fn perform(
 ///
 /// Returns the reason the app half did not land, for the app's own report. `None`
 /// means it landed — or that this run was never going to touch it.
-async fn update_desktop_if_stale(version: &str, plan: &DesktopPlan) -> Option<String> {
-    if !plan.update {
+async fn run_desktop_step(
+    version: &str,
+    step: &DesktopStep,
+    steps: &Steps,
+    verbose: bool,
+) -> Option<String> {
+    let app_dir = match step {
         // `skipped` is `None` for every path that was never going to touch the
         // app — Linux, no handoff — and `Some` only where a caller asked for the
         // app half and is not getting it.
-        return plan.skipped.clone();
-    }
-
-    let app_dir = plan.app_dir.as_deref();
-    let existing = veld_core::setup::desktop_app_status_in(app_dir);
-    if let Some((_, installed)) = &existing {
-        if installed.as_deref() == Some(version) {
-            return None;
+        DesktopStep::Skip(reason) => return reason.clone(),
+        DesktopStep::Install { app_dir, .. } => {
+            steps.print(&format!("Installing Veld Desktop {version}"));
+            app_dir.clone()
         }
-    }
+        DesktopStep::Update {
+            app_dir,
+            installed,
+            path,
+            ..
+        } => {
+            steps.print(&format!(
+                "Updating Veld Desktop {} → {version}",
+                installed.as_deref().unwrap_or("(unknown version)")
+            ));
+            println!("        {}", output::dim(&path.display().to_string()));
+            app_dir.clone()
+        }
+    };
+    let app_dir = app_dir.as_deref();
 
-    match &existing {
-        Some((path, installed)) => output::print_info(&format!(
-            "Veld Desktop at {} is {} — updating it to {version}.",
-            path.display(),
-            installed.as_deref().unwrap_or("an unknown version"),
-        )),
-        None => output::print_info(&format!("Installing Veld Desktop {version}...")),
-    }
     let opts = veld_core::setup::DesktopInstall {
         // The bundle the caller named, so an app running from `~/Applications`
         // is the one replaced rather than a second copy appearing in
         // `/Applications`. `None` leaves the script its own search.
-        app_dir: plan.app_dir.clone(),
+        app_dir: app_dir.map(std::path::Path::to_path_buf),
         // Passed on so `install.sh`'s `cleanup` EXIT/INT/TERM trap reopens the
         // app too, which is a *second* net rather than a duplicate of the one in
         // `run`. The statement in `run` is an ordinary line of Rust: a Ctrl-C, a
@@ -1036,7 +1257,8 @@ async fn update_desktop_if_stale(version: &str, plan: &DesktopPlan) -> Option<St
         // route the app has already been closed — so without this the interrupted
         // case ends with no window at all. `open` on a running app focuses it, so
         // both firing is harmless, which is the same argument `run` already makes.
-        relaunch: plan.reopen,
+        relaunch: step.reopen(),
+        verbose,
         ..Default::default()
     };
     let result = veld_core::setup::install_desktop(version, &opts)
@@ -1156,33 +1378,48 @@ async fn privileged_helper_serviceable() -> bool {
 /// Restart the helper/daemon so they run the newly installed binaries, then
 /// verify the helper actually came back healthy.
 ///
-/// A managed helper (privileged/unprivileged) restarts *itself* when its binary
-/// changes on disk (an in-process watcher exits so launchd relaunches the new
-/// version — no sudo), complemented by the plist's `WatchPaths`. Rather than
-/// assume that worked (the old bug), we poll until the helper reports the new
-/// version, and give actionable guidance if it doesn't.
+/// Three tiers, none of which needs a password on the happy path. In privileged
+/// mode the CLI first *asks* the helper to restart, over the socket it already
+/// exposes to unprivileged callers ([`request_helper_restart`]) — the tier that
+/// matters most, because the CLI knows the installer has finished writing where
+/// the next tier can only guess. A helper too old to understand the request falls
+/// back to its own binary-change watcher, which exits so launchd/systemd
+/// relaunches it (~12s). Sudo is tier three and is only *offered*, after the
+/// first two have had their full budget ([`offer_sudo_helper_restart`]).
+///
+/// None of that is assumed to have worked (the old bug): we poll until the helper
+/// reports the new version, give actionable guidance if it doesn't, and return
+/// whether every service came back — the caller's success banner depends on it.
+///
+/// Unprivileged mode's helper is a user LaunchAgent the installer already
+/// bounced, so only the polling half applies there.
 ///
 /// `target_version` is the version we just updated TO (from `check_update`),
 /// NOT `env!("CARGO_PKG_VERSION")` — this process is the *old* CLI, so its
 /// compile-time version is the version we updated *from*. Comparing against
 /// that would invert the check (fail on every successful update, pass on a
 /// failed one).
-async fn restart_services(target_version: &str, helper_dead_privileged: bool) {
+#[must_use]
+async fn restart_services(target_version: &str, helper_dead_privileged: bool) -> bool {
     let mode = super::read_setup_mode();
 
     // Auto mode has no persistent service: stop the ephemeral helper so the
     // next `veld start` re-bootstraps it with the new binary.
     if !matches!(mode.as_deref(), Some("privileged") | Some("unprivileged")) {
-        output::print_info("Restarting auto-bootstrapped helper...");
         let user_socket = veld_core::helper::user_socket_path();
         let client = veld_core::helper::HelperClient::new(&user_socket);
         if client.shutdown().await.is_ok() {
-            output::print_info("Helper stopped. It will restart on next `veld start`.");
+            Steps::detail(&output::dim(
+                "veld-helper stopped — it restarts on the next `veld start`",
+            ));
         }
-        return;
+        return true;
     }
 
+    let mut all_healthy = true;
+
     if helper_dead_privileged {
+        all_healthy = false;
         // Already reported before the install; a dead privileged helper has no
         // watcher and nothing here can restart it without sudo, so waiting 45s
         // for its version to flip would only produce a second, misleading error.
@@ -1192,73 +1429,40 @@ async fn restart_services(target_version: &str, helper_dead_privileged: bool) {
             false,
         );
     } else {
-        // In privileged mode the helper is a root service, so `veld update`
-        // (unprivileged) cannot bounce it directly. Rather than passively wait
-        // out the ~12s binary-watcher poll (which, if it slips past the 45s
-        // budget, ends in a misleading "re-run veld setup privileged"),
-        // deterministically restart it via sudo (a graceful SIGTERM that leaves
-        // Caddy running — see restart_privileged_helper) — passwordless if a
-        // credential is cached, otherwise a single interactive prompt. This is
-        // the reliable path; the self-restart watcher stays as the no-sudo
-        // fallback. Unprivileged mode's helper is a user LaunchAgent the
-        // installer already bounced, so no sudo is needed there.
-        if mode.as_deref() == Some("privileged") {
-            output::print_info("Restarting veld-helper (privileged) with the new binary...");
-            // A human is present only if we have a TTY AND weren't asked to run
-            // non-interactively — otherwise sudo's password prompt would hang a
-            // scripted/pty-driven update. Treat VELD_NON_INTERACTIVE as set only
-            // when it's non-empty, matching install.sh's `[ -n ... ]` convention:
-            // unset or empty (`=`) stays interactive; any non-empty value
-            // (including `0`) means non-interactive, exactly as the shell reads
-            // it. When interactive, warn before the prompt appears so an
-            // unexpected sudo prompt from a dev tool isn't mistaken for malware.
-            let non_interactive_env = std::env::var("VELD_NON_INTERACTIVE")
-                .map(|v| !v.is_empty())
-                .unwrap_or(false);
-            let interactive = std::io::stdin().is_terminal() && !non_interactive_env;
-            if interactive {
-                output::print_info(
-                    "veld may prompt for your sudo password to restart the privileged helper.",
-                );
-            }
-            if !veld_core::setup::restart_privileged_helper(interactive).await {
-                output::print_info(
-                    "Could not restart the privileged helper via sudo — waiting for it to \
-                     restart itself instead.",
-                );
-                // Name the *reason*, because it is the one a user can act on and
-                // the one that produced a silently-not-updated machine: with no
-                // controlling terminal there is only ever `sudo -n`, so an
-                // uncached credential means no prompt rather than a prompt
-                // nobody saw. This is exactly what `--console` exists to avoid,
-                // and reaching here means no terminal window could be opened.
-                if !interactive {
-                    println!(
-                        "  {}",
-                        output::dim(
-                            "There is no terminal here for sudo to ask in. The helper's own \
-                             binary-change watcher should pick the new version up; if it does \
-                             not, re-run `veld update` from a terminal."
-                        )
-                    );
-                }
-            }
-        }
-
         // Verify against the specific socket for this mode — not `connect()` (which
         // falls through to the user socket and could latch onto a stale auto-helper
         // while the privileged one is mid-restart).
-        let socket = if mode.as_deref() == Some("privileged") {
+        let privileged = mode.as_deref() == Some("privileged");
+        let socket = if privileged {
             veld_core::helper::system_socket_path()
         } else {
             veld_core::helper::user_socket_path()
         };
-        output::print_info("Waiting for veld-helper to restart with the new binary...");
-        if wait_for_helper_version(&socket, target_version, std::time::Duration::from_secs(45))
+
+        // In privileged mode the helper is a root service, so this unprivileged
+        // process cannot bounce it directly. It does not need to: the helper
+        // restarts *itself* on request, over the socket it already exposes to
+        // the unprivileged CLI. Unprivileged mode's helper is a user LaunchAgent
+        // the installer already bounced.
+        if privileged {
+            request_helper_restart(&socket, target_version).await;
+        }
+
+        // Say what is being waited for. The no-sudo paths are *slower* than the
+        // sudo bounce they replaced — up to 12s for the watcher, and the whole
+        // 45s budget on the bad day — and the step line alone left that as
+        // unexplained silence, which reads as a hang.
+        Steps::detail(&output::dim("waiting for veld-helper..."));
+
+        // `||` short-circuits, so the sudo offer is only ever reached after the
+        // no-sudo paths have had their full budget and failed.
+        let healthy = wait_for_helper_version(&socket, target_version, HELPER_RESTART_TIMEOUT)
             .await
-        {
-            output::print_success("veld-helper restarted and healthy.");
+            || (privileged && offer_sudo_helper_restart(&socket, target_version).await);
+        if healthy {
+            Steps::service_ok("veld-helper", target_version);
         } else {
+            all_healthy = false;
             output::print_error(
                 "veld-helper did not pick up the new binary automatically. \
                  Run `veld doctor`; if it stays down, re-run `veld setup`.",
@@ -1272,16 +1476,19 @@ async fn restart_services(target_version: &str, helper_dead_privileged: bool) {
     // `veld update` returns while the daemon is mid-restart, and an immediate
     // `veld doctor` shows "Daemon: not running / Feedback server not responding"
     // even though it self-heals moments later.
-    output::print_info("Waiting for veld-daemon to restart with the new binary...");
+    Steps::detail(&output::dim("waiting for veld-daemon..."));
     if wait_for_daemon_version(target_version, std::time::Duration::from_secs(45)).await {
-        output::print_success("veld-daemon restarted and healthy.");
+        Steps::service_ok("veld-daemon", target_version);
     } else {
+        all_healthy = false;
         output::print_error(
             "veld-daemon did not pick up the new binary automatically. \
              Run `veld doctor`; if it stays down, re-run `veld setup`.",
             false,
         );
     }
+
+    all_healthy
 }
 
 /// Poll the daemon's `/api/health` until it reports `expected_version`, or the
@@ -1330,6 +1537,180 @@ async fn wait_for_daemon_version(expected_version: &str, timeout: std::time::Dur
 /// "a helper is reachable" as success. A pre-change helper (no `version` field)
 /// reports `None` and never matches, so this correctly times out into the
 /// actionable error instead of falsely reporting success on the first update.
+/// How long to wait for the helper to come back on the new binary before
+/// offering sudo.
+///
+/// Sized against the slowest no-sudo path rather than picked round. The `restart`
+/// ping normally lands in well under a second, but both it and the binary watcher
+/// run the same safety gate, whose exec check can burn a full
+/// `BINARY_EXEC_CHECK_TIMEOUT` (6s in `veld-helper`) before giving up — so a
+/// watcher tick that has to wait one out costs 10s poll + 2s settle + 6s and
+/// *fails*, and the retry needs another. 45s covers two such ticks with room; a
+/// binary that fails the exec check twice over is the case the sudo offer exists
+/// for, and by then the offer knows to say the binary is broken rather than
+/// prompt.
+const HELPER_RESTART_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
+
+/// How long to wait after a sudo-driven restart. Short: sudo bounced the service
+/// directly, so if it were going to come back it already has.
+const SUDO_RESTART_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// Ask the privileged helper to restart onto the new binary, without sudo.
+///
+/// Best-effort by design — every failure here falls through to the helper's own
+/// binary watcher, which reaches the same end state within ~12s. The ping is
+/// worth making anyway for a reason that is not speed: the CLI *knows* the
+/// installer has finished writing, where the watcher can only infer it from a
+/// settling size/mtime. That inference has lost the race in the field and left
+/// launchd crash-looping on a half-written binary with no helper running at all.
+///
+/// Silent on every path. A user who did not ask how the helper restarts should
+/// not have to read about it — the next line they see is either "restarted and
+/// healthy" or a real problem.
+async fn request_helper_restart(socket: &std::path::Path, target_version: &str) {
+    let client = veld_core::helper::HelperClient::new(socket);
+
+    // The watcher may have got there first: the installer wrote the binary
+    // before this code runs, so on a slow enough install the helper is already
+    // current. Restarting it again would be a second bounce for nothing.
+    if matches!(client.version().await, Ok(Some(v)) if v == target_version) {
+        return;
+    }
+
+    // Two failures are expected rather than exceptional, and both mean the same
+    // thing: a helper older than this release answers `unknown command:
+    // restart`, and a helper that would be unsafe to relaunch refuses with its
+    // reason. Neither is worth a line of output, because the watcher and the
+    // wait below already cover them.
+    let _ = client.restart().await;
+}
+
+/// Last resort, offered only after both no-sudo paths have had their chance and
+/// the helper still has not come back.
+///
+/// Deliberately not offered up front. `veld update` used to reach for sudo
+/// first, which meant it spent a password prompt on every single update to buy a
+/// determinism the socket now provides for free — and it fired before the
+/// no-sudo mechanism was ever given a chance, so the prompt was almost always
+/// unnecessary. A prompt that arrives after a visible failure, naming what
+/// failed, is a different prompt from one that interrupts a working update.
+///
+/// Returns whether the helper came back healthy.
+async fn offer_sudo_helper_restart(socket: &std::path::Path, target_version: &str) -> bool {
+    use std::io::{BufRead, Write};
+
+    // Free recovery FIRST, and before saying anything. `restart_privileged_helper(false)`
+    // only ever runs `sudo -n`, which fails rather than asking, so it is safe on a
+    // headless box and silent on an attended one — it is also what the *old* code
+    // did unconditionally, and dropping it would have quietly cost every
+    // NOPASSWD/cached-credential machine, and every desktop handoff that could not
+    // open a terminal, a recovery they used to get for nothing. Reporting the
+    // timeout before trying it would print a red failure on machines where the very
+    // next line is a green success.
+    if veld_core::setup::restart_privileged_helper(false).await
+        && wait_for_helper_version(socket, target_version, SUDO_RESTART_TIMEOUT).await
+    {
+        return true;
+    }
+
+    output::print_error(
+        &format!(
+            "veld-helper is still not running {target_version} after {}s.",
+            HELPER_RESTART_TIMEOUT.as_secs()
+        ),
+        false,
+    );
+
+    // Why the helper is not coming back decides whether a prompt is even honest.
+    // If the newly installed binary does not run, `launchctl kill` relaunches the
+    // service onto exactly that binary — which is the 2432-line crash loop, with
+    // the helper then gone entirely instead of merely stale. The two no-sudo
+    // paths refuse to exit onto an unrunnable binary; sudo must refuse to be
+    // offered for one, or it is the hole they were closed against.
+    if let Some(bad) = unrunnable_helper_binary().await {
+        output::print_error(
+            &format!(
+                "The installed veld-helper at {} does not run, so restarting the service would \
+                 leave it down rather than update it. Re-run `veld update`; if it persists, \
+                 re-run `veld setup privileged`.",
+                bad.display()
+            ),
+            false,
+        );
+        return false;
+    }
+
+    // A human is present only with a TTY on both ends and no explicit request to
+    // run non-interactively — otherwise sudo's password prompt would hang a
+    // scripted or pty-driven update. `attended()` reads VELD_NON_INTERACTIVE the
+    // way the shell does: unset or empty stays interactive, any non-empty value
+    // (including `0`) does not.
+    if !attended() {
+        println!(
+            "  {}",
+            output::dim(
+                "Restart it with: sudo launchctl kill TERM system/dev.veld.helper \
+                 (Linux: sudo systemctl restart veld-helper)"
+            )
+        );
+        return false;
+    }
+
+    print!("  Restart the privileged helper with sudo? [Y/n] ");
+    let _ = std::io::stdout().flush();
+    let mut line = String::new();
+    let read = std::io::stdin().lock().read_line(&mut line).unwrap_or(0);
+    if read == 0 {
+        println!();
+    }
+    if !consent(if read == 0 { None } else { Some(line.as_str()) }) {
+        return false;
+    }
+
+    if !veld_core::setup::restart_privileged_helper(true).await {
+        return false;
+    }
+    wait_for_helper_version(socket, target_version, SUDO_RESTART_TIMEOUT).await
+}
+
+/// The binary the privileged helper service would be relaunched onto, if it is
+/// there but does not execute.
+///
+/// The path comes from the **service manager**, not from `paths::lib_dir()`.
+/// `lib_dir()` prefers `~/.local/lib/veld` whenever that directory merely exists,
+/// while a privileged install writes `/usr/local/lib/veld` and the plist pins
+/// whichever absolute path `veld setup` chose — so on a machine carrying both,
+/// guessing would accuse a binary this update never touched *and*, worse, clear a
+/// broken one: the sudo restart would then relaunch the root service onto exactly
+/// the file the no-sudo paths had just refused, which is the crash loop this
+/// guard exists to prevent.
+///
+/// `None` covers "it runs", "there is no such file", and "we could not tell" —
+/// a probe that failed for a reason of its own, or a service manager that did not
+/// answer, must not be reported to the user as a broken binary. This mirrors
+/// `veld-helper`'s own `binary_executes`, and for the same reason: a stat cannot
+/// tell a finished write from a paused one, and asking the kernel to exec the
+/// thing can.
+async fn unrunnable_helper_binary() -> Option<PathBuf> {
+    let bin = veld_core::setup::privileged_helper_program().await?;
+    if !bin.is_file() {
+        return None;
+    }
+    let run = tokio::process::Command::new(&bin)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    match tokio::time::timeout(std::time::Duration::from_secs(20), run).await {
+        Ok(Ok(status)) if status.success() => None,
+        // A spawn error is ENOEXEC on a half-written file — exactly the case.
+        Ok(Ok(_)) | Ok(Err(_)) => Some(bin),
+        // A hung probe proves nothing; do not accuse the binary.
+        Err(_) => None,
+    }
+}
+
 async fn wait_for_helper_version(
     socket: &std::path::Path,
     expected_version: &str,
@@ -1521,6 +1902,7 @@ mod handoff_tests {
             Some(std::path::Path::new("/Applications/Veld.app")),
             Some("16.12.0"),
             false,
+            true,
         );
         assert!(!args.contains(&"--console".to_string()), "{args:?}");
     }
@@ -1535,6 +1917,7 @@ mod handoff_tests {
                     "/Applications/Veld.app/Contents/MacOS/Veld"
                 )),
                 Some("16.12.0"),
+                true,
                 true,
             ),
             vec![
@@ -1552,6 +1935,10 @@ mod handoff_tests {
                 "--app-path",
                 "/Applications/Veld.app/Contents/MacOS/Veld",
                 "--force",
+                // Without this the window the handoff opened — the surface the
+                // user was sent to *watch* — is the one place `--verbose` does
+                // nothing.
+                "--verbose",
             ]
         );
     }
@@ -1562,7 +1949,10 @@ mod handoff_tests {
         // wait for and nothing owed a relaunch. `honour_relaunch` already refuses
         // `--relaunch` without a pid upstream of this, and passing one anyway
         // would have the window *launch* an app the user never had running.
-        assert_eq!(console_args(None, false, None, None, false), vec!["update"]);
+        assert_eq!(
+            console_args(None, false, None, None, false, false),
+            vec!["update"]
+        );
     }
 
     #[test]

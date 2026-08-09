@@ -9,12 +9,14 @@ import {
   type Repo,
   type RepoList,
   type RunInfo,
+  type RunRef,
   type SharesList,
   type SettingsDoc,
   type StatsResponse,
   type Worktree,
 } from "./api";
 import {
+  hideDisabledActions,
   logsTimeZone,
   markerFace,
   markerStyle,
@@ -62,6 +64,8 @@ import {
 import { startOriginLabel } from "./shared/startOrigin";
 import { worktreeLabel } from "./shared/worktreeName";
 import { LogoMark } from "./components/LogoMark";
+import { nodeRows, type NodeRow } from "./shared/NodeList";
+import { NodeActions } from "./shared/NodeActions";
 import {
   ActionIcon,
   Button,
@@ -97,6 +101,8 @@ import {
   IconDeviceDesktop,
   IconExternalLink,
   IconWorld,
+  IconListDetails,
+  IconX,
 } from "@tabler/icons-react";
 import { Notifications } from "@mantine/notifications";
 import { ContextMenuProvider, useContextMenu } from "mantine-contextmenu";
@@ -130,7 +136,6 @@ import {
   defaultLayout,
   diagTab,
   dockOf,
-  forgetWorktreeLayouts,
   lastBlankBrowserId,
   loadLayouts,
   newTabId,
@@ -138,7 +143,6 @@ import {
   paneTabLabel,
   parseSessionSets,
   parseTransferTabs,
-  readWorktreeLayout,
   revealDiagPane,
   saveLayouts,
   serializeSessionSets,
@@ -148,11 +152,24 @@ import {
   updateTab,
   urlLabel,
 } from "./panes/model";
+import { acquireWorktree } from "./ide/acquire";
+import { channel, type ClientInfo } from "./ide/channel";
+import {
+  adoptLegacyLayouts,
+  cancelPendingWrite,
+  dropLayout,
+  flushPendingOnUnload,
+  onExternalLayoutChange,
+  readLayout,
+  refreshLayout,
+  syncLayouts,
+} from "./ide/layoutStore";
 import {
   applyTerminalTheme,
   onTerminalOpenUrl,
   openExternally,
   pruneTerminals,
+  noteExpectedResumes,
   releaseTerminal,
   restartTerminal,
 } from "./panes/terminalHost";
@@ -191,6 +208,7 @@ import {
   chromeless,
   desktopApp,
   desktopWindow,
+  isElectron,
   layoutSlot,
   openSettingsOnBoot,
   topbarClass,
@@ -199,6 +217,95 @@ import {
 } from "./shell";
 
 const POLL_MS = 5000;
+
+/**
+ * How this client is described to the others when it is holding a worktree they
+ * want.
+ *
+ * Only ever *rendered* for a browser holder — a desktop window is raised, so
+ * there is nothing to tell the user about where it is — and a browser tab is
+ * named by its browser, because that is the whole of what can honestly be said
+ * about a client nothing can raise. The Electron string exists so the daemon's
+ * log and any future surface have something better than an empty field; it is
+ * deliberately not `document.title`, which the shell never sets (it sets the
+ * *native* title) and which is therefore the same word in every window.
+ */
+function clientLabel(): string {
+  // An Electron window that cannot raise itself is described as the place it is
+  // rather than as a window that will come forward — see `clientKind`.
+  if (canRaiseSelf()) return "Veld Desktop";
+  if (isElectron) return "another Veld Desktop window";
+  const ua = navigator.userAgent;
+  for (const [name, probe] of [
+    ["Firefox", /Firefox\//],
+    ["Edge", /Edg\//],
+    ["Chrome", /Chrome\//],
+    ["Safari", /Safari\//],
+  ] as const) {
+    if (probe.test(ua)) return name;
+  }
+  return "a browser tab";
+}
+
+/**
+ * Whether this client can bring itself to the front when the daemon asks.
+ *
+ * **A capability, not a platform.** `isElectron` is a URL parameter and is true
+ * on any shell, including one older than `focusSelf` — so reporting the kind
+ * from it told the daemon a window could be raised when nothing was there to
+ * raise it, and the client that was refused promised "switched to it" for a
+ * switch that visibly did not happen. Asking what this page can actually do
+ * cannot drift from what it does.
+ */
+function canRaiseSelf(): boolean {
+  return typeof desktopWindow?.focusSelf === "function";
+}
+
+/** How the daemon should describe this client to the others. */
+function clientKind(): "electron" | "browser" {
+  return canRaiseSelf() ? "electron" : "browser";
+}
+
+/**
+ * What to tell someone whose click was refused.
+ *
+ * The distinction is the point, and it is why the daemon sends the holder's
+ * kind rather than just refusing. A desktop window has been raised and is now in
+ * front of them, so the notice explains where they went. A **browser tab cannot
+ * be raised** — `window.focus()` outside a user gesture is ignored by every
+ * browser — so promising "switched to it" there would be a lie about something
+ * they can see did not happen. It says where the worktree is instead, and the
+ * tab marks itself so it is findable.
+ */
+function holderNotice(w: Worktree, holder?: ClientInfo): string {
+  const label = worktreeLabel(w);
+  if (holder?.kind === "browser") {
+    const where = holder.label || "a browser tab";
+    return `${label} is open in ${where} — switch to it there`;
+  }
+  return `${label} is open in another window — switched to it`;
+}
+
+/**
+ * Mark this page as wanted, for a client that cannot raise itself.
+ *
+ * The title, because it is the one thing a background tab still shows. Cleared
+ * on the next interaction rather than a timer: the marker's job is to survive
+ * until the person looks, and a timeout that fires while they are in another
+ * app is a marker that was never seen.
+ */
+function flashAttention(): void {
+  const original = document.title;
+  if (original.startsWith("\u25CF ")) return;
+  document.title = `\u25CF ${original}`;
+  const clear = () => {
+    document.title = original;
+    window.removeEventListener("focus", clear);
+    window.removeEventListener("pointerdown", clear);
+  };
+  window.addEventListener("focus", clear);
+  window.addEventListener("pointerdown", clear);
+}
 
 /** How long an optimistic pending marker survives without an observed run
  *  signature change. Several polls' worth, so a slow `veld start` isn't cut
@@ -417,13 +524,12 @@ function useUrlSelection(): {
  * from this bar entirely rather than moved: the bar is dense, and the brand is
  * carried by the favicon, the window/app icon and the daemon's own pages.
  *
- * At rest it is the mark plus the mode you are **in** — `V IDE`. Under the
- * pointer both are replaced by the swap glyph, and only the tooltip names the
- * mode a click reaches. A button that reads "Runs" while showing the IDE has to
- * be read as an instruction rather than a state, and the two readings are
- * indistinguishable at a glance; this way the resting state answers "where am
- * I", which is the question a bar is for, and the hover state answers "and what
- * happens if I press it".
+ * At rest it is just the mark. Under the pointer the mark is replaced by the
+ * swap glyph, and the tooltip names both halves the glyphs cannot — which mode
+ * you are in, and which one a click reaches. The word labels are gone: in a bar
+ * this dense they read as the loudest text in it, and "IDE"/"Runs" as words
+ * carry no information the tooltip and the destination glyph do not. A screen
+ * reader still gets the full state + destination from the `aria-label`.
  *
  * The two states are layered in one grid cell, so the wider of them fixes the
  * button's width and nothing in the bar moves as the pointer crosses it.
@@ -445,7 +551,7 @@ function ModeSwitch(props: {
   onHover: (h: boolean) => void;
 }) {
   const other = props.mode === "ide" ? "runs" : "ide";
-  const label = (m: string) => (m === "runs" ? "Runs" : "IDE");
+  const modeLabel = (m: string) => (m === "runs" ? "Runs" : "IDE");
   return (
     // The pointer listeners sit outside the Tooltip rather than on the Button:
     // Mantine clones its child and passes the child's own handlers through
@@ -456,23 +562,20 @@ function ModeSwitch(props: {
       onMouseEnter={() => props.onHover(true)}
       onMouseLeave={() => props.onHover(false)}
     >
-      <Tooltip label={`Switch to ${label(other)}`}>
+      <Tooltip label={`Switch to ${modeLabel(other)}`}>
         <Button
           size="compact-sm"
           variant="default"
           className={`mode-switch${props.hover ? " hovered" : ""}`}
-          // Both halves, because the visible text carries only the first and the
-          // tooltip carries neither: Mantine's Tooltip is `role="tooltip"`, which
-          // floating-ui wires as `aria-describedby` and only while it is open, so
-          // it is never part of the accessible name. Without this a screen reader
-          // announces "IDE, button" — the state, with nothing saying the control
-          // leaves it — where before this change it announced the destination.
-          aria-label={`${label(props.mode)}, switch to ${label(other)}`}
+          // The bar is dense and the brand is carried by the mark itself; the
+          // resting state is the mark alone. The label is gone, so the tooltip
+          // and the accessible name carry both halves that the visible glyph
+          // cannot — which mode you are in and which one a click reaches.
+          aria-label={`${modeLabel(props.mode)}, switch to ${modeLabel(other)}`}
           onClick={() => props.onMode(other)}
         >
           <span className="ms-layer ms-rest">
             <LogoMark />
-            {label(props.mode)}
           </span>
           {/* Hidden from the accessibility tree: the `aria-label` above is the
               button's whole name, and a glyph in here would append a decoration
@@ -581,6 +684,10 @@ function AppInner(props: {
   // payload once (see `pruneRunHistory`), so every surface that renders history
   // agrees without each one filtering for itself.
   const historyDays = runHistoryDays(settings ?? {});
+
+  // Whether an inapplicable top-bar action is hidden rather than shown greyed.
+  // Read here and threaded to the bar — see shared/settings.ts.
+  const hideDisabled = hideDisabledActions(settings ?? {});
 
   // Which quick switches a browser pane's chrome shows. Read here and threaded,
   // rather than each pane calling `useSettings` — that would be a fetch and a
@@ -801,31 +908,122 @@ function AppInner(props: {
    * two.
    */
   const [elsewhere, setElsewhere] = useState<Set<number>>(new Set());
+
+  /**
+   * Open this client's control socket and keep it open for the life of the page.
+   *
+   * Deliberately not torn down on a dependency change: the socket **is** this
+   * client's membership of the daemon's claim registry, so a lifecycle tied to
+   * anything that re-renders would release every claim the page holds. It is
+   * closed by the page going away, which is exactly the event a claim should not
+   * survive.
+   *
+   * A detached window has no part in this: its tabs were transferred out of a
+   * worktree its origin owns, so it is a satellite of that claim rather than a
+   * claimant.
+   */
   useEffect(() => {
-    const shell = desktopWindow;
-    if (chromeless || !shell?.onClaimsChanged) return;
-    let cancelled = false;
-    let pushed = false;
-    // Both, and in this order: the subscription first, so a claim made while
-    // the initial query is in flight is not lost, then the query for the state
-    // that predates this window. `pushed` because the answer to the query can
-    // land after an update that supersedes it — and "nobody else has anything"
-    // is a real answer, so an empty set cannot stand in for "not yet asked".
-    const off = shell.onClaimsChanged((p) => {
-      pushed = true;
-      setElsewhere(new Set(p.worktreeIds));
+    if (chromeless) return;
+    // Before anything else touches a layout: whichever client still holds the
+    // old browser store is the only one that can move it, and the first client
+    // to open a worktree creates its row.
+    void adoptLegacyLayouts();
+    channel.start(clientKind(), clientLabel(), {
+      // `mine` is the daemon's per-recipient answer, so the rail never needs to
+      // know any client's identity to work out which rows are not its own.
+      onClaims: (claims) => {
+        setElsewhere(new Set(claims.filter((c) => !c.mine).map((c) => c.worktree_id)));
+      },
+      onYield: (worktreeId, ack) => onYield.current(worktreeId, ack),
+      onFocus: () => {
+        // An Electron window raises itself through its shell. A browser tab
+        // **cannot** — `window.focus()` without a user gesture is ignored — so it
+        // marks itself instead of pretending, and the client that asked was told
+        // the holder is a browser and said so (see `holderNotice`).
+        if (desktopWindow?.focusSelf) {
+          void desktopWindow.focusSelf().catch(() => {});
+          return;
+        }
+        flashAttention();
+      },
+      onLayoutChanged: (worktreeId) => {
+        // Only for a worktree this client is showing. Anything else is a
+        // notification about panes it does not have mounted, and re-reading it
+        // would put a layout into state that nothing is attached to.
+        if (layoutsRef.current[worktreeId]) void refreshLayout(worktreeId);
+      },
+      /**
+       * **Ask for the worktree back on every connect.**
+       *
+       * A claim lives on the socket, so a socket that went away took this
+       * client's claims with it — including across a daemon restart, where the
+       * PTY holder processes keep the shells alive and two clients can each be
+       * showing a worktree with nothing arbitrating between them. Re-claiming is
+       * what resolves that, and it is why a reconnect is not a no-op.
+       *
+       * `sameEpoch` is deliberately *not* used to reset the layout store's
+       * cached versions. Those describe rows in a database that outlives the
+       * daemon, and clearing them made the next save present version 0, lose the
+       * check against a row still at N, and adopt the pre-restart document —
+       * silently reverting whatever the user had just done, and unmounting (and
+       * hanging up) any terminal they had opened in the meantime.
+       */
+      onReady: (sameEpoch) => {
+        // What to ask for. The worktree this client holds, first. Otherwise the
+        // selection — but only when asking again cannot take a worktree off
+        // somebody: either this client was never granted anything (the boot
+        // claim ran before the socket was up), or the daemon **restarted**, in
+        // which case its registry is empty and nobody holds anything. Without
+        // the second case a window that had yielded sat empty for good: the boot
+        // effect is keyed on a selection that has not changed, and nothing else
+        // re-acquires.
+        const mayAskAgain = !grantedRef.current || !sameEpoch;
+        const wanted = shownRef.current ?? (mayAskAgain ? selectedRef.current : null);
+        const target = worktreesRef.current.find((w) => w.id === wanted);
+        // Gone from the list between the disconnect and now — a `git worktree
+        // remove` in a terminal, say. Nothing to ask for.
+        if (!target) return;
+        void acquireRef.current(target);
+      },
+      onClosed: () => {
+        // Nobody's claims are knowable now, and rendering the last table would
+        // grey out rows whose holders may already be gone.
+        setElsewhere(new Set());
+      },
     });
-    void shell
-      .claimedElsewhere()
-      .then((ids) => {
-        if (!cancelled && !pushed) setElsewhere(new Set(ids));
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-      off();
-    };
   }, [chromeless]);
+
+  /**
+   * Write anything still sitting in the layout store's debounce before the page
+   * goes.
+   *
+   * `pagehide` rather than `beforeunload`: it fires for a bfcache eviction and on
+   * mobile Safari, where `beforeunload` does not, and the whole window being
+   * closed is precisely when the last thing the user did (moved a tab, dragged a
+   * split) would otherwise be lost.
+   */
+  useEffect(() => {
+    const flush = () => flushPendingOnUnload();
+    window.addEventListener("pagehide", flush);
+    return () => window.removeEventListener("pagehide", flush);
+  }, []);
+
+  // Adopt layouts this client did not write: a save that lost its version check
+  // (the hand-off race) and the daemon's push for a worktree it is showing.
+  useEffect(() => {
+    onExternalLayoutChange((worktreeId, next) => {
+      setLayouts((prev) => {
+        if (!prev[worktreeId]) return prev;
+        if (!next) {
+          const without = { ...prev };
+          delete without[worktreeId];
+          return without;
+        }
+        noteExpectedResumes(terminalIds(next));
+        return { ...prev, [worktreeId]: next };
+      });
+    });
+  }, []);
 
   /**
    * Show a worktree — or go to the window that already is.
@@ -846,35 +1044,58 @@ function AppInner(props: {
    * worktree's layout would open a pane in a set of panes another window owns.
    */
   const selectWorktree = async (w: Worktree): Promise<boolean> => {
-    if (!desktopWindow) {
+    // A detached window shows one dock of a worktree its origin owns; it is a
+    // satellite of that claim and never makes one of its own.
+    if (chromeless) {
       setActiveRepoRoot(w.repo_root);
       setActiveWtKey(String(w.id));
+      setShownId(w.id);
       return true;
     }
-    return desktopWindow
-      .claimWorktree(w.id)
-      .then((result) => {
-        if (!result?.ok) {
-          // Without this the click reads as ignored: the row does not open,
-          // and a *different* window comes forward with nothing tying the two
-          // together. The toast is in this window, not the one that took
-          // focus — it is what you find when you come back, and the greyed
-          // rail row (`elsewhere`) is what warns you before you click.
-          if (result?.reason === "shown-elsewhere") {
-            notifyRedirect(`${worktreeLabel(w)} is open in another window — switched to it`);
-          }
-          return false;
-        }
-        setActiveRepoRoot(w.repo_root);
-        setActiveWtKey(String(w.id));
-        return true;
-      })
-      .catch(() => {
-        // An older shell without the channel: behave as it did before.
-        setActiveRepoRoot(w.repo_root);
-        setActiveWtKey(String(w.id));
-        return true;
-      });
+    // A click owns the outcome from here: cancel whatever acquire is running, so
+    // a hunt still waiting on somebody's yield cannot land afterwards and move
+    // the window off the row that was just picked.
+    acquireGenRef.current++;
+    const result = await channel.claim(w.id);
+    if (!result.ok) {
+      // Without this the click reads as ignored: the row does not open, and
+      // either a different window comes forward with nothing tying the two
+      // together, or — when the holder is a browser tab — nothing visibly
+      // happens at all. The notice is in *this* client, which is where the
+      // person is looking.
+      if (result.reason === "shown_elsewhere") notifyRedirect(holderNotice(w, result.holder));
+      // Nothing to say for `superseded` — a later click owns the outcome — but
+      // an unreachable daemon has to be said, or the click reads as ignored.
+      else if (result.reason === "offline") {
+        notifyRedirect("Not connected to the Veld daemon yet — try that again in a moment");
+      }
+      // **The click cancelled whatever was running, and then failed.** The bump
+      // above is pre-emptive by necessity — a hunt has to stop the moment the
+      // user picks something, not when the daemon eventually answers — so a
+      // refused click can leave this client having cancelled its own acquire and
+      // acquired nothing, with the boot effect keyed on a selection that did not
+      // change. Re-arm, unless something was granted in the meantime.
+      //
+      // **Only when somebody else has it.** `superseded` means a *later* request
+      // from this client owns the outcome, so re-arming there starts an acquire
+      // whose claim outranks the one still in flight — and that one is then
+      // refused as superseded, which the UI deliberately says nothing about. The
+      // user's second click would vanish, which is the symptom two earlier
+      // rounds of this review already removed once.
+      if (result.reason === "shown_elsewhere" && shownRef.current === null && worktreeRef.current) {
+        void acquireRef.current(worktreeRef.current);
+      }
+      return false;
+    }
+    setActiveRepoRoot(w.repo_root);
+    setActiveWtKey(String(w.id));
+    // Both, and `grantedRef` is not redundant: it is what stops a reconnect
+    // asking for a worktree this client *yielded* (where `shownId` is also
+    // null), and a click can be the only grant this client ever gets — it
+    // supersedes a boot claim without changing the selection.
+    grantedRef.current = true;
+    setShownId(w.id);
+    return true;
   };
 
   // Self-heal the URL to the RESOLVED selection: a stale/deep-linked
@@ -1024,6 +1245,23 @@ function AppInner(props: {
   // the fallback is legible rather than misleading.
   const diagRun: RunInfo | null = pick.run;
   const diagRef = worktree && diagRun ? runRef(worktree.path, diagRun) : null;
+  // The running run's nodes that declare actions, raised to the top bar and the
+  // new-pane chooser (shared/NodeActions.tsx). Only a *live running* run can act:
+  // an ended one's actions would spawn against whatever is current. `nodeRows`
+  // already nulls historical actions; gating on `running` closes the live-but-
+  // not-running case (a run bound but stopped).
+  const actionNodes =
+    diagRun && diagRun.status === "running"
+      ? nodeRows(diagRun, null).filter((n) => n.actions.length > 0)
+      : [];
+  const nodeActionProps =
+    diagRef && actionNodes.length > 0
+      ? {
+          run: diagRef,
+          nodes: actionNodes,
+          onChanged: () => void refresh(),
+        }
+      : null;
   const diagStats =
     worktree && diagRun
       ? stats?.projects?.[worktree.path]?.[diagRun.name]
@@ -1128,6 +1366,61 @@ function AppInner(props: {
   /** Run actions make sense only for a worktree of an on-disk repo. */
   const canRunWorktreeNow = (w: Worktree) =>
     w.has_veld_config && (repo?.available ?? false);
+
+  // The top-bar node-actions button. `nodeActionProps` being null is a *disabled*
+  // state, governed by `ui.hideDisabledActions` like the other inapplicable
+  // actions: hidden when the setting is on, shown greyed with a reason when off.
+  const nodeActionsDisabled = !nodeActionProps;
+  const nodeActionsButton =
+    worktree &&
+    canRunWorktreeNow(worktree) &&
+    !(nodeActionsDisabled && hideDisabled) ? (
+      <NodeActionsButton
+        disabled={nodeActionsDisabled}
+        run={nodeActionProps?.run ?? null}
+        nodes={nodeActionProps?.nodes ?? []}
+        onChanged={() => void refresh()}
+      />
+    ) : null;
+
+  /**
+   * Whether any of the selected worktree's machine vars has a value answered on
+   * this machine, plus a tick to force a re-read after the vars dialog closes.
+   *
+   * Powers the small badge on the `{}` button: a project whose vars are already
+   * answered reads as settled, and one with a gap (or none at all) does not. A
+   * var counts as overridden when its scope is `project` or `worktree` — the two
+   * values *this* machine supplied — never `default` (the config's own fallback)
+   * or `unset`.
+   */
+  const [configVarsOverridden, setConfigVarsOverridden] = useState(false);
+  const [varsTick, setVarsTick] = useState(0);
+  useEffect(() => {
+    const path = worktree?.path;
+    // No config (or one that declares nothing) cannot be overridden. `null`
+    // `machine_vars` (an unreadable config) falls through to the fetch, which
+    // errors and reads as not-overridden — the honest answer.
+    if (!path || !worktree.has_veld_config || worktree.machine_vars === 0) {
+      setConfigVarsOverridden(false);
+      return;
+    }
+    let cancelled = false;
+    api
+      .configVars(path)
+      .then((r) => {
+        if (!cancelled) {
+          setConfigVarsOverridden(
+            r.vars.some((v) => v.from === "project" || v.from === "worktree"),
+          );
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setConfigVarsOverridden(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [worktree?.path, varsTick]);
 
   /**
    * Whether ▶ can do anything for this worktree. One predicate for ALL FOUR
@@ -1840,10 +2133,53 @@ function AppInner(props: {
   /** Every worktree is shown by another window, so this one has nothing to
    *  display that is its own. */
   const [claimBlocked, setClaimBlocked] = useState(false);
-  /** Yields whose release has been scheduled but not yet committed. State rather
-   *  than a ref, because the point is to have something an effect can run after —
-   *  see the yield handler below. */
-  const [yieldAcks, setYieldAcks] = useState<number[]>([]);
+  /**
+   * The worktree this client has actually been **granted**, as opposed to the
+   * one it has selected.
+   *
+   * The two are not the same and conflating them was a real defect: the panes of
+   * a worktree name live PTY sessions, and attaching to one *takes it over*, so
+   * a client that renders a layout before its claim is answered steals the
+   * shells of whichever client legitimately holds it. On boot the gap is wide —
+   * the selection is restored from `?wt=`/storage immediately while the claim
+   * waits out every other holder's yield — which is exactly when a second client
+   * is most likely to be up.
+   *
+   * So nothing reads a layout until this is set, and only a granted claim sets
+   * it. A detached window sets it directly: it is a satellite of its origin's
+   * claim and makes none of its own.
+   */
+  const [shownId, setShownId] = useState<number | null>(null);
+  /** …and through a ref, for the reconnect handler, which is registered once. */
+  const shownRef = useRef<number | null>(null);
+  shownRef.current = shownId;
+  /**
+   * Whether this client has ever been granted a worktree.
+   *
+   * The difference between the two ways `shownId` can be `null`, and they need
+   * opposite answers on reconnect. **Never granted** — the boot claim ran while
+   * the socket was still connecting and answered `offline` — means the window is
+   * showing nothing and must try again, or it stays blank forever with the boot
+   * effect keyed on a selection that has not changed. **Granted and then
+   * yielded** means another client has it now, and re-claiming on reconnect
+   * would take it straight back off them.
+   */
+  const grantedRef = useRef(false);
+  /** Bumped by anything that supersedes a running acquire — a newer acquire, or
+   *  a rail click. See `acquireRef`. */
+  const acquireGenRef = useRef(0);
+  /** The selection, for the reconnect handler — see `grantedRef`. */
+  const selectedRef = useRef<number | null>(null);
+  /** …and the row itself, for the paths that re-acquire it. */
+  const worktreeRef = useRef<Worktree | null>(null);
+  // Assigned during render, like `layoutsRef`: an acquire started from a socket
+  // handler must see the selection this render was built from.
+  selectedRef.current = worktree?.id ?? null;
+  worktreeRef.current = worktree;
+  /** Acknowledgements for yields whose release has been scheduled but not yet
+   *  committed. State rather than a ref, because the point is to have something
+   *  an effect can run *after* — see the yield handler below. */
+  const [yieldAcks, setYieldAcks] = useState<(() => void)[]>([]);
 
   // Mirrored into a ref, the same idiom `dialogRef` uses above: an effect with `[]`
   // deps closes over the first render's `layouts` forever, and a decision that has to
@@ -1895,26 +2231,78 @@ function AppInner(props: {
   }, [diagnoseFor, worktree?.id, layouts]);
 
   useEffect(() => {
+    // A detached window's panes are its own (`saveLayouts`); a main window's
+    // belong to the worktree and go to the daemon, which is what makes them the
+    // same panes in a browser tab and in the app.
     saveLayouts(layoutSlot, layouts, chromeless);
+    if (!chromeless) syncLayouts(layouts);
   }, [layouts]);
 
-  // Give a newly selected worktree a layout. New worktrees inherit the split
-  // of one already open, so the proportions the user chose carry across
-  // instead of snapping back to 50/50 on every new worktree.
+  /**
+   * Give a newly selected worktree a layout. New worktrees inherit the split of
+   * one already open, so the proportions the user chose carry across instead of
+   * snapping back to 50/50 on every new worktree.
+   *
+   * **Read from the daemon, at the moment of showing it.** A worktree has one
+   * set of panes and the database holds it, so this is where a browser tab picks
+   * up the very terminals the desktop app has running rather than inventing a
+   * second set beside them. Reading it now rather than at boot is the same
+   * discipline the shared store needed and for a stronger reason: another
+   * *client* may have been using this worktree since, and there is no longer any
+   * local copy that could stand in for what it left.
+   *
+   * **Keyed on the granted claim, never on the selection.** The selection is
+   * restored from `?wt=`/storage the moment the worktree list resolves, while
+   * the claim is still waiting out other clients' yields — so keying this on
+   * `worktree?.id` fetched and mounted the panes first and learned they belonged
+   * to somebody else afterwards, by which time this client had already taken
+   * over their shells. On boot with a second client up, that is the common case
+   * rather than a race.
+   */
   useEffect(() => {
-    if (!worktree) return;
-    setLayouts((prev) => {
-      if (prev[worktree.id]) return prev;
-      // The shared store first, read *now* rather than at boot: another window
-      // may have been using this worktree since, and its panes are the ones
-      // that exist. Defaulting straight to a fresh layout here is precisely how
-      // a second set would appear.
-      const existing = readWorktreeLayout(worktree.id, chromeless, layoutSlot);
-      if (existing) return { ...prev, [worktree.id]: existing };
-      const seed = Object.values(prev)[0]?.ratio ?? DEFAULT_RATIO;
-      return { ...prev, [worktree.id]: defaultLayout(seed) };
-    });
-  }, [worktree?.id]);
+    const id = shownId;
+    if (id === null) return;
+    // A detached window's panes came with it and are not the worktree's.
+    if (chromeless) {
+      setLayouts((prev) =>
+        prev[id]
+          ? prev
+          : { ...prev, [id]: defaultLayout(Object.values(prev)[0]?.ratio ?? DEFAULT_RATIO) },
+      );
+      return;
+    }
+    // Through the ref, not `layouts`: this effect is keyed on the selection
+    // alone, so the render's `layouts` can be a commit behind a layout that has
+    // just been adopted — and re-fetching one already on screen would restore an
+    // older version over the user's last change.
+    if (layoutsRef.current[id]) return;
+    let cancelled = false;
+    void (async () => {
+      let stored: PaneLayout | null = null;
+      try {
+        stored = await readLayout(id);
+      } catch {
+        // The daemon is unreachable. Seeding a default is the same answer as
+        // "nothing stored", and it cannot destroy anything: the first save
+        // presents version 0, loses the check against whatever is really there,
+        // and adopts it.
+      }
+      if (cancelled) return;
+      // **Before the panes render.** These shells were expected to be running
+      // when this client found them, so a terminal that cannot reattach says so
+      // instead of quietly opening a fresh prompt — which is exactly what a
+      // browser tab used to do for every terminal the app had open.
+      if (stored) noteExpectedResumes(terminalIds(stored));
+      setLayouts((prev) => {
+        if (prev[id]) return prev;
+        if (stored) return { ...prev, [id]: stored };
+        return { ...prev, [id]: defaultLayout(Object.values(prev)[0]?.ratio ?? DEFAULT_RATIO) };
+      });
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [shownId, chromeless]);
 
   /**
    * Let go of one worktree's panes, because another window is taking it.
@@ -1938,10 +2326,10 @@ function AppInner(props: {
    * `setLayouts` updater, i.e. during the render React schedules from here, so
    * the ack is queued for the effect below and sent after that commit.
    */
+  const onYield = useRef<(worktreeId: number, ack: () => void) => void>(() => {});
   useEffect(() => {
-    const shell = desktopWindow;
-    if (chromeless || !shell) return;
-    const off = shell.onYieldWorktree(({ worktreeId, yieldId }) => {
+    if (chromeless) return;
+    onYield.current = (worktreeId: number, ack: () => void) => {
       // A pending "reveal node health" request for this worktree can never be
       // satisfied now, and its own guard cannot see that: a yield deletes the
       // layout without touching the *selection*, so `worktree?.id` still equals
@@ -1950,6 +2338,13 @@ function AppInner(props: {
       // too. Left set, the request would fire on some later visit and open a
       // Nodes pane nobody asked for then.
       setDiagnoseFor((cur) => (cur === worktreeId ? null : cur));
+      // It is not granted to this client any more, so nothing may re-seed it —
+      // and a reconnect must not ask for it back.
+      setShownId((cur) => (cur === worktreeId ? null : cur));
+      // Nor may a save composed before the release still land: it would be sent
+      // at a version the *claiming* client has not moved yet, be accepted, and
+      // replace the panes this handler just handed over.
+      cancelPendingWrite(worktreeId);
       setLayouts((prev) => {
         const giving = prev[worktreeId];
         if (!giving) return prev;
@@ -1964,17 +2359,13 @@ function AppInner(props: {
       // effect below run *after* the release rather than beside it. Queued even
       // when there was no layout to give up: the claimer is waiting either way,
       // and the answer is "nothing to let go of".
-      if (typeof yieldId === "number") setYieldAcks((q) => [...q, yieldId]);
-    });
-    // **The shell waits for a release only if this is here**, and it learns that
-    // from here rather than from a neighbouring signal — so removing or moving this
-    // effect withdraws the promise with it, and a claim goes back to not waiting
-    // instead of waiting for an acknowledgement nothing will send. Reported after
-    // the listener, withdrawn before it: the safe order in both directions.
-    void shell.yieldsReady?.(true).catch(() => {});
+      setYieldAcks((q) => [...q, ack]);
+    };
     return () => {
-      void shell.yieldsReady?.(false).catch(() => {});
-      off();
+      // Back to a handler that releases nothing, which is what an unmounted app
+      // can honestly promise. The daemon waits out its acknowledgement timeout
+      // and proceeds — the documented fallback.
+      onYield.current = () => {};
     };
   }, [chromeless]);
 
@@ -1989,85 +2380,116 @@ function AppInner(props: {
   useEffect(() => {
     if (yieldAcks.length === 0) return;
     const sent = new Set(yieldAcks);
-    for (const yieldId of sent) {
-      void desktopWindow?.yielded?.(yieldId).catch(() => {});
-    }
+    for (const ack of sent) ack();
     // **Filtered, never cleared.** React flushes a passive effect in a later task
-    // than the commit it belongs to, so an IPC callback can append a yield in
+    // than the commit it belongs to, so a socket frame can append a yield in
     // between — and `setYieldAcks([])` would discard it. That yield is then never
-    // acknowledged at all and its claimer waits out the full `YIELD_ACK_MS` for a
-    // release that has already happened, which is the one thing this channel
-    // exists to avoid. Two review angles found this line independently.
-    setYieldAcks((q) => q.filter((id) => !sent.has(id)));
+    // acknowledged at all and its claimer waits out the full acknowledgement
+    // timeout for a release that has already happened, which is the one thing
+    // this channel exists to avoid. Two review angles found this line
+    // independently.
+    setYieldAcks((q) => q.filter((ack) => !sent.has(ack)));
   }, [yieldAcks]);
 
   /**
-   * Tell the shell what this window is holding, so it knows who to ask.
+   * Tell the daemon what this client is holding, so it knows who to ask.
    *
    * Only a main window: a detached one holds tabs transferred out of a worktree
    * its origin owns, and must never be asked to yield them — they are already
    * where they belong.
    */
   useEffect(() => {
-    if (chromeless || !desktopWindow) return;
-    void desktopWindow.holdsWorktrees(Object.keys(layouts).map(Number)).catch(() => {});
+    if (chromeless) return;
+    channel.holds(Object.keys(layouts).map(Number));
   }, [chromeless, layouts]);
+
+  /**
+   * Tell the *shell* which worktree is on screen, which is a different question.
+   *
+   * The daemon arbitrates ownership; Electron only needs this to route a
+   * cross-window tab drop at a window those tabs belong in — a question about
+   * its own windows, and the one thing it can still answer better than anyone.
+   * A detached window never reports: its worktree is fixed at creation and the
+   * shell reads it from the window record.
+   */
+  useEffect(() => {
+    if (chromeless) return;
+    // The *granted* worktree, not the selected one: a drop routed at a window
+    // that has asked for a worktree but not been given it would put tabs into a
+    // set of panes it is about to stop showing.
+    void desktopWindow?.showsWorktree?.(shownId).catch(() => {});
+  }, [chromeless, shownId]);
+
+  /**
+   * Take a worktree, or the next free one — the single path by which this client
+   * comes to be showing anything.
+   *
+   * Shared by boot and by every reconnect, and that sharing is the point. It was
+   * two code paths, and the second one was wrong in two ways at once: it refused
+   * on one worktree without ever hunting, and it set `claimBlocked` — which
+   * replaces the whole workspace, rail included — for a single refusal. Waking a
+   * laptop whose worktree somebody had opened in a browser meanwhile left the
+   * window with no way back except ⌘K.
+   *
+   * Held in a ref because the socket's handlers are registered once, at boot, and
+   * would otherwise close over the first render's state forever.
+   */
+  const acquireRef = useRef<(preferred: Worktree) => Promise<void>>(async () => {});
+  acquireRef.current = (preferred: Worktree) => {
+    const gen = ++acquireGenRef.current;
+    return acquireWorktree(preferred, {
+      claim: (id, focusHolder) => channel.claim(id, focusHolder),
+      release: (id, seq) => channel.release(id, seq),
+      candidates: () => worktreesRef.current,
+      show: (target) => {
+        grantedRef.current = true;
+        setActiveRepoRoot(target.repo_root);
+        setActiveWtKey(String(target.id));
+        setShownId(target.id);
+        setClaimBlocked(false);
+      },
+      blocked: () => setClaimBlocked(true),
+      // Refused, so this client is not showing it — and `preferred` is the
+      // worktree it *was* showing whenever a reconnect asks for it back.
+      notGranted: (id) => setShownId((cur) => (cur === id ? null : cur)),
+      // **A generation, not a condition about the current state.** The first
+      // attempt asked "is anything shown yet", and that was wrong in a way worth
+      // recording: nothing nulls `shownId` when the *selection* changes without a
+      // claim — switching repo, importing one, creating a worktree — so the
+      // acquire for the new selection cancelled itself before it started, the
+      // worktree was never claimed, and the workspace rendered empty until the
+      // user clicked a rail row. "Has something newer started" is the question,
+      // and only a counter answers it without depending on what that newer thing
+      // has managed to do yet.
+      live: () => acquireGenRef.current === gen,
+    });
+  };
 
   /**
    * Claim the worktree this window resolved to on its own, without a click.
    *
    * `selectWorktree` covers the rail; this covers boot, a restored `?wt=`, and
    * the fallback that lands on the first repo — all of which put a worktree on
-   * screen without anyone choosing it. Without it the first window to open
-   * claims nothing, and the second one is free to show the same worktree.
+   * screen without anyone choosing it.
    *
-   * **Keyed on the selection, never on the worktree list.** `worktrees` gets a new
-   * identity on every 5s poll (`repoList` is replaced, so `repos` → `repo` →
-   * `worktrees` are all new), so having it in the deps re-claimed the same worktree
-   * every five seconds for the life of the window. That was invisible churn while a
-   * claim was synchronous; it stopped being invisible once a claim could be
-   * *superseded*, because the poll's claim then overtook a rail click that was
-   * waiting on a holder and the click was silently dropped. The hunt below reads
-   * the list through a ref, where a five-second-old candidate list is harmless.
+   * **Keyed on the selection, never on the worktree list.** `worktrees` gets a
+   * new identity on every 5s poll, so having it in the deps re-claimed the same
+   * worktree every five seconds for the life of the window — invisible while a
+   * claim was synchronous, and not once a claim could be *superseded*, because
+   * the poll's claim then overtook a rail click that was waiting on a holder.
    */
   useEffect(() => {
-    const shell = desktopWindow;
-    if (chromeless || !shell || !worktree) return;
-    let cancelled = false;
-    void (async () => {
-      const mine = await shell.claimWorktree(worktree.id, false).catch(() => null);
-      // `superseded` is not a refusal to act on: it means a *later* claim from
-      // this window overtook this one while it waited for the previous holders to
-      // let go, and that claim owns the outcome. Reacting to it would hunt for a
-      // free worktree and move the window off one it had just been granted —
-      // `cancelled` does not cover it, because clicking the row that is already
-      // selected supersedes the claim without changing `worktree?.id`.
-      if (cancelled || mine?.ok !== false || mine.reason === "superseded") return;
-      // **Refused, so this window must show something else.** Ignoring the
-      // answer here was the hole that made the whole ownership model a
-      // suggestion: `⌘N` opens on the last-selected worktree by design, which
-      // is the one the window you pressed it in is showing — so the claim was
-      // always refused, always ignored, and the new window rendered the same
-      // panes and took their shells. `selectWorktree` honoured the refusal
-      // because a click has somewhere to stay; a window opening has not.
-      for (const candidate of worktreesRef.current) {
-        if (candidate.id === worktree.id) continue;
-        const free = await shell.claimWorktree(candidate.id, false).catch(() => null);
-        // Same rule inside the hunt: overtaken means stop, not try the next one.
-        if (cancelled || free?.reason === "superseded") return;
-        if (free?.ok) {
-          setActiveRepoRoot(candidate.repo_root);
-          setActiveWtKey(String(candidate.id));
-          return;
-        }
-      }
-      // Every worktree in this repo is already on screen somewhere. Say so
-      // rather than showing a set of panes that belongs to another window.
-      if (!cancelled) setClaimBlocked(true);
-    })();
-    return () => {
-      cancelled = true;
-    };
+    if (chromeless || !worktree) return;
+    // Already granted, so there is nothing to ask for — this effect re-runs on
+    // every selection change, including the one `selectWorktree` has just been
+    // granted, and asking again costs a second round trip plus a second yield
+    // ask to anyone still listing that worktree. A *skip*, not a cancel: it
+    // cannot reproduce the self-cancelling predicate this replaced, because it
+    // never starts an acquire that then refuses to act.
+    if (shownRef.current === worktree.id) return;
+    // No cleanup: a selection change re-runs this effect, and starting a new
+    // acquire is itself what cancels the old one.
+    void acquireRef.current(worktree);
   }, [chromeless, worktree?.id]);
 
   // Cleared as soon as this window is showing something it owns.
@@ -2190,12 +2612,15 @@ function AppInner(props: {
   /**
    * Forget worktrees that no longer exist — everywhere they are recorded.
    *
-   * In memory, so their terminals get collected below. In the shared layout
-   * store, because that write is a *merge*: dropping a worktree from `layouts`
-   * leaves its stored panes untouched. And in the shell's claim map, so no window
-   * goes on reporting a deleted worktree as one it is showing.
+   * In memory, so their terminals get collected below; in the layout store,
+   * because omission is deliberately *not* deletion there (a client that yields
+   * a worktree drops it from `layouts` while its panes go on existing); and in
+   * the daemon's claim registry, so no client goes on being recorded as showing
+   * a worktree that is gone. The daemon's foreign key collects the layout *row*
+   * with the worktree, so that half needs nothing from here; the shell's own
+   * display map is cleared by `showsWorktree` when the selection moves off.
    *
-   * All three matter for the same reason: `worktrees.id` is a plain `INTEGER
+   * They matter for the same reason: `worktrees.id` is a plain `INTEGER
    * PRIMARY KEY`, so SQLite reuses the highest free rowid and the *next* worktree
    * created can arrive wearing a deleted one's id — inheriting its panes, and
    * being greyed out in the rail as "open in another window".
@@ -2219,8 +2644,11 @@ function AppInner(props: {
     setLayouts((prev) =>
       Object.fromEntries(Object.entries(prev).filter(([id]) => alive.has(Number(id)))),
     );
-    forgetWorktreeLayouts(gone);
-    void desktopWindow?.worktreesGone(gone).catch(() => {});
+    // The daemon's foreign key collects the layout row with the worktree, so
+    // this is only about the claim registry and this client's cached versions.
+    for (const id of gone) dropLayout(id);
+    setShownId((cur) => (cur !== null && gone.includes(cur) ? null : cur));
+    channel.forget(gone);
     // `layouts` is a dependency on purpose: the ids to forget come from it, and
     // reading them inside the updater would be too late — React runs that during
     // the next render, not here. Converges, because the run after this one finds
@@ -3044,29 +3472,43 @@ function AppInner(props: {
    * still receives the hover.
    */
   const configVarsNone = worktree?.machine_vars === 0;
-  const configVarsButton = worktree && canRunWorktreeNow(worktree) && (
-    <Tooltip
-      label={
-        configVarsNone
-          ? `${worktreeLabel(worktree)} doesn’t ask you for any values`
-          : `Values for this machine — ${worktreeLabel(worktree)}`
-      }
-    >
-      <span style={{ display: "inline-flex" }}>
-        <ActionIcon
-          size="md"
-          variant="default"
-          aria-label="Values for this machine"
-          disabled={configVarsNone}
-          onClick={() =>
-            setDialog({ kind: "config-vars", project: worktree.path })
-          }
-        >
-          <IconBraces size={14} />
-        </ActionIcon>
-      </span>
-    </Tooltip>
-  );
+  // Hidden when the project asks for nothing and `ui.hideDisabledActions` is on;
+  // otherwise shown, greyed, with the tooltip explaining why. A small badge
+  // appears when this machine has answered at least one of the vars.
+  const configVarsButton =
+    worktree &&
+    canRunWorktreeNow(worktree) &&
+    !(configVarsNone && hideDisabled) && (
+      <Tooltip
+        label={
+          configVarsNone
+            ? `Worktree “${worktreeLabel(worktree)}” doesn’t ask you for any values`
+            : `Values for this machine — worktree “${worktreeLabel(worktree)}”`
+        }
+      >
+        {/* The `<span>` is load-bearing even now the button can be hidden: when
+            hide-disabled is off and the project asks for nothing, the disabled
+            control must still show its *why* — a disabled Mantine control has
+            `pointer-events: none`, so the wrapper is what lets the tooltip open
+            (the #205 trap). `overridden` classes the badge below. */}
+        <span className={`vars-btn${configVarsOverridden ? " overridden" : ""}`}>
+          <ActionIcon
+            size="md"
+            variant="default"
+            aria-label="Values for this machine"
+            disabled={configVarsNone}
+            onClick={() =>
+              setDialog({ kind: "config-vars", project: worktree.path })
+            }
+          >
+            <IconBraces size={14} />
+          </ActionIcon>
+          {configVarsOverridden && (
+            <span className="vars-badge" aria-hidden="true" />
+          )}
+        </span>
+      </Tooltip>
+    );
 
   const themeButton = (
     <Tooltip
@@ -3112,7 +3554,12 @@ function AppInner(props: {
       opened
       project={dialog.project}
       onRetry={dialog.retry}
-      onClose={closeDialog}
+      // Closing re-reads whether any var is now overridden — the dialog is the
+      // only surface that changes that, so it is the only moment worth the read.
+      onClose={() => {
+        closeDialog();
+        setVarsTick((n) => n + 1);
+      }}
     />
   );
 
@@ -3152,29 +3599,49 @@ function AppInner(props: {
   // Shown while the worktree *could* run something, and also whenever a share is
   // live: a repo whose directory has gone missing still has a share to stop, and
   // gating on startability was the one path that hid the only control that ends it.
+  // Disabled when there is nothing to share (no live run to share, and no share
+  // to stop) — the panel would otherwise offer to share a run that is not running.
+  const shareDisabled = !sharingActive && diagRun?.status !== "running";
   const sharingSurface =
-    worktree && (canRunWorktreeNow(worktree) || sharingActive) ? (
-      <Button
-        size="compact-sm"
-        /* Active is a *filled* green button with a broadcast icon, not the same
-           outline with a different word in it. "Sharing" vs "Share" is one character
-           of difference in a bar full of controls, and this is the one state in the
-           app where something of yours is reachable from outside the machine — it
-           should be legible without reading. */
-        variant={sharingActive ? "filled" : "default"}
-        color={sharingActive ? "green" : undefined}
-        leftSection={
-          sharingActive ? <IconBroadcast size={14} /> : <IconShare2 size={14} />
-        }
-        onClick={() => setDialog({ kind: "sharing" })}
-        title={
+    worktree &&
+    (canRunWorktreeNow(worktree) || sharingActive) &&
+    // Same hide-vs-disable rule as the other inapplicable actions: hidden when
+    // `ui.hideDisabledActions` is on, shown greyed (with the reason in its
+    // tooltip) when off.
+    !(shareDisabled && hideDisabled) ? (
+      <Tooltip
+        label={
           sharingActive
             ? "This run is shared right now — open for links, QR codes and connections"
-            : "Share this run privately with a peer, or publish it to the web"
+            : shareDisabled
+              ? "Start the run to share it"
+              : "Share this run privately with a peer, or publish it to the web"
         }
       >
-        {sharingActive ? "Sharing live" : "Share"}
-      </Button>
+        {/* The wrapper lets the tooltip open while the button is disabled — the
+            #205 trap: a disabled ActionIcon has `pointer-events: none`, and the
+            *why* is exactly what a greyed share button needs. */}
+        <span className="bar-hover-slot">
+          <ActionIcon
+            size="md"
+            /* One action, two readings: outline `IconShare2` when nothing is
+               shared, filled green `IconBroadcast` when it is — "on air" is what
+               the icon says, and colour plus fill carry it without a word widening
+               the bar. */
+            variant={sharingActive ? "filled" : "default"}
+            color={sharingActive ? "green" : undefined}
+            disabled={shareDisabled}
+            aria-label={
+              sharingActive
+                ? "Sharing live — open the sharing panel"
+                : "Share this run"
+            }
+            onClick={() => setDialog({ kind: "sharing" })}
+          >
+            {sharingActive ? <IconBroadcast size={14} /> : <IconShare2 size={14} />}
+          </ActionIcon>
+        </span>
+      </Tooltip>
     ) : null;
 
   const sharingDialog = dialog.kind === "sharing" && (
@@ -3224,6 +3691,9 @@ function AppInner(props: {
             onRemoveSession={removeSession}
             quickSwitches={quickSwitches}
             runCtx={runCtx}
+            nodeActions={
+              nodeActionProps ? <NodeActions {...nodeActionProps} /> : null
+            }
           />
         )}
       </div>
@@ -3254,7 +3724,7 @@ function AppInner(props: {
         spinner={spinnerAction(pendingForRun(worktree, run?.name), run)}
         run={run}
         runSelect={
-          worktree && runs.length > 0 ? (
+          worktree && canRunWorktreeNow(worktree) ? (
             <RunSelect
               // Remounts per worktree, which is what actually enforces the
               // "reveal ended runs for this opening only" rule: React reconciles
@@ -3281,8 +3751,19 @@ function AppInner(props: {
                 startWorktree(worktree, anotherNameFor(worktree))
               }
               onSelect={setSelectedRunName}
+              // Disabled when the selector has nothing to offer: fewer than two
+              // runs *and* no other run to start. A single **running** run still
+              // stays enabled when `canStartAnother` — a coding agent's run under
+              // a non-auto name is exactly that case — so "start another run"
+              // (the auto/alias name) stays reachable from the menu.
+              disabled={runs.length < 2 && !canStartAnother(worktree)}
             />
           ) : null
+        }
+        runSelectDisabled={
+          !worktree ||
+          !canRunWorktreeNow(worktree) ||
+          (runs.length < 2 && !canStartAnother(worktree))
         }
         urls={urls}
         sharing={sharingSurface}
@@ -3303,6 +3784,8 @@ function AppInner(props: {
         themeButton={themeButton}
         settingsButton={settingsButton}
         configVarsButton={configVarsButton}
+        nodeActions={nodeActionsButton}
+        hideDisabled={hideDisabled}
       />
 
       {offline && (
@@ -3411,6 +3894,9 @@ function AppInner(props: {
               onRemoveSession={removeSession}
               quickSwitches={quickSwitches}
               runCtx={runCtx}
+              nodeActions={
+                nodeActionProps ? <NodeActions {...nodeActionProps} /> : null
+              }
             />
           )}
         </div>
@@ -3660,6 +4146,9 @@ function RunSelect(props: {
   canStartAnother: boolean;
   onStartAnother: () => void;
   onSelect: (name: string) => void;
+  /** No runs to choose from — the button is shown greyed (or hidden, see
+   *  `ui.hideDisabledActions`) and the menu cannot open. */
+  disabled: boolean;
 }) {
   const { selected, missing } = props;
   /**
@@ -3691,7 +4180,6 @@ function RunSelect(props: {
   // disagree — "1/4" above a two-row list is worse than no counter.
   const siblingAlert = runs.length > 1 && needsAttention(props.siblingStatus);
   const origin = startOriginLabel(selected?.started_from, props.presets);
-  const label = awaiting ?? selected?.name ?? missing ?? "no run";
   const tooltip = [
     awaiting
       ? `Run ${awaiting}: starting…`
@@ -3717,29 +4205,35 @@ function RunSelect(props: {
   return (
     <Menu position="bottom-start" width={300}>
       <Menu.Target>
+        {/* The run's name is deliberately **not** the visible label. The dot
+            answers "is something running, and how", and the `x/x` counter
+            answers "which of several" — both without the name, which is one
+            hover (the `title` above) away. A name here made the control as
+            wide as the longest environment in the worktree and read as if the
+            bar were about that run rather than about the actions on it. The
+            dot is the button's only content, so it centres in a square cell;
+            the counter rides beside it when there is more than one run. */}
         <Button
           size="compact-sm"
           variant="default"
           className="run-select"
           title={tooltip}
-          leftSection={
-            <span
-              // `partial` while awaiting: the same amber a `starting` run gets,
-              // because that is exactly what this is — the daemon simply has not
-              // listed it yet.
-              className={`dot ${awaiting ? "partial" : runStatus(selected)}`}
-              role="img"
-              aria-label={
-                awaiting
-                  ? `Run ${awaiting}: starting`
-                  : selected
-                    ? `Run ${selected.name}: ${props.pending ?? selected.status}`
-                    : "No run selected"
-              }
-            />
-          }
+          disabled={props.disabled}
         >
-          {label}
+          <span
+            // `partial` while awaiting: the same amber a `starting` run gets,
+            // because that is exactly what this is — the daemon simply has not
+            // listed it yet.
+            className={`dot ${awaiting ? "partial" : runStatus(selected)}`}
+            role="img"
+            aria-label={
+              awaiting
+                ? `Run ${awaiting}: starting`
+                : selected
+                  ? `Run ${selected.name}: ${props.pending ?? selected.status}`
+                  : "No run selected"
+            }
+          />
           {/* Hidden while awaiting: `position` indexes the listed runs, and the
               environment being started is not among them yet, so the counter would
               read `dev-2  1/2` with the `1` pointing at a different run. */}
@@ -3828,6 +4322,59 @@ function RunSelect(props: {
   );
 }
 
+/**
+ * The top-bar door to the running run's node actions.
+ *
+ * A menu (the bar's one compact icon) rather than inline buttons: the bar is
+ * the densest row in the app, and node actions belong to the run's nodes, which
+ * may be several. The menu's content is `NodeActions`, the same buttons the
+ * new-pane chooser embeds directly.
+ */
+function NodeActionsButton(props: {
+  run: RunRef | null;
+  nodes: NodeRow[];
+  onChanged: () => void;
+  /** No run to act on — shown greyed (or hidden, see `ui.hideDisabledActions`). */
+  disabled: boolean;
+}) {
+  if (props.disabled) {
+    // The `<span>` is load-bearing: a disabled ActionIcon has `pointer-events:
+    // none`, so the tooltip that explains *why* it is disabled would never open
+    // (the #205 trap). The wrapper still receives the hover.
+    return (
+      <Tooltip label="Start the run to act on its nodes">
+        <span style={{ display: "inline-flex" }}>
+          <ActionIcon size="md" variant="default" aria-label="Node actions" disabled>
+            <IconListDetails size={14} />
+          </ActionIcon>
+        </span>
+      </Tooltip>
+    );
+  }
+  // Enabled implies a run is set (`disabled === !nodeActionProps`), so the guard
+  // below is defensive rather than reachable — it exists to keep the cast-free
+  // path through `NodeActions` rather than a `run as RunRef` that a future
+  // caller could trip.
+  if (!props.run) return null;
+  return (
+    <Menu position="bottom-start" width={280} withinPortal>
+      <Menu.Target>
+        <Tooltip label="Node actions">
+          <ActionIcon size="md" variant="default" aria-label="Node actions">
+            <IconListDetails size={14} />
+          </ActionIcon>
+        </Tooltip>
+      </Menu.Target>
+      <Menu.Dropdown>
+        <Menu.Label>Actions on the running run</Menu.Label>
+        <div className="node-actions-menu">
+          <NodeActions run={props.run} nodes={props.nodes} onChanged={props.onChanged} />
+        </div>
+      </Menu.Dropdown>
+    </Menu>
+  );
+}
+
 function TopBar(props: {
   modeSwitch: React.ReactNode;
   repos: Repo[];
@@ -3844,13 +4391,16 @@ function TopBar(props: {
   spinner: PendingAction | null;
   run: { name: string; status: string } | null;
   /**
-   * The run selector, or `null` when the worktree has no runs at all.
+   * The run selector, or `null` when this worktree has no run controls at all.
    *
    * Built by the app because it needs the worktree's presets and the whole run
    * list. It *replaces* the old status dot — it carries one — so exactly one
    * control in the bar answers "which run, and how is it".
    */
   runSelect: React.ReactNode;
+  /** Whether the run selector has no runs to offer — hidden (or greyed per
+   *  `ui.hideDisabledActions`). */
+  runSelectDisabled: boolean;
   urls: Array<[string, string]>;
   /** The Sharing surface, built by the app (it owns the shares poll). */
   sharing: React.ReactNode;
@@ -3866,9 +4416,37 @@ function TopBar(props: {
   themeButton: React.ReactNode;
   settingsButton: React.ReactNode;
   configVarsButton: React.ReactNode;
+  /** Node actions for the currently-running run, or `null` when none can fire. */
+  nodeActions: React.ReactNode;
+  /** `ui.hideDisabledActions` — hide an inapplicable action, or show it greyed. */
+  hideDisabled: boolean;
 }) {
   const { worktree, run } = props;
   const repoAvailable = props.repo?.available ?? false;
+  const repoLabel = props.repo
+    ? props.repo.available
+      ? props.repo.name
+      : `${props.repo.name} (unavailable)`
+    : "";
+  // Whether the play/stop control can *abort* a start it is in the middle of —
+  // see the button below. Hover-owned so a fresh mount does not replay the
+  // transition, the same reason the mode switch owns its own hover state.
+  const [startHover, setStartHover] = useState(false);
+  // A start in flight: the play/stop button spins red and offers a stop on hover.
+  const starting = props.spinner === "start";
+  // The project selector shrinks to its current name instead of always occupying
+  // its 170px cap. A hidden mirror span is measured rather than a font guess, so
+  // the width tracks the real rendered label; capped at 170 with ellipsis, floored
+  // so a one-char name does not collapse the cell below a usable target.
+  const [projectWidth, setProjectWidth] = useState(170);
+  const projectMeasureRef = useRef<HTMLSpanElement>(null);
+  useEffect(() => {
+    const el = projectMeasureRef.current;
+    if (!el) return;
+    setProjectWidth(
+      Math.min(170, Math.max(64, Math.ceil(el.getBoundingClientRect().width) + 40)),
+    );
+  }, [repoLabel]);
   // No run controls for a repo we can't see on disk — git/veld actions would
   // only fail later with a worse error.
   const canRun = !!worktree?.has_veld_config && repoAvailable;
@@ -3876,24 +4454,32 @@ function TopBar(props: {
     <div className={topbarClass}>
       {props.modeSwitch}
       {props.repos.length > 0 && (
-        <Select
-          title="Switch project"
-          size="xs"
-          w={170}
-          allowDeselect={false}
-          value={props.repo?.root ?? null}
-          onChange={(v) => v && props.onSelectRepo(v)}
-          data={props.repos.map((r) => ({
-            value: r.root,
-            label: r.available ? r.name : `${r.name} (unavailable)`,
-          }))}
-          comboboxProps={{ width: 240, position: "bottom-start" }}
-          /* Not monospace, unlike the start preset beside it: a project's name
-             is a name, where the preset carries a `node:variant` path whose
-             punctuation is worth fixed-width. The dropdown options lost the
-             mono override with the field, so the closed and open states cannot
-             disagree. */
-        />
+        <div className="project-select" title={props.repo ? repoLabel : "Switch project"}>
+          {/* Hidden mirror for `projectWidth` above — measuring it is how the
+              select shrinks to its value rather than always filling 170px. */}
+          <span ref={projectMeasureRef} className="project-select-measure" aria-hidden="true">
+            {props.repo ? repoLabel : ""}
+          </span>
+          <Select
+            title="Switch project"
+            size="xs"
+            w={projectWidth}
+            className="project-select-control"
+            allowDeselect={false}
+            value={props.repo?.root ?? null}
+            onChange={(v) => v && props.onSelectRepo(v)}
+            data={props.repos.map((r) => ({
+              value: r.root,
+              label: r.available ? r.name : `${r.name} (unavailable)`,
+            }))}
+            comboboxProps={{ width: 240, position: "bottom-start" }}
+            /* Not monospace, unlike the start preset beside it: a project's name
+               is a name, where the preset carries a `node:variant` path whose
+               punctuation is worth fixed-width. The dropdown options lost the
+               mono override with the field, so the closed and open states cannot
+               disagree. */
+          />
+        </div>
       )}
       <Menu position="bottom-start" width={200}>
         <Menu.Target>
@@ -3922,6 +4508,11 @@ function TopBar(props: {
         <>
           <div className="sep" />
           {canRun && props.startConfig}
+          {/* The runs button sits between the preset picker and the start control
+              — the bar reads "what I'll run, which run, run it". Disabled (or
+              hidden, per `ui.hideDisabledActions`) when the worktree has no runs
+              to choose from. */}
+          {(!props.hideDisabled || !props.runSelectDisabled) && props.runSelect}
           {canRun && (
             <>
               {/* The spinner belongs on the button that was pressed. Putting
@@ -3932,53 +4523,79 @@ function TopBar(props: {
                   unmistakable at the instant it is clicked, not one hover away. */}
               <Tooltip
                 label={
-                  props.running
-                    ? `Stop ${props.run?.name ?? "run"}`
-                    : "Start run"
+                  starting
+                    ? "Starting… click to abort"
+                    : props.running
+                      ? `Stop ${props.run?.name ?? "run"}`
+                      : "Start run"
                 }
               >
-                <ActionIcon
-                  size="md"
-                  variant="light"
-                  color={props.running ? "red" : "green"}
-                  // `spinner`, not `pending`: the rail's row control spins for a
-                  // transition it merely *observed* (one started from the CLI or
-                  // another window), and this button showing a static glyph for
-                  // the same worktree at the same moment is two surfaces
-                  // disagreeing about whether anything is happening.
-                  //
-                  // Still filtered to start/stop rather than truthiness, which is
-                  // what keeps the comment above true: a locally-fired restart
-                  // spins the restart button alone. An externally-fired one is
-                  // indistinguishable from a stop-then-start on the wire, so it
-                  // legitimately lands here instead.
-                  loading={props.spinner === "start" || props.spinner === "stop"}
-                  disabled={
-                    props.pending !== null ||
-                    (!props.running && !props.canStart)
-                  }
-                  onClick={props.running ? props.onStop : props.onStart}
+                {/* The pointer listeners sit on a wrapper, not the ActionIcon:
+                    Mantine's Tooltip merges child handlers through floating-ui,
+                    and the `starting` swap needs them even while the loader shows.
+                    The wrapper is what makes a *starting* run's stop-on-hover
+                    reachable without the button being enabled at rest. */}
+                <span
+                  className="bar-hover-slot"
+                  onMouseEnter={() => setStartHover(true)}
+                  onMouseLeave={() => setStartHover(false)}
                 >
-                  {props.running ? (
-                    <IconPlayerStopFilled size={13} />
-                  ) : (
-                    <IconPlayerPlayFilled size={13} />
-                  )}
-                </ActionIcon>
+                  <ActionIcon
+                    size="md"
+                    variant="light"
+                    color={starting ? "red" : props.running ? "red" : "green"}
+                    // `spinner`, not `pending`: the rail's row control spins for a
+                    // transition it merely *observed* (one started from the CLI or
+                    // another window), and this button showing a static glyph for
+                    // the same worktree at the same moment is two surfaces
+                    // disagreeing about whether anything is happening.
+                    //
+                    // Still filtered to start/stop rather than truthiness, which is
+                    // what keeps the comment above true: a locally-fired restart
+                    // spins the restart button alone. An externally-fired one is
+                    // indistinguishable from a stop-then-start on the wire, so it
+                    // legitimately lands here instead.
+                    //
+                    // A *starting* run spins red and, on hover, offers a stop — so
+                    // while a start is in flight this control is deliberately NOT
+                    // disabled: the hover swap replaces the loader with a stop
+                    // glyph, and clicking it aborts the start.
+                    loading={
+                      (props.spinner === "start" || props.spinner === "stop") &&
+                      !(starting && startHover)
+                    }
+                    disabled={
+                      (props.pending !== null && !starting) ||
+                      (!props.running && !props.canStart && !starting)
+                    }
+                    onClick={props.running || starting ? props.onStop : props.onStart}
+                  >
+                    {starting && startHover ? (
+                      <IconX size={14} />
+                    ) : props.running ? (
+                      <IconPlayerStopFilled size={13} />
+                    ) : (
+                      <IconPlayerPlayFilled size={13} />
+                    )}
+                  </ActionIcon>
+                </span>
               </Tooltip>
-              <Tooltip
-                label={`Restart ${props.run?.name ?? "run"}`}
-              >
-                <ActionIcon
-                  size="md"
-                  variant="default"
-                  loading={props.pending === "restart"}
-                  disabled={!props.running || props.pending !== null}
-                  onClick={props.onRestart}
-                >
-                  <IconRefresh size={13} />
-                </ActionIcon>
-              </Tooltip>
+              {/* A restart only makes sense while something is live. Hidden (or,
+                  with `ui.hideDisabledActions` off, shown greyed) when nothing
+                  is — a refresh glyph beside a stopped ▶ reads as a second start. */}
+              {(!props.hideDisabled || props.running) && (
+                <Tooltip label={`Restart ${props.run?.name ?? "run"}`}>
+                  <ActionIcon
+                    size="md"
+                    variant="default"
+                    loading={props.pending === "restart"}
+                    disabled={!props.running || props.pending !== null}
+                    onClick={props.onRestart}
+                  >
+                    <IconRefresh size={13} />
+                  </ActionIcon>
+                </Tooltip>
+              )}
               {/* Beside the start controls, not over with search/settings/theme.
                   The bar has two clusters — what this *project* does on the left,
                   what the *app* does on the right — and a machine var is squarely
@@ -3987,33 +4604,32 @@ function TopBar(props: {
                   settings gear, which is the exact confusion the `{}` glyph was
                   chosen to avoid. */}
               {props.configVarsButton}
-              {/* Status is a dot, not a word: the text was long enough to be
-                  clipped in a crowded bar, and it duplicated what the
-                  start/stop icon already says. The dot now rides on the run
-                  selector, so the same glyph also says *which* run it describes —
-                  a worktree can hold several, and a dot with no name attached was
-                  read as belonging to whatever the control beside it named.
-
-                  No fallback for a missing selector: it is absent only when the
-                  worktree has no runs at all, and then there is no status to
-                  report. A standalone dot kept "just in case" was unreachable code
-                  that read as a live path. */}
-              {props.runSelect}
-              {run && (
+              {/* The running run's node actions, one click from the surface that
+                  is always up — see shared/NodeActions.tsx. Hidden when nothing
+                  can fire and `ui.hideDisabledActions` is on; shown greyed with a
+                  reason when off. */}
+              {props.nodeActions}
+              {run && (props.hideDisabled ? props.urls.length > 0 : true) && (
                 // Opens a browser pane on the run's URLs, not an overlay of its
                 // own: the URLs live in whichever pane is about to need them, and
                 // a modal listing them was a second, inconsistent surface that
                 // also covered the panes it was talking about.
-                <Button
-                  size="compact-sm"
-                  variant="default"
-                  leftSection={<IconWorld size={14} />}
-                  onClick={props.onShowVeldLinks}
-                  disabled={!props.onShowVeldLinks}
-                  title={`Open the run's URLs in a pane`}
-                >
-                  {props.urls.length}
-                </Button>
+                //
+                // Icon-only: the count used to sit in the button, but it changed
+                // the bar's width every time the run gained a URL, and the bar is
+                // the densest row in the app. The URLs themselves are one click
+                // away, and the tooltip names what they open.
+                <Tooltip label="Open the run's URLs in a pane">
+                  <ActionIcon
+                    size="md"
+                    variant="default"
+                    aria-label="Open the run's URLs in a pane"
+                    disabled={!props.onShowVeldLinks || props.urls.length === 0}
+                    onClick={props.onShowVeldLinks}
+                  >
+                    <IconWorld size={14} />
+                  </ActionIcon>
+                </Tooltip>
               )}
               {props.sharing}
             </>

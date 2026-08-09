@@ -18,6 +18,29 @@ pub struct Response {
     pub error: Option<String>,
 }
 
+/// A dispatched request's outcome: the reply to send, plus whether the helper
+/// must exit once that reply is actually on the wire.
+///
+/// The flag exists to make an ordering structural instead of a timing bet.
+/// Signalling the exit from inside a command handler races the socket write that
+/// carries its reply — the process can be gone before the bytes leave — and the
+/// caller then cannot tell "restarting" apart from "the helper died". Deciding
+/// here and exiting in the connection loop, after the flush, removes the race.
+pub struct Handled {
+    pub response: Response,
+    pub exit_after_reply: bool,
+}
+
+impl Handled {
+    /// The ordinary case: reply and keep running.
+    pub fn reply(response: Response) -> Self {
+        Self {
+            response,
+            exit_after_reply: false,
+        }
+    }
+}
+
 impl Response {
     pub fn ok() -> Self {
         Self {

@@ -225,6 +225,7 @@ pub enum SettingKey {
     BrowserQuickSwitchResponsive,
     BrowserQuickSwitchColorScheme,
     BrowserExternalOrigins,
+    UiHideDisabledActions,
     Unknown(String),
 }
 
@@ -256,6 +257,7 @@ impl SettingKey {
         Self::BrowserQuickSwitchResponsive,
         Self::BrowserQuickSwitchColorScheme,
         Self::BrowserExternalOrigins,
+        Self::UiHideDisabledActions,
     ];
 
     pub fn as_str(&self) -> &str {
@@ -276,6 +278,7 @@ impl SettingKey {
             Self::BrowserQuickSwitchResponsive => "browser.quickSwitch.responsive",
             Self::BrowserQuickSwitchColorScheme => "browser.quickSwitch.colorScheme",
             Self::BrowserExternalOrigins => "browser.externalOrigins",
+            Self::UiHideDisabledActions => "ui.hideDisabledActions",
             Self::Unknown(k) => k,
         }
     }
@@ -298,6 +301,7 @@ impl SettingKey {
             "browser.quickSwitch.responsive" => Self::BrowserQuickSwitchResponsive,
             "browser.quickSwitch.colorScheme" => Self::BrowserQuickSwitchColorScheme,
             "browser.externalOrigins" => Self::BrowserExternalOrigins,
+            "ui.hideDisabledActions" => Self::UiHideDisabledActions,
             other => Self::Unknown(other.to_string()),
         }
     }
@@ -349,7 +353,8 @@ impl SettingKey {
             | Self::TerminalOpenUrlsInApp
             | Self::TerminalInterceptSystemOpen
             | Self::BrowserQuickSwitchResponsive
-            | Self::BrowserQuickSwitchColorScheme => Value::from(value.as_bool().ok_or_else(bad)?),
+            | Self::BrowserQuickSwitchColorScheme
+            | Self::UiHideDisabledActions => Value::from(value.as_bool().ok_or_else(bad)?),
             // The one list-valued setting, and the one whose entries are checked
             // by a parser that lives elsewhere: `veld_core::ide::parse_origin` is
             // what `ide.externalOrigins` in a project config goes through, and the
@@ -523,6 +528,15 @@ pub fn defaults() -> BTreeMap<String, Value> {
             SettingKey::LogsTimeZone,
             Value::from(LogTimeZone::default().as_str()),
         ),
+        // Hide a top-bar action that is currently inapplicable (restart with no
+        // live run, the machine-vars button for a project that asks for nothing, a
+        // URLs button with nothing to open) rather than showing it greyed out. The
+        // alternative — keep every button, disable the ones that cannot fire — is
+        // the value a user who wants a stable bar picks, so the default is the
+        // other one: the bar is the densest row in the app, and an icon that does
+        // nothing still has to be read before it is dismissed. This is a rendering
+        // choice only; nothing the daemon enforces reads it.
+        (SettingKey::UiHideDisabledActions, Value::from(true)),
     ]
     .into_iter()
     .map(|(k, v)| (k.as_str().to_string(), v))

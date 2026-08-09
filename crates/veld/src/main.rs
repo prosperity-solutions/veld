@@ -492,6 +492,16 @@ enum Command {
         /// password prompt is only reclaimed after 30 minutes without this.
         #[arg(long)]
         force: bool,
+
+        /// Show the install script's own output instead of veld's summary.
+        ///
+        /// The update normally narrates its own steps and runs the installer
+        /// quietly, because the two of them talking at once produced three
+        /// "installed successfully!" banners and a first-install footer in the
+        /// middle of an update. This is the escape hatch for debugging one: the
+        /// raw stream, every URL and checksum, exactly as the script emits it.
+        #[arg(long)]
+        verbose: bool,
     },
 
     /// Install, update or inspect Veld Desktop (macOS app).
@@ -1014,12 +1024,21 @@ async fn main() {
             status,
             json,
             force,
+            verbose,
         } => {
             if status {
                 commands::update::status(json)
             } else {
-                commands::update::run(wait_pid, relaunch, app_path, target_version, console, force)
-                    .await
+                commands::update::run(
+                    wait_pid,
+                    relaunch,
+                    app_path,
+                    target_version,
+                    console,
+                    force,
+                    verbose,
+                )
+                .await
             }
         }
 

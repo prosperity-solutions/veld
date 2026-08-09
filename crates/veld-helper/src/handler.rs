@@ -3,7 +3,7 @@ use tracing::{info, warn};
 
 use crate::caddy::CaddyManager;
 use crate::dns::{self, DnsManager};
-use crate::protocol::{Request, Response};
+use crate::protocol::{Handled, Request, Response};
 
 /// Shared state for all connection handlers.
 pub struct State {
@@ -55,14 +55,27 @@ impl State {
         }
     }
 
-    /// Parse and dispatch a single JSON request line, returning a `Response`.
-    pub async fn handle_request(&self, line: &str) -> Response {
+    /// Parse and dispatch a single JSON request line.
+    pub async fn handle_request(&self, line: &str) -> Handled {
         let request: Request = match serde_json::from_str(line) {
             Ok(r) => r,
-            Err(e) => return Response::err(format!("invalid request JSON: {e}")),
+            Err(e) => return Handled::reply(Response::err(format!("invalid request JSON: {e}"))),
         };
 
-        match request.command.as_str() {
+        // Both exiting commands are handled ahead of the table, because their
+        // replies must be flushed before the process goes away and the table's
+        // arms all return a plain `Response`.
+        if request.command == veld_core::helper::RESTART {
+            return self.handle_restart().await;
+        }
+
+        // The other one: `shutdown` ends the process too, and additionally stops
+        // Caddy on the way out.
+        if request.command == "shutdown" {
+            return self.handle_shutdown().await;
+        }
+
+        Handled::reply(match request.command.as_str() {
             "add_host" => self.handle_add_host(&request.args).await,
             "remove_host" => self.handle_remove_host(&request.args).await,
             "add_route" => self.handle_add_route(&request.args).await,
@@ -73,12 +86,39 @@ impl State {
             "caddy_stop" => self.handle_caddy_stop().await,
             "caddy_reload" => self.handle_caddy_reload().await,
             "status" => self.handle_status().await,
-            "shutdown" => self.handle_shutdown().await,
             other => {
                 warn!(command = other, "unknown command");
                 Response::err(format!("unknown command: {other}"))
             }
+        })
+    }
+
+    /// Exit so the service manager relaunches us onto the binary now on disk,
+    /// leaving Caddy running so every live URL stays up across the swap.
+    ///
+    /// This is what `veld update` calls instead of waiting out the binary
+    /// watcher's poll. The difference that matters is not speed: the CLI *knows*
+    /// when the installer finished writing, where the watcher can only infer it
+    /// from a settling size/mtime — an inference that has lost the race against
+    /// the installer's own multi-step write in the field. Same safety gate as
+    /// the watcher ([`crate::restart_blocker`]), so neither path can exit into a
+    /// hole the other refuses.
+    async fn handle_restart(&self) -> Handled {
+        if let Some(reason) = crate::restart_blocker().await {
+            warn!(reason, "refusing restart request");
+            return Handled::reply(Response::err(reason));
         }
+        info!("restart requested — exiting so the service manager relaunches the new binary");
+        Handled {
+            response: Response::ok(),
+            exit_after_reply: true,
+        }
+    }
+
+    /// Signal the accept loop to exit. Caddy is deliberately left running — see
+    /// [`Self::handle_restart`].
+    pub fn signal_exit(&self) {
+        let _ = self.shutdown_tx.send(true);
     }
 
     async fn handle_add_host(&self, args: &Value) -> Response {
@@ -243,13 +283,24 @@ impl State {
         }))
     }
 
-    async fn handle_shutdown(&self) -> Response {
+    /// Stop Caddy and exit. Unlike [`Self::handle_restart`] this takes the URLs
+    /// down with it, which is why an update does not use it.
+    ///
+    /// Routed through `exit_after_reply` rather than signalling inline: it had the
+    /// same write-vs-exit race `restart` was built to avoid — the process could be
+    /// gone before its own `{"ok":true}` left the socket, so a caller saw a dropped
+    /// connection and could not tell "shutting down" from "died". Leaving one of the
+    /// two exiting commands on the old path would also have been a trap for whoever
+    /// adds the third.
+    async fn handle_shutdown(&self) -> Handled {
         info!("shutdown command received, stopping caddy and signalling exit");
         if let Err(e) = self.caddy.stop().await {
             warn!("error stopping caddy during shutdown: {e:#}");
         }
-        let _ = self.shutdown_tx.send(true);
-        Response::ok()
+        Handled {
+            response: Response::ok(),
+            exit_after_reply: true,
+        }
     }
 }
 
