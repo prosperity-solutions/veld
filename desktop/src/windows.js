@@ -857,6 +857,19 @@ function openWindow(options = {}) {
   win.on("move", persistWindows);
   win.on("resize", persistWindows);
 
+  // Full screen is main-process knowledge: macOS moves the traffic lights out of
+  // the content area, and the page's top bar has to give back the inset it holds
+  // for them. Nothing in the DOM can see this — `:fullscreen` is the element API
+  // and `display-mode: fullscreen` does not match an Electron window — so the
+  // shell is the only thing that can tell it. The page reads the state it booted
+  // into over `veld:window:fullscreen` (below) and hears about changes here.
+  const sendFullScreen = (fullScreen) => {
+    if (win.isDestroyed()) return;
+    win.webContents.send("veld:window:fullscreen", { fullScreen });
+  };
+  win.on("enter-full-screen", () => sendFullScreen(true));
+  win.on("leave-full-screen", () => sendFullScreen(false));
+
   win.on("close", () => {
     // **Nothing may be given to this window from here on.** `handBack` below drains
     // its queue, while the record stays alive and matchable until `closed` — so a
@@ -1190,6 +1203,24 @@ function registerWindowIpc(ipcMain) {
   ipcMain.on("veld:window:seed", (event) => {
     const win = BrowserWindow.fromWebContents(event.sender);
     event.returnValue = recordFor(win)?.seed ?? null;
+  });
+
+  /**
+   * Whether this window is in native full screen *right now*.
+   *
+   * Synchronous, and read from the preload, for the same reason the seed is: it
+   * has to be true in the renderer's first paint. The top bar reserves 90px for
+   * the traffic lights, full screen takes those lights away, and an answer
+   * arriving a tick later means every reload in full screen — and every full
+   * screen the app is *relaunched* into — flashes an empty gutter before the bar
+   * snaps left.
+   *
+   * Resolved from `event.sender` alone, like the seed: `event.senderFrame` is not
+   * reliably populated at preload time, and only the main frame gets a preload.
+   */
+  ipcMain.on("veld:window:fullscreen", (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender);
+    event.returnValue = win && !win.isDestroyed() ? win.isFullScreen() : false;
   });
 
   /**

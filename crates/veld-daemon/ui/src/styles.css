@@ -242,18 +242,29 @@ select:focus {
  * `TOPBAR_HEIGHT` in `desktop/src/main.js` mirrors this height and centers the
  * traffic lights against it — change one and change the other, or the OS-drawn
  * buttons sit off the bar's own controls. The inset is what clears those
- * buttons: `windows.js` puts the leftmost at x=13, and three 12px lights on
- * macOS's 20px pitch end at 65px, so 78 leaves them on the right the same 13px
- * they get on their left. That is the lights' own metric, not the bar's — the
- * bar uses 10px of padding and 9px between controls, so retuning those is not a
- * reason to move this. */
+ * buttons: `windows.js` puts the leftmost at x=13, and three 14px lights on
+ * macOS 26's 23px pitch end at 73px (see `TRAFFIC_LIGHT_SIZE` for where those
+ * two numbers were measured). 90 leaves 17px after them — more than the 13px
+ * they get on their left and clearly more than the 9px between the bar's own
+ * controls, so the OS buttons read as their own group rather than as the first
+ * item of ours. That is the lights' metric, not the bar's: retuning the bar's
+ * padding or gap is not a reason to move this. */
 .topbar.electron {
   height: 40px;
-  padding-left: 78px; /* traffic-light inset */
+  padding-left: 90px; /* traffic-light inset */
   -webkit-app-region: drag;
 }
 .topbar.electron > * {
   -webkit-app-region: no-drag;
+}
+/* Full screen: macOS takes the traffic lights out of the content area entirely
+   (they live in the menu-bar overlay that drops down), so the inset above is
+   90px of dead space at the left of the densest row in the app. The flag is set
+   on <body> by `watchFullScreen` in shell.ts — main-process state, since a page
+   cannot see native full screen: `:fullscreen` is about the *element* API, and
+   `display-mode: fullscreen` never matches an Electron window. */
+body[data-fullscreen="true"] .topbar.electron {
+  padding-left: 10px;
 }
 
 /* One control height for the whole bar.

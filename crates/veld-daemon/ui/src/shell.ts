@@ -166,6 +166,11 @@ export interface DesktopWindowApi {
     reason?: string | null;
     accepted?: string[];
   }>;
+  /** Native full screen when the page started. Optional: an older shell has no
+   *  such field, and `undefined` reads as the windowed state it always had. */
+  fullScreen?: boolean;
+  /** …and every change to it. Optional for the same reason. */
+  onFullScreen?(fn: (p: { fullScreen: boolean }) => void): () => void;
   snapshot(payload: TabTransfer): Promise<boolean>;
   setTitle(title: string): Promise<boolean>;
   close(): Promise<boolean>;
@@ -178,6 +183,27 @@ export interface DesktopWindowApi {
 
 export const desktopWindow: DesktopWindowApi | null =
   (window as { veldDesktop?: { window?: DesktopWindowApi } }).veldDesktop?.window ?? null;
+
+/**
+ * Mirror the window's native full-screen state onto `<body data-fullscreen>`.
+ *
+ * On the body rather than in React state because the thing that reads it is one
+ * CSS rule (`.topbar.electron`'s traffic-light inset) and there are two top bars
+ * in two modes, neither of which owns the window. `data-fullscreen` sits beside
+ * `data-theme`, which is set the same way for the same reason.
+ *
+ * Called once at boot from `main.tsx`, and nothing unsubscribes: the state is
+ * the window's, so the subscription is meant to live as long as the page. The
+ * unsubscribe is returned anyway rather than swallowed — a caller that ever does
+ * need to detach should not have to change this function to do it.
+ */
+export function watchFullScreen(): () => void {
+  const apply = (fullScreen: boolean) => {
+    document.body.dataset.fullscreen = String(fullScreen);
+  };
+  apply(desktopWindow?.fullScreen === true);
+  return desktopWindow?.onFullScreen?.((p) => apply(p?.fullScreen === true)) ?? (() => {});
+}
 
 /** App-level surfaces the Electron main process drives. */
 export interface DesktopAppApi {

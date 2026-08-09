@@ -126,7 +126,12 @@ requests at runtime — branding rule.
   is on screen (runs mode does its own). Push/SSE is a later increment.
 - Detects the Electron shell via a `?shell=electron` query param to render the
   native-title-bar layout (drag region, traffic-light inset padding) instead of
-  the browser-build header row.
+  the browser-build header row. In native full screen macOS moves the traffic
+  lights out of the content area, so the shell mirrors that state onto
+  `<body data-fullscreen>` (preload `window.fullScreen` + `onFullScreen`,
+  applied by `watchFullScreen` in `shell.ts`) and the bar drops the inset. No
+  CSS can detect it: `:fullscreen` is the element API and
+  `display-mode: fullscreen` never matches an Electron window.
 - The v1 dashboard at `/` is untouched until the runs-mode rebuild reaches
   parity and takes it over.
 
@@ -1029,9 +1034,14 @@ organisation — stored *on the row* so nothing points at a worktree, which is w
 makes reused rowids harmless), plus `trashed_at` and `trash_error` (the trash).
 `trashed_at` is a timestamp rather than a flag because it is also the **retention
 clock**: the checkout stays on disk until `worktree.trashRetentionDays` elapses from
-it, or until the user deletes it explicitly. The row is both the record of intent and
-the work queue, so a daemon that dies mid-deletion recovers by re-reading trashed
-rows at boot.
+it, or until the user deletes it explicitly. The row records the bin and nothing more
+— it is deliberately *not* also the work queue, because at boot "in the bin" and
+"queued for removal" are indistinguishable on the row, and a daemon that resumed every
+trashed row deleted the whole trash on every restart. What a restart *does* re-run is
+the retention sweep, so nothing depends on the daemon having been up when a period
+expired. A removal interrupted by the daemon going away is not resumed: git deletes a
+checkout in readdir order and leaves no reliable trace of a half-finished removal, so
+there is nothing honest to detect, and the worktree simply stays in the bin.
 
 Migrations v5 + v6 (`crates/veld-core/src/db/mod.rs`, `user_version` 4 → 6):
 
