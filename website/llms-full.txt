@@ -23,7 +23,7 @@ This detects your OS and architecture, downloads the latest release, and install
 
 No sudo required. Ensure `~/.local/bin` is on your `PATH`.
 
-**Upgrading from an older veld:** `veld.json` must declare `"schemaVersion": "3"`; `"1"` and `"2"` no longer load. The load error names every change needed. See `docs/migrating-to-v3.md` for the complete rule set, then `veld lint` to verify.
+**Upgrading from an older veld:** `veld.json` must declare `"schemaVersion": "3"`; `"1"` and `"2"` no longer load. The load error names every change needed. See `docs/migrating-to-v3.md` for the complete rule set, then `veld lint` to verify. There is no v4: what v3 gained after shipping (`long_running`, port-less long-running nodes, `protocol`/`host` on a named port, the `settle` probe, per-port sharing consent) is additive, and `docs/adopting-long-running-and-ports.md` covers adopting it.
 
 Setup is optional — commands auto-bootstrap on first use with HTTPS on port 18443.
 For the full experience with clean URLs (no port numbers), run the one-time privileged setup:

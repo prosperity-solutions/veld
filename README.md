@@ -228,6 +228,8 @@ A node's `type` describes its **lifecycle only** — whether it runs to completi
 - `${veld.port}` is the primary — the port named `http`, the sole entry marked `"protocol": "http"`, or the sole entry when it states no protocol. Several ports with none of those is `ambiguous-primary-port`, a `veld lint` error rather than a guess.
 - A port entry also carries its own `share` opt-in — see [Sharing](#sharing). Consent is per port, because a node that serves an app, an ops console and a database must be able to expose one of them without exposing all three.
 
+All of this is additive within `schemaVersion: "3"` — there is no v4 and nothing to rewrite. [docs/adopting-long-running-and-ports.md](docs/adopting-long-running-and-ports.md) is the page to hand a coding agent if you want to adopt it, and it ends with the three behaviour changes that can move under a config you never touch.
+
 ### Setup & teardown
 
 Project-level lifecycle steps that run outside the dependency graph. Setup steps run sequentially before any node starts; teardown steps run after all nodes stop.

@@ -146,6 +146,10 @@ header{position:relative}
 .svc-table .svc-node{font-family:var(--mono);font-weight:500;white-space:nowrap}
 .svc-table .svc-url a{color:var(--blue)}
 .svc-table .svc-url a:hover{text-decoration:underline}
+.svc-table .svc-url div+div{margin-top:2px}
+.svc-table .svc-port-name{color:var(--text2);font-size:10px}
+.svc-table .svc-addr{font-family:var(--mono);color:var(--text2)}
+.svc-table .svc-proto{font-size:9px;text-transform:uppercase;letter-spacing:.04em;color:var(--text2);border:1px solid var(--border);border-radius:3px;padding:0 3px}
 .svc-table .svc-url-btns{white-space:nowrap}
 .svc-table .svc-url-btns button{background:none;border:none;color:var(--text2);font-size:11px;padding:2px 5px;cursor:pointer;border-radius:3px}
 .svc-table .svc-url-btns button:hover{color:var(--blue);background:rgba(108,140,255,.06)}
@@ -495,8 +499,29 @@ function render(data){
         h+='<table class="svc-table"><thead><tr><th>Node</th><th>URL</th><th></th><th>Variant</th><th>PID</th><th>Resources</th></tr></thead><tbody>';
         for(const n of nodes){
           const url=n.url||'';
+          // Every port the node serves, primary first. A daemon that predates
+          // per-port endpoints sends only `url`, which is the single primary
+          // entry it has always been. A raw (tcp) port has no `url`: it is shown
+          // as its address and never as a link, because nothing routes it.
+          const eps=(Array.isArray(n.endpoints)&&n.endpoints.length)?n.endpoints
+            :(url?[{name:'http',hostname:url,url:url,port:0,primary:true}]:[]);
+          const labelled=eps.length>1;
           h+='<tr><td class="svc-node">'+esc(n.name)+'<span class="health-dot '+esc(n.status)+'" title="'+esc(n.status)+'"></span></td>';
-          h+='<td class="svc-url">'+(url?'<a href="'+esc(url)+'" target="_blank" rel="noopener">'+esc(shortUrl(url))+'</a>':'<span style="color:var(--dim)">&ndash;</span>')+'</td>';
+          h+='<td class="svc-url">';
+          if(!eps.length){
+            h+='<span style="color:var(--dim)">&ndash;</span>';
+          }else{
+            for(const e of eps){
+              const tag=labelled?'<span class="svc-port-name">'+esc(e.name)+'</span> ':'';
+              if(e.url){
+                h+='<div>'+tag+'<a href="'+esc(e.url)+'" target="_blank" rel="noopener">'+esc(shortUrl(e.url))+'</a></div>';
+              }else{
+                const addr=e.port>0?(e.hostname+':'+e.port):e.hostname;
+                h+='<div>'+tag+'<span class="svc-addr" title="Raw TCP port — not reachable over HTTP">'+esc(addr)+'</span> <span class="svc-proto">tcp</span></div>';
+              }
+            }
+          }
+          h+='</td>';
           h+='<td class="svc-url-btns">';
           if(url){
             h+='<button data-action="copy-url" data-url="'+esc(url)+'">Copy</button>';

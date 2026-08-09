@@ -136,6 +136,12 @@ Supporting two readings was tried and abandoned: every rule then needed a severi
 that depended on the document's version, and every new field was silently live in an
 old document that had never opted into it. One reading is the feature.
 
+**There is no v4.** What v3 has gained since it shipped — `long_running`,
+port-less long-running nodes, `protocol`/`host` on a named port, the `settle`
+probe, per-port sharing consent — is all additive, and
+[docs/adopting-long-running-and-ports.md](adopting-long-running-and-ports.md) is
+the one page that covers adopting it.
+
 A document containing `command` fails to load, with a message naming every offending
 position.
 

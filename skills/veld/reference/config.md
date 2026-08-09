@@ -67,6 +67,11 @@ optional in every file, so an included file is just `{ "nodes": { … } }`.
 There is no converter — apply the rules in `docs/migrating-to-v3.md` yourself and
 run `veld lint`. The `command` key is replaced by `argv`/`shell`.
 
+There is no `"4"` either. `long_running`, `"ports": null`, `protocol`/`host` on a
+named port, the `settle` probe and per-port `share` were all added *within* `"3"`;
+`docs/adopting-long-running-and-ports.md` covers adopting them and the behaviour
+changes that come with them.
+
 ## Running something: `argv` or `shell`
 
 Two keys, exactly one of them, **everywhere** Veld runs something — a variant,
