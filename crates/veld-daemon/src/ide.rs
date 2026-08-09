@@ -163,6 +163,23 @@ async fn get_layout(Path(worktree_id): Path<i64>) -> Result<Json<LayoutResponse>
     }))
 }
 
+/// Turn a failed layout write into a status.
+///
+/// **Only the foreign key is a 404.** Everything else — a locked database, a
+/// full disk, a poisoned mutex — is this daemon's problem, and reporting it as
+/// "worktree not found" made a machine whose database had stopped accepting
+/// writes indistinguishable from a client racing a deletion, at `debug!` level,
+/// while the client's own save path swallows the error. Layouts would simply
+/// stop persisting with nothing said anywhere.
+fn layout_write_error(e: veld_core::db::DbError) -> ApiError {
+    if e.is_constraint_violation() {
+        debug!("layout write refused: no such worktree ({e})");
+        return err(StatusCode::NOT_FOUND, "worktree not found");
+    }
+    warn!("layout write: database error: {e}");
+    err(StatusCode::INTERNAL_SERVER_ERROR, "database error")
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PutLayoutRequest {
@@ -191,31 +208,35 @@ async fn put_layout(
     let db = open_db().map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "database error"))?;
 
     // A worktree with no panes left has no row, so the next client to open it
-    // seeds a default instead of restoring an empty screen. Unversioned on
-    // purpose: the only caller is a client that has just closed the last pane,
-    // and it holds the worktree to be able to do that.
+    // seeds a default instead of restoring an empty screen.
+    //
+    // **Versioned like any other write**, which it was not at first and that was
+    // a hole rather than a shortcut: a delete that ignores the version lets the
+    // client that just let a worktree go — or one running off a stale poll —
+    // erase the panes of the client that now holds it, which then sees them
+    // unmount as it adopts the `null`. There is no reason for the destructive
+    // write to be the one that skips the check the others pass.
     let Some(layout) = body.layout else {
-        db.delete_pane_layout(worktree_id).map_err(|e| {
-            warn!("layout delete: database error: {e}");
-            err(StatusCode::INTERNAL_SERVER_ERROR, "database error")
-        })?;
-        broadcast_layout(worktree_id, 0, body.client_id.as_deref());
-        return Ok(Json(LayoutResponse {
-            version: 0,
-            layout: None,
-        }));
+        let outcome = db
+            .delete_pane_layout(worktree_id, body.version)
+            .map_err(layout_write_error)?;
+        return match outcome {
+            LayoutWrite::Stored(_) => {
+                broadcast_layout(worktree_id, 0, body.client_id.as_deref());
+                Ok(Json(LayoutResponse {
+                    version: 0,
+                    layout: None,
+                }))
+            }
+            LayoutWrite::Conflict(cur) => Err(conflict(cur)),
+        };
     };
 
     let text = serde_json::to_string(&layout)
         .map_err(|_| err(StatusCode::BAD_REQUEST, "layout is not serializable"))?;
     let outcome = db
         .put_pane_layout(worktree_id, body.version, &text)
-        .map_err(|e| {
-            // The foreign key refuses a layout for a worktree that does not
-            // exist, which is a client racing a deletion rather than a fault.
-            debug!("layout write: {e}");
-            err(StatusCode::NOT_FOUND, "worktree not found")
-        })?;
+        .map_err(layout_write_error)?;
 
     match outcome {
         Err(LayoutRejected::NotJson) => Err(err(StatusCode::BAD_REQUEST, "layout is not JSON")),
@@ -229,15 +250,23 @@ async fn put_layout(
                 layout: Some(layout),
             }))
         }
-        Ok(LayoutWrite::Conflict(cur)) => Err((
-            StatusCode::CONFLICT,
-            Json(serde_json::json!({
-                "error": "layout version is stale",
-                "version": cur.version,
-                "layout": serde_json::from_str::<serde_json::Value>(&cur.layout).ok(),
-            })),
-        )),
+        Ok(LayoutWrite::Conflict(cur)) => Err(conflict(cur)),
     }
+}
+
+/// A refused write, carrying what is actually stored.
+///
+/// The body is the point: the loser reconciles from it in the same round trip
+/// rather than re-reading and racing the same winner again.
+fn conflict(cur: veld_core::db::PaneLayout) -> ApiError {
+    (
+        StatusCode::CONFLICT,
+        Json(serde_json::json!({
+            "error": "layout version is stale",
+            "version": cur.version,
+            "layout": serde_json::from_str::<serde_json::Value>(&cur.layout).ok(),
+        })),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -245,6 +274,8 @@ async fn put_layout(
 // ---------------------------------------------------------------------------
 
 struct Ticket {
+    /// The identity the socket this ticket opens will carry.
+    client_id: String,
     expires_at: Instant,
 }
 
@@ -255,6 +286,20 @@ static TICKETS: LazyLock<Mutex<HashMap<String, Ticket>>> =
 struct TicketResponse {
     ticket: String,
     expires_in_ms: u64,
+    /// The identity this connection will have.
+    ///
+    /// **Minted here, not chosen by the client.** A client-chosen id let anything
+    /// that could open a socket present another client's id, which displaced that
+    /// client *and inherited its claim* — after which claiming the worktree asked
+    /// no yield of the victim, because the daemon believed the claimer already
+    /// owned it. That is the false all-clear this whole module exists to prevent,
+    /// and it did not need an attacker: Chrome's "Duplicate Tab" copies
+    /// `sessionStorage`, so two tabs would arrive under one id by accident.
+    ///
+    /// It is a secret in the weak sense that matters here — it is never put on
+    /// the wire to any *other* client (see [`ClientInfo`]), so presenting one you
+    /// were not given means guessing a v4 UUID.
+    client_id: String,
 }
 
 /// Mint a single-use ticket for the control socket.
@@ -268,6 +313,7 @@ async fn mint_ticket(headers: HeaderMap) -> Result<Json<TicketResponse>, ApiErro
     check_csrf(&headers)
         .map_err(|_| err(StatusCode::FORBIDDEN, "missing X-Veld-Request header"))?;
     let ticket = uuid::Uuid::new_v4().simple().to_string();
+    let client_id = uuid::Uuid::new_v4().simple().to_string();
     let now = Instant::now();
     {
         let mut store = TICKETS.lock().expect("ide ticket store poisoned");
@@ -277,6 +323,7 @@ async fn mint_ticket(headers: HeaderMap) -> Result<Json<TicketResponse>, ApiErro
         store.insert(
             ticket.clone(),
             Ticket {
+                client_id: client_id.clone(),
                 expires_at: now + TICKET_TTL,
             },
         );
@@ -284,16 +331,16 @@ async fn mint_ticket(headers: HeaderMap) -> Result<Json<TicketResponse>, ApiErro
     Ok(Json(TicketResponse {
         ticket,
         expires_in_ms: TICKET_TTL.as_millis() as u64,
+        client_id,
     }))
 }
 
-/// Consume a ticket. `false` if it is unknown or expired.
-fn redeem(ticket: &str) -> bool {
+/// Consume a ticket, returning the identity it carries. `None` if it is unknown
+/// or expired.
+fn redeem(ticket: &str) -> Option<String> {
     let mut store = TICKETS.lock().expect("ide ticket store poisoned");
-    match store.remove(ticket) {
-        Some(t) => t.expires_at > Instant::now(),
-        None => false,
-    }
+    let t = store.remove(ticket)?;
+    (t.expires_at > Instant::now()).then_some(t.client_id)
 }
 
 // ---------------------------------------------------------------------------
@@ -325,11 +372,18 @@ pub enum ClientKind {
 /// daemon.
 #[derive(Debug, Deserialize)]
 struct Hello {
-    /// Stable across reloads of one tab or window, so a reload gets its claims
-    /// back within [`RECONNECT_GRACE`]. Chosen by the client; it names nothing
-    /// but itself, and a client that forges another's id can only take over
-    /// claims it could have made anyway by asking.
-    client_id: String,
+    /// An identity this page held on a previous connection, to be given its
+    /// claims back within [`RECONNECT_GRACE`] — the reload case.
+    ///
+    /// **Honoured only when nothing is connected under it.** The identity itself
+    /// was minted by the daemon (see [`TicketResponse::client_id`]); this is a
+    /// request to resume it, and a request is all it can be, because two live
+    /// sockets under one identity is the state that produced a claim inherited
+    /// with no yield asked. When it is refused — the id is live, or was never
+    /// issued — the connection simply keeps the fresh identity its ticket
+    /// carried, and the client is told which one it got.
+    #[serde(default)]
+    resume: Option<String>,
     kind: ClientKind,
     /// What to call this client when another one is told where a worktree is.
     /// Free text, bounded, and rendered — never used to route anything.
@@ -370,9 +424,13 @@ fn yes() -> bool {
 }
 
 /// How a client is described to the others.
+///
+/// **No identity on it.** The id is the credential a reconnect resumes with, so
+/// putting it in a broadcast handed every client the set of ids it would need to
+/// impersonate any other. What a rail needs is which worktrees are not its own
+/// and what to say about them, and neither question needs a name.
 #[derive(Debug, Clone, Serialize)]
 pub struct ClientInfo {
-    pub client_id: String,
     pub kind: ClientKind,
     pub label: String,
 }
@@ -382,9 +440,11 @@ pub struct ClientInfo {
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ServerMsg {
     /// The handshake landed. `epoch` changes when the daemon restarts, which is
-    /// how a reconnecting client knows to re-read everything rather than assume
-    /// its picture survived.
-    Ready { epoch: String },
+    /// how a reconnecting client knows its claims are gone and it must ask
+    /// again. `client_id` is the identity actually in use — the ticket's, or a
+    /// resumed one if the resume was honoured — and is what the client stores to
+    /// resume with next time.
+    Ready { epoch: String, client_id: String },
     /// Who is showing what, in full. Sent on connect and after every change —
     /// state, not a delta, so a client that missed one is not wrong afterwards.
     Claims { claims: Vec<ClaimView> },
@@ -418,10 +478,16 @@ type PendingYield = (String, u64, oneshot::Receiver<()>);
 /// that decides whether it is still current, and the yields to wait out.
 type GrantedClaim = (u64, Vec<PendingYield>);
 
-/// One entry of the claims table, as clients see it.
+/// One entry of the claims table, as one client sees it.
+///
+/// Personalised, which is what lets the identity stay off the wire: the rail's
+/// question is "is this one mine", and answering it here costs a boolean where
+/// answering it in the client would cost every client every other client's id.
 #[derive(Debug, Clone, Serialize)]
 struct ClaimView {
     worktree_id: i64,
+    /// Whether the recipient is the one showing it.
+    mine: bool,
     client: ClientInfo,
 }
 
@@ -452,6 +518,8 @@ struct Client {
 /// versus "open in a browser tab" has to stay true across the gap. Deriving it
 /// from the (now absent) client would mean guessing.
 struct Orphan {
+    /// Who may resume it. Never leaves the daemon.
+    client_id: String,
     info: ClientInfo,
     since: Instant,
 }
@@ -496,30 +564,38 @@ static NEXT_CONN: AtomicU64 = AtomicU64::new(1);
 static EPOCH: LazyLock<String> = LazyLock::new(|| uuid::Uuid::new_v4().simple().to_string());
 
 impl Registry {
-    /// Drop orphaned claims whose owner is not coming back.
+    /// Drop orphaned claims whose owner is not coming back. Returns whether
+    /// anything was released.
     ///
-    /// Called on the paths that read `claims`, rather than from a timer: the
-    /// only thing an expired orphan affects is the answer to a claim or the
-    /// contents of a broadcast, so evaluating it there is both sufficient and
-    /// free. A timer would be a second thing to keep alive for no gain.
+    /// Called on the paths that read `claims`, **and** from a one-shot timer
+    /// armed by [`disconnect`]. The lazy call alone was not enough and the
+    /// mistake is worth naming: an expired orphan changes what every *other*
+    /// client's rail should render, and nothing else in this module was going to
+    /// run at that moment — so a closed tab greyed a worktree out until somebody
+    /// happened to claim something, which contradicts the whole point of the
+    /// grace being short.
     ///
     /// The claim is removed only if it is *still* the orphan's. A worktree
     /// claimed by somebody else during the grace has already had its orphan
     /// entry dropped, but checking the owner here as well means this can never
     /// be the thing that revokes a live claim.
-    fn expire_orphans(&mut self, now: Instant) {
+    fn expire_orphans(&mut self, now: Instant) -> bool {
         let expired: Vec<(i64, String)> = self
             .orphaned
             .iter()
             .filter(|(_, o)| now.duration_since(o.since) >= RECONNECT_GRACE)
-            .map(|(worktree_id, o)| (*worktree_id, o.info.client_id.clone()))
+            .map(|(worktree_id, o)| (*worktree_id, o.client_id.clone()))
             .collect();
+        if expired.is_empty() {
+            return false;
+        }
         for (worktree_id, owner) in expired {
             self.orphaned.remove(&worktree_id);
             if self.claims.get(&worktree_id) == Some(&owner) {
                 self.claims.remove(&worktree_id);
             }
         }
+        true
     }
 
     /// Hand a returning client the claims its previous socket held.
@@ -531,7 +607,7 @@ impl Registry {
         let mine: Vec<i64> = self
             .orphaned
             .iter()
-            .filter(|(_, o)| o.info.client_id == client_id)
+            .filter(|(_, o)| o.client_id == client_id)
             .map(|(worktree_id, _)| *worktree_id)
             .collect();
         for worktree_id in mine {
@@ -540,15 +616,12 @@ impl Registry {
         }
     }
 
-    /// Who is showing what, as clients see it.
+    /// Who is showing what, as one client sees it.
     ///
-    /// Includes a client's own claim: the rail needs "somewhere else" and can
-    /// subtract itself, and sending each client a personalised list would mean
-    /// recomputing the whole table per recipient to save one comparison.
-    /// An orphaned claim is included too — the worktree really is spoken for
-    /// until the grace expires, and showing it as free would invite a click
-    /// that then gets taken away.
-    fn view(&self) -> Vec<ClaimView> {
+    /// An orphaned claim is included — the worktree really is spoken for until
+    /// the grace expires, and showing it as free would invite a click that then
+    /// gets taken away.
+    fn view_for(&self, recipient: &str) -> Vec<ClaimView> {
         self.claims
             .iter()
             .filter_map(|(worktree_id, client_id)| {
@@ -561,6 +634,7 @@ impl Registry {
                     .or_else(|| self.orphaned.get(worktree_id).map(|o| o.info.clone()))?;
                 Some(ClaimView {
                     worktree_id: *worktree_id,
+                    mine: client_id == recipient,
                     client: info,
                 })
             })
@@ -569,11 +643,10 @@ impl Registry {
 
     /// Push the claims table to every connected client.
     fn broadcast(&self) {
-        let msg = ServerMsg::Claims {
-            claims: self.view(),
-        };
-        for client in self.clients.values() {
-            let _ = client.tx.send(msg.clone());
+        for (id, client) in &self.clients {
+            let _ = client.tx.send(ServerMsg::Claims {
+                claims: self.view_for(id),
+            });
         }
     }
 
@@ -595,7 +668,7 @@ impl Registry {
         request_id: u64,
         focus_holder: bool,
     ) -> Option<GrantedClaim> {
-        self.expire_orphans(Instant::now());
+        let _ = self.expire_orphans(Instant::now());
 
         // An orphan is not a holder: nothing is attached behind a closed socket,
         // so a claim takes it and the returning client re-claims (or hunts for
@@ -738,11 +811,11 @@ async fn channel(
         );
         return (StatusCode::FORBIDDEN, "origin not allowed").into_response();
     }
-    if !redeem(&q.ticket) {
+    let Some(minted) = redeem(&q.ticket) else {
         return (StatusCode::FORBIDDEN, "invalid or expired ticket").into_response();
-    }
+    };
     ws.max_message_size(MAX_FRAME_BYTES)
-        .on_upgrade(serve_channel)
+        .on_upgrade(move |socket| serve_channel(socket, minted))
 }
 
 /// Bound on the identity strings a client may send.
@@ -754,7 +827,7 @@ fn valid_client_id(id: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
-async fn serve_channel(socket: WebSocket) {
+async fn serve_channel(socket: WebSocket, minted: String) {
     let (mut ws_tx, mut ws_rx) = socket.split();
 
     // The first frame must be the hello. Everything after it is scoped to the
@@ -764,11 +837,7 @@ async fn serve_channel(socket: WebSocket) {
     let hello: Hello = loop {
         match ws_rx.next().await {
             Some(Ok(Message::Text(text))) => match serde_json::from_str::<Hello>(&text) {
-                Ok(h) if valid_client_id(&h.client_id) => break h,
-                Ok(_) => {
-                    warn!("ide channel: rejected an invalid client id");
-                    return;
-                }
+                Ok(h) => break h,
                 Err(e) => {
                     debug!("ide channel: unreadable hello: {e}");
                     return;
@@ -784,9 +853,7 @@ async fn serve_channel(socket: WebSocket) {
         }
     };
 
-    let client_id = hello.client_id.clone();
     let info = ClientInfo {
-        client_id: client_id.clone(),
         kind: hello.kind,
         // Bounded: it is rendered in another client's UI, and an unbounded
         // string crossing that boundary is a payload, not a name.
@@ -795,20 +862,26 @@ async fn serve_channel(socket: WebSocket) {
 
     let (tx, mut rx) = mpsc::unbounded_channel::<ServerMsg>();
     let conn = NEXT_CONN.fetch_add(1, Ordering::Relaxed);
+    let client_id;
 
     {
         let mut reg = REGISTRY.lock().await;
-        reg.expire_orphans(Instant::now());
-        // **A reconnecting client takes its claims back** — see
-        // `reclaim_orphans_of`.
+        let _ = reg.expire_orphans(Instant::now());
+        // **A resume is honoured only when nothing is connected under that id.**
+        // The alternative — letting the newcomer displace the incumbent — is
+        // what made a claim inheritable without a yield: the displaced client
+        // stayed attached to its terminals while the registry handed its claim
+        // to whoever arrived. Refusing costs a reloading page nothing (its old
+        // socket is closed by definition) and costs a duplicated tab only the
+        // claims it never had. `valid_client_id` first, because the id becomes a
+        // map key and a `%client` field in the log.
+        client_id = match hello.resume {
+            Some(resume) if valid_client_id(&resume) && !reg.clients.contains_key(&resume) => {
+                resume
+            }
+            _ => minted,
+        };
         reg.reclaim_orphans_of(&client_id);
-        // A second socket for one `client_id` (a reload whose old socket has not
-        // been noticed yet, or two tabs with a copied id) displaces the first
-        // rather than running beside it: two sockets under one identity would
-        // both be sent that identity's yields, and each would think the other
-        // had answered. Dropping the old record drops its queue, which ends its
-        // writer task; its reader task then finds `conn` changed and leaves the
-        // registry alone.
         reg.clients.insert(
             client_id.clone(),
             Client {
@@ -821,6 +894,7 @@ async fn serve_channel(socket: WebSocket) {
         );
         let _ = reg.clients[&client_id].tx.send(ServerMsg::Ready {
             epoch: EPOCH.clone(),
+            client_id: client_id.clone(),
         });
         // Everyone, including this client, which gets the table it is joining.
         reg.broadcast();
@@ -884,22 +958,58 @@ async fn handle(client_id: &str, msg: ClientMsg) {
                 let _ = settle.send(());
             }
         }
-        ClientMsg::Forget { worktree_ids } => {
-            let mut reg = REGISTRY.lock().await;
-            let gone: HashSet<i64> = worktree_ids.into_iter().take(MAX_HELD).collect();
-            if gone.is_empty() {
-                return;
+        ClientMsg::Forget { worktree_ids } => forget(worktree_ids).await,
+    }
+}
+
+/// Drop the registry state of worktrees that no longer exist.
+///
+/// **Every id is checked against the database first**, and that is the whole
+/// safety of this message. It is the one client→daemon message that mutates
+/// *other* clients' state — clearing a `holds` entry removes that client from
+/// the next claim's yield list, so a claimer is granted with nothing to wait for
+/// and attaches to PTY sessions the other client is still driving. Taking the
+/// sender's word for it therefore hands any client a way to produce exactly the
+/// false all-clear this module exists to prevent — and it does not take malice:
+/// the caller reports off a five-second poll, so a list one tick stale would
+/// have revoked live claims.
+///
+/// A worktree that really is gone has no row, because the sender deleted it —
+/// and if the deletion has not landed yet, the next poll sends the id again.
+async fn forget(worktree_ids: Vec<i64>) {
+    let asked: Vec<i64> = worktree_ids.into_iter().take(MAX_HELD).collect();
+    if asked.is_empty() {
+        return;
+    }
+    let Ok(db) = open_db() else {
+        // Without the database there is no way to check, and clearing on trust
+        // is the failure above. Leaving the entries costs a greyed rail row that
+        // the next poll corrects.
+        warn!("ide channel: cannot verify forgotten worktrees without a database");
+        return;
+    };
+    let mut gone: HashSet<i64> = HashSet::new();
+    for id in asked {
+        match db.get_worktree(id) {
+            Ok(None) => {
+                gone.insert(id);
             }
-            reg.claims
-                .retain(|worktree_id, _| !gone.contains(worktree_id));
-            reg.orphaned
-                .retain(|worktree_id, _| !gone.contains(worktree_id));
-            for client in reg.clients.values_mut() {
-                client.holds.retain(|w| !gone.contains(w));
-            }
-            reg.broadcast();
+            Ok(Some(_)) => {}
+            Err(e) => warn!(worktree_id = id, "ide channel: worktree lookup failed: {e}"),
         }
     }
+    if gone.is_empty() {
+        return;
+    }
+    let mut reg = REGISTRY.lock().await;
+    reg.claims
+        .retain(|worktree_id, _| !gone.contains(worktree_id));
+    reg.orphaned
+        .retain(|worktree_id, _| !gone.contains(worktree_id));
+    for client in reg.clients.values_mut() {
+        client.holds.retain(|w| !gone.contains(w));
+    }
+    reg.broadcast();
 }
 
 /// Ask to show a worktree.
@@ -918,22 +1028,36 @@ async fn claim(client_id: &str, worktree_id: i64, request_id: u64, focus_holder:
         return;
     };
 
-    for (target, yield_id, settle) in waits {
-        if tokio::time::timeout(YIELD_ACK, settle).await.is_err() {
-            // Proceeding anyway is the documented fallback, and it is also the
-            // one path that can still reinstate the takeover race — so it says
-            // so. The condition (a wedged or very slow client) is exactly the
-            // kind only ever reported second-hand.
-            warn!(
-                client = %target,
-                worktree_id,
-                "did not acknowledge yielding in {}ms; proceeding",
-                YIELD_ACK.as_millis()
-            );
-            let mut reg = REGISTRY.lock().await;
-            if let Some(c) = reg.clients.get_mut(&target) {
-                c.pending.remove(&yield_id);
+    // **One deadline for all of them, not one each.** Awaiting them in sequence
+    // made a claim's worst case `holders × YIELD_ACK` — and `holds` is
+    // client-declared, so a page could name itself a holder of every worktree
+    // and put minutes in front of every real claim. Concurrently, a claim costs
+    // at most `YIELD_ACK` however many clients are involved, which is what the
+    // constant's own doc already promised.
+    let timed_out = futures_util::future::join_all(waits.into_iter().map(
+        |(target, yield_id, settle)| async move {
+            match tokio::time::timeout(YIELD_ACK, settle).await {
+                Ok(_) => None,
+                Err(_) => Some((target, yield_id)),
             }
+        },
+    ))
+    .await;
+
+    for (target, yield_id) in timed_out.into_iter().flatten() {
+        // Proceeding anyway is the documented fallback, and it is also the one
+        // path that can still reinstate the takeover race — so it says so. The
+        // condition (a wedged or very slow client) is exactly the kind only ever
+        // reported second-hand.
+        warn!(
+            client = %target,
+            worktree_id,
+            "did not acknowledge yielding in {}ms; proceeding",
+            YIELD_ACK.as_millis()
+        );
+        let mut reg = REGISTRY.lock().await;
+        if let Some(c) = reg.clients.get_mut(&target) {
+            c.pending.remove(&yield_id);
         }
     }
 
@@ -989,14 +1113,30 @@ async fn disconnect(client_id: &str, conn: u64) {
             reg.orphaned.insert(
                 worktree_id,
                 Orphan {
+                    client_id: client_id.to_owned(),
                     info: info.clone(),
                     since: now,
                 },
             );
         }
     }
-    reg.expire_orphans(now);
+    let _ = reg.expire_orphans(now);
     reg.broadcast();
+    drop(reg);
+
+    // **Arm the expiry.** Nothing else in this module runs at the moment the
+    // grace ends, so without this a closed tab left every other client's rail
+    // greying out a worktree until somebody happened to claim something. One
+    // short-lived task per disconnect, which is the only event that creates an
+    // orphan; it re-checks under the lock, so a client that came back or a
+    // worktree somebody else took is a no-op.
+    tokio::spawn(async move {
+        tokio::time::sleep(RECONNECT_GRACE + Duration::from_millis(50)).await;
+        let mut reg = REGISTRY.lock().await;
+        if reg.expire_orphans(Instant::now()) {
+            reg.broadcast();
+        }
+    });
 }
 
 #[cfg(test)]
@@ -1016,7 +1156,6 @@ mod tests {
             Client {
                 conn: NEXT_CONN.fetch_add(1, Ordering::Relaxed),
                 info: ClientInfo {
-                    client_id: id.to_owned(),
                     kind,
                     label: id.to_owned(),
                 },
@@ -1212,8 +1351,8 @@ mod tests {
         reg.orphaned.insert(
             7,
             Orphan {
+                client_id: "a".to_owned(),
                 info: ClientInfo {
-                    client_id: "a".to_owned(),
                     kind: ClientKind::Electron,
                     label: "a".to_owned(),
                 },
@@ -1236,8 +1375,8 @@ mod tests {
         reg.orphaned.insert(
             7,
             Orphan {
+                client_id: "a".to_owned(),
                 info: ClientInfo {
-                    client_id: "a".to_owned(),
                     kind: ClientKind::Electron,
                     label: "a".to_owned(),
                 },
@@ -1263,8 +1402,8 @@ mod tests {
         reg.orphaned.insert(
             7,
             Orphan {
+                client_id: "a".to_owned(),
                 info: ClientInfo {
-                    client_id: "a".to_owned(),
                     kind: ClientKind::Electron,
                     label: "a".to_owned(),
                 },
@@ -1285,8 +1424,8 @@ mod tests {
         reg.orphaned.insert(
             7,
             Orphan {
+                client_id: "a".to_owned(),
                 info: ClientInfo {
-                    client_id: "a".to_owned(),
                     kind: ClientKind::Electron,
                     label: "a".to_owned(),
                 },
@@ -1307,18 +1446,19 @@ mod tests {
         reg.orphaned.insert(
             7,
             Orphan {
+                client_id: "a".to_owned(),
                 info: ClientInfo {
-                    client_id: "a".to_owned(),
                     kind: ClientKind::Browser,
                     label: "Safari".to_owned(),
                 },
                 since: Instant::now(),
             },
         );
-        let view = reg.view();
+        let view = reg.view_for("someone-else");
         assert_eq!(view.len(), 1);
         assert_eq!(view[0].client.kind, ClientKind::Browser);
         assert_eq!(view[0].client.label, "Safari");
+        assert!(!view[0].mine);
     }
 
     /// Worktree rowids are reused, so a claim left on a deleted worktree would
@@ -1332,8 +1472,8 @@ mod tests {
         reg.orphaned.insert(
             9,
             Orphan {
+                client_id: "z".to_owned(),
                 info: ClientInfo {
-                    client_id: "z".to_owned(),
                     kind: ClientKind::Browser,
                     label: String::new(),
                 },
@@ -1356,6 +1496,99 @@ mod tests {
     // Identity
     // -----------------------------------------------------------------------
 
+    /// **The identity never goes on the wire to anyone else.** It is the
+    /// credential a reconnect resumes with, so a broadcast carrying it handed
+    /// every client the set of ids it would need to impersonate any other — and
+    /// impersonation inherited a live claim without a yield being asked of the
+    /// client still attached to its terminals.
+    #[test]
+    fn the_claims_broadcast_never_carries_a_client_id() {
+        let mut reg = Registry::default();
+        let a = connect(&mut reg, "secret-id-a", ClientKind::Electron);
+        // A label of its own, so the assertion is about the identity and not
+        // about the fixture happening to reuse it.
+        reg.clients.get_mut(&a.id).unwrap().info.label = "Window 1".to_owned();
+        connect(&mut reg, "b", ClientKind::Browser);
+        reg.begin_claim(&a.id, 7, 1, true).unwrap();
+        let json = serde_json::to_string(&ServerMsg::Claims {
+            claims: reg.view_for("b"),
+        })
+        .unwrap();
+        assert!(
+            !json.contains("secret-id-a"),
+            "an identity must never reach another client: {json}"
+        );
+    }
+
+    /// The rail's question is "is this one mine", and it is answered per
+    /// recipient so the identity can stay off the wire entirely.
+    #[test]
+    fn a_claim_is_mine_only_to_the_client_that_made_it() {
+        let mut reg = Registry::default();
+        let a = connect(&mut reg, "a", ClientKind::Electron);
+        connect(&mut reg, "b", ClientKind::Browser);
+        reg.begin_claim(&a.id, 7, 1, true).unwrap();
+        assert!(reg.view_for("a")[0].mine);
+        assert!(!reg.view_for("b")[0].mine);
+    }
+
+    /// A grace that ends without telling anyone leaves every other client's rail
+    /// greying out a worktree nobody holds — for as long as nobody happens to
+    /// claim something.
+    #[test]
+    fn expiring_an_orphan_reports_that_something_changed() {
+        let mut reg = Registry::default();
+        reg.claims.insert(7, "a".to_owned());
+        reg.orphaned.insert(
+            7,
+            Orphan {
+                client_id: "a".to_owned(),
+                info: ClientInfo {
+                    kind: ClientKind::Electron,
+                    label: "a".to_owned(),
+                },
+                since: Instant::now() - RECONNECT_GRACE - Duration::from_secs(1),
+            },
+        );
+        assert!(
+            reg.expire_orphans(Instant::now()),
+            "the caller must broadcast"
+        );
+        // …and says nothing when there was nothing to release, so a broadcast is
+        // not sent on every claim for no reason.
+        assert!(!reg.expire_orphans(Instant::now()));
+    }
+
+    /// A claim waits for every holder at once. Sequentially, `holds` being
+    /// client-declared meant one page could name itself a holder of everything
+    /// and put `holders × YIELD_ACK` in front of every real claim.
+    #[tokio::test(start_paused = true)]
+    async fn a_claim_waits_out_silent_holders_concurrently() {
+        // Three silent holders, one deadline. Under the old sequential await
+        // this took 3 × YIELD_ACK.
+        let (tx, rx) = (0..3)
+            .map(|_| oneshot::channel::<()>())
+            .collect::<Vec<_>>()
+            .into_iter()
+            .fold((Vec::new(), Vec::new()), |(mut t, mut r), (a, b)| {
+                t.push(a);
+                r.push(b);
+                (t, r)
+            });
+        let started = tokio::time::Instant::now();
+        let _keep = tx;
+        futures_util::future::join_all(
+            rx.into_iter()
+                .map(|settle| async move { tokio::time::timeout(YIELD_ACK, settle).await }),
+        )
+        .await;
+        assert!(
+            started.elapsed() < YIELD_ACK * 2,
+            "the waits must overlap, not queue: {:?}",
+            started.elapsed()
+        );
+    }
+
     #[test]
     fn client_ids_are_bounded_to_a_charset_that_cannot_carry_a_payload() {
         assert!(valid_client_id("abc-123_XYZ"));
@@ -1371,7 +1604,7 @@ mod tests {
     #[test]
     fn a_label_is_truncated_rather_than_trusted() {
         let hello: Hello = serde_json::from_str(&format!(
-            r#"{{"type":"hello","client_id":"a","kind":"browser","label":"{}"}}"#,
+            r#"{{"type":"hello","kind":"browser","label":"{}"}}"#,
             "x".repeat(500)
         ))
         .unwrap();
@@ -1383,11 +1616,11 @@ mod tests {
     /// daemon — a rejected hello is a page that never works at all.
     #[test]
     fn an_unknown_hello_field_is_ignored() {
-        let hello: Hello = serde_json::from_str(
-            r#"{"type":"hello","client_id":"a","kind":"electron","label":"w","future":1}"#,
-        )
-        .unwrap();
+        let hello: Hello =
+            serde_json::from_str(r#"{"type":"hello","kind":"electron","label":"w","future":1}"#)
+                .unwrap();
         assert_eq!(hello.kind, ClientKind::Electron);
+        assert_eq!(hello.resume, None);
     }
 
     #[test]
@@ -1396,12 +1629,16 @@ mod tests {
         TICKETS.lock().unwrap().insert(
             ticket.clone(),
             Ticket {
+                client_id: "c".to_owned(),
                 expires_at: Instant::now() + TICKET_TTL,
             },
         );
-        assert!(redeem(&ticket));
-        assert!(!redeem(&ticket), "a redeemed ticket must not work twice");
-        assert!(!redeem("never-minted"));
+        assert_eq!(redeem(&ticket).as_deref(), Some("c"));
+        assert!(
+            redeem(&ticket).is_none(),
+            "a redeemed ticket must not work twice"
+        );
+        assert!(redeem("never-minted").is_none());
     }
 
     #[test]
@@ -1410,9 +1647,10 @@ mod tests {
         TICKETS.lock().unwrap().insert(
             ticket.clone(),
             Ticket {
+                client_id: "c".to_owned(),
                 expires_at: Instant::now() - Duration::from_secs(1),
             },
         );
-        assert!(!redeem(&ticket));
+        assert!(redeem(&ticket).is_none());
     }
 }

@@ -122,6 +122,25 @@ pub enum DbError {
     AmbiguousRunId(String),
 }
 
+impl DbError {
+    /// Whether this is SQLite refusing a row rather than failing.
+    ///
+    /// The one distinction a caller usually needs, and the one that is easy to
+    /// get wrong by collapsing every error into the friendliest status: a
+    /// foreign-key violation means the row this references is gone (a client
+    /// racing a deletion), while a locked database, a full disk or a poisoned
+    /// lock are this process's problem and must not be reported as "not found".
+    /// Kept here so callers do not have to link `rusqlite` to ask.
+    #[must_use]
+    pub fn is_constraint_violation(&self) -> bool {
+        matches!(
+            self,
+            DbError::Sqlite(rusqlite::Error::SqliteFailure(inner, _))
+                if inner.code == rusqlite::ErrorCode::ConstraintViolation
+        )
+    }
+}
+
 /// Handle to the central Veld database. Cheap to clone; all clones share one
 /// connection guarded by a mutex (SQLite serializes writers anyway, and WAL
 /// keeps other *processes* unblocked).

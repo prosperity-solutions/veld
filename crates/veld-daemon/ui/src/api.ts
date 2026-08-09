@@ -1095,9 +1095,10 @@ export const api = {
    * proves the request came from this page. One ticket per connection,
    * including every reconnect.
    */
-  ideTicket: () => request<{ ticket: string; expires_in_ms: number }>("/api/ide/tickets", {
-    method: "POST",
-  }),
+  ideTicket: () =>
+    request<{ ticket: string; expires_in_ms: number; client_id: string }>("/api/ide/tickets", {
+      method: "POST",
+    }),
   /**
    * A worktree's panes.
    *

@@ -20,9 +20,9 @@
  *
  * **The socket is the lease.** The daemon releases everything this client holds
  * when this socket closes, so there is no heartbeat here and nothing to expire.
- * The one thing that must survive is the identity: `clientId` lives in
- * `sessionStorage`, so a reload reconnects as the same client and gets its
- * claims back, while a second tab is genuinely a second client.
+ * The one thing that must survive is the identity, which the daemon mints and
+ * this page remembers in `sessionStorage` so a reload can ask for it back — see
+ * `CLIENT_ID_KEY`.
  */
 
 import { api } from "../api";
@@ -30,37 +30,51 @@ import { api } from "../api";
 /** What kind of client this is, which decides whether it can be raised. */
 export type ClientKind = "electron" | "browser";
 
-/** How the daemon describes a client to the others. */
+/**
+ * How the daemon describes a client to the others.
+ *
+ * No identity on it, deliberately: the id is the credential a reconnect resumes
+ * with, so a broadcast carrying it would hand every client what it needs to
+ * impersonate any other. A rail renders a kind and a label.
+ */
 export interface ClientInfo {
-  client_id: string;
   kind: ClientKind;
   label: string;
 }
 
-/** One row of the claims table. */
+/** One row of the claims table, as *this* client sees it. */
 export interface ClaimEntry {
   worktree_id: number;
+  /** Whether this client is the one showing it — answered per recipient by the
+   *  daemon, which is what lets the identity stay off the wire. */
+  mine: boolean;
   client: ClientInfo;
 }
 
 /** The outcome of asking to show a worktree. */
 export interface ClaimResult {
   ok: boolean;
-  /** `shown_elsewhere` or `superseded`. Absent on success. */
+  /** `shown_elsewhere`, `superseded`, or `offline`. Absent on success. */
   reason?: string;
   /** Who has it, when the reason is `shown_elsewhere`. */
   holder?: ClientInfo;
 }
 
 /**
- * This client's identity, stable across reloads of this tab or window.
+ * Where this page remembers the identity the daemon gave it, so a reload can ask
+ * for it back and get its claims with it.
  *
- * `sessionStorage`, deliberately, and this is the one decision in the file worth
- * arguing about. `localStorage` would be shared by every tab in the browser
- * profile, so two tabs would claim under one identity and the daemon would
- * consider them the same client — each would be sent the other's yields and each
- * would think the other had answered. A per-tab id is what makes "this tab holds
- * worktree 7" a true statement.
+ * **The id is the daemon's, not ours.** It comes back with the ticket
+ * (`api.ideTicket`), because a client-chosen one let any client present
+ * another's and inherit its claim with no yield asked of the client still
+ * attached to those terminals.
+ *
+ * `sessionStorage` rather than `localStorage`, because the latter is shared by
+ * every tab in the profile — so two tabs would ask to resume one identity, and
+ * the daemon refuses a resume while that id is connected, leaving the second tab
+ * with the fresh id its own ticket carried. That is exactly right for Chrome's
+ * "Duplicate Tab", which copies `sessionStorage`: the copy is a second client,
+ * not a usurper.
  *
  * The cost is that a *restored* browser session (reopen the tab, "continue where
  * you left off") is a new client. That is correct: nothing of that tab's was
@@ -68,28 +82,38 @@ export interface ClaimResult {
  */
 const CLIENT_ID_KEY = "veld.clientId.v1";
 
-function readClientId(): string {
+function rememberedId(): string | null {
   try {
     const existing = sessionStorage.getItem(CLIENT_ID_KEY);
-    // Same charset the daemon validates, so a hand-edited value is replaced
-    // rather than refused at the handshake — where the failure would be a page
-    // that silently never claims anything.
-    if (existing && /^[A-Za-z0-9_-]{1,64}$/.test(existing)) return existing;
-    const fresh = crypto.randomUUID();
-    sessionStorage.setItem(CLIENT_ID_KEY, fresh);
-    return fresh;
+    // Same charset the daemon validates. A value that fails it is dropped rather
+    // than sent, so a hand-edited one costs the reclaim and nothing else.
+    return existing && /^[A-Za-z0-9_-]{1,64}$/.test(existing) ? existing : null;
   } catch {
-    // Storage throws outright in some privacy configurations. A per-load id
-    // still works; it just means a reload does not reclaim.
-    return crypto.randomUUID();
+    // Storage access throws outright in some privacy configurations.
+    return null;
   }
 }
 
-export const clientId: string = readClientId();
+function remember(id: string): void {
+  try {
+    sessionStorage.setItem(CLIENT_ID_KEY, id);
+  } catch {
+    // A per-load identity still works; it just means a reload does not reclaim.
+  }
+}
 
 /** How long to wait before reconnecting, backing off to `MAX_RETRY_MS`. */
 const BASE_RETRY_MS = 300;
 const MAX_RETRY_MS = 5000;
+
+/**
+ * How long a claim waits for the socket before answering "offline".
+ *
+ * Covers the boot case — the page renders before the handshake lands, and a
+ * click in that window must not be dropped — without turning a genuinely absent
+ * daemon into a hung rail.
+ */
+const CONNECT_WAIT_MS = 4000;
 
 interface Handlers {
   /** The full claims table. State, not a delta — a client that missed one is
@@ -135,10 +159,23 @@ class Channel {
   private label = "";
   private started = false;
   private closed = false;
+  /** The identity in use, once the daemon has told us. */
+  private id: string | null = null;
+  /** Whether the handshake has completed on the current socket. */
+  private ready = false;
+  /** Callers parked until it has. */
+  private waiting: (() => void)[] = [];
 
-  /** Whether the socket is up right now. */
+  /** Whether the socket is up and the handshake done. */
   get connected(): boolean {
-    return this.ws?.readyState === WebSocket.OPEN;
+    return this.ready && this.ws?.readyState === WebSocket.OPEN;
+  }
+
+  /** The identity the daemon gave this connection, or `null` before the
+   *  handshake. Used to tag layout writes so the daemon does not echo them
+   *  back to their own author. */
+  get identity(): string | null {
+    return this.id;
   }
 
   start(kind: ClientKind, label: string, handlers: Handlers): void {
@@ -160,8 +197,11 @@ class Channel {
   private async connect(): Promise<void> {
     if (this.closed) return;
     let ticket: string;
+    let minted: string;
     try {
-      ({ ticket } = await api.ideTicket());
+      const t = await api.ideTicket();
+      ticket = t.ticket;
+      minted = t.client_id;
     } catch {
       // The daemon is down or restarting. Nothing to report to the user here —
       // every other request in the app is failing too and says so.
@@ -181,11 +221,14 @@ class Channel {
 
     ws.onopen = () => {
       // The hello must be the first frame: everything after it is scoped to the
-      // identity it establishes.
+      // identity it establishes. `resume` is a *request* — the daemon honours it
+      // only if nothing is connected under that id, and tells us in `ready`
+      // which identity we actually got.
+      const resume = rememberedId();
       ws.send(
         JSON.stringify({
           type: "hello",
-          client_id: clientId,
+          ...(resume && resume !== minted ? { resume } : {}),
           kind: this.kind,
           label: this.label,
         }),
@@ -213,6 +256,7 @@ class Channel {
     const drop = () => {
       if (this.ws !== ws) return;
       this.ws = null;
+      this.ready = false;
       // Every outstanding claim is unanswerable now. Resolving them as refused
       // rather than leaving them hanging is what keeps a caller from awaiting
       // forever — and "not ok" is the safe direction, because a caller that
@@ -239,7 +283,17 @@ class Channel {
         const same = this.epoch === null || this.epoch === epoch;
         this.epoch = epoch;
         this.retry = BASE_RETRY_MS;
+        if (typeof msg.client_id === "string") {
+          this.id = msg.client_id;
+          remember(msg.client_id);
+        }
+        // Anything queued while the socket was down goes now — including the
+        // re-claim the app issues from here, which is what stops a daemon
+        // restart leaving two clients each believing they own a worktree.
+        this.ready = true;
+        const waiting = this.waiting.splice(0);
         h.onReady(same);
+        for (const resolve of waiting) resolve();
         return;
       }
       case "claims": {
@@ -301,13 +355,19 @@ class Channel {
    * answer — so it can take up to the daemon's acknowledgement timeout. Which
    * is also why answers do not arrive in call order.
    *
-   * With no socket the answer is `ok` and nothing is recorded: a page that
-   * cannot reach the daemon has no terminals to fight over either, and refusing
-   * would leave the rail unusable for the whole of a daemon restart.
+   * **With no socket this waits, and then refuses.** Answering `ok` was the
+   * first version and it was wrong in the way that matters: HTTP and the socket
+   * fail independently, so a page whose channel is down (the reconnect backoff
+   * after a daemon restart, an origin the upgrade refuses) still reads the
+   * worktree's real layout over `fetch` and attaches to its live shells — the
+   * exact takeover the arbitration exists to prevent, with nothing arbitrating.
+   * A short wait first, because at boot the socket is legitimately still
+   * connecting and refusing there would make the first click do nothing.
    */
-  claim(worktreeId: number, focusHolder = true): Promise<ClaimResult> {
-    if (this.ws?.readyState !== WebSocket.OPEN) {
-      return Promise.resolve({ ok: true, reason: "offline" });
+  async claim(worktreeId: number, focusHolder = true): Promise<ClaimResult> {
+    if (!this.connected) {
+      await this.whenReady();
+      if (!this.connected) return { ok: false, reason: "offline" };
     }
     const requestId = this.nextRequest++;
     return new Promise<ClaimResult>((resolve) => {
@@ -318,6 +378,27 @@ class Channel {
         request_id: requestId,
         focus_holder: focusHolder,
       });
+    });
+  }
+
+  /**
+   * Resolve when the handshake lands, or when [`CONNECT_WAIT_MS`] runs out.
+   *
+   * Bounded rather than open-ended: a click has to answer, and "the daemon is
+   * not there" is a real answer. It resolves either way — the caller re-checks
+   * `connected`, so a timeout is not an error to handle in two places.
+   */
+  private whenReady(): Promise<void> {
+    if (this.ready) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      let settled = false;
+      const once = () => {
+        if (settled) return;
+        settled = true;
+        resolve();
+      };
+      this.waiting.push(once);
+      setTimeout(once, CONNECT_WAIT_MS);
     });
   }
 

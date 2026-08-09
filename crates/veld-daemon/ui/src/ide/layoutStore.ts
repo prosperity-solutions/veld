@@ -24,7 +24,7 @@
 
 import { api } from "../api";
 import { allTabs, parseLayout, type PaneLayout } from "../panes/model";
-import { clientId } from "./channel";
+import { channel } from "./channel";
 
 /**
  * Where main-window layouts lived before they were the daemon's.
@@ -146,11 +146,69 @@ export async function readLayout(worktreeId: number): Promise<PaneLayout | null>
     return null;
   }
   const parsed = parseLayout(doc.layout);
-  // Record what the server holds even when it does not parse: without this the
-  // next write would present version 0, be refused, and adopt the unreadable
-  // document it just rejected.
-  written.set(worktreeId, JSON.stringify(doc.layout));
+  // **Keyed on the parsed form, which is what `writeLayout` compares against.**
+  // Keying on the server's document instead meant the two strings never matched
+  // — `serde_json` re-serialises a `Value` with its keys sorted, so the daemon
+  // returns `docks, focused, ratio` where the model builds `docks, ratio,
+  // focused` — and the dedupe silently never fired on this path: every worktree
+  // *open* wrote a new version and broadcast a change to every other client.
+  // A document that does not parse records nothing, so the next write goes out
+  // and replaces it; the version was recorded above either way, which is what
+  // stops that write presenting 0 and adopting the unreadable row it rejected.
+  if (parsed) written.set(worktreeId, JSON.stringify(parsed));
+  else written.delete(worktreeId);
   return parsed;
+}
+
+/**
+ * Move every layout still in the old browser store into the daemon, once, at
+ * boot.
+ *
+ * The lazy per-worktree adoption in [`readLayout`] is not enough on its own, and
+ * the gap is the one this whole change creates: **the first client to open a
+ * worktree after the update creates its row**, and a browser tab is a different
+ * origin from Veld Desktop (`https://veld.localhost` versus
+ * `http://127.0.0.1:19899`), so it has no old store to adopt from. It would seed
+ * a default, and the app — finding a row — would never look in its own
+ * `localStorage` again. The user's panes, naming shells still running under the
+ * detach grace, would be stranded permanently.
+ *
+ * So the client that *has* the old layouts pushes all of them as soon as it
+ * starts, rather than waiting to be asked for each one.
+ *
+ * Each entry is removed whatever the outcome. Accepted is obvious; refused means
+ * a row already exists, and that row is the one in use — keeping the old copy
+ * would only leave it to resurrect dead session ids at some later boot.
+ */
+export async function adoptLegacyLayouts(): Promise<void> {
+  let ids: number[];
+  try {
+    const raw = localStorage.getItem(LEGACY_WORKTREE_KEY);
+    if (!raw) return;
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return;
+    ids = Object.keys(parsed as Record<string, unknown>)
+      .map(Number)
+      .filter(Number.isInteger);
+  } catch {
+    return;
+  }
+  for (const id of ids) {
+    const layout = takeLegacyLayout(id);
+    if (!layout) continue;
+    try {
+      // Straight to the daemon rather than through `writeLayout`: this must not
+      // sit in the debounce, and it must not disturb the version bookkeeping of
+      // a worktree this client may be opening at the same moment.
+      await api.putPaneLayout(id, 0, layout, channel.identity);
+    } catch {
+      // A worktree that no longer exists (the foreign key refuses it) or an
+      // unreachable daemon. The entry is gone either way — a layout for a
+      // deleted checkout has nowhere to go, and one that missed its window will
+      // be seeded fresh, which is recoverable where a resurrected session id is
+      // not.
+    }
+  }
 }
 
 /**
@@ -218,7 +276,7 @@ async function flush(worktreeId: number): Promise<void> {
 
   let result: Awaited<ReturnType<typeof api.putPaneLayout>>;
   try {
-    result = await api.putPaneLayout(worktreeId, version, payload, clientId);
+    result = await api.putPaneLayout(worktreeId, version, payload, channel.identity);
   } catch {
     // The daemon is down, or the worktree was deleted under us. Nothing to tell
     // the user — the layout is on screen and will be written on the next change
@@ -260,7 +318,7 @@ export function dropLayout(worktreeId: number): void {
   queued.delete(worktreeId);
   versions.delete(worktreeId);
   written.delete(worktreeId);
-  void api.putPaneLayout(worktreeId, 0, null, clientId).catch(() => {});
+  void api.putPaneLayout(worktreeId, 0, null, channel.identity).catch(() => {});
 }
 
 /**
@@ -285,7 +343,7 @@ export function flushPendingOnUnload(): void {
         method: "PUT",
         keepalive: true,
         headers: { "Content-Type": "application/json", "X-Veld-Request": "1" },
-        body: JSON.stringify({ version, layout: payload, client_id: clientId }),
+        body: JSON.stringify({ version, layout: payload, client_id: channel.identity }),
       });
     } catch {
       // Nothing useful to do while the document is being torn down.

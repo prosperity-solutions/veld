@@ -161,18 +161,53 @@ impl Db {
         })))
     }
 
-    /// Forget a worktree's panes.
+    /// Forget a worktree's panes, if `expected` still matches.
     ///
     /// For the client-side "this worktree has no panes left" case only. Worktree
     /// *deletion* is handled by the foreign key, which is the case that has to
     /// be airtight.
-    pub fn delete_pane_layout(&self, worktree_id: i64) -> Result<(), DbError> {
-        let conn = self.lock();
-        conn.execute(
+    ///
+    /// **Versioned like a store**, because it is the destructive one. An
+    /// unversioned delete lets a client running on a stale read erase the panes
+    /// of whoever holds the worktree now — the exact write the version exists to
+    /// refuse, arriving through the one path that skipped the check.
+    /// `LayoutWrite::Stored` on success carries version 0: there is no row.
+    pub fn delete_pane_layout(
+        &self,
+        worktree_id: i64,
+        expected: i64,
+    ) -> Result<LayoutWrite, DbError> {
+        let mut conn = self.lock();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let current = tx
+            .query_row(
+                "SELECT version, layout FROM pane_layouts WHERE worktree_id = ?1",
+                params![worktree_id],
+                |r| {
+                    Ok(PaneLayout {
+                        version: r.get(0)?,
+                        layout: r.get(1)?,
+                    })
+                },
+            )
+            .optional()?;
+
+        let have = current.as_ref().map_or(0, |c| c.version);
+        if have != expected {
+            return Ok(LayoutWrite::Conflict(current.unwrap_or(PaneLayout {
+                version: 0,
+                layout: String::new(),
+            })));
+        }
+        tx.execute(
             "DELETE FROM pane_layouts WHERE worktree_id = ?1",
             params![worktree_id],
         )?;
-        Ok(())
+        tx.commit()?;
+        Ok(LayoutWrite::Stored(PaneLayout {
+            version: 0,
+            layout: String::new(),
+        }))
     }
 }
 
@@ -336,9 +371,41 @@ mod tests {
         let (db, _dir) = db();
         let wt = worktree(&db);
         stored(db.put_pane_layout(wt, 0, "{}").unwrap());
-        db.delete_pane_layout(wt).unwrap();
+        assert!(matches!(
+            db.delete_pane_layout(wt, 1).unwrap(),
+            LayoutWrite::Stored(_)
+        ));
         assert_eq!(db.pane_layout(wt).unwrap(), None);
         // …and the version restarts, which is what `expected: 0` means.
         assert_eq!(stored(db.put_pane_layout(wt, 0, "{}").unwrap()).version, 1);
+    }
+
+    /// The destructive write is the one that most needs the check: a client
+    /// running on a stale read would otherwise erase the panes of whoever holds
+    /// the worktree now.
+    #[test]
+    fn a_stale_delete_is_refused_and_leaves_the_layout_alone() {
+        let (db, _dir) = db();
+        let wt = worktree(&db);
+        stored(db.put_pane_layout(wt, 0, r#"{"a":1}"#).unwrap());
+        stored(db.put_pane_layout(wt, 1, r#"{"a":2}"#).unwrap());
+        match db.delete_pane_layout(wt, 1).unwrap() {
+            LayoutWrite::Conflict(cur) => assert_eq!(cur.version, 2),
+            LayoutWrite::Stored(_) => panic!("a stale delete must not erase a layout"),
+        }
+        assert_eq!(db.pane_layout(wt).unwrap().unwrap().layout, r#"{"a":2}"#);
+    }
+
+    /// Deleting a worktree that has no layout is not an error — the client that
+    /// closed the last pane and the one that never opened one agree on the
+    /// outcome.
+    #[test]
+    fn deleting_an_absent_layout_at_version_zero_succeeds() {
+        let (db, _dir) = db();
+        let wt = worktree(&db);
+        assert!(matches!(
+            db.delete_pane_layout(wt, 0).unwrap(),
+            LayoutWrite::Stored(_)
+        ));
     }
 }

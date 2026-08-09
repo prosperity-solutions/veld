@@ -29,6 +29,7 @@ vi.mock("../api", () => ({
 }));
 
 const {
+  adoptLegacyLayouts,
   dropLayout,
   onExternalLayoutChange,
   readLayout,
@@ -36,6 +37,18 @@ const {
   writeLayout,
   forgetVersions,
 } = await import("./layoutStore");
+
+/**
+ * A layout with its keys in the order the **daemon** returns them.
+ *
+ * `serde_json` re-serialises a `Value` with its object keys sorted, so a
+ * round-tripped layout comes back `docks, focused, ratio` where the model builds
+ * `docks, ratio, focused`. Tests that build the document in model order cannot
+ * see a dedupe keyed on the raw string, which is what let that bug through.
+ */
+function asServerReturnsIt(layout: PaneLayout): unknown {
+  return JSON.parse(JSON.stringify(layout, ["docks", "tabs", "id", "kind", "title", "activeId", "focused", "ratio"]));
+}
 
 /** A minimal layout with one terminal, which is all any of this cares about. */
 function layoutWith(id: string, ratio = 0.5): PaneLayout {
@@ -202,6 +215,21 @@ describe("writing", () => {
     expect(writes).toHaveLength(1);
   });
 
+  /**
+   * The dedupe has to hold on read→write, not only write→write: without it every
+   * *open* of a worktree wrote a new version and broadcast a change to every
+   * other client. It failed silently because the two sides stringified different
+   * key orders.
+   */
+  it("does not write back a layout it just read", async () => {
+    reads.set(7, { version: 3, layout: asServerReturnsIt(layoutWith("a")) });
+    const got = await readLayout(7);
+    expect(got).not.toBeNull();
+    writeLayout(7, got as PaneLayout);
+    await settle();
+    expect(writes).toEqual([]);
+  });
+
   it("advances the version so the next write is not stale", async () => {
     writeLayout(7, layoutWith("a", 0.2));
     await settle();
@@ -287,6 +315,42 @@ describe("losing the version check", () => {
     writeLayout(7, layoutWith("mine"));
     await settle();
     expect(adopted).toEqual([[7, null]]);
+  });
+});
+
+describe("moving the old browser store into the daemon at boot", () => {
+  /**
+   * The lazy per-worktree path cannot cover this: a browser tab is a different
+   * origin from the desktop app, so it has no old store — and whichever client
+   * opens a worktree first creates its row, after which the app never looks in
+   * its own `localStorage` again and the user's panes are stranded.
+   */
+  it("pushes every worktree the old store still holds", async () => {
+    installStorage({
+      [LEGACY]: JSON.stringify({ 7: layoutWith("a"), 9: layoutWith("b") }),
+    });
+    await adoptLegacyLayouts();
+    expect(writes.map((w) => w.worktreeId).sort()).toEqual([7, 9]);
+    // …all at version 0, so a row that already exists wins.
+    expect(writes.every((w) => w.version === 0)).toBe(true);
+  });
+
+  it("empties the old store, whatever the daemon said", async () => {
+    const map = installStorage({
+      [LEGACY]: JSON.stringify({ 7: layoutWith("a"), 9: layoutWith("b") }),
+    });
+    // One refused (a row exists), one accepted.
+    nextWrite = (id) =>
+      id === 7
+        ? { ok: false, conflict: { version: 4, layout: layoutWith("theirs") } }
+        : { ok: true, doc: { version: 1, layout: {} } };
+    await adoptLegacyLayouts();
+    expect(JSON.parse(map.get(LEGACY) as string)).toEqual({});
+  });
+
+  it("does nothing when there is no old store", async () => {
+    await adoptLegacyLayouts();
+    expect(writes).toEqual([]);
   });
 });
 
