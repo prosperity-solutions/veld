@@ -94,6 +94,7 @@ import {
   IconSearch,
   IconBraces,
   IconSettings,
+  IconBroadcast,
   IconShare2,
   IconTrash,
   IconSun,
@@ -101,6 +102,7 @@ import {
   IconExternalLink,
   IconWorld,
   IconListDetails,
+  IconX,
 } from "@tabler/icons-react";
 import { Notifications } from "@mantine/notifications";
 import { ContextMenuProvider, useContextMenu } from "mantine-contextmenu";
@@ -1364,6 +1366,22 @@ function AppInner(props: {
   /** Run actions make sense only for a worktree of an on-disk repo. */
   const canRunWorktreeNow = (w: Worktree) =>
     w.has_veld_config && (repo?.available ?? false);
+
+  // The top-bar node-actions button. `nodeActionProps` being null is a *disabled*
+  // state, governed by `ui.hideDisabledActions` like the other inapplicable
+  // actions: hidden when the setting is on, shown greyed with a reason when off.
+  const nodeActionsDisabled = !nodeActionProps;
+  const nodeActionsButton =
+    worktree &&
+    canRunWorktreeNow(worktree) &&
+    !(nodeActionsDisabled && hideDisabled) ? (
+      <NodeActionsButton
+        disabled={nodeActionsDisabled}
+        run={nodeActionProps?.run ?? null}
+        nodes={nodeActionProps?.nodes ?? []}
+        onChanged={() => void refresh()}
+      />
+    ) : null;
 
   /**
    * Whether any of the selected worktree's machine vars has a value answered on
@@ -3464,8 +3482,8 @@ function AppInner(props: {
       <Tooltip
         label={
           configVarsNone
-            ? `${worktreeLabel(worktree)} doesn’t ask you for any values`
-            : `Values for this machine — ${worktreeLabel(worktree)}`
+            ? `Worktree “${worktreeLabel(worktree)}” doesn’t ask you for any values`
+            : `Values for this machine — worktree “${worktreeLabel(worktree)}”`
         }
       >
         {/* The `<span>` is load-bearing even now the button can be hidden: when
@@ -3592,13 +3610,12 @@ function AppInner(props: {
       >
         <ActionIcon
           size="md"
-          /* One icon for both states, because there is one action: open the
-             sharing panel. Active is a *filled* green button that also pulses —
-             colour plus motion, the same legibility the old "Sharing live" text
-             carried without the words widening the bar. */
+          /* One action, two readings: outline `IconShare2` when nothing is
+             shared, filled green `IconBroadcast` when it is — "on air" is what
+             the icon says, and colour plus fill carry it without a word widening
+             the bar. */
           variant={sharingActive ? "filled" : "default"}
           color={sharingActive ? "green" : undefined}
-          className={`share-btn${sharingActive ? " live" : ""}`}
           aria-label={
             sharingActive
               ? "Sharing live — open the sharing panel"
@@ -3606,7 +3623,7 @@ function AppInner(props: {
           }
           onClick={() => setDialog({ kind: "sharing" })}
         >
-          <IconShare2 size={14} />
+          {sharingActive ? <IconBroadcast size={14} /> : <IconShare2 size={14} />}
         </ActionIcon>
       </Tooltip>
     ) : null;
@@ -3691,7 +3708,7 @@ function AppInner(props: {
         spinner={spinnerAction(pendingForRun(worktree, run?.name), run)}
         run={run}
         runSelect={
-          worktree && runs.length > 0 ? (
+          worktree && canRunWorktreeNow(worktree) ? (
             <RunSelect
               // Remounts per worktree, which is what actually enforces the
               // "reveal ended runs for this opening only" rule: React reconciles
@@ -3718,8 +3735,13 @@ function AppInner(props: {
                 startWorktree(worktree, anotherNameFor(worktree))
               }
               onSelect={setSelectedRunName}
+              // No runs yet: shown greyed (or hidden, per `ui.hideDisabledActions`).
+              disabled={runs.length === 0}
             />
           ) : null
+        }
+        runSelectDisabled={
+          !worktree || !canRunWorktreeNow(worktree) || runs.length === 0
         }
         urls={urls}
         sharing={sharingSurface}
@@ -3740,9 +3762,7 @@ function AppInner(props: {
         themeButton={themeButton}
         settingsButton={settingsButton}
         configVarsButton={configVarsButton}
-        nodeActions={
-          nodeActionProps ? <NodeActionsButton {...nodeActionProps} /> : null
-        }
+        nodeActions={nodeActionsButton}
         hideDisabled={hideDisabled}
       />
 
@@ -4104,6 +4124,9 @@ function RunSelect(props: {
   canStartAnother: boolean;
   onStartAnother: () => void;
   onSelect: (name: string) => void;
+  /** No runs to choose from — the button is shown greyed (or hidden, see
+   *  `ui.hideDisabledActions`) and the menu cannot open. */
+  disabled: boolean;
 }) {
   const { selected, missing } = props;
   /**
@@ -4160,34 +4183,35 @@ function RunSelect(props: {
   return (
     <Menu position="bottom-start" width={300}>
       <Menu.Target>
+        {/* The run's name is deliberately **not** the visible label. The dot
+            answers "is something running, and how", and the `x/x` counter
+            answers "which of several" — both without the name, which is one
+            hover (the `title` above) away. A name here made the control as
+            wide as the longest environment in the worktree and read as if the
+            bar were about that run rather than about the actions on it. The
+            dot is the button's only content, so it centres in a square cell;
+            the counter rides beside it when there is more than one run. */}
         <Button
           size="compact-sm"
           variant="default"
           className="run-select"
           title={tooltip}
-          leftSection={
-            <span
-              // `partial` while awaiting: the same amber a `starting` run gets,
-              // because that is exactly what this is — the daemon simply has not
-              // listed it yet.
-              className={`dot ${awaiting ? "partial" : runStatus(selected)}`}
-              role="img"
-              aria-label={
-                awaiting
-                  ? `Run ${awaiting}: starting`
-                  : selected
-                    ? `Run ${selected.name}: ${props.pending ?? selected.status}`
-                    : "No run selected"
-              }
-            />
-          }
+          disabled={props.disabled}
         >
-          {/* The run's name is deliberately **not** the visible label. The dot
-              answers "is something running, and how", and the `x/x` counter
-              answers "which of several" — both without the name, which is one
-              hover (the `title` above) away. A name here made the control as
-              wide as the longest environment in the worktree and read as if the
-              bar were about that run rather than about the actions on it. */}
+          <span
+            // `partial` while awaiting: the same amber a `starting` run gets,
+            // because that is exactly what this is — the daemon simply has not
+            // listed it yet.
+            className={`dot ${awaiting ? "partial" : runStatus(selected)}`}
+            role="img"
+            aria-label={
+              awaiting
+                ? `Run ${awaiting}: starting`
+                : selected
+                  ? `Run ${selected.name}: ${props.pending ?? selected.status}`
+                  : "No run selected"
+            }
+          />
           {/* Hidden while awaiting: `position` indexes the listed runs, and the
               environment being started is not among them yet, so the counter would
               read `dev-2  1/2` with the `1` pointing at a different run. */}
@@ -4285,10 +4309,26 @@ function RunSelect(props: {
  * new-pane chooser embeds directly.
  */
 function NodeActionsButton(props: {
-  run: RunRef;
+  run: RunRef | null;
   nodes: NodeRow[];
   onChanged: () => void;
+  /** No run to act on — shown greyed (or hidden, see `ui.hideDisabledActions`). */
+  disabled: boolean;
 }) {
+  if (props.disabled) {
+    // The `<span>` is load-bearing: a disabled ActionIcon has `pointer-events:
+    // none`, so the tooltip that explains *why* it is disabled would never open
+    // (the #205 trap). The wrapper still receives the hover.
+    return (
+      <Tooltip label="Start the run to act on its nodes">
+        <span style={{ display: "inline-flex" }}>
+          <ActionIcon size="md" variant="default" aria-label="Node actions" disabled>
+            <IconListDetails size={14} />
+          </ActionIcon>
+        </span>
+      </Tooltip>
+    );
+  }
   return (
     <Menu position="bottom-start" width={280} withinPortal>
       <Menu.Target>
@@ -4301,7 +4341,7 @@ function NodeActionsButton(props: {
       <Menu.Dropdown>
         <Menu.Label>Actions on the running run</Menu.Label>
         <div className="node-actions-menu">
-          <NodeActions {...props} />
+          <NodeActions run={props.run as RunRef} nodes={props.nodes} onChanged={props.onChanged} />
         </div>
       </Menu.Dropdown>
     </Menu>
@@ -4324,13 +4364,16 @@ function TopBar(props: {
   spinner: PendingAction | null;
   run: { name: string; status: string } | null;
   /**
-   * The run selector, or `null` when the worktree has no runs at all.
+   * The run selector, or `null` when this worktree has no run controls at all.
    *
    * Built by the app because it needs the worktree's presets and the whole run
    * list. It *replaces* the old status dot — it carries one — so exactly one
    * control in the bar answers "which run, and how is it".
    */
   runSelect: React.ReactNode;
+  /** Whether the run selector has no runs to offer — hidden (or greyed per
+   *  `ui.hideDisabledActions`). */
+  runSelectDisabled: boolean;
   urls: Array<[string, string]>;
   /** The Sharing surface, built by the app (it owns the shares poll). */
   sharing: React.ReactNode;
@@ -4358,6 +4401,25 @@ function TopBar(props: {
       ? props.repo.name
       : `${props.repo.name} (unavailable)`
     : "";
+  // Whether the play/stop control can *abort* a start it is in the middle of —
+  // see the button below. Hover-owned so a fresh mount does not replay the
+  // transition, the same reason the mode switch owns its own hover state.
+  const [startHover, setStartHover] = useState(false);
+  // A start in flight: the play/stop button spins red and offers a stop on hover.
+  const starting = props.spinner === "start";
+  // The project selector shrinks to its current name instead of always occupying
+  // its 170px cap. A hidden mirror span is measured rather than a font guess, so
+  // the width tracks the real rendered label; capped at 170 with ellipsis, floored
+  // so a one-char name does not collapse the cell below a usable target.
+  const [projectWidth, setProjectWidth] = useState(170);
+  const projectMeasureRef = useRef<HTMLSpanElement>(null);
+  useEffect(() => {
+    const el = projectMeasureRef.current;
+    if (!el) return;
+    setProjectWidth(
+      Math.min(170, Math.max(64, Math.ceil(el.getBoundingClientRect().width) + 40)),
+    );
+  }, [repoLabel]);
   // No run controls for a repo we can't see on disk — git/veld actions would
   // only fail later with a worse error.
   const canRun = !!worktree?.has_veld_config && repoAvailable;
@@ -4366,16 +4428,15 @@ function TopBar(props: {
       {props.modeSwitch}
       {props.repos.length > 0 && (
         <div className="project-select" title={props.repo ? repoLabel : "Switch project"}>
-          {/* Sizing mirror: the select shrinks to its current value rather than
-              always occupying its cap, so a short project name does not leave a
-              170px hole in the densest row in the app. Invisible, but it fixes
-              the grid column the select renders into (see styles.css). */}
-          <span className="project-select-measure" aria-hidden="true">
+          {/* Hidden mirror for `projectWidth` above — measuring it is how the
+              select shrinks to its value rather than always filling 170px. */}
+          <span ref={projectMeasureRef} className="project-select-measure" aria-hidden="true">
             {props.repo ? repoLabel : ""}
           </span>
           <Select
             title="Switch project"
             size="xs"
+            w={projectWidth}
             className="project-select-control"
             allowDeselect={false}
             value={props.repo?.root ?? null}
@@ -4420,6 +4481,11 @@ function TopBar(props: {
         <>
           <div className="sep" />
           {canRun && props.startConfig}
+          {/* The runs button sits between the preset picker and the start control
+              — the bar reads "what I'll run, which run, run it". Disabled (or
+              hidden, per `ui.hideDisabledActions`) when the worktree has no runs
+              to choose from. */}
+          {(!props.hideDisabled || !props.runSelectDisabled) && props.runSelect}
           {canRun && (
             <>
               {/* The spinner belongs on the button that was pressed. Putting
@@ -4430,39 +4496,62 @@ function TopBar(props: {
                   unmistakable at the instant it is clicked, not one hover away. */}
               <Tooltip
                 label={
-                  props.running
-                    ? `Stop ${props.run?.name ?? "run"}`
-                    : "Start run"
+                  starting
+                    ? "Starting… click to abort"
+                    : props.running
+                      ? `Stop ${props.run?.name ?? "run"}`
+                      : "Start run"
                 }
               >
-                <ActionIcon
-                  size="md"
-                  variant="light"
-                  color={props.running ? "red" : "green"}
-                  // `spinner`, not `pending`: the rail's row control spins for a
-                  // transition it merely *observed* (one started from the CLI or
-                  // another window), and this button showing a static glyph for
-                  // the same worktree at the same moment is two surfaces
-                  // disagreeing about whether anything is happening.
-                  //
-                  // Still filtered to start/stop rather than truthiness, which is
-                  // what keeps the comment above true: a locally-fired restart
-                  // spins the restart button alone. An externally-fired one is
-                  // indistinguishable from a stop-then-start on the wire, so it
-                  // legitimately lands here instead.
-                  loading={props.spinner === "start" || props.spinner === "stop"}
-                  disabled={
-                    props.pending !== null ||
-                    (!props.running && !props.canStart)
-                  }
-                  onClick={props.running ? props.onStop : props.onStart}
+                {/* The pointer listeners sit on a wrapper, not the ActionIcon:
+                    Mantine's Tooltip merges child handlers through floating-ui,
+                    and the `starting` swap needs them even while the loader shows.
+                    The wrapper is what makes a *starting* run's stop-on-hover
+                    reachable without the button being enabled at rest. */}
+                <span
+                  className="bar-hover-slot"
+                  onMouseEnter={() => setStartHover(true)}
+                  onMouseLeave={() => setStartHover(false)}
                 >
-                  {props.running ? (
-                    <IconPlayerStopFilled size={13} />
-                  ) : (
-                    <IconPlayerPlayFilled size={13} />
-                  )}
-                </ActionIcon>
+                  <ActionIcon
+                    size="md"
+                    variant="light"
+                    color={starting ? "red" : props.running ? "red" : "green"}
+                    // `spinner`, not `pending`: the rail's row control spins for a
+                    // transition it merely *observed* (one started from the CLI or
+                    // another window), and this button showing a static glyph for
+                    // the same worktree at the same moment is two surfaces
+                    // disagreeing about whether anything is happening.
+                    //
+                    // Still filtered to start/stop rather than truthiness, which is
+                    // what keeps the comment above true: a locally-fired restart
+                    // spins the restart button alone. An externally-fired one is
+                    // indistinguishable from a stop-then-start on the wire, so it
+                    // legitimately lands here instead.
+                    //
+                    // A *starting* run spins red and, on hover, offers a stop — so
+                    // while a start is in flight this control is deliberately NOT
+                    // disabled: the hover swap replaces the loader with a stop
+                    // glyph, and clicking it aborts the start.
+                    loading={
+                      (props.spinner === "start" || props.spinner === "stop") &&
+                      !(starting && startHover)
+                    }
+                    disabled={
+                      (props.pending !== null && !starting) ||
+                      (!props.running && !props.canStart && !starting)
+                    }
+                    onClick={props.running || starting ? props.onStop : props.onStart}
+                  >
+                    {starting && startHover ? (
+                      <IconX size={14} />
+                    ) : props.running ? (
+                      <IconPlayerStopFilled size={13} />
+                    ) : (
+                      <IconPlayerPlayFilled size={13} />
+                    )}
+                  </ActionIcon>
+                </span>
               </Tooltip>
               {/* A restart only makes sense while something is live. Hidden (or,
                   with `ui.hideDisabledActions` off, shown greyed) when nothing
@@ -4488,22 +4577,10 @@ function TopBar(props: {
                   settings gear, which is the exact confusion the `{}` glyph was
                   chosen to avoid. */}
               {props.configVarsButton}
-              {/* Status is a dot, not a word: the text was long enough to be
-                  clipped in a crowded bar, and it duplicated what the
-                  start/stop icon already says. The dot now rides on the run
-                  selector, so the same glyph also says *which* run it describes —
-                  a worktree can hold several, and a dot with no name attached was
-                  read as belonging to whatever the control beside it named.
-
-                  No fallback for a missing selector: it is absent only when the
-                  worktree has no runs at all, and then there is no status to
-                  report. A standalone dot kept "just in case" was unreachable code
-                  that read as a live path. */}
-              {props.runSelect}
               {/* The running run's node actions, one click from the surface that
-                  is always up — see shared/NodeActions.tsx. `null` when nothing
-                  can fire, which is contextual (no run, or none of its nodes
-                  declare an action) and so not governed by `hideDisabled`. */}
+                  is always up — see shared/NodeActions.tsx. Hidden when nothing
+                  can fire and `ui.hideDisabledActions` is on; shown greyed with a
+                  reason when off. */}
               {props.nodeActions}
               {run && (props.hideDisabled ? props.urls.length > 0 : true) && (
                 // Opens a browser pane on the run's URLs, not an overlay of its

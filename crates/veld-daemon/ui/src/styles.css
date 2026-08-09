@@ -368,29 +368,32 @@ body[data-fullscreen="true"] .topbar.electron {
   margin: 0 1px;
 }
 
+/* A hover-owner wrapper for a control whose pointer state the control itself
+   must not own (the mode switch and the starting-run abort share this shape).
+   Inline-flex so it is exactly the control's box and adds no layout. */
+.bar-hover-slot {
+  display: inline-flex;
+}
+
 /* The project selector shrinks to its value instead of always occupying its
    170px cap — a short project name should not leave a hole in the densest row
-   of the app. Both the invisible measure span and the select render into the
-   same grid cell, so the grid's width is the wider of the two: the measure
-   carries the current label with the input's metrics, and `max-width` caps the
-   whole thing so an over-long name ellipsises instead of stretching the bar.
-   The measure's trailing padding accounts for the input's own right section
-   (the dropdown chevron), so the box never undershoots the text it must show. */
+   of the app. The width is computed in `TopBar` by measuring the hidden mirror
+   span (so the font is whatever the input renders, not a guess); `max-width`
+   here is the backstop and the input's ellipsis keeps an over-long name from
+   stretching the bar. */
 .project-select {
-  display: inline-grid;
-  max-width: 170px;
+  display: inline-flex;
   min-width: 0;
+  max-width: 170px;
 }
 .project-select-measure {
-  grid-area: 1 / 1;
+  position: absolute;
   visibility: hidden;
   white-space: nowrap;
-  font: inherit;
-  padding: 0 40px 0 12px;
+  font-size: 12px;
+  font-family: inherit;
 }
 .project-select-control {
-  grid-area: 1 / 1;
-  width: 100%;
   min-width: 0;
 }
 .project-select-control .mantine-Input-input {
@@ -408,44 +411,25 @@ body[data-fullscreen="true"] .topbar.electron {
 }
 .vars-btn .vars-badge {
   position: absolute;
-  top: -1px;
-  right: -1px;
-  width: 7px;
-  height: 7px;
+  top: -2px;
+  right: -2px;
+  width: 12px;
+  height: 12px;
   border-radius: 50%;
   background: var(--accent);
-  border: 1.5px solid var(--panel2);
-}
-
-/* The share button's active state. One icon for both states; active is filled
-   green *and* pulses a soft ring, so it is legible without reading the word
-   the old button carried. The ring respects reduced motion, like the other
-   pulse animations in the app. */
-.share-btn.live {
-  animation: share-ring 2s ease-in-out infinite;
-}
-@keyframes share-ring {
-  0%,
-  100% {
-    box-shadow: 0 0 0 0 color-mix(in oklab, var(--live) 55%, transparent);
-  }
-  50% {
-    box-shadow: 0 0 0 4px color-mix(in oklab, var(--live) 0%, transparent);
-  }
-}
-@media (prefers-reduced-motion: reduce) {
-  .share-btn.live {
-    animation: none;
-  }
+  border: 2px solid var(--panel2);
 }
 
 /* Node actions in a menu (top bar) and the new-pane chooser. Each node is its
    own labelled group so overlapping action labels stay attributable. */
+.node-actions-menu {
+  padding: 4px 12px 8px;
+}
 .node-action-group {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  padding: 4px 8px;
+  padding: 4px 0;
 }
 .node-action-node {
   font-family: "JetBrains Mono Variable", ui-monospace, monospace;
@@ -947,22 +931,30 @@ body[data-fullscreen="true"] .topbar.electron {
 
 /* ---- run selector (top bar) ---------------------------------------------- */
 
-/* Which run the window is bound to. Sized to the run name, so a long
-   environment name is not truncated into ambiguity with its siblings. */
+/* Which run the window is bound to. A square cell when there is one run (just
+   the dot, centred) that widens for the `x/x` chip beside it. `padding-inline`
+   is symmetric so the dot sits dead centre; `min-width` keeps a lone dot from
+   collapsing the cell below the bar's control height. */
 .run-select {
   max-width: 240px;
+  min-width: var(--topbar-control-h);
+  padding-inline: 7px;
+  justify-content: center;
 }
 /* "1/2" — how many runs the worktree holds and which one is showing. Always
    rendered when there is more than one, because a selector that hid the second
    run behind a click would be a tidier version of the bug it fixes. Also used on
-   a rail row, where it is the second environment's only representation. */
+   a rail row, where it is the second environment's only representation. A pill,
+   not a bare number: it is a count of two states, and a pill reads as a badge
+   rather than as the button's text. */
 .run-count {
-  margin-left: 6px;
-  padding: 0 4px;
-  border-radius: 4px;
-  background: var(--elev);
+  margin-left: 5px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--text) 12%, transparent);
   color: var(--muted);
   font-size: 10px;
+  line-height: 1.4;
   font-variant-numeric: tabular-nums;
   flex: none;
 }
