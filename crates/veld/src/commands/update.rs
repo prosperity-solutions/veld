@@ -123,23 +123,39 @@ pub async fn run(
     // restart, and `install.sh` does its own escalation for a `/usr/local`
     // install, so nothing legitimate needs this — a root-run install would also
     // leave root-owned binaries in the user's `~/.local`.
-    if let Ok(user) = std::env::var("SUDO_USER") {
-        if !user.is_empty() {
-            output::print_error(
-                "`veld update` must not run under sudo — run it as yourself.",
-                false,
+    if std::env::var("SUDO_USER").is_ok_and(|user| !user.is_empty()) {
+        let msg = "`veld update` must not run under sudo — run it as yourself.";
+        output::print_error(msg, false);
+        println!(
+            "  {}",
+            output::dim(
+                "It escalates on its own where it needs to (the privileged helper restart, \
+                 and a /usr/local install inside install.sh), and prompts for your password \
+                 when it does. Under sudo it would install root-owned files into your home \
+                 and take its lock in root's."
+            )
+        );
+        // **Every exit path a handoff can take owes the app a report**, and this
+        // is a new one. The app has already quit and is waiting on
+        // `desktop-update.json` to decide whether to say anything on relaunch —
+        // an absent report reads as success, so a silent return here is an app
+        // that reopens on the old version having been told nothing. Unlikely to
+        // be reached (it needs `SUDO_USER` in the app's own launch environment)
+        // and cheap to hold, which is the definition of an invariant worth
+        // keeping rather than reasoning about.
+        if handoff {
+            veld_core::setup::write_desktop_update_report(
+                &reported_version,
+                Err(msg),
+                veld_core::setup::UpdateHalf::Release,
             );
-            println!(
-                "  {}",
-                output::dim(
-                    "It escalates on its own where it needs to (the privileged helper restart, \
-                     and a /usr/local install inside install.sh), and prompts for your password \
-                     when it does. Under sudo it would install root-owned files into your home \
-                     and take its lock in root's."
-                )
-            );
-            return 1;
         }
+        if relaunch {
+            if let Some((app, _)) = veld_core::setup::desktop_app_status_in(app_dir.as_deref()) {
+                veld_core::setup::open_desktop_app(&app);
+            }
+        }
+        return 1;
     }
 
     // Refused before the lock is taken, so that the message names *this* run's

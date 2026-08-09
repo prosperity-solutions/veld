@@ -90,10 +90,11 @@ One documented cost: a custom icon lives in the file's resource fork, and
 and are launched by launchd normally.
 
 **The app's own *Check for Updates…* updates the whole release.** It offers
-*veld `<version>`* rather than a new app, spawns `veld update --console
---wait-pid <pid> --relaunch --app-path <exe>` detached, quits so its bundle can
-be replaced, and the CLI moves every half and reopens it. One click, one restart,
-no follow-up trip to a terminal.
+*veld `<version>`* rather than a new app, spawns `veld update --target-version
+<version> --wait-pid <pid> --relaunch --app-path <exe>` detached (plus
+`--console`, when the CLI advertises it — see below), quits so its bundle can be
+replaced, and the CLI moves every half and reopens it. One click, one restart, no
+follow-up trip to a terminal.
 
 **`--console` re-runs the update in a terminal window**, which fixes two things a
 detached child cannot do. It has no surface to show progress on once the app has
@@ -113,6 +114,17 @@ lock to be claimed by a different pid, which only a `veld update` that really
 started can do, and runs the update itself (headless, as before) when that never
 happens. `VELD_UPDATE_ORIGIN=console` is exported into the window purely so the
 run describes itself correctly to observers; nothing branches on it.
+
+**`--console` is gated on its own capability, `console-handoff`**, and not on
+`full-update-handoff`. The two are genuinely independent: `veld desktop update`
+moves the app half *alone*, so a new app can be driving an old CLI — one that has
+always had `--wait-pid`/`--relaunch` and therefore advertises the full handoff,
+while its clap rejects `--console` with a usage error and a non-zero exit. That
+would happen *after* the app quit and with no report written, so the user would
+reopen on the old version having been told nothing. Unlike its neighbour,
+`console-handoff` is advertised unconditionally: it is a claim about this
+binary's vocabulary, not about whether the machine can finish an unattended
+update, and the flag degrades to a headless run on its own.
 
 Which command it spawns is a **capability** decision, not a version comparison:
 `veld desktop status --json` carries a `capabilities` array, and the app uses the
@@ -158,12 +170,13 @@ veld update
 
 **Only one update runs at a time.** `veld update` takes a lock at
 `~/.veld/update.lock` (a directory — `mkdir` is the create-or-fail primitive) and
-publishes `{pid, origin, version, phase, phase_at, tty}` into `state.json` inside
+publishes `{pid, origin, version, started_at, phase, phase_at, tty}` into
+`state.json` inside
 it. A second `veld update` refuses with **exit 75** (`EX_TEMPFAIL`, so an agent
 can tell "retry shortly" from a real failure) and names the holder and its phase.
 So does every other veld command except a small allow-list — `update`, `doctor`,
-`version`, `config`, `lint`, `init`, and the internal log sinks that running
-environments depend on — because the rest exec binaries that are being replaced
+`version`, `config`, `lint`, `init`, `desktop status`, and the internal log sinks
+that running environments depend on — because the rest exec binaries that are being replaced
 or talk to services that are being restarted. Veld Desktop reads the same file at
 startup and quits with an explanation rather than opening over its own bundle
 swap.
