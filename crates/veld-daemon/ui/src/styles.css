@@ -368,6 +368,75 @@ body[data-fullscreen="true"] .topbar.electron {
   margin: 0 1px;
 }
 
+/* A hover-owner wrapper for a control whose pointer state the control itself
+   must not own (the mode switch and the starting-run abort share this shape).
+   Inline-flex so it is exactly the control's box and adds no layout. */
+.bar-hover-slot {
+  display: inline-flex;
+}
+
+/* The project selector shrinks to its value instead of always occupying its
+   170px cap — a short project name should not leave a hole in the densest row
+   of the app. The width is computed in `TopBar` by measuring the hidden mirror
+   span (so the font is whatever the input renders, not a guess); `max-width`
+   here is the backstop and the input's ellipsis keeps an over-long name from
+   stretching the bar. */
+.project-select {
+  display: inline-flex;
+  min-width: 0;
+  max-width: 170px;
+}
+.project-select-measure {
+  position: absolute;
+  visibility: hidden;
+  white-space: nowrap;
+  font-size: 12px;
+  font-family: inherit;
+}
+.project-select-control {
+  min-width: 0;
+}
+.project-select-control .mantine-Input-input {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The machine-vars `{}` button: a small badge marks that this machine has
+   answered at least one of the project's vars. Positioned on the control's
+   corner so it reads as a status on the button rather than a second control. */
+.vars-btn {
+  position: relative;
+  display: inline-flex;
+}
+.vars-btn .vars-badge {
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 2px solid var(--panel2);
+}
+
+/* Node actions in a menu (top bar) and the new-pane chooser. Each node is its
+   own labelled group so overlapping action labels stay attributable. */
+.node-actions-menu {
+  padding: 4px 12px 8px;
+}
+.node-action-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 4px 0;
+}
+.node-action-node {
+  font-family: "JetBrains Mono Variable", ui-monospace, monospace;
+  font-size: 11px;
+  color: var(--muted);
+}
+
 .btn {
   display: inline-flex;
   align-items: center;
@@ -862,22 +931,28 @@ body[data-fullscreen="true"] .topbar.electron {
 
 /* ---- run selector (top bar) ---------------------------------------------- */
 
-/* Which run the window is bound to. Sized to the run name, so a long
-   environment name is not truncated into ambiguity with its siblings. */
+/* Which run the window is bound to. A square cell when there is one run (just
+   the dot, centred) that widens for the `x/x` count beside it. `padding-inline`
+   is symmetric so the dot sits dead centre; `min-width` keeps a lone dot from
+   collapsing the cell below the bar's control height. */
 .run-select {
   max-width: 240px;
+  min-width: var(--topbar-control-h);
+  padding-inline: 7px;
+  justify-content: center;
 }
 /* "1/2" — how many runs the worktree holds and which one is showing. Always
    rendered when there is more than one, because a selector that hid the second
    run behind a click would be a tidier version of the bug it fixes. Also used on
-   a rail row, where it is the second environment's only representation. */
+   a rail row, where it is the second environment's only representation. Plain
+   text, not a chip: the dot already carries the state, and a badge around the
+   count read as a second status inside a button that was only ever about which
+   run. */
 .run-count {
-  margin-left: 6px;
-  padding: 0 4px;
-  border-radius: 4px;
-  background: var(--elev);
+  margin-left: 4px;
   color: var(--muted);
   font-size: 10px;
+  line-height: 1.4;
   font-variant-numeric: tabular-nums;
   flex: none;
 }
@@ -885,7 +960,6 @@ body[data-fullscreen="true"] .topbar.electron {
    control the user is already looking at carries the state of the run they are
    not. */
 .run-count.alert {
-  background: var(--warn-bg);
   color: var(--warn);
 }
 .run-item-name {
@@ -2916,12 +2990,13 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
   flex: none;
 }
 
-/* A shade smaller than the rest of the bar on purpose: the label is a *state*
-   ("you are in the IDE"), not one of the bar's verbs. `.mantine-Button-root` is
-   in the selector only to outrank the bar-wide 12px rule on specificity rather
-   than on source order — two `!important` declarations of equal weight are
-   settled by whichever comes last in the file, which is not a thing to leave a
-   reader to work out. */
+/* A shade smaller than the rest of the bar on purpose: the mark is the bar's
+   one non-control glyph (the tooltip names the mode and the destination, which
+   the resting mark cannot), not one of the bar's verbs. `.mantine-Button-root`
+   is in the selector only to outrank the bar-wide 12px rule on specificity
+   rather than on source order — two `!important` declarations of equal weight
+   are settled by whichever comes last in the file, which is not a thing to leave
+   a reader to work out. */
 .topbar .mode-switch.mantine-Button-root {
   --button-fz: 11px !important;
 }

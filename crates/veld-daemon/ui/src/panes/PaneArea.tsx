@@ -281,6 +281,11 @@ export function PaneArea(props: {
   quickSwitches: QuickSwitchPrefs;
   /** The selected worktree's run, for the `logs` and `nodes` panes. */
   runCtx: RunPaneContext;
+  /**
+   * The running run's node actions, offered by the new-pane chooser — `null`
+   * when none can fire. See shared/NodeActions.tsx; the app builds the element.
+   */
+  nodeActions?: React.ReactNode | null;
 }) {
   const { layout, onLayout } = props;
   const areaRef = useRef<HTMLDivElement>(null);
@@ -741,6 +746,7 @@ export function PaneArea(props: {
           quicklinks={props.quicklinks}
           panes={props.panes}
           urlsEmptyHint={props.urlsEmptyHint}
+          nodeActions={props.nodeActions}
           onTerminal={() =>
             onLayout(addTab(layout, 0, { id: newTabId(), kind: "terminal", title: "Terminal" }))
           }
@@ -812,6 +818,7 @@ export function PaneArea(props: {
               onRemoveSession={props.onRemoveSession}
               quickSwitches={props.quickSwitches}
               runCtx={props.runCtx}
+              nodeActions={props.nodeActions}
               onDetach={desktopWindow ? detachTabs : undefined}
               onDropOut={desktopWindow ? dropOutTabs : undefined}
               wasOutside={() => dragOutsideRef.current}
@@ -877,6 +884,8 @@ function DockView(props: {
   onRemoveSession: (profile: BrowserProfile) => void;
   quickSwitches: QuickSwitchPrefs;
   runCtx: RunPaneContext;
+  /** The running run's node actions, offered by the new-pane chooser. */
+  nodeActions?: React.ReactNode | null;
   /** Pull tabs out into a window of their own. Absent outside Electron, which
    *  has no window manager to pull them into. */
   onDetach: ((tabs: PaneTab[]) => void | Promise<void>) | undefined;
@@ -1273,6 +1282,7 @@ function DockView(props: {
             quicklinks={props.quicklinks}
             panes={props.panes}
             urlsEmptyHint={props.urlsEmptyHint}
+            nodeActions={props.nodeActions}
             // A `new` tab becomes the chosen kind in place; an empty dock has no
             // tab to convert, so it gets a fresh one.
             onTerminal={() =>
@@ -1343,6 +1353,8 @@ function PaneChooser(props: {
   /** Pane types the project declares in `ide.panes`. */
   panes: PaneSpec[];
   urlsEmptyHint: string;
+  /** The running run's node actions, offered when something can act. */
+  nodeActions?: React.ReactNode | null;
   onTerminal: () => void;
   onPane: (spec: PaneSpec) => void;
   onBrowser: (tab: PaneTab) => void;
@@ -1408,6 +1420,16 @@ function PaneChooser(props: {
             </button>
           ))}
         </div>
+      )}
+      {/* The running run's node actions, when it has any — the same surface the
+          top bar exposes as a menu, embedded here so a freshly-opened pane
+          starts next to the things it might be there to act on. */}
+      {props.nodeActions && (
+        <>
+          <hr className="pane-chooser-rule" />
+          <span className="section-label">Actions on the running run</span>
+          {props.nodeActions}
+        </>
       )}
       {/* The run's URLs, one click from being the pane's content. Not a third
           button opening a third kind — see VeldLinks.tsx. The rule separates
