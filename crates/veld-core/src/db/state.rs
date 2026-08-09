@@ -752,11 +752,7 @@ impl Db {
             .collect::<Result<_, _>>()?;
 
         // Both columns: `url` is the primary, `endpoints` carries every named
-        // port. The registry feeds `claimed_hostname`, which is what stops two
-        // projects serving the same hostname — so a port missing here is a
-        // collision nothing detects. Unrouted (`tcp`) endpoints count too: they
-        // own a DNS entry, and a DNS collision is the harder one to diagnose
-        // because nothing serves an error page.
+        // port. Rows with neither claim nothing and are skipped.
         let mut url_stmt = conn.prepare_cached(
             "SELECT node_key, url, endpoints FROM nodes WHERE run_row = ?1
              AND (url IS NOT NULL OR endpoints != '{}')",
@@ -765,6 +761,7 @@ impl Db {
         let mut registry = GlobalRegistry::default();
         for (run_row, root, project_name, run_name, run_id, status) in rows {
             let mut urls: HashMap<String, String> = HashMap::new();
+            let mut hostnames: Vec<String> = Vec::new();
             let per_node = url_stmt.query_map([run_row], |r| {
                 Ok((
                     r.get::<_, String>(0)?,
@@ -774,19 +771,37 @@ impl Db {
             })?;
             for row in per_node {
                 let (node_key, primary, endpoints_json) = row?;
-                if let Some(primary) = primary {
-                    urls.insert(node_key.clone(), primary);
-                }
-                // Keyed `node_key#port` so a secondary never collides with the
-                // primary's entry. Only the values are read (by
-                // `claimed_hostname`); the key just has to be unique. The
-                // *hostname* is what matters, so an unrouted endpoint
-                // contributes its bare hostname.
                 let per_port: std::collections::BTreeMap<String, crate::state::NodeEndpoint> =
                     serde_json::from_str(&endpoints_json).unwrap_or_default();
-                for (port_name, endpoint) in per_port {
-                    let value = endpoint.url.unwrap_or(endpoint.hostname);
-                    urls.insert(format!("{node_key}#{port_name}"), value);
+
+                if let Some(primary) = &primary {
+                    urls.insert(node_key.clone(), primary.clone());
+                }
+                for (port_name, endpoint) in &per_port {
+                    // Every hostname, routed or not: an unrouted (`tcp`) port
+                    // owns a DNS entry, and a DNS collision is the harder one to
+                    // diagnose because nothing serves an error page.
+                    let host = crate::url::hostname_of_url(&endpoint.hostname).to_owned();
+                    if !hostnames.contains(&host) {
+                        hostnames.push(host);
+                    }
+                    // Display keys, so only routed ports appear — and the
+                    // primary is already in under its bare node key. Matched by
+                    // value, exactly as `NodeState::routed_urls` does it, so the
+                    // two never disagree about which port is the primary.
+                    let Some(url) = &endpoint.url else { continue };
+                    if Some(url) == primary.as_ref() {
+                        continue;
+                    }
+                    urls.insert(format!("{node_key}#{port_name}"), url.clone());
+                }
+                // A row persisted before per-port endpoints has a `url` and an
+                // empty map; its hostname would otherwise go unclaimed.
+                if let Some(primary) = &primary {
+                    let host = crate::url::hostname_of_url(primary).to_owned();
+                    if !hostnames.contains(&host) {
+                        hostnames.push(host);
+                    }
                 }
             }
             let entry = registry
@@ -804,6 +819,7 @@ impl Db {
                     name: run_name,
                     status: parse_run_status(&status),
                     urls,
+                    hostnames,
                 },
             );
         }
@@ -1058,6 +1074,65 @@ mod tests {
         assert_eq!(
             entry.runs["dev"].urls["web:local"],
             "https://web.test.veld.localhost"
+        );
+    }
+
+    /// The two halves of a multi-port run's registry entry answer different
+    /// questions and must not be derived from each other: `urls` is what the
+    /// dashboards render as links, `hostnames` is what the collision check walks.
+    #[test]
+    fn registry_separates_display_urls_from_claimed_hostnames() {
+        let (_dir, db) = test_db();
+        let root = Path::new("/tmp/projPorts");
+        let mut run = sample_run("dev");
+        let node = run.nodes.get_mut("web:local").unwrap();
+        node.endpoints.insert(
+            "http".into(),
+            crate::state::NodeEndpoint {
+                hostname: "web.test.veld.localhost".into(),
+                url: Some("https://web.test.veld.localhost".into()),
+                port: 3000,
+            },
+        );
+        node.endpoints.insert(
+            "admin".into(),
+            crate::state::NodeEndpoint {
+                hostname: "web-admin.test.veld.localhost".into(),
+                url: Some("https://web-admin.test.veld.localhost".into()),
+                port: 3001,
+            },
+        );
+        node.endpoints.insert(
+            "db".into(),
+            crate::state::NodeEndpoint {
+                hostname: "web-db.test.veld.localhost".into(),
+                url: None,
+                port: 5432,
+            },
+        );
+        db.save_run(root, "proj", &run).unwrap();
+
+        let reg = db.registry().unwrap();
+        let info = &reg.projects["/tmp/projPorts"].runs["dev"];
+
+        // The primary keeps its bare node key — no second entry under `#http`,
+        // which would render the same service twice in the links menu.
+        let mut keys: Vec<&str> = info.urls.keys().map(String::as_str).collect();
+        keys.sort();
+        assert_eq!(keys, ["web:local", "web:local#admin"]);
+        // And no unrouted port: a scheme-less host opened as a link is dead.
+        assert!(info.urls.values().all(|u| u.starts_with("https://")));
+
+        // Every hostname is claimed, `tcp` included.
+        let mut hosts = info.hostnames.clone();
+        hosts.sort();
+        assert_eq!(
+            hosts,
+            [
+                "web-admin.test.veld.localhost",
+                "web-db.test.veld.localhost",
+                "web.test.veld.localhost",
+            ]
         );
     }
 

@@ -13,11 +13,34 @@ export interface ActionInfo {
   label: string;
 }
 
+/**
+ * One of a node's ports.
+ *
+ * `url` present means the port is routed (`protocol: "http"`) and can be opened;
+ * absent means a raw `tcp` port, reachable at `hostname:port` and nowhere else.
+ * Never synthesise a URL for one — a scheme in front of a raw port produces a
+ * link that looks right and reaches nothing.
+ */
+export interface EndpointInfo {
+  name: string;
+  hostname: string;
+  url?: string | null;
+  port: number;
+  /** The node's primary port — the one {@link NodeInfo.url} repeats. */
+  primary: boolean;
+}
+
 export interface NodeInfo {
   name: string;
   variant: string;
   status: string;
   url?: string | null;
+  /**
+   * Every port the node claimed, primary first. Omitted by the daemon when
+   * empty, and absent entirely from runs recorded before per-port endpoints —
+   * so a client must fall back to {@link NodeInfo.url}, not assume a list.
+   */
+  endpoints?: EndpointInfo[];
   pid?: number | null;
   recovery_count?: number;
   consecutive_failures?: number;
@@ -480,6 +503,12 @@ export interface ShareInfo {
   public_urls: GatewayPublicUrl[];
   web_password?: string | null;
   connections: ShareConnectionInfo[];
+  /**
+   * Raw `host:port` endpoints (unrouted `tcp` ports), separate from `urls`
+   * because they are not openable. On a join these are the **local** listener
+   * addresses — the origin's port number is not reachable from here.
+   */
+  addresses: string[];
 }
 
 /**
@@ -497,6 +526,7 @@ export function normalizeShare(s: ShareInfo): ShareInfo {
     joiners: s.joiners ?? 0,
     public_urls: s.public_urls ?? [],
     connections: s.connections ?? [],
+    addresses: s.addresses ?? [],
   };
 }
 

@@ -412,7 +412,10 @@ fn claimed_hostname(
             if run.status != RunStatus::Running {
                 continue;
             }
-            for claimed in run.urls.values().map(|u| url::hostname_of_url(u)) {
+            // `hostnames`, not `urls`: the URL map is display-only and holds
+            // routed ports alone, so reading it here would let a `tcp` port's
+            // hostname be claimed twice with nothing to report it.
+            for claimed in run.hostnames.iter() {
                 if let Some(ours) = planned.iter().find(|h| h.eq_ignore_ascii_case(claimed)) {
                     conflicts.push((
                         ours.clone(),
@@ -4726,6 +4729,7 @@ mod tests {
                     "web:local".to_owned(),
                     format!("https://{hostname}:18443"),
                 )]),
+                hostnames: vec![hostname.to_owned()],
             },
         );
         let mut projects = HashMap::new();

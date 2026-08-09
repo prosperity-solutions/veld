@@ -682,7 +682,20 @@ pub struct RegistryRunInfo {
     pub run_id: Uuid,
     pub name: String,
     pub status: RunStatus,
+    /// Reachable URLs, for display: `node` for a node's primary port and
+    /// `node#port` for every other one. **Routed ports only** — a `tcp` port has
+    /// a hostname but no URL, and anything that renders this map as links would
+    /// turn a scheme-less host into a dead one.
     pub urls: HashMap<String, String>,
+    /// Every hostname this run has claimed, routed or not.
+    ///
+    /// Separate from [`RegistryRunInfo::urls`] because the two questions differ:
+    /// collision detection has to see a `tcp` port (it owns a DNS entry, and a
+    /// DNS collision is the harder one to diagnose — nothing serves an error
+    /// page), while a URL list must not. Deriving one from the other cost the
+    /// UI a duplicate row per node and a scheme-less "link".
+    #[serde(default)]
+    pub hostnames: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

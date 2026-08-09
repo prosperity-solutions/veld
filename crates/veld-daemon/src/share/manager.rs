@@ -931,7 +931,7 @@ impl ShareManager {
                 run: s.manifest.run.clone(),
                 run_id: Some(s.manifest.run_id),
                 approve: Some(s.approve_mode),
-                nodes: s.manifest.nodes.iter().map(|n| n.node.clone()).collect(),
+                nodes: s.manifest.display_nodes(),
                 urls: s
                     .manifest
                     .nodes
@@ -954,6 +954,15 @@ impl ShareManager {
                     .and_then(|w| w.access.as_ref())
                     .and_then(|a| a.password.clone()),
                 connections: peer_info.get(&s.id).cloned().unwrap_or_default(),
+                // On the host the raw port is reachable at its own name and its
+                // own port — there is no listener in between to renumber it.
+                addresses: s
+                    .manifest
+                    .nodes
+                    .iter()
+                    .filter(|n| !n.is_routed())
+                    .map(|n| format!("{}:{}", n.hostname, n.upstream_port))
+                    .collect(),
             })
             .collect();
         let joins = self
@@ -976,6 +985,7 @@ impl ShareManager {
                 web_password: None,
                 // The join's single tunnel, labeled for what it reaches.
                 connections: vec![veld_share::status::connection_info(&j.conn, "host")],
+                addresses: j.addresses.clone(),
             })
             .collect();
         let pending = self

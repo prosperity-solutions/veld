@@ -1154,6 +1154,7 @@ mod tests {
             name: name.to_owned(),
             status: veld_core::state::RunStatus::Running,
             urls: std::collections::HashMap::new(),
+            hostnames: Vec::new(),
         }
     }
 

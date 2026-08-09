@@ -109,6 +109,29 @@ pub struct ShareManifest {
     pub expires_at: i64,
 }
 
+impl ShareManifest {
+    /// What to call each shared port in a list, in manifest order.
+    ///
+    /// A node contributing one port is named plainly; a node contributing
+    /// several gets `node#port` per entry. Both halves matter: without the
+    /// qualifier a two-port node appeared twice under one name and read as a
+    /// rendering bug, and with it unconditionally every single-port share — the
+    /// common case — grew a `#http` nobody wrote.
+    pub fn display_nodes(&self) -> Vec<String> {
+        let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        for n in &self.nodes {
+            *counts.entry(n.node.as_str()).or_default() += 1;
+        }
+        self.nodes
+            .iter()
+            .map(|n| match (&n.port_name, counts[n.node.as_str()]) {
+                (Some(port), c) if c > 1 => format!("{}#{port}", n.node),
+                _ => n.node.clone(),
+            })
+            .collect()
+    }
+}
+
 /// A 32-byte bearer secret embedded in a ticket. A host serves a connection only
 /// if it presents the matching capability (gate 1 of the security model).
 ///
@@ -367,6 +390,16 @@ pub struct ShareInfo {
     /// from daemons that predate connection reporting.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub connections: Vec<ShareConnectionInfo>,
+    /// Raw `host:port` endpoints — the unrouted (`tcp`) ports this share covers.
+    ///
+    /// Listed apart from `urls` rather than folded in because the two are not
+    /// interchangeable: a raw port has no scheme and no route, so anything that
+    /// renders it as a link produces an address that looks right and reaches
+    /// nothing. On a hosted share these are the origin's own names; on a join
+    /// they are the **local** listener addresses, which is what the joiner
+    /// connects to — the origin's port number is not reachable from here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub addresses: Vec<String>,
 }
 
 /// Live tunnel transport state for one connected peer of a share (or for the

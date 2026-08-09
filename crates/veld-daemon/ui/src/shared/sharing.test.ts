@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { HistoryEntry, RunInfo, ShareInfo } from "../api";
 import { runOfShare, sharesForRun } from "./Sharing";
-import { nodeRows } from "./NodeList";
+import { type NodeRow, nodeEndpoints, nodeRows } from "./NodeList";
 
 const share = (over: Partial<ShareInfo>): ShareInfo => ({
   id: "shr_1",
@@ -12,6 +12,7 @@ const share = (over: Partial<ShareInfo>): ShareInfo => ({
   joiners: 0,
   public_urls: [],
   connections: [],
+  addresses: [],
   ...over,
 });
 
@@ -115,6 +116,9 @@ describe("nodeRows", () => {
         variant: "local",
         status: "crashed",
         url: null,
+        // An ended run's routes are gone, so it offers no endpoints either —
+        // not a stale list of addresses that no longer answer.
+        endpoints: [],
         pid: null,
         actions: [],
         recovery_count: 0,
@@ -134,5 +138,53 @@ describe("nodeRows", () => {
       consecutive_failures: 0,
       last_liveness_error: null,
     });
+  });
+});
+
+describe("nodeEndpoints", () => {
+  const row = (over: Partial<NodeRow>): NodeRow => ({
+    name: "web",
+    variant: "local",
+    status: "healthy",
+    url: null,
+    endpoints: [],
+    pid: null,
+    actions: [],
+    recovery_count: 0,
+    consecutive_failures: 0,
+    last_liveness_error: null,
+    ...over,
+  });
+
+  it("synthesises the single primary entry for a daemon that sends no endpoints", () => {
+    expect(nodeEndpoints(row({ url: "https://web.dev.p.localhost" }))).toEqual([
+      {
+        name: "http",
+        hostname: "https://web.dev.p.localhost",
+        url: "https://web.dev.p.localhost",
+        // No port was recorded — 0 means "unknown", and the row renders the
+        // hostname alone rather than inventing a number.
+        port: 0,
+        primary: true,
+      },
+    ]);
+  });
+
+  it("passes real endpoints through, raw ports included", () => {
+    const endpoints = [
+      {
+        name: "http",
+        hostname: "web.dev.p.localhost",
+        url: "https://web.dev.p.localhost",
+        port: 3000,
+        primary: true,
+      },
+      { name: "db", hostname: "web-db.dev.p.localhost", port: 5432, primary: false },
+    ];
+    expect(nodeEndpoints(row({ url: "https://web.dev.p.localhost", endpoints }))).toEqual(endpoints);
+  });
+
+  it("offers nothing for a node with no ports at all", () => {
+    expect(nodeEndpoints(row({}))).toEqual([]);
   });
 });

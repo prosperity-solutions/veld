@@ -37,6 +37,7 @@ import { useState } from "react";
 import {
   api,
   type ActionInfo,
+  type EndpointInfo,
   type HistoryEntry,
   type NodeStats,
   type RunInfo,
@@ -53,11 +54,28 @@ export interface NodeRow {
   variant: string;
   status: string;
   url: string | null;
+  /** Every port the node claimed, primary first. See {@link nodeEndpoints}. */
+  endpoints: EndpointInfo[];
   pid: number | null;
   actions: ActionInfo[];
   recovery_count: number;
   consecutive_failures: number;
   last_liveness_error: string | null;
+}
+
+/**
+ * The endpoints to render for a node.
+ *
+ * A node that declared several ports has them all; a node from a daemon or a run
+ * that predates per-port endpoints has only `url`, which is synthesised into the
+ * single primary entry it has always been. The synthesised entry carries no port
+ * number because none was recorded — and inventing one to fill the shape would
+ * put a wrong number on screen, which is worse than an absent one.
+ */
+export function nodeEndpoints(n: NodeRow): EndpointInfo[] {
+  if (n.endpoints.length > 0) return n.endpoints;
+  if (!n.url) return [];
+  return [{ name: "http", hostname: n.url, url: n.url, port: 0, primary: true }];
 }
 
 /**
@@ -75,6 +93,7 @@ export function nodeRows(run: RunInfo, selected: HistoryEntry | null): NodeRow[]
       variant: n.variant,
       status: n.status,
       url: null,
+      endpoints: [],
       pid: null,
       actions: [],
       recovery_count: 0,
@@ -87,6 +106,7 @@ export function nodeRows(run: RunInfo, selected: HistoryEntry | null): NodeRow[]
     variant: n.variant,
     status: n.status,
     url: n.url ?? null,
+    endpoints: n.endpoints ?? [],
     pid: n.pid ?? null,
     actions: n.actions ?? [],
     recovery_count: n.recovery_count ?? 0,
@@ -166,6 +186,112 @@ function NodeStatsLine(props: { stats?: NodeStats; expanded: boolean; onToggle?:
   );
 }
 
+/**
+ * One port of a node: what it is reachable at, and what you can do with it.
+ *
+ * Two shapes, because there are two kinds of reachable. A routed (`http`) port
+ * is a link and gets the three launchers. A raw (`tcp`) port is an address —
+ * `db.app.localhost:5432` — and gets copy alone: there is no route in front of
+ * it, so opening it in a browser reaches nothing, and offering the button anyway
+ * would be an invitation to a dead end. The `tcp` badge says which one you are
+ * looking at without the reader having to notice the missing scheme.
+ *
+ * The port name is shown only where it disambiguates. On a single-port node it
+ * is noise — `http` under a node called `web` says nothing the card did not
+ * already say.
+ */
+function EndpointRow(props: {
+  endpoint: EndpointInfo;
+  nodeName: string;
+  /** Whether to label the row with its port name. */
+  labelled: boolean;
+  onOpenPane?: (name: string, url: string) => void;
+}) {
+  const e = props.endpoint;
+  const { flash, copy } = useCopyFlash();
+  // A synthesised legacy entry has no recorded port number; `hostname` is the
+  // whole address in that case, so there is nothing to append.
+  const address = e.port > 0 ? `${e.hostname}:${e.port}` : e.hostname;
+  const label = props.labelled ? <span className="node-port-name">{e.name}</span> : null;
+
+  if (!e.url) {
+    return (
+      <div className="node-url-row">
+        {label}
+        <Tooltip label="Raw TCP port — reachable at this address, not over HTTP">
+          <span className="node-address" title={address}>
+            {address}
+          </span>
+        </Tooltip>
+        <span className="node-proto">tcp</span>
+        <Tooltip label={flash === "addr" ? "Copied" : "Copy the address"} openDelay={250}>
+          <ActionIcon
+            size="sm"
+            variant="subtle"
+            color="gray"
+            aria-label={`Copy the ${e.name} address for ${props.nodeName}`}
+            onClick={() => copy(address, "addr")}
+          >
+            {flash === "addr" ? <IconCheck size={13} /> : <IconCopy size={13} />}
+          </ActionIcon>
+        </Tooltip>
+      </div>
+    );
+  }
+
+  const url = e.url;
+  return (
+    <div className="node-url-row">
+      {label}
+      <a href={url} target="_blank" rel="noreferrer" className="node-url" title={url}>
+        {shortUrl(url)}
+      </a>
+      {/* First of the three, because in a window that *has* panes this is the
+          one you want: the service opens beside the terminal rather than in
+          another application. Absent in runs mode, which has nowhere to put
+          it — the same reason the URL launcher takes this as a prop. */}
+      {props.onOpenPane && (
+        <Tooltip label="Open in a browser pane" openDelay={250}>
+          <ActionIcon
+            size="sm"
+            variant="subtle"
+            color="gray"
+            aria-label={`Open ${props.nodeName} in a browser pane`}
+            onClick={() => props.onOpenPane?.(props.nodeName, url)}
+          >
+            <IconWorld size={13} />
+          </ActionIcon>
+        </Tooltip>
+      )}
+      <Tooltip label={flash === "url" ? "Copied" : "Copy the URL"} openDelay={250}>
+        <ActionIcon
+          size="sm"
+          variant="subtle"
+          color="gray"
+          aria-label={`Copy the URL for ${props.nodeName}`}
+          onClick={() => copy(url, "url")}
+        >
+          {flash === "url" ? <IconCheck size={13} /> : <IconCopy size={13} />}
+        </ActionIcon>
+      </Tooltip>
+      <Tooltip label="Open in the system browser" openDelay={250}>
+        <ActionIcon
+          size="sm"
+          variant="subtle"
+          color="gray"
+          component="a"
+          href={url}
+          target="_blank"
+          rel="noreferrer"
+          aria-label={`Open ${props.nodeName} in the system browser`}
+        >
+          <IconExternalLink size={13} />
+        </ActionIcon>
+      </Tooltip>
+    </div>
+  );
+}
+
 /** What is wrong with this node, if anything. */
 function healthNote(n: NodeRow): string | null {
   // Label-colon form, as the old table had it: count-agnostic, so a single
@@ -192,7 +318,7 @@ function NodeCard(props: {
   const n = props.node;
   const [busy, setBusy] = useState<string | null>(null);
   const [expanded, setExpanded] = useState(false);
-  const { flash, copy } = useCopyFlash();
+  const endpoints = nodeEndpoints(n);
   const note = healthNote(n);
   const bucket = statusBucket(n.status);
   // Gating the chart on a *live* sample meant a build's curve became unreachable
@@ -253,55 +379,15 @@ function NodeCard(props: {
 
       {expanded && canGraph && <ResourcePanel run={props.run} nodeKey={`${n.name}:${n.variant}`} />}
 
-      {n.url && (
-        <div className="node-url-row">
-          <a href={n.url} target="_blank" rel="noreferrer" className="node-url" title={n.url}>
-            {shortUrl(n.url)}
-          </a>
-          {/* First of the three, because in a window that *has* panes this is the
-              one you want: the service opens beside the terminal rather than in
-              another application. Absent in runs mode, which has nowhere to put
-              it — the same reason the URL launcher takes this as a prop. */}
-          {props.onOpenPane && (
-            <Tooltip label="Open in a browser pane" openDelay={250}>
-              <ActionIcon
-                size="sm"
-                variant="subtle"
-                color="gray"
-                aria-label={`Open ${n.name} in a browser pane`}
-                onClick={() => props.onOpenPane?.(n.name, n.url!)}
-              >
-                <IconWorld size={13} />
-              </ActionIcon>
-            </Tooltip>
-          )}
-          <Tooltip label={flash === "url" ? "Copied" : "Copy the URL"} openDelay={250}>
-            <ActionIcon
-              size="sm"
-              variant="subtle"
-              color="gray"
-              aria-label={`Copy the URL for ${n.name}`}
-              onClick={() => copy(n.url!, "url")}
-            >
-              {flash === "url" ? <IconCheck size={13} /> : <IconCopy size={13} />}
-            </ActionIcon>
-          </Tooltip>
-          <Tooltip label="Open in the system browser" openDelay={250}>
-            <ActionIcon
-              size="sm"
-              variant="subtle"
-              color="gray"
-              component="a"
-              href={n.url}
-              target="_blank"
-              rel="noreferrer"
-              aria-label={`Open ${n.name} in the system browser`}
-            >
-              <IconExternalLink size={13} />
-            </ActionIcon>
-          </Tooltip>
-        </div>
-      )}
+      {endpoints.map((e) => (
+        <EndpointRow
+          key={e.name}
+          endpoint={e}
+          nodeName={n.name}
+          labelled={endpoints.length > 1}
+          onOpenPane={props.onOpenPane}
+        />
+      ))}
 
       {note && <div className={`node-health${bucket === "red" ? " bad" : ""}`}>{note}</div>}
 
