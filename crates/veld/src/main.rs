@@ -463,6 +463,35 @@ enum Command {
         /// since the app's "already offered" set is per session.
         #[arg(long, hide = true)]
         target_version: Option<String>,
+
+        /// Re-run this update in a terminal window instead of here.
+        ///
+        /// Veld Desktop's handoff sets it. The app quits so its bundle can be
+        /// replaced, which leaves the update with nothing to render on and — more
+        /// seriously — no controlling terminal, so a privileged install's `sudo`
+        /// can only ever try `sudo -n` and fail silently. A window fixes both at
+        /// once. Falls back to running right here when no terminal can be opened.
+        #[arg(long, hide = true)]
+        console: bool,
+
+        /// Report whether an update is running, and what it is doing.
+        ///
+        /// Reads the same lock file every other gate reads, so it is the honest
+        /// answer rather than a second opinion. Installs nothing.
+        #[arg(long)]
+        status: bool,
+
+        /// Machine-readable `--status`.
+        #[arg(long, requires = "status")]
+        json: bool,
+
+        /// Start even though another update holds the lock.
+        ///
+        /// The escape hatch for a holder this one knows is dead but that the
+        /// staleness rules have not written off yet — a run abandoned at a
+        /// password prompt is only reclaimed after 30 minutes without this.
+        #[arg(long)]
+        force: bool,
     },
 
     /// Install, update or inspect Veld Desktop (macOS app).
@@ -744,6 +773,29 @@ async fn main() {
 
     let command = cli.command.unwrap();
 
+    // An update in flight is replacing veld, veld-daemon, veld-helper and caddy
+    // and restarting both services. Nearly every command either execs one of
+    // those binaries or expects a daemon that is currently down, so it gets a
+    // straight answer here instead of an unexplained connection error thirty
+    // seconds into a `veld start`. See `command_survives_an_update` for the
+    // allow-list and why each entry is on it.
+    if !command_survives_an_update(&command) {
+        if let Some(state) = veld_core::update_lock::current() {
+            output::print_error(&state.describe(chrono::Utc::now()), false);
+            eprintln!(
+                "  {}",
+                output::dim(
+                    "Commands that touch the daemon, the helper or the installed binaries are \
+                     unavailable until it finishes. Watch it with `veld update --status`."
+                )
+            );
+            // EX_TEMPFAIL. "Try again shortly" is exactly what this is, and a
+            // coding agent driving veld needs to be able to tell it apart from
+            // the failures that mean something is wrong.
+            std::process::exit(75);
+        }
+    }
+
     // Check for version mismatches on commands that talk to the daemon/helper.
     let needs_version_check = matches!(
         command,
@@ -958,7 +1010,18 @@ async fn main() {
             relaunch,
             app_path,
             target_version,
-        } => commands::update::run(wait_pid, relaunch, app_path, target_version).await,
+            console,
+            status,
+            json,
+            force,
+        } => {
+            if status {
+                commands::update::status(json)
+            } else {
+                commands::update::run(wait_pid, relaunch, app_path, target_version, console, force)
+                    .await
+            }
+        }
 
         Command::Desktop { command } => match command {
             // Bare `veld desktop` reports rather than installs: a command that
@@ -1119,6 +1182,57 @@ async fn main() {
     };
 
     std::process::exit(exit_code);
+}
+
+// ---------------------------------------------------------------------------
+// Update gate
+// ---------------------------------------------------------------------------
+
+/// Which commands stay available while an update is running.
+///
+/// An **allow-list**, not a block-list, and that direction is the decision. The
+/// unsafe set is "anything that execs a binary being replaced, or talks to a
+/// service being restarted", which is most of this enum and grows every time a
+/// subcommand is added — so a block-list would silently stop covering new
+/// commands, and the symptom would be a corrupted update rather than a compile
+/// error. Adding a command therefore means it is blocked during an update until
+/// someone deliberately puts it here.
+///
+/// Each entry earns its place:
+///
+/// - `Update` arbitrates itself through the lock; `--status` and `--force` are
+///   the two things a user reaches for *because* an update is running.
+/// - `Doctor` is where a stuck user is sent, and it now reports the update.
+/// - `Version` must answer during an update — it is how a human or a script
+///   checks whether the swap has happened yet.
+/// - `Config`, `Lint` and `Init` only read and write files in the project. They
+///   are what a coding agent is likely doing in a worktree while an unrelated
+///   update runs, and blocking them buys nothing.
+/// - `InternalLog` / `InternalTimestamp` are **not** a convenience: they are
+///   spawned by the node processes of environments that are still running, and
+///   an update deliberately leaves those serving. Blocking them would break live
+///   environments to protect an update that never touches them.
+/// - `Desktop { Status }` — read-only (it reads a plist), and blocking it
+///   produces a *wrong* answer rather than a blocked one: Veld Desktop resolves
+///   the CLI by running `veld desktop status --json`, and its caller catches any
+///   failure as "there is no veld CLI here", which silently demotes
+///   *Check for Updates…* to the download-from-GitHub route. The install and
+///   update arms stay blocked — those move bytes.
+fn command_survives_an_update(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::Update { .. }
+            | Command::Doctor { .. }
+            | Command::Version
+            | Command::Config { .. }
+            | Command::Lint { .. }
+            | Command::Init
+            | Command::InternalLog { .. }
+            | Command::InternalTimestamp { .. }
+            | Command::Desktop {
+                command: None | Some(DesktopCommand::Status { .. })
+            }
+    )
 }
 
 // ---------------------------------------------------------------------------

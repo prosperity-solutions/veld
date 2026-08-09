@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use veld_core::setup::QuitOutcome;
 use veld_core::state::RunStatus;
+use veld_core::update_lock::{self, Acquired, Origin, Phase, UpdateGuard};
 
 use crate::output;
 
@@ -15,6 +16,23 @@ use crate::output;
 /// Every path that runs out of this budget leaves the bundle alone rather than
 /// forcing the issue.
 const QUIT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long `--console` waits for the window it opened to prove it exists.
+///
+/// Proof is the terminal's `veld update` taking the update lock — the one thing
+/// only a process that actually started can do. `open` and every Linux terminal
+/// emulator are fire-and-forget: a zero exit status means a launcher ran, not
+/// that a window appeared, so without this handshake the app would hand the
+/// update to a window that never opened and report success. Sized for a cold
+/// Terminal.app launch on a loaded machine, which is seconds, not tens of them.
+const CONSOLE_HANDSHAKE: Duration = Duration::from_secs(20);
+
+/// The exit status a caller gets when another update already holds the lock.
+///
+/// `EX_TEMPFAIL`. "Try again shortly" is exactly what this is, and it has to be
+/// distinguishable from the failures that mean something is actually wrong —
+/// a coding agent driving `veld update` should retry this one and not the others.
+const EX_TEMPFAIL: i32 = 75;
 
 /// What this run intends to do about Veld Desktop, decided *before* anything is
 /// installed.
@@ -75,6 +93,8 @@ pub async fn run(
     relaunch: bool,
     app_path: Option<PathBuf>,
     target_version: Option<String>,
+    console: bool,
+    force: bool,
 ) -> i32 {
     // Pid 0 is dropped rather than waited on, and it is not a theoretical input:
     // `kill(0, signal)` addresses the *caller's own process group*, so
@@ -92,6 +112,158 @@ pub async fn run(
         .clone()
         .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
 
+    // **`sudo veld update` is refused, and the reason is not tidiness.** Under
+    // sudo, `dirs::home_dir()` is *root's* (this repo already relies on that at
+    // `setup.rs`'s `resolve_real_user_macos`), so the lock would be taken in
+    // `/var/root/.veld` while every other reader — a plain `veld update`, the
+    // command gate, `veld doctor`, the daemon monitor, Veld Desktop — looks in
+    // the user's `~/.veld`. Single-flight against a lock nobody else can see is
+    // no single-flight at all, and it is silent. The rest of `veld update`
+    // already assumes it runs unprivileged and escalates only for the helper
+    // restart, and `install.sh` does its own escalation for a `/usr/local`
+    // install, so nothing legitimate needs this — a root-run install would also
+    // leave root-owned binaries in the user's `~/.local`.
+    if std::env::var("SUDO_USER").is_ok_and(|user| !user.is_empty()) {
+        let msg = "`veld update` must not run under sudo — run it as yourself.";
+        output::print_error(msg, false);
+        println!(
+            "  {}",
+            output::dim(
+                "It escalates on its own where it needs to (the privileged helper restart, \
+                 and a /usr/local install inside install.sh), and prompts for your password \
+                 when it does. Under sudo it would install root-owned files into your home \
+                 and take its lock in root's."
+            )
+        );
+        // **Every exit path a handoff can take owes the app a report**, and this
+        // is a new one. The app has already quit and is waiting on
+        // `desktop-update.json` to decide whether to say anything on relaunch —
+        // an absent report reads as success, so a silent return here is an app
+        // that reopens on the old version having been told nothing. Unlikely to
+        // be reached (it needs `SUDO_USER` in the app's own launch environment)
+        // and cheap to hold, which is the definition of an invariant worth
+        // keeping rather than reasoning about.
+        if handoff {
+            veld_core::setup::write_desktop_update_report(
+                &reported_version,
+                Err(msg),
+                veld_core::setup::UpdateHalf::Release,
+            );
+        }
+        if relaunch {
+            if let Some((app, _)) = veld_core::setup::desktop_app_status_in(app_dir.as_deref()) {
+                veld_core::setup::open_desktop_app(&app);
+            }
+        }
+        return 1;
+    }
+
+    // Refused before the lock is taken, so that the message names *this* run's
+    // problem rather than a lock it just created. `--force` skips it the same way
+    // it skips the acquisition below — the two must agree, or `--force` would
+    // clear one gate and be stopped by the other.
+    if let Some(state) = update_lock::current() {
+        if !force {
+            return refuse_busy(
+                &state,
+                handoff,
+                &reported_version,
+                relaunch,
+                app_dir.as_deref(),
+            );
+        }
+    }
+
+    // A terminal window, when the app asked for one. Everything after this point
+    // happens inside it instead of here — including taking the lock, which is how
+    // this process knows the window is real.
+    if console {
+        match hand_over_to_console(
+            wait_pid,
+            relaunch,
+            app_path.as_deref(),
+            target_version.as_deref(),
+            force,
+        )
+        .await
+        {
+            ConsoleHandoff::TookOver(launcher) => {
+                output::print_success(&format!("The update is running in {launcher}."));
+                return 0;
+            }
+            ConsoleHandoff::Failed(reason) => {
+                output::print_info(&format!(
+                    "Could not open a terminal window for the update ({reason}) — running it here \
+                     instead."
+                ));
+            }
+        }
+    }
+
+    let origin = match (console_child(), handoff) {
+        (true, _) => Origin::Console,
+        (false, true) => Origin::Desktop,
+        (false, false) => Origin::Cli,
+    };
+    let mut guard = match update_lock::acquire(origin, target_version.clone(), force) {
+        Ok(Acquired::Ours(guard)) => guard,
+        Ok(Acquired::Busy(state)) => {
+            return refuse_busy(
+                &state,
+                handoff,
+                &reported_version,
+                relaunch,
+                app_dir.as_deref(),
+            );
+        }
+        // A lock that cannot be taken must not stop an update: the failure mode
+        // of proceeding is the one that existed before this lock did, and the
+        // failure mode of refusing is a machine that can never update again
+        // because `~/.veld` is briefly unwritable.
+        Err(e) => {
+            output::print_info(&format!(
+                "Could not take the update lock ({e}) — continuing without it."
+            ));
+            return run_locked(
+                None,
+                wait_pid,
+                relaunch,
+                app_dir,
+                handoff,
+                &reported_version,
+                target_version,
+            )
+            .await;
+        }
+    };
+    guard.set_phase(Phase::WaitingForApp);
+    run_locked(
+        Some(guard),
+        wait_pid,
+        relaunch,
+        app_dir,
+        handoff,
+        &reported_version,
+        target_version,
+    )
+    .await
+}
+
+/// The update proper, with the lock already settled one way or the other.
+///
+/// `guard` is `None` only on the degraded path where the lock could not be
+/// written at all; every phase call is therefore optional rather than the guard
+/// being faked, so that "there is no lock" stays visible in the code instead of
+/// being papered over by a no-op guard.
+async fn run_locked(
+    mut guard: Option<UpdateGuard>,
+    wait_pid: Option<u32>,
+    relaunch: bool,
+    app_dir: Option<PathBuf>,
+    handoff: bool,
+    reported_version: &str,
+    target_version: Option<String>,
+) -> i32 {
     // Before anything is installed: the app must actually be gone. A pid that has
     // not exited is a process still reading the bundle we are about to replace,
     // and the honest response is to install nothing at all — the app is about to
@@ -102,7 +274,7 @@ pub async fn run(
             let msg = "Veld Desktop did not quit within 30s, so nothing was updated.";
             output::print_error(msg, false);
             veld_core::setup::write_desktop_update_report(
-                &reported_version,
+                reported_version,
                 Err(msg),
                 veld_core::setup::UpdateHalf::Release,
             );
@@ -126,7 +298,7 @@ pub async fn run(
     }
 
     let plan = plan_desktop(app_dir, handoff, relaunch).await;
-    let outcome = perform(&plan, target_version.as_deref()).await;
+    let outcome = perform(&plan, target_version.as_deref(), guard.as_mut()).await;
 
     // Written before the app is reopened, and that ordering is load-bearing for
     // the same reason it is in `veld desktop update`: the app reads this during
@@ -137,6 +309,16 @@ pub async fn run(
             outcome.error.as_deref().map_or(Ok(()), Err),
             veld_core::setup::UpdateHalf::Release,
         );
+    }
+
+    // **The lock goes before the app comes back, and the order is not cosmetic.**
+    // Veld Desktop quits itself on startup when an update is in progress, so
+    // reopening while still holding would have this update close the very window
+    // it exists to give back. Everything that mutates the machine is done by now:
+    // what remains is `open`.
+    if let Some(mut guard) = guard.take() {
+        guard.set_phase(Phase::Finishing);
+        guard.release();
     }
 
     // Resolved now rather than before the update: see `DesktopPlan::reopen`. If
@@ -273,6 +455,279 @@ async fn plan_desktop(app_dir: Option<PathBuf>, handoff: bool, relaunch: bool) -
     plan
 }
 
+// ---------------------------------------------------------------------------
+// Single-flight
+// ---------------------------------------------------------------------------
+
+/// Tell the caller somebody else is already updating, and put the app back if we
+/// took it off screen.
+///
+/// The handoff path needs the report as much as any failure does — more, in fact:
+/// it is the *only* channel back to an app that has already quit, and "another
+/// update is running" reported as silence is precisely the invisible outcome this
+/// whole change exists to remove.
+fn refuse_busy(
+    state: &veld_core::update_lock::UpdateState,
+    handoff: bool,
+    reported_version: &str,
+    relaunch: bool,
+    app_dir: Option<&std::path::Path>,
+) -> i32 {
+    let msg = state.describe(chrono::Utc::now());
+    output::print_error(&msg, false);
+
+    // **A window that lost the race owes the user nothing, and must not pretend
+    // otherwise.** A console child only exists because an outer process launched
+    // it, and that outer process is the one holding the report-and-relaunch duty:
+    // either it refused here itself (and already wrote the report and reopened
+    // the app), or its handshake timed out and it is *currently installing* while
+    // holding this very lock. Writing a failure report from here would overwrite
+    // that run's success — the app's next launch would announce a failed update
+    // that actually worked — and reopening the app would put a window back over a
+    // bundle swap in progress. The user is looking at this window; the message
+    // above is the whole report they need.
+    if console_child() {
+        return EX_TEMPFAIL;
+    }
+    if let Some(tty) = &state.tty {
+        output::print_info(&format!("It may be waiting for an answer in {tty}."));
+    }
+    println!(
+        "  {}",
+        output::dim(&format!(
+            "Watch it with `veld update --status`. If you know it is dead, `veld update --force` \
+             takes over; otherwise it is reclaimed automatically after {} minutes without \
+             progress.",
+            veld_core::update_lock::PHASE_TIMEOUT.as_secs() / 60
+        ))
+    );
+
+    if handoff {
+        veld_core::setup::write_desktop_update_report(
+            reported_version,
+            Err(&msg),
+            veld_core::setup::UpdateHalf::Release,
+        );
+    }
+    // The app quit for an update that is not going to happen here. Give it back —
+    // the same debt `DesktopPlan::reopen` describes, owed on a path that never
+    // gets as far as building a plan.
+    if relaunch {
+        if let Some((app, _)) = veld_core::setup::desktop_app_status_in(app_dir) {
+            veld_core::setup::open_desktop_app(&app);
+        }
+    }
+    EX_TEMPFAIL
+}
+
+/// The `--status --json` payload.
+///
+/// Split out because `skills/veld/SKILL.md` tells coding agents to read
+/// `in_progress`, `phase` and friends — which makes these key names a contract,
+/// and a contract with no test is a contract one rename silently breaks.
+///
+/// `in_progress` is deliberately **false for a stale lock** while the rest of the
+/// fields still describe it: a consumer branching on one boolean gets the right
+/// answer, and one that wants to explain the leftovers has `stale_reason`.
+fn status_json(
+    peeked: Option<&(
+        veld_core::update_lock::UpdateState,
+        Option<veld_core::update_lock::StaleReason>,
+    )>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> serde_json::Value {
+    match peeked {
+        Some((state, reason)) => serde_json::json!({
+            "in_progress": reason.is_none(),
+            "pid": state.pid,
+            "origin": state.origin.as_str(),
+            "version": state.version,
+            "phase": state.phase.as_str(),
+            "started_at": state.started_at.to_rfc3339(),
+            "phase_at": state.phase_at.to_rfc3339(),
+            "age_seconds": state.age(now).as_secs(),
+            "tty": state.tty,
+            "stale_reason": reason.map(|r| r.as_str()),
+        }),
+        None => serde_json::json!({ "in_progress": false }),
+    }
+}
+
+/// `veld update --status` — what, if anything, is updating.
+pub fn status(json: bool) -> i32 {
+    let now = chrono::Utc::now();
+    let peeked = veld_core::update_lock::peek();
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&status_json(peeked.as_ref(), now)).unwrap()
+        );
+        return 0;
+    }
+
+    match peeked {
+        None => output::print_success("No update is running."),
+        Some((state, None)) => {
+            output::print_info(&state.describe(now));
+            if let Some(tty) = &state.tty {
+                println!("  {}", output::dim(&format!("Terminal: {tty}")));
+            }
+        }
+        // Reported rather than hidden: a user who just watched an update die wants
+        // to know the leftovers are harmless, and the next `veld update` clearing
+        // them is a promise worth making out loud.
+        Some((state, Some(reason))) => {
+            output::print_success("No update is running.");
+            println!(
+                "  {}",
+                output::dim(&format!(
+                    "A lock left by pid {} is {} and will be cleared by the next update.",
+                    state.pid,
+                    match reason {
+                        veld_core::update_lock::StaleReason::HolderGone => "gone",
+                        veld_core::update_lock::StaleReason::Stalled => "stalled",
+                        veld_core::update_lock::StaleReason::Unreadable => "unreadable",
+                    }
+                ))
+            );
+        }
+    }
+    0
+}
+
+// ---------------------------------------------------------------------------
+// Terminal handoff
+// ---------------------------------------------------------------------------
+
+/// Set inside the generated script so the run in the window knows what it is.
+///
+/// **Two paths branch on it**, so a stale inherited value is not cosmetic:
+/// `refuse_busy` uses it to stay silent (no report, no relaunch) when a window
+/// that lost the race is the one reporting, and `hand_over_to_console`'s
+/// handshake only accepts a holder whose `Origin` is `Console`. A `veld update`
+/// that wrongly believed itself a console child would therefore refuse a busy
+/// lock without telling the app anything.
+///
+/// What bounds the inheritance is the launch path rather than a check: the app
+/// is reopened with `/usr/bin/open`, and LaunchServices does not pass the
+/// caller's environment to the app it launches — so the variable cannot leak
+/// from an update into the Veld Desktop it reopens, which is the only loop that
+/// could carry it.
+const ORIGIN_ENV: &str = "VELD_UPDATE_ORIGIN";
+
+fn console_child() -> bool {
+    std::env::var(ORIGIN_ENV).as_deref() == Ok("console")
+}
+
+enum ConsoleHandoff {
+    /// A window opened and its `veld update` took the lock.
+    TookOver(String),
+    /// No window; the caller should do the update itself.
+    Failed(String),
+}
+
+/// The argv the window runs — the entire contract between this process and it.
+///
+/// Extracted from `hand_over_to_console` so it can be tested, because every arm
+/// is load-bearing in a way that is invisible at the call site: **`--console` is
+/// absent**, or the window opens a window and so on forever; `--wait-pid` is what
+/// stops the window replacing a bundle the app still holds open; `--relaunch` is
+/// the app's only way back onto the screen; `--target-version` is what keeps the
+/// window off `api.github.com`, which is rate-limited per IP and briefly out of
+/// step with the feed the app was offered.
+fn console_args(
+    wait_pid: Option<u32>,
+    relaunch: bool,
+    app_path: Option<&std::path::Path>,
+    target_version: Option<&str>,
+    force: bool,
+) -> Vec<String> {
+    let mut args = vec!["update".to_string()];
+    if let Some(v) = target_version {
+        args.push("--target-version".into());
+        args.push(v.to_string());
+    }
+    if let Some(pid) = wait_pid {
+        args.push("--wait-pid".into());
+        args.push(pid.to_string());
+    }
+    if relaunch {
+        args.push("--relaunch".into());
+    }
+    if let Some(p) = app_path {
+        args.push("--app-path".into());
+        args.push(p.to_string_lossy().to_string());
+    }
+    if force {
+        args.push("--force".into());
+    }
+    args
+}
+
+/// Re-run this invocation inside a terminal window.
+///
+/// The arguments are reconstructed rather than forwarded verbatim because one of
+/// them must not be: `--console` is dropped, or the window would open a window.
+async fn hand_over_to_console(
+    wait_pid: Option<u32>,
+    relaunch: bool,
+    app_path: Option<&std::path::Path>,
+    target_version: Option<&str>,
+    force: bool,
+) -> ConsoleHandoff {
+    let Ok(exe) = std::env::current_exe() else {
+        return ConsoleHandoff::Failed("this binary's own path is unknown".into());
+    };
+
+    let args = console_args(wait_pid, relaunch, app_path, target_version, force);
+
+    // Captured before the launch, so a lock taken *after* this instant is the
+    // only thing the handshake below will accept.
+    let launched_at = chrono::Utc::now();
+
+    let launcher = match veld_core::console::launch(
+        &exe,
+        &args,
+        &[(ORIGIN_ENV, "console")],
+        "Updating veld",
+        "Update finished. You can close this window.",
+    ) {
+        Ok(launcher) => launcher,
+        Err(e) => return ConsoleHandoff::Failed(e.to_string()),
+    };
+
+    // **The handshake, and the reason this is not fire-and-forget.** `open` and
+    // every Linux terminal emulator report success for "a launcher started", not
+    // for "a window appeared and ran your command" — so without waiting for
+    // evidence, a machine with a broken `.command` association would have the app
+    // quit, report that the update was running in a terminal, and update nothing.
+    // Taking the update lock is evidence only the real thing can produce.
+    //
+    // **Three conditions, not one.** "A lock exists" is not evidence: this
+    // process deliberately never acquires, so *any* holder would satisfy a bare
+    // `pid != me` — including an unrelated `veld update` a user started in
+    // another terminal a second ago. Accepting that would have the app quit,
+    // announce "the update is running in your terminal", and exit 0 with no
+    // window anywhere and nobody owing the app a relaunch. So the holder must
+    // also say it *is* a console run, and must have started after the launch.
+    let start = std::time::Instant::now();
+    loop {
+        if let Some(state) = update_lock::current() {
+            if state.origin == update_lock::Origin::Console && state.started_at >= launched_at {
+                return ConsoleHandoff::TookOver(launcher);
+            }
+        }
+        if start.elapsed() >= CONSOLE_HANDSHAKE {
+            return ConsoleHandoff::Failed(format!(
+                "{launcher} did not start the update within {}s",
+                CONSOLE_HANDSHAKE.as_secs()
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
 /// Whether there is a human at a terminal to answer a question.
 ///
 /// Both halves matter, and `VELD_NON_INTERACTIVE` is read the way `install.sh`
@@ -372,9 +827,27 @@ async fn resolve_target(
 }
 
 /// The update itself, once the app question is settled.
-async fn perform(plan: &DesktopPlan, target_version: Option<&str>) -> Outcome {
+async fn perform(
+    plan: &DesktopPlan,
+    target_version: Option<&str>,
+    mut guard: Option<&mut UpdateGuard>,
+) -> Outcome {
+    // Each of these is also the stall clock being reset. A phase that stops
+    // moving for `PHASE_TIMEOUT` is what lets a *later* update reclaim a run
+    // abandoned at a password prompt, so the granularity here is not cosmetic:
+    // one phase for the whole run would mean the clock only ever ticks from the
+    // start, and a slow-but-healthy install would look abandoned.
+    macro_rules! phase {
+        ($p:expr) => {
+            if let Some(g) = guard.as_deref_mut() {
+                g.set_phase($p);
+            }
+        };
+    }
+
     let current = env!("CARGO_PKG_VERSION");
     output::print_info(&format!("Current version: {current}"));
+    phase!(Phase::Checking);
     if target_version.is_none() {
         output::print_info("Checking for updates...");
     }
@@ -408,6 +881,9 @@ async fn perform(plan: &DesktopPlan, target_version: Option<&str>) -> Outcome {
             }
 
             output::print_info(&format!("New version available: {current} → {new_version}"));
+            if let Some(g) = guard.as_deref_mut() {
+                g.set_version(&new_version);
+            }
 
             // After install, privileged mode restarts the root helper via sudo
             // (see restart_services), with the helper's own binary-change
@@ -433,14 +909,17 @@ async fn perform(plan: &DesktopPlan, target_version: Option<&str>) -> Outcome {
             }
 
             output::print_info("Installing update...");
+            phase!(Phase::Installing);
 
             match veld_core::setup::perform_update(&new_version).await {
                 Ok(()) => {
                     output::print_success(&format!("Updated to {new_version}."));
                     cleanup_stale_binaries();
                     output::print_info("Restarting services with new binaries...");
+                    phase!(Phase::RestartingServices);
                     restart_services(&new_version, helper_dead_privileged).await;
                     super::remove_legacy_hammerspoon().await;
+                    phase!(Phase::UpdatingApp);
                     // On this branch too, not only the "already latest" one. The
                     // CLI install runs with `VELD_DESKTOP=0`, so the app half is
                     // this call and nothing else — and the case the comment on
@@ -483,6 +962,7 @@ async fn perform(plan: &DesktopPlan, target_version: Option<&str>) -> Outcome {
             // after the last update. Without this, `veld update` would report
             // success while leaving a stale app in /Applications and never mention
             // it — the CLI half moves, the app half silently does not.
+            phase!(Phase::UpdatingApp);
             let error = update_desktop_if_stale(current, plan).await;
             Outcome {
                 code: 0,
@@ -746,6 +1226,22 @@ async fn restart_services(target_version: &str, helper_dead_privileged: bool) {
                     "Could not restart the privileged helper via sudo — waiting for it to \
                      restart itself instead.",
                 );
+                // Name the *reason*, because it is the one a user can act on and
+                // the one that produced a silently-not-updated machine: with no
+                // controlling terminal there is only ever `sudo -n`, so an
+                // uncached credential means no prompt rather than a prompt
+                // nobody saw. This is exactly what `--console` exists to avoid,
+                // and reaching here means no terminal window could be opened.
+                if !interactive {
+                    println!(
+                        "  {}",
+                        output::dim(
+                            "There is no terminal here for sudo to ask in. The helper's own \
+                             binary-change watcher should pick the new version up; if it does \
+                             not, re-run `veld update` from a terminal."
+                        )
+                    );
+                }
             }
         }
 
@@ -991,5 +1487,111 @@ mod tests {
         // an answer must read as "no" — the opposite default from the bare Enter
         // a human at a prompt gives.
         assert!(!consent(None));
+    }
+}
+
+#[cfg(test)]
+mod handoff_tests {
+    use super::{console_args, status_json};
+    use veld_core::update_lock::{Origin, Phase, StaleReason, UpdateState};
+
+    fn state() -> UpdateState {
+        let t = chrono::DateTime::parse_from_rfc3339("2026-08-09T07:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        UpdateState {
+            pid: 4242,
+            origin: Origin::Console,
+            version: Some("16.12.0".into()),
+            started_at: t,
+            phase: Phase::Installing,
+            phase_at: t,
+            tty: Some("/dev/ttys004".into()),
+        }
+    }
+
+    #[test]
+    fn the_window_is_never_told_to_open_a_window() {
+        // The one arm that must never appear. With it, the window's `veld update`
+        // opens another window, which opens another — and each one waits 20s for
+        // the next to take a lock it will never get.
+        let args = console_args(
+            Some(4711),
+            true,
+            Some(std::path::Path::new("/Applications/Veld.app")),
+            Some("16.12.0"),
+            false,
+        );
+        assert!(!args.contains(&"--console".to_string()), "{args:?}");
+    }
+
+    #[test]
+    fn every_flag_the_app_handed_over_reaches_the_window() {
+        assert_eq!(
+            console_args(
+                Some(4711),
+                true,
+                Some(std::path::Path::new(
+                    "/Applications/Veld.app/Contents/MacOS/Veld"
+                )),
+                Some("16.12.0"),
+                true,
+            ),
+            vec![
+                "update",
+                // Without this the window asks api.github.com instead of
+                // installing the release the app was actually offered.
+                "--target-version",
+                "16.12.0",
+                // Without this the window replaces a bundle the app still holds
+                // open, and install.sh's pgrep guard silently skips the app half.
+                "--wait-pid",
+                "4711",
+                // Without this the user's app never comes back.
+                "--relaunch",
+                "--app-path",
+                "/Applications/Veld.app/Contents/MacOS/Veld",
+                "--force",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_terminal_run_hands_over_nothing_it_was_not_given() {
+        // `veld update --console` typed by hand: no app quit for it, so no pid to
+        // wait for and nothing owed a relaunch. `honour_relaunch` already refuses
+        // `--relaunch` without a pid upstream of this, and passing one anyway
+        // would have the window *launch* an app the user never had running.
+        assert_eq!(console_args(None, false, None, None, false), vec!["update"]);
+    }
+
+    #[test]
+    fn the_status_payload_keeps_the_keys_agents_are_told_to_read() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-08-09T07:01:40Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+
+        // Nothing running: one key, and it is the one to branch on.
+        let none = status_json(None, now);
+        assert_eq!(none["in_progress"], serde_json::json!(false));
+        assert_eq!(none.as_object().unwrap().len(), 1);
+
+        let live = status_json(Some(&(state(), None)), now);
+        assert_eq!(live["in_progress"], serde_json::json!(true));
+        assert_eq!(live["pid"], serde_json::json!(4242));
+        assert_eq!(live["origin"], serde_json::json!("console"));
+        assert_eq!(live["version"], serde_json::json!("16.12.0"));
+        assert_eq!(live["phase"], serde_json::json!("installing"));
+        assert_eq!(live["age_seconds"], serde_json::json!(100));
+        assert_eq!(live["tty"], serde_json::json!("/dev/ttys004"));
+        assert_eq!(live["stale_reason"], serde_json::Value::Null);
+
+        // A stale lock is NOT in progress, but still describes itself — a
+        // consumer branching on the boolean is right, and one that wants to
+        // explain the leftovers has the reason.
+        let stale = status_json(Some(&(state(), Some(StaleReason::Stalled))), now);
+        assert_eq!(stale["in_progress"], serde_json::json!(false));
+        assert_eq!(stale["stale_reason"], serde_json::json!("stalled"));
+        assert_eq!(stale["pid"], serde_json::json!(4242));
     }
 }

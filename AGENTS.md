@@ -377,6 +377,42 @@ and several were paid for in this codebase already.
   outside a user gesture is ignored — so a refusal carries the holder's *kind* and
   the UI says where the worktree is instead of promising a raise that will not
   happen; do not "fix" that by calling `focus()` anyway.
+- **`veld update` holds a lock, and nothing that the update replaces may own it.**
+  One update at a time is enforced by `veld_core::update_lock`: a lock *directory*
+  at `~/.veld/update.lock` (`mkdir` is the create-or-fail primitive, and already
+  the idiom `install.sh` uses) with a `state.json` inside carrying pid, origin,
+  target version, phase and `phase_at`. The same file is the **progress feed** —
+  `veld update --status`, `veld doctor`, the command gate in `main.rs` and the
+  Electron app's startup check all read it, which is why it is a small JSON file
+  and not something cleverer. Both of the obvious cleverer options are
+  disqualified for the same structural reason: the **daemon** cannot arbitrate,
+  because the update restarts it halfway through and the daemon that comes back
+  is a different binary version; and the **SQLite DB** cannot hold the lease,
+  because the update migrates it and a binary refuses a `user_version` newer than
+  it supports (`DbError::NewerSchema`), so the holder can be locked out of its own
+  lock by the update it is running. A kernel-held `flock`/socket bind would be
+  tidier still and has no answer for the case the timeout exists for: a run that
+  is **alive** and blocked forever on a `sudo` password nobody typed.
+
+  Staleness is therefore **two independent conditions** — the holder's pid is
+  gone, *or* it has not changed phase in 30 minutes — and neither alone is
+  enough. Every long step calls `set_phase`, which is what keeps a slow-but-
+  healthy install from looking abandoned; a step added without one silently
+  shortens the timeout for everything after it. Release happens on `Drop`, and
+  `veld update` gives the guard up **before** it reopens Veld Desktop, because the
+  app quits itself when it sees a live lock — hold it one line longer and the
+  update closes the window it exists to give back. The blocked-command list is an
+  **allow-list** (`command_survives_an_update`) so a new subcommand is refused by
+  default rather than silently escaping the gate, and blocked callers get exit
+  **75** (`EX_TEMPFAIL`) so an agent can tell "retry shortly" from a real failure.
+- **A pid of 0 is not a process.** `kill(0, …)` addresses the caller's own process
+  group, so it succeeds unconditionally — which had `veld_core::process::is_alive(0)`
+  return `true` from inside every process that asked, and would have made a corrupt
+  state file claiming pid 0 look like a live lock holder. `is_alive` and
+  `wait_for_pid_exit` both reject 0 (and anything above `i32::MAX`, which would
+  otherwise truncate into some *other* live process). Nothing in veld stores 0 to
+  mean a real pid; it means "no process", and any new pid predicate must read it
+  that way.
 - **Every user-facing HTML surface carries the Veld brand.** Any HTML a Veld
   binary serves to a browser — management UI, gateway pages (index, login,
   404), overlays, error pages, and every future surface — must follow

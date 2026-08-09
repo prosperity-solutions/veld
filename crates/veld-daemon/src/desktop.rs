@@ -1909,10 +1909,18 @@ async fn start_worktree_run(
     }
 
     let code = spawn_veld(&wt_path, &args).await;
-    if code == StatusCode::ACCEPTED {
-        Ok(StatusCode::ACCEPTED)
-    } else {
-        Err(err(code, "failed to spawn veld start"))
+    match code {
+        StatusCode::ACCEPTED => Ok(StatusCode::ACCEPTED),
+        // `spawn_veld` refuses while `veld update` holds the update lock, and
+        // nothing was spawned. Saying "failed to spawn veld start" here would
+        // throw away the only part of that answer a user can act on: this is
+        // temporary, it will clear in a minute or two, and retrying is the fix.
+        // The IDE renders this string in a toast, so it is the whole message.
+        StatusCode::SERVICE_UNAVAILABLE => Err(err(
+            code,
+            "a veld update is in progress — try again when it finishes",
+        )),
+        _ => Err(err(code, "failed to spawn veld start")),
     }
 }
 

@@ -626,6 +626,75 @@ export function moveWorktree(
 }
 
 /**
+ * Which lane a pointer is aiming at, from the lane sections' bottom edges.
+ *
+ * The rail's lane drag resolves its target from the pointer's Y against these
+ * boxes rather than from the element under the pointer, and this is the choice
+ * itself, split out from the DOM read so it can be pinned: **above the first
+ * lane is the first, below the last is the last, and a gutter belongs to the
+ * lane under it**. There is no dead space in the column and no direction the
+ * mapping treats differently, which is exactly what per-element hit testing
+ * could not promise — a lane is grabbed by the header at the top of its own
+ * section, so dragging up left that section immediately while dragging down had
+ * to clear its full height first, and the gutters and the padding below the last
+ * lane belonged to no section at all.
+ *
+ * `sections` must be in rail order. `null` only when there is nothing to aim at.
+ */
+export function laneDropTarget(
+  sections: Array<{ index: number; bottom: number }>,
+  clientY: number,
+): number | null {
+  let last: number | null = null;
+  for (const s of sections) {
+    if (Number.isNaN(s.index)) continue;
+    if (clientY < s.bottom) return s.index;
+    last = s.index;
+  }
+  return last;
+}
+
+/**
+ * The lane order after moving the lane `name` onto the place currently held by
+ * the lane `onto`.
+ *
+ * **Displacement, expressed as two lane names — deliberately not an index.** The
+ * gesture is "this lane takes that lane's place", and the one thing that took
+ * three attempts to get right was which *coordinate system* an index was in: a
+ * final position or an insertion point. The row drag thirty lines away in the
+ * rail hands out insertion points (`index + (below ? 1 : 0)`), which is the
+ * natural template to copy and the wrong answer here — an insertion point past
+ * the dragged lane's own position resolves to where it already sits, so a lane
+ * could be dragged up but never down. Taking names instead deletes the category:
+ * there is no index to be in the wrong system, and both call sites (the drag and
+ * the ⋮ menu's one-step moves) already have a name in hand.
+ *
+ * Returns the **full order** as names, mirroring [`moveWorktree`] and
+ * `reorder_lanes`, so the write is idempotent. `null` when either lane is unknown
+ * or the move changes nothing — dropping a lane on itself is a normal gesture and
+ * must not cost a request and a refresh.
+ */
+export function moveLane(
+  lanes: Lane[],
+  name: string,
+  onto: string,
+): string[] | null {
+  const from = lanes.findIndex((l) => l.name === name);
+  const at = lanes.findIndex((l) => l.name === onto);
+  // An unknown lane is a stale render — one deleted or renamed by another window
+  // between this drag starting and the drop.
+  if (from < 0 || at < 0 || from === at) return null;
+  const order = lanes.map((l) => l.name);
+  order.splice(from, 1);
+  // `at` is the index the dragged lane must *hold* afterwards — that is what
+  // taking the target's place means — so it indexes the final list directly. No
+  // shift for having removed the lane first: an insertion point would need one,
+  // and confusing the two is the bug this signature exists to make unsayable.
+  order.splice(at, 0, name);
+  return order;
+}
+
+/**
  * A value that changes whenever a fired action has visibly landed — what the
  * optimistic pending markers watch.
  *

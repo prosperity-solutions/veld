@@ -1039,13 +1039,40 @@ pub async fn run_command_streaming(
 // ---------------------------------------------------------------------------
 
 /// Check whether a process is still alive by sending signal 0.
+///
+/// **Pid 0 is not a process and is answered `false` without asking the kernel.**
+/// `kill(0, …)` addresses the *caller's own process group*, so it succeeds
+/// unconditionally — which made `is_alive(0)` return `true` from inside every
+/// process that asked. Nothing in veld stores 0 to mean "this pid", it means "no
+/// process", and reading it as alive is how a placeholder becomes a live
+/// process: a corrupt state file claiming pid 0 held the update lock would have
+/// been believed. `wait_for_pid_exit` has carried the same guard for the same
+/// reason; this is that reasoning stated where the check actually lives.
+/// Anything above `i32::MAX` cannot round-trip through `Pid` either, and would
+/// otherwise be truncated into some *other* live process.
+///
+/// **Only `ESRCH` means dead.** `EPERM` means the process exists and belongs to
+/// somebody this user may not signal, which is the opposite answer — and the one
+/// this function used to give, because every error collapsed into `false`. It
+/// bites wherever veld reads a pid it did not spawn: a root-owned process, or one
+/// belonging to another account on a shared machine, was reported *gone* — and
+/// for the update lock that means a live holder judged abandoned and its lock
+/// stolen. `desktop/src/updater.js` has always read `EPERM` as alive, so this
+/// also stops the two halves of the same product answering the same question
+/// differently. Any other errno is unexpected and reads as dead, which is what
+/// the previous behaviour was for every case.
 pub fn is_alive(pid: u32) -> bool {
     use nix::sys::signal::kill;
     use nix::unistd::Pid;
 
-    kill(Pid::from_raw(pid as i32), None)
-        .map(|_| true)
-        .unwrap_or(false)
+    if pid == 0 || pid > i32::MAX as u32 {
+        return false;
+    }
+    match kill(Pid::from_raw(pid as i32), None) {
+        Ok(()) => true,
+        Err(nix::errno::Errno::EPERM) => true,
+        Err(_) => false,
+    }
 }
 
 /// Kill a process and its process group: send SIGTERM, wait briefly, then
@@ -1455,6 +1482,40 @@ mod characterization_tests {
             captured.contains("to-stderr"),
             "stderr must reach the log sink via 2>&1, got {captured:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod liveness_tests {
+    use super::*;
+
+    #[test]
+    fn a_pid_that_is_not_a_process_is_never_alive() {
+        // The one that bit: `kill(0, …)` signals the caller's own process group,
+        // so without the guard this returns `true` from inside any process — and
+        // 0 is what every "no process here" placeholder in veld deserialises to.
+        assert!(!is_alive(0));
+        // Truncating into an `i32` would otherwise turn this into some unrelated
+        // live pid.
+        assert!(!is_alive(i32::MAX as u32 + 1));
+        assert!(!is_alive(u32::MAX));
+        // The control: this process is alive, so the guard has not simply
+        // disabled the check.
+        assert!(is_alive(std::process::id()));
+    }
+
+    #[test]
+    fn a_process_this_user_may_not_signal_is_alive_not_dead() {
+        // pid 1 (launchd / init) is always running and always owned by root, so
+        // an unprivileged test process gets EPERM for it — the one errno that
+        // means "it exists" while not being `Ok`. Collapsing it into "dead" is
+        // what let an unprivileged veld try to steal a root-held update lock.
+        // Skipped when the tests happen to run as root, where the answer is `Ok`
+        // and the case is unreachable rather than wrong.
+        if nix::unistd::Uid::effective().is_root() {
+            return;
+        }
+        assert!(is_alive(1), "pid 1 exists; EPERM is not ESRCH");
     }
 }
 

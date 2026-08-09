@@ -90,10 +90,43 @@ One documented cost: a custom icon lives in the file's resource fork, and
 and are launched by launchd normally.
 
 **The app's own *Check for Updates…* updates the whole release.** It offers
-*veld `<version>`* rather than a new app, spawns `veld update --wait-pid <pid>
---relaunch --app-path <exe>` detached, quits so its bundle can be replaced, and
-the CLI moves every half and reopens it. One click, one restart, no follow-up
-trip to a terminal.
+*veld `<version>`* rather than a new app, spawns `veld update --target-version
+<version> --wait-pid <pid> --relaunch --app-path <exe>` detached (plus
+`--console`, when the CLI advertises it — see below), quits so its bundle can be
+replaced, and the CLI moves every half and reopens it. One click, one restart, no
+follow-up trip to a terminal.
+
+**`--console` re-runs the update in a terminal window**, which fixes two things a
+detached child cannot do. It has no surface to show progress on once the app has
+quit — one to four minutes of nothing — and no controlling terminal, so on a
+privileged install `sudo` can only ever be tried as `sudo -n` and fails silently
+when no credential is cached. The CLI writes `~/.veld/update-console.command`
+(macOS, 0700) or `~/.veld/update-console.sh` (Linux) and opens it: on macOS with
+a bare `open`, so LaunchServices routes it to whatever the user registered for
+`.command` — Terminal.app unless they chose otherwise — falling back to
+`open -a Terminal`; on Linux through `$VELD_TERMINAL`, `$TERMINAL`,
+`x-terminal-emulator`, then a list of emulators, and never at all without
+`DISPLAY`/`WAYLAND_DISPLAY`.
+
+A launcher exiting 0 is **not** evidence a window opened — `open` and every Linux
+emulator are fire-and-forget. So the outer process waits up to 20s for the update
+lock to be claimed by a different pid, which only a `veld update` that really
+started can do, and runs the update itself (headless, as before) when that never
+happens. `VELD_UPDATE_ORIGIN=console` is exported into the window so the run knows what it
+is. Two paths read it: a console run that finds the lock already held stays
+silent rather than writing a failure report over the parent's success, and the
+handshake only accepts a holder whose origin is `console`.
+
+**`--console` is gated on its own capability, `console-handoff`**, and not on
+`full-update-handoff`. The two are genuinely independent: `veld desktop update`
+moves the app half *alone*, so a new app can be driving an old CLI — one that has
+always had `--wait-pid`/`--relaunch` and therefore advertises the full handoff,
+while its clap rejects `--console` with a usage error and a non-zero exit. That
+would happen *after* the app quit and with no report written, so the user would
+reopen on the old version having been told nothing. Unlike its neighbour,
+`console-handoff` is advertised unconditionally: it is a claim about this
+binary's vocabulary, not about whether the machine can finish an unattended
+update, and the flag degrades to a headless run on its own.
 
 Which command it spawns is a **capability** decision, not a version comparison:
 `veld desktop status --json` carries a `capabilities` array, and the app uses the
@@ -108,7 +141,10 @@ is. `install.sh` treats that as a system install and will not relocate it — a
 privileged LaunchDaemon still references `/usr/local` paths — so under
 `VELD_NON_INTERACTIVE=1` it requires `sudo -n` and exits 1 when that fails. The
 handoff is a detached child with no controlling terminal, so `sudo -n` fails there
-unless a credential is already cached. Advertising a capability the binary cannot
+unless a credential is already cached. `--console` would give sudo a terminal to
+prompt in, and it is still not enough to advertise the capability: the terminal is
+best-effort and the headless fallback is the path that cannot finish on these
+machines. Advertising a capability the binary can only *sometimes*
 deliver would turn a working app-only update into a failed full one, so those
 machines keep the app-only route from the GUI and use `veld update` in a terminal
 — where sudo can prompt — to move both halves. Deliberately *not* probed with
@@ -133,6 +169,28 @@ field existed.
 ```bash
 veld update
 ```
+
+**Only one update runs at a time.** `veld update` takes a lock at
+`~/.veld/update.lock` (a directory — `mkdir` is the create-or-fail primitive) and
+publishes `{pid, origin, version, started_at, phase, phase_at, tty}` into
+`state.json` inside
+it. A second `veld update` refuses with **exit 75** (`EX_TEMPFAIL`, so an agent
+can tell "retry shortly" from a real failure) and names the holder and its phase.
+So does every other veld command except a small allow-list — `update`, `doctor`,
+`version`, `config`, `lint`, `init`, `desktop status`, and the internal log sinks
+that running environments depend on — because the rest exec binaries that are being replaced
+or talk to services that are being restarted. Veld Desktop reads the same file at
+startup and quits with an explanation rather than opening over its own bundle
+swap.
+
+A lock is written off — and stolen by the next `acquire` — when **either** the
+holder's pid is gone, or its `phase_at` is more than 30 minutes old. Both
+conditions are needed: a liveness check cannot see a run wedged at an unanswered
+`sudo` prompt, and a timeout alone cannot tell a crash from a slow download.
+`veld update --force` skips the wait; `veld update --status [--json]` reports the
+current state without installing anything, and `veld doctor` prints the same
+thing at the top of its report (deliberately not as a check, since an update in
+flight is not a failure — but it does explain why the versions below it disagree).
 
 This downloads the latest release and restarts the background services
 (helper + daemon) onto the new binaries automatically. On macOS it moves Veld

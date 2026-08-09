@@ -34,6 +34,7 @@ const {
   checkForUpdates,
   initUpdater,
   noteDaemonVersion,
+  quitIfUpdating,
   skewMenuItem,
 } = require("./updater");
 
@@ -612,8 +613,13 @@ app.on("second-instance", () => focusPrimary());
  */
 const VERSION_POLL_MS = 60_000;
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   if (!isPrimaryInstance) return;
+  // Before anything else is built: an update in flight owns this app's bundle,
+  // and a window opened into that window is a window the update cannot replace.
+  // Ahead of the IPC registrations and `restoreWindows` so a refused launch
+  // leaves no handlers, no tray and no restored layout behind it.
+  if (await quitIfUpdating()) return;
   // Registered before any window exists, so the first page load already finds
   // the handlers. A view is only ever addressable from the window that owns it.
   registerBrowserViewIpc((event) => BrowserWindow.fromWebContents(event.sender), {
