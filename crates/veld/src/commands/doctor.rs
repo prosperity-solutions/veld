@@ -554,7 +554,7 @@ impl Diagnostics {
         // died after an update" had nowhere to look. This names the directory and
         // counts what is in it; a socket nobody answers is a holder that is gone
         // and gets swept at the next daemon start.
-        self.checks.push(self.terminal_holders_check());
+        self.checks.push(self.terminal_holders_check(feedback_ok));
 
         // 10. The terminal-URL shims.
         //
@@ -720,7 +720,31 @@ impl Diagnostics {
         }
     }
 
-    /// Count holder sockets, and how many of them answer.
+    /// Count holder sockets, and — only when it is safe to ask — how many of them
+    /// answer.
+    ///
+    /// **`daemon_up` decides whether this row probes at all, and that is the
+    /// point.** Connecting is the only way to tell a live holder from a leftover
+    /// socket file, and a holder treats a connection as a daemon arriving. On a
+    /// holder from *this* build that costs nothing (a connection has to stay open
+    /// for `TAKEOVER_PROBATION` before it displaces anything) — but the holders
+    /// that matter most are the ones already running when that fix ships, which
+    /// keep the old binary until their shell exits and still hand the session to
+    /// anything that connects. That is the bug this command was the reported
+    /// trigger for: one `veld doctor` disconnected every terminal on the machine.
+    ///
+    /// So the probe is skipped exactly when it could hurt: a reachable daemon is
+    /// attached to these holders, and the count it would have confirmed is
+    /// something the daemon already knows. With no daemon there is nothing to
+    /// displace, and that is also the state this row exists to explain — "my
+    /// terminals died, is anything still holding them?"
+    ///
+    /// One consequence to know rather than to fix: a holder with no daemon
+    /// attached treats the probe as a daemon arriving and leaving, which re-arms
+    /// its orphan grace. So running this on a machine whose daemon is down gives
+    /// every orphaned shell another full grace before it hangs itself up. That is
+    /// the friendly direction to be wrong in — somebody diagnosing a dead daemon
+    /// is the last person who should lose a shell to the diagnosis.
     ///
     /// The row doubles as the check that a holder *can* bind here at all. A
     /// `sockaddr_un` path is capped at 104 bytes and this directory's is not
@@ -730,9 +754,16 @@ impl Diagnostics {
     /// `bind` error ("path must be shorter than SUN_LEN") only ever reaches the
     /// user as a terminal that will not open. So the length is checked first, and
     /// it is a *failure* rather than a note — nothing works until it is fixed.
-    fn terminal_holders_check(&self) -> Check {
-        let dir = veld_core::instance::pty_dir();
-        let shown = tilde_path(&dir);
+    fn terminal_holders_check(&self, daemon_up: bool) -> Check {
+        Self::holders_row(&veld_core::instance::pty_dir(), daemon_up)
+    }
+
+    /// The body of [`Self::terminal_holders_check`], taking its directory rather
+    /// than reading `VELD_PTY_DIR` — so a test can hand it a real listener in a
+    /// tempdir and observe whether this knocks on it, which is the behaviour worth
+    /// pinning and is not observable through the environment without a lock.
+    fn holders_row(dir: &Path, daemon_up: bool) -> Check {
+        let shown = tilde_path(dir);
         // The name a real socket would get: `socket_for` digests the session id to
         // a fixed 16 hex chars precisely so every session's path is the same length,
         // which is what makes one probe answer for all of them.
@@ -755,30 +786,40 @@ impl Diagnostics {
                 ),
             };
         }
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            // No directory is the ordinary state: it appears with the first
-            // terminal and nothing prunes it.
+        // `holder_sockets_in`, not a `read_dir` of its own: the directory is
+        // `VELD_PTY_DIR`, which is a plain environment variable, and pointed one
+        // level up at `~/.veld` a `.sock`-extension test counts `daemon.sock` and
+        // `helper.sock` as terminals — and, worse, connects to them. A missing
+        // directory is an empty list, which is the ordinary state: it appears with
+        // the first terminal and nothing prunes it.
+        let sockets = veld_core::instance::holder_sockets_in(dir);
+        if sockets.is_empty() {
             return Check {
                 pass: true,
                 label: format!("No terminal holders ({shown})"),
             };
-        };
+        }
+        if daemon_up {
+            // Counted, not probed — see the note above this function.
+            return Check {
+                pass: true,
+                label: format!(
+                    "{} terminal holder(s) ({shown}) — not probed while the daemon is running",
+                    sockets.len()
+                ),
+            };
+        }
         let (mut live, mut stale) = (0usize, 0usize);
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("sock") {
-                continue;
-            }
+        for path in sockets {
+            // Connect-and-close. Safe here because no daemon is attached to these
+            // holders: there is no connection for this one to displace.
             match std::os::unix::net::UnixStream::connect(&path) {
-                Ok(_) => live += 1,
+                Ok(stream) => {
+                    drop(stream);
+                    live += 1;
+                }
                 Err(_) => stale += 1,
             }
-        }
-        if live == 0 && stale == 0 {
-            return Check {
-                pass: true,
-                label: format!("No terminal holders ({shown})"),
-            };
         }
         Check {
             // Not a failure: a stale socket is swept at the next daemon start.
@@ -1362,6 +1403,59 @@ fn colorize_status(status: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `veld doctor` must not knock on a holder that has a daemon attached.
+    ///
+    /// This command was the reported trigger for terminals dying: connecting to a
+    /// holder is how a daemon arrives, and a holder that still runs the pre-fix
+    /// binary — which every terminal open at update time does, until its shell
+    /// exits — hands the session to anything that connects. So the row counts
+    /// while the daemon is up and probes only when it is down, and the assertion
+    /// is on the *listener*: whether anything reached it, not what the label says.
+    #[test]
+    fn the_holder_row_only_knocks_when_the_daemon_is_down() {
+        let dir = tempfile::tempdir().unwrap();
+        // A digest-shaped name, which is what `holder_sockets_in` looks for.
+        let socket = dir.path().join("00000000deadbeef.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        // Something that is not a holder, beside it: it must be counted by
+        // neither branch.
+        std::fs::write(dir.path().join("daemon.sock"), b"").unwrap();
+
+        let row = Diagnostics::holders_row(dir.path(), true);
+        assert!(row.pass);
+        assert!(
+            row.label.contains("1 terminal holder(s)") && row.label.contains("not probed"),
+            "a counted row must say it did not probe: {}",
+            row.label
+        );
+        assert!(
+            listener.accept().is_err(),
+            "nothing may connect to a holder while its daemon is attached"
+        );
+
+        let row = Diagnostics::holders_row(dir.path(), false);
+        assert!(row.pass);
+        assert_eq!(
+            row.label,
+            format!("1 terminal holder(s) running ({})", tilde_path(dir.path())),
+            "with no daemon there is nothing to displace, and the answer is worth having"
+        );
+        assert!(
+            listener.accept().is_ok(),
+            "the probe must actually reach the socket"
+        );
+
+        // And an empty directory is the ordinary state, not a failure.
+        let empty = tempfile::tempdir().unwrap();
+        assert!(Diagnostics::holders_row(empty.path(), true).pass);
+        assert!(
+            Diagnostics::holders_row(empty.path(), true)
+                .label
+                .starts_with("No terminal holders")
+        );
+    }
 
     #[test]
     fn the_log_path_is_read_out_of_a_plist() {

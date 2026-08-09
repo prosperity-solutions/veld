@@ -464,6 +464,19 @@ struct Session {
     /// A `watch` rather than a queued frame so the hangup cannot sit behind a
     /// backlog of keystrokes: the writer polls it first.
     closing: watch::Sender<bool>,
+    /// Set when this daemon has given the session up **without ending it** —
+    /// see [`release_session`].
+    ///
+    /// Deliberately not the attach epoch, which would be the obvious way to make
+    /// attached sockets leave: an epoch change means *takeover* on the wire
+    /// ([`ServerControl::TakenOver`]), and the UI renders that as a terminal that
+    /// ended — "opened in another window", with Restart as the only button, which
+    /// deletes the very shell this path exists to keep alive. A socket that ends
+    /// on this signal instead closes with no control frame at all, which the
+    /// client already reads as a dropped connection and answers with Reconnect —
+    /// the truthful affordance, and the one that reaches the live holder again
+    /// through [`obtain_session`].
+    released: watch::Sender<bool>,
     /// The shell's pid, for log lines only — it is a pid in *another* process's
     /// child list, and nothing here may signal it.
     pid: i32,
@@ -482,6 +495,64 @@ static SESSIONS: LazyLock<tokio::sync::Mutex<HashMap<String, Arc<Session>>>> =
     LazyLock::new(|| tokio::sync::Mutex::new(HashMap::new()));
 
 static LIVE_SESSIONS: AtomicUsize = AtomicUsize::new(0);
+
+/// Sessions this daemon gave up while their shells kept running
+/// ([`release_session`]), and the worktree each belongs to.
+///
+/// The registry is otherwise the only record that a session exists, and
+/// `mint_ticket` reads it to decide whether an attach is a *resume* — which is
+/// what exempts it from the rules that govern starting a shell (no new terminal
+/// in a trashed worktree, the directory must exist, capacity, resolving a pane's
+/// command). A released session is a live shell with no registry entry, so
+/// without this it would be gated as a fresh spawn and could be refused a
+/// reattach the trash check explicitly promises to allow.
+///
+/// A tombstone rather than "does the holder socket still exist": the file is
+/// evidence of a *holder*, not of this session, and a leftover one from a killed
+/// holder would exempt a genuinely fresh spawn from those same rules. This
+/// carries the worktree id for the same reason the registry's entry does.
+///
+/// Entries leave when the session is registered again ([`register`]), when its
+/// shell is ended ([`hang_up_released_holder`]), and — the one that matters for
+/// correctness — when [`released_worktree`] reads one whose holder socket is
+/// gone. `release_session`'s own sweep is a bound on entries nobody ever reads
+/// back, not the thing that keeps them true.
+static RELEASED: LazyLock<Mutex<HashMap<String, i64>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// The worktree a released session belongs to, if this daemon released one and
+/// a holder could still be serving it.
+///
+/// The socket is checked as a **necessary** condition, never a sufficient one,
+/// and the difference is the whole reason this map exists: a socket file is
+/// evidence of some holder, not of *this* session, so a leftover one must not
+/// make a fresh spawn look like a resume — but its absence is proof the holder
+/// this record describes is gone (a holder unlinks its socket on the way out).
+/// Pruning here rather than only in `release_session` is what keeps a record from
+/// outliving the shell it stands for: a released session whose shell then exits
+/// on its own is a case nothing else observes, because this daemon gave up the
+/// link that would have told it — that is what "released" means.
+///
+/// **Do not "improve" this into a `holder_is_alive` handshake.** It was written
+/// that way for one round and reverted: the greeting a holder sends a peer that
+/// connects after its shell has exited *contains the exit code*, and delivering
+/// it is what ends the holder ([`holder::deliver_exit`]). A probe from here is
+/// issued by the handler that runs immediately before the attach which would have
+/// adopted that holder — so the probe consumed the post-mortem, the holder exited,
+/// and the reattach found nothing and started a fresh shell, losing the scrollback
+/// the release existed to preserve. The residual it was meant to fix is far
+/// smaller: a `SIGKILL`ed holder leaves its socket, which reads as a resume and
+/// skips the trash and cwd gates for a genuinely fresh spawn. A terminal in a
+/// trashed worktree beats a silently discarded one.
+fn released_worktree(id: &str) -> Option<i64> {
+    let mut released = RELEASED.lock().expect("released set poisoned");
+    let worktree_id = *released.get(id)?;
+    if !socket_for(id).exists() {
+        released.remove(id);
+        return None;
+    }
+    Some(worktree_id)
+}
 
 /// Reserved slot in the [`MAX_SESSIONS`] budget, released on drop.
 struct SessionSlot {
@@ -533,13 +604,56 @@ fn valid_session_id(id: &str) -> bool {
 async fn end_session(id: &str, reason: &str) -> bool {
     let session = SESSIONS.lock().await.remove(id);
     let Some(session) = session else {
-        return false;
+        // Not in the registry is not the same as not running: [`release_session`]
+        // gives a live shell up while its holder keeps serving it. Without this,
+        // closing such a pane returned "closed" having done nothing, and the shell
+        // — with whatever agent or dev server is inside it — ran on until the
+        // holder's orphan grace, half an hour after the user asked for it to stop.
+        return hang_up_released_holder(id, reason).await;
     };
     info!(session = %session.id, worktree = %session.label, reason, "terminal session ended");
     // `send_replace`, not `send`: the writer task is the only receiver and may
     // already have finished (a shell that exited on its own), in which case
     // `send` would drop the flag and there is nothing left to hang up anyway.
     session.closing.send_replace(true);
+    true
+}
+
+/// End a session this daemon no longer has a registry entry for, by asking its
+/// holder directly. `true` if a holder answered for that id and was told to stop.
+///
+/// The only way to a live shell that is absent from the registry, which
+/// [`release_session`] makes reachable. Two things keep it from ending somebody
+/// else's shell: the socket is derived from the id, and the greeting must claim
+/// that same id — the check `adopt_one` makes for the same reason.
+async fn hang_up_released_holder(id: &str, reason: &str) -> bool {
+    if !valid_session_id(id) {
+        return false;
+    }
+    let attached = match connect_holder(&socket_for(id)).await {
+        Ok(attached) => attached,
+        Err(e) => {
+            // Nothing is behind the socket: the shell this record stood for is
+            // gone, so the record goes too. Every *other* failure leaves it alone
+            // — this connect is single-shot, and a live holder parks its own loop
+            // for longer than a handshake gets (see `holder_is_alive`). Dropping
+            // the record there would classify the next attach as a fresh spawn and
+            // let the trash and cwd gates refuse a shell that is still running.
+            if is_unanswered(&e) {
+                RELEASED.lock().expect("released set poisoned").remove(id);
+            }
+            return false;
+        }
+    };
+    if attached.hello.session_id != id {
+        // A digest collision, or a hand-planted socket. Not ours to hang up, and
+        // not ours to forget either.
+        warn!("not ending {id:?}: the holder at its socket answers for another session");
+        return false;
+    }
+    info!(session = %id, pid = attached.hello.pid, reason, "ending a released terminal session");
+    discard_holder(attached, reason).await;
+    RELEASED.lock().expect("released set poisoned").remove(id);
     true
 }
 
@@ -648,22 +762,12 @@ fn socket_for(session_id: &str) -> PathBuf {
     pty_dir().join(format!("{:016x}.sock", session_digest(session_id)))
 }
 
-/// Whether a path has the exact shape [`socket_for`] produces.
-///
-/// The gate on anything destructive in [`adopt_existing_sessions`]. It is a
-/// name check, not a claim about the contents — the greeting is what proves a
-/// socket is the session it should be.
-fn is_holder_socket_name(path: &FsPath) -> bool {
-    path.file_name()
-        .and_then(|n| n.to_str())
-        .and_then(|n| n.strip_suffix(".sock"))
-        .is_some_and(|stem| {
-            stem.len() == 16
-                && stem
-                    .chars()
-                    .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase())
-        })
-}
+// The predicate that decides whether a path has the shape `socket_for` produces
+// — the gate on anything destructive in `adopt_existing_sessions` — lives in
+// `veld_core::instance`, together with the `holder_sockets_in` scan built on it,
+// because `veld doctor` and `veld uninstall` walk the same directory and have to
+// apply the same rule. Doctor did not, and connected to anything ending in
+// `.sock`.
 
 /// FNV-1a over the session id. A hash, not a hash *function* in the security
 /// sense — nothing here depends on it being hard to invert, only on distinct ids
@@ -881,11 +985,18 @@ async fn await_holder(socket: &FsPath) -> anyhow::Result<Attached> {
 
 /// Tell a holder we do not want it after all, and let it clean itself up.
 ///
-/// Only ever called on a holder this daemon started (or adopted) and then decided
-/// against: dropping the connection alone would leave its shell running until the
-/// orphan grace. **Never call it on a holder that failed
-/// [`verify_identity`]** — that one belongs to another session and may have a live
-/// shell in it.
+/// Three callers, and what they have in common is the rule: **never call this on
+/// a holder whose greeting has not been checked against the session id it is
+/// supposed to be serving** — one that belongs to another session may have a live
+/// shell in it, and this frame ends whatever it reaches.
+///
+/// - a holder this daemon started and then decided against (dropping the
+///   connection alone would leave its shell running until the orphan grace);
+/// - one it adopted and then decided against, same reason;
+/// - one serving a session this daemon has *released*
+///   ([`hang_up_released_holder`]), where the check is that function's own
+///   `hello.session_id` comparison rather than [`verify_identity`] — there is no
+///   [`HolderConfig`] to compare against, because nothing here spawned anything.
 async fn discard_holder(attached: Attached, reason: &str) {
     let mut stream = attached.stream;
     debug!(session = %attached.hello.session_id, reason, "discarding a holder");
@@ -1335,7 +1446,7 @@ async fn mint_ticket(
     // A live session is claimed by the worktree it was started in. Without
     // this check a pane could name another worktree's session and adopt a
     // shell running somewhere the user isn't looking.
-    let resumed = match SESSIONS.lock().await.get(&body.session_id) {
+    let registered = match SESSIONS.lock().await.get(&body.session_id) {
         Some(s) if s.worktree_id != body.worktree_id => {
             return Err(err(
                 StatusCode::CONFLICT,
@@ -1345,6 +1456,25 @@ async fn mint_ticket(
         Some(_) => true,
         None => false,
     };
+    // Absent from the registry is not the same as gone. `release_session` hands a
+    // live shell back to its holder without an entry, and everything below this
+    // line applies a *fresh spawn's* rules — refusing a reattach into a trashed
+    // worktree, or one whose directory has moved, which is exactly what the note
+    // under the trash check promises not to do.
+    let resumed = registered
+        || match released_worktree(&body.session_id) {
+            Some(worktree_id) if worktree_id != body.worktree_id => {
+                // The same claim the registry arm above makes, and it has to be
+                // made here too: a released session is still owned by the worktree
+                // it was started in.
+                return Err(err(
+                    StatusCode::CONFLICT,
+                    "session belongs to another worktree",
+                ));
+            }
+            Some(_) => true,
+            None => false,
+        };
 
     // No NEW shells in a checkout that is in the trash. It is still a real directory
     // for the whole retention period, so nothing stops a URL or a direct API call
@@ -1402,7 +1532,15 @@ async fn mint_ticket(
     // Only a spawn needs a command. A reattach is already running whatever it
     // was started with, so resolving here would read the config, check PATH and
     // possibly refuse — for a session the answer cannot change.
-    let pane = match (&body.pane, resumed) {
+    //
+    // Keyed on `registered`, not on `resumed`: a *released* session is one this
+    // daemon can no longer reach through the registry, and if its holder has since
+    // died the attach below spawns rather than adopts. Without a resolved pane
+    // that spawn is a bare login shell where the user's pane command should be —
+    // silently, and in a pane whose whole identity is that command. Resolving one
+    // we then do not use costs a config read; not resolving one we need replaces
+    // the terminal.
+    let pane = match (&body.pane, registered) {
         (Some(spec_id), false) => Some(
             resolve_pane(
                 &db,
@@ -1798,6 +1936,17 @@ async fn attach(
             )
                 .into_response();
         }
+        Err(SessionError::Unreachable(e)) => {
+            warn!(
+                session = %ticket.session_id,
+                "could not reach the holder at this session's socket: {e}"
+            );
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("could not reach that terminal's holder: {e}"),
+            )
+                .into_response();
+        }
         Err(SessionError::Starting) => {
             // Two sockets attaching the same session id at once, with no shell
             // there yet. The other one is milliseconds from registering it, and
@@ -1831,6 +1980,13 @@ async fn attach(
 enum SessionError {
     AtCapacity,
     Spawn(anyhow::Error),
+    /// The holder at this session's socket could not be reached, or is not this
+    /// session's — a wedged holder, a protocol version this build refuses, a
+    /// greeting that answers for another id. Separate from
+    /// [`SessionError::Spawn`] because nothing was spawned: "could not start a
+    /// shell" sends whoever reads it looking for a startup failure that never
+    /// happened, when the thing to look at is the holder.
+    Unreachable(anyhow::Error),
     /// Another attach for the same session id is mid-spawn. The caller cannot
     /// usefully wait, because the shell it would get is about to exist under an
     /// id it already knows — it retries.
@@ -1961,10 +2117,60 @@ async fn obtain_session(
         argv: ticket.pane.as_ref().map(|p| p.argv.clone()),
         pane_label: ticket.pane.as_ref().map(|p| p.label.clone()),
     };
-    let attached = start_holder(&cfg).await.map_err(SessionError::Spawn)?;
+    // A holder for this session id may still be running with a live shell in it:
+    // this daemon's link to it broke (a takeover, a socket error), or it started
+    // after the boot-time adoption sweep and this daemon has no record of it. Its
+    // socket is the one `cfg` names, so adopt it rather than spawning a second
+    // holder — the socket path has room for exactly one, so that spawn always
+    // fails to bind, and only reaches the right shell by accident: the doomed
+    // holder's own "is somebody already there?" probe lands on the live holder as
+    // a connection, and `await_holder` then poll-connects onto it. Before
+    // `TAKEOVER_PROBATION` those two connections displaced whatever the daemon had
+    // just attached, so every resume both worked *and* immediately reported the
+    // shell as exited — the loop the user sees as "it comes back for a moment and
+    // then drops".
+    let (attached, adopted) = match connect_holder(&cfg.socket).await {
+        Ok(attached) => (attached, true),
+        // Nothing behind the socket: this is a session to start, not to adopt.
+        // The retry below deliberately does not cover this case — a fresh session
+        // is the common one, and it would spend `HOLDER_START_TIMEOUT` doing
+        // nothing before every single spawn.
+        Err(e) if is_unanswered(&e) => (
+            start_holder(&cfg).await.map_err(SessionError::Spawn)?,
+            false,
+        ),
+        // Something *is* listening and did not complete the handshake — a holder
+        // whose main loop is momentarily parked (it writes greetings and waits on
+        // its daemon from that loop, both with longer bounds than this
+        // handshake's), `EMFILE`, a full command channel. Poll it the way
+        // `start_holder` polls a holder it just spawned: giving up on one attempt
+        // would fail the reattach outright, and riding transients out is the
+        // behaviour this path is replacing.
+        Err(_) => (
+            await_holder(&cfg.socket)
+                .await
+                .map_err(SessionError::Unreachable)?,
+            true,
+        ),
+    };
+    if adopted {
+        // Never hung up on a mismatch: that holder belongs to another session and
+        // may have a live shell in it — the same rule `adopt_one` has.
+        // `start_holder` runs this check itself for the holder it spawned.
+        verify_identity(&attached, &cfg).map_err(SessionError::Unreachable)?;
+        debug!(session = %ticket.session_id, "adopted the holder already serving this session");
+    }
 
     let mut sessions = SESSIONS.lock().await;
     if let Some(existing) = sessions.get(&ticket.session_id) {
+        if adopted {
+            // Never `discard_holder` an adopted one. That writes `HANGUP`, which a
+            // holder honours whatever the generation and whoever is attached — and
+            // the holder behind an adoption is the one the winning `existing`
+            // session is serving, so the "cleanup" would kill its live shell. Only
+            // a holder *this call spawned* is ours to throw away.
+            return Ok((existing.clone(), true));
+        }
         discard_holder(attached, "another attach won the race").await;
         return Ok((existing.clone(), true));
     }
@@ -1978,17 +2184,32 @@ async fn obtain_session(
     // Only now, with a holder actually running the command, does the pane's
     // identity become a fact worth remembering — the row is what makes this pane
     // resumable, and one written before the spawn would outlive a failure and
-    // offer a resume for a conversation that was never created.
-    if let Some(pane) = ticket.pane.as_ref().filter(|p| p.fresh) {
+    // offer a resume for a conversation that was never created. Never on an
+    // adoption: nothing was launched, the row for that launch already exists, and
+    // writing a second one would offer a resume for a conversation this attach
+    // did not start.
+    if let Some(pane) = ticket.pane.as_ref().filter(|p| p.fresh && !adopted) {
         record_pane_launch(ticket, pane);
     }
-    info!(
-        session = %session.id,
-        worktree = %ticket.label,
-        pid = session.pid,
-        "terminal session started"
-    );
-    Ok((session, false))
+    if adopted {
+        info!(
+            session = %session.id,
+            worktree = %ticket.label,
+            pid = session.pid,
+            "adopted a terminal session from its own holder"
+        );
+    } else {
+        info!(
+            session = %session.id,
+            worktree = %ticket.label,
+            pid = session.pid,
+            "terminal session started"
+        );
+    }
+    // An adopted shell is one that was already running, which is exactly what
+    // `resumed` means to the client — it is the difference between replaying a
+    // terminal and presenting a fresh one.
+    Ok((session, adopted))
 }
 
 /// Remember the identity a freshly launched pane is running under.
@@ -2040,6 +2261,7 @@ fn register(
     let (exit, _) = watch::channel(hello.exited);
     let (attach_epoch, _) = watch::channel(0u64);
     let (closing, _) = watch::channel(false);
+    let (released, _) = watch::channel(false);
     let (to_holder, holder_rx) = mpsc::channel(HOLDER_INPUT_CHANNEL);
 
     // The mirror starts as the holder's copy: for a session this daemon just
@@ -2078,10 +2300,17 @@ fn register(
                 .unwrap_or_else(Instant::now),
         )),
         closing,
+        released,
         pid: hello.pid,
         _slot: slot,
     });
     sessions.insert(session.id.clone(), session.clone());
+    // Whatever this session was before, it is in the registry now, which is the
+    // record `RELEASED` stands in for while it is not.
+    RELEASED
+        .lock()
+        .expect("released set poisoned")
+        .remove(&session.id);
 
     tokio::spawn(pump_to_holder(
         writer,
@@ -2109,28 +2338,12 @@ fn register(
 /// speaks costs [`HOLDER_HELLO_TIMEOUT`], and one wedged holder must not add that
 /// to the startup of every session behind it.
 pub async fn adopt_existing_sessions() {
-    let dir = pty_dir();
-    let entries = match std::fs::read_dir(&dir) {
-        Ok(entries) => entries,
-        // No directory means no holders, which is the common case.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
-        Err(e) => {
-            warn!("could not read the terminal holder directory {dir:?}: {e}");
-            return;
-        }
-    };
-
-    let mut candidates = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        // Only names this daemon could have written, because a failed handshake
-        // ends in `remove_file`: `VELD_PTY_DIR` is a plain env var, and pointed
-        // one level up at `~/.veld` a boot would otherwise delete `daemon.sock`.
-        // Anything else in the directory is not ours to reason about.
-        if is_holder_socket_name(&path) {
-            candidates.push(path);
-        }
-    }
+    // Only names this daemon could have written, because a failed handshake ends
+    // in `remove_file`: `VELD_PTY_DIR` is a plain env var, and pointed one level
+    // up at `~/.veld` a boot would otherwise delete `daemon.sock`. Anything else
+    // in the directory is not ours to reason about. A missing directory is an
+    // empty list, which is the common case.
+    let candidates = veld_core::instance::holder_sockets_in(&pty_dir());
     if candidates.is_empty() {
         return;
     }
@@ -2285,6 +2498,23 @@ async fn pump_holder(session: Arc<Session>, mut reader: OwnedReadHalf) {
             session.exit.send_replace(Some(1));
             return;
         }
+        // Losing the connection is not the same fact as losing the holder, and
+        // the two used to be conflated here. A peer that connects to the holder
+        // displaces this connection, and the shell behind it is untouched —
+        // publishing an exit for it reports a live shell as dead, hands every
+        // attached socket a status nothing produced, and leaves the reaper to hang
+        // up a terminal somebody is still working in. So ask the holder before
+        // speaking for it.
+        if holder_is_alive(&session.id).await {
+            warn!(
+                session = %session.id,
+                pid,
+                "this daemon's connection to the holder was displaced; releasing the session \
+                 rather than reporting an exit — reattaching will pick the shell up again"
+            );
+            release_session(&session).await;
+            return;
+        }
         // The holder went away with the shell still running: it was killed, or
         // it crashed. The shell is gone with it (the master died with the
         // holder), so this is an exit like any other — reported, rather than
@@ -2301,6 +2531,83 @@ async fn pump_holder(session: Arc<Session>, mut reader: OwnedReadHalf) {
         warn!(session = %session.id, pid, "terminal holder disappeared");
         session.exit.send_replace(Some(1));
     }
+}
+
+/// Whether a holder may still be serving `id` — and **fails safe**, because the
+/// answer decides whether a live shell is about to be declared dead.
+///
+/// Only the three errnos [`is_unanswered`] names mean "nothing is behind this
+/// socket". Everything else — a handshake that did not finish inside
+/// [`HOLDER_HELLO_TIMEOUT`], `EMFILE`, a refused protocol version — is a holder
+/// that may well be alive, and one of those is *routine* here: the holder's main
+/// loop is parked while it writes a greeting (up to `GREETING_TIMEOUT`) or waits
+/// on a daemon that is not reading (up to `OUTPUT_SEND_TIMEOUT`), both longer than
+/// the timeout on this handshake, and a parked loop cannot answer this probe. A
+/// wedged holder therefore leaks its shell until its own orphan grace, which is
+/// the better half of the trade: the other half is inventing an exit for a shell
+/// somebody is working in.
+///
+/// Deliberately a full handshake rather than "does the socket accept?": a socket
+/// file outlives the process that bound it. The connection is then dropped, which
+/// is the probe shape `holder::TAKEOVER_PROBATION` makes harmless — it is
+/// greeted, never promoted, and the holder's own daemon keeps the session. The
+/// one exception is a protocol version this build refuses, where
+/// [`connect_holder`] writes a `HANGUP` and ends that shell; that is the
+/// deliberate policy documented there, not something this probe gets to opt out
+/// of, and it is unreachable from here in practice — a holder cannot change
+/// version, and this daemon only reaches this function for a session it already
+/// spoke to.
+async fn holder_is_alive(id: &str) -> bool {
+    match connect_holder(&socket_for(id)).await {
+        // The socket path is derived from the id, but a digest collision would
+        // put another session behind it — and that one being alive says nothing
+        // about this one.
+        Ok(attached) => attached.hello.session_id == id,
+        Err(e) => !is_unanswered(&e),
+    }
+}
+
+/// Give a session up without ending its shell.
+///
+/// The counterpart to [`end_session`], for the case where this daemon has lost
+/// its link to a holder that is still running: the registry entry is useless
+/// (nothing can reach the shell through it any more) but the shell itself is
+/// fine, so nothing may be hung up and no exit may be published.
+///
+/// Attached sockets are closed rather than told anything, via
+/// [`Session::released`] — a client reads that as a dropped connection and offers
+/// to reattach, which goes through [`obtain_session`], finds the live holder at
+/// its socket and adopts it. The user does have to ask for that reattach; what
+/// they must never be offered is the *destructive* answer, which is what
+/// signalling this as a takeover produced.
+async fn release_session(session: &Arc<Session>) {
+    {
+        let mut released = RELEASED.lock().expect("released set poisoned");
+        // A bound, not the correctness rule — `released_worktree` prunes what it
+        // reads. This is what keeps entries for ids nobody ever asks about again
+        // from accumulating for the life of the daemon, and it runs here because
+        // this is the rare path.
+        released.retain(|id, _| socket_for(id).exists());
+        released.insert(session.id.clone(), session.worktree_id);
+    }
+    {
+        let mut sessions = SESSIONS.lock().await;
+        // Only if it is still *this* session: an entry re-registered under the
+        // same id in the meantime belongs to a working link, and removing it
+        // would strand the shell it is serving.
+        if sessions
+            .get(&session.id)
+            .is_some_and(|s| Arc::ptr_eq(s, session))
+        {
+            sessions.remove(&session.id);
+        }
+    }
+    // `send_replace` for the reason `exit` documents: with no socket attached
+    // there is no receiver, and `send` would drop the flag — which matters here
+    // because a socket that attaches *after* this point (a reattach that raced
+    // the release) must still see it and leave, rather than sit on a session
+    // nothing feeds.
+    session.released.send_replace(true);
 }
 
 // ---------------------------------------------------------------------------
@@ -2409,6 +2716,20 @@ async fn serve_socket(socket: WebSocket, session: Arc<Session>, size: PtySize, r
         .detached_since
         .lock()
         .expect("detach clock poisoned") = None;
+
+    // Released between `obtain_session` handing this socket the session and the
+    // upgrade completing — a browser round trip wide, which is not a theoretical
+    // window. **Before the replay, deliberately**: sending the scrollback and a
+    // `Ready` and only then closing is precisely the "it comes back for a moment
+    // showing everything, then drops" that this whole change exists to remove, and
+    // it would be this code producing it. Nothing is attached yet, so there is no
+    // input task to abort.
+    let mut released_rx = session.released.subscribe();
+    if *released_rx.borrow_and_update() {
+        let _ = ws_tx.close().await;
+        mark_detached(&session, epoch);
+        return;
+    }
 
     // A reattaching client's terminal is whatever size it is now, which is not
     // necessarily the size the shell last knew.
@@ -2532,6 +2853,18 @@ async fn serve_socket(socket: WebSocket, session: Arc<Session>, size: PtySize, r
                 let current = *epoch_rx.borrow_and_update();
                 if current != epoch {
                     let _ = ws_tx.send(ServerControl::TakenOver.frame()).await;
+                    break;
+                }
+            },
+
+            // This daemon gave the session up while the shell kept running
+            // (`release_session`). No control frame: a close with none is what the
+            // client already reads as "the pipe broke, the shell probably did
+            // not", which is both true here and the state whose button is
+            // Reconnect. `TakenOver` would be a different claim with a
+            // *destructive* button behind it.
+            Ok(()) = released_rx.changed() => {
+                if *released_rx.borrow_and_update() {
                     break;
                 }
             },
@@ -2748,6 +3081,8 @@ mod tests {
 
     #[test]
     fn only_names_this_daemon_could_have_written_are_adoption_candidates() {
+        use veld_core::instance::is_holder_socket_name;
+
         // The gate on a destructive path: `adopt_one` removes a socket nobody
         // answers, and `VELD_PTY_DIR` is a plain env var — pointed one level up at
         // `~/.veld`, an ungated boot would delete `daemon.sock`.
@@ -2823,10 +3158,19 @@ mod tests {
             seen.push(errno);
             // Only a pressure errno earns another go; a genuinely wrong
             // classification must still fail the test rather than be retried away.
+            //
+            // `errno.is_none()` belongs in that set for the same reason, and it
+            // cannot hide the thing under test: an error with no errno is one the
+            // *handshake* produced, which means the connect succeeded — the failure
+            // being asserted (`ECONNREFUSED` ⇒ stale) is not even reachable through
+            // it. Observed as "holder closed before greeting" while the rest of
+            // this binary was forking real shells, i.e. the kernel answering for a
+            // listener that has been closed and whose descriptor something else is
+            // briefly keeping alive. Machine, not code.
             let pressure = matches!(
                 errno,
                 Some(libc::EMFILE | libc::ENFILE | libc::EINTR | libc::EAGAIN)
-            );
+            ) || errno.is_none();
             assert!(
                 pressure,
                 "dead socket misclassified: errno={errno:?} err={e}"
@@ -3242,9 +3586,27 @@ mod tests {
 
         /// Status code from a handshake that is expected to fail.
         async fn handshake_status(req: http::Request<()>) -> http::StatusCode {
+            handshake_error(req).await.0
+        }
+
+        /// Status **and body** from a handshake that is expected to fail.
+        ///
+        /// The body matters wherever two refusals share a status: 503 is both "too
+        /// many terminal sessions" and "could not reach that terminal's holder", so
+        /// asserting on the code alone would let a suite that accumulated sessions
+        /// pass a test about identity.
+        async fn handshake_error(req: http::Request<()>) -> (http::StatusCode, String) {
             match tokio_tungstenite::connect_async(req).await {
                 Ok(_) => panic!("handshake unexpectedly succeeded"),
-                Err(tokio_tungstenite::tungstenite::Error::Http(res)) => res.status(),
+                Err(tokio_tungstenite::tungstenite::Error::Http(res)) => {
+                    let status = res.status();
+                    let body = res
+                        .body()
+                        .as_ref()
+                        .map(|b| String::from_utf8_lossy(b).into_owned())
+                        .unwrap_or_default();
+                    (status, body)
+                }
                 Err(e) => panic!("unexpected handshake error: {e}"),
             }
         }
@@ -3574,6 +3936,427 @@ mod tests {
                 .unwrap();
             read_until(&mut again, "mark=kept").await;
             end_session(&sid, "test cleanup").await;
+        }
+
+        /// Somebody probing the holder's socket must not cost the user a
+        /// terminal.
+        ///
+        /// The daemon's half of `holder::tests::
+        /// a_probe_connection_does_not_take_a_terminal_from_its_daemon`, and the
+        /// level the bug was actually experienced at: `veld doctor` counts live
+        /// holders by connecting to each socket in the directory and closing
+        /// again. While any accepted connection displaced the attached daemon, one
+        /// `veld doctor` disconnected every terminal on the machine — the daemon
+        /// read EOF from the holder, published exit code 1 for shells that were
+        /// still running, and the reaper hung those shells up 30 minutes later.
+        /// The shape here is exactly doctor's: connect, drop, count.
+        #[tokio::test]
+        async fn a_probe_on_the_holder_socket_does_not_end_the_session() {
+            let addr = serve().await;
+            let dir = tempfile::tempdir().unwrap();
+            let sid = session_id();
+
+            let mut ws = open(addr, &sid, dir.path(), "&cols=90&rows=30").await;
+            read_control(&mut ws, "ready").await;
+            ws.send(WsMessage::Binary(
+                b"VELD_MARK=probed; printf 'set%s\\n' '-ok'\n"
+                    .to_vec()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+            read_until(&mut ws, "set-ok").await;
+
+            // Three, because doctor probes every socket it finds and a resume
+            // probes again on every retry.
+            let socket = socket_for(&sid);
+            for _ in 0..3 {
+                let probe = std::os::unix::net::UnixStream::connect(&socket)
+                    .expect("the holder must be listening");
+                drop(probe);
+            }
+
+            // Same socket, same shell, same variable. `read_until` fails loudly on
+            // an `exit` control frame, which is what the bug produced here.
+            ws.send(WsMessage::Binary(
+                b"printf 'mark=%s\\n' $VELD_MARK\n".to_vec().into(),
+            ))
+            .await
+            .unwrap();
+            read_until(&mut ws, "mark=probed").await;
+            end_session(&sid, "test cleanup").await;
+        }
+
+        /// A daemon that has lost its record of a session, while the holder for it
+        /// is still running, must adopt that holder rather than spawn a second one.
+        ///
+        /// The registry entry is removed by hand here because that is precisely the
+        /// state `release_session` leaves behind, and the state a daemon is in
+        /// whenever a holder started after its boot-time adoption sweep. What it
+        /// used to do instead was spawn a holder onto a socket path with room for
+        /// one: that holder fails to bind, and the session came back only by
+        /// accident — through the doomed holder's own liveness probe and
+        /// `await_holder`'s poll-connect, both of which then displaced the
+        /// connection the daemon had just made. The user saw their shell reappear
+        /// and drop again, several times a second.
+        #[tokio::test]
+        async fn a_lost_session_adopts_the_holder_that_is_still_serving_it() {
+            let addr = serve().await;
+            let dir = tempfile::tempdir().unwrap();
+            let sid = session_id();
+
+            let mut ws = open(addr, &sid, dir.path(), "&cols=90&rows=30").await;
+            read_control(&mut ws, "ready").await;
+            ws.send(WsMessage::Binary(
+                b"VELD_MARK=readopted; printf 'set%s\\n' '-ok'\n"
+                    .to_vec()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+            read_until(&mut ws, "set-ok").await;
+            drop(ws);
+
+            // The daemon forgets the session. The holder — and the shell in it —
+            // knows nothing about that.
+            SESSIONS.lock().await.remove(&sid);
+            assert!(
+                socket_for(&sid).exists(),
+                "the holder must still be serving its socket"
+            );
+
+            let mut again = open(addr, &sid, dir.path(), "&cols=90&rows=30").await;
+            let ready = read_control(&mut again, "ready").await;
+            assert_eq!(
+                ready["resumed"], true,
+                "adopting a running holder is a resume, not a fresh terminal"
+            );
+            again
+                .send(WsMessage::Binary(
+                    b"printf 'mark=%s\\n' $VELD_MARK\n".to_vec().into(),
+                ))
+                .await
+                .unwrap();
+            read_until(&mut again, "mark=readopted").await;
+            end_session(&sid, "test cleanup").await;
+        }
+
+        /// Releasing a session must not tell the client its terminal was taken
+        /// over, because the client's answer to that is destructive.
+        ///
+        /// `release_session` runs when this daemon has lost its link to a holder
+        /// whose shell is still running. Signalling it through the attach epoch —
+        /// the obvious way to make attached sockets leave — puts
+        /// `ServerControl::TakenOver` on the wire, which
+        /// `ui/src/panes/terminalHost.ts` renders as `ended` / "opened in another
+        /// window". `PaneArea.tsx` offers Reconnect only for `error`, so that pane
+        /// would present **Restart** as its one action — which deletes the session
+        /// and hangs up the very shell this path exists to preserve. A close with
+        /// no control frame is what the client already reads as a dropped
+        /// connection, which is both true and the state whose button reattaches.
+        #[tokio::test]
+        async fn a_released_session_closes_its_socket_without_claiming_a_takeover() {
+            use futures_util::StreamExt;
+
+            let addr = serve().await;
+            let dir = tempfile::tempdir().unwrap();
+            let sid = session_id();
+            let mut ws = open(addr, &sid, dir.path(), "&cols=90&rows=30").await;
+            read_control(&mut ws, "ready").await;
+
+            let session = SESSIONS
+                .lock()
+                .await
+                .get(&sid)
+                .cloned()
+                .expect("the session must be registered");
+            release_session(&session).await;
+
+            let ended = tokio::time::timeout(STEP_TIMEOUT, async {
+                while let Some(Ok(msg)) = ws.next().await {
+                    // **No control frame at all**, which is the actual contract —
+                    // not merely "not these two". A future `Released` variant is
+                    // the natural thing to reach for (every other server→client
+                    // signal is a typed frame) and would be a new claim the client
+                    // has to interpret, when the whole point is that it already
+                    // interprets a silent close correctly.
+                    if let WsMessage::Text(text) = msg {
+                        panic!("a release must close in silence, got a control frame: {text}");
+                    }
+                }
+            })
+            .await;
+            assert!(ended.is_ok(), "the socket must close on a release");
+            assert!(
+                SESSIONS.lock().await.get(&sid).is_none(),
+                "a released session leaves the registry"
+            );
+
+            // And the way back is the ordinary one: reattaching adopts the holder
+            // that kept running. This doubles as the cleanup — with no registry
+            // entry there is nothing `end_session` could hang up, and the shell
+            // would sit in the holder until its orphan grace.
+            let mut again = open(addr, &sid, dir.path(), "&cols=90&rows=30").await;
+            let ready = read_control(&mut again, "ready").await;
+            assert_eq!(ready["resumed"], true, "the shell was still there");
+            end_session(&sid, "test cleanup").await;
+        }
+
+        /// A socket that attaches to an already-released session closes without
+        /// showing anything first.
+        ///
+        /// The release can land between `obtain_session` handing this socket the
+        /// session and the WebSocket upgrade completing — a browser round trip
+        /// wide. Checking for it *after* the scrollback replay and `Ready` would
+        /// make this code produce the reported symptom exactly: the terminal comes
+        /// back showing everything it was doing, and drops. So the check sits
+        /// before the replay, and this pins that ordering rather than the fact of
+        /// the close (which the test above covers).
+        ///
+        /// The session is put back in the registry by hand because that window is
+        /// not otherwise reachable from a client: once released, the next attach
+        /// builds a *new* session by adopting the holder.
+        #[tokio::test]
+        async fn attaching_to_an_already_released_session_shows_nothing() {
+            use futures_util::StreamExt;
+
+            let addr = serve().await;
+            let dir = tempfile::tempdir().unwrap();
+            let sid = session_id();
+            let mut ws = open(addr, &sid, dir.path(), "&cols=90&rows=30").await;
+            read_control(&mut ws, "ready").await;
+            // Something in the scrollback, so a replay would be visible.
+            ws.send(WsMessage::Binary(
+                b"printf 'set%s\\n' '-ok'\n".to_vec().into(),
+            ))
+            .await
+            .unwrap();
+            read_until(&mut ws, "set-ok").await;
+
+            let session = SESSIONS
+                .lock()
+                .await
+                .get(&sid)
+                .cloned()
+                .expect("the session must be registered");
+            release_session(&session).await;
+            drop(ws);
+            SESSIONS.lock().await.insert(sid.clone(), session);
+
+            let mut late = open(addr, &sid, dir.path(), "&cols=90&rows=30").await;
+            let seen = tokio::time::timeout(STEP_TIMEOUT, async {
+                let mut frames = 0usize;
+                while let Some(Ok(msg)) = late.next().await {
+                    if !matches!(msg, WsMessage::Close(_)) {
+                        frames += 1;
+                    }
+                }
+                frames
+            })
+            .await
+            .expect("the socket must close");
+            assert_eq!(
+                seen, 0,
+                "a released session must not replay its terminal and then drop"
+            );
+
+            // Cleanup: the manual re-insert left an entry whose holder is still
+            // running, and `end_session` is what reaches it.
+            end_session(&sid, "test cleanup").await;
+        }
+
+        /// A holder that answers for another session is never adopted — and never
+        /// hung up either.
+        ///
+        /// The socket path is a digest of the session id, so what sits behind it
+        /// is a claim, not a fact; `mint_ticket`'s cross-worktree guard reads the
+        /// *registry*, so a session absent from it walks past that guard and this
+        /// check is what stops there. It is also the reason the adopt path may not
+        /// "clean up" what it refuses: that holder has somebody else's live shell
+        /// in it.
+        #[tokio::test]
+        async fn a_holder_answering_for_another_session_is_refused_not_adopted() {
+            use std::io::Write;
+
+            let addr = serve().await;
+            let dir = tempfile::tempdir().unwrap();
+            let ours = session_id();
+            let theirs = session_id();
+
+            // A real holder, at *our* socket path, announcing *their* id.
+            let cfg = wire::HolderConfig {
+                session_id: theirs.clone(),
+                worktree_id: 1,
+                label: "test".to_owned(),
+                cwd: dir.path().to_path_buf(),
+                cols: 80,
+                rows: 24,
+                socket: socket_for(&ours),
+                orphan_grace_secs: 3600,
+                argv: Some(vec!["cat".to_owned()]),
+                env: std::collections::BTreeMap::new(),
+                pane_label: None,
+            };
+            tokio::spawn(holder::run(cfg));
+            let deadline = Instant::now() + STEP_TIMEOUT;
+            while !socket_for(&ours).exists() {
+                assert!(Instant::now() < deadline, "the fixture holder must bind");
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+
+            let ticket = plant_ticket(&ours, dir.path());
+            let (status, body) = handshake_error(attach_request(
+                addr,
+                &format!("ticket={ticket}"),
+                Some(&good_origin()),
+            ))
+            .await;
+            assert_eq!(
+                status,
+                http::StatusCode::SERVICE_UNAVAILABLE,
+                "a holder that answers for another session is not this session's"
+            );
+            // The body, because 503 is also what a full session table answers.
+            assert!(
+                body.contains("could not reach that terminal's holder"),
+                "the refusal must be the identity one: {body}"
+            );
+            assert!(
+                SESSIONS.lock().await.get(&ours).is_none(),
+                "and nothing may be registered for it"
+            );
+            assert!(
+                socket_for(&ours).exists(),
+                "the refused holder must be left alone, not hung up"
+            );
+
+            // Cleanup: the five bytes any peer may write, since this holder is not
+            // one this daemon owns a session for.
+            let mut blunt = std::os::unix::net::UnixStream::connect(socket_for(&ours)).unwrap();
+            let mut frame = vec![wire::HANGUP];
+            frame.extend_from_slice(&0u32.to_be_bytes());
+            blunt.write_all(&frame).unwrap();
+            blunt.flush().unwrap();
+        }
+
+        /// A released session is a resume; one whose holder has since gone is not.
+        ///
+        /// `mint_ticket` reads this to decide whether an attach is a resume, and a
+        /// resume is exempt from every rule that governs *starting* a shell — no
+        /// new terminal in a trashed worktree, the directory must exist, capacity,
+        /// resolving a pane's command. So the tombstone being wrong in the "still
+        /// there" direction is not a stale entry, it is a fresh spawn let through
+        /// the gates under a resume's rules, in a pane still labelled for a command
+        /// nobody ran. The socket is checked as a necessary condition for exactly
+        /// that reason, and this pins both halves.
+        #[tokio::test]
+        async fn a_released_session_stops_counting_as_one_when_its_holder_goes() {
+            let addr = serve().await;
+            let dir = tempfile::tempdir().unwrap();
+            let sid = session_id();
+            let mut ws = open(addr, &sid, dir.path(), "&cols=90&rows=30").await;
+            read_control(&mut ws, "ready").await;
+            let session = SESSIONS
+                .lock()
+                .await
+                .get(&sid)
+                .cloned()
+                .expect("the session must be registered");
+            let worktree_id = session.worktree_id;
+            release_session(&session).await;
+            drop(ws);
+
+            assert_eq!(
+                released_worktree(&sid),
+                Some(worktree_id),
+                "a released session with a live holder is a resume, and belongs to \
+                 the worktree it was started in"
+            );
+
+            // The other half, and it is written by hand for a reason: the state it
+            // describes — a record whose holder has gone — is one this daemon
+            // cannot produce on demand, because releasing is precisely giving up
+            // the link that would tell it the shell ended. Ending the session
+            // through the API instead would satisfy the assertion by removing the
+            // record itself, and the test would pass with the prune deleted.
+            let ghost = session_id();
+            RELEASED
+                .lock()
+                .expect("released set poisoned")
+                .insert(ghost.clone(), worktree_id);
+            assert!(
+                !socket_for(&ghost).exists(),
+                "the fixture needs an id with no holder"
+            );
+            // Asserted before the read, because a concurrent test's
+            // `release_session` sweeps records whose socket is gone — and this one
+            // qualifies. Without this, losing that race would satisfy the
+            // assertions below for the wrong reason, which is the failure mode
+            // this whole test exists to have caught once already.
+            assert!(
+                RELEASED
+                    .lock()
+                    .expect("released set poisoned")
+                    .contains_key(&ghost),
+                "the record must still be there for the read to be the thing under test"
+            );
+            assert_eq!(
+                released_worktree(&ghost),
+                None,
+                "a record whose holder is gone must not make the next attach a resume"
+            );
+            assert!(
+                !RELEASED
+                    .lock()
+                    .expect("released set poisoned")
+                    .contains_key(&ghost),
+                "and reading it must drop it, since nothing else will"
+            );
+
+            end_session(&sid, "test cleanup").await;
+        }
+
+        /// Closing a pane must reach the shell even when this daemon has given the
+        /// session up.
+        ///
+        /// `end_session` works off the registry, and `release_session` is a way for
+        /// a *live* shell to be absent from it — so `DELETE /api/pty/sessions/{id}`
+        /// answered "closed" having done nothing, and whatever was running in that
+        /// terminal (an agent, a dev server) kept running until the holder's orphan
+        /// grace, half an hour after the user asked it to stop.
+        #[tokio::test]
+        async fn closing_a_released_session_still_ends_its_shell() {
+            let addr = serve().await;
+            let dir = tempfile::tempdir().unwrap();
+            let sid = session_id();
+            let mut ws = open(addr, &sid, dir.path(), "&cols=90&rows=30").await;
+            read_control(&mut ws, "ready").await;
+            let socket = socket_for(&sid);
+            assert!(socket.exists(), "the holder must be serving");
+
+            let session = SESSIONS
+                .lock()
+                .await
+                .get(&sid)
+                .cloned()
+                .expect("the session must be registered");
+            release_session(&session).await;
+            drop(ws);
+
+            assert!(
+                end_session(&sid, "closed by the client").await,
+                "closing a released session must reach its holder"
+            );
+            // The holder removes its own socket on the way out, so its
+            // disappearance is the shell's death observed from outside.
+            let deadline = Instant::now() + STEP_TIMEOUT;
+            while socket.exists() {
+                assert!(
+                    Instant::now() < deadline,
+                    "the holder must hang up and exit: {socket:?} is still there"
+                );
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
         }
 
         /// The daemon's environment additions actually reach the shell.

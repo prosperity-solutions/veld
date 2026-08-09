@@ -365,6 +365,41 @@ and several were paid for in this codebase already.
   one that may signal it.** The daemon asks a holder to hang up over the socket
   and never signals the shell's process group itself — a `killpg` racing
   `child.wait()` can land on a recycled pid.
+
+  **Connecting to a holder is a probe, not a takeover.** Every piece of code that
+  wants to know whether a holder is alive says so the same way — by connecting to
+  its socket, greeting and all: `veld doctor` counts live holders, `holder::bind`
+  tells a leftover socket file from a running holder before it refuses to start,
+  `pump_holder` asks whether the holder it just lost is really gone, and
+  `veld uninstall` sweeps every instance's. All of those close again immediately;
+  adoption (`adopt_one`, and `obtain_session` when a holder is already serving the
+  session) is the counter-example that *keeps* what it connects to. So a newly
+  accepted connection is greeted at once (the connect-write-`HANGUP`-close
+  contract in `pty/wire.rs` depends on that) but does **not** displace the
+  attached daemon until it has either stayed connected for
+  `holder::TAKEOVER_PROBATION` or sent a frame only a daemon sends. While any
+  accepted connection displaced the incumbent on the spot, one `veld doctor` cut
+  every terminal on the machine loose from its daemon — and the daemon then
+  published exit code 1 for shells that were still running, which is the second
+  half of the rule: **losing the connection to a holder is not the same fact as
+  losing the holder.** `pump_holder` asks the holder before speaking for it, and
+  releases the session (`release_session`, no hangup, no exit) when the shell is
+  still there. A release travels on its own `Session::released` signal and closes
+  the socket with **no** control frame, because the two obvious alternatives are
+  both worse than saying nothing: an `exit` is a lie about a running shell, and a
+  takeover (which is what bumping the attach epoch means on the wire) makes the
+  UI offer Restart as the pane's only action — deleting the session and hanging
+  up the shell the release exists to keep. A close with no frame is what the
+  client already reads as a dropped pipe, and its answer to that is Reconnect.
+  Anything that scans `instance::pty_dir()` inherits both rules, and goes through
+  `instance::holder_sockets_in` rather than its own `read_dir` — every such scan
+  then *acts* on what it found, and `VELD_PTY_DIR` is a plain environment
+  variable, so pointed at `~/.veld` a `.sock`-extension filter hands the daemon's
+  own control socket to code that connects to it or hangs it up. One more rule
+  belongs to the same population: **the holders that keep the old behaviour are
+  the ones already running**, since a holder is only ever replaced by its shell
+  ending. A change to this protocol's semantics protects sessions started after
+  it, and the daemon-side half is what has to cover the rest.
 - **Which client is showing a worktree is the daemon's answer, never a shell's.**
   The IDE's ownership registry lives in `crates/veld-daemon/src/ide.rs`, behind a
   control WebSocket (`/api/ide/channel`, ticket-authed like the PTY attach because
