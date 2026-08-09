@@ -38,7 +38,9 @@ const {
   primaryAction,
   releasePageUrl,
   reportIsFresh,
+  updateInProgress,
   updateMode,
+  updatePhaseLabel,
   versionSkew,
 } = require("./updatePolicy");
 
@@ -94,6 +96,84 @@ function handoffLogHandles() {
   } catch {
     return ["ignore", "ignore"];
   }
+}
+
+/**
+ * `~/.veld/update.lock/state.json` — what the running `veld update` is doing.
+ *
+ * Written by `veld_core::update_lock`. A directory rather than a plain file
+ * because `mkdir` is the create-or-fail primitive the lock is built on; only the
+ * state inside it is read here.
+ */
+const updateLockStatePath = () =>
+  path.join(os.homedir(), ".veld", "update.lock", "state.json");
+
+/**
+ * The update that is running right now, if one is.
+ *
+ * Synchronous on purpose: the one caller runs before any window exists, and the
+ * decision it feeds is whether to build a window at all.
+ *
+ * @returns {{pid: number, phase: string, version: string | null, origin: string} | null}
+ */
+function runningUpdate() {
+  let state;
+  try {
+    state = JSON.parse(fs.readFileSync(updateLockStatePath(), "utf8"));
+  } catch {
+    // No lock, unreadable lock, or half-written JSON — all "no update". The
+    // consequence of this answer is that the app opens, which is the safe
+    // direction: the failure it guards against costs a confusing session, while
+    // being wrong the other way makes the app unopenable.
+    return null;
+  }
+  return updateInProgress({
+    state,
+    // `kill(pid, 0)` throws ESRCH for a pid that is gone and EPERM for one this
+    // user may not signal. EPERM means it exists, which is the question.
+    pidAlive: (pid) => {
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch (err) {
+        return err?.code === "EPERM";
+      }
+    },
+  });
+}
+
+/**
+ * Refuse to open while an update is replacing this app's own bundle.
+ *
+ * The app is *supposed* to be closed for that window — `veld update` quits it,
+ * swaps `/Applications/Veld.app`, and reopens it at the end. A copy launched from
+ * the Dock in between attaches to a daemon that is mid-restart, holds open a
+ * bundle the installer is about to replace, and (because `install.sh` refuses to
+ * swap a running app) can silently reduce a full update to a CLI-only one. The
+ * user's mental model is already right — they are waiting for an update — so the
+ * honest response is to say so and quit rather than to open a window that will
+ * misbehave.
+ *
+ * Deliberately **only at startup**. An update started from a terminal asks the
+ * user's permission before closing this app, and auto-closing a running window
+ * mid-session would overrule an answer they were explicitly asked for.
+ *
+ * @returns {Promise<boolean>} whether the app should stop launching
+ */
+async function quitIfUpdating() {
+  const update = runningUpdate();
+  if (!update) return false;
+  const version = update.version ? ` to ${update.version}` : "";
+  await dialog.showMessageBox({
+    type: "info",
+    message: `Veld is updating${version}.`,
+    detail:
+      `The update is ${updatePhaseLabel(update.phase)} and will reopen Veld Desktop when it ` +
+      "finishes.\n\nOpening the app now would hold on to the bundle the update is replacing.",
+    buttons: ["OK"],
+  });
+  app.quit();
+  return true;
 }
 
 /**
@@ -757,5 +837,6 @@ module.exports = {
   checkForUpdates,
   initUpdater,
   noteDaemonVersion,
+  quitIfUpdating,
   skewMenuItem,
 };

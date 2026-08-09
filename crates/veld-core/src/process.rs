@@ -1039,10 +1039,24 @@ pub async fn run_command_streaming(
 // ---------------------------------------------------------------------------
 
 /// Check whether a process is still alive by sending signal 0.
+///
+/// **Pid 0 is not a process and is answered `false` without asking the kernel.**
+/// `kill(0, …)` addresses the *caller's own process group*, so it succeeds
+/// unconditionally — which made `is_alive(0)` return `true` from inside every
+/// process that asked. Nothing in veld stores 0 to mean "this pid", it means "no
+/// process", and reading it as alive is how a placeholder becomes a live
+/// process: a corrupt state file claiming pid 0 held the update lock would have
+/// been believed. `wait_for_pid_exit` has carried the same guard for the same
+/// reason; this is that reasoning stated where the check actually lives.
+/// Anything above `i32::MAX` cannot round-trip through `Pid` either, and would
+/// otherwise be truncated into some *other* live process.
 pub fn is_alive(pid: u32) -> bool {
     use nix::sys::signal::kill;
     use nix::unistd::Pid;
 
+    if pid == 0 || pid > i32::MAX as u32 {
+        return false;
+    }
     kill(Pid::from_raw(pid as i32), None)
         .map(|_| true)
         .unwrap_or(false)
@@ -1455,6 +1469,26 @@ mod characterization_tests {
             captured.contains("to-stderr"),
             "stderr must reach the log sink via 2>&1, got {captured:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod liveness_tests {
+    use super::*;
+
+    #[test]
+    fn a_pid_that_is_not_a_process_is_never_alive() {
+        // The one that bit: `kill(0, …)` signals the caller's own process group,
+        // so without the guard this returns `true` from inside any process — and
+        // 0 is what every "no process here" placeholder in veld deserialises to.
+        assert!(!is_alive(0));
+        // Truncating into an `i32` would otherwise turn this into some unrelated
+        // live pid.
+        assert!(!is_alive(i32::MAX as u32 + 1));
+        assert!(!is_alive(u32::MAX));
+        // The control: this process is alive, so the guard has not simply
+        // disabled the check.
+        assert!(is_alive(std::process::id()));
     }
 }
 

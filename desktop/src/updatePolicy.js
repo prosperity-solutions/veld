@@ -198,6 +198,87 @@ function reportIsFresh({ finishedAt, now = Date.now(), maxAgeMs = REPORT_MAX_AGE
   return Math.abs(now - written) <= maxAgeMs;
 }
 
+/**
+ * How long a lock holder may sit in one phase before it is written off.
+ *
+ * Mirrors `PHASE_TIMEOUT` in `crates/veld-core/src/update_lock.rs`, and the
+ * duplication is deliberate rather than a shared constant: this file is
+ * dependency-free by design, and the only thing the two copies must agree on is
+ * "roughly half an hour". Reading a stale lock as live for a few minutes longer
+ * than the CLI would costs a dialog, not correctness — `acquire` on the Rust side
+ * remains the only thing that ever *acts* on staleness.
+ */
+const UPDATE_PHASE_TIMEOUT_MS = 30 * 60 * 1000;
+
+/**
+ * Whether `~/.veld/update.lock/state.json` describes an update that is really
+ * running.
+ *
+ * Two independent staleness conditions, same as the CLI's: the holder is gone,
+ * or it has not changed phase in {@link UPDATE_PHASE_TIMEOUT_MS}. Both are needed
+ * — a liveness check cannot see a run wedged at a `sudo` prompt, and a timeout
+ * cannot tell a crash from a slow success.
+ *
+ * `pidAlive` is injected so this stays testable without spawning processes; the
+ * caller passes a `process.kill(pid, 0)` probe.
+ *
+ * An unparseable or shapeless state file reads as "no update". The app quits
+ * itself on the strength of this answer, so the burden of proof is on the file:
+ * garbage in `~/.veld` must never make Veld Desktop unopenable.
+ *
+ * @param {{state: unknown, now?: number, pidAlive?: (pid: number) => boolean}} ctx
+ * @returns {{pid: number, phase: string, version: string | null, origin: string} | null}
+ */
+function updateInProgress({ state, now = Date.now(), pidAlive = () => true }) {
+  if (!state || typeof state !== "object") return null;
+  const { pid, phase, phase_at: phaseAt, version, origin } = /** @type {any} */ (state);
+  if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0) return null;
+  if (!pidAlive(pid)) return null;
+  const moved = Date.parse(typeof phaseAt === "string" ? phaseAt : "");
+  // A missing or unparseable timestamp cannot vouch for a live update. Same
+  // direction as `reportIsFresh`: silence is the cheaper mistake.
+  if (Number.isNaN(moved)) return null;
+  // One-sided, unlike `reportIsFresh`: a `phase_at` in the future is a clock that
+  // moved, not evidence of abandonment, so only the past is checked.
+  if (now - moved > UPDATE_PHASE_TIMEOUT_MS) return null;
+  return {
+    pid,
+    phase: typeof phase === "string" ? phase : "starting",
+    version: typeof version === "string" ? version : null,
+    origin: typeof origin === "string" ? origin : "cli",
+  };
+}
+
+/**
+ * What to put in the "an update is running" dialog, for a given phase.
+ *
+ * Kept beside the phase names rather than inlined at the dialog, because these
+ * strings are the app's half of a vocabulary the CLI defines — an unknown phase
+ * (an older app, a newer CLI) has to degrade to something true rather than to
+ * `undefined`.
+ *
+ * @param {string} phase
+ * @returns {string}
+ */
+function updatePhaseLabel(phase) {
+  switch (phase) {
+    case "waiting-for-app":
+      return "waiting for Veld Desktop to quit";
+    case "checking":
+      return "checking which release to install";
+    case "installing":
+      return "downloading and installing";
+    case "restarting-services":
+      return "restarting the daemon and helper";
+    case "updating-app":
+      return "installing Veld Desktop";
+    case "finishing":
+      return "finishing up";
+    default:
+      return "in progress";
+  }
+}
+
 /** The page a user lands on to pick the right artifact for their machine. */
 function releasePageUrl(version) {
   const tag = version ? `tag/v${String(version).replace(/^v/, "")}` : "latest";
@@ -317,6 +398,14 @@ function handoffCommand({ capabilities = [], version, pid, execPath }) {
   const args = full
     ? [
         "update",
+        // Run the update in a terminal window rather than here. Two things the
+        // detached-child route could not do: show the user 1–4 minutes of
+        // progress after this app has quit, and give `sudo` a terminal to ask
+        // for the password in — a privileged install restarts a root helper, and
+        // a child with no controlling terminal only ever gets `sudo -n`. The CLI
+        // falls back to running headless when no terminal can be opened, so this
+        // never makes an update fail that would otherwise have worked.
+        "--console",
         // The release the user was just offered, from the feed that offered it.
         // Without this the CLI asks `api.github.com/…/releases/latest` — a
         // second source, rate-limited per IP and briefly out of step with the
@@ -365,6 +454,7 @@ module.exports = {
   FULL_UPDATE_HANDOFF,
   GITHUB_REPO,
   REPORT_MAX_AGE_MS,
+  UPDATE_PHASE_TIMEOUT_MS,
   capabilitiesFrom,
   cliCandidatePaths,
   compareVersions,
@@ -374,6 +464,8 @@ module.exports = {
   primaryAction,
   releasePageUrl,
   reportIsFresh,
+  updateInProgress,
   updateMode,
+  updatePhaseLabel,
   versionSkew,
 };

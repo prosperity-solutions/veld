@@ -4,6 +4,7 @@ const assert = require("node:assert/strict");
 const {
   FULL_UPDATE_HANDOFF,
   REPORT_MAX_AGE_MS,
+  UPDATE_PHASE_TIMEOUT_MS,
   capabilitiesFrom,
   cliCandidatePaths,
   compareVersions,
@@ -13,9 +14,21 @@ const {
   primaryAction,
   releasePageUrl,
   reportIsFresh,
+  updateInProgress,
   updateMode,
+  updatePhaseLabel,
   versionSkew,
 } = require("./updatePolicy");
+
+// A `phase_at` the staleness rule will accept, unless a test wants otherwise.
+const liveState = (over = {}) => ({
+  pid: 4242,
+  origin: "console",
+  version: "16.12.0",
+  phase: "installing",
+  phase_at: new Date().toISOString(),
+  ...over,
+});
 
 test("an unpackaged run never updates itself", () => {
   for (const platform of ["darwin", "linux"]) {
@@ -301,6 +314,11 @@ test("a CLI that advertises the handoff updates the whole release", () => {
   assert.equal(full, true);
   assert.deepEqual(args, [
     "update",
+    // The reason this route is worth having at all now: the CLI re-runs itself
+    // in a terminal window, so the user sees the 1–4 minutes after this app
+    // quits, and `sudo` has somewhere to ask for the password a privileged
+    // install needs.
+    "--console",
     // The release the app was offered, from the feed that offered it. Without
     // it the CLI asks api.github.com — a second source, rate-limited per IP and
     // briefly out of step with the feed after a release.
@@ -343,4 +361,94 @@ test("the button never promises more than the mode can deliver", () => {
     primaryAction({ viaCli: false, canInstall: true, full: true }),
     "Download and Install",
   );
+});
+
+test("a live update stops the app from opening over it", () => {
+  const running = updateInProgress({ state: liveState(), pidAlive: () => true });
+  assert.deepEqual(running, {
+    pid: 4242,
+    phase: "installing",
+    version: "16.12.0",
+    origin: "console",
+  });
+});
+
+test("both staleness conditions free the app, and neither alone is enough", () => {
+  const now = Date.now();
+  // Dead holder, timestamp fresh — only the liveness check can catch this.
+  assert.equal(
+    updateInProgress({ state: liveState(), now, pidAlive: () => false }),
+    null,
+  );
+  // Live holder, timestamp old — the wedged-at-a-sudo-prompt case, which a
+  // liveness check cannot see at all.
+  assert.equal(
+    updateInProgress({
+      state: liveState({ phase_at: new Date(now - UPDATE_PHASE_TIMEOUT_MS - 1000).toISOString() }),
+      now,
+      pidAlive: () => true,
+    }),
+    null,
+  );
+  // Neither: still running.
+  assert.notEqual(
+    updateInProgress({
+      state: liveState({ phase_at: new Date(now - UPDATE_PHASE_TIMEOUT_MS + 60_000).toISOString() }),
+      now,
+      pidAlive: () => true,
+    }),
+    null,
+  );
+});
+
+test("a clock that moved forwards is not read as abandonment", () => {
+  const now = Date.now();
+  assert.notEqual(
+    updateInProgress({
+      state: liveState({ phase_at: new Date(now + 2 * 60 * 60 * 1000).toISOString() }),
+      now,
+      pidAlive: () => true,
+    }),
+    null,
+  );
+});
+
+test("garbage in ~/.veld never makes the app unopenable", () => {
+  // Every one of these must read as "no update": the consequence of this answer
+  // is that Veld Desktop opens, and a malformed file must not be able to lock a
+  // user out of their app.
+  for (const state of [
+    null,
+    undefined,
+    "nope",
+    42,
+    {},
+    { pid: "4242", phase_at: new Date().toISOString() },
+    { pid: 0, phase_at: new Date().toISOString() },
+    { pid: -1, phase_at: new Date().toISOString() },
+    { pid: 4242 },
+    { pid: 4242, phase_at: "not a date" },
+  ]) {
+    assert.equal(updateInProgress({ state, pidAlive: () => true }), null, JSON.stringify(state));
+  }
+});
+
+test("an unknown phase from a newer CLI still says something true", () => {
+  // The app and the CLI ship together, but a user can end up with a newer CLI
+  // and an older app for exactly the minutes this dialog exists to cover.
+  assert.equal(updatePhaseLabel("something-invented-later"), "in progress");
+  assert.equal(updatePhaseLabel("restarting-services"), "restarting the daemon and helper");
+  // Every phase the Rust side can write must have its own wording — a label
+  // that silently falls through to the default is a dialog that says less than
+  // it knows.
+  for (const phase of [
+    "waiting-for-app",
+    "checking",
+    "installing",
+    "restarting-services",
+    "updating-app",
+    "finishing",
+  ]) {
+    assert.notEqual(updatePhaseLabel(phase), "in progress", phase);
+  }
 });
