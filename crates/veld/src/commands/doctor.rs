@@ -739,6 +739,13 @@ impl Diagnostics {
     /// displace, and that is also the state this row exists to explain — "my
     /// terminals died, is anything still holding them?"
     ///
+    /// One consequence to know rather than to fix: a holder with no daemon
+    /// attached treats the probe as a daemon arriving and leaving, which re-arms
+    /// its orphan grace. So running this on a machine whose daemon is down gives
+    /// every orphaned shell another full grace before it hangs itself up. That is
+    /// the friendly direction to be wrong in — somebody diagnosing a dead daemon
+    /// is the last person who should lose a shell to the diagnosis.
+    ///
     /// The row doubles as the check that a holder *can* bind here at all. A
     /// `sockaddr_un` path is capped at 104 bytes and this directory's is not
     /// something the user chose — it follows `$HOME` and the daemon port — so a

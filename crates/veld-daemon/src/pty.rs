@@ -518,13 +518,26 @@ static LIVE_SESSIONS: AtomicUsize = AtomicUsize::new(0);
 static RELEASED: LazyLock<Mutex<HashMap<String, i64>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// The worktree a released session belongs to, if this daemon released one.
+/// The worktree a released session belongs to, if this daemon released one and
+/// a holder could still be serving it.
+///
+/// The socket is checked as a **necessary** condition, never a sufficient one,
+/// and the difference is the whole reason this map exists: a socket file is
+/// evidence of some holder, not of *this* session, so a leftover one must not
+/// make a fresh spawn look like a resume — but its absence is proof the holder
+/// this entry describes is gone (a holder unlinks its socket on the way out).
+/// Pruning here rather than only in `release_session` is what keeps an entry from
+/// outliving the shell it stands for: a released session whose shell then exits
+/// on its own is a case nothing else observes, because this daemon gave up its
+/// link to that holder — that is what "released" means.
 fn released_worktree(id: &str) -> Option<i64> {
-    RELEASED
-        .lock()
-        .expect("released set poisoned")
-        .get(id)
-        .copied()
+    let mut released = RELEASED.lock().expect("released set poisoned");
+    let worktree_id = *released.get(id)?;
+    if !socket_for(id).exists() {
+        released.remove(id);
+        return None;
+    }
+    Some(worktree_id)
 }
 
 /// Reserved slot in the [`MAX_SESSIONS`] budget, released on drop.
@@ -600,6 +613,12 @@ async fn end_session(id: &str, reason: &str) -> bool {
 /// else's shell: the socket is derived from the id, and the greeting must claim
 /// that same id — the check `adopt_one` makes for the same reason.
 async fn hang_up_released_holder(id: &str, reason: &str) -> bool {
+    // Whatever happens below, this daemon is done with the session: the user asked
+    // for it to end. Dropped on *every* path, not only the one that reached a
+    // holder — an entry left behind by a holder that had already gone is one that
+    // outlives its shell, and the next attach for that id would be told it was
+    // resuming something.
+    let released = RELEASED.lock().expect("released set poisoned").remove(id);
     if !valid_session_id(id) {
         return false;
     }
@@ -607,13 +626,19 @@ async fn hang_up_released_holder(id: &str, reason: &str) -> bool {
         return false;
     };
     if attached.hello.session_id != id {
-        // A digest collision, or a hand-planted socket. Not ours to hang up.
+        // A digest collision, or a hand-planted socket. Not ours to hang up — and
+        // it was never the released one, so put that entry back.
         warn!("not ending {id:?}: the holder at its socket answers for another session");
+        if let Some(worktree_id) = released {
+            RELEASED
+                .lock()
+                .expect("released set poisoned")
+                .insert(id.to_owned(), worktree_id);
+        }
         return false;
     }
     info!(session = %id, pid = attached.hello.pid, reason, "ending a released terminal session");
     discard_holder(attached, reason).await;
-    RELEASED.lock().expect("released set poisoned").remove(id);
     true
 }
 
@@ -1899,7 +1924,7 @@ async fn attach(
             );
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
-                format!("that terminal is still running but is not answering: {e}"),
+                format!("could not reach that terminal's holder: {e}"),
             )
                 .into_response();
         }
@@ -4100,6 +4125,56 @@ mod tests {
             // Cleanup: the manual re-insert left an entry whose holder is still
             // running, and `end_session` is what reaches it.
             end_session(&sid, "test cleanup").await;
+        }
+
+        /// A released session is a resume; one whose holder has since gone is not.
+        ///
+        /// `mint_ticket` reads this to decide whether an attach is a resume, and a
+        /// resume is exempt from every rule that governs *starting* a shell — no
+        /// new terminal in a trashed worktree, the directory must exist, capacity,
+        /// resolving a pane's command. So the tombstone being wrong in the "still
+        /// there" direction is not a stale entry, it is a fresh spawn let through
+        /// the gates under a resume's rules, in a pane still labelled for a command
+        /// nobody ran. The socket is checked as a necessary condition for exactly
+        /// that reason, and this pins both halves.
+        #[tokio::test]
+        async fn a_released_session_stops_counting_as_one_when_its_holder_goes() {
+            let addr = serve().await;
+            let dir = tempfile::tempdir().unwrap();
+            let sid = session_id();
+            let mut ws = open(addr, &sid, dir.path(), "&cols=90&rows=30").await;
+            read_control(&mut ws, "ready").await;
+            let session = SESSIONS
+                .lock()
+                .await
+                .get(&sid)
+                .cloned()
+                .expect("the session must be registered");
+            let worktree_id = session.worktree_id;
+            release_session(&session).await;
+            drop(ws);
+
+            assert_eq!(
+                released_worktree(&sid),
+                Some(worktree_id),
+                "a released session with a live holder is a resume, and belongs to \
+                 the worktree it was started in"
+            );
+
+            // The shell ends on its own — which this daemon cannot see, because
+            // releasing is precisely giving up the link that would have told it.
+            // A holder unlinks its socket on the way out.
+            end_session(&sid, "test cleanup").await;
+            let deadline = Instant::now() + STEP_TIMEOUT;
+            while socket_for(&sid).exists() {
+                assert!(Instant::now() < deadline, "the holder must exit");
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            assert_eq!(
+                released_worktree(&sid),
+                None,
+                "an entry whose holder is gone must not make the next attach a resume"
+            );
         }
 
         /// Closing a pane must reach the shell even when this daemon has given the
