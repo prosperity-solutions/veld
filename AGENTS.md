@@ -390,10 +390,16 @@ and several were paid for in this codebase already.
   takeover (which is what bumping the attach epoch means on the wire) makes the
   UI offer Restart as the pane's only action — deleting the session and hanging
   up the shell the release exists to keep. A close with no frame is what the
-  client already reads as a dropped pipe, and its answer to that is Reconnect. Anything new that scans `instance::pty_dir()` inherits both rules,
-  and must gate on `instance::is_holder_socket_name` rather than on a `.sock`
-  extension — `VELD_PTY_DIR` is a plain environment variable, and pointed at
-  `~/.veld` the loose test connects to `daemon.sock`.
+  client already reads as a dropped pipe, and its answer to that is Reconnect.
+  Anything that scans `instance::pty_dir()` inherits both rules, and goes through
+  `instance::holder_sockets_in` rather than its own `read_dir` — every such scan
+  then *acts* on what it found, and `VELD_PTY_DIR` is a plain environment
+  variable, so pointed at `~/.veld` a `.sock`-extension filter hands the daemon's
+  own control socket to code that connects to it or hangs it up. One more rule
+  belongs to the same population: **the holders that keep the old behaviour are
+  the ones already running**, since a holder is only ever replaced by its shell
+  ending. A change to this protocol's semantics protects sessions started after
+  it, and the daemon-side half is what has to cover the rest.
 - **`veld update` holds a lock, and nothing that the update replaces may own it.**
   One update at a time is enforced by `veld_core::update_lock`: a lock *directory*
   at `~/.veld/update.lock` (`mkdir` is the create-or-fail primitive, and already

@@ -142,8 +142,18 @@ pub const PTY_DIR_PREFIX: &str = "pty-";
 /// A missing directory is an empty list: it appears with the first terminal and
 /// nothing prunes it, so "not there" is the ordinary state, not an error.
 pub fn holder_sockets_in(dir: &std::path::Path) -> Vec<PathBuf> {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return Vec::new();
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        // Anything else — permissions, a broken volume — is not the ordinary
+        // "no terminals yet" state, and the caller's answer to it (adopt nothing,
+        // hang up nothing, report nothing) looks identical to a clean run. The
+        // daemon's adoption sweep used to say this itself; it says it here now so
+        // all three scans do.
+        Err(e) => {
+            tracing::warn!("could not read the terminal holder directory {dir:?}: {e}");
+            return Vec::new();
+        }
     };
     entries
         .flatten()

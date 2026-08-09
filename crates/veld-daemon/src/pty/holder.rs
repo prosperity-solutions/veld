@@ -1544,11 +1544,13 @@ mod tests {
         assert!(echoes_back(&mut second, "AFTER-PROBATION").await);
     }
 
-    /// The other half of the same rule: a peer that stays is a peer, and takeover
-    /// still works. Deleting the probation would pass the test above trivially by
-    /// never handing a session over at all.
+    /// The other half of the same rule: a peer that *speaks* is a peer, and gets
+    /// the session at once rather than serving the window out — a frame only a
+    /// daemon sends is stronger evidence than time is. Deleting the probation
+    /// entirely would pass the probe test above trivially, by never handing a
+    /// session over at all; this is what stops that.
     #[tokio::test]
-    async fn a_peer_that_stays_connected_still_takes_the_session_over() {
+    async fn a_peer_that_speaks_takes_the_session_over_at_once() {
         let dir = tempfile::tempdir().unwrap();
         let socket = echo_holder(dir.path(), "takeoverprobe").await;
         let mut first = greet(&socket).await;
