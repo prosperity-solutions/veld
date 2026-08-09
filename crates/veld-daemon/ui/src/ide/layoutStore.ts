@@ -389,9 +389,3 @@ export function flushPendingOnUnload(): void {
   timers.clear();
   queued.clear();
 }
-
-/** Reset every cached version — the daemon restarted, so nothing is current. */
-export function forgetVersions(): void {
-  versions.clear();
-  written.clear();
-}

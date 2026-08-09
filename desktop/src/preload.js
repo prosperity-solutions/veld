@@ -116,6 +116,41 @@ contextBridge.exposeInMainWorld("veldDesktop", {
      *  those tabs belong in. */
     showsWorktree: (worktreeId) =>
       ipcRenderer.invoke("veld:window:shows", { worktreeId }),
+
+    // --- Retired: worktree ownership, now the daemon's ---------------------
+    //
+    // **Stubs, not deletions, and the distinction is load-bearing.** This shell
+    // loads whatever `/ide` the *daemon* serves, and the two update
+    // independently — so a shell newer than the daemon is a real state, and the
+    // bundle it then serves is the one that still calls these. That bundle calls
+    // most of them **unguarded** (`shell.onYieldWorktree(...)`,
+    // `desktopWindow.holdsWorktrees(...)`), because they were never optional;
+    // only `onClaimsChanged` was feature-detected. Removing them outright turns
+    // that pairing into a `TypeError` inside a `useEffect`, and with no error
+    // boundary anywhere in `/ide` that is a white screen rather than a degraded
+    // feature.
+    //
+    // Each answers the way that leaves an old bundle *working*, minus the
+    // arbitration it can no longer take part in: it shows what it shows, it is
+    // never asked to yield, and nothing greys out. Which is exactly what that
+    // bundle did before slots and claims existed. Delete these once no shipped
+    // `/ide` calls them — not before.
+    /** @deprecated The daemon arbitrates. Always granted here. */
+    claimWorktree: () => Promise.resolve({ ok: true }),
+    /** @deprecated Nothing is known to be elsewhere, so nothing greys out. */
+    claimedElsewhere: () => Promise.resolve([]),
+    /** @deprecated Never fires; returns the unsubscribe its callers expect. */
+    onClaimsChanged: () => () => {},
+    /** @deprecated The daemon learns this over the control socket. */
+    holdsWorktrees: () => Promise.resolve(true),
+    /** @deprecated The daemon collects these with the worktree row. */
+    worktreesGone: () => Promise.resolve(true),
+    /** @deprecated Never fires; returns the unsubscribe its callers expect. */
+    onYieldWorktree: () => () => {},
+    /** @deprecated Nothing asks, so nothing is acknowledged. */
+    yielded: () => Promise.resolve(true),
+    /** @deprecated Reported to a shell that no longer waits on it. */
+    yieldsReady: () => Promise.resolve(true),
     /** Bring this window to the front, because the daemon says somebody asked to
      *  be taken to the worktree it is showing. The one part of that only the
      *  shell can do; a plain browser tab has no equivalent and marks itself

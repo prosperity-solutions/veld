@@ -228,16 +228,19 @@ function restoreBudget(stored) {
 }
 
 // ---------------------------------------------------------------------------
-// Worktree ownership
+// Which window is displaying what
 // ---------------------------------------------------------------------------
 //
-// Two maps and the rules between them. `claims` is worktree → the one window
-// *showing* it; `holders` is worktree → every window still holding its panes,
-// which is a superset because a window keeps what it has visited so switching
-// back is instant rather than a reconnect. Pure bookkeeping, kept here rather
-// than in `windows.js`, because the failures are set arithmetic — a claim that
-// outlives its window, a holder never asked to let go — and `node --test` can
-// reach them here.
+// One map: worktree → the window showing it, reported by the renderer once the
+// *daemon* has granted it (`veld:window:shows`). **Not ownership** — who may
+// show a worktree, who has to let go, and what a click on a taken one does are
+// the daemon's, because `/ide` also runs in a browser tab this process cannot
+// see. What is left here is routing a cross-window tab drop at a window those
+// tabs belong in, which is a question about this process's own windows.
+//
+// Pure bookkeeping, kept here rather than in `windows.js`, because the failure
+// is set arithmetic — an entry that outlives its window — and `node --test` can
+// reach it here.
 
 /**
  * Whether `record` is a window this worktree's panes belong in.
@@ -267,11 +270,13 @@ function ownsWorktree(record, worktreeId, showing) {
  * Whether a cross-window drop may be pushed at a window's drop listener, or has
  * to be queued for it.
  *
- * A window holds its claim from the moment it *asks* for a worktree, while the
- * listener that answers a drop does not exist until `/ide` has mounted and
- * `PaneArea` has registered its handler — so a claim is routable for a window
- * that cannot answer, and pushing there means `webContents.send` goes nowhere,
- * the ack times out, and the gesture reports `refused` after two seconds of
+ * A window reports what it displays only once the daemon has granted it *and*
+ * React has committed — which is after `PaneArea` registers its drop handler, so
+ * for a current bundle the two now arrive in the safe order. The gap that
+ * remains is a page that is **loading or reloading**: it is still in the map
+ * from before, its handler is gone, and pushing there means `webContents.send`
+ * goes nowhere, the ack times out, and the gesture reports `refused` after two
+ * seconds of
  * looking like a hang.
  *
  * **This is only half the question, and the smaller half.** A page that has not
@@ -296,8 +301,9 @@ function dropDelivery(dropListener) {
 /**
  * What one of a window's listener states becomes when its page navigates.
  *
- * Shared by both — the drop listener and the yield listener — because the question
- * is the same one and the trap in it is the same one.
+ * One listener now (the drop listener); it was two, and the yield listener went
+ * with the claim protocol to the daemon. Kept general because the question is
+ * about a page's listeners, not about which one.
  *
  * Only a main-frame, cross-document navigation counts. `did-start-loading` is the
  * tab spinner and an iframe's load turns it too; a same-document navigation

@@ -79,11 +79,8 @@ const {
  *   record is still alive and matchable in that gap, and its adopt queue has
  *   already been handed on, so nothing may be given to it any more. Read by
  *   `queueDrop`, the drop target test, `handBack`'s target filter and
- *   `claimHolder`; `openSettings` and `focusPrimary` still match on
+ *   `showsWorktree`'s pruning; `openSettings` and `focusPrimary` still match on
  *   `isDestroyed()` alone, which is pre-existing and outside this change.
- * @property {number} claimSeq  which claim this window is currently making, so a
- *   claim that has finished waiting for its yields can tell that another has
- *   overtaken it. Absent until the window's first claim.
  * @property {"unknown" | "ready" | "gone"} dropListener
  *   whether this window has a live listener for a cross-window drop. `unknown`
  *   until the renderer says — which an older `/ide` bundle never does, and which

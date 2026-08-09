@@ -1285,9 +1285,19 @@ describe("layout slots", () => {
       expect(restored[4].docks[0].tabs[0].url).toBeUndefined();
     });
 
-    it("is absent by default, so nothing changes for a window that has none", () => {
-      expect(readLayouts(fake(), fake(), "main-w2", null, true, true)).toEqual({});
-      expect(readLayouts(fake(), fake(), "main-w2", null, true, true)).toEqual({});
+    it("defaults to absent, and to not being a satellite", () => {
+      // Two defaults in one call, and the second is the load-bearing one: a
+      // caller that forgets `satellite` must get nothing, not a satellite read.
+      // Spelled with positional omissions on purpose — passing them explicitly
+      // tests the arguments rather than the defaults.
+      expect(readLayouts(fake(), fake(), "main-w2")).toEqual({});
+      const durable = fake({ [layoutSlotKey("main-w2")]: serializeLayouts(layouts) });
+      expect(readLayouts(fake(), durable, "main-w2")).toEqual({});
+      // …and with `satellite` given, the slot store is read again.
+      expect(readLayouts(fake(), durable, "main-w2", null, true, true)).toEqual(layouts);
+    });
+
+    it("degrades to no layout on a seed it cannot parse", () => {
       expect(readLayouts(fake(), fake(), "main-w2", "{not json", true, true)).toEqual({});
     });
   });

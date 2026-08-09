@@ -1111,8 +1111,10 @@ export const api = {
   /**
    * Store a worktree's panes, if `version` is still the current one.
    *
-   * Rejects with a `LayoutConflict` when it is not. That is a hand-off, not a
-   * merge conflict: one client shows a worktree at a time, so the only way to
+   * Resolves with `{ ok: false, conflict }` when it is not — see
+   * [`LayoutSaveResult`]. It does not *reject*, deliberately: a conflict is an
+   * outcome to reconcile, not a failure. That is a hand-off, not a merge
+   * conflict: one client shows a worktree at a time, so the only way to
    * see this is a debounced save from the client that just let go racing the
    * one that just took it — and the loser must adopt what it is told rather
    * than overwrite it.

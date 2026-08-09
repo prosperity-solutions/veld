@@ -222,7 +222,10 @@ const POLL_MS = 5000;
  * *native* title) and which is therefore the same word in every window.
  */
 function clientLabel(): string {
-  if (isElectron) return "Veld Desktop";
+  // An Electron window that cannot raise itself is described as the place it is
+  // rather than as a window that will come forward — see `clientKind`.
+  if (canRaiseSelf()) return "Veld Desktop";
+  if (isElectron) return "another Veld Desktop window";
   const ua = navigator.userAgent;
   for (const [name, probe] of [
     ["Firefox", /Firefox\//],
@@ -233,6 +236,25 @@ function clientLabel(): string {
     if (probe.test(ua)) return name;
   }
   return "a browser tab";
+}
+
+/**
+ * Whether this client can bring itself to the front when the daemon asks.
+ *
+ * **A capability, not a platform.** `isElectron` is a URL parameter and is true
+ * on any shell, including one older than `focusSelf` — so reporting the kind
+ * from it told the daemon a window could be raised when nothing was there to
+ * raise it, and the client that was refused promised "switched to it" for a
+ * switch that visibly did not happen. Asking what this page can actually do
+ * cannot drift from what it does.
+ */
+function canRaiseSelf(): boolean {
+  return typeof desktopWindow?.focusSelf === "function";
+}
+
+/** How the daemon should describe this client to the others. */
+function clientKind(): "electron" | "browser" {
+  return canRaiseSelf() ? "electron" : "browser";
 }
 
 /**
@@ -250,7 +272,7 @@ function holderNotice(w: Worktree, holder?: ClientInfo): string {
   const label = worktreeLabel(w);
   if (holder?.kind === "browser") {
     const where = holder.label || "a browser tab";
-    return `${label} is open in ${where} — switch to that tab to use it`;
+    return `${label} is open in ${where} — switch to it there`;
   }
   return `${label} is open in another window — switched to it`;
 }
@@ -897,7 +919,7 @@ function AppInner(props: {
     // old browser store is the only one that can move it, and the first client
     // to open a worktree creates its row.
     void adoptLegacyLayouts();
-    channel.start(isElectron ? "electron" : "browser", clientLabel(), {
+    channel.start(clientKind(), clientLabel(), {
       // `mine` is the daemon's per-recipient answer, so the rail never needs to
       // know any client's identity to work out which rows are not its own.
       onClaims: (claims) => {
@@ -2486,12 +2508,15 @@ function AppInner(props: {
   /**
    * Forget worktrees that no longer exist — everywhere they are recorded.
    *
-   * In memory, so their terminals get collected below. In the shared layout
-   * store, because that write is a *merge*: dropping a worktree from `layouts`
-   * leaves its stored panes untouched. And in the shell's claim map, so no window
-   * goes on reporting a deleted worktree as one it is showing.
+   * In memory, so their terminals get collected below; in the layout store,
+   * because omission is deliberately *not* deletion there (a client that yields
+   * a worktree drops it from `layouts` while its panes go on existing); and in
+   * the daemon's claim registry, so no client goes on being recorded as showing
+   * a worktree that is gone. The daemon's foreign key collects the layout *row*
+   * with the worktree, so that half needs nothing from here; the shell's own
+   * display map is cleared by `showsWorktree` when the selection moves off.
    *
-   * All three matter for the same reason: `worktrees.id` is a plain `INTEGER
+   * They matter for the same reason: `worktrees.id` is a plain `INTEGER
    * PRIMARY KEY`, so SQLite reuses the highest free rowid and the *next* worktree
    * created can arrive wearing a deleted one's id — inheriting its panes, and
    * being greyed out in the rail as "open in another window".

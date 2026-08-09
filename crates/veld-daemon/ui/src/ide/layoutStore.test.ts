@@ -28,16 +28,17 @@ vi.mock("../api", () => ({
   },
 }));
 
-const {
-  adoptLegacyLayouts,
-  cancelPendingWrite,
-  dropLayout,
-  onExternalLayoutChange,
-  readLayout,
-  syncLayouts,
-  writeLayout,
-  forgetVersions,
-} = await import("./layoutStore");
+/**
+ * The store is module state by design — one per page — so each test gets a fresh
+ * instance rather than a reset function existing only for the tests.
+ */
+let adoptLegacyLayouts: typeof import("./layoutStore").adoptLegacyLayouts;
+let cancelPendingWrite: typeof import("./layoutStore").cancelPendingWrite;
+let dropLayout: typeof import("./layoutStore").dropLayout;
+let onExternalLayoutChange: typeof import("./layoutStore").onExternalLayoutChange;
+let readLayout: typeof import("./layoutStore").readLayout;
+let syncLayouts: typeof import("./layoutStore").syncLayouts;
+let writeLayout: typeof import("./layoutStore").writeLayout;
 
 /**
  * A layout with its keys in the order the **daemon** returns them.
@@ -86,12 +87,20 @@ function installStorage(initial: Record<string, string> = {}) {
 
 const LEGACY = "veld.panes.worktrees.v1";
 
-beforeEach(() => {
+beforeEach(async () => {
   vi.useFakeTimers();
   reads.clear();
   writes.length = 0;
-  forgetVersions();
-  onExternalLayoutChange(() => {});
+  vi.resetModules();
+  ({
+    adoptLegacyLayouts,
+    cancelPendingWrite,
+    dropLayout,
+    onExternalLayoutChange,
+    readLayout,
+    syncLayouts,
+    writeLayout,
+  } = await import("./layoutStore"));
   nextWrite = (worktreeId) => ({
     ok: true,
     doc: { version: (reads.get(worktreeId)?.version ?? 0) + 1, layout: {} },
