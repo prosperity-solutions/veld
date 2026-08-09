@@ -379,9 +379,16 @@ struct Hello {
     /// was minted by the daemon (see [`TicketResponse::client_id`]); this is a
     /// request to resume it, and a request is all it can be, because two live
     /// sockets under one identity is the state that produced a claim inherited
-    /// with no yield asked. When it is refused — the id is live, or was never
-    /// issued — the connection simply keeps the fresh identity its ticket
-    /// carried, and the client is told which one it got.
+    /// with no yield asked. When it is refused, the connection keeps the fresh
+    /// identity its ticket carried and the client is told which one it got.
+    ///
+    /// What is *not* checked, stated because the obvious reading is that it is:
+    /// this daemon does not remember which ids it has issued, so any well-formed
+    /// id nothing is connected under is accepted. The property that makes that
+    /// safe is unguessability — ids are v4 UUIDs and never appear on the wire to
+    /// any other client (see [`ClientInfo`]) — not a registry. Putting an id
+    /// back into a broadcast breaks this, which is what the
+    /// `the_claims_broadcast_never_carries_a_client_id` test is for.
     #[serde(default)]
     resume: Option<String>,
     kind: ClientKind,
@@ -925,6 +932,24 @@ async fn serve_channel(socket: WebSocket, minted: String) {
             }
         };
         match serde_json::from_str::<ClientMsg>(&text) {
+            // **A claim is spawned, not awaited.** It waits out other clients'
+            // yields, and awaiting it here stops this client's *own* later
+            // frames being read for the duration — including the `yielded` that
+            // some third client's claim is waiting on. The symptom is the one
+            // warning this module has for the takeover race firing about a
+            // client that answered promptly. Everything else is a map update
+            // that finishes immediately, and `claim` re-checks `claim_seq` under
+            // the lock, so being overtaken is already its normal case.
+            Ok(ClientMsg::Claim {
+                worktree_id,
+                request_id,
+                focus_holder,
+            }) => {
+                let id = client_id.clone();
+                tokio::spawn(
+                    async move { claim(&id, worktree_id, request_id, focus_holder).await },
+                );
+            }
             Ok(msg) => handle(&client_id, msg).await,
             Err(e) => debug!(client = %client_id, "ide channel: unreadable message: {e}"),
         }

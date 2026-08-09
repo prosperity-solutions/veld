@@ -114,6 +114,23 @@ export function onExternalLayoutChange(fn: ExternalChange): void {
   onExternal = fn;
 }
 
+/**
+ * Drop a queued write for a worktree, because what it was based on is gone.
+ *
+ * **The version is read at flush time, not at queue time**, so a write that
+ * survives an intervening read would be sent against a version it never saw —
+ * and be *accepted*, silently replacing whatever that read had just adopted.
+ * That is the write the version exists to refuse, arriving through the one gap
+ * the check cannot see. Every path that replaces this client's picture of a
+ * worktree therefore cancels the write that belonged to the old one.
+ */
+export function cancelPendingWrite(worktreeId: number): void {
+  const timer = timers.get(worktreeId);
+  if (timer) clearTimeout(timer);
+  timers.delete(worktreeId);
+  queued.delete(worktreeId);
+}
+
 /** Whether a layout has any panes at all. */
 function isEmpty(layout: PaneLayout): boolean {
   return allTabs(layout).length === 0;
@@ -130,6 +147,10 @@ function isEmpty(layout: PaneLayout): boolean {
  */
 export async function readLayout(worktreeId: number): Promise<PaneLayout | null> {
   const doc = await api.paneLayout(worktreeId);
+  // Anything queued was composed against the layout this read replaces — see
+  // `cancelPendingWrite`. Cancelled *before* the version moves, so there is no
+  // window in which a stale write could pick up the fresh one.
+  cancelPendingWrite(worktreeId);
   versions.set(worktreeId, doc.version);
   if (doc.layout === null) {
     written.delete(worktreeId);
@@ -301,8 +322,15 @@ async function flush(worktreeId: number): Promise<void> {
     onExternal(worktreeId, null);
     return;
   }
-  written.set(worktreeId, JSON.stringify(result.conflict.layout));
-  onExternal(worktreeId, parseLayout(result.conflict.layout));
+  // Keyed on the parsed form for the same reason the read path is: the daemon's
+  // key order differs, and `parseLayout` normalises besides — so keying on the
+  // server's document meant the loser immediately echoed the winner's layout
+  // back at the winner's version, taking the worktree from them, and the
+  // winner's next real edit was then the one refused.
+  const adopted = parseLayout(result.conflict.layout);
+  if (adopted) written.set(worktreeId, JSON.stringify(adopted));
+  else written.delete(worktreeId);
+  onExternal(worktreeId, adopted);
 }
 
 /**
@@ -312,13 +340,14 @@ async function flush(worktreeId: number): Promise<void> {
  * panes stay for whoever takes it.
  */
 export function dropLayout(worktreeId: number): void {
-  const timer = timers.get(worktreeId);
-  if (timer) clearTimeout(timer);
-  timers.delete(worktreeId);
-  queued.delete(worktreeId);
+  cancelPendingWrite(worktreeId);
+  // Read before clearing: the delete is versioned like every other write, so
+  // presenting 0 for a worktree that has a row is a guaranteed refusal — the
+  // call did nothing and the whole behaviour rested on the foreign key.
+  const version = versions.get(worktreeId) ?? 0;
   versions.delete(worktreeId);
   written.delete(worktreeId);
-  void api.putPaneLayout(worktreeId, 0, null, channel.identity).catch(() => {});
+  void api.putPaneLayout(worktreeId, version, null, channel.identity).catch(() => {});
 }
 
 /**
@@ -335,9 +364,17 @@ export function flushPendingOnUnload(): void {
     if (!layout) continue;
     const version = versions.get(worktreeId) ?? 0;
     const payload = isEmpty(layout) ? null : layout;
-    // Not through `api`, which cannot express `keepalive`. A conflict here is
-    // unobservable and that is acceptable: the page is going away, and the
-    // client that holds the worktree afterwards re-reads.
+    // **Assume it landed.** `pagehide` also fires on the way *into* the
+    // bfcache, and a page restored from there would otherwise hold a version one
+    // behind and lose its next save to a 409 it caused itself.
+    versions.set(worktreeId, version + (payload === null ? 0 : 1));
+    written.delete(worktreeId);
+    // Not through `api`, which cannot express `keepalive`. Two things this
+    // cannot promise, both accepted rather than papered over: a conflict is
+    // unobservable (the page is going away, and whoever holds the worktree next
+    // re-reads), and the Fetch spec caps *all* in-flight keepalive bodies at
+    // 64 KiB — well past any real layout, but a pathological one is dropped
+    // here rather than truncated.
     try {
       void fetch(`/api/worktrees/${worktreeId}/layout`, {
         method: "PUT",

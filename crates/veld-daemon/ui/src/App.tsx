@@ -147,6 +147,7 @@ import {
 import { channel, type ClientInfo } from "./ide/channel";
 import {
   adoptLegacyLayouts,
+  cancelPendingWrite,
   dropLayout,
   flushPendingOnUnload,
   onExternalLayoutChange,
@@ -937,17 +938,13 @@ function AppInner(props: {
        * hanging up) any terminal they had opened in the meantime.
        */
       onReady: () => {
-        const showing = shownRef.current;
-        if (showing === null) return;
-        void channel.claim(showing, false).then((r) => {
-          // Refused: another client took it while this one was disconnected.
-          // Say so rather than carrying on rendering panes it no longer owns —
-          // the boot-claim effect's hunt is keyed on the selection, which has
-          // not changed, so nothing else would notice.
-          if (!r.ok && r.reason === "shown_elsewhere") {
-            setClaimBlocked(true);
-          }
-        });
+        // What to ask for: the worktree this client holds, or — if it never got
+        // one because the boot claim ran before the socket was up — the one it
+        // has selected. Not the selection after a *yield*: that worktree belongs
+        // to somebody else now, and asking again would take it back off them.
+        const wanted = shownRef.current ?? (grantedRef.current ? null : selectedRef.current);
+        if (wanted === null) return;
+        void acquireRef.current(wanted);
       },
       onClosed: () => {
         // Nobody's claims are knowable now, and rendering the last table would
@@ -2007,6 +2004,21 @@ function AppInner(props: {
   /** …and through a ref, for the reconnect handler, which is registered once. */
   const shownRef = useRef<number | null>(null);
   shownRef.current = shownId;
+  /**
+   * Whether this client has ever been granted a worktree.
+   *
+   * The difference between the two ways `shownId` can be `null`, and they need
+   * opposite answers on reconnect. **Never granted** — the boot claim ran while
+   * the socket was still connecting and answered `offline` — means the window is
+   * showing nothing and must try again, or it stays blank forever with the boot
+   * effect keyed on a selection that has not changed. **Granted and then
+   * yielded** means another client has it now, and re-claiming on reconnect
+   * would take it straight back off them.
+   */
+  const grantedRef = useRef(false);
+  /** The selection, for the reconnect handler — see `grantedRef`. */
+  const selectedRef = useRef<number | null>(null);
+  selectedRef.current = worktree?.id ?? null;
   /** Acknowledgements for yields whose release has been scheduled but not yet
    *  committed. State rather than a ref, because the point is to have something
    *  an effect can run *after* — see the yield handler below. */
@@ -2172,6 +2184,10 @@ function AppInner(props: {
       // It is not granted to this client any more, so nothing may re-seed it —
       // and a reconnect must not ask for it back.
       setShownId((cur) => (cur === worktreeId ? null : cur));
+      // Nor may a save composed before the release still land: it would be sent
+      // at a version the *claiming* client has not moved yet, be accepted, and
+      // replace the panes this handler just handed over.
+      cancelPendingWrite(worktreeId);
       setLayouts((prev) => {
         const giving = prev[worktreeId];
         if (!giving) return prev;
@@ -2264,52 +2280,86 @@ function AppInner(props: {
    * waiting on a holder and the click was silently dropped. The hunt below reads
    * the list through a ref, where a five-second-old candidate list is harmless.
    */
+  /**
+   * Take a worktree, or the next free one — the single path by which this client
+   * comes to be showing anything.
+   *
+   * Shared by boot and by every reconnect, and that sharing is the point. It was
+   * two code paths, and the second one was wrong in two ways at once: it refused
+   * on one worktree without ever hunting, and it set `claimBlocked` — which
+   * replaces the whole workspace, rail included — for a single refusal. Waking a
+   * laptop whose worktree somebody had opened in a browser meanwhile left the
+   * window with no way back except ⌘K.
+   *
+   * Held in a ref because the socket's handlers are registered once, at boot, and
+   * would otherwise close over the first render's state forever.
+   */
+  const acquireRef = useRef<(preferred: number) => Promise<void>>(async () => {});
+  acquireRef.current = async (preferred: number) => {
+    const mine = await channel.claim(preferred, false);
+    if (mine.ok) {
+      grantedRef.current = true;
+      setShownId(preferred);
+      setClaimBlocked(false);
+      return;
+    }
+    // `superseded` means a later claim from this client overtook this one and
+    // owns the outcome. `offline`/`disconnected` mean nothing was decided at all
+    // — hunting on either would move the window off a worktree for a transport
+    // failure, and the first candidate would be "granted" the same way. Both are
+    // "stay put", which is what the old shell's `.catch(() => null)` did for the
+    // same failures.
+    if (mine.reason !== "shown_elsewhere") return;
+    // **Refused, so this window must show something else.** Ignoring the answer
+    // was the hole that made the whole ownership model a suggestion: `⌘N` opens
+    // on the last-selected worktree by design, which is the one the window you
+    // pressed it in is showing — so the claim was always refused, always
+    // ignored, and the new window rendered the same panes and took their shells.
+    // `selectWorktree` honours a refusal because a click has somewhere to stay;
+    // a window opening, or one coming back from a disconnect, has not.
+    setShownId((cur) => (cur === preferred ? null : cur));
+    for (const candidate of worktreesRef.current) {
+      if (candidate.id === preferred) continue;
+      const free = await channel.claim(candidate.id, false);
+      // Same rule inside the hunt: overtaken, or never asked, means stop — not
+      // try the next one.
+      if (!free.ok && free.reason !== "shown_elsewhere") return;
+      if (free.ok) {
+        grantedRef.current = true;
+        setActiveRepoRoot(candidate.repo_root);
+        setActiveWtKey(String(candidate.id));
+        setShownId(candidate.id);
+        setClaimBlocked(false);
+        return;
+      }
+    }
+    // Every worktree in this repo is already on screen somewhere. Say so rather
+    // than showing a set of panes that belongs to another client.
+    setClaimBlocked(true);
+  };
+
+  /**
+   * Claim the worktree this window resolved to on its own, without a click.
+   *
+   * `selectWorktree` covers the rail; this covers boot, a restored `?wt=`, and
+   * the fallback that lands on the first repo — all of which put a worktree on
+   * screen without anyone choosing it.
+   *
+   * **Keyed on the selection, never on the worktree list.** `worktrees` gets a
+   * new identity on every 5s poll, so having it in the deps re-claimed the same
+   * worktree every five seconds for the life of the window — invisible while a
+   * claim was synchronous, and not once a claim could be *superseded*, because
+   * the poll's claim then overtook a rail click that was waiting on a holder.
+   */
   useEffect(() => {
     if (chromeless || !worktree) return;
     let cancelled = false;
+    const id = worktree.id;
     void (async () => {
-      const mine = await channel.claim(worktree.id, false);
+      await acquireRef.current(id);
+      // The selection moved on while this was waiting out somebody's yield; the
+      // effect for the new one owns the outcome.
       if (cancelled) return;
-      if (mine.ok) {
-        setShownId(worktree.id);
-        return;
-      }
-      // `superseded` is not a refusal to act on: it means a *later* claim from
-      // this window overtook this one while it waited for the previous holders to
-      // let go, and that claim owns the outcome. Reacting to it would hunt for a
-      // free worktree and move the window off one it had just been granted —
-      // `cancelled` does not cover it, because clicking the row that is already
-      // selected supersedes the claim without changing `worktree?.id`.
-      // `superseded` means a later claim from this client overtook this one and
-      // owns the outcome. `offline`/`disconnected` mean nothing was decided at
-      // all — hunting on either would move the window off a worktree for a
-      // transport failure, and the first candidate would be "granted" the same
-      // way. Both are "stay put", which is what the old shell's `.catch(() =>
-      // null)` did for the same failures.
-      if (mine.reason !== "shown_elsewhere") return;
-      // **Refused, so this window must show something else.** Ignoring the
-      // answer here was the hole that made the whole ownership model a
-      // suggestion: `⌘N` opens on the last-selected worktree by design, which
-      // is the one the window you pressed it in is showing — so the claim was
-      // always refused, always ignored, and the new window rendered the same
-      // panes and took their shells. `selectWorktree` honoured the refusal
-      // because a click has somewhere to stay; a window opening has not.
-      for (const candidate of worktreesRef.current) {
-        if (candidate.id === worktree.id) continue;
-        const free = await channel.claim(candidate.id, false);
-        // Same rule inside the hunt: overtaken, or never asked, means stop —
-        // not try the next one.
-        if (cancelled || (!free.ok && free.reason !== "shown_elsewhere")) return;
-        if (free.ok) {
-          setActiveRepoRoot(candidate.repo_root);
-          setActiveWtKey(String(candidate.id));
-          setShownId(candidate.id);
-          return;
-        }
-      }
-      // Every worktree in this repo is already on screen somewhere. Say so
-      // rather than showing a set of panes that belongs to another window.
-      if (!cancelled) setClaimBlocked(true);
     })();
     return () => {
       cancelled = true;

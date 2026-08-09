@@ -30,6 +30,7 @@ vi.mock("../api", () => ({
 
 const {
   adoptLegacyLayouts,
+  cancelPendingWrite,
   dropLayout,
   onExternalLayoutChange,
   readLayout,
@@ -277,6 +278,32 @@ describe("writing", () => {
   });
 });
 
+describe("a write whose basis is gone", () => {
+  /**
+   * **The version is read at flush time, not at queue time.** So a write that
+   * survived an intervening read would be sent against a version it never saw —
+   * and accepted, silently replacing what that read had just adopted. That is
+   * the write the version exists to refuse, arriving through the one gap the
+   * check cannot see.
+   */
+  it("is cancelled by a read that replaced what it was based on", async () => {
+    writeLayout(7, layoutWith("mine", 0.2));
+    // The daemon says the layout moved; this client adopts the new one.
+    reads.set(7, { version: 9, layout: layoutWith("theirs") });
+    await readLayout(7);
+    await settle();
+    expect(writes).toEqual([]);
+  });
+
+  /** The same, for a yield: the panes have been handed to another client. */
+  it("is cancelled explicitly", async () => {
+    writeLayout(7, layoutWith("mine"));
+    cancelPendingWrite(7);
+    await settle();
+    expect(writes).toEqual([]);
+  });
+});
+
 describe("losing the version check", () => {
   /**
    * The hand-off. The client that just let a worktree go can still have a
@@ -306,6 +333,28 @@ describe("losing the version check", () => {
     writeLayout(7, layoutWith("next"));
     await settle();
     expect(writes[1].version).toBe(5);
+  });
+
+  /**
+   * The loser must not turn round and write the winner's layout back at the
+   * winner's version — that takes the worktree from them, and their next real
+   * edit is the one that then gets refused.
+   */
+  it("does not echo the winner's layout back at them", async () => {
+    nextWrite = () => ({ ok: false, conflict: { version: 5, layout: layoutWith("theirs") } });
+    let adopted: PaneLayout | null = null;
+    onExternalLayoutChange((_id, l) => {
+      adopted = l;
+    });
+    writeLayout(7, layoutWith("mine"));
+    await settle();
+    expect(writes).toHaveLength(1);
+
+    // The app puts the adopted layout into state, which runs the save effect.
+    writes.length = 0;
+    writeLayout(7, adopted as unknown as PaneLayout);
+    await settle();
+    expect(writes).toEqual([]);
   });
 
   it("drops the worktree when the winner deleted it", async () => {
@@ -361,5 +410,18 @@ describe("dropping a worktree", () => {
     await settle();
     // One call, and it is the delete — not the queued layout.
     expect(writes).toEqual([{ worktreeId: 7, version: 0, layout: null }]);
+  });
+
+  /**
+   * The delete is versioned like every other write, so presenting 0 for a
+   * worktree that has a row is a guaranteed refusal — the call did nothing and
+   * the behaviour rested entirely on the foreign key.
+   */
+  it("presents the version it last saw, not zero", async () => {
+    reads.set(7, { version: 4, layout: layoutWith("a") });
+    await readLayout(7);
+    dropLayout(7);
+    await settle();
+    expect(writes).toEqual([{ worktreeId: 7, version: 4, layout: null }]);
   });
 });
