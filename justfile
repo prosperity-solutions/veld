@@ -41,6 +41,23 @@ dev_daemon_sock := env("HOME") + "/.veld/dev-" + dev_daemon_port + ".sock"
 # `env_nonempty` on the Rust side and `||` in vite.config.ts both read empty as
 # absent.
 clear_stack_env := "VELD_PORT= VELD_URL= VELD_PROXY_ORIGINS="
+# The INSTANCE variables, cleared for recipes that must never address whichever
+# instance the surrounding terminal belongs to.
+#
+# `VELD_DB_PATH` is the dangerous one and the reason this exists. A terminal
+# opened inside the dev stack's own /ide — including the `claude` and `codex`
+# agent panes this repo ships — inherits the dev-daemon node's environment,
+# because nothing calls `env_clear` between the daemon and a PTY holder. And
+# `Db::path_override` consults `VELD_DB_PATH` BEFORE `cargo_target_db`, so it
+# defeats the backstop whose entire job is stopping `cargo test` from writing
+# "the database a running dev daemon owns". `just test` in such a pane migrated
+# the live run's database. Same leak, milder symptom, for the other two: a bare
+# `veld status` there silently addresses the dev instance.
+#
+# Separate from `clear_stack_env` on purpose: `dev` and `dev-daemon` assign
+# `VELD_DB_PATH` deliberately, and a command-prefix assignment later in the line
+# wins — folding these in would blank the very paths those recipes set.
+clear_instance_env := "VELD_DB_PATH= VELD_DAEMON_PORT= VELD_DAEMON_SOCK= VELD_PTY_DIR="
 
 # ============================================================================
 # Veld Development Workflow
@@ -368,13 +385,13 @@ build:
     cargo build
 
 test:
-    cargo test --workspace
+    {{clear_instance_env}} cargo test --workspace
     cd crates/veld-daemon/frontend && npm test
     cd crates/veld-daemon/ui && npm test
     cd desktop && npm test
 
 lint:
-    cargo clippy --workspace --all-targets
+    {{clear_instance_env}} cargo clippy --workspace --all-targets
     cargo fmt --all --check
     cd crates/veld-daemon/frontend && npx tsc --noEmit
     cd crates/veld-daemon/ui && npm run typecheck

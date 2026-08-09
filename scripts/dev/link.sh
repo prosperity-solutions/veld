@@ -7,10 +7,21 @@
 # and whichever worktree wrote it last owned the name.
 #
 # Rewritten at every start and removed at every stop, because what it carries is
-# a live allocation — the run's actual daemon port. A wrapper left behind after
-# the run stops points at a port nothing serves, which is a worse failure than
-# no wrapper at all: the CLI hangs or reports an empty instance rather than
-# telling you the dev stack is down.
+# a live allocation — the run's actual daemon port.
+#
+# THE REMOVAL IS BEST-EFFORT, so the wrapper also checks itself. `on_stop` has
+# exactly one caller, inside `Orchestrator::stop`; the crash path
+# (`monitor.rs` → `finalize_crashed`) and the stale-run sweep both kill PIDs
+# without running any hook. For a stack whose whole purpose is breaking the
+# daemon, crashing is the *likely* ending, not the exceptional one — so relying
+# on removal alone would leave the stale wrapper this file exists to prevent.
+# The generated script therefore refuses when its port is not listening.
+#
+# It is also keyed on a run name, which is NOT unique across checkouts: two
+# clones can hold the same live run name (`generate_run_name` yields a folder
+# for a worktree and a branch for a main checkout, and `--name` is free-form).
+# Hence the ownership check on removal below — a stop must never delete another
+# checkout's wrapper.
 set -euo pipefail
 
 root="${VELD_DEV_ROOT:?VELD_DEV_ROOT must be set by the veld node}"
@@ -18,6 +29,13 @@ run="${VELD_DEV_RUN:?VELD_DEV_RUN must be set by the veld node}"
 wrapper="$HOME/.local/bin/veld-dev-$run"
 
 if [ "${1:-}" = "--remove" ]; then
+    # Only ours. A same-named run in another checkout owns a wrapper naming a
+    # different root, and deleting that would reintroduce exactly the
+    # last-writer-wins failure this script replaced.
+    if [ -f "$wrapper" ] && ! grep -q "^# veld-dev-root: $root\$" "$wrapper"; then
+        echo "Left $wrapper alone — it belongs to another checkout." >&2
+        exit 0
+    fi
     rm -f "$wrapper"
     echo "Removed $wrapper" >&2
     exit 0
@@ -43,9 +61,25 @@ cat >"$wrapper" <<'WRAPPER'
 #!/usr/bin/env bash
 WRAPPER
 cat >>"$wrapper" <<WRAPPER
+# veld-dev-root: $root
 export VELD_DB_PATH="$dir/veld.db"
 export VELD_DAEMON_PORT="$port"
 export VELD_DAEMON_SOCK="\$HOME/.veld/dev-$port.sock"
+
+# Refuse rather than mislead. This wrapper carries a port that was allocated to
+# one run; if that run crashed, nothing removed this file (the \`on_stop\` hook
+# runs only on a deliberate \`veld stop\`), and every command below would address
+# a dead instance — reporting an empty environment, which reads as "my work
+# vanished" rather than "the stack is down".
+# bash's own /dev/tcp rather than \`nc\`, which is not everywhere and comes in
+# incompatible flavours. Every mainstream bash build enables it.
+if ! (exec 3<>/dev/tcp/127.0.0.1/"\$VELD_DAEMON_PORT") 2>/dev/null; then
+    echo "veld-dev-$run: nothing is listening on port \$VELD_DAEMON_PORT." >&2
+    echo "  That run is not up. Start it with: veld start --preset dev-keep" >&2
+    echo "  (in $root)" >&2
+    exit 1
+fi
+
 exec "$root/target/debug/veld" "\$@"
 WRAPPER
 

@@ -37,7 +37,15 @@ export VELD_DAEMON_SOCK="$HOME/.veld/dev-$port.sock"
 # 19-character home — one byte inside the limit, and over it for any home longer
 # than that. The digest caps the run's contribution at 10 characters, and stays
 # stable across restarts, which is the property the directory needs.
-run_digest="$(printf '%s' "$run" | cksum | awk '{print $1}')"
+# Keyed on the project root TOO, not the run name alone. A run name is unique
+# within a project and nowhere else — `generate_run_name` yields the worktree
+# folder for a linked worktree and the branch for a main checkout, and `--name`
+# is free-form — so two checkouts can hold the same live run name. Sharing one
+# holder directory would have two dev daemons adopting each other's sessions,
+# whose `worktree_id`s come from different databases, and sharing the `shims/`
+# subdirectory whose executables point at one specific daemon's session
+# registry. `run_route_id` carries a project discriminator for the same reason.
+run_digest="$(printf '%s|%s' "$root" "$run" | cksum | awk '{print $1}')"
 export VELD_PTY_DIR="$HOME/.veld/pty-dv-$run_digest"
 
 # The digest is not guessable from the run name, and `veld doctor` reports the

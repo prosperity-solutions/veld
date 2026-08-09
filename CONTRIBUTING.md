@@ -46,6 +46,22 @@ The workspace has four crates:
 
 ## Local development
 
+### First: install veld
+
+Working on veld needs a working veld — the dev stack below is a veld
+environment, started and supervised by your *installed* instance, and that
+instance is also what owns Caddy, DNS and the helper:
+
+```sh
+curl -fsSL https://veld.oss.life.li/get | sh
+veld setup            # unprivileged by default; no sudo
+veld --version
+```
+
+Already have one? Make sure it is current — this repo's `veld.json` uses config
+features from the latest release, and an older binary fails to parse the **whole
+file** (see the note below). `veld update`.
+
 ### The dev stack is a veld environment
 
 The usual way to run veld while working on it is to let veld run it. The root

@@ -297,6 +297,14 @@
 
     "dev-daemon": {
       "depends_on": { "dev-build": "local", "dev-db": "ensure" },
+      // ⚠ This map contains cross-node references (`${nodes.dev-ui.*}` below),
+      // which is safe ONLY because this node has no `on_stop`. A node's `env` is
+      // re-resolved for its stop hook, `build_env` is all-or-nothing, and
+      // `${nodes.*}` does not resolve once the run is stopping — so adding an
+      // `on_stop` here would empty the whole map and the hook would run blind.
+      // That is not hypothetical: it is the bug `scripts/dev/link.sh` documents
+      // fixing, which is why THAT node's env is builtins-only. Add an `on_stop`
+      // to this node and you must move these two out of `env` first.
       "env": {
         "VELD_DEV_ROOT": "${veld.root}",
         "VELD_DEV_RUN": "${veld.run}",
