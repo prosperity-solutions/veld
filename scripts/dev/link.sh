@@ -15,7 +15,9 @@
 # without running any hook. For a stack whose whole purpose is breaking the
 # daemon, crashing is the *likely* ending, not the exceptional one — so relying
 # on removal alone would leave the stale wrapper this file exists to prevent.
-# The generated script therefore refuses when its port is not listening.
+# The generated script therefore WARNS when its port is not listening. It does
+# not refuse: most of what you reach for after a crash (stop, logs, runs) needs
+# no daemon at all.
 #
 # It is also keyed on a run name, which is NOT unique across checkouts: two
 # clones can hold the same live run name (`generate_run_name` yields a folder

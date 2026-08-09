@@ -32,7 +32,8 @@ dev_daemon_sock := env("HOME") + "/.veld/dev-" + dev_daemon_port + ".sock"
 # RUN something against an instance — `dev`, `dev-daemon`, `dev-ui`,
 # `dev-desktop`, `dev-desktop-embedded`. The install/restore and dev-db recipes
 # do not take it: they address the system install or an explicit path, and
-# neither reads these.
+# neither reads these. `dev-real` DOES take it — it runs the source binary
+# against an instance, so it carries exactly the hazards listed below.
 #
 # These recipes are most useful from a terminal inside the dev stack's own /ide
 # — that is the documented escape hatch — and such a terminal inherits the
@@ -182,6 +183,7 @@ dev-real *ARGS:
         fi
     fi
     VELD_LIB_DIR="{{justfile_directory()}}/target/debug" \
+    {{clear_stack_env}} \
         ./target/debug/veld {{ARGS}}
 
 # Wipe the dev DB (including WAL/SHM sidecars) for a fresh-state run.

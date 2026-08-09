@@ -18,8 +18,11 @@
 # binaries, `cargo run` — and not to `just dev`, which builds with cargo and
 # then executes `./target/debug/veld` itself with the paths it means to use.
 #
-# The justfile clears these on `test` and `lint` as well. That is not redundant:
-# those recipes also run npm suites, and this file cannot reach them.
+# The justfile clears these on `test` and `lint` too. That IS redundant for the
+# cargo lines — this file already covers them — and it is kept as a belt-and-
+# braces statement at the call site, not because it reaches anything extra. (It
+# does not reach the npm suites in those recipes either: `{{clear_instance_env}}`
+# is a prefix on the cargo line alone.) The npm suites read none of these.
 [env]
 VELD_DB_PATH = { value = "", force = true }
 VELD_DAEMON_PORT = { value = "", force = true }

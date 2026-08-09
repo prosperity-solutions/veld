@@ -319,7 +319,9 @@ and several were paid for in this codebase already.
   the backstop. It is not always unset: a terminal opened inside the dev stack's
   own `/ide` inherits the `dev-daemon` node's value, so a `cargo test` there
   wrote the database a running dev daemon owns. `.cargo/config.toml` blanks the
-  instance variables for everything cargo runs, and
+  instance variables for everything cargo runs **when cargo is invoked from
+  inside the checkout** (config is discovered by walking up from the cwd, not
+  from the manifest), and
   `a_cargo_test_never_inherits_another_instances_identity` is the tripwire. They are split
   on purpose — sharing one meant `cargo test --workspace` wrote the database a
   running dev daemon owned, and a `cargo test` between `dev-db-from-real` and
