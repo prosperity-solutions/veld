@@ -105,6 +105,7 @@ fn an_app_install_runs_the_script_in_app_only_mode() {
         relaunch: true,
         app_dir: Some(PathBuf::from("/Users/x/Applications")),
         log: None,
+        verbose: false,
     };
     let (env, ok) = record(dir.path(), &[], || {
         veld_core::setup::install_desktop("9.9.9", &opts)
@@ -144,11 +145,11 @@ fn a_default_app_install_asks_for_no_handoff_mechanics() {
 fn a_cli_update_never_installs_the_app_as_a_side_effect() {
     let dir = tempfile::tempdir().unwrap();
     // `veld update`'s two halves are separate calls: this one moves the
-    // binaries, `update_desktop_if_stale` moves the app. If this said anything
+    // binaries, `run_desktop_step` moves the app. If this said anything
     // but 0, the app would be downloaded twice per update — and the script's
     // install-by-default would be deciding it, not the CLI.
     let (env, ok) = record(dir.path(), &[], || {
-        veld_core::setup::perform_update("9.9.9")
+        veld_core::setup::perform_update("9.9.9", false)
     });
     assert!(ok);
     assert_eq!(env.get("VELD_DESKTOP"), Some("0"));
@@ -175,7 +176,7 @@ fn an_ambient_handoff_variable_cannot_reach_the_script() {
         // recorder rather than test anything.
     ];
     let (env, ok) = record(dir.path(), &ambient, || {
-        veld_core::setup::perform_update("9.9.9")
+        veld_core::setup::perform_update("9.9.9", false)
     });
     assert!(ok);
     assert!(!env.has("VELD_DESKTOP_ONLY"));
@@ -369,4 +370,96 @@ fn the_handoff_log_path_means_the_same_thing_in_both_languages() {
         "desktop/src/updater.js no longer resolves the same log path as \
          veld_core::setup::desktop_update_log_path",
     );
+}
+
+/// Every call into the install script is nested inside a command that is already
+/// printing, so the script's own progress chatter, next-steps footer and success
+/// banner are the caller's to print — not the script's.
+///
+/// Pinned because the failure is silent and cosmetic-looking: without it a single
+/// `veld update` printed three "installed successfully!" banners, a first-install
+/// footer halfway through an update, and two raw curl meters. It also decides
+/// something that is *not* cosmetic — an embedded run leaves the privileged
+/// helper restart to the CLI (see `install.sh`), so a regression here would have
+/// two things racing to bounce a root service.
+#[test]
+fn every_scripted_install_runs_embedded() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let (env, ok) = record(dir.path(), &[], || {
+        veld_core::setup::perform_update("9.9.9", false)
+    });
+    assert!(ok);
+    assert_eq!(env.get("VELD_EMBEDDED"), Some("1"));
+    assert_eq!(env.get("VELD_VERBOSE"), Some(""));
+
+    let opts = veld_core::setup::DesktopInstall::default();
+    let (env, ok) = record(dir.path(), &[], || {
+        veld_core::setup::install_desktop("9.9.9", &opts)
+    });
+    assert!(ok);
+    assert_eq!(env.get("VELD_EMBEDDED"), Some("1"));
+    assert_eq!(env.get("VELD_VERBOSE"), Some(""));
+}
+
+/// `--verbose` asks for the installer's output back — and **only** that.
+///
+/// `VELD_EMBEDDED` must stay `1`, because in `install.sh` it does not only mean
+/// "be quiet": it is also what leaves the privileged helper restart to the CLI.
+/// The first version of this change folded the two together, so `--verbose`
+/// silently re-enabled the script's own `sudo launchctl kill` — a debug flag
+/// bouncing a root service while the CLI restarted it too. This test is the thing
+/// standing between that and a future edit that "simplifies" the two variables
+/// back into one.
+///
+/// `VELD_VERBOSE` is empty rather than absent when off, deliberately: it is
+/// inherited by anything the script re-executes, and an omitted one could be
+/// filled in by an ambient value from the user's launchd session.
+#[test]
+fn verbose_asks_for_output_without_handing_back_the_privileged_restart() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let (env, ok) = record(dir.path(), &[], || {
+        veld_core::setup::perform_update("9.9.9", true)
+    });
+    assert!(ok);
+    assert_eq!(env.get("VELD_EMBEDDED"), Some("1"));
+    assert_eq!(env.get("VELD_VERBOSE"), Some("1"));
+
+    let opts = veld_core::setup::DesktopInstall {
+        verbose: true,
+        ..Default::default()
+    };
+    let (env, ok) = record(dir.path(), &[], || {
+        veld_core::setup::install_desktop("9.9.9", &opts)
+    });
+    assert!(ok);
+    assert_eq!(env.get("VELD_EMBEDDED"), Some("1"));
+    assert_eq!(env.get("VELD_VERBOSE"), Some("1"));
+}
+
+/// Neither variable can be decided by the user's shell.
+///
+/// The CLI sets both on every call, so this asserts the *override* rather than a
+/// strip: an exported `VELD_VERBOSE=1` must not be able to make a normal update
+/// print two success banners again, and an exported `VELD_EMBEDDED=""` must not
+/// be able to hand the privileged helper restart back to the script.
+#[test]
+fn an_ambient_output_variable_cannot_decide_how_the_script_runs() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let (env, ok) = record(
+        dir.path(),
+        &[("VELD_EMBEDDED", ""), ("VELD_VERBOSE", "1")],
+        || veld_core::setup::perform_update("9.9.9", false),
+    );
+    assert!(ok);
+    assert_eq!(env.get("VELD_EMBEDDED"), Some("1"));
+    assert_eq!(env.get("VELD_VERBOSE"), Some(""));
+
+    let (env, ok) = record(dir.path(), &[("VELD_VERBOSE", "")], || {
+        veld_core::setup::perform_update("9.9.9", true)
+    });
+    assert!(ok);
+    assert_eq!(env.get("VELD_VERBOSE"), Some("1"));
 }
