@@ -105,8 +105,19 @@ function handoffLogHandles() {
  * because `mkdir` is the create-or-fail primitive the lock is built on; only the
  * state inside it is read here.
  */
-const updateLockStatePath = () =>
-  path.join(os.homedir(), ".veld", "update.lock", "state.json");
+const updateLockDir = () => path.join(os.homedir(), ".veld", "update.lock");
+const updateLockStatePath = () => path.join(updateLockDir(), "state.json");
+
+/**
+ * How long the "Veld is updating" dialog may hold the app open.
+ *
+ * Bounded because the dialog is shown *before* any window exists, so it can sit
+ * unfocused behind other apps indefinitely — while this process keeps its bundle
+ * open and `install.sh`'s `pgrep` guard skips the app half of the update.
+ * Comfortably long enough to read three lines, far shorter than the ~70 s the
+ * installer spends downloading before it checks.
+ */
+const QUIT_DIALOG_GRACE_MS = 10_000;
 
 /**
  * The update that is running right now, if one is.
@@ -164,14 +175,31 @@ async function quitIfUpdating() {
   const update = runningUpdate();
   if (!update) return false;
   const version = update.version ? ` to ${update.version}` : "";
-  await dialog.showMessageBox({
+  const shown = dialog.showMessageBox({
     type: "info",
     message: `Veld is updating${version}.`,
     detail:
       `The update is ${updatePhaseLabel(update.phase)} and will reopen Veld Desktop when it ` +
-      "finishes.\n\nOpening the app now would hold on to the bundle the update is replacing.",
+      "finishes.\n\nOpening the app now would hold on to the bundle the update is replacing." +
+      // The escape hatch, named here because this is the only place the user
+      // sees when it goes wrong. A lock is written off once its holder is gone
+      // or after 30 minutes without progress, so the stuck case is bounded
+      // rather than permanent — but a pid that got recycled inside that window
+      // would otherwise leave someone with an app that will not open and
+      // nothing to read about why.
+      `\n\nIf no update is really running, delete ${updateLockDir()} — or run ` +
+      "`veld update --status` to see what veld thinks is happening. A stalled " +
+      "lock clears itself after 30 minutes.",
     buttons: ["OK"],
   });
+  // **Raced, not awaited.** The bundle stays open for as long as this dialog
+  // does, and `install.sh` re-checks `pgrep` immediately before the swap — so a
+  // dialog nobody clicks (it appears before any window exists, so it can sit
+  // unfocused behind other apps) would make the installer skip the app half and
+  // quietly demote a full update to a CLI-only one. That is the exact failure
+  // this function exists to prevent. The user gets long enough to read it; the
+  // update gets its bundle back regardless.
+  await Promise.race([shown, new Promise((r) => setTimeout(r, QUIT_DIALOG_GRACE_MS))]);
   app.quit();
   return true;
 }

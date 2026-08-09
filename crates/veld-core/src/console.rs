@@ -158,15 +158,34 @@ exit "$status"
         done_hint = quote(done_hint),
     );
 
-    std::fs::write(&path, body)?;
+    // Owner-only *and* executable: it names paths from this user's machine and is
+    // exec'd by a launcher, so 0700 rather than the 0600 everything else in
+    // `~/.veld` gets.
+    //
+    // The mode is set **at create time**, not with a `set_permissions` after a
+    // plain `fs::write`. That sequence lands the file at the umask default —
+    // 0644 on a stock macOS account, where every local user is in `staff` — and
+    // leaves it world-readable for the window between the two calls. Small, and
+    // the contents are only a path and an argv, but there is no reason to have a
+    // window at all when `OpenOptions` closes it.
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        // Owner-only *and* executable: it names paths from this user's machine and
-        // is exec'd by a launcher, so 0700 rather than the 0600 everything else in
-        // `~/.veld` gets.
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o700)
+            .open(&path)?;
+        file.write_all(body.as_bytes())?;
+        // `mode` applies only when the file is *created*, so a leftover from an
+        // earlier release (or an earlier umask) keeps its old permissions
+        // without this.
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))?;
     }
+    #[cfg(not(unix))]
+    std::fs::write(&path, body)?;
     Ok(path)
 }
 

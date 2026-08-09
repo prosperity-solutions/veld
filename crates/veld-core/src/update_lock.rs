@@ -349,7 +349,11 @@ pub fn acquire(origin: Origin, version: Option<String>, force: bool) -> io::Resu
                     tty: current_tty(),
                 };
                 write_state(&dir, &state)?;
-                return Ok(Acquired::Ours(UpdateGuard { dir, state }));
+                return Ok(Acquired::Ours(UpdateGuard {
+                    dir,
+                    state,
+                    lost: false,
+                }));
             }
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
                 let state = read_state(&dir);
@@ -366,7 +370,19 @@ pub fn acquire(origin: Origin, version: Option<String>, force: bool) -> io::Resu
                     )));
                 }
                 last_seen = state;
-                steal(&dir)?;
+                // **A steal that fails is `Busy`, never `Err`.** The caller's `Err`
+                // arm deliberately proceeds *without* a lock rather than bricking
+                // updates on an unwritable `~/.veld` — which is the right answer
+                // for "the lock could not be created" and exactly the wrong one
+                // here: a directory this process may not remove is one somebody
+                // else owns, and proceeding is the two-concurrent-updates case the
+                // whole module exists to prevent. Reached when a `sudo veld update`
+                // left a root-owned lock behind in the invoking user's `~/.veld`.
+                if steal(&dir).is_err() {
+                    return Ok(Acquired::Busy(Box::new(
+                        last_seen.unwrap_or_else(unknown_holder),
+                    )));
+                }
             }
             Err(e) => return Err(e),
         }
@@ -374,18 +390,27 @@ pub fn acquire(origin: Origin, version: Option<String>, force: bool) -> io::Resu
 
     // Three passes and still not ours: somebody is winning the race repeatedly,
     // which is a live contender however the state file reads.
-    Ok(Acquired::Busy(Box::new(last_seen.unwrap_or_else(|| {
-        let now = Utc::now();
-        UpdateState {
-            pid: 0,
-            origin: Origin::Cli,
-            version: None,
-            started_at: now,
-            phase: Phase::Starting,
-            phase_at: now,
-            tty: None,
-        }
-    }))))
+    Ok(Acquired::Busy(Box::new(
+        last_seen.unwrap_or_else(unknown_holder),
+    )))
+}
+
+/// A stand-in for a holder whose state could not be read, so that "somebody has
+/// it and I could not learn who" is still expressible as an `UpdateState`.
+///
+/// `pid: 0` is deliberate and is not a placeholder that could be mistaken for a
+/// process: `is_alive` rejects 0 outright, so this can only ever read as stale.
+fn unknown_holder() -> UpdateState {
+    let now = Utc::now();
+    UpdateState {
+        pid: 0,
+        origin: Origin::Cli,
+        version: None,
+        started_at: now,
+        phase: Phase::Starting,
+        phase_at: now,
+        tty: None,
+    }
 }
 
 /// Take a stale lock out of the way, atomically enough that two stealers cannot
@@ -452,9 +477,44 @@ fn current_tty() -> Option<String> {
 pub struct UpdateGuard {
     dir: PathBuf,
     state: UpdateState,
+    /// Set once this guard notices the lock is no longer its own.
+    ///
+    /// A guard **can** be stolen from while it is still running: that is the
+    /// deliberate outcome of the `Stalled` rule and of every `--force`. Without
+    /// this flag the two write paths disagreed about ownership — `Drop` checked
+    /// it, `set_phase` did not — and the consequences compounded: the stolen-from
+    /// guard would stamp its own pid back over the thief's state, at which point
+    /// the *thief's* `Drop` saw a foreign pid and left the directory behind while
+    /// the stolen-from guard's `Drop` saw its own pid and deleted a live lock,
+    /// letting a third update start. Once lost, this guard writes nothing and
+    /// removes nothing.
+    lost: bool,
 }
 
 impl UpdateGuard {
+    /// Whether this guard still owns the lock, latching `lost` if it does not.
+    ///
+    /// Checked on every write rather than once, because losing the lock is an
+    /// event that happens *to* a running guard from another process.
+    fn still_ours(&mut self) -> bool {
+        if self.lost {
+            return false;
+        }
+        // An unreadable state file is not evidence of a steal — a steal replaces
+        // the directory, so the read fails with `NotFound` only in the window
+        // between the thief's `create_dir` and its first `write_state`. Treating
+        // that as "still ours" is the safe direction: the thief's own state lands
+        // a moment later and the next check latches correctly, whereas treating
+        // it as lost would abandon a lock nobody actually took.
+        match read_state(&self.dir) {
+            Some(state) if state.pid != self.state.pid => {
+                self.lost = true;
+                false
+            }
+            _ => true,
+        }
+    }
+
     /// Publish a new phase, and reset the stall clock.
     ///
     /// Best-effort: a state file that cannot be written must never fail an update
@@ -464,13 +524,17 @@ impl UpdateGuard {
     pub fn set_phase(&mut self, phase: Phase) {
         self.state.phase = phase;
         self.state.phase_at = Utc::now();
-        let _ = write_state(&self.dir, &self.state);
+        if self.still_ours() {
+            let _ = write_state(&self.dir, &self.state);
+        }
     }
 
     /// Record the release once it is known, so observers can name it.
     pub fn set_version(&mut self, version: &str) {
         self.state.version = Some(version.to_string());
-        let _ = write_state(&self.dir, &self.state);
+        if self.still_ours() {
+            let _ = write_state(&self.dir, &self.state);
+        }
     }
 
     /// Give the lock up early.
@@ -492,8 +556,10 @@ impl Drop for UpdateGuard {
     fn drop(&mut self) {
         // Only if it is still ours. Somebody may have judged us stale and stolen
         // it — in which case the directory now belongs to them and removing it
-        // would delete a *live* lock.
-        if read_state(&self.dir).map(|s| s.pid) == Some(self.state.pid) {
+        // would delete a *live* lock. `still_ours` is the same predicate every
+        // write uses, so a guard cannot be judged the owner by one path and not
+        // by the other.
+        if self.still_ours() {
             let _ = fs::remove_dir_all(&self.dir);
         }
     }
@@ -648,6 +714,7 @@ mod tests {
         let mut guard = UpdateGuard {
             dir: dir.clone(),
             state: state_at(std::process::id(), old),
+            lost: false,
         };
         guard.set_phase(Phase::RestartingServices);
 
@@ -704,6 +771,77 @@ mod tests {
 
         let (state, _) = peek().expect("the new owner's lock must survive our Drop");
         assert_eq!(state.pid, std::process::id() + 1);
+    }
+
+    #[test]
+    fn a_guard_that_was_stolen_from_stops_writing_and_stops_deleting() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _env = isolated(tmp.path());
+
+        let dir = lock_dir().unwrap();
+        let mut victim = match acquire(Origin::Cli, None, false).unwrap() {
+            Acquired::Ours(g) => g,
+            Acquired::Busy(_) => panic!("nothing held the lock"),
+        };
+
+        // A thief judged us stale and took over: same directory, live foreign pid.
+        let thief = std::process::id() + 1;
+        write_state(&dir, &state_at(thief, Utc::now())).unwrap();
+
+        // The victim keeps running and keeps reporting progress. Neither of these
+        // may touch the thief's lock — stamping our pid back over it is what made
+        // the thief's `Drop` abandon the directory and ours delete a live lock.
+        victim.set_phase(Phase::RestartingServices);
+        victim.set_version("9.9.9");
+        assert_eq!(peek().unwrap().0.pid, thief, "a lost guard must not write");
+
+        drop(victim);
+        assert_eq!(
+            peek()
+                .expect("the thief's lock must survive the victim's Drop")
+                .0
+                .pid,
+            thief
+        );
+    }
+
+    #[test]
+    fn a_lock_that_cannot_be_stolen_is_busy_rather_than_no_lock_at_all() {
+        // `acquire`'s `Err` arm deliberately lets the caller continue *without* a
+        // lock, so that an unwritable `~/.veld` cannot brick updates forever. A
+        // directory this process may not remove must never reach that arm — it is
+        // somebody else's live lock, and continuing is the two-concurrent-updates
+        // case. Simulated by making the lock's parent read-only, which is what
+        // `rename` out of it needs.
+        let tmp = tempfile::tempdir().unwrap();
+        let _env = isolated(tmp.path());
+
+        let dir = lock_dir().unwrap();
+        fs::create_dir_all(&dir).unwrap();
+        // Dead holder ⇒ stale ⇒ `acquire` will try to steal it.
+        write_state(&dir, &state_at(0, Utc::now())).unwrap();
+
+        let parent = dir.parent().unwrap().to_path_buf();
+        let original = fs::metadata(&parent).unwrap().permissions();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&parent, fs::Permissions::from_mode(0o500)).unwrap();
+        }
+
+        let outcome = acquire(Origin::Cli, None, false);
+
+        // Restore before asserting, so a failure does not leave an undeletable
+        // tempdir behind.
+        fs::set_permissions(&parent, original).unwrap();
+
+        match outcome {
+            Ok(Acquired::Busy(_)) => {}
+            Ok(Acquired::Ours(_)) => panic!("stole a lock it could not remove"),
+            Err(e) => panic!(
+                "a failed steal must be Busy, not Err ({e}) — the caller's Err arm continues without a lock"
+            ),
+        }
     }
 
     #[test]

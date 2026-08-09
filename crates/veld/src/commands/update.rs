@@ -429,6 +429,20 @@ fn refuse_busy(
 ) -> i32 {
     let msg = state.describe(chrono::Utc::now());
     output::print_error(&msg, false);
+
+    // **A window that lost the race owes the user nothing, and must not pretend
+    // otherwise.** A console child only exists because an outer process launched
+    // it, and that outer process is the one holding the report-and-relaunch duty:
+    // either it refused here itself (and already wrote the report and reopened
+    // the app), or its handshake timed out and it is *currently installing* while
+    // holding this very lock. Writing a failure report from here would overwrite
+    // that run's success — the app's next launch would announce a failed update
+    // that actually worked — and reopening the app would put a window back over a
+    // bundle swap in progress. The user is looking at this window; the message
+    // above is the whole report they need.
+    if console_child() {
+        return EX_TEMPFAIL;
+    }
     if let Some(tty) = &state.tty {
         output::print_info(&format!("It may be waiting for an answer in {tty}."));
     }
@@ -460,28 +474,49 @@ fn refuse_busy(
     EX_TEMPFAIL
 }
 
+/// The `--status --json` payload.
+///
+/// Split out because `skills/veld/SKILL.md` tells coding agents to read
+/// `in_progress`, `phase` and friends — which makes these key names a contract,
+/// and a contract with no test is a contract one rename silently breaks.
+///
+/// `in_progress` is deliberately **false for a stale lock** while the rest of the
+/// fields still describe it: a consumer branching on one boolean gets the right
+/// answer, and one that wants to explain the leftovers has `stale_reason`.
+fn status_json(
+    peeked: Option<&(
+        veld_core::update_lock::UpdateState,
+        Option<veld_core::update_lock::StaleReason>,
+    )>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> serde_json::Value {
+    match peeked {
+        Some((state, reason)) => serde_json::json!({
+            "in_progress": reason.is_none(),
+            "pid": state.pid,
+            "origin": state.origin.as_str(),
+            "version": state.version,
+            "phase": state.phase.as_str(),
+            "started_at": state.started_at.to_rfc3339(),
+            "phase_at": state.phase_at.to_rfc3339(),
+            "age_seconds": state.age(now).as_secs(),
+            "tty": state.tty,
+            "stale_reason": reason.map(|r| r.as_str()),
+        }),
+        None => serde_json::json!({ "in_progress": false }),
+    }
+}
+
 /// `veld update --status` — what, if anything, is updating.
 pub fn status(json: bool) -> i32 {
     let now = chrono::Utc::now();
     let peeked = veld_core::update_lock::peek();
 
     if json {
-        let payload = match &peeked {
-            Some((state, reason)) => serde_json::json!({
-                "in_progress": reason.is_none(),
-                "pid": state.pid,
-                "origin": state.origin.as_str(),
-                "version": state.version,
-                "phase": state.phase.as_str(),
-                "started_at": state.started_at.to_rfc3339(),
-                "phase_at": state.phase_at.to_rfc3339(),
-                "age_seconds": state.age(now).as_secs(),
-                "tty": state.tty,
-                "stale_reason": reason.map(|r| r.as_str()),
-            }),
-            None => serde_json::json!({ "in_progress": false }),
-        };
-        println!("{}", serde_json::to_string_pretty(&payload).unwrap());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&status_json(peeked.as_ref(), now)).unwrap()
+        );
         return 0;
     }
 
@@ -537,21 +572,22 @@ enum ConsoleHandoff {
     Failed(String),
 }
 
-/// Re-run this invocation inside a terminal window.
+/// The argv the window runs — the entire contract between this process and it.
 ///
-/// The arguments are reconstructed rather than forwarded verbatim because one of
-/// them must not be: `--console` is dropped, or the window would open a window.
-async fn hand_over_to_console(
+/// Extracted from `hand_over_to_console` so it can be tested, because every arm
+/// is load-bearing in a way that is invisible at the call site: **`--console` is
+/// absent**, or the window opens a window and so on forever; `--wait-pid` is what
+/// stops the window replacing a bundle the app still holds open; `--relaunch` is
+/// the app's only way back onto the screen; `--target-version` is what keeps the
+/// window off `api.github.com`, which is rate-limited per IP and briefly out of
+/// step with the feed the app was offered.
+fn console_args(
     wait_pid: Option<u32>,
     relaunch: bool,
     app_path: Option<&std::path::Path>,
     target_version: Option<&str>,
     force: bool,
-) -> ConsoleHandoff {
-    let Ok(exe) = std::env::current_exe() else {
-        return ConsoleHandoff::Failed("this binary's own path is unknown".into());
-    };
-
+) -> Vec<String> {
     let mut args = vec!["update".to_string()];
     if let Some(v) = target_version {
         args.push("--target-version".into());
@@ -571,6 +607,29 @@ async fn hand_over_to_console(
     if force {
         args.push("--force".into());
     }
+    args
+}
+
+/// Re-run this invocation inside a terminal window.
+///
+/// The arguments are reconstructed rather than forwarded verbatim because one of
+/// them must not be: `--console` is dropped, or the window would open a window.
+async fn hand_over_to_console(
+    wait_pid: Option<u32>,
+    relaunch: bool,
+    app_path: Option<&std::path::Path>,
+    target_version: Option<&str>,
+    force: bool,
+) -> ConsoleHandoff {
+    let Ok(exe) = std::env::current_exe() else {
+        return ConsoleHandoff::Failed("this binary's own path is unknown".into());
+    };
+
+    let args = console_args(wait_pid, relaunch, app_path, target_version, force);
+
+    // Captured before the launch, so a lock taken *after* this instant is the
+    // only thing the handshake below will accept.
+    let launched_at = chrono::Utc::now();
 
     let launcher = match veld_core::console::launch(
         &exe,
@@ -589,11 +648,18 @@ async fn hand_over_to_console(
     // evidence, a machine with a broken `.command` association would have the app
     // quit, report that the update was running in a terminal, and update nothing.
     // Taking the update lock is evidence only the real thing can produce.
-    let me = std::process::id();
+    //
+    // **Three conditions, not one.** "A lock exists" is not evidence: this
+    // process deliberately never acquires, so *any* holder would satisfy a bare
+    // `pid != me` — including an unrelated `veld update` a user started in
+    // another terminal a second ago. Accepting that would have the app quit,
+    // announce "the update is running in your terminal", and exit 0 with no
+    // window anywhere and nobody owing the app a relaunch. So the holder must
+    // also say it *is* a console run, and must have started after the launch.
     let start = std::time::Instant::now();
     loop {
         if let Some(state) = update_lock::current() {
-            if state.pid != me {
+            if state.origin == update_lock::Origin::Console && state.started_at >= launched_at {
                 return ConsoleHandoff::TookOver(launcher);
             }
         }
@@ -1366,5 +1432,111 @@ mod tests {
         // an answer must read as "no" — the opposite default from the bare Enter
         // a human at a prompt gives.
         assert!(!consent(None));
+    }
+}
+
+#[cfg(test)]
+mod handoff_tests {
+    use super::{console_args, status_json};
+    use veld_core::update_lock::{Origin, Phase, StaleReason, UpdateState};
+
+    fn state() -> UpdateState {
+        let t = chrono::DateTime::parse_from_rfc3339("2026-08-09T07:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        UpdateState {
+            pid: 4242,
+            origin: Origin::Console,
+            version: Some("16.12.0".into()),
+            started_at: t,
+            phase: Phase::Installing,
+            phase_at: t,
+            tty: Some("/dev/ttys004".into()),
+        }
+    }
+
+    #[test]
+    fn the_window_is_never_told_to_open_a_window() {
+        // The one arm that must never appear. With it, the window's `veld update`
+        // opens another window, which opens another — and each one waits 20s for
+        // the next to take a lock it will never get.
+        let args = console_args(
+            Some(4711),
+            true,
+            Some(std::path::Path::new("/Applications/Veld.app")),
+            Some("16.12.0"),
+            false,
+        );
+        assert!(!args.contains(&"--console".to_string()), "{args:?}");
+    }
+
+    #[test]
+    fn every_flag_the_app_handed_over_reaches_the_window() {
+        assert_eq!(
+            console_args(
+                Some(4711),
+                true,
+                Some(std::path::Path::new(
+                    "/Applications/Veld.app/Contents/MacOS/Veld"
+                )),
+                Some("16.12.0"),
+                true,
+            ),
+            vec![
+                "update",
+                // Without this the window asks api.github.com instead of
+                // installing the release the app was actually offered.
+                "--target-version",
+                "16.12.0",
+                // Without this the window replaces a bundle the app still holds
+                // open, and install.sh's pgrep guard silently skips the app half.
+                "--wait-pid",
+                "4711",
+                // Without this the user's app never comes back.
+                "--relaunch",
+                "--app-path",
+                "/Applications/Veld.app/Contents/MacOS/Veld",
+                "--force",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_terminal_run_hands_over_nothing_it_was_not_given() {
+        // `veld update --console` typed by hand: no app quit for it, so no pid to
+        // wait for and nothing owed a relaunch. `honour_relaunch` already refuses
+        // `--relaunch` without a pid upstream of this, and passing one anyway
+        // would have the window *launch* an app the user never had running.
+        assert_eq!(console_args(None, false, None, None, false), vec!["update"]);
+    }
+
+    #[test]
+    fn the_status_payload_keeps_the_keys_agents_are_told_to_read() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-08-09T07:01:40Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+
+        // Nothing running: one key, and it is the one to branch on.
+        let none = status_json(None, now);
+        assert_eq!(none["in_progress"], serde_json::json!(false));
+        assert_eq!(none.as_object().unwrap().len(), 1);
+
+        let live = status_json(Some(&(state(), None)), now);
+        assert_eq!(live["in_progress"], serde_json::json!(true));
+        assert_eq!(live["pid"], serde_json::json!(4242));
+        assert_eq!(live["origin"], serde_json::json!("console"));
+        assert_eq!(live["version"], serde_json::json!("16.12.0"));
+        assert_eq!(live["phase"], serde_json::json!("installing"));
+        assert_eq!(live["age_seconds"], serde_json::json!(100));
+        assert_eq!(live["tty"], serde_json::json!("/dev/ttys004"));
+        assert_eq!(live["stale_reason"], serde_json::Value::Null);
+
+        // A stale lock is NOT in progress, but still describes itself — a
+        // consumer branching on the boolean is right, and one that wants to
+        // explain the leftovers has the reason.
+        let stale = status_json(Some(&(state(), Some(StaleReason::Stalled))), now);
+        assert_eq!(stale["in_progress"], serde_json::json!(false));
+        assert_eq!(stale["stale_reason"], serde_json::json!("stalled"));
+        assert_eq!(stale["pid"], serde_json::json!(4242));
     }
 }

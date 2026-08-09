@@ -262,6 +262,8 @@ function updateInProgress({ state, now = Date.now(), pidAlive = () => true }) {
  */
 function updatePhaseLabel(phase) {
   switch (phase) {
+    case "starting":
+      return "starting up";
     case "waiting-for-app":
       return "waiting for Veld Desktop to quit";
     case "checking":

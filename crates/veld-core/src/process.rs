@@ -1050,6 +1050,17 @@ pub async fn run_command_streaming(
 /// reason; this is that reasoning stated where the check actually lives.
 /// Anything above `i32::MAX` cannot round-trip through `Pid` either, and would
 /// otherwise be truncated into some *other* live process.
+///
+/// **Only `ESRCH` means dead.** `EPERM` means the process exists and belongs to
+/// somebody this user may not signal, which is the opposite answer — and the one
+/// this function used to give, because every error collapsed into `false`. It
+/// bites where a `sudo veld update` leaves a root-owned artifact behind in the
+/// invoking user's `~/.veld`: an unprivileged veld would read the live root
+/// holder as gone, try to steal its update lock, and fail to remove a
+/// root-owned directory. `desktop/src/updater.js` has always read `EPERM` as
+/// alive, so this also stops the two halves answering the same question
+/// differently. Any other errno is unexpected and reads as dead, which is what
+/// the previous behaviour was for every case.
 pub fn is_alive(pid: u32) -> bool {
     use nix::sys::signal::kill;
     use nix::unistd::Pid;
@@ -1057,9 +1068,11 @@ pub fn is_alive(pid: u32) -> bool {
     if pid == 0 || pid > i32::MAX as u32 {
         return false;
     }
-    kill(Pid::from_raw(pid as i32), None)
-        .map(|_| true)
-        .unwrap_or(false)
+    match kill(Pid::from_raw(pid as i32), None) {
+        Ok(()) => true,
+        Err(nix::errno::Errno::EPERM) => true,
+        Err(_) => false,
+    }
 }
 
 /// Kill a process and its process group: send SIGTERM, wait briefly, then
@@ -1489,6 +1502,20 @@ mod liveness_tests {
         // The control: this process is alive, so the guard has not simply
         // disabled the check.
         assert!(is_alive(std::process::id()));
+    }
+
+    #[test]
+    fn a_process_this_user_may_not_signal_is_alive_not_dead() {
+        // pid 1 (launchd / init) is always running and always owned by root, so
+        // an unprivileged test process gets EPERM for it — the one errno that
+        // means "it exists" while not being `Ok`. Collapsing it into "dead" is
+        // what let an unprivileged veld try to steal a root-held update lock.
+        // Skipped when the tests happen to run as root, where the answer is `Ok`
+        // and the case is unreachable rather than wrong.
+        if nix::unistd::Uid::effective().is_root() {
+            return;
+        }
+        assert!(is_alive(1), "pid 1 exists; EPERM is not ESRCH");
     }
 }
 

@@ -1212,6 +1212,12 @@ async fn main() {
 ///   spawned by the node processes of environments that are still running, and
 ///   an update deliberately leaves those serving. Blocking them would break live
 ///   environments to protect an update that never touches them.
+/// - `Desktop { Status }` — read-only (it reads a plist), and blocking it
+///   produces a *wrong* answer rather than a blocked one: Veld Desktop resolves
+///   the CLI by running `veld desktop status --json`, and its caller catches any
+///   failure as "there is no veld CLI here", which silently demotes
+///   *Check for Updates…* to the download-from-GitHub route. The install and
+///   update arms stay blocked — those move bytes.
 fn command_survives_an_update(command: &Command) -> bool {
     matches!(
         command,
@@ -1223,6 +1229,9 @@ fn command_survives_an_update(command: &Command) -> bool {
             | Command::Init
             | Command::InternalLog { .. }
             | Command::InternalTimestamp { .. }
+            | Command::Desktop {
+                command: None | Some(DesktopCommand::Status { .. })
+            }
     )
 }
 

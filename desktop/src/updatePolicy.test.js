@@ -1,5 +1,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
 
 const {
   FULL_UPDATE_HANDOFF,
@@ -438,17 +440,32 @@ test("an unknown phase from a newer CLI still says something true", () => {
   // and an older app for exactly the minutes this dialog exists to cover.
   assert.equal(updatePhaseLabel("something-invented-later"), "in progress");
   assert.equal(updatePhaseLabel("restarting-services"), "restarting the daemon and helper");
-  // Every phase the Rust side can write must have its own wording — a label
-  // that silently falls through to the default is a dialog that says less than
-  // it knows.
-  for (const phase of [
-    "waiting-for-app",
-    "checking",
-    "installing",
-    "restarting-services",
-    "updating-app",
-    "finishing",
-  ]) {
-    assert.notEqual(updatePhaseLabel(phase), "in progress", phase);
+});
+
+test("every phase the Rust side can write has its own wording here", () => {
+  // **Read out of `update_lock.rs` rather than restated.** A hand-copied list
+  // makes this test a claim it cannot hold: the first version of it enumerated
+  // six phases, silently omitted `starting` — which `acquire` writes on every
+  // single update — and passed. A seventh variant added in Rust would have shipped
+  // green too. This is the drift gate, in the shape `install_script_contract.rs`
+  // uses for the same reason.
+  const rust = fs.readFileSync(
+    path.join(__dirname, "..", "..", "crates", "veld-core", "src", "update_lock.rs"),
+    "utf8",
+  );
+  const asStr = rust.slice(
+    rust.indexOf("impl Phase {"),
+    rust.indexOf("/// One human clause"),
+  );
+  const phases = [...asStr.matchAll(/Phase::\w+ => "([a-z-]+)"/g)].map((m) => m[1]);
+
+  assert.ok(phases.length >= 7, `found only ${phases.length} phases — did the parse break?`);
+  assert.ok(phases.includes("starting"), "the phase `acquire` writes must be in the list");
+  for (const phase of phases) {
+    assert.notEqual(
+      updatePhaseLabel(phase),
+      "in progress",
+      `Phase::…"${phase}" falls through to the default label`,
+    );
   }
 });
