@@ -491,9 +491,18 @@ fn steal(dir: &Path) -> io::Result<()> {
 }
 
 /// Write the state file whole, by rename, so a reader can never see half of it.
+///
+/// The rename is what makes the *published* file atomic; the pid in the temp
+/// name is what keeps the file being renamed whole in the first place. Two
+/// processes can briefly both be writing this directory — a `--force` acquirer,
+/// or a thief mid-steal, overlapping the previous holder — and a shared
+/// `state.json.tmp` would have both `fs::write`s land at offset 0 of one file,
+/// so `rename` would publish a torn body. That reads back as `Unreadable`, which
+/// makes a *live* lock stealable by the next `acquire`. `steal` pid-suffixes its
+/// own temp name for the same reason.
 fn write_state(dir: &Path, state: &UpdateState) -> io::Result<()> {
     let path = state_path(dir);
-    let tmp = path.with_extension("json.tmp");
+    let tmp = dir.join(format!("state.json.{}.tmp", std::process::id()));
     let body = serde_json::to_vec_pretty(state).map_err(io::Error::other)?;
     fs::write(&tmp, body)?;
     let _ = crate::paths::set_owner_only(&tmp);
