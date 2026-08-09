@@ -1040,6 +1040,10 @@ function AppInner(props: {
       setShownId(w.id);
       return true;
     }
+    // A click owns the outcome from here: cancel whatever acquire is running, so
+    // a hunt still waiting on somebody's yield cannot land afterwards and move
+    // the window off the row that was just picked.
+    acquireGenRef.current++;
     const result = await channel.claim(w.id);
     if (!result.ok) {
       // Without this the click reads as ignored: the row does not open, and
@@ -2048,6 +2052,9 @@ function AppInner(props: {
    * would take it straight back off them.
    */
   const grantedRef = useRef(false);
+  /** Bumped by anything that supersedes a running acquire — a newer acquire, or
+   *  a rail click. See `acquireRef`. */
+  const acquireGenRef = useRef(0);
   /** The selection, for the reconnect handler — see `grantedRef`. */
   const selectedRef = useRef<number | null>(null);
   selectedRef.current = worktree?.id ?? null;
@@ -2326,17 +2333,24 @@ function AppInner(props: {
    * Held in a ref because the socket's handlers are registered once, at boot, and
    * would otherwise close over the first render's state forever.
    */
-  const acquireRef = useRef<(preferred: number, live?: () => boolean) => Promise<void>>(
-    async () => {},
-  );
-  acquireRef.current = async (preferred: number, live: () => boolean = () => true) => {
-    // **Checked before every write, not once at the end.** Each claim in here
-    // can block for the daemon's acknowledgement timeout, so a hunt is easily
-    // still running when the user clicks a row and is granted it — and without
-    // this the hunt then lands on its own candidate and moves the window off the
-    // worktree they just picked, releasing it for nothing after another client
-    // had already been made to yield it.
-    if (!live()) return;
+  const acquireRef = useRef<(preferred: number) => Promise<void>>(async () => {});
+  acquireRef.current = async (preferred: number) => {
+    // **A generation, not a condition about the current state.** Each claim in
+    // here can block for the daemon's acknowledgement timeout, so a hunt is
+    // easily still running when the user clicks a row — and without cancellation
+    // it lands on its own candidate afterwards and moves the window off the
+    // worktree they just picked.
+    //
+    // The first attempt asked "is anything shown yet", and that was wrong in a
+    // way worth recording: nothing nulls `shownId` when the *selection* changes
+    // without a claim — switching repo, importing one, creating a worktree — so
+    // the acquire for the new selection cancelled itself before it started, the
+    // worktree was never claimed, and the workspace rendered empty until the
+    // user clicked a rail row. "Has something newer started" is the question,
+    // and only a counter answers it without depending on what that newer thing
+    // has managed to do yet.
+    const gen = ++acquireGenRef.current;
+    const live = () => acquireGenRef.current === gen;
     const mine = await channel.claim(preferred, false);
     if (!live()) return;
     if (mine.ok) {
@@ -2397,15 +2411,9 @@ function AppInner(props: {
    */
   useEffect(() => {
     if (chromeless || !worktree) return;
-    let cancelled = false;
-    const id = worktree.id;
-    // Also false once this client has been granted something *else* — a rail
-    // click during a hunt is granted through `selectWorktree`, which the hunt
-    // must not then overwrite.
-    void acquireRef.current(id, () => !cancelled && shownRef.current === null);
-    return () => {
-      cancelled = true;
-    };
+    // No cleanup: a selection change re-runs this effect, and starting a new
+    // acquire is itself what cancels the old one.
+    void acquireRef.current(worktree.id);
   }, [chromeless, worktree?.id]);
 
   // Cleared as soon as this window is showing something it owns.

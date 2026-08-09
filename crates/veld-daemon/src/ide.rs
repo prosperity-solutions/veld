@@ -705,6 +705,30 @@ impl Registry {
         if self.clients.get(client_id).is_none_or(|c| c.conn != conn) {
             return None;
         }
+        // **A superseded claim changes nothing at all.** Keeping the highest
+        // `seq` made the *answer* right, but the registry was still written in
+        // scheduler order — so of two claims read in one poll, the loser could
+        // run second and leave `claims[old] = me` behind while its owner was
+        // told it had been superseded. The result was a client showing one
+        // worktree, the daemon recording another, and that other one greyed out
+        // in every rail as shown by a client that is not showing it. Refusing
+        // before any mutation is the only version of this rule that holds
+        // whichever order the two tasks are polled in.
+        if self
+            .claim_seq
+            .get(client_id)
+            .is_some_and(|current| *current > seq)
+        {
+            if let Some(me) = self.clients.get(client_id) {
+                let _ = me.tx.send(ServerMsg::ClaimResult {
+                    request_id,
+                    ok: false,
+                    reason: Some("superseded"),
+                    holder: None,
+                });
+            }
+            return None;
+        }
         let _ = self.expire_orphans(Instant::now());
 
         // An orphan is not a holder: nothing is attached behind a closed socket,
@@ -750,14 +774,9 @@ impl Registry {
         // everyone, and the one it took is now spoken for.
         self.broadcast();
 
-        // **The highest seq wins, not the last writer.** These arrive in frame
-        // order but *run* in scheduler order, so a plain insert let whichever
-        // task happened to run second install its number — and the earlier frame
-        // then owned the outcome. Keeping the maximum makes the rule "a later
-        // claim from this client supersedes this one" true regardless of how the
-        // two were scheduled.
-        let current = self.claim_seq.entry(client_id.to_owned()).or_insert(seq);
-        *current = (*current).max(seq);
+        // Reached only by a claim that is not superseded (checked above), so
+        // this is monotonic by construction.
+        self.claim_seq.insert(client_id.to_owned(), seq);
 
         // Every *other* client still holding this worktree's panes has to let go
         // before this one attaches, or the two would trade its shells.
@@ -1682,11 +1701,23 @@ mod tests {
         let first = NEXT_CLAIM_SEQ.fetch_add(1, Ordering::Relaxed);
         let second = NEXT_CLAIM_SEQ.fetch_add(1, Ordering::Relaxed);
         reg.begin_claim(&a.id, a.conn, 8, 2, false, second).unwrap();
-        reg.begin_claim(&a.id, a.conn, 7, 1, false, first).unwrap();
+        assert!(
+            reg.begin_claim(&a.id, a.conn, 7, 1, false, first).is_none(),
+            "the earlier frame is refused once a later one has been granted"
+        );
         assert_eq!(
             reg.claim_seq.get("a"),
             Some(&second),
             "the later frame owns the outcome whichever ran first"
+        );
+        // …and the loser must not have written anything on its way past. This
+        // is the half that keeping a maximum did *not* buy: the registry was
+        // still mutated in scheduler order, leaving the client shown one
+        // worktree and recorded against another.
+        assert_eq!(reg.claims.get(&8).map(String::as_str), Some("a"));
+        assert!(
+            !reg.claims.contains_key(&7),
+            "a superseded claim must not record itself"
         );
     }
 

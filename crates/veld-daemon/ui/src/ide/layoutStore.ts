@@ -393,6 +393,13 @@ export function flushPendingOnUnload(): void {
     // is one wasted round trip on a page restored from the bfcache; the
     // alternative was a silent clobber.
     //
+    // `written` *is* cleared, and that is a separate question from the version:
+    // it records what the server is known to hold, and after a request whose
+    // outcome nobody sees it is no longer known. Left in place, a page restored
+    // from the bfcache whose user returns the layout to exactly its pre-unload
+    // shape has that write deduped away, and the two diverge silently.
+    written.delete(worktreeId);
+    //
     // Not through `api`, which cannot express `keepalive`. Two things this
     // cannot promise, both stated rather than papered over: a conflict is
     // unobservable (the page is going away, and whoever holds the worktree next
