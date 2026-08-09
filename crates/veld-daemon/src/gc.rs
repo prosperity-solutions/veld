@@ -366,9 +366,11 @@ async fn cleanup_routes_and_dns(run: &RunState, run_name: &str, helper: &HelperC
         }
 
         // The hostname-keyed id, on the other hand, is derivable only from a
-        // recorded URL. An entry added just before a kill, with no URL persisted,
-        // is therefore unreachable here — it is overwritten by the next start of
-        // the same environment, since the id is a pure function of the hostname.
+        // recorded hostname — from `url` on a legacy row, from an `endpoints`
+        // entry otherwise, both of which `hostnames()` folds together. An entry
+        // added just before a kill, with neither persisted, is therefore
+        // unreachable here — it is overwritten by the next start of the same
+        // environment, since the id is a pure function of the hostname.
         // `veld_core::url` owns both the hostname extraction and the id format,
         // so this cannot drift from the orchestrator's construction side (#170).
         // Note the port is stripped here too — the previous version removed the

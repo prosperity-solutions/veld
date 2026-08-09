@@ -2481,9 +2481,8 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
   white-space: nowrap;
 }
 
-/* The port's name, shown only on a multi-port node. Fixed-width enough that the
-   addresses beside it line up down the card, but never at the cost of the
-   address itself: this shrinks first. */
+/* The port's name, shown only on a multi-port node. Shrinks before the address
+   does — the address is the value, the name is the label. */
 .node-port-name {
   flex: 0 1 auto;
   min-width: 0;

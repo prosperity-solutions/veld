@@ -250,7 +250,10 @@ fn endpoint_infos(ns: &NodeState) -> Vec<EndpointInfo> {
         .iter()
         .map(|(name, e)| EndpointInfo {
             name: name.clone(),
-            hostname: e.hostname.clone(),
+            // Port-stripped, as `raw_addresses` and the `hosts.<name>` builtin
+            // both are: a `url_template` carrying a literal port would
+            // otherwise render and copy `db.test:8443:5432`.
+            hostname: veld_core::url::hostname_of_url(&e.hostname).to_owned(),
             url: e.url.clone(),
             port: e.port,
             primary: ns.is_primary(e),

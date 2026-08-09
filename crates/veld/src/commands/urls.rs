@@ -45,6 +45,10 @@ pub async fn run(name: Option<String>, json: bool) -> i32 {
                 "{}",
                 serde_json::json!({
                     "urls": [],
+                    // Present and empty, not absent: the live branch always
+                    // emits it, and a consumer must not have to probe which
+                    // shape it got.
+                    "addresses": [],
                     "live": false,
                     "ended_at": run_state.ended_at.map(|t| t.to_rfc3339()),
                 })

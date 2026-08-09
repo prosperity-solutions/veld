@@ -4824,6 +4824,22 @@ fn check_resolved_variants(config: &VeldConfig, out: &mut Vec<Finding>) {
                     continue;
                 }
 
+                // A zero settle window has already elapsed, so the sleep loses
+                // its race against process exit every time and the probe passes
+                // for a process that died on spawn — the exact "reports healthy
+                // forever" shape `settle` is documented to avoid. The schema
+                // already says `minimum: 1`; without this the parser disagreed
+                // with it.
+                if what == "readiness" && r.readiness.as_ref().and_then(|h| h.seconds) == Some(0) {
+                    out.push(Finding::error(
+                        "settle-needs-a-window",
+                        format!("{loc}.probes.readiness.seconds"),
+                        "`seconds: 0` is a settle window that has already elapsed, so the \
+                         probe passes before the process can fail. Use at least 1"
+                            .to_owned(),
+                    ));
+                }
+
                 // A port-shaped probe needs a port to shape itself around. On a
                 // portless node there is nothing to connect to, and answering
                 // "healthy" is exactly the failure this rule exists to stop.
@@ -9662,6 +9678,31 @@ mod tests {
             )
             .is_empty()
         );
+    }
+
+    /// The schema says `minimum: 1`, and the parser used to disagree — a zero
+    /// window has already elapsed, so the settle sleep loses its race against
+    /// process exit every time and reports a dead process ready.
+    #[test]
+    fn a_zero_settle_window_is_refused() {
+        fn rules(seconds: &str) -> Vec<String> {
+            let json = format!(
+                r#"{{"schemaVersion":"3","name":"t","nodes":{{"a":{{"variants":{{"dev":{{
+                    "type":"long_running","shell":"x","ports":null,
+                    "probes":{{"readiness":{{"type":"settle"{seconds}}}}}
+                }}}}}}}}}}"#
+            );
+            let cfg: VeldConfig = serde_json::from_str(&json).expect("fixture parses");
+            validate(&cfg)
+                .iter()
+                .filter(|f| f.rule == "settle-needs-a-window")
+                .map(|f| f.rule.to_string())
+                .collect()
+        }
+        assert_eq!(rules(r#","seconds":0"#), ["settle-needs-a-window"]);
+        assert!(rules(r#","seconds":1"#).is_empty());
+        // Absent means the default (3), not zero.
+        assert!(rules("").is_empty());
     }
 
     /// A port name is a DNS label, an env-var suffix, a builtin namespace

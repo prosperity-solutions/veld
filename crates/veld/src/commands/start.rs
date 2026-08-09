@@ -1671,7 +1671,7 @@ fn interactive_node_variant_picker(config: &VeldConfig) -> Option<Vec<NodeSelect
     Some(selections)
 }
 
-/// Find all `start_server` nodes whose URL template resolves to a
+/// Find all `long_running` nodes whose URL template resolves to a
 /// non-localhost domain. Returns a list of `(node:variant, hostname)` pairs.
 fn find_non_localhost_domains(
     selections: &[veld_core::graph::NodeSelection],

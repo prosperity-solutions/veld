@@ -230,9 +230,7 @@ function EndpointRow(props: {
       <div className="node-url-row">
         {label}
         <Tooltip label="Raw TCP port — reachable at this address, not over HTTP">
-          <span className="node-address" title={address}>
-            {address}
-          </span>
+          <span className="node-address">{address}</span>
         </Tooltip>
         <span className="node-proto">tcp</span>
         <Tooltip label={flash === "addr" ? "Copied" : "Copy the address"} openDelay={250}>
@@ -251,6 +249,10 @@ function EndpointRow(props: {
   }
 
   const url = e.url;
+  // A multi-port node renders these controls once per port, so the port has to
+  // be in the accessible name — three buttons all called "Copy the URL for web"
+  // are indistinguishable to a screen reader.
+  const what = props.labelled ? `${props.nodeName} ${e.name}` : props.nodeName;
   return (
     <div className="node-url-row">
       {label}
@@ -267,8 +269,8 @@ function EndpointRow(props: {
             size="sm"
             variant="subtle"
             color="gray"
-            aria-label={`Open ${props.nodeName} in a browser pane`}
-            onClick={() => props.onOpenPane?.(props.nodeName, url)}
+            aria-label={`Open ${what} in a browser pane`}
+            onClick={() => props.onOpenPane?.(what, url)}
           >
             <IconWorld size={13} />
           </ActionIcon>
@@ -279,7 +281,7 @@ function EndpointRow(props: {
           size="sm"
           variant="subtle"
           color="gray"
-          aria-label={`Copy the URL for ${props.nodeName}`}
+          aria-label={`Copy the URL for ${what}`}
           onClick={() => copy(url, "url")}
         >
           {flash === "url" ? <IconCheck size={13} /> : <IconCopy size={13} />}
@@ -294,7 +296,7 @@ function EndpointRow(props: {
           href={url}
           target="_blank"
           rel="noreferrer"
-          aria-label={`Open ${props.nodeName} in the system browser`}
+          aria-label={`Open ${what} in the system browser`}
         >
           <IconExternalLink size={13} />
         </ActionIcon>

@@ -985,7 +985,13 @@ function setJoinState(kind,data){
     body.innerHTML='<div class="spinner" style="margin:0 auto 18px"></div><h2>Joining…</h2><p>'+esc(data)+'</p>';
   }else if(kind==='ok'){
     const warn=(data.warnings&&data.warnings.length)?'<p>'+data.warnings.map(esc).join('<br>')+'</p>':'';
-    body.innerHTML='<div class="big">✅</div><h2>Approved — you’re in</h2><p>These URLs now open on this machine:</p><div class="urls">'+linkUrls(data.urls)+'</div>'+warn+'<a class="sbtn" href="/">Open dashboard</a> <button class="sbtn deny" data-join-leave="'+esc(data.join_id)+'">Leave</button>';
+    // Raw TCP endpoints, if the share carried any. Unlinked — nothing routes
+    // them — and under their own heading, because the sentence above them is
+    // about URLs and a tcp-only share would otherwise print it over nothing.
+    const addrs=(data.addresses||[]);
+    const urlPart=(data.urls&&data.urls.length)?'<p>These URLs now open on this machine:</p><div class="urls">'+linkUrls(data.urls)+'</div>':'';
+    const addrPart=addrs.length?'<p>Raw TCP, reachable at:</p><div class="urls">'+addrs.map(a=>'<span class="surl">'+esc(a)+'</span>').join('')+'</div>':'';
+    body.innerHTML='<div class="big">✅</div><h2>Approved — you’re in</h2>'+urlPart+addrPart+warn+'<a class="sbtn" href="/">Open dashboard</a> <button class="sbtn deny" data-join-leave="'+esc(data.join_id)+'">Leave</button>';
   }else if(kind==='ended'){
     body.innerHTML='<div class="big">🔌</div><h2>Share ended</h2><p>The host stopped sharing — these URLs are no longer reachable.</p><a class="sbtn" href="/">Go to dashboard</a>';
   }else if(kind==='needsToken'){
