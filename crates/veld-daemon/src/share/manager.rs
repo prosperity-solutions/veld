@@ -857,8 +857,16 @@ impl ShareManager {
             }
 
             tasks.push(handle);
-            if let Some(url) = node.url.clone() {
-                urls.push(url);
+            // Gated on `is_routed`, not on `url.is_some()`. The mirror of the
+            // malformed case above: an entry declaring `tcp` while carrying a
+            // `url` gets a local listener and no Caddy route, so publishing that
+            // URL would hand the joiner a link whose name resolves to 127.0.0.1
+            // and whose port nothing is serving. It is reachable at the raw
+            // address, which is what `addresses` already says.
+            if node.is_routed() {
+                if let Some(url) = node.url.clone() {
+                    urls.push(url);
+                }
             }
             nodes.push(display[idx].clone());
         }

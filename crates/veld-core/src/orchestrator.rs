@@ -2634,7 +2634,12 @@ impl Orchestrator {
         // and a failed resolve does not run the hook at all. Rehydrated from the
         // run's own recorded endpoints, not re-derived from the config, so a
         // config edited after start cannot change where teardown points.
-        for (port_name, endpoint) in &node_state.endpoints {
+        //
+        // `endpoints_or_legacy`, for the same reason the share path needs it: a
+        // run live across the upgrade records no endpoint map, and a teardown
+        // hook is exactly the place where resolving to nothing means the hook
+        // does not run and the container it would have removed is left behind.
+        for (port_name, endpoint) in &node_state.endpoints_or_legacy() {
             ctx.set_builtin(
                 &format!("hosts.{port_name}"),
                 url::hostname_of_url(&endpoint.hostname).to_owned(),

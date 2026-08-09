@@ -1161,8 +1161,12 @@ pub struct ResolvedPorts {
     /// Port name → resolved port, in declaration-independent (sorted) order.
     pub ports: BTreeMap<String, ResolvedPort>,
     /// The name `${veld.port}` aliases, and the only port whose hostname is the
-    /// node's own. `None` for a node that declares no ports at all, and for one
-    /// whose ports are all `tcp` — neither has a URL.
+    /// node's own.
+    ///
+    /// `None` in three shapes, and only the third is an error: a node that
+    /// declares no ports at all; a node whose ports are all `tcp` (neither has a
+    /// URL, and that is a legitimate declaration); and a node where veld cannot
+    /// tell which port is the front door, which is `primary_ambiguous` below.
     pub primary: Option<String>,
     /// True when the author declared `ports` at all — "no ports on purpose"
     /// rather than "nothing said, so one was synthesized".
@@ -5249,6 +5253,21 @@ impl BuiltinSite {
                 );
             }
             if self.primary.is_none() {
+                // Two ways to have no primary, and they need opposite advice.
+                // Saying "every port is tcp" to a node with two http ports is
+                // flatly false, and it contradicts the `ambiguous-primary-port`
+                // error printed beside it.
+                if !self.http_ports.is_empty() {
+                    let mut names = self.http_ports.clone();
+                    names.sort();
+                    return format!(
+                        "`${{veld.{name}}}` describes the node's primary port, and veld cannot \
+                         tell which of these is the front door: {}. Name one of them \
+                         \"{PRIMARY_PORT_NAME}\", or use `${{veld.urls.<name>}}` for a \
+                         specific one",
+                        names.join(", ")
+                    );
+                }
                 let mut names = self.ports.clone();
                 names.sort();
                 return format!(
@@ -9563,6 +9582,24 @@ mod tests {
         assert_eq!(msgs.len(), 1, "{msgs:?}");
         assert!(msgs[0].contains("veld.ports.<name>"), "{}", msgs[0]);
         assert!(msgs[0].contains("db"), "{}", msgs[0]);
+
+        // Two http ports: there IS a front door, veld just cannot tell which.
+        // Telling that author "every port is tcp" would be flatly false and
+        // would contradict the `ambiguous-primary-port` error beside it.
+        let two_http = r#"{"api":{"port":"auto","protocol":"http"},"admin":{"port":"auto","protocol":"http"}}"#;
+        let msgs = lint_case(two_http, "${veld.url}");
+        assert_eq!(msgs.len(), 1, "{msgs:?}");
+        assert!(
+            msgs[0].contains("which of these is the front door"),
+            "{}",
+            msgs[0]
+        );
+        assert!(msgs[0].contains("api"), "{}", msgs[0]);
+        assert!(
+            !msgs[0].contains("every port it declares"),
+            "must not claim they are all tcp: {}",
+            msgs[0]
+        );
 
         // A port *named* `http` that declares `tcp` does not become the primary
         // just by its name, so this is an all-tcp node and neither builtin
