@@ -34,32 +34,30 @@ import {
 import { handleKeyEvent } from "./terminalKeys";
 
 /**
- * Terminal ids this page expects to *resume*, captured once at module load.
+ * Terminal ids this page expects to *resume*.
  *
- * Read here rather than threaded down from the app so the knowledge lives beside
- * the code that needs it. It answers a question the daemon's `resumed: false`
- * cannot: was this a brand-new terminal, or one whose shell we expected to still
- * be there? Without it, a lost shell is silently replaced by an empty prompt.
+ * It answers a question the daemon's `resumed: false` cannot: was this a
+ * brand-new terminal, or one whose shell we expected to still be there? Without
+ * it, a lost shell is silently replaced by an empty prompt.
  *
- * Read from the durable store this window restores from. Reading
- * `sessionStorage` directly meant the set was always empty in the case that
- * matters most: after Veld Desktop restarts there is no `sessionStorage`, so
- * every tab was treated as brand new and a reboot (or an expired grace, or a
- * refused protocol version) handed the user fresh prompts in "restored" tabs
- * without a word.
+ * **It grows rather than being captured once**, because the answer no longer
+ * lives in this page's storage. A main window's panes come from the daemon, one
+ * worktree at a time as they are opened, so `noteExpectedResumes` is called with
+ * each layout that arrives. Which is the fix for the case the whole change
+ * exists for: a browser tab had no store at all, so every terminal in a worktree
+ * the desktop app was running looked brand new to it — and it spawned a second
+ * shell beside the one that was already there instead of re-attaching.
+ *
+ * The seed and the detached window's slot store are still read at module load:
+ * a detached window's tabs are its own, and a window opened by dragging a
+ * terminal out of another one has no layout to fetch.
  */
 const EXPECTED_RESUMES: Set<string> = (() => {
   try {
-    // Read-only, and deliberately *not* through `loadLayouts`: "which shells
-    // might legitimately still be running" is a different question from "which
-    // panes does this window own", and a main window owns only what it displays
-    // (see `readLayouts`). Answering the first with the second is what let a
-    // window stamp its boot snapshot over another window's worktree.
-    //
-    // `windowSeed` on top, for the same reason it exists: a window opened by
-    // detaching a terminal has no store yet, so without it every transferred
-    // shell would look brand new — and a transfer that arrived to find its shell
-    // gone would say nothing at all, which is the case this set exists to catch.
+    // `windowSeed` for the reason it exists: a window opened by detaching a
+    // terminal has no store yet, so without it every transferred shell would
+    // look brand new — and a transfer that arrived to find its shell gone would
+    // say nothing at all, which is the case this set exists to catch.
     return new Set([
       ...storedTerminalIds(layoutSlot, chromeless),
       ...Object.values(parseLayouts(windowSeed)).flatMap(terminalIds),
@@ -68,6 +66,20 @@ const EXPECTED_RESUMES: Set<string> = (() => {
     return new Set<string>();
   }
 })();
+
+/**
+ * Note that these shells were expected to be running when this page found them.
+ *
+ * Called with every layout the daemon hands over, **before** the panes it names
+ * are rendered — a terminal only connects once it has mounted, which is at
+ * least one commit after the layout reached React state, so the set is
+ * populated by the time anything reads it. Additive on purpose: a page visits
+ * several worktrees, and a shell does not stop being expected because the user
+ * looked at something else.
+ */
+export function noteExpectedResumes(ids: string[]): void {
+  for (const id of ids) EXPECTED_RESUMES.add(id);
+}
 
 export type TerminalState =
   | "absent"

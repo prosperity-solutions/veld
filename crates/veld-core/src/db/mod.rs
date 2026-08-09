@@ -18,6 +18,7 @@
 pub(crate) mod feedback;
 mod import;
 mod kv;
+mod layouts;
 mod logs;
 mod panes;
 mod settings;
@@ -26,6 +27,7 @@ mod stats;
 mod var_overrides;
 mod worktrees;
 
+pub use layouts::{LayoutRejected, LayoutWrite, MAX_LAYOUT_BYTES, PaneLayout};
 pub use logs::{LogFilter, LogRow, LogStream, stream_is_per_node};
 pub use panes::{PaneSession, mint_pane_token};
 pub use settings::{DEFAULT_DETACH_GRACE_MINUTES, LogTimeZone, MAX_RUN_HISTORY_DAYS};
@@ -472,6 +474,11 @@ const MIGRATIONS: &[Migration] = &[
         version: 13,
         name: "worktree-display-name",
         apply: migrate_v13_worktree_display_name,
+    },
+    Migration {
+        version: 14,
+        name: "pane-layouts",
+        apply: migrate_v14_pane_layouts,
     },
 ];
 
@@ -1109,6 +1116,51 @@ fn migrate_v12_var_overrides(conn: &Connection) -> rusqlite::Result<()> {
 /// make every reader handle an absence that means the same thing as `''`.
 fn migrate_v13_worktree_display_name(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch("ALTER TABLE worktrees ADD COLUMN display_name TEXT NOT NULL DEFAULT '';")
+}
+
+/// v14: the panes a worktree is showing — one row per worktree, not per window.
+///
+/// This is where a layout stopped being browser state. It lived in
+/// `sessionStorage` plus two `localStorage` keys, which made "the panes of
+/// worktree 7" a different set in every client: a browser tab opening the same
+/// worktree as the desktop app saw a fresh, empty layout, and because the
+/// tab could not know the terminal ids the app was using, it spawned a *second*
+/// set of shells rather than re-attaching to the running ones. There is one set
+/// of panes per worktree, so there is one row.
+///
+/// **`layout` is opaque to the daemon and that is the design, not laziness.**
+/// The inner shape is the UI's `PaneLayout` — docks, tabs, per-kind payloads
+/// (`url`, `profile`, `emulation`, `media`, `zoom`) — and it grows a field
+/// every time a pane kind does. Nothing in Rust reads inside it, so a new pane
+/// kind is a UI-only change instead of a migration, and an *older* daemon
+/// round-trips a newer client's layout instead of erasing the parts it does not
+/// understand. The client validates on the way in (`parseLayouts`), which is
+/// where the knowledge is. The one property the daemon does enforce is that it
+/// is syntactically JSON — see `Db::put_pane_layout`.
+///
+/// **`version` is the whole concurrency story.** A write states the version it
+/// read; a mismatch is refused rather than merged. Contention is rare by
+/// construction — one client shows a worktree at a time (the claim registry in
+/// `veld-daemon`'s `ide` module) — so this is a hand-off guard, not a merge
+/// engine: the window that has just been granted a worktree must not lose panes
+/// to a debounced write still in flight from the window that let it go.
+///
+/// **`ON DELETE CASCADE`, for the reason v11 spells out**: `worktrees.id` is a
+/// rowid and SQLite reuses the highest free one, so a layout row that outlived
+/// its worktree would be adopted by the next checkout created — handing it a
+/// set of panes, and terminal session ids, from a worktree that no longer
+/// exists.
+fn migrate_v14_pane_layouts(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        r#"
+        CREATE TABLE pane_layouts (
+            worktree_id INTEGER PRIMARY KEY REFERENCES worktrees(id) ON DELETE CASCADE,
+            version     INTEGER NOT NULL,
+            layout      TEXT NOT NULL,
+            updated_at  TEXT NOT NULL
+        );
+        "#,
+    )
 }
 
 // ---------------------------------------------------------------------------

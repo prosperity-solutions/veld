@@ -32,6 +32,10 @@ pub mod worktree_trash;
 #[path = "pty.rs"]
 mod pty;
 
+/// The IDE control channel: worktree claims, focus, and the pane-layout store.
+#[path = "ide.rs"]
+mod ide;
+
 #[path = "settings.rs"]
 mod settings;
 
@@ -128,6 +132,10 @@ pub async fn run_feedback_server(share_manager: Arc<crate::share::manager::Share
         // Terminal sockets. Kept out of desktop::routes() because that
         // router's CSRF layer cannot gate a WebSocket upgrade — see pty.rs.
         .merge(pty::routes())
+        // Worktree claims, focus requests and pane layouts. Out of
+        // desktop::routes() for the same reason pty is: its load-bearing route
+        // is a WebSocket upgrade, which that router's CSRF layer cannot gate.
+        .merge(ide::routes())
         .merge(crate::share::api::routes(share_manager));
 
     // Terminal sessions outlive their socket (so a page reload keeps its

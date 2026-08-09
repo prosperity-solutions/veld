@@ -1697,7 +1697,11 @@ fn allowed_origins() -> Vec<String> {
 /// Fails closed on a missing or non-ASCII `Origin`. Browsers always send one
 /// on a WebSocket handshake, so the only callers this turns away are
 /// non-browser clients — which have a real terminal already.
-fn origin_allowed(headers: &HeaderMap) -> bool {
+///
+/// Shared with the IDE control socket (`ide::channel`), which is the same kind
+/// of upgrade with the same inability to carry a CSRF header. One allowlist, so
+/// the two sockets cannot drift into disagreeing about who may connect.
+pub(super) fn origin_allowed(headers: &HeaderMap) -> bool {
     let Some(origin) = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) else {
         return false;
     };

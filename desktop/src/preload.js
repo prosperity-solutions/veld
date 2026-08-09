@@ -110,39 +110,17 @@ contextBridge.exposeInMainWorld("veldDesktop", {
     /** Open another full window. With no payload it inherits the app-wide last
      *  selection (what ⌘N does); with one it opens on that worktree. */
     newWindow: (payload) => ipcRenderer.invoke("veld:window:new", payload ?? {}),
-    /** Ask to show a worktree. `{ok:false, reason:"shown-elsewhere"}` means
-     *  another window has it and the shell just focused that window — the
-     *  caller should stay where it is. */
-    claimWorktree: (worktreeId, focusHolder = true) =>
-      ipcRenderer.invoke("veld:window:claim", { worktreeId, focusHolder }),
-    /** Which worktrees another window is showing right now — the rail greys
-     *  those rows out. Answers the state this page booted into; changes arrive
-     *  through `onClaimsChanged`. */
-    claimedElsewhere: () => ipcRenderer.invoke("veld:window:claims"),
-    /** …and every change to it, since they nearly all happen in some other
-     *  window: a claim, a switch, a window closing. */
-    onClaimsChanged: (fn) => on("veld:window:claims", fn),
-    /** Which worktrees this window currently holds the panes of, so the shell
-     *  knows who to ask to let go when another window claims one. */
-    holdsWorktrees: (worktreeIds) =>
-      ipcRenderer.invoke("veld:window:holds", { worktreeIds }),
-    /** These worktrees no longer exist — drop every claim and hold on them.
-     *  Worktree ids are database rowids and get reused, so a claim left on a
-     *  deleted one lands on whatever worktree is created next. */
-    worktreesGone: (worktreeIds) =>
-      ipcRenderer.invoke("veld:window:worktrees-gone", { worktreeIds }),
-    /** Let go of one worktree's panes — another window is taking it. Release,
-     *  never close: the shells keep running for whoever attaches next. Answer
-     *  with `yielded` once the release is on screen: the window that asked does
-     *  not attach until it hears back. */
-    onYieldWorktree: (fn) => on("veld:window:yield", fn),
-    /** …that release has happened. */
-    yielded: (yieldId) => ipcRenderer.invoke("veld:window:yielded", { yieldId }),
-    /** Whether the page is in a position to send that acknowledgement at all.
-     *  Reported by the effect that sends it, so a claim never waits on a window
-     *  whose acknowledging half is not there — an older bundle, or a page mid-load.
-     *  Without it the wait falls back to a timeout every single handover. */
-    yieldsReady: (ready) => ipcRenderer.invoke("veld:window:yields-ready", { ready }),
+    /** Which worktree this window is displaying. Reporting, not asking — whether
+     *  it *may* is the daemon's answer (its control socket), and the only thing
+     *  the shell does with this is route a cross-window tab drop at a window
+     *  those tabs belong in. */
+    showsWorktree: (worktreeId) =>
+      ipcRenderer.invoke("veld:window:shows", { worktreeId }),
+    /** Bring this window to the front, because the daemon says somebody asked to
+     *  be taken to the worktree it is showing. The one part of that only the
+     *  shell can do; a plain browser tab has no equivalent and marks itself
+     *  instead. */
+    focusSelf: () => ipcRenderer.invoke("veld:window:focus-self"),
     /** A tab drag started here. Every window freezes its embedded browser views
      *  (they paint over all DOM, so an overlay under one is invisible) and the
      *  shell starts carrying the cursor to whichever window it is over. */

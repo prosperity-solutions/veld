@@ -29,7 +29,6 @@ import {
   defaultLayout,
   diagTab,
   dockVisible,
-  dropWorktreeLayouts,
   findTab,
   focusDock,
   hasTab,
@@ -43,7 +42,6 @@ import {
   nextFreeProfile,
   normalizeBrowserUrl,
   normalizeSessionSet,
-  LAYOUT_WORKTREE_KEY,
   layoutSlotKey,
   parseLayouts,
   paneTabLabel,
@@ -61,7 +59,6 @@ import {
   shouldCloseOnExit,
   terminalIds,
   terminalLabel,
-  worktreeLayoutFrom,
   writeLayouts,
   updateTab,
   urlLabel,
@@ -1152,91 +1149,34 @@ describe("layout slots", () => {
   const layout = twoDock(DEFAULT_RATIO);
   const layouts = { 7: layout };
 
-  it("writes a main window's layouts to the shared per-worktree store", () => {
+  it("writes a detached window's layout to its own slot", () => {
     const session = fake();
     const durable = fake();
-    writeLayouts(session, durable, "main", layouts);
+    writeLayouts(session, durable, "main-w2", layouts, true);
     expect(session.map.get("veld.panes.v1")).toBe(serializeLayouts(layouts));
-    // Keyed by worktree and shared, not by window: a worktree has one set of
-    // panes, and whichever window shows it next picks that set up.
-    expect(durable.map.get(LAYOUT_WORKTREE_KEY)).toBe(serializeLayouts(layouts));
-    expect(durable.map.get(layoutSlotKey("main"))).toBeUndefined();
-  });
-
-  it("merges the shared store rather than replacing it", () => {
-    // Each window holds only the worktree it is showing, so a blind write would
-    // delete every other window's worktree from the shared key. Same hazard and
-    // same fix as `editSessions` — read through at write time, not at boot.
-    const durable = fake({
-      [LAYOUT_WORKTREE_KEY]: serializeLayouts({ 4: twoDock(0.2), 7: twoDock(0.9) }),
-    });
-    writeLayouts(fake(), durable, "main", { 7: layout });
-    const written = parseLayouts(durable.map.get(LAYOUT_WORKTREE_KEY) ?? null);
-    expect(Object.keys(written).sort()).toEqual(["4", "7"]);
-    expect(written[7].ratio).toBe(layout.ratio);
-    // …and the other window's worktree survives untouched.
-    expect(written[4].ratio).toBe(0.2);
-  });
-
-  describe("dropWorktreeLayouts", () => {
-    it("removes a deleted worktree the merge would otherwise keep forever", () => {
-      // The merge above is exactly why this has to exist: dropping a worktree from
-      // the app's own `layouts` leaves the stored copy in place, and worktree
-      // rowids are reused — so the *next* worktree created inherits a deleted
-      // one's terminals and browser panes.
-      const durable = fake({
-        [LAYOUT_WORKTREE_KEY]: serializeLayouts({ 4: twoDock(0.2), 7: layout }),
-      });
-      dropWorktreeLayouts(durable, [7]);
-      const written = parseLayouts(durable.map.get(LAYOUT_WORKTREE_KEY) ?? null);
-      expect(Object.keys(written)).toEqual(["4"]);
-      expect(written[4].ratio).toBe(0.2);
-    });
-
-    it("does not rewrite the shared key when it changed nothing", () => {
-      // Two windows share this key, so a pointless write is a chance to clobber a
-      // concurrent one for no gain.
-      const stored = serializeLayouts({ 4: twoDock(0.2) });
-      const durable = fake({ [LAYOUT_WORKTREE_KEY]: stored });
-      let writes = 0;
-      const counted = {
-        getItem: durable.getItem,
-        setItem: (k: string, v: string) => {
-          writes += 1;
-          durable.setItem(k, v);
-        },
-      };
-      dropWorktreeLayouts(counted, [99]);
-      dropWorktreeLayouts(counted, []);
-      expect(writes).toBe(0);
-      expect(durable.map.get(LAYOUT_WORKTREE_KEY)).toBe(stored);
-    });
-
-    it("tolerates no durable storage at all", () => {
-      // Same configurations `storages()` guards against; forgetting is not a
-      // reason to throw where saving would not.
-      expect(() => dropWorktreeLayouts(null, [7])).not.toThrow();
-    });
-  });
-
-  it("keeps a detached window out of the shared store", () => {
-    // A satellite's tabs were transferred *out of* a worktree a main window
-    // owns, so writing them under that worktree's key would overwrite the
-    // layout they came from.
-    const durable = fake();
-    writeLayouts(fake(), durable, "main-w2", layouts, true);
     expect(durable.map.get(layoutSlotKey("main-w2"))).toBe(serializeLayouts(layouts));
-    expect(durable.map.get(LAYOUT_WORKTREE_KEY)).toBeUndefined();
   });
 
-  it("writes only the session store without a slot", () => {
+  /**
+   * **The change this file is about.** A worktree's panes are the worktree's,
+   * so they live in the daemon (`ide/layoutStore.ts`) and not in any one
+   * client's storage. A main window writing here is what made a browser tab and
+   * a desktop window disagree about which terminals exist.
+   */
+  it("gives a main window nothing, and stores nothing for it", () => {
+    const session = fake({ "veld.panes.v1": serializeLayouts(layouts) });
+    const durable = fake({ [layoutSlotKey("main")]: serializeLayouts(layouts) });
+    expect(readLayouts(session, durable, "main", null, true, false)).toEqual({});
+    writeLayouts(session, durable, "main", { 9: twoDock(0.4) }, false);
+    expect(session.map.get("veld.panes.v1")).toBe(serializeLayouts(layouts));
+    expect(durable.map.get(layoutSlotKey("main"))).toBe(serializeLayouts(layouts));
+  });
+
+  it("writes nothing durable for a detached window with no slot", () => {
     const session = fake();
     const durable = fake();
-    writeLayouts(session, durable, null, layouts);
+    writeLayouts(session, durable, null, layouts, true);
     expect(session.map.size).toBe(1);
-    // A browser tab must not leave a layout behind that another tab could
-    // restore — both would attach to the same shells and take them from each
-    // other on every reattach.
     expect(durable.map.size).toBe(0);
   });
 
@@ -1255,12 +1195,12 @@ describe("layout slots", () => {
     const session = fake({ "veld.panes.v1": serializeLayouts(mine) });
     const durable = fake({ [layoutSlotKey("main")]: serializeLayouts(stale) });
     // A reload must not resurrect a layout from before the last change.
-    expect(readLayouts(session, durable, "main")).toEqual(mine);
+    expect(readLayouts(session, durable, "main-w2", null, true, true)).toEqual(mine);
   });
 
   it("ignores the slot store without a slot", () => {
     const durable = fake({ [layoutSlotKey("main")]: serializeLayouts(layouts) });
-    expect(readLayouts(fake(), durable, null)).toEqual({});
+    expect(readLayouts(fake(), durable, null, null, true, true)).toEqual({});
   });
 
   it("keeps satellites apart, by slot", () => {
@@ -1274,57 +1214,16 @@ describe("layout slots", () => {
     expect(layoutSlotKey("main-w2")).not.toBe(layoutSlotKey("main-w3"));
   });
 
-  it("hands one worktree's panes to whichever main window shows it next", () => {
-    // The point of the shared store. Window A writes its layouts; window B, on
-    // a different slot, picks the same worktree up — one set of panes, one
-    // window showing them, and no hand-off protocol between them. What stops
-    // *both* rendering it is the shell's claim, not this key.
-    const durable = fake();
-    writeLayouts(fake(), durable, "main", { 7: layout });
-    expect(worktreeLayoutFrom(durable, 7)).toEqual(layout);
-  });
-
-  it("gives a main window nothing at boot, whatever the store holds", () => {
-    // Ownership, not thrift. `writeLayouts` merges this window's `layouts` over
-    // what is on disk, so a window that booted holding every worktree stamped
-    // its boot snapshot back over each of them on every save — reverting
-    // worktrees another window had been editing since, and orphaning the panes
-    // added in the meantime. A window owns what it displays and picks the rest
-    // up one at a time through `worktreeLayoutFrom`.
-    const durable = fake({ [LAYOUT_WORKTREE_KEY]: serializeLayouts(layouts) });
-    expect(readLayouts(fake(), durable, "main")).toEqual({});
-    expect(readLayouts(fake(), durable, "main", null, true)).toEqual({});
-  });
-
-  it("reads one worktree's panes fresh, not from a boot snapshot", () => {
-    // What stops a window that claims a worktree from inventing a second set:
-    // it may not have that worktree in memory *because another window has been
-    // using it since this one booted*, and those panes are the ones that exist.
-    const durable = fake();
-    writeLayouts(fake(), durable, "main", { 7: layout });
-    expect(worktreeLayoutFrom(durable, 7)).toEqual(layout);
-    expect(worktreeLayoutFrom(durable, 99)).toBeNull();
-  });
-
-  it("gives a plain browser tab nothing durable, in either direction", () => {
-    // A tab is a session; two of them restoring one layout would attach to the
-    // same shells and take them from each other on every reattach.
-    const durable = fake({ [LAYOUT_WORKTREE_KEY]: serializeLayouts(layouts) });
-    expect(readLayouts(fake(), durable, null)).toEqual({});
-    writeLayouts(fake(), durable, null, { 9: twoDock(0.4) });
-    expect(parseLayouts(durable.map.get(LAYOUT_WORKTREE_KEY) ?? null)).toEqual(layouts);
-  });
-
   it("survives storage being unavailable", () => {
     // Storage access throws outright in some privacy configurations, and this
     // runs in a useState initialiser where a throw white-screens the app.
-    expect(readLayouts(null, null, "main")).toEqual({});
-    expect(() => writeLayouts(null, null, "main", layouts)).not.toThrow();
+    expect(readLayouts(null, null, "main-w2", null, true, true)).toEqual({});
+    expect(() => writeLayouts(null, null, "main-w2", layouts, true)).not.toThrow();
   });
 
   it("degrades to no saved layout on a corrupt slot store", () => {
-    const durable = fake({ [layoutSlotKey("main")]: "{not json" });
-    expect(readLayouts(fake(), durable, "main")).toEqual({});
+    const durable = fake({ [layoutSlotKey("main-w2")]: "{not json" });
+    expect(readLayouts(fake(), durable, "main-w2", null, true, true)).toEqual({});
   });
 
   describe("the detach seed", () => {
@@ -1334,13 +1233,13 @@ describe("layout slots", () => {
     it("is what a brand-new detached window boots with", () => {
       // Neither store has anything: this window did not exist a moment ago, and
       // the tabs it is meant to hold were handed to it on its command line.
-      expect(readLayouts(fake(), fake(), "main-w2", seed)).toEqual(seeded);
+      expect(readLayouts(fake(), fake(), "main-w2", seed, false, true)).toEqual(seeded);
     });
 
     it("loses to the session store, so a reload does not resurrect it", () => {
       const mine = { 4: twoDock(0.8) };
       expect(
-        readLayouts(fake({ "veld.panes.v1": serializeLayouts(mine) }), fake(), "main-w2", seed),
+        readLayouts(fake({ "veld.panes.v1": serializeLayouts(mine) }), fake(), "main-w2", seed, false, true),
       ).toEqual(mine);
     });
 
@@ -1357,7 +1256,7 @@ describe("layout slots", () => {
       // attached to, taking them over from the window that just adopted them.
       const dead = { 4: twoDock(0.8) };
       const durable = fake({ [layoutSlotKey("main-w2")]: serializeLayouts(dead) });
-      expect(readLayouts(fake(), durable, "main-w2", seed)).toEqual(seeded);
+      expect(readLayouts(fake(), durable, "main-w2", seed, false, true)).toEqual(seeded);
     });
 
     it("is not consulted by a restored window, which has no seed", () => {
@@ -1382,14 +1281,14 @@ describe("layout slots", () => {
           focused: 0,
         },
       });
-      const restored = readLayouts(fake(), fake(), "main-w2", hostile);
+      const restored = readLayouts(fake(), fake(), "main-w2", hostile, false, true);
       expect(restored[4].docks[0].tabs[0].url).toBeUndefined();
     });
 
     it("is absent by default, so nothing changes for a window that has none", () => {
-      expect(readLayouts(fake(), fake(), "main")).toEqual({});
-      expect(readLayouts(fake(), fake(), "main", null)).toEqual({});
-      expect(readLayouts(fake(), fake(), "main", "{not json")).toEqual({});
+      expect(readLayouts(fake(), fake(), "main-w2", null, true, true)).toEqual({});
+      expect(readLayouts(fake(), fake(), "main-w2", null, true, true)).toEqual({});
+      expect(readLayouts(fake(), fake(), "main-w2", "{not json", true, true)).toEqual({});
     });
   });
 
