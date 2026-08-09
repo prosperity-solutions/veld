@@ -229,7 +229,10 @@ function EndpointRow(props: {
     return (
       <div className="node-url-row">
         {label}
-        <Tooltip label="Raw TCP port — reachable at this address, not over HTTP">
+        {/* The address is in the label, not only in the row: the row ellipsises
+            in a narrow pane, and this is the one place the full value is
+            readable without copying it. */}
+        <Tooltip label={`${address} — raw TCP, reachable at this address, not over HTTP`}>
           <span className="node-address">{address}</span>
         </Tooltip>
         <span className="node-proto">tcp</span>

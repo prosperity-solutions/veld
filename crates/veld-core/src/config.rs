@@ -5116,6 +5116,16 @@ struct BuiltinSite {
     /// [`ResolvedPorts::choose_primary`], which refuses an `http`-named entry
     /// that declares `"protocol": "tcp"` precisely so the two cannot diverge.
     primary: Option<String>,
+    /// Whether `primary` is `None` because veld could not *tell* which port is
+    /// the front door, as opposed to the node legitimately having none.
+    ///
+    /// Carried from [`ResolvedPorts::primary_ambiguous`] rather than re-derived
+    /// from `http_ports`: resolved protocols default to `tcp` whenever there is
+    /// no primary, so a node writing `{"a": "auto", "b": "auto"}` has an empty
+    /// `http_ports` and is nonetheless ambiguous — and telling that author
+    /// "every port you declared is tcp" is both false and the opposite of the
+    /// advice `ambiguous-primary-port` gives them one line earlier.
+    primary_ambiguous: bool,
 }
 
 /// The pieces `${veld.url…}` and `${veld.urls.<name>…}` decompose into, mirroring
@@ -5152,6 +5162,7 @@ impl BuiltinSite {
             ports: Vec::new(),
             http_ports: Vec::new(),
             primary: None,
+            primary_ambiguous: false,
         }
     }
 
@@ -5270,11 +5281,17 @@ impl BuiltinSite {
             }
             if self.primary.is_none() {
                 // Two ways to have no primary, and they need opposite advice.
-                // Saying "every port is tcp" to a node with two http ports is
-                // flatly false, and it contradicts the `ambiguous-primary-port`
-                // error printed beside it.
-                if !self.http_ports.is_empty() {
-                    let mut names = self.http_ports.clone();
+                // Saying "every port is tcp" to a node veld simply could not
+                // choose for is false, and contradicts the
+                // `ambiguous-primary-port` error printed beside it.
+                if self.primary_ambiguous {
+                    // The http ports where there are any (two front doors), else
+                    // every declared port (no port said which one it is).
+                    let mut names = if self.http_ports.is_empty() {
+                        self.ports.clone()
+                    } else {
+                        self.http_ports.clone()
+                    };
                     names.sort();
                     return format!(
                         "`${{veld.{name}}}` describes the node's primary port, and veld cannot \
@@ -5452,6 +5469,7 @@ fn check_builtin_names(config: &VeldConfig, out: &mut Vec<Finding>) {
                 .map(|(name, _)| name.clone())
                 .collect(),
             primary: resolved_ports.primary.clone(),
+            primary_ambiguous: resolved_ports.primary_ambiguous,
         }
     }
 
@@ -9614,6 +9632,25 @@ mod tests {
         assert!(
             !msgs[0].contains("every port it declares"),
             "must not claim they are all tcp: {}",
+            msgs[0]
+        );
+
+        // The case the `http_ports`-based gate got wrong: two ports, neither
+        // declaring a protocol. There is no primary and no *resolved* http port
+        // — resolved protocols default to tcp whenever there is no primary — so
+        // gating on `http_ports` sent this author the all-tcp sentence, one line
+        // away from `ambiguous-primary-port` telling them none is marked http.
+        let two_bare = r#"{"a":"auto","b":"auto"}"#;
+        let msgs = lint_case(two_bare, "${veld.port}");
+        assert_eq!(msgs.len(), 1, "{msgs:?}");
+        assert!(
+            msgs[0].contains("which of these is the front door"),
+            "{}",
+            msgs[0]
+        );
+        assert!(
+            !msgs[0].contains("every port it declares"),
+            "the author declared no protocol at all — they were not told it is tcp: {}",
             msgs[0]
         );
 
