@@ -755,8 +755,15 @@ impl Diagnostics {
     /// user as a terminal that will not open. So the length is checked first, and
     /// it is a *failure* rather than a note — nothing works until it is fixed.
     fn terminal_holders_check(&self, daemon_up: bool) -> Check {
-        let dir = veld_core::instance::pty_dir();
-        let shown = tilde_path(&dir);
+        Self::holders_row(&veld_core::instance::pty_dir(), daemon_up)
+    }
+
+    /// The body of [`Self::terminal_holders_check`], taking its directory rather
+    /// than reading `VELD_PTY_DIR` — so a test can hand it a real listener in a
+    /// tempdir and observe whether this knocks on it, which is the behaviour worth
+    /// pinning and is not observable through the environment without a lock.
+    fn holders_row(dir: &Path, daemon_up: bool) -> Check {
+        let shown = tilde_path(dir);
         // The name a real socket would get: `socket_for` digests the session id to
         // a fixed 16 hex chars precisely so every session's path is the same length,
         // which is what makes one probe answer for all of them.
@@ -785,7 +792,7 @@ impl Diagnostics {
         // `helper.sock` as terminals — and, worse, connects to them. A missing
         // directory is an empty list, which is the ordinary state: it appears with
         // the first terminal and nothing prunes it.
-        let sockets = veld_core::instance::holder_sockets_in(&dir);
+        let sockets = veld_core::instance::holder_sockets_in(dir);
         if sockets.is_empty() {
             return Check {
                 pass: true,
@@ -1396,6 +1403,59 @@ fn colorize_status(status: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `veld doctor` must not knock on a holder that has a daemon attached.
+    ///
+    /// This command was the reported trigger for terminals dying: connecting to a
+    /// holder is how a daemon arrives, and a holder that still runs the pre-fix
+    /// binary — which every terminal open at update time does, until its shell
+    /// exits — hands the session to anything that connects. So the row counts
+    /// while the daemon is up and probes only when it is down, and the assertion
+    /// is on the *listener*: whether anything reached it, not what the label says.
+    #[test]
+    fn the_holder_row_only_knocks_when_the_daemon_is_down() {
+        let dir = tempfile::tempdir().unwrap();
+        // A digest-shaped name, which is what `holder_sockets_in` looks for.
+        let socket = dir.path().join("00000000deadbeef.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        // Something that is not a holder, beside it: it must be counted by
+        // neither branch.
+        std::fs::write(dir.path().join("daemon.sock"), b"").unwrap();
+
+        let row = Diagnostics::holders_row(dir.path(), true);
+        assert!(row.pass);
+        assert!(
+            row.label.contains("1 terminal holder(s)") && row.label.contains("not probed"),
+            "a counted row must say it did not probe: {}",
+            row.label
+        );
+        assert!(
+            listener.accept().is_err(),
+            "nothing may connect to a holder while its daemon is attached"
+        );
+
+        let row = Diagnostics::holders_row(dir.path(), false);
+        assert!(row.pass);
+        assert_eq!(
+            row.label,
+            format!("1 terminal holder(s) running ({})", tilde_path(dir.path())),
+            "with no daemon there is nothing to displace, and the answer is worth having"
+        );
+        assert!(
+            listener.accept().is_ok(),
+            "the probe must actually reach the socket"
+        );
+
+        // And an empty directory is the ordinary state, not a failure.
+        let empty = tempfile::tempdir().unwrap();
+        assert!(Diagnostics::holders_row(empty.path(), true).pass);
+        assert!(
+            Diagnostics::holders_row(empty.path(), true)
+                .label
+                .starts_with("No terminal holders")
+        );
+    }
 
     #[test]
     fn the_log_path_is_read_out_of_a_plist() {

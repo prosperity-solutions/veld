@@ -512,9 +512,11 @@ static LIVE_SESSIONS: AtomicUsize = AtomicUsize::new(0);
 /// holder would exempt a genuinely fresh spawn from those same rules. This
 /// carries the worktree id for the same reason the registry's entry does.
 ///
-/// Entries leave when the session is registered again ([`register`]) or when
-/// its shell is ended ([`hang_up_released_holder`]); the rest are pruned inside
-/// `release_session`, which is the only place that adds one.
+/// Entries leave when the session is registered again ([`register`]), when its
+/// shell is ended ([`hang_up_released_holder`]), and — the one that matters for
+/// correctness — when [`released_worktree`] reads one whose holder socket is
+/// gone. `release_session`'s own sweep is a bound on entries nobody ever reads
+/// back, not the thing that keeps them true.
 static RELEASED: LazyLock<Mutex<HashMap<String, i64>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
@@ -613,32 +615,33 @@ async fn end_session(id: &str, reason: &str) -> bool {
 /// else's shell: the socket is derived from the id, and the greeting must claim
 /// that same id — the check `adopt_one` makes for the same reason.
 async fn hang_up_released_holder(id: &str, reason: &str) -> bool {
-    // Whatever happens below, this daemon is done with the session: the user asked
-    // for it to end. Dropped on *every* path, not only the one that reached a
-    // holder — an entry left behind by a holder that had already gone is one that
-    // outlives its shell, and the next attach for that id would be told it was
-    // resuming something.
-    let released = RELEASED.lock().expect("released set poisoned").remove(id);
     if !valid_session_id(id) {
         return false;
     }
-    let Ok(attached) = connect_holder(&socket_for(id)).await else {
-        return false;
+    let attached = match connect_holder(&socket_for(id)).await {
+        Ok(attached) => attached,
+        Err(e) => {
+            // Nothing is behind the socket: the shell this record stood for is
+            // gone, so the record goes too. Every *other* failure leaves it alone
+            // — this connect is single-shot, and a live holder parks its own loop
+            // for longer than a handshake gets (see `holder_is_alive`). Dropping
+            // the record there would classify the next attach as a fresh spawn and
+            // let the trash and cwd gates refuse a shell that is still running.
+            if is_unanswered(&e) {
+                RELEASED.lock().expect("released set poisoned").remove(id);
+            }
+            return false;
+        }
     };
     if attached.hello.session_id != id {
-        // A digest collision, or a hand-planted socket. Not ours to hang up — and
-        // it was never the released one, so put that entry back.
+        // A digest collision, or a hand-planted socket. Not ours to hang up, and
+        // not ours to forget either.
         warn!("not ending {id:?}: the holder at its socket answers for another session");
-        if let Some(worktree_id) = released {
-            RELEASED
-                .lock()
-                .expect("released set poisoned")
-                .insert(id.to_owned(), worktree_id);
-        }
         return false;
     }
     info!(session = %id, pid = attached.hello.pid, reason, "ending a released terminal session");
     discard_holder(attached, reason).await;
+    RELEASED.lock().expect("released set poisoned").remove(id);
     true
 }
 
@@ -1920,7 +1923,7 @@ async fn attach(
         Err(SessionError::Unreachable(e)) => {
             warn!(
                 session = %ticket.session_id,
-                "a holder is serving this session but could not be reached: {e}"
+                "could not reach the holder at this session's socket: {e}"
             );
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -1961,12 +1964,12 @@ async fn attach(
 enum SessionError {
     AtCapacity,
     Spawn(anyhow::Error),
-    /// A holder is serving this session and could not be reached — a wedged
-    /// holder, a protocol version this build refuses. Separate from
-    /// [`SessionError::Spawn`] because nothing was spawned and, more usefully for
-    /// whoever reads the message, the shell is probably still alive: "could not
-    /// start a shell" would send them looking for a startup failure that never
-    /// happened.
+    /// The holder at this session's socket could not be reached, or is not this
+    /// session's — a wedged holder, a protocol version this build refuses, a
+    /// greeting that answers for another id. Separate from
+    /// [`SessionError::Spawn`] because nothing was spawned: "could not start a
+    /// shell" sends whoever reads it looking for a startup failure that never
+    /// happened, when the thing to look at is the holder.
     Unreachable(anyhow::Error),
     /// Another attach for the same session id is mid-spawn. The caller cannot
     /// usefully wait, because the shell it would get is about to exist under an
@@ -2564,9 +2567,10 @@ async fn holder_is_alive(id: &str) -> bool {
 async fn release_session(session: &Arc<Session>) {
     {
         let mut released = RELEASED.lock().expect("released set poisoned");
-        // Opportunistic prune, on the rare path rather than on the read: an entry
-        // whose holder socket is gone describes a shell nobody can reach any more,
-        // and nothing else would ever remove it.
+        // A bound, not the correctness rule — `released_worktree` prunes what it
+        // reads. This is what keeps entries for ids nobody ever asks about again
+        // from accumulating for the life of the daemon, and it runs here because
+        // this is the rare path.
         released.retain(|id, _| socket_for(id).exists());
         released.insert(session.id.clone(), session.worktree_id);
     }
@@ -4127,6 +4131,74 @@ mod tests {
             end_session(&sid, "test cleanup").await;
         }
 
+        /// A holder that answers for another session is never adopted — and never
+        /// hung up either.
+        ///
+        /// The socket path is a digest of the session id, so what sits behind it
+        /// is a claim, not a fact; `mint_ticket`'s cross-worktree guard reads the
+        /// *registry*, so a session absent from it walks past that guard and this
+        /// check is what stops there. It is also the reason the adopt path may not
+        /// "clean up" what it refuses: that holder has somebody else's live shell
+        /// in it.
+        #[tokio::test]
+        async fn a_holder_answering_for_another_session_is_refused_not_adopted() {
+            use std::io::Write;
+
+            let addr = serve().await;
+            let dir = tempfile::tempdir().unwrap();
+            let ours = session_id();
+            let theirs = session_id();
+
+            // A real holder, at *our* socket path, announcing *their* id.
+            let cfg = wire::HolderConfig {
+                session_id: theirs.clone(),
+                worktree_id: 1,
+                label: "test".to_owned(),
+                cwd: dir.path().to_path_buf(),
+                cols: 80,
+                rows: 24,
+                socket: socket_for(&ours),
+                orphan_grace_secs: 3600,
+                argv: Some(vec!["cat".to_owned()]),
+                env: std::collections::BTreeMap::new(),
+                pane_label: None,
+            };
+            tokio::spawn(holder::run(cfg));
+            let deadline = Instant::now() + STEP_TIMEOUT;
+            while !socket_for(&ours).exists() {
+                assert!(Instant::now() < deadline, "the fixture holder must bind");
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+
+            let ticket = plant_ticket(&ours, dir.path());
+            assert_eq!(
+                handshake_status(attach_request(
+                    addr,
+                    &format!("ticket={ticket}"),
+                    Some(&good_origin()),
+                ))
+                .await,
+                http::StatusCode::SERVICE_UNAVAILABLE,
+                "a holder that answers for another session is not this session's"
+            );
+            assert!(
+                SESSIONS.lock().await.get(&ours).is_none(),
+                "and nothing may be registered for it"
+            );
+            assert!(
+                socket_for(&ours).exists(),
+                "the refused holder must be left alone, not hung up"
+            );
+
+            // Cleanup: the five bytes any peer may write, since this holder is not
+            // one this daemon owns a session for.
+            let mut blunt = std::os::unix::net::UnixStream::connect(socket_for(&ours)).unwrap();
+            let mut frame = vec![wire::HANGUP];
+            frame.extend_from_slice(&0u32.to_be_bytes());
+            blunt.write_all(&frame).unwrap();
+            blunt.flush().unwrap();
+        }
+
         /// A released session is a resume; one whose holder has since gone is not.
         ///
         /// `mint_ticket` reads this to decide whether an attach is a resume, and a
@@ -4161,20 +4233,35 @@ mod tests {
                  the worktree it was started in"
             );
 
-            // The shell ends on its own — which this daemon cannot see, because
-            // releasing is precisely giving up the link that would have told it.
-            // A holder unlinks its socket on the way out.
-            end_session(&sid, "test cleanup").await;
-            let deadline = Instant::now() + STEP_TIMEOUT;
-            while socket_for(&sid).exists() {
-                assert!(Instant::now() < deadline, "the holder must exit");
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-            assert_eq!(
-                released_worktree(&sid),
-                None,
-                "an entry whose holder is gone must not make the next attach a resume"
+            // The other half, and it is written by hand for a reason: the state it
+            // describes — a record whose holder has gone — is one this daemon
+            // cannot produce on demand, because releasing is precisely giving up
+            // the link that would tell it the shell ended. Ending the session
+            // through the API instead would satisfy the assertion by removing the
+            // record itself, and the test would pass with the prune deleted.
+            let ghost = session_id();
+            RELEASED
+                .lock()
+                .expect("released set poisoned")
+                .insert(ghost.clone(), worktree_id);
+            assert!(
+                !socket_for(&ghost).exists(),
+                "the fixture needs an id with no holder"
             );
+            assert_eq!(
+                released_worktree(&ghost),
+                None,
+                "a record whose holder is gone must not make the next attach a resume"
+            );
+            assert!(
+                !RELEASED
+                    .lock()
+                    .expect("released set poisoned")
+                    .contains_key(&ghost),
+                "and reading it must drop it, since nothing else will"
+            );
+
+            end_session(&sid, "test cleanup").await;
         }
 
         /// Closing a pane must reach the shell even when this daemon has given the
