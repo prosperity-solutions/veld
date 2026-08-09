@@ -514,8 +514,8 @@ static LIVE_SESSIONS: AtomicUsize = AtomicUsize::new(0);
 ///
 /// Entries leave when the session is registered again ([`register`]), when its
 /// shell is ended ([`hang_up_released_holder`]), and — the one that matters for
-/// correctness — when [`released_worktree`] reads one whose holder no longer
-/// answers. `release_session`'s own sweep is a bound on entries nobody ever reads
+/// correctness — when [`released_worktree`] reads one whose holder socket is
+/// gone. `release_session`'s own sweep is a bound on entries nobody ever reads
 /// back, not the thing that keeps them true.
 static RELEASED: LazyLock<Mutex<HashMap<String, i64>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -523,25 +523,32 @@ static RELEASED: LazyLock<Mutex<HashMap<String, i64>>> =
 /// The worktree a released session belongs to, if this daemon released one and
 /// a holder could still be serving it.
 ///
-/// The record is **necessary but not sufficient**, and the difference is the
-/// whole reason it exists: a holder still has to answer for the id. The socket
-/// file alone would not do — that is evidence of some holder, not of *this*
-/// session, and a `SIGKILL`ed holder leaves one behind — so this asks the holder,
-/// through the same fail-safe question `pump_holder` asks
-/// ([`holder_is_alive`]: only a definitively unanswered socket counts as gone).
-/// Failing safe is the right direction here too: treating a live shell as a fresh
-/// spawn refuses a reattach the trash check promises to allow, while the converse
-/// is one terminal opened under a resume's rules.
-///
-/// Asking here rather than only in `release_session` is what keeps a record from
+/// The socket is checked as a **necessary** condition, never a sufficient one,
+/// and the difference is the whole reason this map exists: a socket file is
+/// evidence of some holder, not of *this* session, so a leftover one must not
+/// make a fresh spawn look like a resume — but its absence is proof the holder
+/// this record describes is gone (a holder unlinks its socket on the way out).
+/// Pruning here rather than only in `release_session` is what keeps a record from
 /// outliving the shell it stands for: a released session whose shell then exits
 /// on its own is a case nothing else observes, because this daemon gave up the
-/// link that would have told it — that is what "released" means. The cost is one
-/// handshake, on a path that is only reached when a record exists at all.
-async fn released_worktree(id: &str) -> Option<i64> {
-    let worktree_id = *RELEASED.lock().expect("released set poisoned").get(id)?;
-    if !holder_is_alive(id).await {
-        RELEASED.lock().expect("released set poisoned").remove(id);
+/// link that would have told it — that is what "released" means.
+///
+/// **Do not "improve" this into a `holder_is_alive` handshake.** It was written
+/// that way for one round and reverted: the greeting a holder sends a peer that
+/// connects after its shell has exited *contains the exit code*, and delivering
+/// it is what ends the holder ([`holder::deliver_exit`]). A probe from here is
+/// issued by the handler that runs immediately before the attach which would have
+/// adopted that holder — so the probe consumed the post-mortem, the holder exited,
+/// and the reattach found nothing and started a fresh shell, losing the scrollback
+/// the release existed to preserve. The residual it was meant to fix is far
+/// smaller: a `SIGKILL`ed holder leaves its socket, which reads as a resume and
+/// skips the trash and cwd gates for a genuinely fresh spawn. A terminal in a
+/// trashed worktree beats a silently discarded one.
+fn released_worktree(id: &str) -> Option<i64> {
+    let mut released = RELEASED.lock().expect("released set poisoned");
+    let worktree_id = *released.get(id)?;
+    if !socket_for(id).exists() {
+        released.remove(id);
         return None;
     }
     Some(worktree_id)
@@ -1455,7 +1462,7 @@ async fn mint_ticket(
     // worktree, or one whose directory has moved, which is exactly what the note
     // under the trash check promises not to do.
     let resumed = registered
-        || match released_worktree(&body.session_id).await {
+        || match released_worktree(&body.session_id) {
             Some(worktree_id) if worktree_id != body.worktree_id => {
                 // The same claim the registry arm above makes, and it has to be
                 // made here too: a released session is still owned by the worktree
@@ -4256,7 +4263,7 @@ mod tests {
             drop(ws);
 
             assert_eq!(
-                released_worktree(&sid).await,
+                released_worktree(&sid),
                 Some(worktree_id),
                 "a released session with a live holder is a resume, and belongs to \
                  the worktree it was started in"
@@ -4290,7 +4297,7 @@ mod tests {
                 "the record must still be there for the read to be the thing under test"
             );
             assert_eq!(
-                released_worktree(&ghost).await,
+                released_worktree(&ghost),
                 None,
                 "a record whose holder is gone must not make the next attach a resume"
             );
