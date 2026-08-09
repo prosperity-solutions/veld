@@ -3458,6 +3458,18 @@ function AppInner(props: {
             // computed from the list *plus* the created row rather than after a
             // refresh, because `worktrees` here is this render's list and would
             // still be the pre-create one.
+            //
+            // Only the rows that were **already hand-placed**, plus this one.
+            // `moveWorktree` returns the whole repo's order, and writing that
+            // would give a `sort_position` to every unplaced row in every
+            // section — one click of any "＋" silently freezing the label sort
+            // repo-wide, and falsifying the promise that what you have not
+            // placed stays alphabetical. `reorder_worktrees` clears the
+            // positions it is not given, so the omitted rows stay unplaced,
+            // which is exactly the state they should keep.
+            const placed = new Set(
+              worktrees.filter((w) => w.sort_position !== null).map((w) => w.path),
+            );
             const order = moveWorktree(
               railGroups([...worktrees, created], lanes),
               created.path,
@@ -3466,7 +3478,10 @@ function AppInner(props: {
             );
             if (order) {
               try {
-                await api.reorderWorktrees(repo.root, order.order);
+                await api.reorderWorktrees(
+                  repo.root,
+                  order.order.filter((p) => p === created.path || placed.has(p)),
+                );
               } catch (e) {
                 // The worktree exists and is usable; only its position is wrong.
                 // Reported, not thrown — throwing would keep the create dialog
@@ -4272,12 +4287,17 @@ function Rail(props: {
    *
    * Measured against the sections' geometry rather than resolved from the
    * element under the pointer, and that is the whole point. Per-element hit
-   * testing made the gesture directional: a lane is grabbed by its header, which
-   * sits at the *top* of its own section, so one pixel upwards is already inside
-   * the section above, while dragging downwards has to clear the dragged lane's
-   * entire height before anything registers — and the 9px gutters, the list's
-   * padding and everything below the last lane belonged to no section at all, so
-   * "pull it to the bottom and let go" landed on nothing.
+   * testing made the gesture directional: the 9px gutters, the list's padding
+   * and everything below the last lane belonged to no section at all, so "pull
+   * it to the bottom and let go" landed on nothing, and a downward drag
+   * registered only where a section happened to be under the pointer.
+   *
+   * What this does **not** remove is the travel a downward move costs. The
+   * dragged lane keeps its place and its height while it is carried, so the
+   * pointer has to clear its own section's bottom before the lane below is the
+   * answer, while the lane above is one pixel past the header it was grabbed by.
+   * That is the price of not reflowing the rail under a pointer that is aiming
+   * at it; the bar tracks the whole way, so it is visible rather than silent.
    *
    * The DOM read lives here and the choice lives in `laneDropTarget`, which has
    * the tests: this mapping is the part that was wrong in every attempt at the
@@ -4448,6 +4468,13 @@ function Rail(props: {
                 draggable={group.editable && canDrag}
                 onDragStart={(e) => {
                   setDragLane(group.lane);
+                  // The two drags are exclusive, and this is what makes that
+                  // true rather than conventional: every drop zone answers only
+                  // to its own drag, so a `dragend` that never arrived (the
+                  // source unmounted by the 5s poll, say) would otherwise leave
+                  // both live and both sets of handlers armed at once.
+                  setDragPath(null);
+                  setDropAt(null);
                   e.dataTransfer.effectAllowed = "move";
                   // Firefox ignores a drag with no payload. Prefixed because a
                   // worktree drag puts a bare path here and something outside the
@@ -4661,6 +4688,10 @@ function Rail(props: {
                   draggable={canDrag && !trashed && !group.pinned && !w.is_main}
                   onDragStart={(e) => {
                     setDragPath(w.path);
+                    // Exclusive with the lane drag — see the lane header's own
+                    // `onDragStart`.
+                    setDragLane(null);
+                    setLaneDropAt(null);
                     e.dataTransfer.effectAllowed = "move";
                     // Firefox ignores a drag with no payload, and the path is the
                     // key everything downstream uses anyway.
@@ -4919,8 +4950,14 @@ function Rail(props: {
       >
         {scroll.map((group) => renderGroup(group))}
       </div>
+      {/* The dock takes a lane drop too, though it holds no lane. It is the
+          natural overshoot for "pull this lane to the bottom", and it is the
+          strip immediately under the edge you have to reach to get there —
+          refusing there made the last position the one place the gesture could
+          miss. `laneTargetAt` already answers "below everything" with the last
+          lane, so the two handlers agree by construction. */}
       {dockVisible && (
-        <div className="rail-dock" onDragEnd={endDrag}>
+        <div className="rail-dock" onDragEnd={endDrag} {...(laneDrop ?? {})}>
           {docked.map((group) => renderGroup(group))}
         </div>
       )}
