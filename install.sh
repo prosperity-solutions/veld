@@ -26,6 +26,19 @@
 #   VELD_BINARY_ICONS=0   Do not give the CLI/daemon/helper the app's icon. They get
 #                         it so an authorization prompt raised on their behalf (1Password,
 #                         sudo) shows the Veld mark instead of a generic "exec" tile.
+#   VELD_EMBEDDED=1       This script is running *inside* another veld command
+#                         (`veld update` and friends run it with stdout
+#                         inherited). Two consequences: progress chatter, the
+#                         next-steps footer and the success banner are suppressed
+#                         so the caller owns the output (warnings and errors are
+#                         not), and the privileged helper restart is left to the
+#                         caller, which can do it without sudo and then verify it
+#                         worked. Always set on a CLI-driven run.
+#   VELD_VERBOSE=1        Print the chatter anyway. `veld update --verbose` sets
+#                         it to get the raw installer stream back for debugging.
+#                         Deliberately does NOT hand the privileged helper
+#                         restart back to this script — that is VELD_EMBEDDED's
+#                         job, and a debug flag must not bounce a root service.
 #   VELD_DESKTOP_RELAUNCH=1   Reopen the app afterwards — on EVERY exit path, not
 #                         only a successful one. The app quit itself to hand over,
 #                         so an unhandled failure would otherwise leave the user
@@ -40,6 +53,61 @@
 set -euo pipefail
 
 REPO="prosperity-solutions/veld"
+
+# --- Output mode ---
+#
+# `veld update` runs this script with VELD_EMBEDDED=1 and inherits its stdout, so
+# every line printed here lands in the middle of the CLI's own output. Left
+# unchecked that produces one command with three "installed successfully!"
+# banners, a first-install footer emitted halfway through an update, and two raw
+# curl meters.
+#
+# In embedded mode the CLI narrates — it is the half that knows the step count,
+# both versions, and whether the app is also moving — and this script speaks only
+# when something goes wrong. So `say` is for progress chatter and disappears when
+# embedded; warnings, errors and anything the user must act on keep using plain
+# `echo` and are never suppressed. When in doubt, use `echo`: a swallowed warning
+# is a worse bug than a duplicated line.
+# Two variables, because they answer two different questions and one of them is
+# not about output at all. `VELD_EMBEDDED` says *a veld command owns this run* —
+# which decides both that the caller prints the summary and that the caller, not
+# this script, restarts the privileged helper (it can do that without sudo and
+# then verify it worked). `VELD_VERBOSE` only asks for the chatter back.
+#
+# Keeping them apart is the point: tying the privileged-restart hand-off to the
+# output mode meant `veld update --verbose` silently re-enabled this script's own
+# `sudo launchctl kill`, so a debug flag bounced a root service and raced the CLI
+# for it.
+EMBEDDED=""
+case "${VELD_EMBEDDED:-}" in
+  1|true|yes) EMBEDDED="1" ;;
+esac
+
+VERBOSE=""
+case "${VELD_VERBOSE:-}" in
+  1|true|yes) VERBOSE="1" ;;
+esac
+
+# An `if`, not `[ … ] && [ … ] && QUIET=1`: under `set -e` that compound is the
+# statement's exit status, so a standalone install would abort here.
+QUIET=""
+if [ -n "$EMBEDDED" ] && [ -z "$VERBOSE" ]; then
+  QUIET="1"
+fi
+
+say() {
+  [ -n "$QUIET" ] || echo "$@"
+}
+
+# curl's default meter is a 13-column table (`% Xferd`, `Dload`, `Spent`) of which
+# one column matters, printed with an all-zeros first row. `--progress-bar` is the
+# same information as one self-overwriting line.
+#
+# Deliberately NOT silenced when embedded, unlike the text above: the app archive
+# is ~113 MB and takes about ten seconds, and a step line followed by ten seconds
+# of nothing reads as a hang. Progress is the one thing the script can say better
+# than the caller, because it is the half holding the socket.
+CURL_PROGRESS="--progress-bar"
 
 # --- Detect platform ---
 
@@ -63,7 +131,7 @@ OS="$(detect_os)"
 ARCH="$(detect_arch)"
 SUFFIX="${OS}-${ARCH}"
 
-echo "Detected platform: ${SUFFIX}"
+say "Detected platform: ${SUFFIX}"
 
 # --- What this run is allowed to install ---
 #
@@ -109,7 +177,7 @@ if [ -n "${VELD_VERSION:-}" ]; then
   VERSION="$VELD_VERSION"
   TAG="v${VERSION}"
 else
-  echo "Fetching latest release..."
+  say "Fetching latest release..."
   TAG="$(curl -fsSL -H "Accept: application/json" "https://api.github.com/repos/${REPO}/releases/latest" | grep -o '"tag_name": *"[^"]*"' | cut -d'"' -f4)"
   VERSION="${TAG#v}"
 fi
@@ -120,9 +188,12 @@ if [ -z "$VERSION" ]; then
 fi
 
 if [ -n "$DESKTOP_ONLY" ]; then
-  echo "Installing Veld Desktop ${VERSION} only (VELD_DESKTOP_ONLY=1) — the CLI is left alone."
+  # No mention of VELD_DESKTOP_ONLY: nobody typed that variable — `veld desktop
+  # install`, `veld update` and the app's own updater all set it — so naming it
+  # reads as a debug print rather than an explanation.
+  say "Installing Veld Desktop ${VERSION} (the CLI is left alone)..."
 else
-  echo "Installing veld ${VERSION}..."
+  say "Installing veld ${VERSION}..."
 fi
 
 # --- Working directory, and the state the exit path has to undo ---
@@ -183,7 +254,7 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-echo "Downloading checksums..."
+say "Downloading checksums..."
 HAVE_CHECKSUMS=""
 if curl -fSL -o "${TMP_DIR}/checksums.txt" "$CHECKSUMS_URL" 2>/dev/null; then
   HAVE_CHECKSUMS="1"
@@ -229,7 +300,7 @@ verify_checksum() {
     return 0
   fi
 
-  echo "Verifying checksum..."
+  say "Verifying checksum..."
   if [ "$OS" = "macos" ]; then
     actual="$(shasum -a 256 "$file" | awk '{print $1}')"
   else
@@ -242,7 +313,7 @@ verify_checksum() {
     echo "  Actual:   ${actual}"
     return 1
   fi
-  echo "Checksum verified."
+  say "Checksum verified."
 }
 
 # --- Veld Desktop (macOS) ---
@@ -445,8 +516,8 @@ install_desktop_app() {
   desktop_lock || return 1
   mkdir -p "$(dirname "$dest")" || return 1
 
-  echo ""
-  echo "Installing Veld Desktop ${VERSION}..."
+  say ""
+  say "Installing Veld Desktop ${VERSION}..."
 
   # The app that is being replaced must not be running: an Electron app reads
   # from its own bundle while it runs (asar, framework dylibs), so swapping the
@@ -494,8 +565,8 @@ install_desktop_app() {
     return 1
   fi
 
-  echo "Downloading ${url}..."
-  if ! curl -fSL -o "${TMP_DIR}/${zip}" "$url"; then
+  say "Downloading ${url}..."
+  if ! curl -fSL $CURL_PROGRESS -o "${TMP_DIR}/${zip}" "$url"; then
     echo "Warning: could not download ${zip}, skipping the app"
     return 1
   fi
@@ -556,7 +627,7 @@ install_desktop_app() {
     trap 'exit 143' TERM
 
     DESKTOP_APP="$dest"
-    echo "Veld Desktop installed to ${dest}"
+    say "Veld Desktop installed to ${dest}"
     return 0
   fi
 
@@ -577,21 +648,23 @@ if [ -n "$DESKTOP_ONLY" ]; then
     echo "Veld Desktop ${VERSION} was not installed."
     exit 1
   fi
-  echo ""
-  echo "Veld Desktop ${VERSION} installed successfully!"
-  echo ""
-  echo "  Veld Desktop:  ${DESKTOP_APP}"
+  # The failure above stays on `echo` — an app that did not install is news
+  # whoever called this needs. The success banner is the caller's to print.
+  say ""
+  say "Veld Desktop ${VERSION} installed successfully!"
+  say ""
+  say "  Veld Desktop:  ${DESKTOP_APP}"
   exit 0
 fi
 
 # --- Download and extract ---
 
-echo "Downloading ${URL}..."
-curl -fSL -o "${TMP_DIR}/${TARBALL}" "$URL"
+say "Downloading ${URL}..."
+curl -fSL $CURL_PROGRESS -o "${TMP_DIR}/${TARBALL}" "$URL"
 
 verify_checksum "${TMP_DIR}/${TARBALL}" "$TARBALL" || exit 1
 
-echo "Extracting..."
+say "Extracting..."
 # Verify tarball only contains expected files before extracting.
 TAR_CONTENTS="$(tar -tzf "${TMP_DIR}/${TARBALL}")"
 for entry in $TAR_CONTENTS; do
@@ -692,7 +765,7 @@ if [ -n "$EXISTING_VELD" ] && [ -z "${VELD_INSTALL_DIR:-}" ]; then
       ;;
     *)
       INSTALL_DIR="$EXISTING_DIR"
-      echo "Existing veld found at ${EXISTING_VELD}, updating in place."
+      say "Existing veld found at ${EXISTING_VELD}, updating in place."
       ;;
   esac
 else
@@ -716,7 +789,7 @@ fi
 # URLs stay up), and they pick up the new orchestrator on the next
 # `veld start`/`veld restart`.
 
-echo "Installing binaries..."
+say "Installing binaries..."
 $NEED_SUDO mkdir -p "$INSTALL_DIR"
 $NEED_SUDO mkdir -p "$LIB_DIR"
 
@@ -855,7 +928,7 @@ restart_launch_agent() {
   local label="$1" plist="$2" name="$3" target
   target="gui/$(id -u)/${label}"
   if launchctl print "$target" >/dev/null 2>&1; then
-    echo "Restarting ${name} service..."
+    say "Restarting ${name} service..."
     launchctl kill TERM "$target" 2>/dev/null || true
     # Belt, not redundancy: it makes this restart correct *without* depending on a
     # `KeepAlive` that lives in a different file. A job launchd is not currently
@@ -867,7 +940,7 @@ restart_launch_agent() {
     launchctl kickstart "$target" 2>/dev/null || true
   else
     # Nothing registered to signal, and a bootstrap here has no teardown to race.
-    echo "Loading ${name} service..."
+    say "Loading ${name} service..."
     launchctl bootstrap "gui/$(id -u)" "$plist" 2>/dev/null || true
   fi
 }
@@ -875,12 +948,18 @@ restart_launch_agent() {
 if [ "$OS" = "macos" ]; then
   if [ -n "$PRIVILEGED_MODE" ] && [ -z "$SWITCHING_TO_USER_PATHS" ]; then
     # Privileged mode (staying in place): helper runs as a system LaunchDaemon
-    # (root). Restarting it in the system domain requires root — the old code
-    # ran `$NEED_SUDO launchctl ... system/...` with NEED_SUDO empty for the
-    # default user-path install, so it silently failed and left a stale helper.
-    # If passwordless sudo is available, restart it now for an immediate swap;
-    # otherwise the helper restarts itself when it detects its binary changed
-    # (in-process watcher + the plist's WatchPaths) — no password prompt.
+    # (root), so restarting it in the system domain requires root.
+    #
+    # Embedded runs skip this entirely. `veld update` restarts the privileged
+    # helper itself — over the helper's own socket, which needs no root — and it
+    # is the half that can then wait for the version to flip and report the
+    # result. Racing it from here would bounce the helper twice and, worse, print
+    # a promise this script cannot keep: the old code said "will restart itself
+    # (no sudo needed)" seconds before the CLI asked for a password.
+    #
+    # A standalone `curl … | bash` has no such caller, so it keeps the
+    # passwordless attempt (never a prompt — `sudo -n`) and otherwise leaves the
+    # helper's own binary watcher to pick the new version up.
     #
     # Use a graceful SIGTERM (`launchctl kill TERM`), NOT `kickstart -k`: the
     # helper handles SIGTERM by exiting while leaving Caddy running, and the
@@ -888,10 +967,9 @@ if [ "$OS" = "macos" ]; then
     # every live URL stays up across the swap. A hard `kickstart -k` (SIGKILL,
     # possibly escalating to launchd job teardown) is riskier for the child
     # Caddy; the helper also spawns Caddy in its own process group as a second
-    # safeguard (see veld-helper caddy.rs). `veld update`'s own post-install
-    # restart uses this same graceful path.
+    # safeguard (see veld-helper caddy.rs).
     HELPER_PLIST="/Library/LaunchDaemons/dev.veld.helper.plist"
-    if [ -f "$HELPER_PLIST" ]; then
+    if [ -z "$EMBEDDED" ] && [ -f "$HELPER_PLIST" ]; then
       if sudo -n true 2>/dev/null; then
         echo "Restarting veld-helper service (privileged)..."
         sudo launchctl kill TERM system/dev.veld.helper 2>/dev/null || true
@@ -913,14 +991,15 @@ if [ "$OS" = "macos" ]; then
   fi
 else
   # Linux: restart systemd services if they exist (skip if switching to user paths).
-  if [ -n "$PRIVILEGED_MODE" ] && [ -z "$SWITCHING_TO_USER_PATHS" ]; then
+  # Embedded: `veld update` owns the privileged restart (see the macOS branch).
+  if [ -n "$PRIVILEGED_MODE" ] && [ -z "$SWITCHING_TO_USER_PATHS" ] && [ -z "$EMBEDDED" ]; then
     if systemctl is-active --quiet veld-helper 2>/dev/null; then
       echo "Restarting veld-helper service (privileged)..."
       $NEED_SUDO systemctl restart veld-helper 2>/dev/null || true
     fi
-  elif [ -z "$SWITCHING_TO_USER_PATHS" ]; then
+  elif [ -z "$PRIVILEGED_MODE" ] && [ -z "$SWITCHING_TO_USER_PATHS" ]; then
     if systemctl --user is-active --quiet veld-helper 2>/dev/null; then
-      echo "Restarting veld-helper service..."
+      say "Restarting veld-helper service..."
       systemctl --user restart veld-helper 2>/dev/null || true
     fi
   fi
@@ -1044,7 +1123,7 @@ case "${VELD_BINARY_ICONS:-}" in
   0|false|no) WANT_BINARY_ICONS="" ;;
 esac
 if [ "$OS" = "macos" ] && [ -n "$WANT_BINARY_ICONS" ] && [ -n "$DESKTOP_APP" ]; then
-  echo "Applying the Veld icon to the binaries..."
+  say "Applying the Veld icon to the binaries..."
   if ! apply_binary_icons "${DESKTOP_APP}/Contents/Resources/icon.icns"; then
     # Never fatal: an authorization prompt with the wrong icon is a worse prompt,
     # not a broken install.
@@ -1054,12 +1133,16 @@ if [ "$OS" = "macos" ] && [ -n "$WANT_BINARY_ICONS" ] && [ -n "$DESKTOP_APP" ]; 
 fi
 
 # --- Next steps (no auto-run of veld setup) ---
+#
+# Suppressed when embedded: this is a *first install*'s footer, and `veld update`
+# printed it halfway through an update — telling someone who has been running
+# veld for months to run `veld start` to get going.
 
-echo ""
-echo "Run 'veld start' in any project to get going."
-echo "Run 'veld setup' for more options."
+say ""
+say "Run 'veld start' in any project to get going."
+say "Run 'veld setup' for more options."
 if [ "$OS" = "macos" ] && [ -z "$DESKTOP_APP" ]; then
-  echo "Run 'veld desktop install' for the Mac app."
+  say "Run 'veld desktop install' for the Mac app."
 fi
 
 # --- PATH handling ---
@@ -1101,16 +1184,23 @@ if ! echo "$PATH" | tr ':' '\n' | grep -qx "$INSTALL_DIR"; then
 fi
 
 # --- Print success ---
+#
+# Suppressed when embedded: `veld update` prints one summary of its own, at the
+# true end of the run. Left in, this banner claimed the update was finished while
+# the service restarts and the app half were still to come — and it was one of
+# three "installed successfully!" lines in a single command.
 
-echo ""
-echo "veld ${VERSION} installed successfully!"
-echo ""
-echo "  veld binary:   ${INSTALL_DIR}/veld"
-echo "  veld-helper:   ${LIB_DIR}/veld-helper"
-echo "  veld-daemon:   ${LIB_DIR}/veld-daemon"
-echo "  caddy:         ${LIB_DIR}/caddy"
-# An `[ … ] && echo` here would be the script's last command, so a machine with no
+say ""
+say "veld ${VERSION} installed successfully!"
+say ""
+say "  veld binary:   ${INSTALL_DIR}/veld"
+say "  veld-helper:   ${LIB_DIR}/veld-helper"
+say "  veld-daemon:   ${LIB_DIR}/veld-daemon"
+say "  caddy:         ${LIB_DIR}/caddy"
+# An `[ … ] && say` here would be the script's last command, so a machine with no
 # app installed would exit non-zero — and `veld update` reads that exit code.
+# (`say` is a function, so it exits 0 even when it prints nothing; the hazard is
+# the `[ … ] &&` test itself, which is why this stays an `if`.)
 if [ -n "$DESKTOP_APP" ]; then
-  echo "  Veld Desktop:  ${DESKTOP_APP}"
+  say "  Veld Desktop:  ${DESKTOP_APP}"
 fi
