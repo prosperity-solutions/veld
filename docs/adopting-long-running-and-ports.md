@@ -225,8 +225,13 @@ own listener, never the origin's number.
 
 These are the items that can affect a config you do not edit. The first two are
 the same fix: a check that could not run used to answer "healthy", and now
-answers "no". Every one of them is reported by `veld lint`, which is why the
-first thing to do after upgrading is run it.
+answers "no".
+
+`veld lint` reports every one of them **except number 2**, which is silent by
+construction — a variant that erases its last port has said something veld now
+takes literally, and there is no way to tell that apart from meaning it. Run
+lint first anyway; then read 2 and decide whether any of your variants meant
+what they now say.
 
 1. **A probe that cannot check anything now fails instead of passing.** An
    unknown `type` — `{"type": "htpp"}` — used to mean "always healthy" on both
@@ -243,7 +248,8 @@ first thing to do after upgrading is run it.
 
 2. **A variant that erases its last port no longer gets a fresh one.** A variant
    writing `"ports": { "http": null }` over a node that declared only `http` now
-   has zero ports — as does a node or variant writing an empty `"ports": {}`. It used to collapse back to "nothing declared" and silently
+   has zero ports — as does a node or variant writing an empty `"ports": {}`.
+   **This is the silent one.** It used to collapse back to "nothing declared" and silently
    allocate a *new* port, which is the opposite of what the author wrote. If you
    have such a variant and it genuinely wanted a port, declare one; if it wanted
    none, it now needs a `command` or `settle` readiness probe.
