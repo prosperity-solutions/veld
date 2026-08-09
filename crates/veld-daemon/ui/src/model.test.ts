@@ -1056,59 +1056,61 @@ describe("laneDropTarget", () => {
 describe("moveLane", () => {
   const lanes = () => [lane("a", 0), lane("b", 1), lane("c", 2)];
 
-  it("takes the position of the lane it was dropped on, going up", () => {
-    expect(moveLane(lanes(), "c", 1)).toEqual(["a", "c", "b"]);
-    expect(moveLane(lanes(), "c", 0)).toEqual(["c", "a", "b"]);
+  it("takes the place of the lane it was dropped on, going up", () => {
+    expect(moveLane(lanes(), "c", "b")).toEqual(["a", "c", "b"]);
+    expect(moveLane(lanes(), "c", "a")).toEqual(["c", "a", "b"]);
   });
 
-  it("takes the position of the lane it was dropped on, going down", () => {
-    // The case the first implementation could not reach at all: dropping "a" on
-    // the neighbour directly below resolved to "a"'s own position, so one step
-    // down did nothing whichever half of "b" the pointer was released on.
-    expect(moveLane(lanes(), "a", 1)).toEqual(["b", "a", "c"]);
-    expect(moveLane(lanes(), "a", 2)).toEqual(["b", "c", "a"]);
+  it("takes the place of the lane it was dropped on, going down", () => {
+    // The case the first implementation could not reach at all: an insertion
+    // point past the dragged lane's own position resolved to where it already
+    // sat, so one step down did nothing whichever half of "b" was released on.
+    expect(moveLane(lanes(), "a", "b")).toEqual(["b", "a", "c"]);
+    expect(moveLane(lanes(), "a", "c")).toEqual(["b", "c", "a"]);
   });
 
   it("is a full order, not a delta", () => {
     // `reorder_lanes` appends anything unmentioned, so a partial write would
     // silently move every lane the drag did not touch.
-    expect(moveLane(lanes(), "b", 0)).toEqual(["b", "a", "c"]);
+    expect(moveLane(lanes(), "b", "a")).toEqual(["b", "a", "c"]);
   });
 
-  it("is one step per click for the ⋮ menu, in the same coordinates", () => {
-    // Up is `index - 1` and down is `index + 1` — what the drag hands it too,
-    // which is the whole reason both gestures share this function.
-    expect(moveLane(lanes(), "b", 0)).toEqual(["b", "a", "c"]);
-    expect(moveLane(lanes(), "b", 2)).toEqual(["a", "c", "b"]);
+  it("is one step per click for the ⋮ menu, said the same way", () => {
+    // The menu names the neighbour, exactly as a drop onto it would.
+    expect(moveLane(lanes(), "b", "a")).toEqual(["b", "a", "c"]);
+    expect(moveLane(lanes(), "b", "c")).toEqual(["a", "c", "b"]);
   });
 
   it("reports a drop on the lane itself as null", () => {
     // The normal way to abandon a lane drag, and it must not cost a request and
     // a refresh.
-    expect(moveLane(lanes(), "b", 1)).toBeNull();
+    expect(moveLane(lanes(), "b", "b")).toBeNull();
   });
 
-  it("clamps a position past the end", () => {
-    expect(moveLane(lanes(), "a", 99)).toEqual(["b", "c", "a"]);
-    // Clamped *before* the no-op check, so the last lane asked to go further
-    // down is nothing rather than a write that reorders nothing.
-    expect(moveLane(lanes(), "c", 99)).toBeNull();
-  });
-
-  it("returns null for a lane it does not know", () => {
-    expect(moveLane(lanes(), "ghost", 0)).toBeNull();
+  it("returns null when either lane is unknown", () => {
+    // A stale render: the lane was renamed or deleted by another window between
+    // this drag starting and the drop.
+    expect(moveLane(lanes(), "ghost", "a")).toBeNull();
+    expect(moveLane(lanes(), "a", "ghost")).toBeNull();
   });
 
   it("has nothing to do with a single lane", () => {
-    expect(moveLane([lane("only", 0)], "only", 0)).toBeNull();
-    expect(moveLane([lane("only", 0)], "only", 1)).toBeNull();
+    expect(moveLane([lane("only", 0)], "only", "only")).toBeNull();
   });
 
   it("moves two lanes past each other in both directions", () => {
     // The case that read as completely dead: with two lanes there is only one
     // neighbour, so a defect in either direction removes half the feature.
     const two = [lane("a", 0), lane("b", 1)];
-    expect(moveLane(two, "a", 1)).toEqual(["b", "a"]);
-    expect(moveLane(two, "b", 0)).toEqual(["b", "a"]);
+    expect(moveLane(two, "a", "b")).toEqual(["b", "a"]);
+    expect(moveLane(two, "b", "a")).toEqual(["b", "a"]);
+  });
+
+  it("moves a lane across several places in one go", () => {
+    // A drag is not limited to a neighbour, which is the whole reason it exists
+    // beside a menu that steps one at a time.
+    const four = [lane("a", 0), lane("b", 1), lane("c", 2), lane("d", 3)];
+    expect(moveLane(four, "d", "a")).toEqual(["d", "a", "b", "c"]);
+    expect(moveLane(four, "a", "d")).toEqual(["b", "c", "d", "a"]);
   });
 });

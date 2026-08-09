@@ -1719,15 +1719,15 @@ function AppInner(props: {
   };
 
   /**
-   * Move a lane to position `to` in the rail — the drag's write path, and the ⋮
-   * menu's.
+   * Move `lane` onto the place `onto` currently holds — the drag's write path,
+   * and the ⋮ menu's.
    *
    * One write for both gestures: `moveLane` owns the arithmetic and returns
    * `null` for a move that changes nothing, which a drop on the lane itself is.
    */
-  const moveLaneTo = async (lane: string, to: number) => {
+  const moveLaneTo = async (lane: string, onto: string) => {
     if (!repo) return;
-    const order = moveLane(lanes, lane, to);
+    const order = moveLane(lanes, lane, onto);
     if (!order) return;
     try {
       await api.reorderLanes(repo.root, order);
@@ -1739,8 +1739,12 @@ function AppInner(props: {
 
   const laneMenu = (lane: string) => {
     const index = lanes.findIndex((l) => l.name === lane);
-    // Final positions — `moveLane`'s coordinates, the same ones the drag hands it.
-    const move = (to: number) => void moveLaneTo(lane, to);
+    // One step is "swap places with that neighbour" — the same thing a drop onto
+    // it says, which is why both go through `moveLane` by name. The bounds are
+    // the `disabled` flags below; a neighbour that is not there is `null` here
+    // and `moveLane` refuses it anyway.
+    const move = (neighbour: Lane | undefined) =>
+      void (neighbour && moveLaneTo(lane, neighbour.name));
     return showContextMenu([
       {
         key: "lane-rename",
@@ -1751,13 +1755,13 @@ function AppInner(props: {
         key: "lane-up",
         title: "Move lane up",
         disabled: index <= 0,
-        onClick: () => move(index - 1),
+        onClick: () => move(lanes[index - 1]),
       },
       {
         key: "lane-down",
         title: "Move lane down",
         disabled: index < 0 || index >= lanes.length - 1,
-        onClick: () => move(index + 1),
+        onClick: () => move(lanes[index + 1]),
       },
       { key: "lane-divider" },
       {
@@ -3381,7 +3385,7 @@ function AppInner(props: {
             onAddLane={() => setDialog({ kind: "new-lane" })}
             onLaneMenu={(e, lane) => laneMenu(lane)(e)}
             onMove={moveWorktreeTo}
-            onMoveLane={(lane, toIndex) => void moveLaneTo(lane, toIndex)}
+            onMoveLane={(lane, onto) => void moveLaneTo(lane, onto)}
             onRestore={restoreWorktree}
             onEmptyTrash={emptyTrash}
             onTrashDrop={trashWorktree}
@@ -4217,9 +4221,9 @@ function Rail(props: {
   onAddLane: () => void;
   onLaneMenu: (e: React.MouseEvent, lane: string) => void;
   onMove: (path: string, toLane: string, toIndex: number) => void;
-  /** Reorder whole lanes by dragging their headers. `to` is the position the
-   *  lane ends up at — see `moveLane`. */
-  onMoveLane: (lane: string, to: number) => void;
+  /** Reorder whole lanes by dragging their headers: `lane` takes the place
+   *  `onto` holds. Two names, never an index — see `moveLane`. */
+  onMoveLane: (lane: string, onto: string) => void;
   onRestore: (w: Worktree) => void;
   onEmptyTrash: () => void;
   /** Dropping a dragged worktree onto the trash — bins it (revertible), which is
@@ -4261,6 +4265,23 @@ function Rail(props: {
   // ask what kind it was before doing anything.
   const [dragLane, setDragLane] = useState<string | null>(null);
   const [laneDropAt, setLaneDropAt] = useState<number | null>(null);
+  // `dragend` fires on the source node, so the rail's own `onDragEnd` only ever
+  // sees a drag whose source is still mounted. A lane renamed in ANOTHER window
+  // changes the section's key, React unmounts it, and the event then fires on a
+  // detached node and reaches nothing — leaving `dragLane` set for good. That is
+  // not cosmetic: the list keeps a live drop zone, so the next unrelated drag
+  // over the rail (a file from Finder) would be accepted and reorder a lane
+  // nobody grabbed. The window always hears it.
+  useEffect(() => {
+    if (dragLane === null) return;
+    const done = () => endDrag();
+    window.addEventListener("dragend", done);
+    window.addEventListener("drop", done);
+    return () => {
+      window.removeEventListener("dragend", done);
+      window.removeEventListener("drop", done);
+    };
+  }, [dragLane]);
   // Positions of the lane sections, by lane name.
   const laneIndex = new Map(props.lanes.map((l, i) => [l.name, i]));
   /**
@@ -4388,20 +4409,59 @@ function Rail(props: {
    * has no "above me" and "below me" halves. Which side the bar is drawn on is a
    * rendering question, answered from the travel direction in `renderGroup`.
    */
+  /**
+   * The dock's own lane drop: always the last lane, never the geometry.
+   *
+   * The dock sits *outside* the scroller, and `getBoundingClientRect` is layout,
+   * not clipping — a section below the fold has a bottom below the dock's own Y,
+   * so running the dock's pointer through `laneTargetAt` picks whichever section
+   * happens to overhang rather than the last lane. That is wrong exactly when the
+   * dock target is useful: a rail long enough to scroll, scrolled up, where the
+   * last lane is off-screen. The dock means "the bottom", so it says so directly.
+   */
+  const laneDockDrop = (() => {
+    const last = props.lanes.at(-1);
+    if (dragLane === null || !last) return null;
+    const take = (e: React.DragEvent) => {
+      if (e.defaultPrevented) return false;
+      e.preventDefault();
+      return true;
+    };
+    return {
+      onDragOver: (e: React.DragEvent) => {
+        if (take(e)) setLaneDropAt(props.lanes.length - 1);
+      },
+      onDrop: (e: React.DragEvent) => {
+        if (!take(e)) return;
+        props.onMoveLane(dragLane, last.name);
+        endDrag();
+      },
+    };
+  })();
+
   const laneDrop = dragLane === null
     ? null
     : {
         onDragOver: (e: React.DragEvent) => {
+          if (e.defaultPrevented) return;
           const to = laneTargetAt(e.clientY);
           if (to === null) return;
           e.preventDefault();
           setLaneDropAt(to);
         },
         onDrop: (e: React.DragEvent) => {
+          // A nested handler that already claimed this drop wins, and says so
+          // by having called `preventDefault`. Without this the container is a
+          // second, invisible consumer of the same event: a future "drop a lane
+          // on the trash" would delete the lane *and* reorder one, because
+          // `stopPropagation` is the only other way to stop this and nothing
+          // here would remind its author to call it.
+          if (e.defaultPrevented) return;
           const to = laneTargetAt(e.clientY);
-          if (to === null) return;
+          const onto = to === null ? undefined : props.lanes[to];
+          if (!onto) return;
           e.preventDefault();
-          props.onMoveLane(dragLane, to);
+          props.onMoveLane(dragLane, onto.name);
           endDrag();
         },
       };
@@ -4954,10 +5014,13 @@ function Rail(props: {
           natural overshoot for "pull this lane to the bottom", and it is the
           strip immediately under the edge you have to reach to get there —
           refusing there made the last position the one place the gesture could
-          miss. `laneTargetAt` already answers "below everything" with the last
-          lane, so the two handlers agree by construction. */}
+          miss. Its own handler, not the list's: see `laneDockDrop`. */}
       {dockVisible && (
-        <div className="rail-dock" onDragEnd={endDrag} {...(laneDrop ?? {})}>
+        <div
+          className="rail-dock"
+          onDragEnd={endDrag}
+          {...(laneDockDrop ?? {})}
+        >
           {docked.map((group) => renderGroup(group))}
         </div>
       )}

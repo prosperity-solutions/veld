@@ -655,39 +655,41 @@ export function laneDropTarget(
 }
 
 /**
- * The lane order after moving the lane `name` so that it ends up at index `to`.
+ * The lane order after moving the lane `name` onto the place currently held by
+ * the lane `onto`.
  *
- * **A final position, not an insertion point.** The rail's lane drag is
- * displacement — dropping a lane anywhere on another lane means "take that lane's
- * place" — so the coordinate is simply the index the dragged lane holds
- * afterwards, and the ⋮ menu's one-step moves are `index - 1` and `index + 1`.
- *
- * The first version of this took an insertion point resolved from the hovered
- * section's midpoint, the way the *row* drag does, and that is wrong for a block:
- * a row's midpoint distinguishes "above this row" from "below it", but every part
- * of a lane means the same thing, so the upper half of the lane directly below
- * resolved to the position the dragged lane already held. Moving one step down
- * was unreachable without crossing a whole section, which read as a drag that
- * does nothing at all.
+ * **Displacement, expressed as two lane names — deliberately not an index.** The
+ * gesture is "this lane takes that lane's place", and the one thing that took
+ * three attempts to get right was which *coordinate system* an index was in: a
+ * final position or an insertion point. The row drag thirty lines away in the
+ * rail hands out insertion points (`index + (below ? 1 : 0)`), which is the
+ * natural template to copy and the wrong answer here — an insertion point past
+ * the dragged lane's own position resolves to where it already sits, so a lane
+ * could be dragged up but never down. Taking names instead deletes the category:
+ * there is no index to be in the wrong system, and both call sites (the drag and
+ * the ⋮ menu's one-step moves) already have a name in hand.
  *
  * Returns the **full order** as names, mirroring [`moveWorktree`] and
- * `reorder_lanes`, so the write is idempotent. `null` when the lane is unknown or
- * the move changes nothing — dropping a lane on itself is a normal gesture and
+ * `reorder_lanes`, so the write is idempotent. `null` when either lane is unknown
+ * or the move changes nothing — dropping a lane on itself is a normal gesture and
  * must not cost a request and a refresh.
  */
 export function moveLane(
   lanes: Lane[],
   name: string,
-  to: number,
+  onto: string,
 ): string[] | null {
   const from = lanes.findIndex((l) => l.name === name);
-  if (from < 0) return null;
+  const at = lanes.findIndex((l) => l.name === onto);
+  // An unknown lane is a stale render — one deleted or renamed by another window
+  // between this drag starting and the drop.
+  if (from < 0 || at < 0 || from === at) return null;
   const order = lanes.map((l) => l.name);
   order.splice(from, 1);
-  // Clamped rather than trusted: the index comes from a drop, and a stale render
-  // can hand over one past the end of a list that just lost a lane.
-  const at = Math.max(0, Math.min(to, order.length));
-  if (at === from) return null;
+  // `at` is the index the dragged lane must *hold* afterwards — that is what
+  // taking the target's place means — so it indexes the final list directly. No
+  // shift for having removed the lane first: an insertion point would need one,
+  // and confusing the two is the bug this signature exists to make unsayable.
   order.splice(at, 0, name);
   return order;
 }
