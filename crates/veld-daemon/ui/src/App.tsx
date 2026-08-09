@@ -31,7 +31,9 @@ import {
   bestFuzzyMatch,
   freshRunName,
   fuzzyMatch,
+  laneDropTarget,
   liveRuns,
+  moveLane,
   moveWorktree,
   needsAttention,
   parsePendingKey,
@@ -1716,20 +1718,33 @@ function AppInner(props: {
     await refresh();
   };
 
+  /**
+   * Move `lane` onto the place `onto` currently holds — the drag's write path,
+   * and the ⋮ menu's.
+   *
+   * One write for both gestures: `moveLane` owns the arithmetic and returns
+   * `null` for a move that changes nothing, which a drop on the lane itself is.
+   */
+  const moveLaneTo = async (lane: string, onto: string) => {
+    if (!repo) return;
+    const order = moveLane(lanes, lane, onto);
+    if (!order) return;
+    try {
+      await api.reorderLanes(repo.root, order);
+    } catch (e) {
+      notifyError("Could not reorder the lanes", e);
+    }
+    await refresh();
+  };
+
   const laneMenu = (lane: string) => {
     const index = lanes.findIndex((l) => l.name === lane);
-    const move = async (to: number) => {
-      if (!repo) return;
-      const order = lanes.map((l) => l.name);
-      const [name] = order.splice(index, 1);
-      order.splice(to, 0, name);
-      try {
-        await api.reorderLanes(repo.root, order);
-      } catch (e) {
-        notifyError("Could not reorder the lanes", e);
-      }
-      await refresh();
-    };
+    // One step is "swap places with that neighbour" — the same thing a drop onto
+    // it says, which is why both go through `moveLane` by name. The bounds are
+    // the `disabled` flags below; a neighbour that is not there is `null` here
+    // and `moveLane` refuses it anyway.
+    const move = (neighbour: Lane | undefined) =>
+      void (neighbour && moveLaneTo(lane, neighbour.name));
     return showContextMenu([
       {
         key: "lane-rename",
@@ -1740,13 +1755,13 @@ function AppInner(props: {
         key: "lane-up",
         title: "Move lane up",
         disabled: index <= 0,
-        onClick: () => void move(index - 1),
+        onClick: () => move(lanes[index - 1]),
       },
       {
         key: "lane-down",
         title: "Move lane down",
         disabled: index < 0 || index >= lanes.length - 1,
-        onClick: () => void move(index + 1),
+        onClick: () => move(lanes[index + 1]),
       },
       { key: "lane-divider" },
       {
@@ -3370,6 +3385,7 @@ function AppInner(props: {
             onAddLane={() => setDialog({ kind: "new-lane" })}
             onLaneMenu={(e, lane) => laneMenu(lane)(e)}
             onMove={moveWorktreeTo}
+            onMoveLane={(lane, onto) => void moveLaneTo(lane, onto)}
             onRestore={restoreWorktree}
             onEmptyTrash={emptyTrash}
             onTrashDrop={trashWorktree}
@@ -3438,6 +3454,44 @@ function AppInner(props: {
               // user reads why the rest did not.
               await refresh();
               throw e;
+            }
+            // Newest first, in the section it was created into. Unplaced rows sort
+            // last (`WT_ORDER`), so a new checkout used to appear at the bottom of
+            // a long lane — furthest from the "＋" that was just clicked, and
+            // furthest from the row the user is about to work in. The order is
+            // computed from the list *plus* the created row rather than after a
+            // refresh, because `worktrees` here is this render's list and would
+            // still be the pre-create one.
+            //
+            // Only the rows that were **already hand-placed**, plus this one.
+            // `moveWorktree` returns the whole repo's order, and writing that
+            // would give a `sort_position` to every unplaced row in every
+            // section — one click of any "＋" silently freezing the label sort
+            // repo-wide, and falsifying the promise that what you have not
+            // placed stays alphabetical. `reorder_worktrees` clears the
+            // positions it is not given, so the omitted rows stay unplaced,
+            // which is exactly the state they should keep.
+            const placed = new Set(
+              worktrees.filter((w) => w.sort_position !== null).map((w) => w.path),
+            );
+            const order = moveWorktree(
+              railGroups([...worktrees, created], lanes),
+              created.path,
+              dialog.lane,
+              0,
+            );
+            if (order) {
+              try {
+                await api.reorderWorktrees(
+                  repo.root,
+                  order.order.filter((p) => p === created.path || placed.has(p)),
+                );
+              } catch (e) {
+                // The worktree exists and is usable; only its position is wrong.
+                // Reported, not thrown — throwing would keep the create dialog
+                // open over a create that succeeded.
+                notifyError("Could not place the new worktree", e);
+              }
             }
             await refresh();
             setActiveWtKey(String(created.id));
@@ -4167,6 +4221,9 @@ function Rail(props: {
   onAddLane: () => void;
   onLaneMenu: (e: React.MouseEvent, lane: string) => void;
   onMove: (path: string, toLane: string, toIndex: number) => void;
+  /** Reorder whole lanes by dragging their headers: `lane` takes the place
+   *  `onto` holds. Two names, never an index — see `moveLane`. */
+  onMoveLane: (lane: string, onto: string) => void;
   onRestore: (w: Worktree) => void;
   onEmptyTrash: () => void;
   /** Dropping a dragged worktree onto the trash — bins it (revertible), which is
@@ -4201,6 +4258,92 @@ function Rail(props: {
   const [dropAt, setDropAt] = useState<{ key: string; index: number } | null>(
     null,
   );
+  // The second drag kind: a whole lane by its header. Kept in its own pair of
+  // states rather than folded into `dragPath`/`dropAt` with a discriminant,
+  // because the two drags have different drop targets and different feedback —
+  // and a single "what is being dragged" value made every handler on both sides
+  // ask what kind it was before doing anything.
+  const [dragLane, setDragLane] = useState<string | null>(null);
+  const [laneDropAt, setLaneDropAt] = useState<number | null>(null);
+  // Whether the dock, rather than a section in the list, is the thing under the
+  // pointer. It resolves to the same last lane either way; what differs is where
+  // the bar can be seen, since the last lane's own bar is inside the scroller and
+  // the dock is used precisely when that lane is scrolled out of view.
+  const [onDock, setOnDock] = useState(false);
+  // `dragend` fires on the source node, so the rail's own `onDragEnd` only ever
+  // sees a drag whose source is still mounted. A lane renamed in ANOTHER window
+  // changes the section's key, React unmounts it, and the event then fires on a
+  // detached node and reaches nothing — leaving `dragLane` set for good. That is
+  // not cosmetic: the list keeps a live drop zone, so the next unrelated drag
+  // over the rail (a file from Finder) would be accepted and reorder a lane
+  // nobody grabbed. The window always hears it.
+  useEffect(() => {
+    if (dragLane === null) return;
+    const done = () => endDrag();
+    window.addEventListener("dragend", done);
+    window.addEventListener("drop", done);
+    return () => {
+      window.removeEventListener("dragend", done);
+      window.removeEventListener("drop", done);
+    };
+  }, [dragLane]);
+  // Positions of the lane sections, by lane name.
+  const laneIndex = new Map(props.lanes.map((l, i) => [l.name, i]));
+  /**
+   * This section's place in the lane order, or `undefined` for a section that
+   * holds none — the ungrouped section, the main checkout, and the two pending
+   * -removal lanes are neither draggable nor lane drop targets.
+   *
+   * Keyed on `lane` behind `editable`, never on `key`. The main checkout's key is
+   * the literal `"main"` and `"main"` is a legal lane name (`valid_lane_name`
+   * rejects only empty, over-long, control characters, `.` and `..`), so keying
+   * on it gave that pinned section the position of a lane called `main`: every
+   * drop over the top of the rail resolved there instead of to the first lane,
+   * and dragging that lane faded the main checkout row as if it were the one
+   * being carried. Same trap the header's `aria-label` already documents for
+   * `UNGROUPED_LABEL`.
+   */
+  const laneAtOf = (g: RailGroup) =>
+    g.editable ? laneIndex.get(g.lane) : undefined;
+  const listRef = useRef<HTMLDivElement>(null);
+
+  /**
+   * The lane a pointer at `clientY` is aiming at, or `null` when the rail holds
+   * no lanes.
+   *
+   * Measured against the sections' geometry rather than resolved from the
+   * element under the pointer, and that is the whole point. Per-element hit
+   * testing made the gesture directional: the 9px gutters, the list's padding
+   * and everything below the last lane belonged to no section at all, so "pull
+   * it to the bottom and let go" landed on nothing, and a downward drag
+   * registered only where a section happened to be under the pointer.
+   *
+   * What this does **not** remove is the travel a downward move costs. The
+   * dragged lane keeps its place and its height while it is carried, so the
+   * pointer has to clear its own section's bottom before the lane below is the
+   * answer, while the lane above is one pixel past the header it was grabbed by.
+   * That is the price of not reflowing the rail under a pointer that is aiming
+   * at it; the bar tracks the whole way, so it is visible rather than silent.
+   *
+   * The DOM read lives here and the choice lives in `laneDropTarget`, which has
+   * the tests: this mapping is the part that was wrong in every attempt at the
+   * feature, and it is the part a rendered component cannot pin.
+   *
+   * `data-lane-index` rather than refs because the sections are rendered by a
+   * plain map and the count changes as lanes come and go; the query runs on
+   * dragover, over a handful of elements.
+   */
+  const laneTargetAt = (clientY: number): number | null => {
+    const list = listRef.current;
+    if (!list) return null;
+    const sections = [
+      ...list.querySelectorAll<HTMLElement>("[data-lane-index]"),
+    ].map((el) => ({
+      index: Number(el.dataset.laneIndex),
+      bottom: el.getBoundingClientRect().bottom,
+    }));
+    return laneDropTarget(sections, clientY);
+  };
   // Suppresses the rail's width transition for the duration of a resize drag. The
   // transition exists for the collapse/expand toggle, where 236px→64px should
   // animate; during a drag it re-animates on every pointer move, so the edge
@@ -4209,6 +4352,9 @@ function Rail(props: {
   const endDrag = () => {
     setDragPath(null);
     setDropAt(null);
+    setDragLane(null);
+    setLaneDropAt(null);
+    setOnDock(false);
   };
   // Dropping is disabled while the rail is collapsed. A 64px row shows only a
   // marker, so there is no way to see *where* a drop would land — and a reorder
@@ -4256,12 +4402,111 @@ function Rail(props: {
   });
 
   /**
+   * The dock's own lane drop: always the last lane, never the geometry.
+   *
+   * The dock sits *outside* the scroller, and `getBoundingClientRect` is layout,
+   * not clipping — a section below the fold has a bottom below the dock's own Y,
+   * so running the dock's pointer through `laneTargetAt` picks whichever section
+   * happens to overhang rather than the last lane. That is wrong exactly when the
+   * dock target is useful: a rail long enough to scroll, scrolled up, where the
+   * last lane is off-screen. The dock means "the bottom", so it says so directly
+   * — its whole area, the Trash header included, because a dock that answered
+   * differently depending on which of its two sections you were over would be a
+   * distinction nothing on screen makes.
+   *
+   * It draws its own bar, too (`onDock`): the last lane's bar lives inside the
+   * scroller, so in the very case this exists for it is scrolled out of sight and
+   * the dock would accept a drop while showing nothing.
+   */
+  const laneDockDrop = (() => {
+    const last = props.lanes.at(-1);
+    if (dragLane === null || !last) return null;
+    const take = (e: React.DragEvent) => {
+      if (e.defaultPrevented) return false;
+      e.preventDefault();
+      return true;
+    };
+    return {
+      onDragOver: (e: React.DragEvent) => {
+        if (!take(e)) return;
+        setLaneDropAt(props.lanes.length - 1);
+        setOnDock(true);
+      },
+      onDrop: (e: React.DragEvent) => {
+        if (!take(e)) return;
+        props.onMoveLane(dragLane, last.name);
+        endDrag();
+      },
+    };
+  })();
+
+  /**
+   * The lane drag's drop zone inside the scroller: the list as a whole, not the
+   * sections.
+   *
+   * One owner within the column. Every section and row bails out of its own
+   * handlers while a lane is in flight (each drop zone answers only to its own
+   * drag), so the event reaches here from anywhere in the list and
+   * [`laneTargetAt`] decides what it means. A dragged lane always has somewhere
+   * to land, which is what per-section targets could not promise; below the
+   * scroller, `laneDockDrop` above owns the same gesture.
+   *
+   * Dropping a lane means displacement — it takes the target lane's place — so
+   * there is no midpoint to consult: a lane is a block, and unlike a row it has
+   * no "above me" and "below me" halves. Which side the bar is drawn on is a
+   * rendering question, answered from the travel direction in `renderGroup`.
+   */
+  const laneDrop = dragLane === null
+    ? null
+    : {
+        onDragOver: (e: React.DragEvent) => {
+          if (e.defaultPrevented) return;
+          const to = laneTargetAt(e.clientY);
+          if (to === null) return;
+          e.preventDefault();
+          setLaneDropAt(to);
+          setOnDock(false);
+        },
+        onDrop: (e: React.DragEvent) => {
+          // A nested handler that already claimed this drop wins, and says so
+          // by having called `preventDefault`. Without this the container is a
+          // second, invisible consumer of the same event: a future "drop a lane
+          // on the trash" would delete the lane *and* reorder one, because
+          // `stopPropagation` is the only other way to stop this and nothing
+          // here would remind its author to call it.
+          if (e.defaultPrevented) return;
+          const to = laneTargetAt(e.clientY);
+          const onto = to === null ? undefined : props.lanes[to];
+          if (!onto) return;
+          e.preventDefault();
+          props.onMoveLane(dragLane, onto.name);
+          endDrag();
+        },
+      };
+
+  /**
    * Render one rail section — a lane, a user lane, or one of the two
    * pinned bottom lanes (trash / deleting). Shared by the scrollable list
    * and the bottom dock, so a lane and the trash render identically; they
    * differ only in where they live, not in how a row looks.
    */
-  const renderGroup = (group: RailGroup) => (
+  const renderGroup = (group: RailGroup) => {
+    const laneAt = laneAtOf(group);
+    // Where the dragged lane would land, drawn in the gutter beside the hovered
+    // section. Which side is the travel direction: carrying a lane *up* onto this
+    // one puts it above, carrying it *down* puts it below. Exactly one section
+    // ever draws a bar, so two of them cannot render the same gutter twice — and
+    // hovering the dragged lane itself draws none, which is honest, because
+    // dropping there is the one move that does nothing.
+    const from = dragLane === null ? undefined : laneIndex.get(dragLane);
+    let laneDropSide: "before" | "after" | null = null;
+    // While the dock owns the hover it draws the bar itself, so the last lane
+    // must not draw a second one for the same target.
+    if (!onDock && laneAt !== undefined && from !== undefined && laneDropAt === laneAt) {
+      if (from > laneAt) laneDropSide = "before";
+      else if (from < laneAt) laneDropSide = "after";
+    }
+    return (
           <div
             key={group.key}
             className={`rail-group${group.key === TRASH_LANE ? " trash" : ""}${group.key === DELETING_LANE ? " deleting" : ""}${
@@ -4271,7 +4516,7 @@ function Rail(props: {
               dragPath && canDropOn(group) && dropAt?.key === group.key
                 ? " drop-in"
                 : ""
-            }`}
+            }${group.editable && dragLane === group.lane ? " lane-dragging" : ""}${laneDropSide === "before" ? " lane-drop-before" : ""}${laneDropSide === "after" ? " lane-drop-after" : ""}`}
             // The section itself is the fallback target, and it resolves to its
             // FIRST position rather than its last. What actually reaches this
             // handler is the header and the padding above it — the rows stop
@@ -4281,10 +4526,41 @@ function Rail(props: {
             // Appending is still reachable, and unambiguously so: it is the lower
             // half of the last row.
             {...dropZone(group, 0)}
+            /* What `laneTargetAt` measures. Only a real lane carries one, so the
+               ungrouped section and the pinned lanes are not lane targets — a
+               pointer over them resolves to the nearest lane instead. */
+            data-lane-index={laneAt}
           >
             {group.label !== null && props.wide && (
               <div
-                className="lane-head"
+                className={`lane-head${group.editable && canDrag ? " grab" : ""}`}
+                /* The header IS the handle — the whole bar, not a grip icon
+                   beside the name. A lane's header is already the thing that
+                   stands for the lane (it is where the menu and the ＋ live), and
+                   a rail this narrow cannot spare a third control per section.
+                   The nested buttons drag it too, which is harmless: they act on
+                   click, and a drag that starts on one is still a drag of the
+                   lane it belongs to.
+
+                   Only a real lane, and only expanded: the ungrouped section and
+                   the trash hold no place in the lane order, and a collapsed rail
+                   renders no headers at all. */
+                draggable={group.editable && canDrag}
+                onDragStart={(e) => {
+                  setDragLane(group.lane);
+                  // The two drags are exclusive, and this is what makes that
+                  // true rather than conventional: every drop zone answers only
+                  // to its own drag, so a `dragend` that never arrived (the
+                  // source unmounted by the 5s poll, say) would otherwise leave
+                  // both live and both sets of handlers armed at once.
+                  setDragPath(null);
+                  setDropAt(null);
+                  e.dataTransfer.effectAllowed = "move";
+                  // Firefox ignores a drag with no payload. Prefixed because a
+                  // worktree drag puts a bare path here and something outside the
+                  // rail may yet read it — the rail itself keys off the state.
+                  e.dataTransfer.setData("text/plain", `lane:${group.lane}`);
+                }}
                 onContextMenu={
                   group.editable
                     ? (e) => props.onLaneMenu(e, group.lane)
@@ -4492,6 +4768,10 @@ function Rail(props: {
                   draggable={canDrag && !trashed && !group.pinned && !w.is_main}
                   onDragStart={(e) => {
                     setDragPath(w.path);
+                    // Exclusive with the lane drag — see the lane header's own
+                    // `onDragStart`.
+                    setDragLane(null);
+                    setLaneDropAt(null);
                     e.dataTransfer.effectAllowed = "move";
                     // Firefox ignores a drag with no payload, and the path is the
                     // key everything downstream uses anyway.
@@ -4695,7 +4975,8 @@ function Rail(props: {
               );
             })}
           </div>
-  );
+    );
+  };
   return (
     <div
       className={`rail${props.wide ? " wide" : ""}${resizing ? " resizing" : ""}`}
@@ -4741,11 +5022,32 @@ function Rail(props: {
           </ActionIcon>
         )}
       </div>
-      <div className="rail-list" onDragEnd={endDrag}>
+      <div
+        className="rail-list"
+        ref={listRef}
+        onDragEnd={endDrag}
+        {...(laneDrop ?? {})}
+      >
         {scroll.map((group) => renderGroup(group))}
       </div>
+      {/* The dock takes a lane drop too, though it holds no lane. It is the
+          natural overshoot for "pull this lane to the bottom", and it is the
+          strip immediately under the edge you have to reach to get there —
+          refusing there made the last position the one place the gesture could
+          miss. Its own handler, not the list's: see `laneDockDrop`. */}
       {dockVisible && (
-        <div className="rail-dock" onDragEnd={endDrag}>
+        <div
+          className={`rail-dock${
+            // Not while the carried lane is already the last one: that drop is a
+            // no-op, and a bar promising a move that will not happen is worse
+            // than none.
+            onDock && dragLane !== null && props.lanes.at(-1)?.name !== dragLane
+              ? " lane-drop-into"
+              : ""
+          }`}
+          onDragEnd={endDrag}
+          {...(laneDockDrop ?? {})}
+        >
           {docked.map((group) => renderGroup(group))}
         </div>
       )}
