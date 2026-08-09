@@ -3603,7 +3603,12 @@ function AppInner(props: {
   // to stop) — the panel would otherwise offer to share a run that is not running.
   const shareDisabled = !sharingActive && diagRun?.status !== "running";
   const sharingSurface =
-    worktree && (canRunWorktreeNow(worktree) || sharingActive) ? (
+    worktree &&
+    (canRunWorktreeNow(worktree) || sharingActive) &&
+    // Same hide-vs-disable rule as the other inapplicable actions: hidden when
+    // `ui.hideDisabledActions` is on, shown greyed (with the reason in its
+    // tooltip) when off.
+    !(shareDisabled && hideDisabled) ? (
       <Tooltip
         label={
           sharingActive
