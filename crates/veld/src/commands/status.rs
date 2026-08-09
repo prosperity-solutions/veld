@@ -184,15 +184,36 @@ pub async fn run(name: Option<String>, show_outputs: bool, json: bool) -> i32 {
             // embedded newline breaks the column alignment for the whole table.
             // A node with one URL (or none) still produces exactly one row.
             let routed = ns.routed_urls();
-            let Some(((first_port, first_url), rest)) = routed.split_first() else {
-                row.push(String::new());
-                rows.push(row);
-                continue;
-            };
-            debug_assert!(first_port.is_none(), "routed_urls puts the primary first");
-            row.push((*first_url).to_owned());
+            // Raw (`tcp`) ports get rows too, marked. They have a hostname veld
+            // minted and nothing else prints, and showing them unmarked beside
+            // the URLs would invite someone to open one.
+            let raw = ns.raw_addresses();
+            let mut extra: Vec<String> = routed
+                .iter()
+                .skip(1)
+                .map(|(port, url)| match port {
+                    Some(port) => format!("{url}  ({port})"),
+                    None => (*url).to_owned(),
+                })
+                .collect();
+            extra.extend(
+                raw.iter()
+                    .map(|(port, address)| format!("{address}  ({port}, tcp)")),
+            );
+
+            match routed.first() {
+                Some((first_port, first_url)) => {
+                    debug_assert!(first_port.is_none(), "routed_urls puts the primary first");
+                    row.push((*first_url).to_owned());
+                }
+                // No URL at all: a portless node, or one with only raw ports —
+                // then the first raw address takes the cell rather than leaving
+                // it blank beside rows that do have one.
+                None if !extra.is_empty() => row.push(extra.remove(0)),
+                None => row.push(String::new()),
+            }
             rows.push(row);
-            for (port, url) in rest {
+            for line in extra {
                 // Leading cells blank: the node's identity and stats belong to
                 // the node, and repeating them would read as several nodes.
                 rows.push(vec![
@@ -201,10 +222,7 @@ pub async fn run(name: Option<String>, show_outputs: bool, json: bool) -> i32 {
                     String::new(),
                     String::new(),
                     String::new(),
-                    match port {
-                        Some(port) => format!("{url}  ({port})"),
-                        None => (*url).to_owned(),
-                    },
+                    line,
                 ]);
             }
         }

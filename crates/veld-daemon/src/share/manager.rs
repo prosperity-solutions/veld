@@ -129,14 +129,15 @@ struct PendingRequest {
 /// A stable, filesystem-and-Caddy-safe fragment identifying one shared endpoint
 /// within a join's route ids.
 ///
-/// Includes the port name, because a node can now contribute several endpoints
-/// and a route id keyed on the node alone would collide — the second
-/// registration would silently overwrite the first's route.
+/// Keyed on the **hostname**, not on `node` + `port_name`. A fused label is not
+/// injective — node `web` port `admin-http` and node `web-admin` port `http`
+/// both spell `web-admin-http` — and the loser of that collision is silently
+/// overwritten in Caddy, so one joined endpoint stops resolving with nothing to
+/// say why. The hostname is unique across a manifest by construction (the host
+/// refuses to mint two entries that share one), and keying route ids by hostname
+/// is what the origin side already does — see `url::run_route_id`.
 fn route_slug(node: &veld_core::share::SharedNode) -> String {
-    match &node.port_name {
-        Some(port) => format!("{}-{port}", node.node),
-        None => node.node.clone(),
-    }
+    veld_core::url::run_route_id(&node.hostname)
 }
 
 /// A share this daemon has joined; holds everything needed to tear it down.
@@ -748,7 +749,24 @@ impl ShareManager {
         let mut tasks = Vec::new();
         let mut warnings = Vec::new();
 
-        for node in &manifest.nodes {
+        // Display labels for the whole manifest, so a joined share names its
+        // services exactly as the hosting side does in `veld shares`.
+        let display = manifest.display_nodes();
+
+        for (idx, node) in manifest.nodes.iter().enumerate() {
+            // An entry claiming `http` with no URL is malformed: reproducing it
+            // would mint a DNS host and a Caddy route for a host-chosen name that
+            // then appears in no output at all, because every display path reads
+            // `url`. Refuse it loudly instead of materialising something the
+            // joiner cannot see. No honest host mints one.
+            if node.is_malformed() {
+                warnings.push(format!(
+                    "skipped '{}': the host offered it as an HTTP endpoint but sent no URL",
+                    node.label()
+                ));
+                continue;
+            }
+
             // Local URL wins: never clobber a hostname this machine already
             // serves — from one of its own runs, or from another active join.
             if hostname_in_use_locally(&node.hostname)
@@ -842,7 +860,7 @@ impl ShareManager {
             if let Some(url) = node.url.clone() {
                 urls.push(url);
             }
-            nodes.push(node.label());
+            nodes.push(display[idx].clone());
         }
 
         let _ = helper.reload_dns().await;

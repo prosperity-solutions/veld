@@ -211,6 +211,40 @@ impl NodeState {
         }
     }
 
+    /// Every endpoint this node serves, including the one a row written before
+    /// multi-port routing carries only as `url`/`port`.
+    ///
+    /// **Use this, not `endpoints`, anywhere the answer decides what a node can
+    /// do.** `veld update` deliberately does not stop running environments, so a
+    /// run that was live across the upgrade has an empty `endpoints` map and a
+    /// populated `url` for the rest of its life — and a consumer reading the map
+    /// alone sees a node with no ports at all. That cost `veld share` an entire
+    /// run's worth of services, refused with "no shareable (URL-bearing) nodes"
+    /// about nodes that all had URLs.
+    ///
+    /// The synthesised entry is named `http`, which is what the port would have
+    /// been called had it been recorded: a legacy row has exactly one port, and
+    /// `resolve_ports` names an undeclared one `http`.
+    pub fn endpoints_or_legacy(&self) -> BTreeMap<String, NodeEndpoint> {
+        if !self.endpoints.is_empty() {
+            return self.endpoints.clone();
+        }
+        let Some(url) = &self.url else {
+            return BTreeMap::new();
+        };
+        let Some(port) = self.port else {
+            return BTreeMap::new();
+        };
+        BTreeMap::from([(
+            "http".to_owned(),
+            NodeEndpoint {
+                hostname: crate::url::hostname_of_url(url).to_owned(),
+                url: Some(url.clone()),
+                port,
+            },
+        )])
+    }
+
     /// Every URL this node serves, primary first.
     ///
     /// `None` in the first slot marks the primary — the one `${veld.url}` means
@@ -234,6 +268,26 @@ impl NodeState {
             out.push((Some(name.as_str()), url.as_str()));
         }
         out
+    }
+
+    /// Every raw (`tcp`) endpoint this node serves, as `(port name, host:port)`.
+    ///
+    /// The counterpart to [`NodeState::routed_urls`], and it exists for the same
+    /// reason: a hostname veld mints and no command prints is a hostname nobody
+    /// can discover. A raw port is never a URL — it has no scheme and nothing
+    /// routes it — so it is returned as the address it actually is, for a caller
+    /// to display separately rather than fold in beside the links.
+    pub fn raw_addresses(&self) -> Vec<(&str, String)> {
+        self.endpoints
+            .iter()
+            .filter(|(_, e)| e.url.is_none())
+            .map(|(name, e)| {
+                (
+                    name.as_str(),
+                    format!("{}:{}", crate::url::hostname_of_url(&e.hostname), e.port),
+                )
+            })
+            .collect()
     }
 
     /// Every hostname this node claimed, port-stripped and deduplicated — the

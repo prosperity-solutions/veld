@@ -426,6 +426,18 @@ impl Registry {
             })
             .collect();
 
+        // Checked again *after* the filter, not only on the raw manifest above.
+        // A manifest whose entries are all unrouted passes the earlier
+        // emptiness test and publishes nothing, while still holding an endpoint
+        // permit, an open tunnel and a lease until it expires — a bounded
+        // gateway slot consumed by a registration with no public URL to show
+        // for it.
+        if nodes.is_empty() {
+            conn.close(0u32.into(), b"no routed endpoints");
+            self.release_endpoint(&choice).await;
+            bail!("share manifest has no HTTP endpoints to expose over the web");
+        }
+
         let reg = Arc::new(Registration {
             id: id.clone(),
             conn: conn.clone(),

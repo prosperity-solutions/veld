@@ -1691,7 +1691,7 @@ element no shell ever sees (inert text — a mistake, but not an exposure).
 | `long-running-needs-readiness` | A `long_running` node with no readiness probe. Reached by either spelling of the type; the remedy it prints differs for a portless node, which cannot use a `port` probe | **error** |
 | `unknown-probe-type` | A probe `type` Veld does not implement — including `settle` written as a *liveness* probe. A typo used to mean "always healthy" on both paths | **error** |
 | `probe-needs-port` | A `port` or `http` probe on a node with no such port: it names a port that is not declared, or needs the primary on a node that has none | **error** |
-| `ambiguous-primary-port` | Two or more ports, none named `http` and none marked `"protocol": "http"`, so `${veld.port}` has no unambiguous meaning | **error** |
+| `ambiguous-primary-port` | Several ports and no unambiguous primary: none named `http`, or more than one marked `"protocol": "http"`. Silent when every port is explicitly `tcp` — that node legitimately has no primary | **error** |
 | `web-share-needs-http` | A `"protocol": "tcp"` port opting into the `web` audience. The gateway serves HTTP and a browser cannot speak a raw protocol through it, so the share would silently drop the port the author asked to publish | **error** |
 | `unknown-var` | `${vars.x}` naming a var that is not declared, listing the declared names | **error** |
 | `vars-cannot-nest` | A var referencing another var | **error** |

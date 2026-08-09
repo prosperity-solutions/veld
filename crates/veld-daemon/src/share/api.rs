@@ -90,7 +90,11 @@ async fn start(
         req.ttl_secs,
         mode,
     )?;
-    let node_names: Vec<String> = manifest.nodes.iter().map(|n| n.node.clone()).collect();
+    // `display_nodes`, not the bare node name: the manifest holds one entry per
+    // **port**, so a node sharing two of them appeared twice under one name — and
+    // "Sharing 2 node(s)" is the only scope statement `veld share` prints when it
+    // mints a link, where an app port and an admin console must not read alike.
+    let node_names: Vec<String> = manifest.display_nodes();
     let expires_at = manifest.expires_at;
 
     if req.web {
@@ -203,7 +207,11 @@ async fn start_web_share(
         );
     }
 
-    let node_names: Vec<String> = manifest.nodes.iter().map(|n| n.node.clone()).collect();
+    // `display_nodes`, not the bare node name: the manifest holds one entry per
+    // **port**, so a node sharing two of them appeared twice under one name — and
+    // "Sharing 2 node(s)" is the only scope statement `veld share` prints when it
+    // mints a link, where an app port and an admin console must not read alike.
+    let node_names: Vec<String> = manifest.display_nodes();
     let expires_at = manifest.expires_at;
     let run_id = manifest.run_id;
 
@@ -661,7 +669,11 @@ fn build_manifest(
     // and withhold its admin console and its database, and each decision has to
     // be made and reported separately.
     for ns in run_state.nodes.values() {
-        for (port_name, endpoint) in &ns.endpoints {
+        // `endpoints_or_legacy`, never `endpoints`: a run that was live across
+        // the upgrade to per-port endpoints has an empty map and a populated
+        // `url`, and reading the map alone refused the whole run as having
+        // nothing to share.
+        for (port_name, endpoint) in &ns.endpoints_or_legacy() {
             had_url_bearing = true;
             if let Some(filter) = nodes_filter {
                 if !filter.iter().any(|n| n == &ns.node_name) {

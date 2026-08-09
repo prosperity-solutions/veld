@@ -27,8 +27,10 @@ unreadable.
   environment or a file, never a command line.
 - **`veld.*` is a closed set.** Node outputs are `${output.*}` and
   `${nodes.<node>.*}`. The set is closed but not uniform: `port`/`url`/`url.*`/
-  `ports.*`/`urls.*` exist only on a `long_running` node that declares the port in
-  question (a `"ports": null` node has none of them), `node`/`variant` only on a node,
+  `ports.*`/`hosts.*`/`urls.*` exist only on a `long_running` node that declares the
+  port in question (a `"ports": null` node has none of them, and neither has a node
+  whose ports are all `tcp` — it has no primary for `port`/`url` to mean),
+  `node`/`variant` only on a node,
   `run_id` not in a project step, and a `vars` value gets the run-scoped names
   only. `veld lint` reports a name written out of scope as
   `builtin-not-in-scope`. A node's `on_stop` has exactly what the node had.

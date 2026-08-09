@@ -232,14 +232,21 @@ fn planned_hostnames(
             )?;
             let hostname = url::hostname_of_url(&rendered).to_owned();
             let owner = format!("{}:{}#{}", sel.node, sel.variant, port_name);
-            if let Some(first) = owners.get(&hostname) {
+            // Keyed case-insensitively, because everything downstream is: DNS
+            // matches without regard to case, Caddy's host matcher does, and
+            // `run_route_id` lowercases before hashing. Two `host` values
+            // differing only in case would otherwise pass this guard and then
+            // derive the *same* route id, so the second registration overwrote
+            // the first and one port's hostname reached the other's process.
+            let key = hostname.to_ascii_lowercase();
+            if let Some(first) = owners.get(&key) {
                 return Err(OrchestratorError::HostnameCollisionWithinRun {
                     hostname,
                     first: first.clone(),
                     second: owner,
                 });
             }
-            owners.insert(hostname.clone(), owner);
+            owners.insert(key, owner);
             planned.push(hostname);
         }
     }
@@ -2615,6 +2622,24 @@ impl Orchestrator {
                 ctx.set_builtin(key, value);
             }
         }
+        // The per-port families, for the same reason. `check_builtin_names`
+        // accepts `${veld.hosts.pg}` and `${veld.urls.admin}` in an `on_stop`
+        // — a node's teardown has exactly what the node had — so leaving them
+        // out here made a hook that lints clean fail to resolve at stop time,
+        // and a failed resolve does not run the hook at all. Rehydrated from the
+        // run's own recorded endpoints, not re-derived from the config, so a
+        // config edited after start cannot change where teardown points.
+        for (port_name, endpoint) in &node_state.endpoints {
+            ctx.set_builtin(
+                &format!("hosts.{port_name}"),
+                url::hostname_of_url(&endpoint.hostname).to_owned(),
+            );
+            if let Some(url) = &endpoint.url {
+                for (key, value) in port_url_builtins(port_name, url) {
+                    ctx.set_builtin(&key, value);
+                }
+            }
+        }
 
         let resolved_cmd = match on_stop_cmd.interpolate(&ctx) {
             Ok(cmd) => cmd,
@@ -3849,6 +3874,13 @@ async fn execute_start_server_isolated(
         // alive after the settle window. Both are raced against process exit —
         // that race is the *only* crash-fast in the start path, so neither
         // branch may skip it.
+        //
+        // The settle window applies to **every** portless node, not only a
+        // `settle` probe: it is the phase-1 crash-fast, and a `command` probe on
+        // a portless node needs it just as much — otherwise a process that dies
+        // on spawn is discovered by whatever the command happens to check, which
+        // may be nothing. `seconds` therefore configures the window for any
+        // portless node, and is ignored where a port makes phase 1 concrete.
         let settle =
             std::time::Duration::from_secs(hc.seconds.unwrap_or(config::DEFAULT_SETTLE_SECONDS));
         emit_progress(

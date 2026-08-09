@@ -5,7 +5,7 @@
 deadline, and no config that loads today and stops loading tomorrow.
 
 Read it as a menu, not a checklist — then read [the behaviour
-changes](#three-behaviour-changes-worth-a-veld-lint) at the end, which are the
+changes](#four-behaviour-changes-worth-a-veld-lint) at the end, which are the
 only part that can move under a config you never touch.
 
 If you are coming from `schemaVersion: "1"` or `"2"`, do
@@ -106,18 +106,24 @@ three fields:
   already resolves to 127.0.0.1 without veld's help, so `db.myapp.veld.localhost:5432`
   reaches the process with Caddy out of the path entirely.
 - **`host`** overrides the `url_template` for one port, replacing it wholesale. It
-  interpolates the same run-scoped pieces a `url_template` does — `{run}`,
-  `{branch ?? run}`, `{project}`, `{node}` — and not `${vars.…}`: the hostname has
-  to be known before any var is resolved.
+  takes the same placeholders a `url_template` does — `{service}`, `{variant}`,
+  `{run}`, `{project}`, `{branch}`, `{worktree}`, `{username}`, `{hostname}`, with
+  `{a ?? b}` for a fallback — and **not** `${vars.…}` or any `${veld.…}`: the
+  hostname has to be known before the first var is resolved. `{service}` is the
+  one to know about, because on a secondary port it is already `<node>-<port>`.
 
 Every port gets a **hostname**, whatever its protocol — naming and routing are
 separate concerns, and `tcp` uses the name without the route.
 
-**Your existing multi-port nodes gain nothing and lose nothing.** The default is
-`http` for the primary port and `tcp` for every other, and that asymmetry is the
-whole point: it is what stops a `{"http": "auto", "debug": "auto"}` node from
-suddenly minting an HTTPS route in front of its Node inspector the first time it
-runs on a newer veld. A secondary port that *should* be a URL has to say so.
+**Your existing multi-port nodes gain no new URL.** The default is `http` for the
+primary port and `tcp` for every other, and that asymmetry is the whole point: it
+is what stops a `{"http": "auto", "debug": "auto"}` node from suddenly minting an
+HTTPS route in front of its Node inspector the first time it runs on a newer
+veld. A secondary port that *should* be a URL has to say so.
+
+They do gain a **name**: naming and routing are separate, so every port now
+claims a hostname whether or not anything routes it — see [behaviour change
+4](#four-behaviour-changes-worth-a-veld-lint).
 
 One thing to know if you adopt a secondary `http` port: it is served at
 `<node>-<port>.…` — `web-admin.dev.veld.localhost`, a sibling of the node's own
@@ -190,13 +196,14 @@ Two rules to know:
   whole design exists to prevent.
 
 Sharing a `tcp` port to a **peer** works: `veld join` binds a local listener,
-splices it over the tunnel, and prints the address separately from the URLs —
-`localhost:<local port>`, the joiner's own listener, which is not the origin's
-port number.
+splices it over the tunnel, and prints the address separately from the URLs. The
+address is `<the origin's hostname>:<the joiner's local port>` — the hostname
+resolves locally because the join mints it in DNS, and the port is the joiner's
+own listener, never the origin's number.
 
 ---
 
-## Three behaviour changes worth a `veld lint`
+## Four behaviour changes worth a `veld lint`
 
 These are the only items on this page that can affect a config you do not edit.
 The first two are the same fix: a check that could not run used to answer
@@ -220,10 +227,20 @@ The first two are the same fix: a check that could not run used to answer
 3. **A node-level `share` with nowhere to land is now an error.** Previously it
    was accepted and granted nothing. See `share-without-primary-port` above.
 
-`ambiguous-primary-port` also became *more permissive*: it fires only when there
-are two or more ports, none named `http`, and none carrying an explicit
-`protocol`. Marking exactly one port `"protocol": "http"` now answers the
-question the rule was asking.
+4. **Every port claims a hostname, including a `tcp` one.** Naming and routing
+   are separate concerns, so `{"http": "auto", "debug": "auto"}` now claims
+   `<node>-debug.…` in DNS as well as `<node>.…` — with no route in front of it,
+   which is why it gains no URL. Two consequences on an unchanged config: the
+   name enters the collision checks, so a run holding a node called `web-debug`
+   alongside a node `web` with a port `debug` is refused at `veld start` (naming
+   both owners, with per-port `host` as the way out); and on a custom apex domain
+   it is a real DNS entry rather than something `*.localhost` resolves for free.
+
+`ambiguous-primary-port` also became *more permissive*: a node whose ports are
+**all** explicitly `tcp` legitimately has no primary, and no longer trips it.
+Marking exactly one port `"protocol": "http"` answers the question the rule is
+asking; marking two does not, and neither does naming a port `http` while
+declaring it `"protocol": "tcp"` — a name cannot outvote the protocol beside it.
 
 ---
 

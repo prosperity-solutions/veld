@@ -243,11 +243,10 @@ fn is_zero(v: &u32) -> bool {
 ///
 /// The primary is matched **by value** against `NodeState::url`, the same rule
 /// `NodeState::routed_urls` uses, so the two never disagree about which port is
-/// the primary. A node persisted before per-port endpoints has an empty map and
-/// yields an empty list — its `url` alone still describes it.
+/// the primary.
 fn endpoint_infos(ns: &NodeState) -> Vec<EndpointInfo> {
     let mut out: Vec<EndpointInfo> = ns
-        .endpoints
+        .endpoints_or_legacy()
         .iter()
         .map(|(name, e)| EndpointInfo {
             name: name.clone(),
@@ -1969,6 +1968,72 @@ mod tests {
             // Heaviest-first ordering means truncation keeps the head.
             assert_eq!(many[0], 0);
         }
+    }
+
+    /// The dashboards decide what to render as a link from `EndpointInfo`, so
+    /// three things have to hold: the primary is first, a raw port carries no
+    /// URL, and a row from before per-port endpoints still describes itself.
+    #[test]
+    fn endpoint_infos_puts_the_primary_first_and_keeps_raw_ports_unlinked() {
+        use veld_core::state::NodeEndpoint;
+
+        let mut ns = NodeState::new("web", "local");
+        ns.port = Some(3000);
+        ns.url = Some("https://web.dev.p.localhost".into());
+        // Inserted so that the primary is NOT the map's first key, which is what
+        // makes the ordering claim worth testing at all.
+        ns.endpoints.insert(
+            "admin".into(),
+            NodeEndpoint {
+                hostname: "web-admin.dev.p.localhost".into(),
+                url: Some("https://web-admin.dev.p.localhost".into()),
+                port: 3001,
+            },
+        );
+        ns.endpoints.insert(
+            "http".into(),
+            NodeEndpoint {
+                hostname: "web.dev.p.localhost".into(),
+                url: Some("https://web.dev.p.localhost".into()),
+                port: 3000,
+            },
+        );
+        ns.endpoints.insert(
+            "pg".into(),
+            NodeEndpoint {
+                hostname: "web-pg.dev.p.localhost".into(),
+                url: None,
+                port: 5432,
+            },
+        );
+
+        let eps = endpoint_infos(&ns);
+        assert_eq!(eps[0].name, "http", "the primary leads");
+        assert!(eps[0].primary);
+        assert_eq!(eps.len(), 3);
+        assert!(
+            eps[1..].iter().all(|e| !e.primary),
+            "exactly one endpoint is the primary"
+        );
+        let pg = eps
+            .iter()
+            .find(|e| e.name == "pg")
+            .expect("raw port listed");
+        assert!(pg.url.is_none(), "a raw port must never carry a URL");
+        assert_eq!(pg.port, 5432);
+
+        // A legacy row: `url` and `port`, no map. It still describes one port,
+        // or the node would render as having none.
+        let mut legacy = NodeState::new("web", "local");
+        legacy.port = Some(3000);
+        legacy.url = Some("https://web.dev.p.localhost".into());
+        let eps = endpoint_infos(&legacy);
+        assert_eq!(eps.len(), 1);
+        assert!(eps[0].primary && eps[0].url.is_some());
+        assert_eq!(eps[0].hostname, "web.dev.p.localhost");
+
+        // And a node that genuinely has no ports offers nothing.
+        assert!(endpoint_infos(&NodeState::new("watcher", "dev")).is_empty());
     }
 
     #[test]

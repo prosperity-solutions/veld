@@ -1076,28 +1076,6 @@ fn migrate_v11_pane_sessions(conn: &Connection) -> rusqlite::Result<()> {
 /// lets a `secret: true` var be overridable without veld taking custody of the
 /// secret. A plain scalar round-trips as a bare JSON string, so the common case
 /// stays readable in `sqlite3`.
-/// One JSON column holding a node's named ports, keyed by port name.
-///
-/// A node used to own exactly one hostname, so `nodes.url` was the whole story
-/// and teardown removed one DNS host and one Caddy route. With every
-/// `protocol: "http"` port getting its own hostname, a node can own several, and
-/// the stop path has to be able to find all of them from state alone — the
-/// config may have changed since the run started, which is why the URL was
-/// persisted in the first place.
-///
-/// Backfill is deliberately absent: existing rows keep `url` and get `'{}'`
-/// here, and `NodeState::hostnames()` folds `url` back in, so a run started
-/// before this migration still tears its single route down. Writing the old
-/// `url` into `urls` would have to invent a port name for it, and the only
-/// honest one ("http") is a guess about a config we no longer have.
-fn migrate_v14_node_endpoints(conn: &Connection) -> rusqlite::Result<()> {
-    conn.execute_batch(
-        r#"
-        ALTER TABLE nodes ADD COLUMN endpoints TEXT NOT NULL DEFAULT '{}';
-        "#,
-    )
-}
-
 fn migrate_v12_var_overrides(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
         r#"
@@ -1110,6 +1088,35 @@ fn migrate_v12_var_overrides(conn: &Connection) -> rusqlite::Result<()> {
             updated_at TEXT NOT NULL,
             PRIMARY KEY (project_id, scope, scope_key, name)
         );
+        "#,
+    )
+}
+
+/// One JSON column holding a node's named ports, keyed by port name.
+///
+/// A node used to own exactly one hostname, so `nodes.url` was the whole story
+/// and teardown removed one DNS host and one Caddy route. With every
+/// `protocol: "http"` port getting its own hostname, a node can own several, and
+/// the stop path has to be able to find all of them from state alone — the
+/// config may have changed since the run started, which is why the URL was
+/// persisted in the first place.
+///
+/// **Backfill is deliberately absent**, and the reason is that it could not be
+/// honest: writing the old `url` into `endpoints` has to invent a port name, and
+/// the only candidate ("http") is a guess about a config that is no longer on
+/// disk. Existing rows keep `url` and get `'{}'` here.
+///
+/// That makes an empty map ambiguous — "no ports" and "ports not recorded" look
+/// alike — so **every consumer that decides what a node can do must read
+/// [`crate::state::NodeState::endpoints_or_legacy`]**, which folds `url`/`port`
+/// back in as the single primary entry such a row always had. Reading the raw
+/// map is correct only where the answer is "what did this run record", never
+/// "what does this node have". `veld update` does not stop running environments,
+/// so rows like these outlive the upgrade by days.
+fn migrate_v14_node_endpoints(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        r#"
+        ALTER TABLE nodes ADD COLUMN endpoints TEXT NOT NULL DEFAULT '{}';
         "#,
     )
 }
@@ -1334,6 +1341,88 @@ mod tests {
             .query_row("PRAGMA integrity_check", [], |r| r.get(0))
             .unwrap();
         assert_eq!(integrity, "ok");
+    }
+
+    /// v14 against a real v13 database holding a node row from before per-port
+    /// endpoints — the row every machine that upgrades with an environment
+    /// running will have, since `veld update` deliberately does not stop them.
+    ///
+    /// Two properties, and the second is the one that matters: the ALTER leaves
+    /// the row alone (no backfill, `endpoints = '{}'`), **and** the node still
+    /// reads back as a node with one endpoint, because `endpoints_or_legacy`
+    /// folds `url`/`port` in. Reading the raw map instead is what made `veld
+    /// share` refuse a whole run as having nothing to share.
+    #[test]
+    fn v13_v14_upgrade_leaves_a_legacy_node_shareable() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("veld.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+            migrate_v1_initial(&conn).unwrap();
+            migrate_v2_node_stats(&conn).unwrap();
+            migrate_v3_environments_and_runs(&conn).unwrap();
+            migrate_v4_graph_snapshot(&conn).unwrap();
+            migrate_v5_desktop_worktrees(&conn).unwrap();
+            migrate_v6_worktree_emoji(&conn).unwrap();
+            migrate_v7_detailed_process_stats(&conn).unwrap();
+            migrate_v8_settings(&conn).unwrap();
+            migrate_v9_worktree_marker_color(&conn).unwrap();
+            migrate_v10_rail_lanes_and_trash(&conn).unwrap();
+            migrate_v11_pane_sessions(&conn).unwrap();
+            migrate_v12_var_overrides(&conn).unwrap();
+            migrate_v13_worktree_display_name(&conn).unwrap();
+            conn.pragma_update(None, "user_version", 13).unwrap();
+            conn.execute_batch(
+                r#"
+                INSERT INTO projects (root, name) VALUES ('/tmp/p', 'p');
+                INSERT INTO environments (project_root, name, created_at)
+                  VALUES ('/tmp/p', 'dev', '2026-01-01T00:00:00.000000Z');
+                INSERT INTO runs (id, environment_id, run_id, status, created_at)
+                  VALUES (1, 1, '11111111-1111-4111-8111-111111111111', 'running',
+                          '2026-01-01T00:00:00.000000Z');
+                INSERT INTO nodes (run_row, node_key, node_name, variant, status, pid, port, url)
+                  VALUES (1, 'web:local', 'web', 'local', 'healthy', 4242, 3000,
+                          'https://web.dev.p.localhost');
+                "#,
+            )
+            .unwrap();
+        }
+
+        let db = Db::open_at(&path).unwrap();
+        assert_eq!(
+            db.schema_version().unwrap(),
+            MIGRATIONS.last().unwrap().version
+        );
+
+        // The column exists and the row was not backfilled.
+        {
+            let conn = db.lock();
+            let raw: String = conn
+                .query_row(
+                    "SELECT endpoints FROM nodes WHERE node_key = 'web:local'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(raw, "{}", "v14 must not invent a port name");
+            let integrity: String = conn
+                .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(integrity, "ok");
+        }
+
+        // And the node is still a node with an endpoint, which is what every
+        // consumer that decides what it can do must see.
+        let state = db.load_project_state(Path::new("/tmp/p")).unwrap();
+        let node = &state.get_run("dev").expect("run survives").nodes["web:local"];
+        assert!(node.endpoints.is_empty(), "nothing was backfilled");
+        let folded = node.endpoints_or_legacy();
+        assert_eq!(folded.len(), 1, "the legacy row still has its one port");
+        let ep = &folded["http"];
+        assert_eq!(ep.hostname, "web.dev.p.localhost");
+        assert_eq!(ep.url.as_deref(), Some("https://web.dev.p.localhost"));
+        assert_eq!(ep.port, 3000);
     }
 
     #[test]

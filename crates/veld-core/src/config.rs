@@ -1170,7 +1170,16 @@ impl ResolvedPorts {
     /// rather than a guess, because silently picking alphabetically would make
     /// `${veld.port}` mean whichever name happened to sort first.
     fn choose_primary(ports: &BTreeMap<String, PortEntry>) -> Option<String> {
-        if ports.contains_key(PRIMARY_PORT_NAME) {
+        // The name wins — but only if the entry does not contradict it. A port
+        // called `http` that declares `"protocol": "tcp"` is not the front door,
+        // and letting the name decide made "primary" and "routed" disagree: the
+        // node's `url` was `None` while a *secondary* port had one, which broke
+        // the primary-first ordering every display depends on. Skipping it here
+        // means a chosen primary is always routed.
+        if ports
+            .get(PRIMARY_PORT_NAME)
+            .is_some_and(|e| e.protocol != Some(PortProtocol::Tcp))
+        {
             return Some(PRIMARY_PORT_NAME.to_owned());
         }
         let explicit_http: Vec<&String> = ports
@@ -2659,8 +2668,14 @@ pub struct HealthCheck {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port: Option<String>,
 
-    /// How long `type: "settle"` waits for the process to stay alive, in
-    /// seconds (default 3).
+    /// How long readiness waits for a **portless** node's process to stay alive,
+    /// in seconds (default 3).
+    ///
+    /// Named for `type: "settle"`, where it is the whole check, but it governs
+    /// the settle window for any readiness probe on a node with no port —
+    /// that window is phase 1's crash-fast, and a `command` probe on a portless
+    /// node needs it just as much. Ignored where the node has a port, because
+    /// phase 1 then waits for the listener instead.
     ///
     /// `settle` is the readiness probe for a long-running node that binds no
     /// port — an Electron shell, a watcher, a compiler. Its claim is deliberately
@@ -4842,13 +4857,14 @@ fn check_resolved_variants(config: &VeldConfig, out: &mut Vec<Finding>) {
 /// [`check_builtin_names`], which reports a name that is real but not populated
 /// where it was written.
 ///
-/// Two families are **not** listed here because they are per-node rather than
-/// fixed: `ports.<name>`, one per entry in the node's `ports` map (F6), and
-/// `urls.<name>[.hostname|host|origin|scheme|port]`, one per entry whose
-/// `protocol` is `http`. [`check_builtin_names`] validates those against what the
-/// node actually declares, which gives a better error than "unknown builtin" — it
-/// can say which port names exist, and for a URL it can say the port exists but
-/// is `tcp`, which is the reason it has no hostname.
+/// Three families are **not** listed here because they are per-node rather than
+/// fixed, one entry per declared port: `ports.<name>` (the port number, every
+/// protocol), `hosts.<name>` (the hostname, every protocol — the only accessor a
+/// `tcp` port has), and `urls.<name>[.hostname|host|origin|scheme|port]` (`http`
+/// ports only, since nothing routes the others). [`check_builtin_names`]
+/// validates those against what the node actually declares, which gives a better
+/// error than "unknown builtin" — it can say which port names exist, and for a
+/// URL it can say the port exists but is `tcp`, which is the reason it has none.
 pub const BUILTIN_VARS: &[&str] = &[
     "run",
     "run_id",
@@ -4985,6 +5001,14 @@ struct BuiltinSite {
     /// The subset of `ports` with `protocol: "http"` — the only ones that get a
     /// hostname, and so the only ones `${veld.urls.<name>}` can resolve.
     http_ports: Vec<String>,
+    /// The primary port's name, if this variant has one. `None` for a node that
+    /// declares `"ports": null` or whose ports are all `tcp` — the two shapes in
+    /// which `${veld.port}` and `${veld.url}` have no answer.
+    ///
+    /// One field for both, because a chosen primary is always routed: see
+    /// [`ResolvedPorts::choose_primary`], which refuses an `http`-named entry
+    /// that declares `"protocol": "tcp"` precisely so the two cannot diverge.
+    primary: Option<String>,
 }
 
 /// The pieces `${veld.url…}` and `${veld.urls.<name>…}` decompose into, mirroring
@@ -5020,6 +5044,7 @@ impl BuiltinSite {
             kind,
             ports: Vec::new(),
             http_ports: Vec::new(),
+            primary: None,
         }
     }
 
@@ -5041,6 +5066,20 @@ impl BuiltinSite {
         if let Some(port) = name.strip_prefix("hosts.") {
             return self.kind == BuiltinScopeKind::ServerNode
                 && self.ports.iter().any(|p| p == port);
+        }
+        // `port` and `url` used to be free on any long-running node, because one
+        // always had exactly one routed port. Both are now conditional, and the
+        // condition has to be checked *here* — otherwise `"ports": null` plus
+        // `${veld.url}` lints clean and dies mid-start with `UnknownBuiltin`,
+        // which is the same silent-until-runtime failure `probe-needs-port` and
+        // `share-without-primary-port` exist to stop.
+        if self.kind == BuiltinScopeKind::ServerNode {
+            if name == "port" {
+                return self.primary.is_some();
+            }
+            if name == "url" || name.starts_with("url.") {
+                return self.primary.is_some() && self.kind.provides(name);
+            }
         }
         self.kind.provides(name)
     }
@@ -5105,6 +5144,34 @@ impl BuiltinSite {
             }
             return format!("`${{veld.{name}}}` is not available here");
         }
+        // `port` / `url` on a node that has no primary port to answer with. The
+        // name is a real builtin and the node is the right kind, so without
+        // these the message would report an unknown builtin and send the reader
+        // looking for a typo that isn't there.
+        // `url.hostname` and friends fail for the same reason `url` does, and the
+        // remedy is the same sentence — so they share it rather than falling
+        // through to a message about an unknown builtin.
+        if self.kind == BuiltinScopeKind::ServerNode
+            && (name == "port" || name == "url" || name.starts_with("url."))
+        {
+            if self.ports.is_empty() {
+                return format!(
+                    "`${{veld.{name}}}` describes the node's primary port, but this node \
+                     declares `\"ports\": null` and has none. Declare a port, or drop the \
+                     reference"
+                );
+            }
+            if self.primary.is_none() {
+                let mut names = self.ports.clone();
+                names.sort();
+                return format!(
+                    "`${{veld.{name}}}` describes the node's primary port, and this node has \
+                     no primary: every port it declares is `\"protocol\": \"tcp\"`. Use \
+                     `${{veld.ports.<name>}}` / `${{veld.hosts.<name>}}` for one of: {}",
+                    names.join(", ")
+                );
+            }
+        }
         match name.strip_prefix("ports.") {
             Some(port) if self.kind == BuiltinScopeKind::ServerNode => {
                 if self.ports.is_empty() {
@@ -5158,8 +5225,9 @@ fn check_builtin_names(config: &VeldConfig, out: &mut Vec<Finding>) {
                     loc,
                     format!(
                         "`${{veld.{name}}}` is not a built-in variable. `veld.*` is a closed \
-                         set ({}, plus `ports.<name>` and `urls.<name>` for a node's \
-                         declared ports). If {name} is a node output, use \
+                         set ({}, plus `ports.<name>`, `hosts.<name>` and \
+                         `urls.<name>` for a node's declared ports). If {name} is \
+                         a node output, use \
                          `${{output.{name}}}` (this node) or `${{nodes.<node>.{name}}}` \
                          (another node)",
                         BUILTIN_VARS.join(", ")
@@ -5261,6 +5329,7 @@ fn check_builtin_names(config: &VeldConfig, out: &mut Vec<Finding>) {
                 .filter(|(_, p)| p.protocol == PortProtocol::Http)
                 .map(|(name, _)| name.clone())
                 .collect(),
+            primary: resolved_ports.primary.clone(),
         }
     }
 
@@ -9362,6 +9431,88 @@ mod tests {
             ambiguous,
             "one stated protocol does not name the front door"
         );
+    }
+
+    /// `${veld.port}` and `${veld.url}` stopped being unconditional the moment a
+    /// long-running node was allowed to have no ports — and a builtin that is
+    /// conditional at runtime but unconditional at lint time is the exact shape
+    /// this diff added `probe-needs-port` to stop. The remedy has to name the
+    /// accessor that *does* work, or the reader goes looking for a typo.
+    #[test]
+    fn the_primary_port_builtins_are_gated_on_having_a_primary() {
+        fn lint_case(ports: &str, reference: &str) -> Vec<String> {
+            let json = format!(
+                r#"{{"schemaVersion":"3","name":"t","nodes":{{"a":{{"variants":{{"dev":{{
+                    "type":"long_running","shell":"x","ports":{ports},
+                    "env":{{"X":"{reference}"}},
+                    "probes":{{"readiness":{{"type":"command","shell":"true"}}}}
+                }}}}}}}}}}"#
+            );
+            let cfg: VeldConfig = serde_json::from_str(&json).expect("fixture parses");
+            validate(&cfg)
+                .iter()
+                .filter(|f| f.rule == "builtin-not-in-scope")
+                .map(|f| f.message.clone())
+                .collect()
+        }
+
+        // A node that declares a routed primary keeps both, exactly as before.
+        assert!(lint_case(r#"{"http":"auto"}"#, "${veld.url}").is_empty());
+        assert!(lint_case(r#"{"http":"auto"}"#, "${veld.port}").is_empty());
+
+        // `"ports": null` — no port and no URL.
+        let msgs = lint_case("null", "${veld.url}");
+        assert_eq!(msgs.len(), 1, "portless node must be caught: {msgs:?}");
+        assert!(msgs[0].contains("\"ports\": null"), "{}", msgs[0]);
+        assert_eq!(lint_case("null", "${veld.port}").len(), 1);
+        assert_eq!(lint_case("null", "${veld.url.hostname}").len(), 1);
+
+        // All-tcp: no primary at all, so neither resolves — and the remedy
+        // points at the per-port accessors, which do.
+        let msgs = lint_case(r#"{"db":{"port":5432,"protocol":"tcp"}}"#, "${veld.port}");
+        assert_eq!(msgs.len(), 1, "{msgs:?}");
+        assert!(msgs[0].contains("veld.ports.<name>"), "{}", msgs[0]);
+        assert!(msgs[0].contains("db"), "{}", msgs[0]);
+
+        // A port *named* `http` that declares `tcp` does not become the primary
+        // just by its name, so this is an all-tcp node and neither builtin
+        // resolves. If it did become the primary, `NodeState.url` would be
+        // `None` while a secondary port had one.
+        let named_http_but_tcp = r#"{"http":{"port":5432,"protocol":"tcp"}}"#;
+        assert_eq!(lint_case(named_http_but_tcp, "${veld.port}").len(), 1);
+        assert_eq!(lint_case(named_http_but_tcp, "${veld.url}").len(), 1);
+    }
+
+    /// Everything downstream — `NodeState.url`, `routed_urls()`'s primary-first
+    /// ordering, `endpoint_infos`' by-value primary match — assumes a primary is
+    /// a port with a URL. Nothing else enforces it, so this does.
+    #[test]
+    fn a_chosen_primary_is_always_routed() {
+        for ports in [
+            r#"{"http":"auto"}"#,
+            r#"{"http":{"port":"auto","protocol":"http"}}"#,
+            r#"{"http":{"port":5432,"protocol":"tcp"},"admin":{"port":"auto","protocol":"http"}}"#,
+            r#"{"api":{"port":"auto","protocol":"http"},"db":{"port":5432,"protocol":"tcp"}}"#,
+            r#"{"only":"auto"}"#,
+            r#"{"db":{"port":5432,"protocol":"tcp"}}"#,
+            "null",
+        ] {
+            let json = format!(
+                r#"{{"schemaVersion":"3","name":"t","nodes":{{"a":{{"variants":{{"dev":{{
+                    "type":"long_running","shell":"x","ports":{ports},
+                    "probes":{{"readiness":{{"type":"command","shell":"true"}}}}
+                }}}}}}}}}}"#
+            );
+            let r = resolve(&json, "a", "dev");
+            let Some(primary) = &r.ports.primary else {
+                continue;
+            };
+            assert_eq!(
+                r.ports.ports[primary].protocol,
+                PortProtocol::Http,
+                "primary `{primary}` of {ports} must be routed"
+            );
+        }
     }
 
     #[test]

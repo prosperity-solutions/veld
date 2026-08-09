@@ -625,10 +625,11 @@ For `command` variants — array (captured from `$VELD_OUTPUT_FILE` or legacy `V
 | `${veld.urls.<name>}` | Full HTTPS URL of a named **http** port; also `.hostname`/`.host`/`.origin`/`.scheme`/`.port`, and `${nodes.<node>.urls.<name>}` cross-node |
 
 Availability is not uniform, and `veld lint` checks a reference against the context it sits in
-(`builtin-not-in-scope`): `port`/`url`/`url.*`/`ports.*`/`urls.*` exist only on a `long_running` node
-that actually declares the port in question — a `"ports": null` node has none of them, and
-`${veld.urls.<name>}` additionally needs that port to be `protocol: "http"`, which lint says by name
-rather than reporting an unknown built-in —
+(`builtin-not-in-scope`): `port`/`url`/`url.*`/`ports.*`/`hosts.*`/`urls.*` exist only on a `long_running`
+node that actually declares the port in question — a `"ports": null` node has none of them, a node whose
+ports are all `tcp` has no primary and so no `port`/`url` either, and `${veld.urls.<name>}` additionally
+needs that port to be `protocol: "http"`. `${veld.hosts.<name>}` is the accessor that works for both
+protocols, and lint says all of this by name rather than reporting an unknown built-in —
 `node`/`variant` only on a node, `run_id` not in a project `setup`/`teardown` step, and a `vars`
 value gets the run-scoped names only (a var is one value for the whole run, so compose per-node
 ones at the use site). A node's `on_stop` receives exactly what the node had, URL family included.
