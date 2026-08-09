@@ -46,6 +46,105 @@ The workspace has four crates:
 
 ## Local development
 
+### First: install veld
+
+Working on veld needs a working veld — the dev stack below is a veld
+environment, started and supervised by your *installed* instance, and that
+instance is also what owns Caddy, DNS and the helper:
+
+```sh
+curl -fsSL https://veld.oss.life.li/get | bash
+veld setup unprivileged     # no sudo; `veld setup` alone only prints status
+veld --version
+```
+
+`bash`, not `sh`: the installer uses `set -o pipefail` and `[[ ]]`, and on a
+Linux box where `/bin/sh` is dash it dies on its first line.
+
+Already have one? Make sure it is current — this repo's `veld.json` uses config
+features from the latest release, and an older binary fails to parse the **whole
+file** (see the note below). `veld update`.
+
+### The dev stack is a veld environment
+
+The usual way to run veld while working on it is to let veld run it. The root
+`veld.json` declares the whole stack — dev daemon, `/ide` with HMR, and the
+Electron shell:
+
+```sh
+veld start --preset dev            # daemon + /ide + Electron, empty database
+veld start --preset dev-keep       # …reusing the database this run already has
+veld start --preset dev-from-real  # …on a snapshot of the REAL database
+veld start --preset dev-headless   # empty database, no Electron
+veld status
+veld logs dev-daemon --follow
+veld stop
+```
+
+`dev` starts on an **empty** database, so it is reproducible and a migration
+always runs against a known state. The cost is that the desktop app's own state
+lives there — imported repos, worktrees, lanes, terminal layouts — so a fresh
+start has none of it. `dev-keep` is the same stack over whatever the run's
+database already holds; reach for it once you have things arranged.
+
+> **`unknown variant 'long_running'`?** Your installed veld predates the release
+> that added it, and the failure is the *whole file* — `veld start website:local`
+> stops working too, because a config is parsed as one unit. Run `veld update`.
+> Until you do, `just dev start --preset dev` runs the same thing through this
+> branch's own binary, which is also the answer while you are working on a change
+> to the config language itself.
+
+**This is parallel-safe, which is the point.** Every worktree's stack gets its
+own allocated ports, its own database under `.veld-dev/<run>/`, its own
+hostnames, and its own `~/.local/bin/veld-dev-<run>` — so two branches can each
+have a full stack up at the same time. The stack you start is monitored by the
+*installed* veld, so `veld status` keeps working even when the dev daemon is
+wedged, and a schema-ahead branch can never touch your real database.
+
+The dev-stack nodes:
+
+| Node | What it is |
+|---|---|
+| `dev-build` | `cargo build -p veld-daemon -p veld` plus the npm deps. Gates everything else, so a broken build fails the run instead of starting three things against a half-built tree |
+| `dev-db` | Prepares `.veld-dev/<run>/veld.db`. Variants `ensure` (default — creates the directory and nothing else), `fresh`, `from-real` |
+| `dev-daemon` | The daemon from source, on an allocated port, with its own socket and holder directory |
+| `dev-ui` | vite for `/ide`, proxying `/api` to `dev-daemon` |
+| `dev-electron` | Supervises the Electron shell against `dev-ui`. A `long_running` node with `"ports": null` — it binds nothing |
+| `dev-link` | Writes `~/.local/bin/veld-dev-<run>`, removed again at stop |
+
+`just dev-db-list` shows every per-run database in the worktree with its schema
+version. They deliberately outlive a stopped run, so stopping the stack does not
+throw away the state you were debugging.
+
+### Quitting Electron does not stop the stack
+
+You can close or Cmd+Q the desktop app and keep working; bring it back with:
+
+```sh
+veld action open --node dev-electron
+```
+
+That is not free behaviour — it needed the node to be a supervisor
+(`scripts/dev/electron.sh`) rather than `electron .`. veld's health monitor
+treats **any** node process dying as a crash of the whole run: it marks the run
+`crashed` and SIGTERMs every surviving sibling. Run bare, one Cmd+Q took the dev
+daemon and the vite server down with it. The node is therefore the supervisor,
+which outlives a quit and relaunches Electron when the action asks it to.
+
+The action handles both ways a window goes away: if Electron is still running
+(on macOS, closing every window does not quit — the tray stays), it activates
+the process so Electron's own `activate` handler opens one; if it has exited,
+the supervisor relaunches it. The first activation may ask for macOS automation
+permission; clicking the tray icon does the same job.
+
+### The bootstrap tier
+
+Everything below this line is the older, **single-worktree** path: fixed ports,
+one dashboard hostname, one `veld-dev` wrapper. It has not gone anywhere,
+because you need a way to run the daemon when the thing you broke is
+`veld start` itself, and because a fresh clone has nothing to start a veld run
+with. Use it for that; use the preset above the rest of the time.
+
 Veld has three tiers of binaries with different lifecycles:
 
 | Tier | Binary | Runs as | How to test changes |
@@ -91,7 +190,10 @@ or `just dev-install`.
 
 **`veld-dev` — the dev instance from any project.** `just dev-link` (one-time)
 installs `~/.local/bin/veld-dev`, a wrapper that carries the full dev
-instance (dev DB, daemon port 19898, dev socket). It is the complete CLI —
+instance (dev DB, daemon port 19898, dev socket). One file naming one worktree,
+so whichever worktree ran `dev-link` last owns the name — the dev stack's
+`dev-link` node writes a per-run `veld-dev-<run>` beside it instead, which is
+the one to use when you have a stack up. It is the complete CLI —
 `start`/`stop`/`restart` included — and shares the installed helper/Caddy,
 so URLs work normally. The old "don't `veld-dev start`" caveat is gone: the
 wrapper no longer overrides the lib directory (the CLI↔installed-services
@@ -130,8 +232,10 @@ just dev-restore    # runs veld update
 
 | Command | What it does | Sudo? |
 |---------|-------------|-------|
+| `veld start --preset dev` | The whole dev stack, per worktree (the usual way) | No |
 | `just dev <args>` | Run CLI from source (safe, no install) | No |
-| `just dev-link` | Create `veld-dev` wrapper for cross-project use | No |
+| `just dev-link` | Create the bootstrap `veld-dev` wrapper for cross-project use | No |
+| `just dev-db-list` | Every per-run dev database, with its schema version | No |
 | `just dev-install-daemon` | Install daemon + restart service | No |
 | `just dev-install-helper` | Install helper + restart Caddy | Yes |
 | `just dev-install` | CLI + daemon | No |

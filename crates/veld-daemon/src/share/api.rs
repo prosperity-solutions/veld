@@ -90,7 +90,11 @@ async fn start(
         req.ttl_secs,
         mode,
     )?;
-    let node_names: Vec<String> = manifest.nodes.iter().map(|n| n.node.clone()).collect();
+    // `display_nodes`, not the bare node name: the manifest holds one entry per
+    // **port**, so a node sharing two of them appeared twice under one name — and
+    // "Sharing 2 node(s)" is the only scope statement `veld share` prints when it
+    // mints a link, where an app port and an admin console must not read alike.
+    let node_names: Vec<String> = manifest.display_nodes();
     let expires_at = manifest.expires_at;
 
     if req.web {
@@ -203,7 +207,11 @@ async fn start_web_share(
         );
     }
 
-    let node_names: Vec<String> = manifest.nodes.iter().map(|n| n.node.clone()).collect();
+    // `display_nodes`, not the bare node name: the manifest holds one entry per
+    // **port**, so a node sharing two of them appeared twice under one name — and
+    // "Sharing 2 node(s)" is the only scope statement `veld share` prints when it
+    // mints a link, where an app port and an admin console must not read alike.
+    let node_names: Vec<String> = manifest.display_nodes();
     let expires_at = manifest.expires_at;
     let run_id = manifest.run_id;
 
@@ -650,46 +658,107 @@ fn build_manifest(
         ExposeMode::Peer => ExposeMode::Web,
         ExposeMode::Web => ExposeMode::Peer,
     };
-    let mut had_url_bearing = false;
+    // Any port at all, routed or raw — the name the failure message uses.
+    let mut had_endpoints = false;
     let mut not_opted_in: Vec<String> = Vec::new();
     let mut other_only: Vec<String> = Vec::new();
+    let mut web_needs_http: Vec<String> = Vec::new();
     let mut nodes = Vec::new();
     let mut web_access: Vec<(String, Option<WebAccessMode>)> = Vec::new();
+    // One iteration per **port**, not per node. Consent is declared on the port
+    // because that is where exposure happens: a node may contribute its app port
+    // and withhold its admin console and its database, and each decision has to
+    // be made and reported separately.
     for ns in run_state.nodes.values() {
-        let (Some(url), Some(port)) = (ns.url.as_ref(), ns.port) else {
-            continue;
-        };
-        had_url_bearing = true;
-        if let Some(filter) = nodes_filter {
-            if !filter.iter().any(|n| n == &ns.node_name) {
+        // `endpoints_or_legacy`, never `endpoints`: a run that was live across
+        // the upgrade to per-port endpoints has an empty map and a populated
+        // `url`, and reading the map alone refused the whole run as having
+        // nothing to share.
+        //
+        // Such a row records no port *name*, so the fallback calls its single
+        // entry `http` — but consent is looked up by name in the config, where
+        // the node's one port may be called `grpc`. Rename the synthesised entry
+        // to whatever the config says its primary is, or an opted-in node is
+        // refused and the diagnostic names a port the config does not contain.
+        let legacy_primary = ns.endpoints.is_empty().then(|| {
+            config
+                .resolved(&ns.node_name, &ns.variant)
+                .and_then(|r| r.ports.primary.clone())
+        });
+        for (port_name, endpoint) in &ns.endpoints_or_legacy() {
+            let port_name = match &legacy_primary {
+                Some(Some(primary)) => primary.as_str(),
+                _ => port_name.as_str(),
+            };
+            had_endpoints = true;
+            if let Some(filter) = nodes_filter {
+                if !filter.iter().any(|n| n == &ns.node_name) {
+                    continue;
+                }
+            }
+            let label = format!("{}:{}#{port_name}", ns.node_name, ns.variant);
+            let share = port_share(&config, &ns.node_name, &ns.variant, port_name);
+            if !share.as_ref().is_some_and(|s| s.allows(mode)) {
+                // An other-audience-only opt-in is a deliberate choice, not a
+                // missing one — call it out distinctly.
+                if share.is_some_and(|s| s.allows(other_mode)) {
+                    other_only.push(label);
+                } else {
+                    not_opted_in.push(label);
+                }
                 continue;
             }
-        }
-        let share = variant_share(&config, &ns.node_name, &ns.variant);
-        if !share.as_ref().is_some_and(|s| s.allows(mode)) {
-            let label = format!("{}:{}", ns.node_name, ns.variant);
-            // An other-audience-only opt-in is a deliberate choice, not a
-            // missing one — call it out distinctly.
-            if share.is_some_and(|s| s.allows(other_mode)) {
-                other_only.push(label);
-            } else {
-                not_opted_in.push(label);
+            // The web audience is HTTP-only, permanently: the gateway speaks
+            // HTTP/1.1 over the tunnel and a browser cannot speak a raw protocol
+            // through it regardless. `config::validate` rejects the combination,
+            // so reaching this means the config changed under a running run —
+            // refuse rather than publish something the gateway cannot serve.
+            if mode == ExposeMode::Web && !endpoint.is_routed() {
+                web_needs_http.push(label);
+                continue;
             }
-            continue;
+            let hostname = veld_core::url::hostname_of_url(&endpoint.hostname).to_owned();
+            if mode == ExposeMode::Web {
+                web_access.push((hostname.clone(), share.and_then(|s| s.web_access())));
+            }
+            let proxy = variant_proxy(&config, &ns.node_name, &ns.variant);
+            nodes.push(SharedNode {
+                node: ns.node_name.clone(),
+                variant: ns.variant.clone(),
+                port_name: Some(port_name.to_owned()),
+                hostname,
+                url: endpoint.url.clone(),
+                protocol: if endpoint.is_routed() {
+                    veld_core::config::PortProtocol::Http
+                } else {
+                    veld_core::config::PortProtocol::Tcp
+                },
+                upstream_port: endpoint.port,
+                proxy: (!proxy.is_empty()).then_some(proxy),
+            });
         }
-        let hostname = hostname_of(url);
-        if mode == ExposeMode::Web {
-            web_access.push((hostname.clone(), share.and_then(|s| s.web_access())));
+    }
+
+    // The host's upstream allowlist is keyed by hostname (`veld-share`'s
+    // `HostShare::upstreams`), so two entries sharing one would let a joiner
+    // reach whichever won the map insert. `planned_hostnames` refuses such a run
+    // at start, which makes this unreachable — and that is exactly why it must
+    // be an explicit refusal rather than an assumption.
+    {
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        if let Some(dup) = nodes
+            .iter()
+            .find(|n| !seen.insert(n.hostname.as_str()))
+            .map(|n| n.hostname.clone())
+        {
+            return Err((
+                StatusCode::CONFLICT,
+                format!(
+                    "two shared ports resolve to the same hostname ({dup}), so one would \
+                     shadow the other over the tunnel. Give one of them its own `host`."
+                ),
+            ));
         }
-        let proxy = variant_proxy(&config, &ns.node_name, &ns.variant);
-        nodes.push(SharedNode {
-            node: ns.node_name.clone(),
-            variant: ns.variant.clone(),
-            hostname,
-            url: url.clone(),
-            upstream_port: port,
-            proxy: (!proxy.is_empty()).then_some(proxy),
-        });
     }
 
     if nodes.is_empty() {
@@ -697,9 +766,10 @@ fn build_manifest(
             StatusCode::BAD_REQUEST,
             share_exclusion_message(
                 &run_name,
-                had_url_bearing,
+                had_endpoints,
                 &mut not_opted_in,
                 &mut other_only,
+                &mut web_needs_http,
                 mode,
             ),
         ));
@@ -712,6 +782,19 @@ fn build_manifest(
     other_only.sort();
     other_only.dedup();
     let mut warnings = Vec::new();
+    // A port that opted into `web` but cannot be served over it is the one
+    // exclusion the author actively asked for and did not get. Never silent —
+    // `config::validate` rejects the combination outright, so reaching this
+    // means the config changed under a running run.
+    web_needs_http.sort();
+    web_needs_http.dedup();
+    if !web_needs_http.is_empty() {
+        warnings.push(format!(
+            "not shared (raw `tcp` ports cannot be served over the public gateway — share \
+             them to a peer instead): {}",
+            web_needs_http.join(", ")
+        ));
+    }
     if !not_opted_in.is_empty() {
         warnings.push(format!(
             "not shared (no `{}` opt-in): {}",
@@ -780,14 +863,21 @@ fn build_manifest(
     })
 }
 
-/// The share policy of a node's specific variant, if any.
+/// The share policy of one **port** of a node's specific variant, if any.
 ///
-/// Resolved, not raw: `share` is hoistable to node level (F3). A raw read would
-/// refuse to share a node whose opt-in is declared once for all its variants —
-/// and, worse, the reverse mistake would be a silent consent bypass, so this must
-/// go through the one resolver.
-fn variant_share(config: &VeldConfig, node: &str, variant: &str) -> Option<SharePolicy> {
-    config.resolved(node, variant).and_then(|r| r.share)
+/// Resolved, not raw, for two reasons that are both consent-critical: `share` is
+/// hoistable to node level (F3), so a raw read would refuse to share a node whose
+/// opt-in is declared once for all its variants — and the reverse mistake would
+/// be a silent consent bypass. `config::resolve_variant` is also where the
+/// node-level `share` gets folded into the **primary port only**, so reading it
+/// from anywhere else would re-open exactly the widening this guards against.
+///
+/// `None` — unknown node, unknown variant, unknown port, or no policy — always
+/// means *not shared*.
+fn port_share(config: &VeldConfig, node: &str, variant: &str, port: &str) -> Option<SharePolicy> {
+    config
+        .resolved(node, variant)
+        .and_then(|r| r.ports.ports.get(port).and_then(|p| p.share.clone()))
 }
 
 /// Resolved reverse-proxy header rules for a node's specific variant
@@ -826,13 +916,14 @@ fn embed_warning(embed_relay_tokens: bool, relay: &RelayChoice) -> Option<String
 /// sorted+deduped in place for a deterministic message.
 fn share_exclusion_message(
     run_name: &str,
-    had_url_bearing: bool,
+    had_endpoints: bool,
     not_opted_in: &mut Vec<String>,
     other_only: &mut Vec<String>,
+    web_needs_http: &mut Vec<String>,
     mode: ExposeMode,
 ) -> String {
-    if !had_url_bearing {
-        return format!("run '{run_name}' has no shareable (URL-bearing) nodes");
+    if !had_endpoints {
+        return format!("run '{run_name}' has no nodes with ports to share");
     }
     not_opted_in.sort();
     not_opted_in.dedup();
@@ -862,8 +953,21 @@ fn share_exclusion_message(
             ),
         });
     }
+    // A port that opted into `web` and cannot be served over it is the one
+    // exclusion the author actively asked for, so it must never fall through to
+    // a generic message — least of all one blaming a `--node` filter the caller
+    // may not have passed.
+    web_needs_http.sort();
+    web_needs_http.dedup();
+    if !web_needs_http.is_empty() {
+        parts.push(format!(
+            "These opt into `web` but are `\"protocol\": \"tcp\"`, which the gateway cannot \
+             serve over HTTP: {}.",
+            web_needs_http.join(", ")
+        ));
+    }
     if parts.is_empty() {
-        // URL-bearing nodes existed but the --node filter excluded them all.
+        // Ports existed but the --node filter excluded them all.
         return format!("run '{run_name}' has no shareable services matching the requested nodes");
     }
     format!(
@@ -1093,6 +1197,7 @@ mod tests {
             name: name.to_owned(),
             status: veld_core::state::RunStatus::Running,
             urls: std::collections::HashMap::new(),
+            hostnames: Vec::new(),
         }
     }
 
@@ -1374,14 +1479,16 @@ mod tests {
     }
 
     #[test]
-    fn variant_share_resolves_the_live_variant_only() {
+    fn node_level_share_is_shorthand_for_the_primary_port() {
         let cfg = config_with_variant(r#", "share": { "expose": ["peer"] }"#);
         // `local` opts in; `prod` (same node, no share) does not.
-        assert!(variant_share(&cfg, "web", "local").is_some_and(|s| s.allows(ExposeMode::Peer)));
-        assert!(variant_share(&cfg, "web", "prod").is_none());
+        assert!(
+            port_share(&cfg, "web", "local", "http").is_some_and(|s| s.allows(ExposeMode::Peer))
+        );
+        assert!(port_share(&cfg, "web", "prod", "http").is_none());
         // Unknown node / variant → None, never a panic.
-        assert!(variant_share(&cfg, "missing", "local").is_none());
-        assert!(variant_share(&cfg, "web", "missing").is_none());
+        assert!(port_share(&cfg, "missing", "local", "http").is_none());
+        assert!(port_share(&cfg, "web", "missing", "http").is_none());
     }
 
     #[test]
@@ -1421,17 +1528,24 @@ mod tests {
     }
 
     #[test]
-    fn variant_share_web_only_does_not_allow_peer() {
+    fn port_share_web_only_does_not_allow_peer() {
         let cfg = config_with_variant(r#", "share": { "expose": ["web"] }"#);
-        let s = variant_share(&cfg, "web", "local").unwrap();
+        let s = port_share(&cfg, "web", "local", "http").unwrap();
         assert!(!s.allows(ExposeMode::Peer));
         assert!(s.allows(ExposeMode::Web));
     }
 
     #[test]
     fn exclusion_message_no_url_bearing() {
-        let msg = share_exclusion_message("r", false, &mut vec![], &mut vec![], ExposeMode::Peer);
-        assert!(msg.contains("no shareable (URL-bearing) nodes"), "{msg}");
+        let msg = share_exclusion_message(
+            "r",
+            false,
+            &mut vec![],
+            &mut vec![],
+            &mut vec![],
+            ExposeMode::Peer,
+        );
+        assert!(msg.contains("no nodes with ports to share"), "{msg}");
     }
 
     #[test]
@@ -1440,6 +1554,7 @@ mod tests {
             "r",
             true,
             &mut vec!["web:local".into()],
+            &mut vec![],
             &mut vec![],
             ExposeMode::Peer,
         );
@@ -1456,6 +1571,7 @@ mod tests {
             true,
             &mut vec![],
             &mut vec!["api:local".into()],
+            &mut vec![],
             ExposeMode::Peer,
         );
         assert!(msg.contains("veld share --web"), "{msg}");
@@ -1467,6 +1583,7 @@ mod tests {
             true,
             &mut vec![],
             &mut vec!["api:local".into()],
+            &mut vec![],
             ExposeMode::Web,
         );
         assert!(msg.contains("opt into `peer` only"), "{msg}");
@@ -1480,6 +1597,7 @@ mod tests {
             true,
             &mut vec!["web:local".into()],
             &mut vec![],
+            &mut vec![],
             ExposeMode::Web,
         );
         assert!(msg.contains(r#""expose": ["web"]"#), "{msg}");
@@ -1488,7 +1606,14 @@ mod tests {
     #[test]
     fn exclusion_message_filtered_out_all() {
         // URL-bearing nodes existed but the --node filter excluded every one.
-        let msg = share_exclusion_message("r", true, &mut vec![], &mut vec![], ExposeMode::Peer);
+        let msg = share_exclusion_message(
+            "r",
+            true,
+            &mut vec![],
+            &mut vec![],
+            &mut vec![],
+            ExposeMode::Peer,
+        );
         assert!(msg.contains("matching the requested nodes"), "{msg}");
     }
 
@@ -1499,9 +1624,33 @@ mod tests {
             true,
             &mut vec!["z:local".into(), "a:local".into(), "a:local".into()],
             &mut vec![],
+            &mut vec![],
             ExposeMode::Peer,
         );
         // sorted + deduped
         assert!(msg.contains("a:local, z:local"), "{msg}");
+    }
+
+    /// A `tcp` port that opted into `web` is the one exclusion the author
+    /// actively asked for and did not get. When it is the *only* reason nothing
+    /// is shareable, the message used to fall through to "no shareable services
+    /// matching the requested nodes" — blaming a `--node` filter the caller may
+    /// never have passed.
+    #[test]
+    fn exclusion_message_names_a_web_share_that_needed_http() {
+        let msg = share_exclusion_message(
+            "r",
+            true,
+            &mut vec![],
+            &mut vec![],
+            &mut vec!["db:local#pg".into()],
+            ExposeMode::Web,
+        );
+        assert!(msg.contains("db:local#pg"), "{msg}");
+        assert!(msg.contains("tcp"), "{msg}");
+        assert!(
+            !msg.contains("matching the requested nodes"),
+            "must not blame a --node filter: {msg}"
+        );
     }
 }

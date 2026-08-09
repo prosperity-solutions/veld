@@ -503,23 +503,23 @@ async fn ingest_client_logs(
         }
     };
 
-    // Find the node whose URL matches this host.
+    // Find the node this host belongs to. Matched against **every** hostname the
+    // node claimed, not just its primary `url`: the overlay and the client-log
+    // collector are injected on every routed endpoint, so a secondary http port
+    // serves a page that posts here — and matching the primary alone 404'd it,
+    // with the collected logs silently going nowhere.
+    let bare_host = host.split(':').next().unwrap_or("");
     let mut node_name = None;
     let mut variant_name = None;
     for ns in run_state.nodes.values() {
-        if let Some(ref url) = ns.url {
-            // Compare hostname from the URL against the Host header.
-            let url_host = url
-                .trim_start_matches("https://")
-                .trim_start_matches("http://")
-                .split('/')
-                .next()
-                .unwrap_or("");
-            if url_host == host || url_host == host.split(':').next().unwrap_or("") {
-                node_name = Some(ns.node_name.clone());
-                variant_name = Some(ns.variant.clone());
-                break;
-            }
+        if ns
+            .hostnames()
+            .iter()
+            .any(|h| h.eq_ignore_ascii_case(bare_host))
+        {
+            node_name = Some(ns.node_name.clone());
+            variant_name = Some(ns.variant.clone());
+            break;
         }
     }
 

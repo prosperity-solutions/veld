@@ -1111,7 +1111,7 @@ export function paneTabLabel(layout: PaneLayout, tab: PaneTab): string {
 // ---------------------------------------------------------------------------
 //
 // **A worktree's panes live in the daemon's database**, one row per worktree
-// (migration v14), read and written through `ide/layoutStore.ts`. What is left
+// (migration v15), read and written through `ide/layoutStore.ts`. What is left
 // here is the storage for *detached* windows, which are a different thing: a
 // detached window holds tabs transferred out of a worktree a main window owns,
 // so it is a satellite of that window's claim rather than a view of the
@@ -1399,7 +1399,7 @@ function parseDock(value: unknown): Dock {
  * One worktree's layout, validated.
  *
  * Exported because the daemon store hands back a document it never looked
- * inside — see `migrate_v14_pane_layouts`. This is the gate: a layout written by
+ * inside — see `migrate_v15_pane_layouts`. This is the gate: a layout written by
  * a newer build, or hand-edited in `sqlite3`, must degrade to "no saved layout"
  * rather than throw during a render.
  */

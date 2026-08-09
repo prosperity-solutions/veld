@@ -33,7 +33,8 @@ No port numbers. No manual wiring. Just clean, stable, human-readable URLs.
 - **`argv` or `shell`** — one vocabulary everywhere veld runs something. `argv` is spawned directly, so an interpolated value containing spaces or globs can never change the argument count; `shell` is the permanently-supported escape hatch
 - **Value sources and secrets** — read a value from the environment, a file, or a command's stdout, and mark it `secret`. Veld carries a *pointer* and a flag, never custody: a secret reaches the process's environment or a file (`files:`) and is refused in a command line, where it would land in the process table
 - **Machine-overridable vars** — some values in a committed config are facts about the *laptop*, not the project: which of two installed container runtimes to use, a memory ceiling a 16 GB machine and a 64 GB machine disagree about, the path to a locally installed tool. A var declares `machine: { default, choices, description, prompt }` and each developer answers it once with `veld config set` — stored in Veld's database, **shared across every worktree of the repo** rather than asked again in each one, narrowable to one checkout with `--worktree`. A var with no default stops the run *before anything spawns*, asks when there is a terminal (or a UI), and otherwise refuses with the exact command — it never resolves a default nobody chose and never persists a guess
-- **Named ports** — `"ports": { "http": "auto", "debug": "auto" }` for debug adapters and multi-port containers, so nothing needs a hand-picked literal port that breaks parallel worktrees
+- **Named ports, with protocols** — `"ports": { "http": "auto", "admin": { "port": "auto", "protocol": "http" }, "debug": "auto" }` for debug adapters and multi-port containers, so nothing needs a hand-picked literal port that breaks parallel worktrees. Every `http` port gets its own hostname (`web-admin.dev.veld.localhost`); a `tcp` port is allocated and exported (`VELD_PORT_DEBUG`) but never routed, because a raw TCP connection carries no hostname to route on
+- **Supervise a process that serves nothing** — `"ports": null` on a `long_running` node: an Electron shell, a file watcher, a background compiler. No port, no URL, no route — just a process veld starts, keeps in the graph, and stops with the rest. Readiness is still required; `{ "type": "settle", "seconds": 3 }` accepts "it was still running after 3s" when there is nothing better to probe
 - **Structured output** — all commands support `--json` for scripting and CI
 - **Browser dashboard** — management UI at `https://veld.localhost` with service health, logs, search, stop/restart
 - **Every step's output is collected** — `command` nodes (a `docker build`, a `pnpm install`) log to their node's stream exactly like servers do, and project `setup`/`teardown` steps to the run's; nothing a step prints is thrown away. Lines also stream into `veld start`'s progress output as they arrive, instead of scribbling over it
@@ -41,7 +42,7 @@ No port numbers. No manual wiring. Just clean, stable, human-readable URLs.
 - **Internal logs** — liveness probe outcomes (with stderr), recovery decisions, health state transitions; view with `veld logs --source internal`
 - **Resource monitoring that doesn't lie, including while a run is still starting** — the daemon samples every node's whole process tree every 5s, from the moment the run begins rather than once it is fully up: a dev server's boot-up allocation ramp is recorded, not skipped. `command` steps — builds, installs, codegen — are sampled too, every 2s, by the `veld start` that runs them, because their processes never outlive that command and no PID for them exists anywhere else. So "what did that `cargo build` peak at" and "how much does the dev server hold before it serves its first request" are questions with answers. (A `docker build` is the exception: the work happens inside `dockerd`/`buildkitd`, outside the step's process tree, so the client is all veld can see.) The headline memory figure is the tree's **footprint** (proportional set size on Linux, `phys_footprint` on macOS), because summing RSS over a tree counts each page shared inside it once per process, so a five-process `npm run dev` reported far more than it occupied. On Linux the footprint splits by page class — private dirty (the heap, what grows when a node leaks), private clean, shared dirty, shared clean, swap, wired — and every node splits by **subprocess**, so "which child is eating the RAM" is a question with an answer. `veld stats` shows it in the terminal (`--processes`, `--history`, `--cpu`, `--memory <metric>`); the dashboard expands any node into a scrubbable chart you can flip between memory and CPU, and between total, by-type and by-process. Where a bucket averages several samples, the chart plots the peak alongside the mean — a mean over a six-minute bucket hides the spike a 5s sample caught. Totals are kept 24h, per-process detail 2h (both reported by the API, so nothing hardcodes them); `VELD_STATS_MEMORY_DETAIL=off` and `VELD_STATS_CMDLINE=off` turn off the detailed probe and argv capture respectively — and because there are two samplers, each has to be set **twice**: in the *daemon's* environment (`launchctl setenv` / `systemctl --user set-environment`, then restart it; a shell `export` does not reach a launchd/systemd service) for long-running services, *and* exported in the shell you run `veld start` from for build/install steps, which the CLI samples. Verify against a `command` node, since a server node reads only the daemon's half — see [skills/veld/SKILL.md](skills/veld/SKILL.md)
 - **Reverse-proxy header rules** — add or strip request/response headers on the local proxy and the public web gateway with a `proxy` config block (project/node/variant). Veld does no header manipulation by default.
-- **Peer-to-peer sharing** — share a running environment with a colleague over an encrypted P2P tunnel (`veld share`); they open the same URLs on their own machine. Services opt in explicitly in config, and relays are configurable (public or self-hosted) for compliance. No accounts, no Veld-hosted server.
+- **Peer-to-peer sharing** — share a running environment with a colleague over an encrypted P2P tunnel (`veld share`); they open the same URLs on their own machine, and a shared `tcp` port (a database, a debugger) shows up as a local port on theirs. **Consent is per port**, declared in config, so a node can expose its app and withhold its ops console. Relays are configurable (public or self-hosted) for compliance. No accounts, no Veld-hosted server.
 - **Public web sharing** — expose a service to someone *without* Veld (`veld share --web`): a self-hosted gateway (`veld-gateway`, one Docker container) mints a real public URL anyone can open in a browser. The overlay's **Copy public URL** action translates your current page (path + query preserved) into the public link.
 
 ## Install
@@ -103,7 +104,7 @@ cargo build --release
       "default_variant": "local",
       "variants": {
         "local": {
-          "type": "start_server",
+          "type": "long_running",
           "argv": ["npm", "run", "dev", "--", "--port", "${veld.port}"],
           "probes": { "readiness": { "type": "http", "path": "/health", "timeout_seconds": 30 } }
         }
@@ -113,7 +114,7 @@ cargo build --release
       "default_variant": "local",
       "variants": {
         "local": {
-          "type": "start_server",
+          "type": "long_running",
           "argv": ["npm", "run", "dev", "--", "--port", "${veld.port}"],
           "probes": { "readiness": { "type": "http", "path": "/", "timeout_seconds": 30 } },
           "depends_on": { "backend": "local" },
@@ -199,8 +200,37 @@ veld stop --name dev
 
 ### Step types
 
-- **`start_server`** — long-running process. Veld allocates a port (`${veld.port}`), starts the process, and runs health checks.
+A node's `type` describes its **lifecycle only** — whether it runs to completion or stays running. Whether it serves anything is a property of its `ports`.
+
+- **`long_running`** — a process veld supervises for the life of the run. By default veld allocates one port (`${veld.port}`), starts the process, and gates the graph on a readiness probe, which is mandatory. Declare `"ports": null` for a long-running process that serves nothing — an Electron shell, a file watcher, a background compiler — and it gets no port, no URL and no route. (`start_server` is the historical spelling and remains a permanent alias, exactly as `bash` is for `command`. Configs written either way load forever, and nothing nags you about the old one: a permanent alias sets no deadline, so there is deliberately no lint rule for it.)
 - **`command`** — runs a command to completion. Can emit outputs by writing `key=value` lines to `$VELD_OUTPUT_FILE` (preferred) or via `VELD_OUTPUT key=value` on stdout (legacy, discouraged). Optional `skip_if` command for idempotency.
+
+### Ports and protocols
+
+`ports` has three authorings:
+
+```jsonc
+// absent  → one auto-allocated http port. The default, unchanged.
+// null    → no ports at all: no allocation, no ${veld.port}, no URL, no route.
+"ports": null
+
+// a map   → named ports, shorthand or long form. `"name": null` erases one entry.
+"ports": {
+  "http":     "auto",                                   // primary → protocol "http"
+  "admin":    { "port": "auto", "protocol": "http" },   // its own hostname
+  "postgres": { "port": 5432,   "protocol": "tcp" },    // allocated, exported, never routed
+  "debug":    "auto"                                    // secondary → protocol "tcp"
+}
+```
+
+- **The default protocol is `http` for the primary port and `tcp` for every other**, so an existing multi-port config gains no new hostname the first time it runs on a newer veld.
+- An **`http`** port gets a hostname and a Caddy route. The primary's `{service}` is the node name; a secondary's is `<node>-<port>` — `web-admin.dev.veld.localhost`, a sibling of the node's own hostname at the same depth, so a wildcard cert that already covers the node covers its extra ports too. Per-port `"host": "<template>"` overrides the template, which is the way out of a collision.
+- A **`tcp`** port is allocated and exported as `${veld.ports.<name>}` / `VELD_PORT_<NAME>`, and deliberately not routed: a raw TCP connection carries no hostname for a proxy to demultiplex on, and every `*.veld.localhost` name already resolves to 127.0.0.1 anyway, so the port number is the whole address.
+- `${veld.port}` is the primary — the port named `http`, the sole entry marked `"protocol": "http"`, or the sole entry when it states no protocol. Several ports with none of those is `ambiguous-primary-port`, a `veld lint` error rather than a guess.
+- **`19899` is veld's own daemon port and is never given to a node** — auto-allocation skips it, and naming it explicitly is refused rather than substituted. A node that bound it would take the port from the daemon's next start, which fails later and elsewhere with nothing pointing back at the config.
+- A port entry also carries its own `share` opt-in — see [Sharing](#sharing). Consent is per port, because a node that serves an app, an ops console and a database must be able to expose one of them without exposing all three.
+
+All of this is additive within `schemaVersion: "3"` — there is no v4 and nothing to rewrite. [docs/adopting-long-running-and-ports.md](docs/adopting-long-running-and-ports.md) is the page to hand a coding agent if you want to adopt it, and it ends with the behaviour changes that can move under a config you never touch.
 
 ### Setup & teardown
 
@@ -225,14 +255,20 @@ Setup steps that fail (non-zero exit) abort startup with the `failureMessage` if
 ```json
 { "type": "http", "path": "/health", "expect_status": 200, "timeout_seconds": 30 }
 { "type": "port", "timeout_seconds": 10 }
+{ "type": "port", "port": "admin" }
 { "type": "command", "argv": ["curl", "-sf", "http://localhost:${veld.port}/ready"] }
+{ "type": "settle", "seconds": 3 }
 ```
+
+`http` and `port` probe the primary port unless `"port": "<name>"` names another. On a node with no such port they are a `probe-needs-port` lint error and fail the run rather than reporting healthy — an unknown `type` likewise (`unknown-probe-type`), because a typo must never be the quiet way to turn a probe off.
+
+**`settle`** is the readiness probe for a portless `long_running` node. Its claim is deliberately weak and it says so: *the process was still running `seconds` after it was spawned* (default 3). That is worth having anyway, because it is raced against process exit exactly as the port probe is, so a node whose command dies on startup still fails the run instead of letting its dependents start behind a corpse. Prefer `{ "type": "command", … }` whenever the process publishes something observable — a socket, a built file, a pid file. `settle` is readiness only; as a liveness check it would report healthy forever, so veld rejects it there.
 
 ### URL template variables
 
 | Variable | Description |
 |----------|-------------|
-| `{service}` | Node name |
+| `{service}` | Node name — for a node's *secondary* `http` port, `<node>-<port>` |
 | `{run}` | Run name |
 | `{project}` | Project name from veld.json |
 | `{branch}` | Current git branch (slugified) |
@@ -244,7 +280,7 @@ Fallback operator: `{branch ?? run}` uses the first non-empty value.
 
 ### Client-side log levels
 
-Veld automatically captures browser `console.log`, `console.warn`, `console.error`, unhandled exceptions, and promise rejections from `start_server` nodes. Configure which levels to capture with `client_log_levels` at the project, node, or variant level (most specific wins):
+Veld automatically captures browser `console.log`, `console.warn`, `console.error`, unhandled exceptions, and promise rejections from `long_running` nodes. Configure which levels to capture with `client_log_levels` at the project, node, or variant level (most specific wins):
 
 ```json
 "client_log_levels": ["log", "warn", "error"]
@@ -256,7 +292,7 @@ View client logs with `veld logs --source client` or filter by source in the man
 
 ### Feature toggles
 
-Control which Veld capabilities are injected into `start_server` nodes' HTML responses with `features` at the project, node, or variant level (most specific wins):
+Control which Veld capabilities are injected into `long_running` nodes' HTML responses with `features` at the project, node, or variant level (most specific wins):
 
 ```json
 "features": {
@@ -312,7 +348,7 @@ Declare `env` at the project, node, or variant level. Variables cascade: variant
 
 Commands, env values, and output templates support `${veld.port}`, `${veld.url}`, `${veld.run}`, `${veld.root}`, `${nodes.backend.url}`, `${nodes.backend.port}`, etc.
 
-For `start_server` nodes, individual URL location pieces are also available (mirrors the Web URL API):
+For `long_running` nodes with an `http` port, individual URL location pieces are also available (mirrors the Web URL API):
 
 | Variable | Example | Description |
 |----------|---------|-------------|
@@ -324,9 +360,11 @@ For `start_server` nodes, individual URL location pieces are also available (mir
 
 These are also available as cross-node references: `${nodes.backend.url.hostname}`, `${nodes.backend.url.host}`, etc., and in the node's own `on_stop` hook — so a container named after `${veld.url.hostname}` in `argv` is removed by the identical string at teardown.
 
-Ports and URLs for all `start_server` nodes are pre-computed before execution, so `${nodes.X.url}` works everywhere — even across nodes with no dependency relationship. Frontend can reference backend's URL and backend can reference frontend's URL without a cycle.
+`${veld.url}` is the **primary** port's URL. Every *other* `http` port has the same family under its own name — `${veld.urls.<name>}` plus `.hostname`, `.host`, `.origin`, `.scheme`, `.port`, cross-node as `${nodes.<node>.urls.<name>.origin}`, and in the environment as `VELD_URL_<NAME>`. A `tcp` port has a `${veld.ports.<name>}` but no URL, and `veld lint` says so by name rather than reporting an unknown built-in.
 
-Availability is not uniform — a `command` node has no port or URL of its own, a project `setup` step belongs to no node, and a `vars` value is one value for the whole run. `veld lint` reports a real built-in written where it is not populated (`builtin-not-in-scope`) rather than letting the run fail with `unknown built-in variable`. See [Availability](docs/configuration.md#availability).
+Ports and URLs for all `long_running` nodes are pre-computed before execution, so `${nodes.X.url}` works everywhere — even across nodes with no dependency relationship. Frontend can reference backend's URL and backend can reference frontend's URL without a cycle.
+
+Availability is not uniform — a `command` node has no port or URL of its own, nor does a `long_running` node that declared `"ports": null`, a project `setup` step belongs to no node, and a `vars` value is one value for the whole run. `veld lint` reports a real built-in written where it is not populated (`builtin-not-in-scope`) rather than letting the run fail with `unknown built-in variable`. See [Availability](docs/configuration.md#availability).
 
 ## Architecture
 
@@ -481,7 +519,7 @@ That token is what lets a pane **fake surviving a reboot**. Veld's terminals alr
 The dock also holds the run's **diagnostics**, so a worktree that is misbehaving can be diagnosed without leaving it. A **Logs** pane is the same viewer the dashboard has — search with ±N context lines, node filter, source filter (server/client/setup/internal), a run picker over history and auto-scroll, and **colour**: a line's ANSI colours are rendered rather than printed as escape codes, other escape sequences are dropped, a progress line that overwrites itself shows its last state instead of every frame at once, and search matches the text you can see rather than the bytes underneath it — and a **Nodes** pane is the per-node health table: status, failure/recovery counts and the last liveness error, URL with copy/open, variant, PID, live CPU and memory with a sparkline that expands into the scrubbable resource chart, and each node's configured actions. In IDE mode each node's URL also carries an **open-in-a-pane** button, so a service opens in an embedded browser beside the terminal instead of in another application (copy and open-in-your-browser sit next to it). They are literally the dashboard's two views, not lookalikes: runs mode is a run's controls plus a Nodes|Logs switcher over the same components, so the two surfaces cannot drift. Both read whichever run the *selected* worktree has, so switching worktrees re-points every open diagnostics pane; both reach past runs (the logs pane's run picker, a picker in the nodes pane's header); and both keep working after a run ends — a crashed run's logs and last node states are exactly what you want then. The nodes view is a card per node rather than a table — a table has columns to lose, and this view has to be readable in a 300px pane and in a 1080px dashboard card alike; here nothing is dropped as the width changes, only rewrapped. Open them from `+` in the tab strip, the pane chooser, or ⌘K.
 The dock also holds the run's **diagnostics**, so a worktree that is misbehaving can be diagnosed without leaving it. A **Logs** pane is the same viewer the dashboard has — search with ±N context lines, node filter, source filter (server/client/setup/internal), a run picker over history and auto-scroll, and **colour**: a line's ANSI colours are rendered rather than printed as escape codes, other escape sequences are dropped, a progress line that overwrites itself shows its last state instead of every frame at once, and search matches the text you can see rather than the bytes underneath it — and a **Nodes** pane is the per-node health table: status, failure/recovery counts and the last liveness error, URL with copy/open, variant, PID, live CPU and memory with a sparkline that expands into the scrubbable resource chart, and each node's configured actions. In IDE mode each node's URL also carries an **open-in-a-pane** button, so a service opens in an embedded browser beside the terminal instead of in another application (copy and open-in-your-browser sit next to it). They are literally the dashboard's two views, not lookalikes: runs mode is a run's controls plus a Nodes|Logs switcher over the same components, so the two surfaces cannot drift. Both read whichever run the *selected* worktree has, so switching worktrees re-points every open diagnostics pane; both reach past runs (the logs pane's run picker, a picker in the nodes pane's header); and both keep working after a run ends — a crashed run's logs and last node states are exactly what you want then. The nodes view is a card per node rather than a table — a table has columns to lose, and this view has to be readable in a 300px pane and in a 1080px dashboard card alike; here nothing is dropped as the width changes, only rewrapped. Open them from `+` in the tab strip, the pane chooser, or ⌘K — or from the rail itself: a worktree whose run has **failed**, or one whose nodes veld is **recovering**, carries a warning on its row that says which, and clicking it brings you to that worktree with its Nodes pane in front. The rest of the row's run state is on its start/stop control, which spins while a run is coming up or going down — including a run you started from the terminal or from another window, not only one you clicked here.
 
-**Sharing** is one surface in the top bar: it starts and stops the peer share and the public `--web` share for the selected worktree's run, offers the join link and the `veld join` command, toggles auto-accept, and shows each live connection's transport (`direct`, or `relayed via <relay>`, with RTT) — so a slow share is diagnosable here too. Join requests are not hidden behind it: while someone is waiting for approval, a prompt sits above the panes naming who wants to join which run, with Approve and Deny. Sharing is opt-in per service (`share.expose`) and needs a relay (`sharing.relays`), so a run that has neither is *refused* rather than shared — the daemon says exactly what to add to `veld.json`, and both UIs now show that text instead of a bare status code.
+**Sharing** is one surface in the top bar: it starts and stops the peer share and the public `--web` share for the selected worktree's run, offers the join link and the `veld join` command, toggles auto-accept, and shows each live connection's transport (`direct`, or `relayed via <relay>`, with RTT) — so a slow share is diagnosable here too. Join requests are not hidden behind it: while someone is waiting for approval, a prompt sits above the panes naming who wants to join which run, with Approve and Deny. Sharing is opt-in per port (`share.expose`) and needs a relay (`sharing.relays`), so a run that has neither is *refused* rather than shared — the daemon says exactly what to add to `veld.json`, and both UIs now show that text instead of a bare status code.
 
 Because a terminal is a shell on your machine, `/api/pty/attach` is gated more tightly than the rest of the daemon's API: WebSocket handshakes cannot carry the `X-Veld-Request` CSRF header, so an attach needs a single-use ticket minted through a CSRF-gated `POST` **and** an `Origin` on the allowlist, failing closed when `Origin` is absent. Details and the reasoning are in `crates/veld-daemon/src/pty.rs`.
 
@@ -530,20 +568,36 @@ You can also download the `.dmg` (macOS) or `.AppImage` / `.deb` (Linux x64) fro
 
 Share a running environment with a colleague so they open the **same** URLs on their own machine, over an encrypted peer-to-peer tunnel (iroh: QUIC with NAT hole-punching and an n0 relay fallback). No accounts, no Veld-hosted server.
 
-**Services must opt in.** A service is shareable only if its variant declares `share.expose` in `veld.json` — `veld share` refuses to expose anything that hasn't. This makes what leaves your machine explicit and auditable:
+**Ports must opt in, one at a time.** `share` is a field on a **port** — that is where exposure happens — and `veld share` refuses to expose anything that hasn't declared one. This makes what leaves your machine explicit and auditable:
 
-```json
+```jsonc
 {
   "sharing": { "relays": "public" },
   "nodes": {
+    "api": {
+      "variants": {
+        "dev": {
+          "type": "long_running",
+          "shell": "api --port ${veld.port} --admin ${veld.ports.admin}",
+          "ports": {
+            "http":     { "port": "auto", "protocol": "http", "share": { "expose": ["peer"] } },
+            "admin":    { "port": "auto", "protocol": "http" },                     // ops console: never shared
+            "postgres": { "port": 5432,   "protocol": "tcp",  "share": { "expose": ["peer"] } }
+          },
+          "probes": { "readiness": { "type": "port" } }
+        }
+      }
+    },
     "frontend": {
       "variants": {
-        "local": { "type": "start_server", "argv": ["npm", "run", "dev"], "share": { "expose": ["peer"] } }
+        "local": { "type": "long_running", "argv": ["npm", "run", "dev"], "share": { "expose": ["peer"] } }
       }
     }
   }
 }
 ```
+
+`frontend` shows the shorthand: a `share` written on a node or a variant is **defined as the primary port's policy**. That keeps every config written before per-port consent meaning exactly what it meant — such a node had one exposed port — while making it impossible for the same three words to start covering an ops console or a database. It lands on the primary and stops there. A port's own `share` replaces the shorthand for that port rather than merging with it, an absent `share` is always "not shared", and nothing anywhere widens a port that declared none. `veld share` names every port it excluded and why, so a partial share is never silent.
 
 ```sh
 veld share my-feature        # prints a join URL to send (plus a veld join command)
@@ -569,6 +623,24 @@ A self-hosted relay can require an **authorization token** so it isn't open to a
 
 `share.expose` is a list of audiences. `peer` (Veld-to-Veld, described above) reproduces the origin URL verbatim. `web` exposes a service to **anyone with a browser** — no Veld required — via a self-hosted gateway.
 
+### Sharing a raw TCP port
+
+A `"protocol": "tcp"` port — a database, a debugger — can be shared to the `peer` audience. It rides the same encrypted tunnel and is reproduced on the joining machine as a **bare local TCP port**: a listener spliced to your service, with no Caddy route in front of it, because a raw connection carries no hostname for a proxy to match on.
+
+**The port number your colleague uses is theirs, not yours.** Nothing is in front of the socket to preserve `5432`, so `veld join` prints raw endpoints apart from the URLs and never as links:
+
+```
+✓ Joined — 3 endpoint(s) now reachable on this machine:
+
+    https://web.demo.acme.localhost
+    https://api-admin.demo.acme.localhost
+    api-postgres.demo.acme.localhost:49317  (tcp)
+```
+
+(`--json` puts them in `addresses`; `urls` stays URLs only.) Two things follow from "no route": `proxy` header rules are an HTTP concept and don't apply, and a colleague running an older Veld **refuses the whole join** rather than reproducing a raw endpoint as an HTTP route — the manifest entry has no `url` and their wire format required one. That is deliberate and fail-closed; upgrade both sides.
+
+`tcp` is `peer`-only: **`"expose": ["web"]` requires `"protocol": "http"`**, and the combination is the `web-share-needs-http` lint error. The gateway speaks HTTP/1.1 over the tunnel and a browser cannot speak a raw protocol through it whatever the gateway does — that is what the `web` audience *is*, not a limitation waiting to be lifted. There is no `udp` protocol, and so no udp sharing.
+
 ### Public web sharing
 
 Point the environment at your org's gateway and opt services into the `web` audience:
@@ -583,7 +655,7 @@ Point the environment at your org's gateway and opt services into the `web` audi
   "nodes": {
     "frontend": {
       "variants": {
-        "local": { "type": "start_server", "argv": ["npm", "run", "dev"], "share": { "expose": ["peer", "web"] } }
+        "local": { "type": "long_running", "argv": ["npm", "run", "dev"], "share": { "expose": ["peer", "web"] } }
       }
     }
   }
@@ -596,7 +668,7 @@ veld share --web            # prints https://<slug>.share.acme.internal per serv
 
 The gateway `token` (and any relay token) is resolved in the **daemon's** environment, not your interactive shell — a bare `export …` won't reach a background daemon, so use a literal (quick start), a `file` secret mount (production), or set the variable in the daemon's service definition. Same rule as [relay auth tokens](docs/configuration.md#relay-auth-tokens).
 
-`veld share --web` mints a **separate** share scoped to the `web`-opted services (its own capability — revoking the web audience never touches peer shares), registers it with the gateway, and prints the public URLs. The gateway joins over iroh like any peer and reverse-proxies the tunneled service onto `https://<slug>.<gateway-domain>`. URLs are **deterministic** (a hash bound to your machine, the service, and the share) and survive gateway restarts; a new share mints new URLs. The daemon keeps the registration alive with heartbeats; `veld unshare` (or the share's TTL) kills the public URLs.
+`veld share --web` mints a **separate** share scoped to the `web`-opted `http` ports (its own capability — revoking the web audience never touches peer shares), registers it with the gateway, and prints the public URLs. The gateway joins over iroh like any peer and reverse-proxies the tunneled service onto `https://<slug>.<gateway-domain>`. URLs are **deterministic** (a hash bound to your machine, the service, and the share) and survive gateway restarts; a new share mints new URLs. The daemon keeps the registration alive with heartbeats; `veld unshare` (or the share's TTL) kills the public URLs.
 
 **Web shares are password-protected by default.** `veld share --web` generates a share password (or takes yours via `--password`) and prints it next to the URLs; the first visit shows a password page, then a session cookie keeps the viewer in for up to 12 hours (never longer than the share). Send URL and password over different channels for real secrecy — or use the printed **one-link** (`https://…/#veld-key=…`), which carries the password in the URL *fragment*: it never appears in DNS, TLS, server logs, or `Referer`, so even the convenient form beats a bare link. To opt a service out (anyone with the link is served — the unguessable 128-bit slug is then the only gate), set `"share": { "expose": ["web"], "web": { "access": "link" } }` in config, or pass `--access link` for services whose config doesn't pin a mode — an explicit config value always wins over the flag. Viewer sessions are stateless (signed with a key derived from the share's capability), so a gateway restart doesn't log viewers out, and revoking the share invalidates every session instantly.
 
@@ -606,7 +678,7 @@ In the browser, the toolbar's arc menu has a top-level **Sharing** item (a green
 
 Deploying the gateway is one container (`ghcr.io/prosperity-solutions/veld-gateway`) plus a wildcard DNS record — see the [gateway operator guide](docs/gateway.md).
 
-> **Upgrading:** opt-in is a behavior change. Before, `veld share` exposed every URL-bearing service in a run; now it shares only services whose variant declares `share.expose`, and errors (naming the candidates) if none have opted in. Add `"share": { "expose": ["peer"] }` to the variants you previously relied on sharing. Password-by-default is a second behavior change: existing web shares gain a password on upgrade, and a freshly-upgraded daemon refuses `veld share --web` against a gateway too old to enforce it (clear error) — upgrade the gateway image, or share with `--access link`.
+> **Upgrading:** opt-in is a behavior change. Before, `veld share` exposed every URL-bearing service in a run; now it shares only ports that declare `share.expose`, and errors (naming the candidates as `node:variant#port`) if none have opted in. Add `"share": { "expose": ["peer"] }` to the variants you previously relied on sharing — that spelling still works and now means their primary port, which on a single-port node is the only thing it ever meant. Password-by-default is a second behavior change: existing web shares gain a password on upgrade, and a freshly-upgraded daemon refuses `veld share --web` against a gateway too old to enforce it (clear error) — upgrade the gateway image, or share with `--access link`.
 
 If the consumer already runs the same environment, the local URL wins — that node is skipped and reported as a warning. Shares live in the daemon's memory: if the daemon stops, shares stop (fail-closed). Stopping the run (`veld stop`) auto-unshares its shares, and so do `veld restart` and a `veld start` that replaces a live environment of the same name — each tears down the ports a share points at and mints a new run, so the old share is released rather than left pointing at nothing. A share whose run ended some other way (a crash) is listed as a "share without a run" in the dashboard, with an Unshare button, so it never becomes unreachable. The consumer's join self-tears-down when the tunnel closes. `veld unshare` and `veld leave` take the id optionally, resolving the sole active share/join when omitted. Run names are unique per project, not across your machine — two repos both on `main` each have an environment named `main` — so `veld share` resolves the run against the project directory you run it from. (Two *checkouts of one repo* are the exception worth knowing: they share a `veld.json`, so the same run name there means the same URL. `veld start` refuses the second one with an error naming the other project rather than hijacking its route — start it under a different `--name`.) A name that project doesn't run is an error naming where it *does* run, so `cd` there; run from outside any project, an ambiguous name is rejected naming the candidates rather than guessed at. Sharing also requires the run to be **running**, not merely started: a stopped environment's URLs point at ports that are gone, and one still coming up would share only the services that happen to be up already. Default TTL is 7200s (3600s for `--web` — the audience is the open internet, so idle web shares die sooner).
 

@@ -126,13 +126,32 @@ struct PendingRequest {
     decision: oneshot::Sender<bool>,
 }
 
+/// A stable, filesystem-and-Caddy-safe fragment identifying one shared endpoint
+/// within a join's route ids.
+///
+/// Keyed on the **hostname**, not on `node` + `port_name`. A fused label is not
+/// injective — node `web` port `admin-http` and node `web-admin` port `http`
+/// both spell `web-admin-http` — and the loser of that collision is silently
+/// overwritten in Caddy, so one joined endpoint stops resolving with nothing to
+/// say why. The hostname is unique across a manifest by construction (the host
+/// refuses to mint two entries that share one), and keying route ids by hostname
+/// is what the origin side already does — see `url::run_route_id`.
+fn route_slug(node: &veld_core::share::SharedNode) -> String {
+    veld_core::url::run_route_id(&node.hostname)
+}
+
 /// A share this daemon has joined; holds everything needed to tear it down.
 struct JoinEntry {
     id: String,
     nodes: Vec<String>,
     urls: Vec<String>,
-    /// (hostname, route_id) pairs registered with the helper.
-    routes: Vec<(String, String)>,
+    /// `host:port` for every **unrouted** (`tcp`) endpoint reproduced locally.
+    /// Not a URL — nothing is in front of it — and the port is the *local*
+    /// listener's, not the origin's, so this is the only way to reach it.
+    addresses: Vec<String>,
+    /// (hostname, route_id) pairs registered with the helper. `route_id` is
+    /// `None` for a tcp endpoint, which owns a DNS entry and no Caddy route.
+    routes: Vec<(String, Option<String>)>,
     /// Local listener tasks; aborted on leave to drop the listeners.
     tasks: Vec<JoinHandle<()>>,
     /// The QUIC connection to the host; closed on leave to stop the tunnel.
@@ -622,13 +641,23 @@ impl ShareManager {
                 joins
                     .values()
                     .find(|j| j.capability.ct_eq(&ticket.capability))
-                    .map(|j| (j.id.clone(), j.urls.clone(), j.warnings.clone()))
+                    .map(|j| {
+                        (
+                            j.id.clone(),
+                            j.urls.clone(),
+                            j.addresses.clone(),
+                            j.warnings.clone(),
+                        )
+                    })
             };
-            if let Some((id, urls, warnings)) = existing {
-                if !urls.is_empty() {
+            if let Some((id, urls, addresses, warnings)) = existing {
+                // A join that reproduced only raw endpoints has no URLs but is
+                // still live, so emptiness must be judged on both.
+                if !urls.is_empty() || !addresses.is_empty() {
                     return Ok(JoinResponse {
                         join_id: id,
                         urls,
+                        addresses,
                         warnings,
                         needs_relay_token: None,
                     });
@@ -687,6 +716,7 @@ impl ShareManager {
                 return Ok(JoinResponse {
                     join_id: String::new(),
                     urls: Vec::new(),
+                    addresses: Vec::new(),
                     warnings: Vec::new(),
                     needs_relay_token: Some(relay_url),
                 });
@@ -713,12 +743,30 @@ impl ShareManager {
 
         let join_id = gen_id("join");
         let mut urls = Vec::new();
+        let mut addresses: Vec<String> = Vec::new();
         let mut nodes = Vec::new();
         let mut routes = Vec::new();
         let mut tasks = Vec::new();
         let mut warnings = Vec::new();
 
-        for node in &manifest.nodes {
+        // Display labels for the whole manifest, so a joined share names its
+        // services exactly as the hosting side does in `veld shares`.
+        let display = manifest.display_nodes();
+
+        for (idx, node) in manifest.nodes.iter().enumerate() {
+            // An entry claiming `http` with no URL is malformed: reproducing it
+            // would mint a DNS host and a Caddy route for a host-chosen name that
+            // then appears in no output at all, because every display path reads
+            // `url`. Refuse it loudly instead of materialising something the
+            // joiner cannot see. No honest host mints one.
+            if node.is_malformed() {
+                warnings.push(format!(
+                    "skipped '{}': the host offered it as an HTTP endpoint but sent no URL",
+                    node.label()
+                ));
+                continue;
+            }
+
             // Local URL wins: never clobber a hostname this machine already
             // serves — from one of its own runs, or from another active join.
             if hostname_in_use_locally(&node.hostname)
@@ -767,36 +815,60 @@ impl ShareManager {
                 }
             });
 
-            // Register DNS + Caddy route pointing at our local listener.
-            let route_id = format!("veld-join-{join_id}-{}", node.node);
+            // Register DNS for every endpoint; a Caddy route only for routed
+            // ones. A `tcp` endpoint is reproduced as a bare local TCP port —
+            // putting Caddy in front of it would make an HTTP proxy try to parse
+            // a protocol it does not speak, and there is no hostname in a raw
+            // connection for it to match on anyway.
             if let Err(e) = helper.add_host(&node.hostname, "127.0.0.1").await {
                 // add_host is a no-op for `.localhost` (RFC 6761); for custom
-                // apex domains a failure means the URL won't resolve — warn.
+                // apex domains a failure means the name won't resolve — warn.
                 warnings.push(format!(
                     "'{}': DNS entry for {} may be incomplete ({e})",
-                    node.node, node.hostname
+                    node.label(),
+                    node.hostname
                 ));
             }
-            let route = serde_json::json!({
-                "route_id": route_id,
-                "hostname": node.hostname,
-                "upstream": format!("localhost:{local_port}"),
-            });
-            if let Err(e) = helper.add_route(route).await {
-                // Undo everything we did for this node so nothing leaks.
-                handle.abort();
-                let _ = helper.remove_host(&node.hostname).await;
-                warnings.push(format!(
-                    "skipped '{}': route registration failed ({e})",
-                    node.node
-                ));
-                continue;
+            if node.is_routed() {
+                let route_id = format!("veld-join-{join_id}-{}", route_slug(node));
+                let route = serde_json::json!({
+                    "route_id": route_id,
+                    "hostname": node.hostname,
+                    "upstream": format!("localhost:{local_port}"),
+                });
+                if let Err(e) = helper.add_route(route).await {
+                    // Undo everything we did for this endpoint so nothing leaks.
+                    handle.abort();
+                    let _ = helper.remove_host(&node.hostname).await;
+                    warnings.push(format!(
+                        "skipped '{}': route registration failed ({e})",
+                        node.label()
+                    ));
+                    continue;
+                }
+                routes.push((node.hostname.clone(), Some(route_id)));
+            } else {
+                // Nothing is in front of it, so the address is the name plus the
+                // port the local listener actually bound — which is *not* the
+                // origin's port number, and is the only way to reach it.
+                addresses.push(format!("{}:{local_port}", node.hostname));
+                // Still tracked so `leave` removes the DNS entry.
+                routes.push((node.hostname.clone(), None));
             }
 
             tasks.push(handle);
-            routes.push((node.hostname.clone(), route_id));
-            urls.push(node.url.clone());
-            nodes.push(node.node.clone());
+            // Gated on `is_routed`, not on `url.is_some()`. The mirror of the
+            // malformed case above: an entry declaring `tcp` while carrying a
+            // `url` gets a local listener and no Caddy route, so publishing that
+            // URL would hand the joiner a link whose name resolves to 127.0.0.1
+            // and whose port nothing is serving. It is reachable at the raw
+            // address, which is what `addresses` already says.
+            if node.is_routed() {
+                if let Some(url) = node.url.clone() {
+                    urls.push(url);
+                }
+            }
+            nodes.push(display[idx].clone());
         }
 
         let _ = helper.reload_dns().await;
@@ -810,6 +882,7 @@ impl ShareManager {
                 id: join_id.clone(),
                 nodes,
                 urls: urls.clone(),
+                addresses: addresses.clone(),
                 routes,
                 tasks,
                 conn: conn.clone(),
@@ -840,10 +913,16 @@ impl ShareManager {
             }
         }
 
-        info!(join_id = %join_id, count = urls.len(), "joined share");
+        info!(
+            join_id = %join_id,
+            urls = urls.len(),
+            raw = addresses.len(),
+            "joined share"
+        );
         Ok(JoinResponse {
             join_id,
             urls,
+            addresses,
             warnings,
             needs_relay_token: None,
         })
@@ -878,8 +957,13 @@ impl ShareManager {
                 run: s.manifest.run.clone(),
                 run_id: Some(s.manifest.run_id),
                 approve: Some(s.approve_mode),
-                nodes: s.manifest.nodes.iter().map(|n| n.node.clone()).collect(),
-                urls: s.manifest.nodes.iter().map(|n| n.url.clone()).collect(),
+                nodes: s.manifest.display_nodes(),
+                urls: s
+                    .manifest
+                    .nodes
+                    .iter()
+                    .filter_map(|n| n.url.clone())
+                    .collect(),
                 // A web share's ticket is a secret held between this daemon
                 // and the gateway — never surfaced for copy/paste.
                 ticket: s.web.is_none().then(|| s.ticket.clone()),
@@ -896,6 +980,20 @@ impl ShareManager {
                     .and_then(|w| w.access.as_ref())
                     .and_then(|a| a.password.clone()),
                 connections: peer_info.get(&s.id).cloned().unwrap_or_default(),
+                // On the host the raw port is reachable at its own name and its
+                // own port — there is no listener in between to renumber it.
+                addresses: s
+                    .manifest
+                    .nodes
+                    .iter()
+                    // `!is_routed()` alone would also match a malformed entry
+                    // (claims http, carries no URL) and print it as a raw
+                    // address. A host never mints one — but this predicate is
+                    // the kind that gets copied to the join side, where they
+                    // do arrive.
+                    .filter(|n| !n.is_routed() && !n.is_malformed())
+                    .map(|n| format!("{}:{}", n.hostname, n.upstream_port))
+                    .collect(),
             })
             .collect();
         let joins = self
@@ -918,6 +1016,7 @@ impl ShareManager {
                 web_password: None,
                 // The join's single tunnel, labeled for what it reaches.
                 connections: vec![veld_share::status::connection_info(&j.conn, "host")],
+                addresses: j.addresses.clone(),
             })
             .collect();
         let pending = self
@@ -1133,7 +1232,9 @@ impl ShareManager {
 
         if let Ok(helper) = HelperClient::connect().await {
             for (hostname, route_id) in &entry.routes {
-                let _ = helper.remove_route(route_id).await;
+                if let Some(route_id) = route_id {
+                    let _ = helper.remove_route(route_id).await;
+                }
                 let _ = helper.remove_host(hostname).await;
             }
             let _ = helper.reload_dns().await;
@@ -1274,7 +1375,9 @@ mod tests {
                 node: "app".to_string(),
                 variant: "local".to_string(),
                 hostname: "app.demo.p.localhost".to_string(),
-                url: "https://app.demo.p.localhost".to_string(),
+                port_name: None,
+                protocol: Default::default(),
+                url: Some("https://app.demo.p.localhost".to_string()),
                 upstream_port: 19001,
                 proxy: None,
             }],

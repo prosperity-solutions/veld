@@ -315,7 +315,38 @@ async fn run_liveness_checks(
                     changes += 1;
                 }
             }
-            Err(error_detail) => {
+            // A probe that cannot run is reported and never counted. Marking
+            // the node unhealthy is honest — the check is not answering — but
+            // letting it reach `failure_threshold` would restart the whole
+            // environment over a config shape a restart cannot change, and the
+            // restart's `veld start` now refuses on the same shape, so the
+            // environment would stay down until `max_recoveries` ran out.
+            Err(LivenessFailure::Unrunnable(detail)) => {
+                if node_state.status != NodeStatus::Unhealthy
+                    || node_state.last_liveness_error.as_deref() != Some(detail.as_str())
+                {
+                    node_state.status = NodeStatus::Unhealthy;
+                    node_state.last_liveness_error = Some(detail.clone());
+                    changes += 1;
+                    warn!(
+                        node = node_name.as_str(),
+                        variant = variant_name.as_str(),
+                        detail = detail.as_str(),
+                        "liveness probe cannot run — reporting unhealthy without recovery, \
+                         since restarting cannot change a probe's shape"
+                    );
+                    if let Some(log) = internal_log {
+                        let _ = log
+                            .write_line(&format!(
+                                "[liveness] {node_label} — probe cannot run ({detail}). Not \
+                                 counted toward recovery; fix the probe and restart."
+                            ))
+                            .await;
+                    }
+                }
+            }
+            Err(failure) => {
+                let error_detail = failure.detail().to_owned();
                 node_state.consecutive_failures += 1;
                 node_state.last_liveness_error = Some(error_detail.clone());
                 changes += 1;
@@ -454,15 +485,41 @@ async fn run_liveness_checks(
     changes
 }
 
+/// Why a liveness check did not pass.
+///
+/// The distinction is load-bearing, not cosmetic. A **failed** probe means the
+/// thing it watches is sick, and restarting is the documented remedy. An
+/// **unrunnable** probe means the probe itself cannot execute — a `port` check on
+/// a node that has no port, a `type` veld does not implement — and no number of
+/// restarts changes a config shape. Counting those toward `failure_threshold`
+/// takes the whole environment down and keeps it down: the restart re-enters
+/// `veld start`, which now refuses on the very lint error the probe shape
+/// produces. `veld update` deliberately does not stop live environments, so this
+/// is reachable on a config that was accepted when the run began.
+enum LivenessFailure {
+    /// The probe ran and did not pass. Counts toward recovery.
+    Failed(String),
+    /// The probe could not run at all. Reported, never counted.
+    Unrunnable(String),
+}
+
+impl LivenessFailure {
+    fn detail(&self) -> &str {
+        match self {
+            LivenessFailure::Failed(d) | LivenessFailure::Unrunnable(d) => d,
+        }
+    }
+}
+
 /// Run a single liveness check for a node.
-/// Returns `Ok(())` if healthy, `Err(reason)` with details if unhealthy.
+/// Returns `Ok(())` if healthy, else why it did not pass — see [`LivenessFailure`].
 async fn run_single_liveness_check(
     liveness: &LivenessProbe,
     working_dir: &Path,
     run: &veld_core::state::RunState,
     node_key: &str,
     user_path: &str,
-) -> Result<(), String> {
+) -> Result<(), LivenessFailure> {
     let node_state = match run.nodes.get(node_key) {
         Some(ns) => ns,
         None => return Ok(()),
@@ -475,7 +532,9 @@ async fn run_single_liveness_check(
                 // Inject the resolved user PATH so probes find tools like
                 // pg_isready even when the daemon starts at boot.
                 let Ok(mut command) = veld_core::process::tokio_command(&cmd) else {
-                    return Err("liveness probe declares an empty argv".to_owned());
+                    return Err(LivenessFailure::Unrunnable(
+                        "liveness probe declares an empty argv".to_owned(),
+                    ));
                 };
                 let result = tokio::time::timeout(Duration::from_secs(30), async {
                     command
@@ -499,13 +558,17 @@ async fn run_single_liveness_check(
                         let stderr = stderr.trim();
                         let code = output.status.code().unwrap_or(-1);
                         if stderr.is_empty() {
-                            Err(format!("exit code {code}"))
+                            Err(LivenessFailure::Failed(format!("exit code {code}")))
                         } else {
-                            Err(format!("exit code {code}: {stderr}"))
+                            Err(LivenessFailure::Failed(format!(
+                                "exit code {code}: {stderr}"
+                            )))
                         }
                     }
-                    Ok(Err(e)) => Err(format!("exec error: {e}")),
-                    Err(_) => Err("command timed out (30s)".to_owned()),
+                    Ok(Err(e)) => Err(LivenessFailure::Failed(format!("exec error: {e}"))),
+                    Err(_) => Err(LivenessFailure::Failed(
+                        "command timed out (30s)".to_owned(),
+                    )),
                 }
             } else {
                 Ok(()) // No command configured, consider healthy.
@@ -521,11 +584,21 @@ async fn run_single_liveness_check(
                 .await
                 {
                     Ok(Ok(_)) => Ok(()),
-                    Ok(Err(e)) => Err(format!("port {port} connection failed: {e}")),
-                    Err(_) => Err(format!("port {port} connection timed out")),
+                    Ok(Err(e)) => Err(LivenessFailure::Failed(format!(
+                        "port {port} connection failed: {e}"
+                    ))),
+                    Err(_) => Err(LivenessFailure::Failed(format!(
+                        "port {port} connection timed out"
+                    ))),
                 }
             } else {
-                Ok(()) // No port known, skip.
+                // Absent is never zero. Reporting healthy because there is
+                // nothing to check is how a node with a port-shaped probe and
+                // no port stayed "healthy" forever — including after it died.
+                Err(LivenessFailure::Unrunnable(
+                    "liveness probe is \"port\", but this node has no port — use \"command\""
+                        .to_owned(),
+                ))
             }
         }
         "http" => {
@@ -544,7 +617,9 @@ async fn run_single_liveness_check(
                     .build()
                 {
                     Ok(c) => c,
-                    Err(e) => return Err(format!("http client error: {e}")),
+                    Err(e) => {
+                        return Err(LivenessFailure::Failed(format!("http client error: {e}")));
+                    }
                 };
 
                 match client.get(&url).send().await {
@@ -553,21 +628,29 @@ async fn run_single_liveness_check(
                         if status == expected {
                             Ok(())
                         } else {
-                            Err(format!("http status {status} (expected {expected})"))
+                            Err(LivenessFailure::Failed(format!(
+                                "http status {status} (expected {expected})"
+                            )))
                         }
                     }
-                    Err(e) => Err(format!("http request failed: {e}")),
+                    Err(e) => Err(LivenessFailure::Failed(format!("http request failed: {e}"))),
                 }
             } else {
-                Ok(()) // No port known, skip.
+                Err(LivenessFailure::Unrunnable(
+                    "liveness probe is \"http\", but this node has no port — use \"command\""
+                        .to_owned(),
+                ))
             }
         }
         other => {
-            warn!(
-                check_type = other,
-                "unknown liveness probe type — treating as healthy"
-            );
-            Ok(())
+            // A typo used to mean "always healthy", so `type: "htpp"` disabled
+            // the probe silently. `unknown-probe-type` rejects it at validate
+            // time; this is the path for a config that predates the rule.
+            warn!(check_type = other, "unknown liveness probe type");
+            Err(LivenessFailure::Unrunnable(format!(
+                "unknown liveness probe type \"{other}\" — expected \"command\", \"http\" or \
+                 \"port\""
+            )))
         }
     }
 }
@@ -742,4 +825,73 @@ fn is_process_alive(pid: u32) -> bool {
         return false;
     };
     unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use veld_core::state::{NodeState, RunState};
+
+    fn run_with_node(port: Option<u16>) -> RunState {
+        let mut run = RunState::new("dev", "proj");
+        let mut ns = NodeState::new("web", "local");
+        ns.status = NodeStatus::Healthy;
+        ns.port = port;
+        run.nodes.insert("web:local".into(), ns);
+        run
+    }
+
+    fn probe(check_type: &str) -> LivenessProbe {
+        serde_json::from_value(serde_json::json!({ "type": check_type }))
+            .expect("a probe with only a type parses")
+    }
+
+    /// A probe that cannot run and a probe that ran and failed are different
+    /// answers, and only one of them is worth restarting an environment over.
+    ///
+    /// Getting this wrong is not theoretical: `veld update` does not stop live
+    /// environments, so a run whose config predates `probe-needs-port` keeps
+    /// going with a probe that now reports failure — and the recovery it would
+    /// trigger re-enters `veld start`, which refuses on that same config. The
+    /// environment would stay down until `max_recoveries` ran out.
+    #[tokio::test]
+    async fn a_probe_that_cannot_run_is_not_a_probe_that_failed() {
+        let dir = std::env::temp_dir();
+
+        // No port to connect to: unrunnable, whatever the node is doing.
+        for check_type in ["port", "http"] {
+            let run = run_with_node(None);
+            let err = run_single_liveness_check(&probe(check_type), &dir, &run, "web:local", "")
+                .await
+                .expect_err("a port-shaped probe with no port cannot pass");
+            assert!(
+                matches!(err, LivenessFailure::Unrunnable(_)),
+                "{check_type}: {}",
+                err.detail()
+            );
+        }
+
+        // A type veld does not implement: also unrunnable, not "unhealthy".
+        let run = run_with_node(Some(3000));
+        let err = run_single_liveness_check(&probe("htpp"), &dir, &run, "web:local", "")
+            .await
+            .expect_err("an unknown probe type cannot pass");
+        assert!(
+            matches!(err, LivenessFailure::Unrunnable(_)),
+            "{}",
+            err.detail()
+        );
+
+        // A real check against a port nothing is listening on DID run, and
+        // failed — that one counts, because a restart can fix it.
+        let run = run_with_node(Some(1));
+        let err = run_single_liveness_check(&probe("port"), &dir, &run, "web:local", "")
+            .await
+            .expect_err("nothing is listening on port 1");
+        assert!(
+            matches!(err, LivenessFailure::Failed(_)),
+            "{}",
+            err.detail()
+        );
+    }
 }

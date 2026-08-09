@@ -2,7 +2,7 @@
 //!
 //! The daemon is the store and not the author: what a layout *means* lives in
 //! the UI (`panes/model.ts`), and this module keeps a JSON document, a version,
-//! and nothing else. See `migrate_v14_pane_layouts` for why the opacity is
+//! and nothing else. See `migrate_v15_pane_layouts` for why the opacity is
 //! deliberate.
 //!
 //! Two rules run through it:

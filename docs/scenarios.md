@@ -44,7 +44,7 @@ For the full field reference, see [configuration.md](./configuration.md).
     "database": {
       "variants": {
         "docker": {
-          "type": "start_server",
+          "type": "long_running",
           "shell": "docker run --rm --name veld-pg-${veld.run} -e POSTGRES_PASSWORD=veld -e POSTGRES_DB=shopfront -p ${veld.port}:5432 postgres:16",
           "on_stop": { "argv": ["docker", "stop", "veld-pg-${veld.run}"] },
           "probes": { "readiness": { "type": "port", "timeout_seconds": 30 } },
@@ -58,7 +58,7 @@ For the full field reference, see [configuration.md](./configuration.md).
     "backend": {
       "variants": {
         "local": {
-          "type": "start_server",
+          "type": "long_running",
           "shell": "pnpm --filter @shopfront/api dev --port ${veld.port}",
           "probes": { "readiness": { "type": "http", "path": "/health" } },
           "depends_on": { "database": "docker" },
@@ -73,7 +73,7 @@ For the full field reference, see [configuration.md](./configuration.md).
     "frontend": {
       "variants": {
         "local": {
-          "type": "start_server",
+          "type": "long_running",
           "shell": "pnpm --filter @shopfront/web dev",
           "probes": { "readiness": { "type": "http", "path": "/" } },
           "depends_on": { "backend": "local" },
@@ -94,7 +94,7 @@ For the full field reference, see [configuration.md](./configuration.md).
 
 ## 2. Cross-Referencing URLs Without Cyclic Dependencies
 
-**When to use:** The frontend needs the backend URL for API calls, and the backend needs the frontend URL for CORS origin configuration. Normally this would create a cycle -- each depends on the other. Veld solves this because `url` and `port` for all `start_server` nodes are pre-computed before any node executes.
+**When to use:** The frontend needs the backend URL for API calls, and the backend needs the frontend URL for CORS origin configuration. Normally this would create a cycle -- each depends on the other. Veld solves this because `url` and `port` for all `long_running` nodes are pre-computed before any node executes.
 
 ```json
 {
@@ -107,7 +107,7 @@ For the full field reference, see [configuration.md](./configuration.md).
     "backend": {
       "variants": {
         "local": {
-          "type": "start_server",
+          "type": "long_running",
           "shell": "pnpm --filter @portal/api dev --port ${veld.port}",
           "probes": { "readiness": { "type": "http", "path": "/health" } },
           "env": {
@@ -121,7 +121,7 @@ For the full field reference, see [configuration.md](./configuration.md).
     "frontend": {
       "variants": {
         "local": {
-          "type": "start_server",
+          "type": "long_running",
           "shell": "pnpm --filter @portal/web dev",
           "probes": { "readiness": { "type": "http", "path": "/" } },
           "env": {
@@ -135,7 +135,7 @@ For the full field reference, see [configuration.md](./configuration.md).
     "admin": {
       "variants": {
         "local": {
-          "type": "start_server",
+          "type": "long_running",
           "shell": "pnpm --filter @portal/admin dev",
           "probes": { "readiness": { "type": "http", "path": "/" } },
           "env": {
@@ -149,7 +149,7 @@ For the full field reference, see [configuration.md](./configuration.md).
 }
 ```
 
-**What happens:** Veld pre-computes URLs and ports for all three `start_server` nodes before starting anything. The backend receives `${nodes.frontend.url}` and `${nodes.admin.url}` as CORS origins even though neither frontend nor admin has started yet. No `depends_on` is needed between them -- all three start in parallel. This is only possible because the built-in `url` and `port` outputs are available before execution.
+**What happens:** Veld pre-computes URLs and ports for all three `long_running` nodes before starting anything. The backend receives `${nodes.frontend.url}` and `${nodes.admin.url}` as CORS origins even though neither frontend nor admin has started yet. No `depends_on` is needed between them -- all three start in parallel. This is only possible because the built-in `url` and `port` outputs are available before execution.
 
 Note: This pre-computation only applies to the built-in `url` and `port` outputs. Custom outputs (from `$VELD_OUTPUT_FILE` or `VELD_OUTPUT` lines) still require the producing node to have executed first, so they still need `depends_on`.
 
@@ -170,7 +170,7 @@ Note: This pre-computation only applies to the built-in `url` and `port` outputs
     "postgres": {
       "variants": {
         "docker": {
-          "type": "start_server",
+          "type": "long_running",
           "shell": "docker run --rm --name veld-pg-${veld.run} -e POSTGRES_PASSWORD=veld -e POSTGRES_DB=taskboard -p ${veld.port}:5432 postgres:16",
           "on_stop": { "argv": ["docker", "stop", "veld-pg-${veld.run}"] },
           "probes": { "readiness": {
@@ -189,7 +189,7 @@ Note: This pre-computation only applies to the built-in `url` and `port` outputs
     "redis": {
       "variants": {
         "docker": {
-          "type": "start_server",
+          "type": "long_running",
           "shell": "docker run --rm --name veld-redis-${veld.run} -p ${veld.port}:6379 redis:7-alpine",
           "on_stop": { "argv": ["docker", "stop", "veld-redis-${veld.run}"] },
           "probes": { "readiness": {
@@ -207,7 +207,7 @@ Note: This pre-computation only applies to the built-in `url` and `port` outputs
     "api": {
       "variants": {
         "local": {
-          "type": "start_server",
+          "type": "long_running",
           "shell": "cargo run --bin taskboard-api -- --port ${veld.port}",
           "probes": { "readiness": { "type": "http", "path": "/health", "timeout_seconds": 60 } },
           "depends_on": {
@@ -249,7 +249,7 @@ Note: This pre-computation only applies to the built-in `url` and `port` outputs
     "database": {
       "variants": {
         "docker": {
-          "type": "start_server",
+          "type": "long_running",
           "shell": "docker run --rm --name veld-pg-${veld.run} -e POSTGRES_PASSWORD=veld -e POSTGRES_DB=dashboard -p ${veld.port}:5432 postgres:16",
           "on_stop": { "argv": ["docker", "stop", "veld-pg-${veld.run}"] },
           "probes": { "readiness": { "type": "port", "timeout_seconds": 30 } },
@@ -264,7 +264,7 @@ Note: This pre-computation only applies to the built-in `url` and `port` outputs
       "default_variant": "local",
       "variants": {
         "local": {
-          "type": "start_server",
+          "type": "long_running",
           "shell": "pnpm --filter @dashboard/api dev --port ${veld.port}",
           "probes": { "readiness": { "type": "http", "path": "/health" } },
           "depends_on": { "database": "docker" },
@@ -284,7 +284,7 @@ Note: This pre-computation only applies to the built-in `url` and `port` outputs
       "default_variant": "local",
       "variants": {
         "local": {
-          "type": "start_server",
+          "type": "long_running",
           "shell": "pnpm --filter @dashboard/web dev",
           "probes": { "readiness": { "type": "http", "path": "/" } },
           "depends_on": { "backend": "local" },
@@ -294,7 +294,7 @@ Note: This pre-computation only applies to the built-in `url` and `port` outputs
           }
         },
         "staging": {
-          "type": "start_server",
+          "type": "long_running",
           "shell": "pnpm --filter @dashboard/web dev",
           "probes": { "readiness": { "type": "http", "path": "/" } },
           "depends_on": { "backend": "staging" },
@@ -333,7 +333,7 @@ Note the qualified form `${nodes.backend:local.url}` and `${nodes.backend:stagin
     "postgres": {
       "variants": {
         "docker": {
-          "type": "start_server",
+          "type": "long_running",
           "shell": "docker run --rm --name veld-pg-${veld.run} -e POSTGRES_PASSWORD=veld -p ${veld.port}:5432 -v veld-pg-data-${veld.run}:/var/lib/postgresql/data postgres:16",
           "on_stop": { "argv": ["docker", "stop", "veld-pg-${veld.run}"] },
           "probes": { "readiness": {
@@ -368,7 +368,7 @@ Note the qualified form `${nodes.backend:local.url}` and `${nodes.backend:stagin
     "api": {
       "variants": {
         "local": {
-          "type": "start_server",
+          "type": "long_running",
           "shell": "pnpm --filter @analytics/api dev --port ${veld.port}",
           "probes": { "readiness": { "type": "http", "path": "/health" } },
           "depends_on": { "clone-db": "default" },
@@ -407,7 +407,7 @@ Note the qualified form `${nodes.backend:local.url}` and `${nodes.backend:stagin
     "postgres": {
       "variants": {
         "docker": {
-          "type": "start_server",
+          "type": "long_running",
           "shell": "docker run --rm --name veld-pg-${veld.run} -e POSTGRES_PASSWORD=veld -p ${veld.port}:5432 postgres:16",
           "on_stop": { "argv": ["docker", "stop", "veld-pg-${veld.run}"] },
           "probes": { "readiness": { "type": "port", "timeout_seconds": 30 } },
@@ -421,7 +421,7 @@ Note the qualified form `${nodes.backend:local.url}` and `${nodes.backend:stagin
     "redis": {
       "variants": {
         "docker": {
-          "type": "start_server",
+          "type": "long_running",
           "shell": "docker run --rm --name veld-redis-${veld.run} -p ${veld.port}:6379 redis:7-alpine",
           "on_stop": { "argv": ["docker", "stop", "veld-redis-${veld.run}"] },
           "probes": { "readiness": { "type": "port", "timeout_seconds": 15 } },
@@ -435,7 +435,7 @@ Note the qualified form `${nodes.backend:local.url}` and `${nodes.backend:stagin
     "rider-service": {
       "variants": {
         "local": {
-          "type": "start_server",
+          "type": "long_running",
           "shell": "cargo run --bin rider-service -- --port ${veld.port}",
           "probes": { "readiness": { "type": "http", "path": "/health", "timeout_seconds": 60 } },
           "depends_on": { "postgres": "docker", "redis": "docker" },
@@ -451,7 +451,7 @@ Note the qualified form `${nodes.backend:local.url}` and `${nodes.backend:stagin
     "driver-service": {
       "variants": {
         "local": {
-          "type": "start_server",
+          "type": "long_running",
           "shell": "cargo run --bin driver-service -- --port ${veld.port}",
           "probes": { "readiness": { "type": "http", "path": "/health", "timeout_seconds": 60 } },
           "depends_on": { "postgres": "docker", "redis": "docker" },
@@ -466,7 +466,7 @@ Note the qualified form `${nodes.backend:local.url}` and `${nodes.backend:stagin
     "pricing-service": {
       "variants": {
         "local": {
-          "type": "start_server",
+          "type": "long_running",
           "shell": "cargo run --bin pricing-service -- --port ${veld.port}",
           "probes": { "readiness": { "type": "http", "path": "/health", "timeout_seconds": 60 } },
           "depends_on": { "redis": "docker" },
@@ -480,7 +480,7 @@ Note the qualified form `${nodes.backend:local.url}` and `${nodes.backend:stagin
     "notification-service": {
       "variants": {
         "local": {
-          "type": "start_server",
+          "type": "long_running",
           "shell": "cargo run --bin notification-service -- --port ${veld.port}",
           "probes": { "readiness": { "type": "http", "path": "/health", "timeout_seconds": 60 } },
           "depends_on": { "redis": "docker" },
@@ -494,7 +494,7 @@ Note the qualified form `${nodes.backend:local.url}` and `${nodes.backend:stagin
     "gateway": {
       "variants": {
         "local": {
-          "type": "start_server",
+          "type": "long_running",
           "shell": "cargo run --bin gateway -- --port ${veld.port}",
           "probes": { "readiness": { "type": "http", "path": "/health" } },
           "depends_on": {
@@ -544,7 +544,7 @@ The presets let you run subsets: `--preset riders-only` starts only the rider se
     "postgres": {
       "variants": {
         "docker": {
-          "type": "start_server",
+          "type": "long_running",
           "shell": "docker run --rm --name veld-pg-${veld.run} -e POSTGRES_PASSWORD=veld -e POSTGRES_DB=enterprise -p ${veld.port}:5432 postgres:16",
           "on_stop": { "argv": ["docker", "stop", "veld-pg-${veld.run}"] },
           "probes": { "readiness": {
@@ -604,7 +604,7 @@ The presets let you run subsets: `--preset riders-only` starts only the rider se
     "backend": {
       "variants": {
         "local": {
-          "type": "start_server",
+          "type": "long_running",
           "shell": "pnpm --filter @enterprise/api dev --port ${veld.port}",
           "probes": { "readiness": { "type": "http", "path": "/health" } },
           "depends_on": {
@@ -623,7 +623,7 @@ The presets let you run subsets: `--preset riders-only` starts only the rider se
     "frontend": {
       "variants": {
         "local": {
-          "type": "start_server",
+          "type": "long_running",
           "shell": "pnpm --filter @enterprise/web dev",
           "probes": { "readiness": { "type": "http", "path": "/" } },
           "depends_on": { "backend": "local" },
@@ -665,7 +665,7 @@ The `skip_if` commands on the setup nodes make subsequent `veld start` calls fas
     "postgres": {
       "variants": {
         "docker": {
-          "type": "start_server",
+          "type": "long_running",
           "shell": "docker run --rm --name veld-pg-${veld.run} -e POSTGRES_PASSWORD=veld -e POSTGRES_DB=search_platform -p ${veld.port}:5432 postgres:16",
           "on_stop": { "argv": ["docker", "stop", "veld-pg-${veld.run}"] },
           "probes": { "readiness": { "type": "port", "timeout_seconds": 30 } },
@@ -680,7 +680,7 @@ The `skip_if` commands on the setup nodes make subsequent `veld start` calls fas
     "redis": {
       "variants": {
         "docker": {
-          "type": "start_server",
+          "type": "long_running",
           "shell": "docker run --rm --name veld-redis-${veld.run} -p ${veld.port}:6379 redis:7-alpine --appendonly yes",
           "on_stop": { "argv": ["docker", "stop", "veld-redis-${veld.run}"] },
           "probes": { "readiness": { "type": "port", "timeout_seconds": 15 } },
@@ -696,7 +696,7 @@ The `skip_if` commands on the setup nodes make subsequent `veld start` calls fas
     "elasticsearch": {
       "variants": {
         "docker": {
-          "type": "start_server",
+          "type": "long_running",
           "shell": "docker run --rm --name veld-es-${veld.run} -e discovery.type=single-node -e xpack.security.enabled=false -e ES_JAVA_OPTS='-Xms512m -Xmx512m' -p ${veld.port}:9200 elasticsearch:8.13.0",
           "on_stop": { "argv": ["docker", "stop", "veld-es-${veld.run}"] },
           "probes": { "readiness": {
@@ -715,7 +715,7 @@ The `skip_if` commands on the setup nodes make subsequent `veld start` calls fas
     "api": {
       "variants": {
         "local": {
-          "type": "start_server",
+          "type": "long_running",
           "shell": "pnpm --filter @search-platform/api dev --port ${veld.port}",
           "probes": { "readiness": { "type": "http", "path": "/health" } },
           "depends_on": {
@@ -756,7 +756,7 @@ The `skip_if` commands on the setup nodes make subsequent `veld start` calls fas
     "database": {
       "variants": {
         "docker": {
-          "type": "start_server",
+          "type": "long_running",
           "shell": "docker run --rm --name veld-pg-${veld.branch}-${veld.run} -e POSTGRES_PASSWORD=veld -e POSTGRES_DB=crm_${veld.branch} -p ${veld.port}:5432 -v veld-pg-${veld.branch}:/var/lib/postgresql/data postgres:16",
           "on_stop": { "argv": ["docker", "stop", "veld-pg-${veld.branch}-${veld.run}"] },
           "probes": { "readiness": { "type": "port", "timeout_seconds": 30 } },
@@ -770,7 +770,7 @@ The `skip_if` commands on the setup nodes make subsequent `veld start` calls fas
     "backend": {
       "variants": {
         "local": {
-          "type": "start_server",
+          "type": "long_running",
           "shell": "pnpm --filter @crm/api dev --port ${veld.port}",
           "probes": { "readiness": { "type": "http", "path": "/health" } },
           "depends_on": { "database": "docker" },
@@ -784,7 +784,7 @@ The `skip_if` commands on the setup nodes make subsequent `veld start` calls fas
     "frontend": {
       "variants": {
         "local": {
-          "type": "start_server",
+          "type": "long_running",
           "shell": "pnpm --filter @crm/web dev",
           "probes": { "readiness": { "type": "http", "path": "/" } },
           "depends_on": { "backend": "local" },
@@ -824,7 +824,7 @@ Each branch also gets its own Docker volume (`veld-pg-${veld.branch}`) and datab
     "backend": {
       "variants": {
         "local": {
-          "type": "start_server",
+          "type": "long_running",
           "shell": "go run ./cmd/server --port ${veld.port}",
           "probes": { "readiness": { "type": "http", "path": "/healthz" } },
           "env": {
@@ -837,7 +837,7 @@ Each branch also gets its own Docker volume (`veld-pg-${veld.branch}`) and datab
     "frontend": {
       "variants": {
         "local": {
-          "type": "start_server",
+          "type": "long_running",
           "shell": "pnpm --filter @inventory/web dev",
           "probes": { "readiness": { "type": "http", "path": "/" } },
           "env": {
@@ -896,7 +896,7 @@ Each branch also gets its own Docker volume (`veld-pg-${veld.branch}`) and datab
     "api": {
       "variants": {
         "local": {
-          "type": "start_server",
+          "type": "long_running",
           "shell": "pnpm --filter @fintech/api dev --port ${veld.port}",
           "probes": { "readiness": { "type": "http", "path": "/health" } },
           "depends_on": {
@@ -940,7 +940,7 @@ The `api` node receives the secrets as environment variables at runtime.
     "api": {
       "variants": {
         "local": {
-          "type": "start_server",
+          "type": "long_running",
           "shell": "go run ./cmd/api --port ${veld.port}",
           "probes": { "readiness": { "type": "http", "path": "/health" } },
           "env": {
@@ -954,7 +954,7 @@ The `api` node receives the secrets as environment variables at runtime.
     "web": {
       "variants": {
         "local": {
-          "type": "start_server",
+          "type": "long_running",
           "shell": "pnpm --filter @saas/web dev",
           "probes": { "readiness": { "type": "http", "path": "/" } },
           "env": {
@@ -969,7 +969,7 @@ The `api` node receives the secrets as environment variables at runtime.
       "url_template": "admin.{branch ?? run}.saas-platform.test",
       "variants": {
         "local": {
-          "type": "start_server",
+          "type": "long_running",
           "shell": "pnpm --filter @saas/admin dev",
           "probes": { "readiness": { "type": "http", "path": "/" } },
           "env": {
@@ -1013,7 +1013,7 @@ The `admin` node uses a node-level `url_template` override to produce a differen
       "default_variant": "staging",
       "variants": {
         "local": {
-          "type": "start_server",
+          "type": "long_running",
           "shell": "cargo run --bin user-service -- --port ${veld.port}",
           "probes": { "readiness": { "type": "http", "path": "/health", "timeout_seconds": 60 } }
         },
@@ -1029,7 +1029,7 @@ The `admin` node uses a node-level `url_template` override to produce a differen
       "default_variant": "staging",
       "variants": {
         "local": {
-          "type": "start_server",
+          "type": "long_running",
           "shell": "cargo run --bin catalog-service -- --port ${veld.port}",
           "probes": { "readiness": { "type": "http", "path": "/health", "timeout_seconds": 60 } }
         },
@@ -1045,7 +1045,7 @@ The `admin` node uses a node-level `url_template` override to produce a differen
       "default_variant": "staging",
       "variants": {
         "local": {
-          "type": "start_server",
+          "type": "long_running",
           "shell": "cargo run --bin payment-service -- --port ${veld.port}",
           "probes": { "readiness": { "type": "http", "path": "/health", "timeout_seconds": 60 } }
         },
@@ -1071,7 +1071,7 @@ The `admin` node uses a node-level `url_template` override to produce a differen
     "gateway": {
       "variants": {
         "local": {
-          "type": "start_server",
+          "type": "long_running",
           "shell": "cargo run --bin gateway -- --port ${veld.port}",
           "probes": { "readiness": { "type": "http", "path": "/health" } },
           "depends_on": {
@@ -1088,7 +1088,7 @@ The `admin` node uses a node-level `url_template` override to produce a differen
           }
         },
         "local-full": {
-          "type": "start_server",
+          "type": "long_running",
           "shell": "cargo run --bin gateway -- --port ${veld.port}",
           "probes": { "readiness": { "type": "http", "path": "/health" } },
           "depends_on": {
@@ -1153,7 +1153,7 @@ Note the use of qualified references (`${nodes.catalog-service:local.url}` vs `$
     "api": {
       "variants": {
         "local": {
-          "type": "start_server",
+          "type": "long_running",
           "shell": "./target/release/docs-api --port ${veld.port}",
           "probes": { "readiness": { "type": "http", "path": "/health" } },
           "depends_on": { "build-api": "default" }
@@ -1164,7 +1164,7 @@ Note the use of qualified references (`${nodes.catalog-service:local.url}` vs `$
     "docs": {
       "variants": {
         "local": {
-          "type": "start_server",
+          "type": "long_running",
           "shell": "python3 -m http.server ${veld.port} --directory ./packages/content/dist",
           "probes": { "readiness": { "type": "http", "path": "/" } },
           "depends_on": { "build-docs": "default" }
@@ -1199,7 +1199,7 @@ Note the use of qualified references (`${nodes.catalog-service:local.url}` vs `$
     "postgres": {
       "variants": {
         "docker": {
-          "type": "start_server",
+          "type": "long_running",
           "shell": "docker run --rm --name veld-pg-${veld.run} -e POSTGRES_PASSWORD=veld -e POSTGRES_DB=jobrunner -p ${veld.port}:5432 postgres:16",
           "on_stop": { "argv": ["docker", "stop", "veld-pg-${veld.run}"] },
           "probes": { "readiness": { "type": "port", "timeout_seconds": 30 } },
@@ -1213,7 +1213,7 @@ Note the use of qualified references (`${nodes.catalog-service:local.url}` vs `$
     "redis": {
       "variants": {
         "docker": {
-          "type": "start_server",
+          "type": "long_running",
           "shell": "docker run --rm --name veld-redis-${veld.run} -p ${veld.port}:6379 redis:7-alpine",
           "on_stop": { "argv": ["docker", "stop", "veld-redis-${veld.run}"] },
           "probes": { "readiness": { "type": "port", "timeout_seconds": 15 } },
@@ -1227,7 +1227,7 @@ Note the use of qualified references (`${nodes.catalog-service:local.url}` vs `$
     "api": {
       "variants": {
         "local": {
-          "type": "start_server",
+          "type": "long_running",
           "shell": "pnpm --filter @jobrunner/api dev --port ${veld.port}",
           "probes": { "readiness": { "type": "http", "path": "/health" } },
           "depends_on": {
@@ -1245,7 +1245,7 @@ Note the use of qualified references (`${nodes.catalog-service:local.url}` vs `$
     "worker": {
       "variants": {
         "local": {
-          "type": "start_server",
+          "type": "long_running",
           "shell": "pnpm --filter @jobrunner/worker start --port ${veld.port} --concurrency 5",
           "probes": { "readiness": { "type": "http", "path": "/status" } },
           "depends_on": {
@@ -1264,7 +1264,7 @@ Note the use of qualified references (`${nodes.catalog-service:local.url}` vs `$
     "scheduler": {
       "variants": {
         "local": {
-          "type": "start_server",
+          "type": "long_running",
           "shell": "pnpm --filter @jobrunner/scheduler start --port ${veld.port}",
           "probes": { "readiness": { "type": "http", "path": "/health" } },
           "depends_on": {
@@ -1291,7 +1291,7 @@ With `--preset api-only`, only the API and its infrastructure dependencies start
 
 **A cross-reference has to hold in every preset that includes the referencing node.** `api` cannot read `${nodes.worker.url}` here, however tempting a worker-dashboard link is: `--preset full` would resolve it and `--preset api-only` would die with `unresolved variable reference`. `veld lint` reports that combination as `preset-missing-node-ref`, naming the preset -- it is the one thing you cannot see by reading a single node file. If the API genuinely needs the worker, add `worker:local` to the preset or give `api` a `depends_on` so every plan that includes it pulls the worker in too.
 
-All three application nodes are `start_server` with health check endpoints, so Veld monitors them and reports if any crashes.
+All three application nodes are `long_running` with health check endpoints, so Veld monitors them and reports if any crashes.
 
 ---
 
@@ -1310,7 +1310,7 @@ All three application nodes are `start_server` with health check endpoints, so V
     "postgres": {
       "variants": {
         "docker": {
-          "type": "start_server",
+          "type": "long_running",
           "shell": "docker run --rm --name veld-pg-${veld.run} -e POSTGRES_PASSWORD=veld -e POSTGRES_DB=polyglot -p ${veld.port}:5432 postgres:16",
           "on_stop": { "argv": ["docker", "stop", "veld-pg-${veld.run}"] },
           "probes": { "readiness": { "type": "port", "timeout_seconds": 30 } },
@@ -1325,7 +1325,7 @@ All three application nodes are `start_server` with health check endpoints, so V
     "auth-service": {
       "variants": {
         "local": {
-          "type": "start_server",
+          "type": "long_running",
           "shell": "cd services/auth && go run . --port ${veld.port}",
           "probes": { "readiness": { "type": "http", "path": "/healthz" } },
           "depends_on": { "postgres": "docker" },
@@ -1339,7 +1339,7 @@ All three application nodes are `start_server` with health check endpoints, so V
     "billing-service": {
       "variants": {
         "local": {
-          "type": "start_server",
+          "type": "long_running",
           "shell": "cd services/billing && ./gradlew bootRun --args='--server.port=${veld.port}'",
           "probes": { "readiness": {
             "type": "http",
@@ -1360,7 +1360,7 @@ All three application nodes are `start_server` with health check endpoints, so V
     "recommendation-service": {
       "variants": {
         "local": {
-          "type": "start_server",
+          "type": "long_running",
           "shell": "cd services/recommendations && uvicorn main:app --host 0.0.0.0 --port ${veld.port}",
           "probes": { "readiness": { "type": "http", "path": "/health" } },
           "depends_on": { "postgres": "docker" },
@@ -1374,7 +1374,7 @@ All three application nodes are `start_server` with health check endpoints, so V
     "frontend": {
       "variants": {
         "local": {
-          "type": "start_server",
+          "type": "long_running",
           "shell": "pnpm --filter @polyglot/web dev",
           "probes": { "readiness": { "type": "http", "path": "/" } },
           "depends_on": {
@@ -1419,7 +1419,7 @@ All three application nodes are `start_server` with health check endpoints, so V
     "postgres": {
       "variants": {
         "docker": {
-          "type": "start_server",
+          "type": "long_running",
           "shell": "docker run --rm --name veld-pg-${veld.run} -e POSTGRES_PASSWORD=veld -e POSTGRES_DB=e2e -p ${veld.port}:5432 postgres:16",
           "on_stop": { "argv": ["docker", "stop", "veld-pg-${veld.run}"] },
           "probes": { "readiness": { "type": "port", "timeout_seconds": 30 } },
@@ -1447,7 +1447,7 @@ All three application nodes are `start_server` with health check endpoints, so V
     "backend": {
       "variants": {
         "local": {
-          "type": "start_server",
+          "type": "long_running",
           "shell": "pnpm --filter @e2e-suite/api dev --port ${veld.port}",
           "probes": { "readiness": { "type": "http", "path": "/health" } },
           "depends_on": { "seed-test-data": "default" },
@@ -1462,7 +1462,7 @@ All three application nodes are `start_server` with health check endpoints, so V
     "frontend": {
       "variants": {
         "local": {
-          "type": "start_server",
+          "type": "long_running",
           "shell": "pnpm --filter @e2e-suite/web dev",
           "probes": { "readiness": { "type": "http", "path": "/" } },
           "depends_on": { "backend": "local" },
@@ -1533,7 +1533,7 @@ With `--preset dev`, only the frontend and its dependencies start (no test runne
     "postgres": {
       "variants": {
         "docker": {
-          "type": "start_server",
+          "type": "long_running",
           "shell": "docker run --rm --name veld-pg-${veld.run} --network ${veld.project}-net -e POSTGRES_PASSWORD=veld -p ${veld.port}:5432 postgres:16",
           "on_stop": { "argv": ["docker", "stop", "veld-pg-${veld.run}"] },
           "probes": { "readiness": { "type": "port", "timeout_seconds": 30 } },
@@ -1546,7 +1546,7 @@ With `--preset dev`, only the frontend and its dependencies start (no test runne
     "backend": {
       "variants": {
         "local": {
-          "type": "start_server",
+          "type": "long_running",
           "shell": "pnpm --filter backend dev --port ${veld.port}",
           "probes": { "readiness": { "type": "http", "path": "/health" } },
           "depends_on": { "postgres": "docker" },

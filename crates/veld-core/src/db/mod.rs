@@ -163,7 +163,9 @@ impl Db {
     /// **Why this exists.** `Db::open()` used to resolve straight to
     /// `<data_dir>/veld/veld.db` — the developer's real database — for *every*
     /// caller, including `cargo test`. Nothing guarded it: no `.cargo/config.toml`,
-    /// no `[env]`, nothing in CI. A test that built an axum router and drove one
+    /// no `[env]`, nothing in CI. (There is a `.cargo/config.toml` now — but it
+    /// guards the *other* hole, an inherited `VELD_DB_PATH`, and it is not what
+    /// makes this function necessary. Read the paragraph as history.) A test that built an axum router and drove one
     /// request through it would migrate the production schema, and since an older
     /// binary refuses a newer `user_version` ([`DbError::NewerSchema`]), a single
     /// `cargo test` could leave the installed veld unable to open its own database
@@ -496,8 +498,13 @@ const MIGRATIONS: &[Migration] = &[
     },
     Migration {
         version: 14,
+        name: "node-endpoints",
+        apply: migrate_v14_node_endpoints,
+    },
+    Migration {
+        version: 15,
         name: "pane-layouts",
-        apply: migrate_v14_pane_layouts,
+        apply: migrate_v15_pane_layouts,
     },
 ];
 
@@ -1113,6 +1120,35 @@ fn migrate_v12_var_overrides(conn: &Connection) -> rusqlite::Result<()> {
     )
 }
 
+/// One JSON column holding a node's named ports, keyed by port name.
+///
+/// A node used to own exactly one hostname, so `nodes.url` was the whole story
+/// and teardown removed one DNS host and one Caddy route. With every
+/// `protocol: "http"` port getting its own hostname, a node can own several, and
+/// the stop path has to be able to find all of them from state alone — the
+/// config may have changed since the run started, which is why the URL was
+/// persisted in the first place.
+///
+/// **Backfill is deliberately absent**, and the reason is that it could not be
+/// honest: writing the old `url` into `endpoints` has to invent a port name, and
+/// the only candidate ("http") is a guess about a config that is no longer on
+/// disk. Existing rows keep `url` and get `'{}'` here.
+///
+/// That makes an empty map ambiguous — "no ports" and "ports not recorded" look
+/// alike — so **every consumer that decides what a node can do must read
+/// [`crate::state::NodeState::endpoints_or_legacy`]**, which folds `url`/`port`
+/// back in as the single primary entry such a row always had. Reading the raw
+/// map is correct only where the answer is "what did this run record", never
+/// "what does this node have". `veld update` does not stop running environments,
+/// so rows like these outlive the upgrade by days.
+fn migrate_v14_node_endpoints(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        r#"
+        ALTER TABLE nodes ADD COLUMN endpoints TEXT NOT NULL DEFAULT '{}';
+        "#,
+    )
+}
+
 /// v13: `worktrees.display_name` — the free-text name the rail renders.
 ///
 /// The alias is an *identifier*: it defaults the run name, which feeds the
@@ -1137,7 +1173,7 @@ fn migrate_v13_worktree_display_name(conn: &Connection) -> rusqlite::Result<()> 
     conn.execute_batch("ALTER TABLE worktrees ADD COLUMN display_name TEXT NOT NULL DEFAULT '';")
 }
 
-/// v14: the panes a worktree is showing — one row per worktree, not per window.
+/// v15: the panes a worktree is showing — one row per worktree, not per window.
 ///
 /// This is where a layout stopped being browser state. It lived in
 /// `sessionStorage` plus two `localStorage` keys, which made "the panes of
@@ -1169,7 +1205,7 @@ fn migrate_v13_worktree_display_name(conn: &Connection) -> rusqlite::Result<()> 
 /// its worktree would be adopted by the next checkout created — handing it a
 /// set of panes, and terminal session ids, from a worktree that no longer
 /// exists.
-fn migrate_v14_pane_layouts(conn: &Connection) -> rusqlite::Result<()> {
+fn migrate_v15_pane_layouts(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
         r#"
         CREATE TABLE pane_layouts (
@@ -1378,6 +1414,88 @@ mod tests {
             .query_row("PRAGMA integrity_check", [], |r| r.get(0))
             .unwrap();
         assert_eq!(integrity, "ok");
+    }
+
+    /// v14 against a real v13 database holding a node row from before per-port
+    /// endpoints — the row every machine that upgrades with an environment
+    /// running will have, since `veld update` deliberately does not stop them.
+    ///
+    /// Two properties, and the second is the one that matters: the ALTER leaves
+    /// the row alone (no backfill, `endpoints = '{}'`), **and** the node still
+    /// reads back as a node with one endpoint, because `endpoints_or_legacy`
+    /// folds `url`/`port` in. Reading the raw map instead is what made `veld
+    /// share` refuse a whole run as having nothing to share.
+    #[test]
+    fn v13_v14_upgrade_leaves_a_legacy_node_shareable() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("veld.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+            migrate_v1_initial(&conn).unwrap();
+            migrate_v2_node_stats(&conn).unwrap();
+            migrate_v3_environments_and_runs(&conn).unwrap();
+            migrate_v4_graph_snapshot(&conn).unwrap();
+            migrate_v5_desktop_worktrees(&conn).unwrap();
+            migrate_v6_worktree_emoji(&conn).unwrap();
+            migrate_v7_detailed_process_stats(&conn).unwrap();
+            migrate_v8_settings(&conn).unwrap();
+            migrate_v9_worktree_marker_color(&conn).unwrap();
+            migrate_v10_rail_lanes_and_trash(&conn).unwrap();
+            migrate_v11_pane_sessions(&conn).unwrap();
+            migrate_v12_var_overrides(&conn).unwrap();
+            migrate_v13_worktree_display_name(&conn).unwrap();
+            conn.pragma_update(None, "user_version", 13).unwrap();
+            conn.execute_batch(
+                r#"
+                INSERT INTO projects (root, name) VALUES ('/tmp/p', 'p');
+                INSERT INTO environments (project_root, name, created_at)
+                  VALUES ('/tmp/p', 'dev', '2026-01-01T00:00:00.000000Z');
+                INSERT INTO runs (id, environment_id, run_id, status, created_at)
+                  VALUES (1, 1, '11111111-1111-4111-8111-111111111111', 'running',
+                          '2026-01-01T00:00:00.000000Z');
+                INSERT INTO nodes (run_row, node_key, node_name, variant, status, pid, port, url)
+                  VALUES (1, 'web:local', 'web', 'local', 'healthy', 4242, 3000,
+                          'https://web.dev.p.localhost');
+                "#,
+            )
+            .unwrap();
+        }
+
+        let db = Db::open_at(&path).unwrap();
+        assert_eq!(
+            db.schema_version().unwrap(),
+            MIGRATIONS.last().unwrap().version
+        );
+
+        // The column exists and the row was not backfilled.
+        {
+            let conn = db.lock();
+            let raw: String = conn
+                .query_row(
+                    "SELECT endpoints FROM nodes WHERE node_key = 'web:local'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(raw, "{}", "v14 must not invent a port name");
+            let integrity: String = conn
+                .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(integrity, "ok");
+        }
+
+        // And the node is still a node with an endpoint, which is what every
+        // consumer that decides what it can do must see.
+        let state = db.load_project_state(Path::new("/tmp/p")).unwrap();
+        let node = &state.get_run("dev").expect("run survives").nodes["web:local"];
+        assert!(node.endpoints.is_empty(), "nothing was backfilled");
+        let folded = node.endpoints_or_legacy();
+        assert_eq!(folded.len(), 1, "the legacy row still has its one port");
+        let ep = &folded["http"];
+        assert_eq!(ep.hostname, "web.dev.p.localhost");
+        assert_eq!(ep.url.as_deref(), Some("https://web.dev.p.localhost"));
+        assert_eq!(ep.port, 3000);
     }
 
     #[test]

@@ -7,7 +7,7 @@
 //! `BrowserWindow`s and nothing else, so opening `/ide` in a plain browser
 //! produced a client that was invisible to the whole arbitration: it showed a
 //! worktree the desktop app also had, rendered a *different* set of panes for
-//! it (the layout was browser storage — now `pane_layouts`, migration v14), and
+//! it (the layout was browser storage — now `pane_layouts`, migration v15), and
 //! could not re-attach to the terminals the app had running because it had
 //! never heard of their session ids. The daemon is the only process both kinds
 //! of client have in common, so it is the only place the answer can live.
