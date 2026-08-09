@@ -1,0 +1,30 @@
+# A cargo-built binary must never inherit another veld instance's identity.
+#
+# `Db::default_path` already resolves any cargo-built binary to
+# `.veld-dev/veld-cargo.db`, so that `cargo test --workspace` cannot write the
+# database a running dev daemon owns. But `Db::path_override` consults
+# `VELD_DB_PATH` *before* that backstop, and there is now a routine way to have
+# it set: the dev stack's `dev-daemon` node sets it, nothing calls `env_clear`
+# between the daemon and a PTY holder, so every terminal — and every `ide.panes`
+# agent pane — opened in the dev stack's own /ide carries it. `cargo test` in
+# such a pane migrated the live run's database.
+#
+# `force = true` because the point is to beat an inherited value; an empty
+# string because every consumer treats empty as absent (`Db::path_override` and
+# `veld_core::instance::env_nonempty` both filter it), and cargo's `[env]` can
+# set a variable but not unset one.
+#
+# Scope is exactly right: this applies to processes **cargo** runs — test
+# binaries, `cargo run` — and not to `just dev`, which builds with cargo and
+# then executes `./target/debug/veld` itself with the paths it means to use.
+#
+# The justfile clears these on `test` and `lint` too. That IS redundant for the
+# cargo lines — this file already covers them — and it is kept as a belt-and-
+# braces statement at the call site, not because it reaches anything extra. (It
+# does not reach the npm suites in those recipes either: `{{clear_instance_env}}`
+# is a prefix on the cargo line alone.) The npm suites read none of these.
+[env]
+VELD_DB_PATH = { value = "", force = true }
+VELD_DAEMON_PORT = { value = "", force = true }
+VELD_DAEMON_SOCK = { value = "", force = true }
+VELD_PTY_DIR = { value = "", force = true }

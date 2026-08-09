@@ -142,7 +142,9 @@ impl Db {
     /// **Why this exists.** `Db::open()` used to resolve straight to
     /// `<data_dir>/veld/veld.db` — the developer's real database — for *every*
     /// caller, including `cargo test`. Nothing guarded it: no `.cargo/config.toml`,
-    /// no `[env]`, nothing in CI. A test that built an axum router and drove one
+    /// no `[env]`, nothing in CI. (There is a `.cargo/config.toml` now — but it
+    /// guards the *other* hole, an inherited `VELD_DB_PATH`, and it is not what
+    /// makes this function necessary. Read the paragraph as history.) A test that built an axum router and drove one
     /// request through it would migrate the production schema, and since an older
     /// binary refuses a newer `user_version` ([`DbError::NewerSchema`]), a single
     /// `cargo test` could leave the installed veld unable to open its own database

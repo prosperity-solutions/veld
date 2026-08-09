@@ -1254,6 +1254,41 @@ same-named run in another repo.
 Prereqs: Rust stable, Node 22+, a working `veld` install (`veld doctor`).
 
 ```sh
+veld start --preset dev
+```
+
+That is the whole thing: the root `veld.json` declares the dev daemon, the vite
+dev server for `/ide`, and the Electron shell as three nodes, so veld builds
+them, starts them in order, watches them, and tears them down together. Every
+port, database, hostname and wrapper is keyed to the run, so **a second worktree
+can have its own stack up at the same time** — which the three-step flow below
+could not do, because it hardcoded one of each.
+
+`veld start --preset dev-headless` leaves Electron out; `veld logs dev-ui
+--follow` and `veld stop` do what you expect. `dev-electron` is the config's
+worked example of `"ports": null`: a supervised process that binds nothing.
+
+**Quit the app freely — the stack stays up, and this comes back:**
+
+```sh
+veld action open --node dev-electron
+```
+
+The node is a supervisor (`scripts/dev/electron.sh`), not `electron .`, because
+veld's health monitor treats any node process dying as a crash of the whole run
+and SIGTERMs the survivors — so a bare Electron node made Cmd+Q take the dev
+daemon and vite with it. The action covers both cases: it activates the process
+when Electron is running but windowless (macOS keeps the app alive on
+`window-all-closed`, so `app.on("activate")` is what reopens a window), and asks
+the supervisor to relaunch when it has exited.
+
+### The three-step flow, for bootstrapping
+
+Still here, still a singleton, and the right answer in exactly two cases: the
+thing you broke is `veld start` itself, or this is a first clone with nothing to
+start a run with.
+
+```sh
 # 0. optional: npm deps for ui/ and desktop/ up front (also how you refresh them
 #    after a dependency bump). Every recipe below installs what it needs first,
 #    so a fresh worktree can skip straight to step 1.

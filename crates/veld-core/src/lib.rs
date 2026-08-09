@@ -24,6 +24,8 @@ pub mod setup;
 pub mod share;
 pub mod state;
 pub mod stats;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub mod update_lock;
 pub mod url;
 pub mod user_path;

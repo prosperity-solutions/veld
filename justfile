@@ -28,16 +28,81 @@ dev_daemon_port := "19898"
 # separates instances exactly as much as the port and the dashboard hostname
 # already do — two worktrees cannot both be the dev instance either way.
 dev_daemon_sock := env("HOME") + "/.veld/dev-" + dev_daemon_port + ".sock"
+# Clear the per-node variables veld injects, for the bootstrap recipes that
+# RUN something against an instance — `dev`, `dev-daemon`, `dev-ui`,
+# `dev-desktop`, `dev-desktop-embedded`. The install/restore and dev-db recipes
+# do not take it: they address the system install or an explicit path, and
+# neither reads these. `dev-real` DOES take it — it runs the source binary
+# against an instance, so it carries exactly the hazards listed below.
+#
+# These recipes are most useful from a terminal inside the dev stack's own /ide
+# — that is the documented escape hatch — and such a terminal inherits the
+# dev-daemon node's environment through the PTY holder. Left in place:
+# `VELD_PORT` makes `just dev-ui` try to bind the dev daemon's port and die on
+# `strictPort`, and `VELD_URL`/`VELD_PROXY_ORIGINS` make the bootstrap daemon
+# trust three origins that route to a DIFFERENT run's processes — origins that
+# provably do not proxy its own /api, which is the one thing that variable's
+# name promises. Assignment to empty, because a recipe cannot unset a variable;
+# `env_nonempty` on the Rust side and `||` in vite.config.ts both read empty as
+# absent.
+#
+# `VELD_PTY_DIR` is here for a sharper reason than the rest: a bootstrap daemon
+# that inherits it binds its holders in — and writes its `shims/` into — the
+# RUNNING stack's holder directory, so two daemons with different databases
+# adopt each other's terminal sessions. That is verbatim the hazard the
+# root-keyed digest in `scripts/dev/daemon.sh` exists to prevent. Safe to clear
+# here because no recipe using this variable sets it.
+#
+# `VELD_DAEMON_PORT` is deliberately NOT in this list: `dev` and `dev-daemon`
+# assign it just before the prefix, and a later assignment on the same command
+# line wins, so including it would blank the port those recipes exist to set.
+# `dev-ui` clears it on its own line instead.
+clear_stack_env := "VELD_PORT= VELD_URL= VELD_PROXY_ORIGINS= VELD_PTY_DIR="
+# The INSTANCE variables, cleared for recipes that must never address whichever
+# instance the surrounding terminal belongs to.
+#
+# `VELD_DB_PATH` is the dangerous one and the reason this exists. A terminal
+# opened inside the dev stack's own /ide — including the `claude` and `codex`
+# agent panes this repo ships — inherits the dev-daemon node's environment,
+# because nothing calls `env_clear` between the daemon and a PTY holder. And
+# `Db::path_override` consults `VELD_DB_PATH` BEFORE `cargo_target_db`, so it
+# defeats the backstop whose entire job is stopping `cargo test` from writing
+# "the database a running dev daemon owns". `just test` in such a pane migrated
+# the live run's database. Same leak, milder symptom, for the other two: a bare
+# `veld status` there silently addresses the dev instance.
+#
+# Separate from `clear_stack_env` on purpose: `dev` and `dev-daemon` assign
+# `VELD_DB_PATH` deliberately, and a command-prefix assignment later in the line
+# wins — folding these in would blank the very paths those recipes set.
+clear_instance_env := "VELD_DB_PATH= VELD_DAEMON_PORT= VELD_DAEMON_SOCK= VELD_PTY_DIR="
 
 # ============================================================================
 # Veld Development Workflow
 #
-# Three tiers — use the lightest one that covers your change:
+# THE USUAL WAY IS NOT IN THIS FILE. The whole dev stack — dev daemon, /ide with
+# HMR, and the Electron shell — is a veld environment declared in the root
+# veld.json:
+#
+#   veld start --preset dev            this worktree's stack, parallel-safe
+#   veld start --preset dev-headless   the same without Electron
+#   veld status / veld logs / veld stop
+#
+# Everything there is keyed off the run: its own allocated ports, its own
+# database under .veld-dev/<run>/, its own hostnames, and its own
+# ~/.local/bin/veld-dev-<run>. Two worktrees can each have one up at once.
+#
+# What follows is the BOOTSTRAP tier, and it is a deliberate singleton — one
+# worktree at a time, on fixed ports. It exists because you need a way to run
+# the daemon when the thing you broke is `veld start` itself, and because a
+# first clone has nothing to start a veld run with. Reach for it in that case;
+# otherwise use the preset above.
 #
 #   just dev <args>           CLI only, no install, own dev instance (most changes)
 #   just dev-daemon           Daemon from source, alongside the installed one
 #                             (own port/DB/socket, dashboard: veld-dev.localhost)
-#   just dev-db-reset         Wipe the dev DB (fresh state)
+#   just dev-ui               vite for /ide on 5199, against `just dev-daemon`
+#   just dev-desktop          Electron against `just dev-ui`
+#   just dev-db-reset         Wipe the dev DBs (fresh state)
 #   just dev-db-from-real     Snapshot the REAL DB into the dev DB (migration rehearsal)
 #   just dev-install-daemon   Install daemon (overlay/feedback changes)
 #   just dev-install-helper   Install helper + restart Caddy (proxy changes, sudo)
@@ -60,6 +125,7 @@ dev *ARGS:
     VELD_DB_PATH="{{dev_db}}" \
     VELD_DAEMON_PORT="{{dev_daemon_port}}" \
     VELD_DAEMON_SOCK="{{dev_daemon_sock}}" \
+    {{clear_stack_env}} \
         ./target/debug/veld {{ARGS}}
 
 # Run the daemon from source, foreground, ALONGSIDE the installed one — own
@@ -88,6 +154,7 @@ dev-daemon:
     VELD_DAEMON_PORT="{{dev_daemon_port}}" \
     VELD_DAEMON_SOCK="{{dev_daemon_sock}}" \
     VELD_MANAGEMENT_HOST="veld-dev.localhost" \
+    {{clear_stack_env}} \
         ./target/debug/veld-daemon
 
 # Run the source-built CLI against the REAL installed DB — for inspecting
@@ -116,6 +183,7 @@ dev-real *ARGS:
         fi
     fi
     VELD_LIB_DIR="{{justfile_directory()}}/target/debug" \
+    {{clear_stack_env}} \
         ./target/debug/veld {{ARGS}}
 
 # Wipe the dev DB (including WAL/SHM sidecars) for a fresh-state run.
@@ -124,10 +192,32 @@ dev-real *ARGS:
 # `veld-cargo.db` behind, and a database stranded at a `user_version` whose
 # migration was later rewritten never gets the corrected one — every query naming
 # the new column then fails. That happened during #167 §5b.
+#
+# Bootstrap-tier databases only. A veld-run dev stack keeps its database under
+# `.veld-dev/<run>/`, which belongs to that run and is reset by naming the
+# variant instead — `veld start dev-db:fresh dev-electron dev-link`. Wiping
+# those from here would delete the state of a stack that is currently up.
+# `just dev-db-list` shows them.
 dev-db-reset:
     rm -f "{{dev_db}}" "{{dev_db}}-wal" "{{dev_db}}-shm"
     rm -f "{{cargo_db}}" "{{cargo_db}}-wal" "{{cargo_db}}-shm"
-    @echo "Dev DBs reset ({{dev_db}}, {{cargo_db}})"
+    @echo "Bootstrap dev DBs reset ({{dev_db}}, {{cargo_db}})"
+    @echo "Per-run dev stack DBs are untouched — see 'just dev-db-list'."
+
+# Every per-run dev database in this worktree, with its schema version.
+# The counterpart to `veld status`: these outlive a stopped run on purpose, so
+# stopping the stack does not throw away the state you were debugging.
+dev-db-list:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    shopt -s nullglob
+    found=0
+    for db in "{{justfile_directory()}}"/.veld-dev/*/veld.db; do
+        run=$(basename "$(dirname "$db")")
+        echo "$run  v$(sqlite3 "$db" 'PRAGMA user_version;' 2>/dev/null || echo '?')  $db"
+        found=1
+    done
+    [ "$found" = 1 ] || echo "No per-run dev databases yet. Start one with 'veld start --preset dev'."
 
 # Snapshot the REAL installed DB into the dev DB — migration rehearsal:
 # the next `just dev <cmd>` migrates the COPY forward while the real file
@@ -313,13 +403,13 @@ build:
     cargo build
 
 test:
-    cargo test --workspace
+    {{clear_instance_env}} cargo test --workspace
     cd crates/veld-daemon/frontend && npm test
     cd crates/veld-daemon/ui && npm test
     cd desktop && npm test
 
 lint:
-    cargo clippy --workspace --all-targets
+    {{clear_instance_env}} cargo clippy --workspace --all-targets
     cargo fmt --all --check
     cd crates/veld-daemon/frontend && npx tsc --noEmit
     cd crates/veld-daemon/ui && npm run typecheck
@@ -345,7 +435,7 @@ shellcheck:
     bash -n install.sh
     bash -n tests/validate-install-contract.sh
     if command -v shellcheck >/dev/null 2>&1; then
-      shellcheck --severity=warning install.sh tests/validate-install-contract.sh
+      shellcheck --severity=warning install.sh tests/validate-install-contract.sh scripts/dev/*.sh
     else
       echo "shellcheck not installed — skipping (brew install shellcheck). CI runs it."
     fi
@@ -475,6 +565,12 @@ desktop-deps:
         ./node_modules/.bin/install-electron
     fi
 
+# Everything npm the dev stack needs, guarded so it is a no-op once installed.
+# Public because `scripts/dev/build.sh` (the `dev-build` node) calls it — the
+# guard for "node_modules exists but predates a new dependency" has a subtlety
+# worth having exactly one copy of.
+dev-deps: ui-deps desktop-deps
+
 build-ui: ui-deps
     cd crates/veld-daemon/ui && npm run build
 
@@ -527,16 +623,20 @@ desktop-package: desktop-deps
 # upgrade (see `allowed_origins` in crates/veld-daemon/src/pty.rs). Deliberate —
 # a dev server must not be able to open a shell through the installed daemon.
 dev-ui: ui-deps
-    cd crates/veld-daemon/ui && npm run dev
+    # VELD_DAEMON_PORT too: inherited from a stack pane it would proxy /api to
+    # the RUN's dev daemon rather than the `just dev-daemon` on 19898 this
+    # recipe tells you to start — pointing the bootstrap tier at the very
+    # daemon it exists to work around.
+    cd crates/veld-daemon/ui && {{clear_stack_env}} VELD_DAEMON_PORT= npm run dev
 
 # Electron shell pointed at the vite dev server (start `just dev-ui` first).
 dev-desktop: desktop-deps
-    cd desktop && VELD_DESKTOP_URL=http://localhost:5199 npm start
+    cd desktop && {{clear_stack_env}} VELD_DESKTOP_URL=http://localhost:5199 npm start
 
 # Electron shell straight at the dev daemon's embedded /ide (no HMR) —
 # start `just dev-daemon` first.
 dev-desktop-embedded: desktop-deps
-    cd desktop && VELD_DESKTOP_URL=http://127.0.0.1:{{dev_daemon_port}} npm start
+    cd desktop && {{clear_stack_env}} VELD_DESKTOP_URL=http://127.0.0.1:{{dev_daemon_port}} npm start
 
 # Electron shell against the installed daemon's embedded /ide.
 desktop: desktop-deps
