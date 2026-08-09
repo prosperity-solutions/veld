@@ -626,35 +626,41 @@ export function moveWorktree(
 }
 
 /**
- * The lane order after moving the lane `name` to insertion point `toIndex`.
+ * The lane order after moving the lane `name` so that it ends up at index `to`.
  *
- * `toIndex` is an **insertion point in the list as it currently stands** — the
- * position the lane is dropped *before*, counted with the dragged lane still in
- * place. That is the coordinate a drop produces (the rail hovers lane `i` and
- * resolves to `i` or `i + 1`), so the conversion to a final position happens
- * here, once, rather than at each call site. The ⋮ menu's up/down speak the same
- * coordinates: one step down is `index + 2`, because `index + 1` is the lane's
- * own trailing edge.
+ * **A final position, not an insertion point.** The rail's lane drag is
+ * displacement — dropping a lane anywhere on another lane means "take that lane's
+ * place" — so the coordinate is simply the index the dragged lane holds
+ * afterwards, and the ⋮ menu's one-step moves are `index - 1` and `index + 1`.
+ *
+ * The first version of this took an insertion point resolved from the hovered
+ * section's midpoint, the way the *row* drag does, and that is wrong for a block:
+ * a row's midpoint distinguishes "above this row" from "below it", but every part
+ * of a lane means the same thing, so the upper half of the lane directly below
+ * resolved to the position the dragged lane already held. Moving one step down
+ * was unreachable without crossing a whole section, which read as a drag that
+ * does nothing at all.
  *
  * Returns the **full order** as names, mirroring [`moveWorktree`] and
- * `reorder_lanes`, so the write is idempotent. `null` when the move is unknown or
- * changes nothing — a drop on the lane's own edges is the common case, and a
- * no-op write would still cost a request and a refresh.
+ * `reorder_lanes`, so the write is idempotent. `null` when the lane is unknown or
+ * the move changes nothing — dropping a lane on itself is a normal gesture and
+ * must not cost a request and a refresh.
  */
 export function moveLane(
   lanes: Lane[],
   name: string,
-  toIndex: number,
+  to: number,
 ): string[] | null {
   const from = lanes.findIndex((l) => l.name === name);
   if (from < 0) return null;
   const order = lanes.map((l) => l.name);
   order.splice(from, 1);
-  // Past its own position the insertion point shifts by one, because removing the
-  // lane closed the gap the index was counted against.
-  const at = Math.max(0, Math.min(toIndex > from ? toIndex - 1 : toIndex, order.length));
+  // Clamped rather than trusted: the index comes from a drop, and a stale render
+  // can hand over one past the end of a list that just lost a lane.
+  const at = Math.max(0, Math.min(to, order.length));
+  if (at === from) return null;
   order.splice(at, 0, name);
-  return at === from ? null : order;
+  return order;
 }
 
 /**

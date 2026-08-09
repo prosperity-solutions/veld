@@ -484,9 +484,11 @@ select:focus {
     0 0 9px 1px color-mix(in oklab, var(--accent) 75%, transparent);
   z-index: 2;
 }
-/* Centred in the 9px gutter a `.rail-group + .rail-group` opens above itself, so
-   the bar sits between the two sections rather than on top of either one's
-   header. */
+/* In the 9px gutter a `.rail-group + .rail-group` opens above itself, so the bar
+   sits between two sections rather than on top of either one's header. Only one
+   section carries a bar at a time — the hovered one, on the side the dragged
+   lane is travelling towards — so the two rules can never draw the same gutter
+   twice. */
 .rail-group.lane-drop-before::before {
   top: -6px;
 }

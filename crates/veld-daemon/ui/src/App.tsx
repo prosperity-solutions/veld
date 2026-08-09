@@ -1718,16 +1718,15 @@ function AppInner(props: {
   };
 
   /**
-   * Move a lane to an insertion point in the rail — the drag's write path, and
-   * the ⋮ menu's.
+   * Move a lane to position `to` in the rail — the drag's write path, and the ⋮
+   * menu's.
    *
-   * One write for both gestures: `moveLane` owns the coordinate arithmetic (see
-   * its note on what `toIndex` counts) and returns `null` for a move that changes
-   * nothing, which is most drops.
+   * One write for both gestures: `moveLane` owns the arithmetic and returns
+   * `null` for a move that changes nothing, which a drop on the lane itself is.
    */
-  const moveLaneTo = async (lane: string, toIndex: number) => {
+  const moveLaneTo = async (lane: string, to: number) => {
     if (!repo) return;
-    const order = moveLane(lanes, lane, toIndex);
+    const order = moveLane(lanes, lane, to);
     if (!order) return;
     try {
       await api.reorderLanes(repo.root, order);
@@ -1739,10 +1738,8 @@ function AppInner(props: {
 
   const laneMenu = (lane: string) => {
     const index = lanes.findIndex((l) => l.name === lane);
-    // Insertion points, not final positions — `moveLane`'s coordinates. Moving
-    // down past one neighbour is `index + 2`: `index + 1` is this lane's own
-    // trailing edge, which is where it already sits.
-    const move = (toIndex: number) => void moveLaneTo(lane, toIndex);
+    // Final positions — `moveLane`'s coordinates, the same ones the drag hands it.
+    const move = (to: number) => void moveLaneTo(lane, to);
     return showContextMenu([
       {
         key: "lane-rename",
@@ -1759,7 +1756,7 @@ function AppInner(props: {
         key: "lane-down",
         title: "Move lane down",
         disabled: index < 0 || index >= lanes.length - 1,
-        onClick: () => move(index + 2),
+        onClick: () => move(index + 1),
       },
       { key: "lane-divider" },
       {
@@ -4313,11 +4310,17 @@ function Rail(props: {
    * Drop handlers for a section receiving a dragged **lane**, or `null` when no
    * lane drag is in flight or this section holds no place in the lane order.
    *
-   * Resolved against the section as a whole — its own index, or the one after it
-   * when the pointer is past its midpoint. Deliberately coarse: a lane is a block,
-   * so which of its rows the pointer happens to be over says nothing about where
-   * the block should land, and the rows' own drop zones bail on a lane drag
-   * without stopping propagation so the event reaches here.
+   * The whole section is one target and it means one thing: the dragged lane
+   * takes this lane's position. No midpoint — a lane is a block, and unlike a row
+   * it has no "above me" and "below me" halves to distinguish, so splitting it
+   * only creates a dead zone. It was split at first, and the upper half of the
+   * lane directly below resolved to the position the dragged lane already held:
+   * dragging a lane down one place did nothing, whichever half you released on,
+   * while dragging up worked. Which way the bar is drawn is a rendering question,
+   * answered from the travel direction — see `renderGroup`.
+   *
+   * The rows' own drop zones bail on a lane drag without stopping propagation, so
+   * a pointer anywhere in the section reaches this.
    *
    * Spread *after* `dropZone`, overriding it: the two drags are mutually exclusive
    * (each handler bails unless its own drag is the live one), and this keeps the
@@ -4326,17 +4329,16 @@ function Rail(props: {
   const laneDropZone = (group: RailGroup) => {
     const index = laneIndex.get(group.key);
     if (dragLane === null || index === undefined) return null;
-    const at = (e: React.DragEvent) => index + (below(e) ? 1 : 0);
     return {
       onDragOver: (e: React.DragEvent) => {
         e.preventDefault();
         e.stopPropagation();
-        setLaneDropAt(at(e));
+        setLaneDropAt(index);
       },
       onDrop: (e: React.DragEvent) => {
         e.preventDefault();
         e.stopPropagation();
-        props.onMoveLane(dragLane, at(e));
+        props.onMoveLane(dragLane, index);
         endDrag();
       },
     };
@@ -4350,18 +4352,18 @@ function Rail(props: {
    */
   const renderGroup = (group: RailGroup) => {
     const laneAt = laneIndex.get(group.key);
-    const laneDrag = dragLane !== null && laneAt !== undefined;
-    // Where the dragged lane would land, drawn in the gutter between sections.
-    // Only ever a *leading* bar, plus a trailing one on the last lane — the
-    // gutter between two lanes belongs to exactly one of them, or both would
-    // draw the same bar on top of each other.
-    const lastLane = props.lanes.length - 1;
-    const laneDropBefore = laneDrag && laneDropAt === laneAt;
-    const laneDropAfter =
-      laneDrag &&
-      laneAt === lastLane &&
-      laneDropAt !== null &&
-      laneDropAt > lastLane;
+    // Where the dragged lane would land, drawn in the gutter beside the hovered
+    // section. Which side is the travel direction: carrying a lane *up* onto this
+    // one puts it above, carrying it *down* puts it below. Exactly one section
+    // ever draws a bar, so two of them cannot render the same gutter twice — and
+    // hovering the dragged lane itself draws none, which is honest, because
+    // dropping there is the one move that does nothing.
+    const from = dragLane === null ? undefined : laneIndex.get(dragLane);
+    let laneDropSide: "before" | "after" | null = null;
+    if (laneAt !== undefined && from !== undefined && laneDropAt === laneAt) {
+      if (from > laneAt) laneDropSide = "before";
+      else if (from < laneAt) laneDropSide = "after";
+    }
     return (
           <div
             key={group.key}
@@ -4372,7 +4374,7 @@ function Rail(props: {
               dragPath && canDropOn(group) && dropAt?.key === group.key
                 ? " drop-in"
                 : ""
-            }${dragLane === group.key ? " lane-dragging" : ""}${laneDropBefore ? " lane-drop-before" : ""}${laneDropAfter ? " lane-drop-after" : ""}`}
+            }${dragLane === group.key ? " lane-dragging" : ""}${laneDropSide === "before" ? " lane-drop-before" : ""}${laneDropSide === "after" ? " lane-drop-after" : ""}`}
             // The section itself is the fallback target, and it resolves to its
             // FIRST position rather than its last. What actually reaches this
             // handler is the header and the padding above it — the rows stop

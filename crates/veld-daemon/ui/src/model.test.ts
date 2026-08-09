@@ -1006,39 +1006,43 @@ describe("moveWorktree", () => {
 describe("moveLane", () => {
   const lanes = () => [lane("a", 0), lane("b", 1), lane("c", 2)];
 
-  it("moves a lane up, in insertion coordinates", () => {
-    // Dropping "c" on the upper half of "b" reports insertion point 1.
+  it("takes the position of the lane it was dropped on, going up", () => {
     expect(moveLane(lanes(), "c", 1)).toEqual(["a", "c", "b"]);
+    expect(moveLane(lanes(), "c", 0)).toEqual(["c", "a", "b"]);
   });
 
-  it("moves a lane down, shifting the insertion point past its own gap", () => {
-    // Dropping "a" on the lower half of "b" reports 2 — counted with "a" still in
-    // the list, so the lane lands *after* "b", not between "a" and "b".
-    expect(moveLane(lanes(), "a", 2)).toEqual(["b", "a", "c"]);
+  it("takes the position of the lane it was dropped on, going down", () => {
+    // The case the first implementation could not reach at all: dropping "a" on
+    // the neighbour directly below resolved to "a"'s own position, so one step
+    // down did nothing whichever half of "b" the pointer was released on.
+    expect(moveLane(lanes(), "a", 1)).toEqual(["b", "a", "c"]);
+    expect(moveLane(lanes(), "a", 2)).toEqual(["b", "c", "a"]);
   });
 
-  it("is what the ⋮ menu's one-step moves mean", () => {
-    // Up is `index - 1` and down is `index + 2` — the same coordinates the drag
-    // produces, which is the whole reason both gestures share this function.
-    expect(moveLane(lanes(), "b", 0)).toEqual(["b", "a", "c"]);
-    expect(moveLane(lanes(), "b", 3)).toEqual(["a", "c", "b"]);
-  });
-
-  it("returns the full order, not a delta", () => {
+  it("is a full order, not a delta", () => {
     // `reorder_lanes` appends anything unmentioned, so a partial write would
     // silently move every lane the drag did not touch.
-    expect(moveLane(lanes(), "a", 3)).toEqual(["b", "c", "a"]);
+    expect(moveLane(lanes(), "b", 0)).toEqual(["b", "a", "c"]);
   });
 
-  it("reports a move that changes nothing as null", () => {
-    // Both edges of the dragged lane itself: the common drop, and one that must
-    // not cost a request and a refresh.
+  it("is one step per click for the ⋮ menu, in the same coordinates", () => {
+    // Up is `index - 1` and down is `index + 1` — what the drag hands it too,
+    // which is the whole reason both gestures share this function.
+    expect(moveLane(lanes(), "b", 0)).toEqual(["b", "a", "c"]);
+    expect(moveLane(lanes(), "b", 2)).toEqual(["a", "c", "b"]);
+  });
+
+  it("reports a drop on the lane itself as null", () => {
+    // The normal way to abandon a lane drag, and it must not cost a request and
+    // a refresh.
     expect(moveLane(lanes(), "b", 1)).toBeNull();
-    expect(moveLane(lanes(), "b", 2)).toBeNull();
   });
 
-  it("clamps an insertion point past the end", () => {
+  it("clamps a position past the end", () => {
     expect(moveLane(lanes(), "a", 99)).toEqual(["b", "c", "a"]);
+    // Clamped *before* the no-op check, so the last lane asked to go further
+    // down is nothing rather than a write that reorders nothing.
+    expect(moveLane(lanes(), "c", 99)).toBeNull();
   });
 
   it("returns null for a lane it does not know", () => {
@@ -1048,5 +1052,13 @@ describe("moveLane", () => {
   it("has nothing to do with a single lane", () => {
     expect(moveLane([lane("only", 0)], "only", 0)).toBeNull();
     expect(moveLane([lane("only", 0)], "only", 1)).toBeNull();
+  });
+
+  it("moves two lanes past each other in both directions", () => {
+    // The case that read as completely dead: with two lanes there is only one
+    // neighbour, so a defect in either direction removes half the feature.
+    const two = [lane("a", 0), lane("b", 1)];
+    expect(moveLane(two, "a", 1)).toEqual(["b", "a"]);
+    expect(moveLane(two, "b", 0)).toEqual(["b", "a"]);
   });
 });
