@@ -160,7 +160,8 @@ describe("nodeEndpoints", () => {
     expect(nodeEndpoints(row({ url: "https://web.dev.p.localhost" }))).toEqual([
       {
         name: "http",
-        hostname: "https://web.dev.p.localhost",
+        // Bare, as on a real endpoint — the daemon strips the scheme too.
+        hostname: "web.dev.p.localhost",
         url: "https://web.dev.p.localhost",
         // No port was recorded — 0 means "unknown", and the row renders the
         // hostname alone rather than inventing a number.

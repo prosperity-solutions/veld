@@ -431,7 +431,7 @@ It has its own page, because it is a menu rather than a migration:
 **[docs/adopting-long-running-and-ports.md](adopting-long-running-and-ports.md)**.
 
 Read at least its [behaviour
-changes](adopting-long-running-and-ports.md#four-behaviour-changes-worth-a-veld-lint)
+changes](adopting-long-running-and-ports.md#behaviour-changes-worth-a-veld-lint)
 section — the only part that can move under a config you never
 touch. `veld lint` reports every one of them.
 

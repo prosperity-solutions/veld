@@ -2509,10 +2509,12 @@ impl Orchestrator {
     /// Remove the DNS host and Caddy route for a node (best-effort).
     /// Remove **every** hostname this node claimed, not just the primary.
     ///
-    /// A node owns one hostname per `protocol: "http"` port, so iterating
-    /// `hostnames()` rather than reading `url` is load-bearing: a hostname
-    /// missed here leaves a permanent `/etc/hosts` line and a Caddy route that
-    /// shadows that name for every later run of any project.
+    /// A node owns one hostname per port, `tcp` included — naming and routing
+    /// are separate, so an unrouted port still holds a DNS entry. Iterating
+    /// `hostnames()` rather than reading `url` is therefore load-bearing: a
+    /// hostname missed here leaves a permanent `/etc/hosts` line, and a routed
+    /// one leaves a Caddy route that shadows that name for every later run of
+    /// any project.
     async fn remove_node_routes(&self, run_name: &str, node_state: &NodeState) {
         for hostname in node_state.hostnames() {
             let _ = self.helper_client.remove_host(&hostname).await;

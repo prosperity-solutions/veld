@@ -1690,7 +1690,9 @@ element no shell ever sees (inert text — a mistake, but not an exposure).
 | `credential-shaped-proxy-header` | The same shape in a `proxy` header value, which travels to Caddy and to every joiner verbatim | warn |
 | `long-running-needs-readiness` | A `long_running` node with no readiness probe. Reached by either spelling of the type; the remedy it prints differs for a portless node, which cannot use a `port` probe | **error** |
 | `unknown-probe-type` | A probe `type` Veld does not implement — including `settle` written as a *liveness* probe. A typo used to mean "always healthy" on both paths | **error** |
-| `probe-needs-port` | A `port` or `http` probe on a node with no such port: it names a port that is not declared, or needs the primary on a node that has none | **error** |
+| `probe-needs-port` | A `port` or `http` probe with no port to check: it names a port that is not declared, needs the primary on a node that has none, or sits on a `command` node — which never gets an allocated port, whatever its `ports` map says | **error** |
+| `port-name` | A port name containing anything but letters, digits, `-` and `_`. The name becomes a DNS label, an environment-variable suffix and a segment of `${veld.ports.<name>}` | **error** |
+| `port-name-collision` | Two port names that collapse to one `VELD_PORT_<NAME>` (names are upper-cased and `-` becomes `_`), so map order would decide which value the process receives | **error** |
 | `ambiguous-primary-port` | Several ports and no unambiguous primary: none named `http`, or more than one marked `"protocol": "http"`. Silent when every port is explicitly `tcp` — that node legitimately has no primary | **error** |
 | `web-share-needs-http` | A `"protocol": "tcp"` port opting into the `web` audience. The gateway serves HTTP and a browser cannot speak a raw protocol through it, so the share would silently drop the port the author asked to publish | **error** |
 | `unknown-var` | `${vars.x}` naming a var that is not declared, listing the declared names | **error** |

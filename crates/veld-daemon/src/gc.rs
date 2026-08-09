@@ -374,9 +374,10 @@ async fn cleanup_routes_and_dns(run: &RunState, run_name: &str, helper: &HelperC
         // Note the port is stripped here too — the previous version removed the
         // DNS host as `host:18443` whenever the helper wasn't on 443.
         //
-        // Iterated, not read off `url`: a node owns one hostname per routed
-        // http port, and a hostname missed by GC is a permanent /etc/hosts line
-        // plus a route that shadows that name for every later run.
+        // Iterated, not read off `url`: a node owns one hostname per port, `tcp`
+        // ones included (they hold a DNS entry and no route), and a hostname
+        // missed by GC is a permanent /etc/hosts line — plus, for a routed one,
+        // a route that shadows that name for every later run.
         for hostname in ns.hostnames() {
             let route_id = veld_core::url::run_route_id(&hostname);
             if helper.remove_route(&route_id).await.is_ok() {

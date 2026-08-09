@@ -5,8 +5,8 @@
 deadline, and no config that loads today and stops loading tomorrow.
 
 Read it as a menu, not a checklist — then read [the behaviour
-changes](#four-behaviour-changes-worth-a-veld-lint) at the end, which are the
-only part that can move under a config you never touch.
+changes](#behaviour-changes-worth-a-veld-lint) at the end, which are the only
+part that can move under a config you never touch.
 
 If you are coming from `schemaVersion: "1"` or `"2"`, do
 [that migration](migrating-to-v3.md) first — it is the one that is mandatory.
@@ -134,8 +134,8 @@ HTTPS route in front of its Node inspector the first time it runs on a newer
 veld. A secondary port that *should* be a URL has to say so.
 
 They do gain a **name**: naming and routing are separate, so every port now
-claims a hostname whether or not anything routes it — see [behaviour change
-4](#four-behaviour-changes-worth-a-veld-lint).
+claims a hostname whether or not anything routes it — see the [behaviour
+changes](#behaviour-changes-worth-a-veld-lint).
 
 One thing to know if you adopt a secondary `http` port: it is served at
 `<node>-<port>.…` — `web-admin.dev.veld.localhost`, a sibling of the node's own
@@ -221,11 +221,12 @@ own listener, never the origin's number.
 
 ---
 
-## Four behaviour changes worth a `veld lint`
+## Behaviour changes worth a `veld lint`
 
-These are the only items on this page that can affect a config you do not edit.
-The first two are the same fix: a check that could not run used to answer
-"healthy", and now answers "no".
+These are the items that can affect a config you do not edit. The first two are
+the same fix: a check that could not run used to answer "healthy", and now
+answers "no". Every one of them is reported by `veld lint`, which is why the
+first thing to do after upgrading is run it.
 
 1. **A probe that cannot check anything now fails instead of passing.** An
    unknown `type` — `{"type": "htpp"}` — used to mean "always healthy" on both
@@ -242,7 +243,7 @@ The first two are the same fix: a check that could not run used to answer
 
 2. **A variant that erases its last port no longer gets a fresh one.** A variant
    writing `"ports": { "http": null }` over a node that declared only `http` now
-   has zero ports. It used to collapse back to "nothing declared" and silently
+   has zero ports — as does a node or variant writing an empty `"ports": {}`. It used to collapse back to "nothing declared" and silently
    allocate a *new* port, which is the opposite of what the author wrote. If you
    have such a variant and it genuinely wanted a port, declare one; if it wanted
    none, it now needs a `command` or `settle` readiness probe.
@@ -250,7 +251,21 @@ The first two are the same fix: a check that could not run used to answer
 3. **A node-level `share` with nowhere to land is now an error.** Previously it
    was accepted and granted nothing. See `share-without-primary-port` above.
 
-4. **Every port claims a hostname, including a `tcp` one.** Naming and routing
+4. **A port-shaped liveness probe on a `command` node is refused.** A `command`
+   node never gets an allocated port, whatever its `ports` map says — so
+   `"liveness": {"type": "port"}` on one has never connected to anything. It
+   used to be skipped silently; it is now `probe-needs-port`, and at runtime the
+   node reports unhealthy rather than healthy. This is the class the "lint before
+   restarting the daemon" note above matters most for.
+
+5. **Port names have rules.** A port name is a DNS label, an
+   environment-variable suffix and a segment of `${veld.ports.<name>}`, so `.`,
+   whitespace and `#` are now `port-name` errors, and two names that collapse to
+   one `VELD_PORT_<NAME>` (`a-b` and `a_b`, `admin` and `Admin`) are
+   `port-name-collision`. Letters, digits, `-` and `_` are unaffected — which is
+   every port name that ever worked.
+
+6. **Every port claims a hostname, including a `tcp` one.** Naming and routing
    are separate concerns, so `{"http": "auto", "debug": "auto"}` now claims
    `<node>-debug.…` in DNS as well as `<node>.…` — with no route in front of it,
    which is why it gains no URL. Two consequences on an unchanged config: the
@@ -258,6 +273,10 @@ The first two are the same fix: a check that could not run used to answer
    alongside a node `web` with a port `debug` is refused at `veld start` (naming
    both owners, with per-port `host` as the way out); and on a custom apex domain
    it is a real DNS entry rather than something `*.localhost` resolves for free.
+
+One rule was **renamed**: `start-server-needs-readiness` is now
+`long-running-needs-readiness`, with identical behaviour. It matters only if you
+filter or suppress `veld lint --json` output by rule id.
 
 `ambiguous-primary-port` also became *more permissive*: a node whose ports are
 **all** explicitly `tcp` legitimately has no primary, and no longer trips it.

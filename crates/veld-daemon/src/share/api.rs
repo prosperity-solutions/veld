@@ -658,7 +658,8 @@ fn build_manifest(
         ExposeMode::Peer => ExposeMode::Web,
         ExposeMode::Web => ExposeMode::Peer,
     };
-    let mut had_url_bearing = false;
+    // Any port at all, routed or raw — the name the failure message uses.
+    let mut had_endpoints = false;
     let mut not_opted_in: Vec<String> = Vec::new();
     let mut other_only: Vec<String> = Vec::new();
     let mut web_needs_http: Vec<String> = Vec::new();
@@ -689,7 +690,7 @@ fn build_manifest(
                 Some(Some(primary)) => primary.as_str(),
                 _ => port_name.as_str(),
             };
-            had_url_bearing = true;
+            had_endpoints = true;
             if let Some(filter) = nodes_filter {
                 if !filter.iter().any(|n| n == &ns.node_name) {
                     continue;
@@ -765,9 +766,10 @@ fn build_manifest(
             StatusCode::BAD_REQUEST,
             share_exclusion_message(
                 &run_name,
-                had_url_bearing,
+                had_endpoints,
                 &mut not_opted_in,
                 &mut other_only,
+                &mut web_needs_http,
                 mode,
             ),
         ));
@@ -914,13 +916,14 @@ fn embed_warning(embed_relay_tokens: bool, relay: &RelayChoice) -> Option<String
 /// sorted+deduped in place for a deterministic message.
 fn share_exclusion_message(
     run_name: &str,
-    had_url_bearing: bool,
+    had_endpoints: bool,
     not_opted_in: &mut Vec<String>,
     other_only: &mut Vec<String>,
+    web_needs_http: &mut Vec<String>,
     mode: ExposeMode,
 ) -> String {
-    if !had_url_bearing {
-        return format!("run '{run_name}' has no shareable (URL-bearing) nodes");
+    if !had_endpoints {
+        return format!("run '{run_name}' has no nodes with ports to share");
     }
     not_opted_in.sort();
     not_opted_in.dedup();
@@ -950,8 +953,21 @@ fn share_exclusion_message(
             ),
         });
     }
+    // A port that opted into `web` and cannot be served over it is the one
+    // exclusion the author actively asked for, so it must never fall through to
+    // a generic message — least of all one blaming a `--node` filter the caller
+    // may not have passed.
+    web_needs_http.sort();
+    web_needs_http.dedup();
+    if !web_needs_http.is_empty() {
+        parts.push(format!(
+            "These opt into `web` but are `\"protocol\": \"tcp\"`, which the gateway cannot \
+             serve over HTTP: {}.",
+            web_needs_http.join(", ")
+        ));
+    }
     if parts.is_empty() {
-        // URL-bearing nodes existed but the --node filter excluded them all.
+        // Ports existed but the --node filter excluded them all.
         return format!("run '{run_name}' has no shareable services matching the requested nodes");
     }
     format!(
@@ -1521,8 +1537,15 @@ mod tests {
 
     #[test]
     fn exclusion_message_no_url_bearing() {
-        let msg = share_exclusion_message("r", false, &mut vec![], &mut vec![], ExposeMode::Peer);
-        assert!(msg.contains("no shareable (URL-bearing) nodes"), "{msg}");
+        let msg = share_exclusion_message(
+            "r",
+            false,
+            &mut vec![],
+            &mut vec![],
+            &mut vec![],
+            ExposeMode::Peer,
+        );
+        assert!(msg.contains("no nodes with ports to share"), "{msg}");
     }
 
     #[test]
@@ -1531,6 +1554,7 @@ mod tests {
             "r",
             true,
             &mut vec!["web:local".into()],
+            &mut vec![],
             &mut vec![],
             ExposeMode::Peer,
         );
@@ -1547,6 +1571,7 @@ mod tests {
             true,
             &mut vec![],
             &mut vec!["api:local".into()],
+            &mut vec![],
             ExposeMode::Peer,
         );
         assert!(msg.contains("veld share --web"), "{msg}");
@@ -1558,6 +1583,7 @@ mod tests {
             true,
             &mut vec![],
             &mut vec!["api:local".into()],
+            &mut vec![],
             ExposeMode::Web,
         );
         assert!(msg.contains("opt into `peer` only"), "{msg}");
@@ -1571,6 +1597,7 @@ mod tests {
             true,
             &mut vec!["web:local".into()],
             &mut vec![],
+            &mut vec![],
             ExposeMode::Web,
         );
         assert!(msg.contains(r#""expose": ["web"]"#), "{msg}");
@@ -1579,7 +1606,14 @@ mod tests {
     #[test]
     fn exclusion_message_filtered_out_all() {
         // URL-bearing nodes existed but the --node filter excluded every one.
-        let msg = share_exclusion_message("r", true, &mut vec![], &mut vec![], ExposeMode::Peer);
+        let msg = share_exclusion_message(
+            "r",
+            true,
+            &mut vec![],
+            &mut vec![],
+            &mut vec![],
+            ExposeMode::Peer,
+        );
         assert!(msg.contains("matching the requested nodes"), "{msg}");
     }
 
@@ -1590,9 +1624,33 @@ mod tests {
             true,
             &mut vec!["z:local".into(), "a:local".into(), "a:local".into()],
             &mut vec![],
+            &mut vec![],
             ExposeMode::Peer,
         );
         // sorted + deduped
         assert!(msg.contains("a:local, z:local"), "{msg}");
+    }
+
+    /// A `tcp` port that opted into `web` is the one exclusion the author
+    /// actively asked for and did not get. When it is the *only* reason nothing
+    /// is shareable, the message used to fall through to "no shareable services
+    /// matching the requested nodes" — blaming a `--node` filter the caller may
+    /// never have passed.
+    #[test]
+    fn exclusion_message_names_a_web_share_that_needed_http() {
+        let msg = share_exclusion_message(
+            "r",
+            true,
+            &mut vec![],
+            &mut vec![],
+            &mut vec!["db:local#pg".into()],
+            ExposeMode::Web,
+        );
+        assert!(msg.contains("db:local#pg"), "{msg}");
+        assert!(msg.contains("tcp"), "{msg}");
+        assert!(
+            !msg.contains("matching the requested nodes"),
+            "must not blame a --node filter: {msg}"
+        );
     }
 }

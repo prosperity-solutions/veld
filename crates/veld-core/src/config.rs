@@ -4824,14 +4824,29 @@ fn check_resolved_variants(config: &VeldConfig, out: &mut Vec<Finding>) {
                 // portless node there is nothing to connect to, and answering
                 // "healthy" is exactly the failure this rule exists to stop.
                 if matches!(probe_type.as_str(), "http" | "port") {
-                    let target_exists = match &port_name {
-                        Some(name) => r.ports.ports.contains_key(name),
-                        None => r.ports.primary.is_some(),
-                    };
+                    // A `command` node has no allocated port whatever its `ports`
+                    // map says: `resolve_ports` synthesizes an `http` primary for
+                    // *every* node that declares none, but only a `long_running`
+                    // node ever reserves one. Reading the map alone let a
+                    // `command` node's `port`/`http` liveness probe lint clean —
+                    // a probe that has never once connected to anything, and now
+                    // reports the node unhealthy instead of shrugging.
+                    let has_allocated_ports = r.step_type == StepType::LongRunning;
+                    let target_exists = has_allocated_ports
+                        && match &port_name {
+                            Some(name) => r.ports.ports.contains_key(name),
+                            None => r.ports.primary.is_some(),
+                        };
                     if !target_exists {
-                        let detail = match &port_name {
-                            Some(name) => format!("names port \"{name}\", which is not declared"),
-                            None => {
+                        let detail = match (&port_name, has_allocated_ports) {
+                            (_, false) => {
+                                "this is a `command` node, which never gets an allocated port"
+                                    .to_owned()
+                            }
+                            (Some(name), _) => {
+                                format!("names port \"{name}\", which is not declared")
+                            }
+                            (None, _) => {
                                 "needs the primary port, and this node declares none".to_owned()
                             }
                         };
@@ -9556,6 +9571,60 @@ mod tests {
         let named_http_but_tcp = r#"{"http":{"port":5432,"protocol":"tcp"}}"#;
         assert_eq!(lint_case(named_http_but_tcp, "${veld.port}").len(), 1);
         assert_eq!(lint_case(named_http_but_tcp, "${veld.url}").len(), 1);
+    }
+
+    /// A `command` node's `ports` map is a synthesized default — `resolve_ports`
+    /// gives *every* node one `http` entry when it declares none — but only a
+    /// `long_running` node ever reserves a port. Reading the map alone let a
+    /// port-shaped liveness probe on a `command` node lint clean, which is the
+    /// one config class where such a probe has never connected to anything.
+    #[test]
+    fn a_port_probe_on_a_command_node_is_refused() {
+        fn rules(step_type: &str, probes: &str) -> Vec<String> {
+            let json = format!(
+                r#"{{"schemaVersion":"3","name":"t","nodes":{{"a":{{"variants":{{"dev":{{
+                    "type":"{step_type}","shell":"x","probes":{probes}
+                }}}}}}}}}}"#
+            );
+            let cfg: VeldConfig = serde_json::from_str(&json).expect("fixture parses");
+            validate(&cfg)
+                .iter()
+                .filter(|f| f.rule == "probe-needs-port")
+                .map(|f| f.message.clone())
+                .collect()
+        }
+
+        for probe in [
+            r#"{"liveness":{"type":"port"}}"#,
+            r#"{"liveness":{"type":"http","path":"/health"}}"#,
+        ] {
+            let msgs = rules("command", probe);
+            assert_eq!(msgs.len(), 1, "{probe}: {msgs:?}");
+            assert!(
+                msgs[0].contains("never gets an allocated port"),
+                "{}",
+                msgs[0]
+            );
+        }
+
+        // A `command` probe on a `command` node is the supported shape and stays
+        // legal — it is how a node that started a container watches it.
+        assert!(
+            rules(
+                "command",
+                r#"{"liveness":{"type":"command","shell":"pg_isready"}}"#
+            )
+            .is_empty()
+        );
+
+        // And a long-running node with a real port is untouched.
+        assert!(
+            rules(
+                "long_running",
+                r#"{"readiness":{"type":"port"},"liveness":{"type":"port"}}"#
+            )
+            .is_empty()
+        );
     }
 
     /// A port name is a DNS label, an env-var suffix, a builtin namespace

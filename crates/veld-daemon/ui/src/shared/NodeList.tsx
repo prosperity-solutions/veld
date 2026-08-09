@@ -75,7 +75,18 @@ export interface NodeRow {
 export function nodeEndpoints(n: NodeRow): EndpointInfo[] {
   if (n.endpoints.length > 0) return n.endpoints;
   if (!n.url) return [];
-  return [{ name: "http", hostname: n.url, url: n.url, port: 0, primary: true }];
+  // `hostname` is the bare host, as it is on a real endpoint — the daemon's
+  // `endpoints_or_legacy` strips the scheme for the same synthesised entry.
+  // Latent today (this entry always has a `url`, so nothing reads its hostname)
+  // and worth keeping true anyway: the day something does, a scheme in there
+  // renders as `https://web.localhost:3000`.
+  let hostname = n.url;
+  try {
+    hostname = new URL(n.url).hostname;
+  } catch {
+    // Not parseable as a URL — keep it verbatim rather than lose the value.
+  }
+  return [{ name: "http", hostname, url: n.url, port: 0, primary: true }];
 }
 
 /**
