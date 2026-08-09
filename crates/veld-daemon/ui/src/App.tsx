@@ -3751,13 +3751,14 @@ function AppInner(props: {
                 startWorktree(worktree, anotherNameFor(worktree))
               }
               onSelect={setSelectedRunName}
-              // No runs yet: shown greyed (or hidden, per `ui.hideDisabledActions`).
-              disabled={runs.length === 0}
+              // A selector with nothing to switch between is disabled: shown
+              // greyed (or hidden, per `ui.hideDisabledActions`).
+              disabled={runs.length < 2}
             />
           ) : null
         }
         runSelectDisabled={
-          !worktree || !canRunWorktreeNow(worktree) || runs.length === 0
+          !worktree || !canRunWorktreeNow(worktree) || runs.length < 2
         }
         urls={urls}
         sharing={sharingSurface}
