@@ -57,6 +57,18 @@ struct Diagnostics {
     // Checks
     checks: Vec<Check>,
 
+    /// The update that is running right now, if one is.
+    ///
+    /// Reported first and loudest, because during an update most of the rest of
+    /// this report is *expected* to look broken: the helper and daemon are being
+    /// restarted onto new binaries and their versions disagree with the CLI's for
+    /// tens of seconds at a time. Without this line, `veld doctor` during an
+    /// update is a page of red that invites someone to "fix" a machine that is
+    /// already fixing itself. It is deliberately **not** a `Check` — an update in
+    /// flight is not a failure, and pushing a failing check would make
+    /// `veld doctor` exit non-zero for it.
+    update_in_progress: Option<veld_core::update_lock::UpdateState>,
+
     // Tip
     tip: String,
 }
@@ -84,6 +96,7 @@ fn current_uid() -> Option<String> {
 
 impl Diagnostics {
     async fn gather(&mut self) {
+        self.update_in_progress = veld_core::update_lock::current();
         self.gather_installation();
         self.gather_services().await;
         self.gather_checks().await;
@@ -797,6 +810,24 @@ impl Diagnostics {
         println!("{}", output::bold("Veld Doctor"));
         println!();
 
+        // Before anything else: see the field's own comment for why this outranks
+        // the installation block it would otherwise sit inside.
+        if let Some(state) = &self.update_in_progress {
+            println!("  {}", output::bold("Update in progress"));
+            println!("    {}", state.describe(chrono::Utc::now()));
+            if let Some(tty) = &state.tty {
+                println!("    {}", output::dim(&format!("Terminal: {tty}")));
+            }
+            println!(
+                "    {}",
+                output::dim(
+                    "Versions and service status below may disagree with each other until it \
+                     finishes. Follow it with `veld update --status`."
+                )
+            );
+            println!();
+        }
+
         // Installation
         println!("  {}", output::bold("Installation"));
         println!(
@@ -938,6 +969,16 @@ impl Diagnostics {
                 "ca": self.ca_status,
             },
             "checks": checks,
+            // `null` when nothing is updating, so a consumer can branch on
+            // presence rather than on a sentinel.
+            "update": self.update_in_progress.as_ref().map(|s| serde_json::json!({
+                "pid": s.pid,
+                "origin": s.origin.as_str(),
+                "version": s.version,
+                "phase": s.phase.as_str(),
+                "started_at": s.started_at.to_rfc3339(),
+                "tty": s.tty,
+            })),
             "tip": self.tip,
         })
     }

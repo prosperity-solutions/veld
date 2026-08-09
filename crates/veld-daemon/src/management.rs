@@ -1453,6 +1453,23 @@ fn stderr_tail(path: &std::path::Path) -> String {
 /// `PATH`. The project_root is looked up from the GlobalRegistry (never
 /// supplied by the client) to prevent directory traversal.
 pub(super) async fn spawn_veld(project_root: &std::path::Path, args: &[String]) -> StatusCode {
+    // **Refuse here rather than let the child refuse where nobody is listening.**
+    // Every command this spawns is one the CLI's own update gate turns into exit
+    // 75 while `veld update` holds the lock — but this function answers `202
+    // ACCEPTED` the moment the process starts and only `warn!`s a non-zero exit
+    // into the daemon log, so a start/stop/restart/action button in the IDE or in
+    // Veld Desktop would silently do nothing for the one to four minutes an
+    // update takes. `503` is a status the UI already surfaces as an error toast,
+    // and it is the honest one: the service really is briefly unavailable, and
+    // the caller really should try again. Checked before the spawn so the
+    // answer is the same whether or not the child ever ran.
+    if veld_core::update_lock::current().is_some() {
+        warn!(
+            "refusing to spawn `veld {}`: an update is in progress",
+            args.join(" ")
+        );
+        return StatusCode::SERVICE_UNAVAILABLE;
+    }
     // Resolve the veld binary as THIS daemon's sibling (current_exe), by
     // absolute path — a bare `veld` would resolve via PATH to the INSTALLED
     // binary, which would then operate a dev instance's DB/daemon (inherited

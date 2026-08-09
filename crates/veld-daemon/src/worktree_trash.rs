@@ -409,11 +409,26 @@ async fn stop_runs(db: &Db, path: &str) -> Result<(), String> {
         names.len()
     );
     for name in &names {
-        super::management::spawn_veld(
+        let code = super::management::spawn_veld(
             &wt_path,
             &["stop".to_owned(), "--name".to_owned(), name.clone()],
         )
         .await;
+        // **Fail now, with the real reason, instead of after 120 seconds with the
+        // wrong one.** `spawn_veld` refuses outright while `veld update` holds the
+        // update lock, so nothing was spawned and nothing is going to stop — but
+        // the poll below cannot tell that from a run that is merely slow, and it
+        // would spend the whole `STOP_TIMEOUT` before reporting "stop it yourself
+        // and try again" about a run the user cannot do anything about. An update
+        // takes one to four minutes, so this collision is realistic rather than
+        // theoretical, and "wait for the update" is the actionable answer.
+        if code == axum::http::StatusCode::SERVICE_UNAVAILABLE {
+            return Err(
+                "a veld update is in progress, so runs cannot be stopped right now — try again \
+                 when it finishes (`veld update --status`)"
+                    .to_owned(),
+            );
+        }
     }
     let deadline = tokio::time::Instant::now() + STOP_TIMEOUT;
     loop {
