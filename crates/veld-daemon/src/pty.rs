@@ -464,6 +464,19 @@ struct Session {
     /// A `watch` rather than a queued frame so the hangup cannot sit behind a
     /// backlog of keystrokes: the writer polls it first.
     closing: watch::Sender<bool>,
+    /// Set when this daemon has given the session up **without ending it** —
+    /// see [`release_session`].
+    ///
+    /// Deliberately not the attach epoch, which would be the obvious way to make
+    /// attached sockets leave: an epoch change means *takeover* on the wire
+    /// ([`ServerControl::TakenOver`]), and the UI renders that as a terminal that
+    /// ended — "opened in another window", with Restart as the only button, which
+    /// deletes the very shell this path exists to keep alive. A socket that ends
+    /// on this signal instead closes with no control frame at all, which the
+    /// client already reads as a dropped connection and answers with Reconnect —
+    /// the truthful affordance, and the one that reaches the live holder again
+    /// through [`obtain_session`].
+    released: watch::Sender<bool>,
     /// The shell's pid, for log lines only — it is a pid in *another* process's
     /// child list, and nothing here may signal it.
     pid: i32,
@@ -1979,6 +1992,14 @@ async fn obtain_session(
 
     let mut sessions = SESSIONS.lock().await;
     if let Some(existing) = sessions.get(&ticket.session_id) {
+        if adopted {
+            // Never `discard_holder` an adopted one. That writes `HANGUP`, which a
+            // holder honours whatever the generation and whoever is attached — and
+            // the holder behind an adoption is the one the winning `existing`
+            // session is serving, so the "cleanup" would kill its live shell. Only
+            // a holder *this call spawned* is ours to throw away.
+            return Ok((existing.clone(), true));
+        }
         discard_holder(attached, "another attach won the race").await;
         return Ok((existing.clone(), true));
     }
@@ -2069,6 +2090,7 @@ fn register(
     let (exit, _) = watch::channel(hello.exited);
     let (attach_epoch, _) = watch::channel(0u64);
     let (closing, _) = watch::channel(false);
+    let (released, _) = watch::channel(false);
     let (to_holder, holder_rx) = mpsc::channel(HOLDER_INPUT_CHANNEL);
 
     // The mirror starts as the holder's copy: for a session this daemon just
@@ -2107,6 +2129,7 @@ fn register(
                 .unwrap_or_else(Instant::now),
         )),
         closing,
+        released,
         pid: hello.pid,
         _slot: slot,
     });
@@ -2372,9 +2395,14 @@ async fn holder_is_alive(id: &str) -> bool {
 /// The counterpart to [`end_session`], for the case where this daemon has lost
 /// its link to a holder that is still running: the registry entry is useless
 /// (nothing can reach the shell through it any more) but the shell itself is
-/// fine, so nothing may be hung up and no exit may be published. Attached sockets
-/// are displaced so they close and can reattach — which goes through
-/// [`obtain_session`], finds the live holder at its socket, and adopts it.
+/// fine, so nothing may be hung up and no exit may be published.
+///
+/// Attached sockets are closed rather than told anything, via
+/// [`Session::released`] — a client reads that as a dropped connection and offers
+/// to reattach, which goes through [`obtain_session`], finds the live holder at
+/// its socket and adopts it. The user does have to ask for that reattach; what
+/// they must never be offered is the *destructive* answer, which is what
+/// signalling this as a takeover produced.
 async fn release_session(session: &Arc<Session>) {
     {
         let mut sessions = SESSIONS.lock().await;
@@ -2388,9 +2416,12 @@ async fn release_session(session: &Arc<Session>) {
             sessions.remove(&session.id);
         }
     }
-    // An epoch no socket holds, so every attached one sees the change and leaves.
-    let epoch = session.attach_seq.fetch_add(1, Ordering::AcqRel) + 1;
-    session.attach_epoch.send_replace(epoch);
+    // `send_replace` for the reason `exit` documents: with no socket attached
+    // there is no receiver, and `send` would drop the flag — which matters here
+    // because a socket that attaches *after* this point (a reattach that raced
+    // the release) must still see it and leave, rather than sit on a session
+    // nothing feeds.
+    session.released.send_replace(true);
 }
 
 // ---------------------------------------------------------------------------
@@ -2535,6 +2566,17 @@ async fn serve_socket(socket: WebSocket, session: Arc<Session>, size: PtySize, r
     // one-writer rule itself rather than relying on this loop to abort it.
     let mut input = tokio::spawn(pump_input(ws_rx, session.clone(), epoch));
 
+    let mut released_rx = session.released.subscribe();
+    // A session released before this socket attached: it is not this daemon's to
+    // serve any more, and staying would present a terminal nothing feeds. Closed
+    // in silence, exactly like the branch in the loop below.
+    if *released_rx.borrow_and_update() {
+        let _ = ws_tx.close().await;
+        input.abort();
+        mark_detached(&session, epoch);
+        return;
+    }
+
     let mut exit_rx = session.exit.subscribe();
     // An exit that happened before this attach is reported immediately, so a
     // reload onto a finished shell shows the exit instead of a live prompt.
@@ -2622,6 +2664,18 @@ async fn serve_socket(socket: WebSocket, session: Arc<Session>, size: PtySize, r
                 let current = *epoch_rx.borrow_and_update();
                 if current != epoch {
                     let _ = ws_tx.send(ServerControl::TakenOver.frame()).await;
+                    break;
+                }
+            },
+
+            // This daemon gave the session up while the shell kept running
+            // (`release_session`). No control frame: a close with none is what the
+            // client already reads as "the pipe broke, the shell probably did
+            // not", which is both true here and the state whose button is
+            // Reconnect. `TakenOver` would be a different claim with a
+            // *destructive* button behind it.
+            Ok(()) = released_rx.changed() => {
+                if *released_rx.borrow_and_update() {
                     break;
                 }
             },
@@ -3775,6 +3829,68 @@ mod tests {
                 .await
                 .unwrap();
             read_until(&mut again, "mark=readopted").await;
+            end_session(&sid, "test cleanup").await;
+        }
+
+        /// Releasing a session must not tell the client its terminal was taken
+        /// over, because the client's answer to that is destructive.
+        ///
+        /// `release_session` runs when this daemon has lost its link to a holder
+        /// whose shell is still running. Signalling it through the attach epoch —
+        /// the obvious way to make attached sockets leave — puts
+        /// `ServerControl::TakenOver` on the wire, which
+        /// `ui/src/panes/terminalHost.ts` renders as `ended` / "opened in another
+        /// window". `PaneArea.tsx` offers Reconnect only for `error`, so that pane
+        /// would present **Restart** as its one action — which deletes the session
+        /// and hangs up the very shell this path exists to preserve. A close with
+        /// no control frame is what the client already reads as a dropped
+        /// connection, which is both true and the state whose button reattaches.
+        #[tokio::test]
+        async fn a_released_session_closes_its_socket_without_claiming_a_takeover() {
+            use futures_util::StreamExt;
+
+            let addr = serve().await;
+            let dir = tempfile::tempdir().unwrap();
+            let sid = session_id();
+            let mut ws = open(addr, &sid, dir.path(), "&cols=90&rows=30").await;
+            read_control(&mut ws, "ready").await;
+
+            let session = SESSIONS
+                .lock()
+                .await
+                .get(&sid)
+                .cloned()
+                .expect("the session must be registered");
+            release_session(&session).await;
+
+            let ended = tokio::time::timeout(STEP_TIMEOUT, async {
+                while let Some(Ok(msg)) = ws.next().await {
+                    if let WsMessage::Text(text) = msg {
+                        assert!(
+                            !text.contains("taken_over"),
+                            "a release must not be reported as a takeover: {text}"
+                        );
+                        assert!(
+                            !text.contains(r#""type":"exit""#),
+                            "a release must not report an exit for a live shell: {text}"
+                        );
+                    }
+                }
+            })
+            .await;
+            assert!(ended.is_ok(), "the socket must close on a release");
+            assert!(
+                SESSIONS.lock().await.get(&sid).is_none(),
+                "a released session leaves the registry"
+            );
+
+            // And the way back is the ordinary one: reattaching adopts the holder
+            // that kept running. This doubles as the cleanup — with no registry
+            // entry there is nothing `end_session` could hang up, and the shell
+            // would sit in the holder until its orphan grace.
+            let mut again = open(addr, &sid, dir.path(), "&cols=90&rows=30").await;
+            let ready = read_control(&mut again, "ready").await;
+            assert_eq!(ready["resumed"], true, "the shell was still there");
             end_session(&sid, "test cleanup").await;
         }
 

@@ -2761,7 +2761,11 @@ fn hang_up_terminal_holders(veld_dir: &Path) {
         };
         for socket in sockets.flatten() {
             let path = socket.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("sock") {
+            // The digest-shaped name a holder socket has, not merely a `.sock`
+            // extension — the one predicate every scan of a holder directory
+            // shares. What it writes here is a `HANGUP`, so a name that is not a
+            // holder's is a frame sent to something that never asked for one.
+            if !crate::instance::is_holder_socket_name(&path) {
                 continue;
             }
             if let Ok(mut stream) = std::os::unix::net::UnixStream::connect(&path) {

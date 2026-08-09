@@ -321,6 +321,22 @@ async fn serve(cfg: &HolderConfig, listener: UnixListener) -> anyhow::Result<()>
                 Ok(0) => break,
                 Ok(n) => {
                     scrollback.push(&buf[..n]);
+                    // A probationary peer is fed the same chunk, which is what
+                    // makes promoting it lossless. Its greeting carried a
+                    // scrollback snapshot taken when it connected, and nothing
+                    // re-sends one — so without this, everything the shell printed
+                    // during the probation would be missing from the promoted
+                    // daemon's mirror for good, possibly splitting an escape
+                    // sequence. `try_send`, unlike the incumbent's send below: a
+                    // peer that cannot take a chunk with `OUT_CHANNEL` frames of
+                    // slack is not a peer to hand a live session to, and a probe
+                    // that never reads must not be able to slow the shell down.
+                    if let Some(p) = &pending {
+                        if p.out.try_send((wire::OUTPUT, buf[..n].to_vec())).is_err() {
+                            debug!(session = %cfg.session_id, "dropping a probationary peer that is not keeping up");
+                            pending = None;
+                        }
+                    }
                     if let Some(c) = &conn {
                         // Awaited rather than `try_send`, because this hop is a
                         // local socket with a daemon that does nothing but drain
@@ -412,13 +428,18 @@ async fn serve(cfg: &HolderConfig, listener: UnixListener) -> anyhow::Result<()>
                         // from here — but do not hand it the session until it has
                         // proved it is a peer at all. See `TAKEOVER_PROBATION`.
                         Some(c) => {
-                            // Replacing an earlier probationary connection, which
-                            // is the same last-one-wins rule takeover has always
-                            // had, applied one step earlier.
+                            // The deadline is armed only when the slot goes from
+                            // empty to occupied. Re-arming it for a *replacement*
+                            // would mean anything that reconnects faster than the
+                            // window keeps a takeover from ever completing — and
+                            // replacing is otherwise the same last-one-wins rule
+                            // takeover has always had, applied one step earlier.
+                            if pending.is_none() {
+                                probation
+                                    .as_mut()
+                                    .reset(tokio::time::Instant::now() + TAKEOVER_PROBATION);
+                            }
                             pending = Some(c);
-                            probation
-                                .as_mut()
-                                .reset(tokio::time::Instant::now() + TAKEOVER_PROBATION);
                         }
                         // The greeting failed, so nothing changed: whoever was
                         // attached still is, and if nobody was, the orphan clock
@@ -434,8 +455,10 @@ async fn serve(cfg: &HolderConfig, listener: UnixListener) -> anyhow::Result<()>
                     // than the window could: only a daemon sends input or a resize,
                     // and the probes the window exists to survive send nothing at
                     // all. Promoting here rather than making it wait is what keeps
-                    // a takeover lossless — this very frame is then acted on below
-                    // instead of being dropped as a displaced peer's. `HANGUP` is
+                    // a takeover prompt — this very frame is then acted on below
+                    // instead of being dropped as a displaced peer's, and the
+                    // output it missed while waiting was teed to it by the PTY
+                    // branch above, which is what makes it lossless. `HANGUP` is
                     // deliberately not in the list: it ends a session rather than
                     // writing to it, and its whole contract is that it works
                     // without being anybody's writer.
@@ -620,6 +643,15 @@ async fn serve(cfg: &HolderConfig, listener: UnixListener) -> anyhow::Result<()>
     scrollback.push(&notice);
     debug!(session = %cfg.session_id, pid, code, "terminal shell exited");
 
+    // The shell is gone, so there is no longer a session to protect from a
+    // takeover — a probationary peer is simply the only peer there is, if nothing
+    // else is attached. Promoting it here is what lets it be handed the exit code
+    // below; left in the slot it would be dropped, and the daemon behind it would
+    // read EOF and invent an exit of its own.
+    if conn.is_none() {
+        conn = pending.take();
+    }
+
     deliver_exit(
         cfg,
         pid,
@@ -728,9 +760,17 @@ async fn deliver_exit(
                     {
                         // `attach` sends the exit itself when the shell is
                         // already gone, so the code is on the wire by here — and
-                        // the notice is in the scrollback it just replayed.
-                        conn = Some(c);
+                        // the notice is in the scrollback it just replayed. That
+                        // makes greeting a newcomer *sufficient* here, which is why
+                        // this arm needs no probation: what it must not do is
+                        // **displace** the peer that is already holding the exit
+                        // open, because that peer reads the close as its holder
+                        // vanishing. A liveness probe landing inside this window
+                        // used to do exactly that.
                         delivered = true;
+                        if conn.is_none() {
+                            conn = Some(c);
+                        }
                     }
                 }
                 Some(Cmd::Disconnected(seq)) => {
@@ -1437,6 +1477,64 @@ mod tests {
             echoes_back(&mut daemon, "AFTER-PROBE").await,
             "a connect-and-close must leave the attached daemon's connection alone"
         );
+    }
+
+    /// A peer that connects, says nothing, and simply stays gets the session once
+    /// the window has passed — and gets the output it missed while waiting.
+    ///
+    /// The timer is the only promotion path a *silent* peer has, and a daemon
+    /// adopting a session with no client attached is exactly that: nothing makes
+    /// it send `INPUT` or `RESIZE` until somebody opens the pane. Without the
+    /// timer such a peer would wait behind an incumbent forever. The scrollback
+    /// half is the other half of the same promise: its greeting snapshot was taken
+    /// before `DURING-PROBATION` was printed, so the bytes can only reach it if
+    /// they were teed to it while it waited.
+    #[tokio::test]
+    async fn a_silent_peer_takes_over_after_the_probation_and_misses_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = echo_holder(dir.path(), "silentprobe").await;
+        let mut first = greet(&socket).await;
+        assert!(echoes_back(&mut first, "FIRST").await);
+
+        // Connect and say nothing at all.
+        let mut second = greet(&socket).await;
+        // Printed while the newcomer is still on probation, so it is in neither
+        // its greeting snapshot nor anything it could ask for later.
+        assert!(echoes_back(&mut first, "DURING-PROBATION").await);
+
+        // Teed to the waiting peer, so it has the bytes before it owns anything.
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut seen = Vec::new();
+        while !String::from_utf8_lossy(&seen).contains("DURING-PROBATION") {
+            assert!(
+                Instant::now() < deadline,
+                "a probationary peer must be fed the shell's output; saw {:?}",
+                String::from_utf8_lossy(&seen)
+            );
+            match tokio::time::timeout(Duration::from_secs(1), wire::read_frame(&mut second)).await
+            {
+                Ok(Ok(Some(frame))) if frame.kind == wire::OUTPUT => {
+                    seen.extend_from_slice(&frame.payload)
+                }
+                Ok(Ok(Some(_))) => {}
+                Ok(Ok(None)) | Ok(Err(_)) => panic!("the probationary connection was dropped"),
+                Err(_) => {}
+            }
+        }
+
+        // Now the timer, and *only* the timer: nothing is written on the second
+        // connection, so if it is promoted at all it is because it stayed. The
+        // observable side of a promotion is the incumbent being dropped.
+        let promoted = tokio::time::timeout(TAKEOVER_PROBATION + Duration::from_secs(20), async {
+            while let Ok(Some(_)) = wire::read_frame(&mut first).await {}
+        })
+        .await;
+        assert!(
+            promoted.is_ok(),
+            "a peer that connected and stayed silent must still take the session over"
+        );
+        // And it owns the session now: its input reaches the PTY.
+        assert!(echoes_back(&mut second, "AFTER-PROBATION").await);
     }
 
     /// The other half of the same rule: a peer that stays is a peer, and takeover
