@@ -626,6 +626,35 @@ export function moveWorktree(
 }
 
 /**
+ * Which lane a pointer is aiming at, from the lane sections' bottom edges.
+ *
+ * The rail's lane drag resolves its target from the pointer's Y against these
+ * boxes rather than from the element under the pointer, and this is the choice
+ * itself, split out from the DOM read so it can be pinned: **above the first
+ * lane is the first, below the last is the last, and a gutter belongs to the
+ * lane under it**. There is no dead space in the column and no direction the
+ * mapping treats differently, which is exactly what per-element hit testing
+ * could not promise — a lane is grabbed by the header at the top of its own
+ * section, so dragging up left that section immediately while dragging down had
+ * to clear its full height first, and the gutters and the padding below the last
+ * lane belonged to no section at all.
+ *
+ * `sections` must be in rail order. `null` only when there is nothing to aim at.
+ */
+export function laneDropTarget(
+  sections: Array<{ index: number; bottom: number }>,
+  clientY: number,
+): number | null {
+  let last: number | null = null;
+  for (const s of sections) {
+    if (Number.isNaN(s.index)) continue;
+    if (clientY < s.bottom) return s.index;
+    last = s.index;
+  }
+  return last;
+}
+
+/**
  * The lane order after moving the lane `name` so that it ends up at index `to`.
  *
  * **A final position, not an insertion point.** The rail's lane drag is

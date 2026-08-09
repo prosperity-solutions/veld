@@ -31,6 +31,7 @@ import {
   bestFuzzyMatch,
   freshRunName,
   fuzzyMatch,
+  laneDropTarget,
   liveRuns,
   moveLane,
   moveWorktree,
@@ -4245,11 +4246,24 @@ function Rail(props: {
   // ask what kind it was before doing anything.
   const [dragLane, setDragLane] = useState<string | null>(null);
   const [laneDropAt, setLaneDropAt] = useState<number | null>(null);
-  // Positions of the lane sections, by group key. Only real lanes are in here:
-  // the ungrouped section, the main checkout and the two pending-removal lanes
-  // hold no position in the lane order, so they are neither draggable nor lane
-  // drop targets.
+  // Positions of the lane sections, by lane name.
   const laneIndex = new Map(props.lanes.map((l, i) => [l.name, i]));
+  /**
+   * This section's place in the lane order, or `undefined` for a section that
+   * holds none — the ungrouped section, the main checkout, and the two pending
+   * -removal lanes are neither draggable nor lane drop targets.
+   *
+   * Keyed on `lane` behind `editable`, never on `key`. The main checkout's key is
+   * the literal `"main"` and `"main"` is a legal lane name (`valid_lane_name`
+   * rejects only empty, over-long, control characters, `.` and `..`), so keying
+   * on it gave that pinned section the position of a lane called `main`: every
+   * drop over the top of the rail resolved there instead of to the first lane,
+   * and dragging that lane faded the main checkout row as if it were the one
+   * being carried. Same trap the header's `aria-label` already documents for
+   * `UNGROUPED_LABEL`.
+   */
+  const laneAtOf = (g: RailGroup) =>
+    g.editable ? laneIndex.get(g.lane) : undefined;
   const listRef = useRef<HTMLDivElement>(null);
 
   /**
@@ -4263,10 +4277,11 @@ function Rail(props: {
    * the section above, while dragging downwards has to clear the dragged lane's
    * entire height before anything registers — and the 9px gutters, the list's
    * padding and everything below the last lane belonged to no section at all, so
-   * "pull it to the bottom and let go" landed on nothing. Reading the pointer
-   * against the lanes' boxes leaves no dead space in the column: above the first
-   * lane is the first, below the last is the last, and a gutter belongs to the
-   * lane under it.
+   * "pull it to the bottom and let go" landed on nothing.
+   *
+   * The DOM read lives here and the choice lives in `laneDropTarget`, which has
+   * the tests: this mapping is the part that was wrong in every attempt at the
+   * feature, and it is the part a rendered component cannot pin.
    *
    * `data-lane-index` rather than refs because the sections are rendered by a
    * plain map and the count changes as lanes come and go; the query runs on
@@ -4275,15 +4290,13 @@ function Rail(props: {
   const laneTargetAt = (clientY: number): number | null => {
     const list = listRef.current;
     if (!list) return null;
-    const sections = list.querySelectorAll<HTMLElement>("[data-lane-index]");
-    let last: number | null = null;
-    for (const el of sections) {
-      const index = Number(el.dataset.laneIndex);
-      if (Number.isNaN(index)) continue;
-      if (clientY < el.getBoundingClientRect().bottom) return index;
-      last = index;
-    }
-    return last;
+    const sections = [
+      ...list.querySelectorAll<HTMLElement>("[data-lane-index]"),
+    ].map((el) => ({
+      index: Number(el.dataset.laneIndex),
+      bottom: el.getBoundingClientRect().bottom,
+    }));
+    return laneDropTarget(sections, clientY);
   };
   // Suppresses the rail's width transition for the duration of a resize drag. The
   // transition exists for the collapse/expand toggle, where 236px→64px should
@@ -4380,7 +4393,7 @@ function Rail(props: {
    * differ only in where they live, not in how a row looks.
    */
   const renderGroup = (group: RailGroup) => {
-    const laneAt = laneIndex.get(group.key);
+    const laneAt = laneAtOf(group);
     // Where the dragged lane would land, drawn in the gutter beside the hovered
     // section. Which side is the travel direction: carrying a lane *up* onto this
     // one puts it above, carrying it *down* puts it below. Exactly one section
@@ -4403,7 +4416,7 @@ function Rail(props: {
               dragPath && canDropOn(group) && dropAt?.key === group.key
                 ? " drop-in"
                 : ""
-            }${dragLane === group.key ? " lane-dragging" : ""}${laneDropSide === "before" ? " lane-drop-before" : ""}${laneDropSide === "after" ? " lane-drop-after" : ""}`}
+            }${group.editable && dragLane === group.lane ? " lane-dragging" : ""}${laneDropSide === "before" ? " lane-drop-before" : ""}${laneDropSide === "after" ? " lane-drop-after" : ""}`}
             // The section itself is the fallback target, and it resolves to its
             // FIRST position rather than its last. What actually reaches this
             // handler is the header and the padding above it — the rows stop
