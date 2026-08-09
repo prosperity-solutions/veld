@@ -63,6 +63,7 @@ import {
 import {
   detachGraceMinutes,
   externalOrigins,
+  hideDisabledActions,
   logsTimeZone,
   terminalInterceptSystemOpen,
   runHistoryDays,
@@ -172,6 +173,7 @@ export function SettingsDialog(props: {
   const openInApp = terminalOpenUrlsInApp(settings ?? {});
   const intercept = terminalInterceptSystemOpen(settings ?? {});
   const logsTz = logsTimeZone(settings ?? {});
+  const hideDisabled = hideDisabledActions(settings ?? {});
 
   // Not persisted, and deliberately so: the dialog is remounted on every open, so
   // it always opens on General rather than wherever a previous visit ended up.
@@ -432,6 +434,19 @@ export function SettingsDialog(props: {
                   ]}
                   onChange={(e) =>
                     set({ "logs.timeZone": e.currentTarget.value as LogTimeZone })
+                  }
+                />
+              </Row>
+              <Row
+                label="Hide top-bar actions that can't fire"
+                help="On, the restart, machine-vars and URLs buttons disappear while they have nothing to act on — a run stopped, a project that asks for no values, no URLs to open. Off, every button stays and the ones that can't fire are greyed out, so the bar never changes shape. This is only about hiding versus disabling; it never removes a control that could fire."
+              >
+                <Checkbox
+                  size="xs"
+                  checked={hideDisabled}
+                  disabled={locked}
+                  onChange={(e) =>
+                    set({ "ui.hideDisabledActions": e.currentTarget.checked })
                   }
                 />
               </Row>

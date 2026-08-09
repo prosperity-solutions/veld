@@ -368,6 +368,91 @@ body[data-fullscreen="true"] .topbar.electron {
   margin: 0 1px;
 }
 
+/* The project selector shrinks to its value instead of always occupying its
+   170px cap — a short project name should not leave a hole in the densest row
+   of the app. Both the invisible measure span and the select render into the
+   same grid cell, so the grid's width is the wider of the two: the measure
+   carries the current label with the input's metrics, and `max-width` caps the
+   whole thing so an over-long name ellipsises instead of stretching the bar.
+   The measure's trailing padding accounts for the input's own right section
+   (the dropdown chevron), so the box never undershoots the text it must show. */
+.project-select {
+  display: inline-grid;
+  max-width: 170px;
+  min-width: 0;
+}
+.project-select-measure {
+  grid-area: 1 / 1;
+  visibility: hidden;
+  white-space: nowrap;
+  font: inherit;
+  padding: 0 40px 0 12px;
+}
+.project-select-control {
+  grid-area: 1 / 1;
+  width: 100%;
+  min-width: 0;
+}
+.project-select-control .mantine-Input-input {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The machine-vars `{}` button: a small badge marks that this machine has
+   answered at least one of the project's vars. Positioned on the control's
+   corner so it reads as a status on the button rather than a second control. */
+.vars-btn {
+  position: relative;
+  display: inline-flex;
+}
+.vars-btn .vars-badge {
+  position: absolute;
+  top: -1px;
+  right: -1px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 1.5px solid var(--panel2);
+}
+
+/* The share button's active state. One icon for both states; active is filled
+   green *and* pulses a soft ring, so it is legible without reading the word
+   the old button carried. The ring respects reduced motion, like the other
+   pulse animations in the app. */
+.share-btn.live {
+  animation: share-ring 2s ease-in-out infinite;
+}
+@keyframes share-ring {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in oklab, var(--live) 55%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 0 4px color-mix(in oklab, var(--live) 0%, transparent);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .share-btn.live {
+    animation: none;
+  }
+}
+
+/* Node actions in a menu (top bar) and the new-pane chooser. Each node is its
+   own labelled group so overlapping action labels stay attributable. */
+.node-action-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 4px 8px;
+}
+.node-action-node {
+  font-family: "JetBrains Mono Variable", ui-monospace, monospace;
+  font-size: 11px;
+  color: var(--muted);
+}
+
 .btn {
   display: inline-flex;
   align-items: center;
@@ -2916,12 +3001,13 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
   flex: none;
 }
 
-/* A shade smaller than the rest of the bar on purpose: the label is a *state*
-   ("you are in the IDE"), not one of the bar's verbs. `.mantine-Button-root` is
-   in the selector only to outrank the bar-wide 12px rule on specificity rather
-   than on source order — two `!important` declarations of equal weight are
-   settled by whichever comes last in the file, which is not a thing to leave a
-   reader to work out. */
+/* A shade smaller than the rest of the bar on purpose: the mark is the bar's
+   one non-control glyph (the tooltip names the mode and the destination, which
+   the resting mark cannot), not one of the bar's verbs. `.mantine-Button-root`
+   is in the selector only to outrank the bar-wide 12px rule on specificity
+   rather than on source order — two `!important` declarations of equal weight
+   are settled by whichever comes last in the file, which is not a thing to leave
+   a reader to work out. */
 .topbar .mode-switch.mantine-Button-root {
   --button-fz: 11px !important;
 }

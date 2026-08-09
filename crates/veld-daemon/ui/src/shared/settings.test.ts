@@ -11,6 +11,7 @@ import {
   terminalInterceptSystemOpen,
   terminalOpenUrlsInApp,
   terminalPrefs,
+  hideDisabledActions,
 } from "./settings";
 
 describe("terminalPrefs", () => {
@@ -165,6 +166,25 @@ describe("logsTimeZone", () => {
       expect(logsTimeZone({ "logs.timeZone": bad as unknown as string })).toBe(
         "local",
       );
+    }
+  });
+});
+
+describe("hideDisabledActions", () => {
+  it("defaults on (the shipped behaviour for a new control)", () => {
+    expect(hideDisabledActions({})).toBe(true);
+  });
+
+  it("reads the stored boolean", () => {
+    expect(hideDisabledActions({ "ui.hideDisabledActions": false })).toBe(false);
+    expect(hideDisabledActions({ "ui.hideDisabledActions": true })).toBe(true);
+  });
+
+  it("ignores a non-boolean value rather than trusting it", () => {
+    for (const bad of ["off", 0, null]) {
+      expect(
+        hideDisabledActions({ "ui.hideDisabledActions": bad as unknown as boolean }),
+      ).toBe(true);
     }
   });
 });

@@ -92,6 +92,10 @@ const FALLBACK = {
   // happen to *agree*: this view already rendered browser-local time before the key
   // existed (its `fmtTs` read `Date` getters), so `local` is both.
   logsTimeZone: "local" as LogTimeZone,
+  // Shipped default for a new control. By the file's `quickSwitch*` exception, a new
+  // key that decides whether controls appear takes the shipped default so an older
+  // daemon (which cannot know the key) does not look like a broken new UI.
+  hideDisabledActions: true,
 } as const;
 
 function strings(doc: SettingsDoc, key: string): string[] {
@@ -330,6 +334,22 @@ export function logsTimeZone(doc: SettingsDoc): LogTimeZone {
     ["local", "utc"] as const,
     FALLBACK.logsTimeZone,
   );
+}
+
+/**
+ * Whether a top-bar action that is currently inapplicable is hidden rather than
+ * shown greyed out. **Defaults on.**
+ *
+ * "Hide the restart button when nothing is running" and its siblings (the
+ * machine-vars button for a project that asks for nothing, the URLs button with
+ * nothing to open) are all one decision: is the bar a stable set of controls,
+ * or does it shrink to what currently applies? Turning this off keeps every
+ * control and disables the ones that cannot fire. Purely a rendering choice —
+ * nothing the daemon enforces reads it, and it has no server-side validator
+ * beyond the boolean shape check.
+ */
+export function hideDisabledActions(doc: SettingsDoc): boolean {
+  return bool(doc, "ui.hideDisabledActions", FALLBACK.hideDisabledActions);
 }
 
 /**
