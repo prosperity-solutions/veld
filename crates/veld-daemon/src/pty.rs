@@ -1685,10 +1685,19 @@ fn allowed_origins() -> Vec<String> {
     // it was pointed at, so the browser's Origin is vite's, not ours. Trust it
     // only on a dev instance: the installed daemon on the default port must
     // never accept an origin that a locally-running dev server could forge.
+    //
+    // This pair is the BOOTSTRAP tier's vite — `just dev-ui`, whose port is a
+    // constant because `just dev-daemon`'s port is. The dev stack started as a
+    // veld run allocates both, and contributes its origins through
+    // `dev_trusted_origins` below instead.
     if port != veld_core::instance::DEFAULT_DAEMON_PORT {
         origins.push(format!("http://localhost:{VITE_DEV_PORT}"));
         origins.push(format!("http://127.0.0.1:{VITE_DEV_PORT}"));
     }
+    // A daemon running as a veld node: its own veld-assigned URL, plus any dev
+    // server declared as proxying its /api. Empty on the installed instance —
+    // that gate lives inside the function, not here.
+    origins.extend(veld_core::instance::dev_trusted_origins());
     origins
 }
 
@@ -2883,6 +2892,20 @@ mod tests {
         if veld_core::instance::daemon_port() == veld_core::instance::DEFAULT_DAEMON_PORT {
             let vite = format!("http://localhost:{VITE_DEV_PORT}");
             assert!(!allowed_origins().contains(&vite));
+            // Same gate, the other source: a daemon started as a veld node
+            // contributes its own URL and its proxying dev servers, and the
+            // installed one must obtain none of that however its environment
+            // is set. The gate itself is pinned in `veld_core::instance`.
+            assert!(veld_core::instance::dev_trusted_origins().is_empty());
+        }
+
+        // Whatever the instance, every origin the instance layer hands out has
+        // to actually reach the allowlist — the wiring is the easy half to drop
+        // in a refactor, and its failure mode is a 403 on a WebSocket handshake,
+        // whose reason a browser cannot show the user.
+        let allowed = allowed_origins();
+        for origin in veld_core::instance::dev_trusted_origins() {
+            assert!(allowed.contains(&origin), "{origin} never reached the list");
         }
     }
 

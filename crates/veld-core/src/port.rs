@@ -11,6 +11,32 @@ use thiserror::Error;
 pub const PORT_RANGE_START: u16 = 19000;
 pub const PORT_RANGE_END: u16 = 29999;
 
+/// Ports inside the managed range that belong to veld's own infrastructure and
+/// must never be handed to a node.
+///
+/// The range has always contained the daemon's own port
+/// ([`crate::instance::DEFAULT_DAEMON_PORT`] = 19899), and nothing excluded it.
+/// The hazard is not theoretical: [`is_port_available`] only keeps a node off
+/// the port while the daemon is *listening*, so any run started while the
+/// installed daemon is down could be handed 19899 — and then the daemon fails
+/// to bind on its next start, for reasons nothing connects back to the run.
+///
+/// The same collision is what makes the dev instance's origin guard sound.
+/// `veld-daemon`'s terminal allowlist trusts extra origins only when
+/// `daemon_port() != DEFAULT_DAEMON_PORT`, i.e. "I am not the installed
+/// daemon". A dev daemon allocated 19899 would silently answer to that guard as
+/// though it were the installed one, and its terminals would stop opening with
+/// a 403 a browser cannot show the reason for.
+///
+/// Both this instance's port and the default are excluded: a dev instance's
+/// port is equally not a node's to take.
+fn infrastructure_ports() -> [u16; 2] {
+    [
+        crate::instance::DEFAULT_DAEMON_PORT,
+        crate::instance::daemon_port(),
+    ]
+}
+
 // ---------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------
@@ -26,6 +52,13 @@ pub enum PortError {
          that asked for it. Use \"auto\" to let veld allocate a free port instead."
     )]
     AlreadyInUse(u16),
+
+    #[error(
+        "port {0} is veld's own daemon port, so a node cannot bind it — the daemon \
+         would fail to start next time with nothing pointing back at this run. Use \
+         \"auto\", or pick another port."
+    )]
+    Infrastructure(u16),
 }
 
 // ---------------------------------------------------------------------------
@@ -88,7 +121,11 @@ impl PortAllocator {
     /// spawning the child process.
     pub fn allocate(&self) -> Result<PortReservation, PortError> {
         let mut allocated = self.allocated.lock().expect("port allocator lock poisoned");
+        let infrastructure = infrastructure_ports();
         for port in PORT_RANGE_START..=PORT_RANGE_END {
+            if infrastructure.contains(&port) {
+                continue;
+            }
             if !allocated.contains(&port) && is_port_available(port) {
                 // Port is free — now grab reservation listeners to hold it.
                 // If the reservation fails (extremely rare race), skip.
@@ -111,6 +148,12 @@ impl PortAllocator {
     /// another would attach the debugger to the wrong place. A fixed port is
     /// discouraged for exactly this reason: it is what breaks parallel worktrees.
     pub fn reserve_fixed(&self, port: u16) -> Result<PortReservation, PortError> {
+        // Named explicitly, so the answer is a diagnostic rather than a
+        // substitution — `AlreadyInUse` would be a lie when the daemon is down,
+        // and granting it would break the daemon's next start.
+        if infrastructure_ports().contains(&port) {
+            return Err(PortError::Infrastructure(port));
+        }
         let mut allocated = self.allocated.lock().expect("port allocator lock poisoned");
         if allocated.contains(&port) {
             return Err(PortError::AlreadyInUse(port));
@@ -330,5 +373,59 @@ mod tests {
             bind_result.is_ok(),
             "port {port} should be free after release"
         );
+    }
+
+    /// The daemon's port is inside the managed range, and `is_port_available`
+    /// only keeps a node off it while the daemon is listening — so the exclusion
+    /// has to be structural, not a side effect of the daemon being up.
+    #[test]
+    fn the_daemon_port_is_never_handed_to_a_node() {
+        assert!(
+            (PORT_RANGE_START..=PORT_RANGE_END).contains(&crate::instance::DEFAULT_DAEMON_PORT),
+            "if the daemon port ever moves out of the range, this exclusion is dead \
+             code and should go — but until then it is load-bearing"
+        );
+
+        let allocator = PortAllocator::new();
+        let err = allocator
+            .reserve_fixed(crate::instance::DEFAULT_DAEMON_PORT)
+            .unwrap_err();
+        assert!(
+            matches!(err, PortError::Infrastructure(p) if p == crate::instance::DEFAULT_DAEMON_PORT),
+            "{err}"
+        );
+        // Refusing is only useful if the message says which port and why.
+        assert!(
+            err.to_string()
+                .contains(&crate::instance::DEFAULT_DAEMON_PORT.to_string()),
+            "{err}"
+        );
+        assert!(err.to_string().contains("daemon"), "{err}");
+    }
+
+    /// `allocate` skips it rather than erroring — a node asking for "auto" has
+    /// expressed no opinion, so the right answer is the next port.
+    #[test]
+    fn allocate_skips_the_daemon_port() {
+        let _guard = port_guard();
+        assert!(
+            !infrastructure_ports().is_empty(),
+            "the skip in `allocate` is keyed on this list"
+        );
+        let excluded = infrastructure_ports();
+
+        // Every port below the daemon's is claimed, so an unfiltered ascending
+        // scan would return the daemon's port next. Reserving them in the
+        // allocator's own set (rather than binding 899 sockets) is what makes
+        // this a unit test.
+        let below: Vec<u16> = (PORT_RANGE_START..crate::instance::DEFAULT_DAEMON_PORT).collect();
+        let allocator = PortAllocator::with_reserved(below);
+        let reservation = allocator.allocate().expect("a port above the daemon's");
+        assert!(
+            !excluded.contains(&reservation.port),
+            "allocated {}, which is veld's own",
+            reservation.port
+        );
+        reservation.release();
     }
 }

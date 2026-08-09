@@ -32,12 +32,30 @@ dev_daemon_sock := env("HOME") + "/.veld/dev-" + dev_daemon_port + ".sock"
 # ============================================================================
 # Veld Development Workflow
 #
-# Three tiers — use the lightest one that covers your change:
+# THE USUAL WAY IS NOT IN THIS FILE. The whole dev stack — dev daemon, /ide with
+# HMR, and the Electron shell — is a veld environment declared in the root
+# veld.json:
+#
+#   veld start --preset dev            this worktree's stack, parallel-safe
+#   veld start --preset dev-headless   the same without Electron
+#   veld status / veld logs / veld stop
+#
+# Everything there is keyed off the run: its own allocated ports, its own
+# database under .veld-dev/<run>/, its own hostnames, and its own
+# ~/.local/bin/veld-dev-<run>. Two worktrees can each have one up at once.
+#
+# What follows is the BOOTSTRAP tier, and it is a deliberate singleton — one
+# worktree at a time, on fixed ports. It exists because you need a way to run
+# the daemon when the thing you broke is `veld start` itself, and because a
+# first clone has nothing to start a veld run with. Reach for it in that case;
+# otherwise use the preset above.
 #
 #   just dev <args>           CLI only, no install, own dev instance (most changes)
 #   just dev-daemon           Daemon from source, alongside the installed one
 #                             (own port/DB/socket, dashboard: veld-dev.localhost)
-#   just dev-db-reset         Wipe the dev DB (fresh state)
+#   just dev-ui               vite for /ide on 5199, against `just dev-daemon`
+#   just dev-desktop          Electron against `just dev-ui`
+#   just dev-db-reset         Wipe the dev DBs (fresh state)
 #   just dev-db-from-real     Snapshot the REAL DB into the dev DB (migration rehearsal)
 #   just dev-install-daemon   Install daemon (overlay/feedback changes)
 #   just dev-install-helper   Install helper + restart Caddy (proxy changes, sudo)
@@ -124,10 +142,32 @@ dev-real *ARGS:
 # `veld-cargo.db` behind, and a database stranded at a `user_version` whose
 # migration was later rewritten never gets the corrected one — every query naming
 # the new column then fails. That happened during #167 §5b.
+#
+# Bootstrap-tier databases only. A veld-run dev stack keeps its database under
+# `.veld-dev/<run>/`, which belongs to that run and is reset by naming the
+# variant instead — `veld start dev-db:fresh dev-electron dev-link`. Wiping
+# those from here would delete the state of a stack that is currently up.
+# `just dev-db-list` shows them.
 dev-db-reset:
     rm -f "{{dev_db}}" "{{dev_db}}-wal" "{{dev_db}}-shm"
     rm -f "{{cargo_db}}" "{{cargo_db}}-wal" "{{cargo_db}}-shm"
-    @echo "Dev DBs reset ({{dev_db}}, {{cargo_db}})"
+    @echo "Bootstrap dev DBs reset ({{dev_db}}, {{cargo_db}})"
+    @echo "Per-run dev stack DBs are untouched — see 'just dev-db-list'."
+
+# Every per-run dev database in this worktree, with its schema version.
+# The counterpart to `veld status`: these outlive a stopped run on purpose, so
+# stopping the stack does not throw away the state you were debugging.
+dev-db-list:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    shopt -s nullglob
+    found=0
+    for db in "{{justfile_directory()}}"/.veld-dev/*/veld.db; do
+        run=$(basename "$(dirname "$db")")
+        echo "$run  v$(sqlite3 "$db" 'PRAGMA user_version;' 2>/dev/null || echo '?')  $db"
+        found=1
+    done
+    [ "$found" = 1 ] || echo "No per-run dev databases yet. Start one with 'veld start --preset dev'."
 
 # Snapshot the REAL installed DB into the dev DB — migration rehearsal:
 # the next `just dev <cmd>` migrates the COPY forward while the real file
@@ -474,6 +514,12 @@ desktop-deps:
         echo "Fetching the Electron binary (npm deferred its install script)…"
         ./node_modules/.bin/install-electron
     fi
+
+# Everything npm the dev stack needs, guarded so it is a no-op once installed.
+# Public because `scripts/dev/build.sh` (the `dev-build` node) calls it — the
+# guard for "node_modules exists but predates a new dependency" has a subtlety
+# worth having exactly one copy of.
+dev-deps: ui-deps desktop-deps
 
 build-ui: ui-deps
     cd crates/veld-daemon/ui && npm run build

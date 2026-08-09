@@ -1739,6 +1739,14 @@ silently breaks parallel worktrees, which is the reason named auto-ports exist. 
 a fixed port is taken, Veld errors rather than substituting another — a debugger
 pointed at 9229 must reach the process that asked for it.
 
+**One number is refused outright: `19899`, Veld's own daemon port.** Auto
+allocation skips it, and naming it explicitly is an error rather than a
+substitution. A node that bound it would take the port from the daemon's next
+start — a failure that surfaces later, somewhere else, with nothing pointing
+back at the config that caused it. (The daemon being *up* is not what protects
+the port: allocation only avoids ports something is currently listening on, so
+a run started while the daemon was down could previously be handed it.)
+
 ### The three authorings
 
 `ports` is one key with three meanings, and the middle one is the whole reason

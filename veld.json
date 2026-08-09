@@ -191,14 +191,268 @@
       }
     }
   },
+  // `veld start` with no arguments offers these. Keys are pinned, because they
+  // are the numbers a contributor types.
+  // Each dev preset names the `dev-db` variant it wants, so the database mode
+  // is part of the thing you start rather than a flag to remember.
+  //
+  // Naming a variant does not REPLACE the `dev-db:ensure` that `dev-daemon`
+  // depends on — veld's plan is keyed on (node, variant), so both run, in the
+  // same stage, before the daemon. That is exactly why `ensure` does nothing
+  // but create the directory. It also means **no preset may combine `fresh`
+  // with `from-real`**: those two would race each other rather than compose.
+  "presets": {
+    "dev": {
+      "key": 1,
+      "selections": ["dev-db:fresh", "dev-electron:local", "dev-link:local"],
+      "when_to_use": "The everyday one: this worktree's stack on an EMPTY database — daemon, /ide with HMR, and the Electron shell. Parallel-safe: every port, database and hostname is this run's. Note it starts with no imported repos or worktrees; use dev-keep to carry them over."
+    },
+    "dev-headless": {
+      "key": 2,
+      "selections": ["dev-db:fresh", "dev-ui:local", "dev-link:local"],
+      "when_to_use": "The same, empty database and no Electron shell — open /ide in a browser tab instead."
+    },
+    "dev-keep": {
+      "key": 3,
+      "selections": ["dev-electron:local", "dev-link:local"],
+      "when_to_use": "Reuse whatever this run's database already holds, instead of starting empty. What you want once you have imported repos and arranged worktrees and would rather not do it again."
+    },
+    "dev-from-real": {
+      "key": 4,
+      "selections": ["dev-db:from-real", "dev-electron:local", "dev-link:local"],
+      "when_to_use": "Migration rehearsal: snapshot the REAL installed database into this run's and start on the copy. The real file is never written. Run this before merging anything that adds a migration. macOS only today."
+    },
+    "website": {
+      "key": 5,
+      "selections": ["website:local"],
+      "when_to_use": "Just the marketing site, for `veld feedback` on copy and design."
+    }
+  },
   "nodes": {
     "website": {
       "default_variant": "local",
       "variants": {
         "local": {
-          "type": "start_server",
+          "type": "long_running",
           "argv": ["npx","--yes","browser-sync","start","--server","website","--watch","--port","${veld.port}","--no-open","--no-ui","--logLevel","${vars.website_log_level}","--reload-delay","${vars.website_reload_delay}"],
           "health_check": { "type": "http", "path": "/index.html", "timeout_seconds": 30 }
+        }
+      }
+    },
+
+    // ── The dev stack ────────────────────────────────────────────────────
+    //
+    // veld running veld. The point is **parallel worktrees**: everything below
+    // is keyed off `${veld.run}` or a port veld allocated, so two checkouts can
+    // each have a full dev stack up at once. That used to be impossible — the
+    // justfile hardcoded one daemon port, one socket, one dashboard hostname
+    // and one `~/.local/bin/veld-dev`, so whichever worktree started second
+    // died on `another veld-daemon is already running`.
+    //
+    // The justfile's `just dev` / `just dev-daemon` tier still exists and is
+    // still a singleton. It is the BOOTSTRAP tier, deliberately: you need a way
+    // to run the daemon when what you broke is `veld start` itself.
+    //
+    // Which instance owns this run? The **installed** veld. It starts and
+    // monitors these nodes; the daemon one of them runs is a separate instance
+    // with its own database. So a schema-ahead branch cannot touch your real
+    // state, and `veld status` still works while the dev daemon is wedged.
+    //
+    // The paths every node here shares. `${veld.root}` rather than a relative
+    // path because a `cwd` moves the goalposts, and `.veld-dev/` is gitignored.
+    "dev-build": {
+      "env": { "VELD_DEV_ROOT": "${veld.root}" },
+      "default_variant": "local",
+      "variants": {
+        "local": {
+          // `command`, so it runs to completion and gates everything after it.
+          // A build failure should stop the run here rather than let three
+          // long-running nodes start against a half-built tree.
+          "type": "command",
+          "argv": ["${veld.root}/scripts/dev/build.sh"]
+        }
+      }
+    },
+
+    "dev-db": {
+      "env": { "VELD_DEV_DIR": "${veld.root}/.veld-dev/${veld.run}" },
+      // `ensure` is the default because it is what `dev-daemon` DEPENDS on, and
+      // a dependency pins one variant. Naming another (as the presets do) adds
+      // a second node rather than replacing this one: veld's plan is keyed on
+      // (node, variant), so `dev-db:ensure` and `dev-db:fresh` both run, in the
+      // same stage, concurrently — and both finish before `dev-daemon` starts,
+      // so the daemon opens whatever the named variant left.
+      //
+      // That only works because `ensure` writes nothing. Give it something to
+      // do and it starts racing the variant the user actually asked for. It is
+      // named for what it is — create the directory — rather than `keep`, which
+      // read like a mode and invited exactly that mistake.
+      "default_variant": "ensure",
+      "variants": {
+        "ensure":    { "type": "command", "argv": ["${veld.root}/scripts/dev/db.sh", "ensure"] },
+        "fresh":     { "type": "command", "argv": ["${veld.root}/scripts/dev/db.sh", "fresh"] },
+        "from-real": { "type": "command", "argv": ["${veld.root}/scripts/dev/db.sh", "from-real"] }
+      }
+    },
+
+    "dev-daemon": {
+      "depends_on": { "dev-build": "local", "dev-db": "ensure" },
+      "env": {
+        "VELD_DEV_ROOT": "${veld.root}",
+        "VELD_DEV_RUN": "${veld.run}",
+        "VELD_DB_PATH": "${veld.root}/.veld-dev/${veld.run}/veld.db",
+        // veld allocated this; the daemon serves its API and /ide on it, and
+        // it is what makes this daemon a different *instance* from yours.
+        "VELD_DAEMON_PORT": "${veld.port}",
+        // Origins allowed to open a terminal through this daemon, beyond its
+        // own (which veld hands it in VELD_URL, so it is not restated here).
+        // The name is the invariant: these are the origins that same-origin
+        // **proxy** this daemon's /api — which is exactly what the vite dev
+        // server below does, and why the browser's Origin on a terminal
+        // upgrade is vite's rather than the daemon's. Only ever honoured off
+        // the default daemon port; see `veld_core::instance`.
+        //
+        // Both spellings of vite's loopback address, because which one you get
+        // depends on how you opened the page, and the check is exact-match.
+        "VELD_PROXY_ORIGINS": "${nodes.dev-ui.url},http://localhost:${nodes.dev-ui.port},http://127.0.0.1:${nodes.dev-ui.port}"
+        //
+        // Deliberately NOT set: VELD_MANAGEMENT_HOST. It makes the daemon
+        // self-register a Caddy route under the id `veld-mgmt-<host>` — but
+        // veld already routes this node, under `run_route_id(hostname)`. Two
+        // route ids for one hostname is the case `crates/veld-core/src/url.rs`
+        // says has no defined winner, and they have different lifetimes: the
+        // daemon drops its route at shutdown, veld drops the run's at stop.
+        // The bootstrap tier still sets it, because there nothing else routes.
+      },
+      "default_variant": "local",
+      "variants": {
+        "local": {
+          "type": "long_running",
+          // A script, not argv: the socket and holder directories must live
+          // under $HOME to stay inside the 104-byte `sun_path` limit, and only
+          // a shell can expand it. The script says why.
+          "argv": ["${veld.root}/scripts/dev/daemon.sh"],
+          "probes": {
+            "readiness": { "type": "http", "path": "/api/health" },
+            "liveness": { "type": "http", "path": "/api/health" }
+          }
+        }
+      }
+    },
+
+    "dev-ui": {
+      "depends_on": { "dev-daemon": "local" },
+      "default_variant": "local",
+      "variants": {
+        "local": {
+          "type": "long_running",
+          "cwd": "crates/veld-daemon/ui",
+          "argv": ["npm", "run", "dev"],
+          "env": {
+            // vite proxies /api — including the terminal WebSocket upgrade —
+            // to the daemon this run started, not to the installed one.
+            "VELD_DAEMON_PORT": "${nodes.dev-daemon.port}"
+            // vite's own port and hostname arrive as VELD_PORT and VELD_URL,
+            // which veld sets for every long-running node. vite.config.ts
+            // reads both, so there is nothing to declare here.
+          },
+          "probes": { "readiness": { "type": "http", "path": "/" } }
+        }
+      }
+    },
+
+    "dev-electron": {
+      "depends_on": { "dev-ui": "local" },
+      // No `env` here on purpose. A node's `env` map reaches the node's own
+      // process and NOTHING else — not an action, not a probe command (both
+      // measured). The run directory therefore travels as an argument, and
+      // `electron.sh` derives the repo root from its own path.
+      "actions": [
+        {
+          "name": "open",
+          "label": "Reopen Electron",
+          "description": "Bring the Veld Desktop window back after you closed or quit it. The rest of the stack keeps running either way.",
+          // An action's argv IS interpolated (a probe's is not).
+          "argv": [
+            "${veld.root}/scripts/dev/electron.sh",
+            "--open",
+            "${veld.root}/.veld-dev/${veld.run}"
+          ]
+        }
+      ],
+      "default_variant": "local",
+      "variants": {
+        "local": {
+          "type": "long_running",
+          // A supervisor, not `electron .` directly, and the reason is the
+          // health monitor: it treats ANY node process dying as a crash of the
+          // whole run and SIGTERMs every surviving sibling. Run bare, one Cmd+Q
+          // took the dev daemon and vite down with it — measured. The node is
+          // therefore the supervisor, which outlives a quit; the script says the
+          // rest.
+          // The second argument is the startup grace, and it MUST equal the
+          // `settle` seconds below: an Electron that dies inside that window is
+          // a failed start and takes the supervisor down with it, which is what
+          // keeps `settle` an honest probe. See the script.
+          "argv": [
+            "${veld.root}/scripts/dev/electron.sh",
+            "${veld.root}/.veld-dev/${veld.run}",
+            "5"
+          ],
+          // The portless case, and the reason `"ports": null` exists at all.
+          // Electron binds nothing; before this it had to be handed a port it
+          // never used, or run outside veld and be forgotten at teardown.
+          "ports": null,
+          // Loopback, not `${nodes.dev-ui.url}`. Going through Caddy would
+          // make Electron's Chromium the thing that has to trust veld's local
+          // CA, and a cert it dislikes is a blank window with the reason only
+          // in devtools. `just dev-desktop` has always pointed at vite
+          // directly for the same reason. The browser path keeps the https
+          // URL, where the system trust store already applies.
+          // Variant-level, because it is the one value here that IS a
+          // cross-node reference. Safe where the node-level map above is not:
+          // nothing re-resolves a variant's env after the run is stopping.
+          "env": { "VELD_DESKTOP_URL": "http://127.0.0.1:${nodes.dev-ui.port}" },
+          // `settle`, and NOT a `command` probe asking whether Electron is up:
+          // a probe's argv is not interpolated, so such a probe could never be
+          // told which run's pidfile to look at. The supervisor closes the gap
+          // instead by adopting the same window — it exits if Electron dies
+          // inside these 5 seconds, so `settle` fails a bad start rather than
+          // reporting on itself. Keep this number equal to the argv one above.
+          //
+          // Deliberately no LIVENESS probe: quitting Electron is a thing the
+          // user is allowed to do, and a liveness failure means recovery.
+          "probes": { "readiness": { "type": "settle", "seconds": 5 } }
+        }
+      }
+    },
+
+    "dev-link": {
+      "depends_on": { "dev-daemon": "local" },
+      // `${veld.*}` builtins ONLY. This map is resolved a second time for the
+      // `on_stop` hook below, `build_env` is all-or-nothing, and a cross-node
+      // reference cannot resolve once the run is stopping — so putting
+      // `${nodes.dev-daemon.port}` here emptied the entire map at stop time and
+      // left exactly the stale wrapper the hook exists to remove. The port goes
+      // in `argv` instead, which is interpolated at start.
+      "env": {
+        "VELD_DEV_ROOT": "${veld.root}",
+        "VELD_DEV_RUN": "${veld.run}",
+        "VELD_DEV_DIR": "${veld.root}/.veld-dev/${veld.run}"
+      },
+      "default_variant": "local",
+      "variants": {
+        "local": {
+          "type": "command",
+          // Writes ~/.local/bin/veld-dev-<run>: the CLI that talks to THIS
+          // run's dev instance, from any directory. It is what you point at a
+          // real project to test veld against it.
+          "argv": ["${veld.root}/scripts/dev/link.sh", "--write", "${nodes.dev-daemon.port}"],
+          // Removed at stop, because what it carries is a live allocation. A
+          // wrapper outliving its run points at a port nothing serves, which
+          // is worse than no wrapper: the CLI reports an empty instance
+          // instead of telling you the dev stack is down.
+          "on_stop": { "argv": ["${veld.root}/scripts/dev/link.sh", "--remove"] }
         }
       }
     }

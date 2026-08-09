@@ -244,6 +244,10 @@ Three authorings, and they are three different things:
 | `null` | no ports at all: no allocation, no `${veld.port}`, no URL, no route |
 | `{ … }` | that map, merged node → variant per key; `"name": null` erases one entry (erasing them all lands on "no ports", not back on the default) |
 
+**`19899` (veld's own daemon port) is never allocated to a node, and naming it
+explicitly is an error rather than a substitution** — a node that bound it would
+break the daemon's next start.
+
 An entry is either shorthand (`"auto"`, `5432`) or the long form
 `{ "port": …, "protocol": "http" | "tcp", "host": "<template>", "share": { … } }`:
 
