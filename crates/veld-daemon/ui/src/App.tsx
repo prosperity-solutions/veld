@@ -3599,32 +3599,43 @@ function AppInner(props: {
   // Shown while the worktree *could* run something, and also whenever a share is
   // live: a repo whose directory has gone missing still has a share to stop, and
   // gating on startability was the one path that hid the only control that ends it.
+  // Disabled when there is nothing to share (no live run to share, and no share
+  // to stop) — the panel would otherwise offer to share a run that is not running.
+  const shareDisabled = !sharingActive && diagRun?.status !== "running";
   const sharingSurface =
     worktree && (canRunWorktreeNow(worktree) || sharingActive) ? (
       <Tooltip
         label={
           sharingActive
             ? "This run is shared right now — open for links, QR codes and connections"
-            : "Share this run privately with a peer, or publish it to the web"
+            : shareDisabled
+              ? "Start the run to share it"
+              : "Share this run privately with a peer, or publish it to the web"
         }
       >
-        <ActionIcon
-          size="md"
-          /* One action, two readings: outline `IconShare2` when nothing is
-             shared, filled green `IconBroadcast` when it is — "on air" is what
-             the icon says, and colour plus fill carry it without a word widening
-             the bar. */
-          variant={sharingActive ? "filled" : "default"}
-          color={sharingActive ? "green" : undefined}
-          aria-label={
-            sharingActive
-              ? "Sharing live — open the sharing panel"
-              : "Share this run"
-          }
-          onClick={() => setDialog({ kind: "sharing" })}
-        >
-          {sharingActive ? <IconBroadcast size={14} /> : <IconShare2 size={14} />}
-        </ActionIcon>
+        {/* The wrapper lets the tooltip open while the button is disabled — the
+            #205 trap: a disabled ActionIcon has `pointer-events: none`, and the
+            *why* is exactly what a greyed share button needs. */}
+        <span className="bar-hover-slot">
+          <ActionIcon
+            size="md"
+            /* One action, two readings: outline `IconShare2` when nothing is
+               shared, filled green `IconBroadcast` when it is — "on air" is what
+               the icon says, and colour plus fill carry it without a word widening
+               the bar. */
+            variant={sharingActive ? "filled" : "default"}
+            color={sharingActive ? "green" : undefined}
+            disabled={shareDisabled}
+            aria-label={
+              sharingActive
+                ? "Sharing live — open the sharing panel"
+                : "Share this run"
+            }
+            onClick={() => setDialog({ kind: "sharing" })}
+          >
+            {sharingActive ? <IconBroadcast size={14} /> : <IconShare2 size={14} />}
+          </ActionIcon>
+        </span>
       </Tooltip>
     ) : null;
 

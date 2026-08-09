@@ -944,14 +944,12 @@ body[data-fullscreen="true"] .topbar.electron {
 /* "1/2" — how many runs the worktree holds and which one is showing. Always
    rendered when there is more than one, because a selector that hid the second
    run behind a click would be a tidier version of the bug it fixes. Also used on
-   a rail row, where it is the second environment's only representation. A pill,
-   not a bare number: it is a count of two states, and a pill reads as a badge
-   rather than as the button's text. */
+   a rail row, where it is the second environment's only representation. Plain
+   text, not a chip: the dot already carries the state, and a badge around the
+   count read as a second status inside a button that was only ever about which
+   run. */
 .run-count {
-  margin-left: 5px;
-  padding: 1px 6px;
-  border-radius: 999px;
-  background: color-mix(in oklab, var(--text) 12%, transparent);
+  margin-left: 4px;
   color: var(--muted);
   font-size: 10px;
   line-height: 1.4;
@@ -962,7 +960,6 @@ body[data-fullscreen="true"] .topbar.electron {
    control the user is already looking at carries the state of the run they are
    not. */
 .run-count.alert {
-  background: var(--warn-bg);
   color: var(--warn);
 }
 .run-item-name {
