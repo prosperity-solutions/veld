@@ -368,10 +368,13 @@ and several were paid for in this codebase already.
 
   **Connecting to a holder is a probe, not a takeover.** Every piece of code that
   wants to know whether a holder is alive says so the same way — by connecting to
-  its socket: `veld doctor` counts live holders, `holder::bind` tells a leftover
-  socket file from a running holder before it refuses to start, and the daemon's
-  own adoption sweep does it at boot. All of them close again immediately. So a
-  newly accepted connection is greeted at once (the connect-write-`HANGUP`-close
+  its socket, greeting and all: `veld doctor` counts live holders, `holder::bind`
+  tells a leftover socket file from a running holder before it refuses to start,
+  `pump_holder` asks whether the holder it just lost is really gone, and
+  `veld uninstall` sweeps every instance's. All of those close again immediately;
+  adoption (`adopt_one`, and `obtain_session` when a holder is already serving the
+  session) is the counter-example that *keeps* what it connects to. So a newly
+  accepted connection is greeted at once (the connect-write-`HANGUP`-close
   contract in `pty/wire.rs` depends on that) but does **not** displace the
   attached daemon until it has either stayed connected for
   `holder::TAKEOVER_PROBATION` or sent a frame only a daemon sends. While any
@@ -381,7 +384,13 @@ and several were paid for in this codebase already.
   half of the rule: **losing the connection to a holder is not the same fact as
   losing the holder.** `pump_holder` asks the holder before speaking for it, and
   releases the session (`release_session`, no hangup, no exit) when the shell is
-  still there. Anything new that scans `instance::pty_dir()` inherits both rules,
+  still there. A release travels on its own `Session::released` signal and closes
+  the socket with **no** control frame, because the two obvious alternatives are
+  both worse than saying nothing: an `exit` is a lie about a running shell, and a
+  takeover (which is what bumping the attach epoch means on the wire) makes the
+  UI offer Restart as the pane's only action — deleting the session and hanging
+  up the shell the release exists to keep. A close with no frame is what the
+  client already reads as a dropped pipe, and its answer to that is Reconnect. Anything new that scans `instance::pty_dir()` inherits both rules,
   and must gate on `instance::is_holder_socket_name` rather than on a `.sock`
   extension — `VELD_PTY_DIR` is a plain environment variable, and pointed at
   `~/.veld` the loose test connects to `daemon.sock`.

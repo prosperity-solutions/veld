@@ -2756,18 +2756,10 @@ fn hang_up_terminal_holders(veld_dir: &Path) {
         {
             continue;
         }
-        let Ok(sockets) = std::fs::read_dir(dir.path()) else {
-            continue;
-        };
-        for socket in sockets.flatten() {
-            let path = socket.path();
-            // The digest-shaped name a holder socket has, not merely a `.sock`
-            // extension — the one predicate every scan of a holder directory
-            // shares. What it writes here is a `HANGUP`, so a name that is not a
-            // holder's is a frame sent to something that never asked for one.
-            if !crate::instance::is_holder_socket_name(&path) {
-                continue;
-            }
+        // The shared scan, not a `read_dir` of its own: what this writes is a
+        // `HANGUP`, so a name that is not a holder's is a frame sent to something
+        // that never asked for one.
+        for path in crate::instance::holder_sockets_in(&dir.path()) {
             if let Ok(mut stream) = std::os::unix::net::UnixStream::connect(&path) {
                 let mut frame = vec![0x83u8];
                 frame.extend_from_slice(&0u32.to_be_bytes());

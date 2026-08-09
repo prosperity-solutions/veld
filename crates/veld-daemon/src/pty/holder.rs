@@ -643,13 +643,20 @@ async fn serve(cfg: &HolderConfig, listener: UnixListener) -> anyhow::Result<()>
     scrollback.push(&notice);
     debug!(session = %cfg.session_id, pid, code, "terminal shell exited");
 
-    // The shell is gone, so there is no longer a session to protect from a
-    // takeover — a probationary peer is simply the only peer there is, if nothing
-    // else is attached. Promoting it here is what lets it be handed the exit code
-    // below; left in the slot it would be dropped, and the daemon behind it would
-    // read EOF and invent an exit of its own.
-    if conn.is_none() {
-        conn = pending.take();
+    // A peer still on probation is told too, and `deliver_exit` below cannot do it
+    // — it takes the one connection that owns the session. `pending` is only ever
+    // occupied while `conn` is (it is assigned nowhere else, and every path that
+    // clears `conn` takes it first), so this is never the *only* peer; it is a
+    // second daemon that would otherwise read the close as its holder vanishing
+    // and invent an exit code of its own for a shell that ended with a real one.
+    //
+    // `try_send`, and best-effort: a peer that cannot take two frames with
+    // `OUT_CHANNEL` of slack is not reading at all, and the shell is already gone.
+    // Dropping the sender afterwards is what ends its writer task — an `mpsc`
+    // drains what is queued before reporting the close.
+    if let Some(p) = pending.take() {
+        let _ = p.out.try_send((wire::OUTPUT, notice.to_vec()));
+        let _ = p.out.try_send((wire::EXIT, code.to_be_bytes().to_vec()));
     }
 
     deliver_exit(

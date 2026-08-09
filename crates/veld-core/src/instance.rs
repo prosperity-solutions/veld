@@ -129,17 +129,39 @@ pub fn socket_path_too_long(path: &std::path::Path) -> Option<String> {
 /// which has to stop them all.
 pub const PTY_DIR_PREFIX: &str = "pty-";
 
+/// Every holder socket in `dir`, and nothing else that happens to live there.
+///
+/// **The chokepoint, and the reason it exists rather than each caller writing
+/// its own `read_dir`:** three of them already do — the daemon's adoption sweep,
+/// `veld uninstall`'s hangup sweep and `veld doctor`'s count — and every one of
+/// them then *acts* on what it found, destructively. The fourth such scan is the
+/// one somebody writes next, and the natural version of it filters on `.sock`,
+/// which is how `veld doctor` came to connect to every socket in a directory
+/// `VELD_PTY_DIR` can point anywhere. Reach for this instead of `read_dir`.
+///
+/// A missing directory is an empty list: it appears with the first terminal and
+/// nothing prunes it, so "not there" is the ordinary state, not an error.
+pub fn holder_sockets_in(dir: &std::path::Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| is_holder_socket_name(path))
+        .collect()
+}
+
 /// Whether a path has the exact shape the daemon gives a holder socket: a
 /// 16-hex-digit lowercase digest of the session id, plus `.sock`.
 ///
-/// Lives here rather than beside the code that *builds* the name because it is
-/// the gate on every scan of [`pty_dir`] — the daemon's adoption sweep, which
-/// deletes what does not answer, `veld uninstall`'s hangup sweep, and `veld
-/// doctor`'s liveness count. `VELD_PTY_DIR` is a plain environment variable, so
-/// a scan that trusts the extension alone will happily act on `daemon.sock` if
-/// somebody points that variable one level up at `~/.veld`. A name check, not a
-/// claim about what is behind the name: the greeting is what proves a socket is
-/// the session it should be.
+/// A name check, not a claim about what is behind the name — the greeting is what
+/// proves a socket is the session it should be. `VELD_PTY_DIR` is a plain
+/// environment variable, so a scan that trusts the `.sock` extension alone will
+/// happily act on `daemon.sock` if somebody points it one level up at `~/.veld`.
+///
+/// Prefer [`holder_sockets_in`] — this is the predicate behind it, exposed for
+/// the callers that already hold a path.
 pub fn is_holder_socket_name(path: &std::path::Path) -> bool {
     path.file_name()
         .and_then(|n| n.to_str())
@@ -391,6 +413,37 @@ mod tests {
             // test because `pty_dir` reads the vars this test owns.
             let realistic = pty_dir().join("0123456789abcdef.sock");
             assert_eq!(socket_path_too_long(&realistic), None, "{realistic:?}");
+
+            // --- holder_sockets_in ---------------------------------------
+            // The chokepoint every holder-directory scan goes through, because
+            // each of them then *acts* on what it found: the daemon deletes a
+            // socket nobody answers, `veld uninstall` writes a HANGUP to it, and
+            // `veld doctor` connects to it. Pointed at `~/.veld` — which
+            // `VELD_PTY_DIR` can be — a `.sock`-extension filter hands all three
+            // the daemon's own control socket.
+            let dir = tempfile::tempdir().unwrap();
+            for name in [
+                "0123456789abcdef.sock",
+                "fedcba9876543210.sock",
+                "daemon.sock",
+                "helper.sock",
+                "0123456789ABCDEF.sock",
+                "0123456789abcdef",
+                "notes.txt",
+            ] {
+                std::fs::write(dir.path().join(name), b"").unwrap();
+            }
+            std::fs::create_dir(dir.path().join("shims")).unwrap();
+            let mut found: Vec<String> = holder_sockets_in(dir.path())
+                .iter()
+                .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+                .collect();
+            found.sort();
+            assert_eq!(found, ["0123456789abcdef.sock", "fedcba9876543210.sock"]);
+            // A directory that does not exist is the ordinary state — it appears
+            // with the first terminal — and must not be an error the caller has to
+            // reason about.
+            assert!(holder_sockets_in(&dir.path().join("nope")).is_empty());
 
             // --- dev_trusted_origins -------------------------------------
             // Same test body for the same reason: it reads VELD_DAEMON_PORT.

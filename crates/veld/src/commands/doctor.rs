@@ -755,24 +755,14 @@ impl Diagnostics {
                 ),
             };
         }
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            // No directory is the ordinary state: it appears with the first
-            // terminal and nothing prunes it.
-            return Check {
-                pass: true,
-                label: format!("No terminal holders ({shown})"),
-            };
-        };
         let (mut live, mut stale) = (0usize, 0usize);
-        for entry in entries.flatten() {
-            let path = entry.path();
-            // The digest-shaped name, not merely a `.sock` extension. `VELD_PTY_DIR`
-            // is a plain environment variable, and pointed one level up at
-            // `~/.veld` the extension test alone counts `daemon.sock` and
-            // `helper.sock` as terminals — and, worse, connects to them.
-            if !veld_core::instance::is_holder_socket_name(&path) {
-                continue;
-            }
+        // `holder_sockets_in`, not a `read_dir` of its own: the directory is
+        // `VELD_PTY_DIR`, which is a plain environment variable, and pointed one
+        // level up at `~/.veld` a `.sock`-extension test counts `daemon.sock` and
+        // `helper.sock` as terminals — and, worse, connects to them. A missing
+        // directory is an empty list, which is the ordinary state: it appears with
+        // the first terminal and nothing prunes it.
+        for path in veld_core::instance::holder_sockets_in(&dir) {
             // Connect-and-close is the only way to tell a live holder from a
             // leftover socket file, and it is a *probe*: this command must never
             // cost somebody their terminal. It used to. The holder treated every
