@@ -39,6 +39,7 @@ let onExternalLayoutChange: typeof import("./layoutStore").onExternalLayoutChang
 let readLayout: typeof import("./layoutStore").readLayout;
 let syncLayouts: typeof import("./layoutStore").syncLayouts;
 let writeLayout: typeof import("./layoutStore").writeLayout;
+let flushPendingOnUnload: typeof import("./layoutStore").flushPendingOnUnload;
 
 /**
  * A layout with its keys in the order the **daemon** returns them.
@@ -87,10 +88,14 @@ function installStorage(initial: Record<string, string> = {}) {
 
 const LEGACY = "veld.panes.worktrees.v1";
 
+/** Requests made through the raw `fetch` the unload flush uses. */
+const sent: { url: string; body: Record<string, unknown> }[] = [];
+
 beforeEach(async () => {
   vi.useFakeTimers();
   reads.clear();
   writes.length = 0;
+  sent.length = 0;
   vi.resetModules();
   ({
     adoptLegacyLayouts,
@@ -100,6 +105,7 @@ beforeEach(async () => {
     readLayout,
     syncLayouts,
     writeLayout,
+    flushPendingOnUnload,
   } = await import("./layoutStore"));
   nextWrite = (worktreeId) => ({
     ok: true,
@@ -409,6 +415,54 @@ describe("moving the old browser store into the daemon at boot", () => {
   it("does nothing when there is no old store", async () => {
     await adoptLegacyLayouts();
     expect(writes).toEqual([]);
+  });
+});
+
+describe("the flush on unload", () => {
+  /** A page can be closed a moment after a drag, and the debounce is a window
+   *  in which the last thing the user did is lost. */
+  it("sends what is queued, without waiting for the debounce", async () => {
+    vi.stubGlobal("fetch", (url: string, init: RequestInit) => {
+      sent.push({ url, body: JSON.parse(init.body as string) as Record<string, unknown> });
+      return Promise.resolve(new Response(null, { status: 200 }));
+    });
+    writeLayout(7, layoutWith("a", 0.3));
+    flushPendingOnUnload();
+    expect(sent).toHaveLength(1);
+    expect(sent[0].url).toBe("/api/worktrees/7/layout");
+    expect(sent[0].body.version).toBe(0);
+    // The debounce must not then fire a second time.
+    await settle();
+    expect(writes).toEqual([]);
+  });
+
+  /**
+   * **The version is not advanced, and `written` is cleared.** Guessing that the
+   * write landed can put the cached version on exactly what the *winning* client
+   * wrote, after which this client's next save is accepted and replaces panes
+   * another client is attached to. Clearing `written` is the other half: after a
+   * request nobody sees the answer to, what the server holds is not known, and
+   * leaving it would dedupe away a later write that returns the layout to its
+   * pre-unload shape.
+   */
+  it("neither advances the version nor claims to know what the server holds", async () => {
+    vi.stubGlobal("fetch", (_url: string, init: RequestInit) => {
+      sent.push({ url: _url, body: JSON.parse(init.body as string) as Record<string, unknown> });
+      return Promise.resolve(new Response(null, { status: 200 }));
+    });
+    reads.set(7, { version: 4, layout: layoutWith("a") });
+    await readLayout(7);
+    const before = layoutWith("a", 0.3);
+    writeLayout(7, before);
+    flushPendingOnUnload();
+    expect(sent[0].body.version).toBe(4);
+
+    // Same document again — it must go out rather than being deduped away.
+    writeLayout(7, before);
+    await settle();
+    expect(writes).toEqual([
+      { worktreeId: 7, version: 4, layout: expect.objectContaining({ ratio: 0.3 }) },
+    ]);
   });
 });
 

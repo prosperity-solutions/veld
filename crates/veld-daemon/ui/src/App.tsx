@@ -144,6 +144,7 @@ import {
   updateTab,
   urlLabel,
 } from "./panes/model";
+import { acquireWorktree } from "./ide/acquire";
 import { channel, type ClientInfo } from "./ide/channel";
 import {
   adoptLegacyLayouts,
@@ -970,8 +971,11 @@ function AppInner(props: {
         // re-acquires.
         const mayAskAgain = !grantedRef.current || !sameEpoch;
         const wanted = shownRef.current ?? (mayAskAgain ? selectedRef.current : null);
-        if (wanted === null) return;
-        void acquireRef.current(wanted);
+        const target = worktreesRef.current.find((w) => w.id === wanted);
+        // Gone from the list between the disconnect and now — a `git worktree
+        // remove` in a terminal, say. Nothing to ask for.
+        if (!target) return;
+        void acquireRef.current(target);
       },
       onClosed: () => {
         // Nobody's claims are knowable now, and rendering the last table would
@@ -1056,6 +1060,15 @@ function AppInner(props: {
       // an unreachable daemon has to be said, or the click reads as ignored.
       else if (result.reason === "offline") {
         notifyRedirect("Not connected to the Veld daemon yet — try that again in a moment");
+      }
+      // **The click cancelled whatever was running, and then failed.** The bump
+      // above is pre-emptive by necessity — a hunt has to stop the moment the
+      // user picks something, not when the daemon eventually answers — so a
+      // refused click can leave this client having cancelled its own acquire and
+      // acquired nothing, with the boot effect keyed on a selection that did not
+      // change. Re-arm, unless something was granted in the meantime.
+      if (shownRef.current === null && worktreeRef.current) {
+        void acquireRef.current(worktreeRef.current);
       }
       return false;
     }
@@ -2057,7 +2070,12 @@ function AppInner(props: {
   const acquireGenRef = useRef(0);
   /** The selection, for the reconnect handler — see `grantedRef`. */
   const selectedRef = useRef<number | null>(null);
+  /** …and the row itself, for the paths that re-acquire it. */
+  const worktreeRef = useRef<Worktree | null>(null);
+  // Assigned during render, like `layoutsRef`: an acquire started from a socket
+  // handler must see the selection this render was built from.
   selectedRef.current = worktree?.id ?? null;
+  worktreeRef.current = worktree;
   /** Acknowledgements for yields whose release has been scheduled but not yet
    *  committed. State rather than a ref, because the point is to have something
    *  an effect can run *after* — see the yield handler below. */
@@ -2333,68 +2351,51 @@ function AppInner(props: {
    * Held in a ref because the socket's handlers are registered once, at boot, and
    * would otherwise close over the first render's state forever.
    */
-  const acquireRef = useRef<(preferred: number) => Promise<void>>(async () => {});
-  acquireRef.current = async (preferred: number) => {
-    // **A generation, not a condition about the current state.** Each claim in
-    // here can block for the daemon's acknowledgement timeout, so a hunt is
-    // easily still running when the user clicks a row — and without cancellation
-    // it lands on its own candidate afterwards and moves the window off the
-    // worktree they just picked.
-    //
-    // The first attempt asked "is anything shown yet", and that was wrong in a
-    // way worth recording: nothing nulls `shownId` when the *selection* changes
-    // without a claim — switching repo, importing one, creating a worktree — so
-    // the acquire for the new selection cancelled itself before it started, the
-    // worktree was never claimed, and the workspace rendered empty until the
-    // user clicked a rail row. "Has something newer started" is the question,
-    // and only a counter answers it without depending on what that newer thing
-    // has managed to do yet.
+  const acquireRef = useRef<(preferred: Worktree) => Promise<void>>(async () => {});
+  acquireRef.current = (preferred: Worktree) => {
     const gen = ++acquireGenRef.current;
-    const live = () => acquireGenRef.current === gen;
-    const mine = await channel.claim(preferred, false);
-    if (!live()) return;
-    if (mine.ok) {
-      grantedRef.current = true;
-      setShownId(preferred);
-      setClaimBlocked(false);
-      return;
-    }
-    // `superseded` means a later claim from this client overtook this one and
-    // owns the outcome. `offline`/`disconnected` mean nothing was decided at all
-    // — hunting on either would move the window off a worktree for a transport
-    // failure, and the first candidate would be "granted" the same way. Both are
-    // "stay put", which is what the old shell's `.catch(() => null)` did for the
-    // same failures.
-    if (mine.reason !== "shown_elsewhere") return;
-    if (!live()) return;
-    // **Refused, so this window must show something else.** Ignoring the answer
-    // was the hole that made the whole ownership model a suggestion: `⌘N` opens
-    // on the last-selected worktree by design, which is the one the window you
-    // pressed it in is showing — so the claim was always refused, always
-    // ignored, and the new window rendered the same panes and took their shells.
-    // `selectWorktree` honours a refusal because a click has somewhere to stay;
-    // a window opening, or one coming back from a disconnect, has not.
-    setShownId((cur) => (cur === preferred ? null : cur));
-    for (const candidate of worktreesRef.current) {
-      if (candidate.id === preferred) continue;
-      const free = await channel.claim(candidate.id, false);
-      if (!live()) return;
-      // Same rule inside the hunt: overtaken, or never asked, means stop — not
-      // try the next one.
-      if (!free.ok && free.reason !== "shown_elsewhere") return;
-      if (free.ok) {
+    return acquireWorktree(preferred, {
+      claim: (id, focusHolder) => channel.claim(id, focusHolder),
+      release: (id) => channel.release(id),
+      candidates: () => worktreesRef.current,
+      show: (target) => {
         grantedRef.current = true;
-        setActiveRepoRoot(candidate.repo_root);
-        setActiveWtKey(String(candidate.id));
-        setShownId(candidate.id);
+        setActiveRepoRoot(target.repo_root);
+        setActiveWtKey(String(target.id));
+        setShownId(target.id);
         setClaimBlocked(false);
-        return;
-      }
-    }
-    // Every worktree in this repo is already on screen somewhere. Say so rather
-    // than showing a set of panes that belongs to another client.
-    if (live()) setClaimBlocked(true);
+      },
+      blocked: () => setClaimBlocked(true),
+      // **A generation, not a condition about the current state.** The first
+      // attempt asked "is anything shown yet", and that was wrong in a way worth
+      // recording: nothing nulls `shownId` when the *selection* changes without a
+      // claim — switching repo, importing one, creating a worktree — so the
+      // acquire for the new selection cancelled itself before it started, the
+      // worktree was never claimed, and the workspace rendered empty until the
+      // user clicked a rail row. "Has something newer started" is the question,
+      // and only a counter answers it without depending on what that newer thing
+      // has managed to do yet.
+      live: () => acquireGenRef.current === gen,
+    });
   };
+
+  /**
+   * Claim the worktree this window resolved to on its own, without a click.
+   *
+   * `selectWorktree` covers the rail; this covers boot, a restored `?wt=`, and
+   * the fallback that lands on the first repo — all of which put a worktree on
+   * screen without anyone choosing it. Without it the first window to open
+   * claims nothing, and the second one is free to show the same worktree.
+   *
+   * **Keyed on the selection, never on the worktree list.** `worktrees` gets a new
+   * identity on every 5s poll (`repoList` is replaced, so `repos` → `repo` →
+   * `worktrees` are all new), so having it in the deps re-claimed the same worktree
+   * every five seconds for the life of the window. That was invisible churn while a
+   * claim was synchronous; it stopped being invisible once a claim could be
+   * *superseded*, because the poll's claim then overtook a rail click that was
+   * waiting on a holder and the click was silently dropped. The hunt below reads
+   * the list through a ref, where a five-second-old candidate list is harmless.
+   */
 
   /**
    * Claim the worktree this window resolved to on its own, without a click.
@@ -2411,9 +2412,16 @@ function AppInner(props: {
    */
   useEffect(() => {
     if (chromeless || !worktree) return;
+    // Already granted, so there is nothing to ask for — this effect re-runs on
+    // every selection change, including the one `selectWorktree` has just been
+    // granted, and asking again costs a second round trip plus a second yield
+    // ask to anyone still listing that worktree. A *skip*, not a cancel: it
+    // cannot reproduce the self-cancelling predicate this replaced, because it
+    // never starts an acquire that then refuses to act.
+    if (shownRef.current === worktree.id) return;
     // No cleanup: a selection change re-runs this effect, and starting a new
     // acquire is itself what cancels the old one.
-    void acquireRef.current(worktree.id);
+    void acquireRef.current(worktree);
   }, [chromeless, worktree?.id]);
 
   // Cleared as soon as this window is showing something it owns.

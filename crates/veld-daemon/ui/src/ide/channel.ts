@@ -408,6 +408,18 @@ class Channel {
     this.send({ type: "holds", worktree_ids: worktreeIds });
   }
 
+  /**
+   * Give a worktree back without taking another.
+   *
+   * The daemon had no message for this, and a claim was otherwise undone only by
+   * claiming something else or by disconnecting — so a client granted a worktree
+   * it then decided not to show held it for the life of its socket, greyed out
+   * in every other client's rail as shown by a window that is showing nothing.
+   */
+  release(worktreeId: number): void {
+    this.send({ type: "release", worktree_id: worktreeId });
+  }
+
   /** These worktrees are gone — rowids are reused, so a stale claim would grey
    *  out whichever one is created next. */
   forget(worktreeIds: number[]): void {

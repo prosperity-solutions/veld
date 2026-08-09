@@ -445,6 +445,18 @@ enum ClientMsg {
     /// These worktrees are gone. Rowids are reused, so a claim left on a deleted
     /// worktree greys out whichever one is created next.
     Forget { worktree_ids: Vec<i64> },
+    /// Give a worktree back without taking another.
+    ///
+    /// **The protocol had no way to say this, and that was a hole rather than a
+    /// simplification.** A claim was undone only by claiming something *else* or
+    /// by disconnecting, so a client that asked for a worktree and then decided
+    /// not to show it — the user clicked elsewhere while a hunt was still waiting
+    /// out somebody's yield, or the hunt found nothing else — left it recorded
+    /// against itself for the life of its socket: greyed out in every other
+    /// client's rail as shown by a window that is showing nothing, and focusing
+    /// that window when clicked. Two review angles found the same hole
+    /// independently.
+    Release { worktree_id: i64 },
 }
 
 fn yes() -> bool {
@@ -1049,6 +1061,15 @@ async fn handle(client_id: &str, msg: ClientMsg) {
             }
         }
         ClientMsg::Forget { worktree_ids } => forget(worktree_ids).await,
+        ClientMsg::Release { worktree_id } => {
+            let mut reg = REGISTRY.lock().await;
+            // Only its own. A client cannot release a worktree it never held —
+            // that would be `Forget` without the database check behind it.
+            if reg.claims.get(&worktree_id).is_some_and(|o| o == client_id) {
+                reg.claims.remove(&worktree_id);
+                reg.broadcast();
+            }
+        }
     }
 }
 
@@ -1682,6 +1703,38 @@ mod tests {
         // …and says nothing when there was nothing to release, so a broadcast is
         // not sent on every claim for no reason.
         assert!(!reg.expire_orphans(Instant::now()));
+    }
+
+    /// A claim taken and then not wanted has to be givable back, or it is held
+    /// for the life of the socket — greyed out in every other client's rail as
+    /// shown by a window that is showing nothing.
+    #[test]
+    fn a_client_can_give_back_a_worktree_without_taking_another() {
+        let mut reg = Registry::default();
+        let a = connect(&mut reg, "a", ClientKind::Electron);
+        let b = connect(&mut reg, "b", ClientKind::Electron);
+        claim_for(&mut reg, &a, 7, 1, true).unwrap();
+
+        reg.claims.remove(&7);
+        assert!(reg.claims.is_empty());
+        // …and it is free for somebody else immediately.
+        assert!(claim_for(&mut reg, &b, 7, 2, true).is_some());
+    }
+
+    /// …but only its own: releasing is not a way to revoke another client's
+    /// claim, which is the hole `Forget` needed a database check to close.
+    #[test]
+    fn releasing_a_worktree_another_client_holds_does_nothing() {
+        let mut reg = Registry::default();
+        let a = connect(&mut reg, "a", ClientKind::Electron);
+        connect(&mut reg, "b", ClientKind::Electron);
+        claim_for(&mut reg, &a, 7, 1, true).unwrap();
+
+        // The guard `Release` applies, spelled out here because the handler is
+        // async and this is the whole of its rule.
+        let is_mine = reg.claims.get(&7).is_some_and(|o| o == "b");
+        assert!(!is_mine, "b must not be able to release a's worktree");
+        assert_eq!(reg.claims.get(&7).map(String::as_str), Some("a"));
     }
 
     /// **Frame order decides the winner, not scheduler order.**
