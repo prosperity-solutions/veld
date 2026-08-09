@@ -549,31 +549,36 @@ impl UpdateGuard {
     /// Checked on every write rather than once, because losing the lock is an
     /// event that happens *to* a running guard from another process.
     ///
-    /// `strict` is what an **unreadable** state file means, and the two callers
-    /// genuinely want opposite answers:
+    /// **Ownership demands positive proof, on every path, with no exceptions —
+    /// and the absence of a parameter here is the fix.** Two earlier versions of
+    /// this let an *absent* state file mean "still ours" for the write path, on
+    /// the reasoning that a transient read failure should not permanently silence
+    /// a healthy guard. That reasoning was wrong twice, for the same reason both
+    /// times: an absent state file is not only a read failure, it is exactly what
+    /// a **thief's** directory looks like in the window between its `create_dir`
+    /// and its first `write_state`. A lenient write in that window stamps this
+    /// guard's pid into the thief's fresh lock, after which the *thief* reads a
+    /// foreign pid and latches `lost` — never publishing, never deleting — while
+    /// this guard matches its own pid and deletes a **live** lock on `Drop`,
+    /// admitting a third update. The lenient rule's own stated mitigation ("the
+    /// real owner's next `write_state` overwrites it") is refuted by this
+    /// function: the owner's writes are gated by the same predicate, so the stray
+    /// write silences the owner rather than being corrected by it.
     ///
-    /// - **Writing** (`set_phase`, `set_version`) passes `false`. A transiently
-    ///   unreadable file must not permanently silence a healthy guard's progress
-    ///   reporting, and the cost of being wrong is one stray write that the real
-    ///   owner's next `write_state` overwrites.
-    /// - **`Drop`** passes `true`, because it deletes. "No state file" is also
-    ///   exactly what a *thief's* directory looks like between its `create_dir`
-    ///   and its first `write_state` — so a lenient `Drop` in that window removes
-    ///   a live lock and lets a third update start. Deleting demands positive
-    ///   proof; a directory left behind because the proof was unavailable is
-    ///   already self-healing, since `peek` reports it `Unreadable` and the next
-    ///   `acquire` steals it.
-    fn still_ours(&mut self, strict: bool) -> bool {
+    /// Being strict costs nothing real, because an absent state file cannot mean
+    /// "transient" for a guard that still owns its lock: [`write_state`] lands by
+    /// `rename`, which is atomic, so `state.json` is never momentarily missing
+    /// and never half-written. From here, gone means taken.
+    fn still_ours(&mut self) -> bool {
         if self.lost {
             return false;
         }
         match read_state(&self.dir) {
             Some(state) if state.pid == self.state.pid => true,
-            Some(_) => {
+            _ => {
                 self.lost = true;
                 false
             }
-            None => !strict,
         }
     }
 
@@ -586,7 +591,7 @@ impl UpdateGuard {
     pub fn set_phase(&mut self, phase: Phase) {
         self.state.phase = phase;
         self.state.phase_at = Utc::now();
-        if self.still_ours(false) {
+        if self.still_ours() {
             let _ = write_state(&self.dir, &self.state);
         }
     }
@@ -594,7 +599,7 @@ impl UpdateGuard {
     /// Record the release once it is known, so observers can name it.
     pub fn set_version(&mut self, version: &str) {
         self.state.version = Some(version.to_string());
-        if self.still_ours(false) {
+        if self.still_ours() {
             let _ = write_state(&self.dir, &self.state);
         }
     }
@@ -620,9 +625,8 @@ impl Drop for UpdateGuard {
         // it — in which case the directory now belongs to them and removing it
         // would delete a *live* lock. `still_ours` is the same predicate every
         // write uses, so a guard cannot be judged the owner by one path and not
-        // by the other, except on the deliberate strictness split `still_ours`
-        // documents.
-        if self.still_ours(true) {
+        // by the other — one predicate, no exceptions. See `still_ours`.
+        if self.still_ours() {
             let _ = fs::remove_dir_all(&self.dir);
         }
     }
@@ -836,8 +840,43 @@ mod tests {
         assert_eq!(state.pid, std::process::id() + 1);
     }
 
+    /// The arm the sibling test below cannot reach, and the one that actually
+    /// happens: a **real** steal `rename`s the directory away and re-creates it,
+    /// so for a moment the victim sees no state file at all rather than a foreign
+    /// pid. Two earlier versions of `still_ours` read that as "still ours" and
+    /// compounded into a deleted live lock — see its doc comment.
     #[test]
-    fn a_guard_that_was_stolen_from_stops_writing_and_stops_deleting() {
+    fn a_guard_loses_the_lock_the_moment_a_thief_replaces_the_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _env = isolated(tmp.path());
+
+        let dir = lock_dir().unwrap();
+        let mut victim = match acquire(Origin::Cli, None, false).unwrap() {
+            Acquired::Ours(g) => g,
+            Acquired::Busy(_) => panic!("nothing held the lock"),
+        };
+
+        // Exactly what `acquire` does to a lock it judges stale, stopped halfway:
+        // the directory is gone and its replacement has no state in it yet.
+        steal(&dir).unwrap();
+        fs::create_dir(&dir).unwrap();
+        assert!(read_state(&dir).is_none(), "precondition: no state yet");
+
+        victim.set_phase(Phase::RestartingServices);
+        assert!(
+            read_state(&dir).is_none(),
+            "the victim wrote into the thief's directory"
+        );
+
+        drop(victim);
+        assert!(
+            dir.exists(),
+            "the victim deleted the thief's live lock directory"
+        );
+    }
+
+    #[test]
+    fn a_guard_stops_writing_and_deleting_once_a_thief_has_written_its_state() {
         let tmp = tempfile::tempdir().unwrap();
         let _env = isolated(tmp.path());
 

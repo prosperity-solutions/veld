@@ -602,9 +602,18 @@ pub fn status(json: bool) -> i32 {
 
 /// Set inside the generated script so the run in the window knows what it is.
 ///
-/// Only ever affects how the run *describes itself* to observers. Nothing
-/// branches on it, which is why an inherited stale value would be a cosmetic bug
-/// rather than a behavioural one.
+/// **Two paths branch on it**, so a stale inherited value is not cosmetic:
+/// `refuse_busy` uses it to stay silent (no report, no relaunch) when a window
+/// that lost the race is the one reporting, and `hand_over_to_console`'s
+/// handshake only accepts a holder whose `Origin` is `Console`. A `veld update`
+/// that wrongly believed itself a console child would therefore refuse a busy
+/// lock without telling the app anything.
+///
+/// What bounds the inheritance is the launch path rather than a check: the app
+/// is reopened with `/usr/bin/open`, and LaunchServices does not pass the
+/// caller's environment to the app it launches — so the variable cannot leak
+/// from an update into the Veld Desktop it reopens, which is the only loop that
+/// could carry it.
 const ORIGIN_ENV: &str = "VELD_UPDATE_ORIGIN";
 
 fn console_child() -> bool {

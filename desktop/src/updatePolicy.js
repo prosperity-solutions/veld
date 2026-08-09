@@ -414,7 +414,7 @@ function handoffCommand({ capabilities = [], version, pid, execPath }) {
   // advertises `full-update-handoff`, but whose clap rejects `--console` with a
   // usage error and exit 2. The app has quit by then and no report is written,
   // so the user would reopen on the old version having been told nothing.
-  const console = capabilities.includes(CONSOLE_HANDOFF);
+  const consoleHandoff = capabilities.includes(CONSOLE_HANDOFF);
   const args = full
     ? [
         "update",
@@ -425,7 +425,7 @@ function handoffCommand({ capabilities = [], version, pid, execPath }) {
         // a child with no controlling terminal only ever gets `sudo -n`. The CLI
         // falls back to running headless when no terminal can be opened, so this
         // never makes an update fail that would otherwise have worked.
-        ...(console ? ["--console"] : []),
+        ...(consoleHandoff ? ["--console"] : []),
         // The release the user was just offered, from the feed that offered it.
         // Without this the CLI asks `api.github.com/…/releases/latest` — a
         // second source, rate-limited per IP and briefly out of step with the

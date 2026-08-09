@@ -112,8 +112,10 @@ A launcher exiting 0 is **not** evidence a window opened — `open` and every Li
 emulator are fire-and-forget. So the outer process waits up to 20s for the update
 lock to be claimed by a different pid, which only a `veld update` that really
 started can do, and runs the update itself (headless, as before) when that never
-happens. `VELD_UPDATE_ORIGIN=console` is exported into the window purely so the
-run describes itself correctly to observers; nothing branches on it.
+happens. `VELD_UPDATE_ORIGIN=console` is exported into the window so the run knows what it
+is. Two paths read it: a console run that finds the lock already held stays
+silent rather than writing a failure report over the parent's success, and the
+handshake only accepts a holder whose origin is `console`.
 
 **`--console` is gated on its own capability, `console-handoff`**, and not on
 `full-update-handoff`. The two are genuinely independent: `veld desktop update`
