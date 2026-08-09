@@ -32,8 +32,9 @@ The website has **two audiences** — humans (`index.html`) and LLMs
 
 ### Correctness constraints
 
-- `command` type steps do NOT get `${veld.port}` allocated — only `start_server` does.
-- `start_server` outputs are objects; `command` outputs are arrays.
+- The node type is `long_running`; `start_server` is a permanent alias. Write `long_running`.
+- `command` type steps do NOT get `${veld.port}` allocated — only a `long_running` node does, and only when it has a port (`"ports": null` means none at all).
+- `long_running` outputs are objects; `command` outputs are arrays.
 - The domain is `veld.oss.life.li`, not `veld.dev`.
 - URL templates use `{variable}` (single braces); commands/env use `${variable}`.
 - The install URL is `https://veld.oss.life.li/get` (nginx redirects to GitHub).

@@ -249,6 +249,15 @@ export function RunsMode(props: { modeSwitch: ReactNode; themeButton: ReactNode;
                   {u}
                 </a>
               ))}
+              {/* Raw TCP endpoints the join reproduced. Text, never a link:
+                  nothing routes them, and the port is this machine's local
+                  listener — which makes this the only place the address is
+                  discoverable outside `veld shares`. */}
+              {j.addresses.map((a) => (
+                <span key={a} className="node-address" title={`Raw TCP — ${a}`}>
+                  {a} <span className="node-proto">tcp</span>
+                </span>
+              ))}
               <Text size="xs" c="dimmed" ff="monospace">
                 {j.id}
               </Text>

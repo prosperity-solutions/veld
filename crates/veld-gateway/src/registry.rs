@@ -401,22 +401,42 @@ impl Registry {
                 }
             });
         }
+        // Routed endpoints only. The gateway speaks HTTP/1.1 over the tunnel, so
+        // a raw `tcp` endpoint has nothing it could serve — and a browser could
+        // not use it if it did. The daemon refuses `--web` on a tcp port before
+        // it ever gets here; this is the second gate, so a manifest that somehow
+        // carries one is dropped rather than published as an HTTP origin.
         let nodes: Vec<RegisteredNode> = manifest
             .nodes
             .iter()
-            .map(|n| {
+            .filter(|n| n.is_routed())
+            .filter_map(|n| {
+                let url = n.url.as_deref()?;
                 let s = slug::derive(&host_node_id, &n.hostname, &ticket.capability);
-                RegisteredNode {
-                    node: n.node.clone(),
-                    hostname: n.hostname.clone(),
-                    origin: origin_of(&n.url, &n.hostname),
-                    slug: s.clone(),
-                    public_url: format!("https://{s}.{}", self.domain),
-                    access: node_access(access, &n.hostname),
-                    proxy: n.proxy.clone(),
-                }
+                Some((n, url, s))
+            })
+            .map(|(n, url, s)| RegisteredNode {
+                node: n.node.clone(),
+                hostname: n.hostname.clone(),
+                origin: origin_of(url, &n.hostname),
+                slug: s.clone(),
+                public_url: format!("https://{s}.{}", self.domain),
+                access: node_access(access, &n.hostname),
+                proxy: n.proxy.clone(),
             })
             .collect();
+
+        // Checked again *after* the filter, not only on the raw manifest above.
+        // A manifest whose entries are all unrouted passes the earlier
+        // emptiness test and publishes nothing, while still holding an endpoint
+        // permit, an open tunnel and a lease until it expires — a bounded
+        // gateway slot consumed by a registration with no public URL to show
+        // for it.
+        if nodes.is_empty() {
+            conn.close(0u32.into(), b"no routed endpoints");
+            self.release_endpoint(&choice).await;
+            bail!("share manifest has no HTTP endpoints to expose over the web");
+        }
 
         let reg = Arc::new(Registration {
             id: id.clone(),

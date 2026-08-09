@@ -2539,12 +2539,44 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
   min-width: 0;
 }
 
-.node-url-row .node-url {
+.node-url-row .node-url,
+.node-url-row .node-address {
   flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* The port's name, shown only on a multi-port node. Shrinks before the address
+   does — the address is the value, the name is the label. */
+.node-port-name {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10px;
+  color: var(--muted);
+  padding-right: 4px;
+}
+
+/* A raw TCP port is an address, not a link — so it is not styled as one. */
+.node-address {
+  font-family: "JetBrains Mono Variable", ui-monospace, monospace;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.node-proto {
+  flex: none;
+  font-size: 9px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 0 3px;
 }
 
 .node-health {

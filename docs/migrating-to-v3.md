@@ -223,7 +223,7 @@ Declare a field once for every variant of a node. Any variant may override it.
 
 ```jsonc
 "api": {
-  "type": "start_server",
+  "type": "long_running",
   "probes": { "readiness": { "type": "http", "path": "/healthz" } },
   "env": { "API_URL": "${vars.remote_api}" },
   "variants": {
@@ -299,6 +299,10 @@ answer it before the project starts.
 A node with no `ports` map behaves exactly as before. This exists so
 debug-adapter variants and multi-port containers stop needing hand-picked literal
 ports, which silently break parallel worktrees.
+
+Named ports have since grown a `protocol`, and `ports` has since grown a third
+authoring — see
+[Added since v3 shipped](#added-since-v3-shipped-nothing-here-is-a-migration).
 
 ### Value sources and `secret`
 
@@ -412,6 +416,24 @@ or if a preset list has grown past what a newcomer can identify:
 `veld lint` reports a duplicate or zero `key`, a `default_preset` naming nothing,
 and — once, at eight or more presets with no metadata at all — a notice suggesting
 the object form.
+
+---
+
+## Added since v3 shipped (nothing here is a migration)
+
+**You do not have to change anything.** Since v3 shipped, veld gained
+`long_running` (a permanent alias of `start_server`), long-running nodes with no
+ports at all, `protocol` and `host` on a named port, the `settle` readiness probe,
+and per-port sharing consent. All of it is additive *within* `schemaVersion: "3"`:
+there is no v4, and no config that loads today stops loading tomorrow.
+
+It has its own page, because it is a menu rather than a migration:
+**[docs/adopting-long-running-and-ports.md](adopting-long-running-and-ports.md)**.
+
+Read at least its [behaviour
+changes](adopting-long-running-and-ports.md#behaviour-changes-worth-a-veld-lint)
+section — the only part that can move under a config you never
+touch. `veld lint` reports every one of them.
 
 ---
 

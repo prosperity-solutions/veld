@@ -25,22 +25,56 @@ pub enum ApprovalMode {
     Auto,
 }
 
-/// One service exposed by a share. The `hostname` is the *literal* host from the
-/// origin's `NodeState.url`, shipped verbatim so the consumer reproduces the
-/// exact same URL (redirects, cookies, and CORS then work unmodified).
+/// One **port** exposed by a share. The `hostname` is the *literal* host from
+/// the origin's endpoint, shipped verbatim so the consumer reproduces the exact
+/// same URL (redirects, cookies, and CORS then work unmodified).
+///
+/// One entry per exposed port, not per node. A node may contribute several — an
+/// app port and an admin port are separate consent decisions and separate
+/// entries — or none.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SharedNode {
     /// Node name (e.g. `frontend`).
     pub node: String,
     /// Variant name (e.g. `local`).
     pub variant: String,
+    /// Which named port of that node this entry is (e.g. `http`, `admin`).
+    ///
+    /// Absent on manifests minted before per-port sharing, where a node
+    /// contributed exactly one entry and it was always the primary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port_name: Option<String>,
     /// Literal hostname to reproduce on the consumer (no scheme, no port); used
-    /// for the consumer's Caddy route match and DNS entry.
+    /// for the consumer's Caddy route match and DNS entry. Unique across a
+    /// manifest — it is the key the host's upstream allowlist is built from.
     pub hostname: String,
     /// The origin's full URL, shown to the consumer as the address to open.
     /// Valid verbatim on the consumer because both peers run the same setup mode
     /// (identical scheme + port).
-    pub url: String,
+    ///
+    /// **`None` for a `tcp` endpoint**, which has no route and therefore no URL.
+    ///
+    /// Compatibility, in both directions, is carried by the *types* rather than
+    /// by an attribute here — serde deserializes a missing `Option` field to
+    /// `None` whether or not `default` is written, so the annotation on this
+    /// field is not a lever anyone can pull:
+    ///
+    /// - **Old consumer, new host.** The pre-per-port `SharedNode` declares
+    ///   `url: String`, required. A manifest containing a tcp endpoint fails to
+    ///   parse there and the join is refused outright — a peer that cannot
+    ///   represent an endpoint must not silently reproduce it as an HTTP route.
+    /// - **New consumer, old host.** Every entry carries a `url` and no
+    ///   `protocol`, which defaults to `Http`: exactly what those entries were.
+    ///
+    /// What *this* crate is responsible for is the third case — an entry that
+    /// claims `Http` and carries no URL, which no honest host mints. That is why
+    /// [`SharedNode::is_routed`] requires both.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// What the endpoint speaks. Absent on pre-per-port manifests, where every
+    /// entry was routed HTTP — which is why the default is `Http`.
+    #[serde(default)]
+    pub protocol: crate::config::PortProtocol,
     /// Host-local TCP port the origin's service listens on (the tunnel target
     /// the host dials).
     pub upstream_port: u16,
@@ -49,6 +83,36 @@ pub struct SharedNode {
     /// for backward compatibility with manifests minted before this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy: Option<crate::config::ResolvedProxy>,
+}
+
+impl SharedNode {
+    /// A routed endpoint the consumer reproduces behind its own Caddy.
+    ///
+    /// **Both halves are required.** A manifest arrives from another machine, so
+    /// `protocol` alone is a claim, not a fact: an entry saying `http` with no
+    /// `url` would have the consumer mint a DNS host and a Caddy route for a
+    /// host-chosen name — with a locally-trusted certificate — and then appear
+    /// in none of the join's output, because every display path reads `url`. An
+    /// endpoint nobody can see is an endpoint nobody consented to.
+    pub fn is_routed(&self) -> bool {
+        self.protocol == crate::config::PortProtocol::Http && self.url.is_some()
+    }
+
+    /// Whether this entry is self-contradictory: it claims to be routed but
+    /// carries no URL to be routed to. No honest host mints one — the host side
+    /// derives both fields from the same endpoint — so a consumer treats it as a
+    /// malformed entry and skips it rather than guessing which half was true.
+    pub fn is_malformed(&self) -> bool {
+        self.protocol == crate::config::PortProtocol::Http && self.url.is_none()
+    }
+
+    /// `node:variant#port`, the label every consent diagnostic uses.
+    pub fn label(&self) -> String {
+        match &self.port_name {
+            Some(port) => format!("{}:{}#{port}", self.node, self.variant),
+            None => format!("{}:{}", self.node, self.variant),
+        }
+    }
 }
 
 /// The set of services a host is sharing, plus lifetime metadata. Carried inside
@@ -67,6 +131,29 @@ pub struct ShareManifest {
     pub created_at: i64,
     /// Unix seconds when the share expires.
     pub expires_at: i64,
+}
+
+impl ShareManifest {
+    /// What to call each shared port in a list, in manifest order.
+    ///
+    /// A node contributing one port is named plainly; a node contributing
+    /// several gets `node#port` per entry. Both halves matter: without the
+    /// qualifier a two-port node appeared twice under one name and read as a
+    /// rendering bug, and with it unconditionally every single-port share — the
+    /// common case — grew a `#http` nobody wrote.
+    pub fn display_nodes(&self) -> Vec<String> {
+        let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        for n in &self.nodes {
+            *counts.entry(n.node.as_str()).or_default() += 1;
+        }
+        self.nodes
+            .iter()
+            .map(|n| match (&n.port_name, counts[n.node.as_str()]) {
+                (Some(port), c) if c > 1 => format!("{}#{port}", n.node),
+                _ => n.node.clone(),
+            })
+            .collect()
+    }
 }
 
 /// A 32-byte bearer secret embedded in a ticket. A host serves a connection only
@@ -262,6 +349,14 @@ pub struct JoinResponse {
     pub join_id: String,
     /// URLs now reachable locally on this machine.
     pub urls: Vec<String>,
+    /// `host:port` for every raw (`tcp`) endpoint reproduced locally.
+    ///
+    /// Not URLs, and the port is the **local listener's**, not the origin's — a
+    /// raw endpoint has no route to preserve the original port through, so this
+    /// is the only address that works. Absent from responses minted before
+    /// per-port sharing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub addresses: Vec<String>,
     /// Non-fatal notes (e.g. nodes skipped because a local URL already owns the
     /// hostname — the local URL always wins).
     #[serde(default)]
@@ -319,6 +414,16 @@ pub struct ShareInfo {
     /// from daemons that predate connection reporting.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub connections: Vec<ShareConnectionInfo>,
+    /// Raw `host:port` endpoints — the unrouted (`tcp`) ports this share covers.
+    ///
+    /// Listed apart from `urls` rather than folded in because the two are not
+    /// interchangeable: a raw port has no scheme and no route, so anything that
+    /// renders it as a link produces an address that looks right and reaches
+    /// nothing. On a hosted share these are the origin's own names; on a join
+    /// they are the **local** listener addresses, which is what the joiner
+    /// connects to — the origin's port number is not reachable from here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub addresses: Vec<String>,
 }
 
 /// Live tunnel transport state for one connected peer of a share (or for the
@@ -646,6 +751,7 @@ impl DaemonClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::PortProtocol;
 
     fn sample_manifest() -> ShareManifest {
         ShareManifest {
@@ -656,13 +762,94 @@ mod tests {
                 node: "app".to_string(),
                 variant: "host".to_string(),
                 hostname: "app.demo.irohtest.localhost".to_string(),
-                url: "https://app.demo.irohtest.localhost".to_string(),
+                port_name: None,
+                protocol: Default::default(),
+                url: Some("https://app.demo.irohtest.localhost".to_string()),
                 upstream_port: 19001,
                 proxy: None,
             }],
             created_at: 1_000_000,
             expires_at: 1_007_200,
         }
+    }
+
+    fn shared(node: &str, port: Option<&str>, protocol: PortProtocol) -> SharedNode {
+        let host = match port {
+            Some(p) => format!("{node}-{p}.demo.t.localhost"),
+            None => format!("{node}.demo.t.localhost"),
+        };
+        SharedNode {
+            node: node.to_string(),
+            variant: "host".to_string(),
+            port_name: port.map(str::to_string),
+            url: (protocol == PortProtocol::Http).then(|| format!("https://{host}")),
+            hostname: host,
+            protocol,
+            upstream_port: 19001,
+            proxy: None,
+        }
+    }
+
+    fn manifest_of(nodes: Vec<SharedNode>) -> ShareManifest {
+        ShareManifest {
+            nodes,
+            ..sample_manifest()
+        }
+    }
+
+    /// The manifest holds one entry per **port**, so the naive `n.node` listed a
+    /// two-port node twice under one name — and qualifying unconditionally put a
+    /// `#http` nobody wrote on every single-port share.
+    #[test]
+    fn display_nodes_qualifies_only_where_a_node_contributes_several() {
+        let m = manifest_of(vec![
+            shared("app", Some("http"), PortProtocol::Http),
+            shared("app", Some("admin"), PortProtocol::Http),
+            shared("db", Some("pg"), PortProtocol::Tcp),
+        ]);
+        assert_eq!(m.display_nodes(), ["app#http", "app#admin", "db"]);
+
+        // Order matches `nodes`, because the join loop indexes into it.
+        assert_eq!(m.display_nodes().len(), m.nodes.len());
+
+        // A manifest from before per-port sharing carries no port names at all.
+        let legacy = manifest_of(vec![shared("app", None, PortProtocol::Http)]);
+        assert_eq!(legacy.display_nodes(), ["app"]);
+    }
+
+    /// `is_routed` decides whether the consumer mints a DNS host and a Caddy
+    /// route, from data another machine sent — so a claim of `http` with no URL
+    /// must not be enough.
+    #[test]
+    fn a_routed_entry_needs_both_its_protocol_and_its_url() {
+        let ok = shared("app", Some("http"), PortProtocol::Http);
+        assert!(ok.is_routed() && !ok.is_malformed());
+
+        let raw = shared("db", Some("pg"), PortProtocol::Tcp);
+        assert!(!raw.is_routed() && !raw.is_malformed());
+
+        let mut lying = shared("app", Some("http"), PortProtocol::Http);
+        lying.url = None;
+        assert!(!lying.is_routed(), "no URL means nothing to route to");
+        assert!(lying.is_malformed(), "and the consumer must say so");
+    }
+
+    /// A new consumer reading an old host's manifest: no `protocol`, no
+    /// `port_name`, a `url` that is present — exactly the entries that used to
+    /// be the only kind, and they must stay routed.
+    #[test]
+    fn a_pre_per_port_manifest_entry_still_deserializes_as_routed() {
+        let json = r#"{
+            "node": "app", "variant": "host",
+            "hostname": "app.demo.t.localhost",
+            "url": "https://app.demo.t.localhost",
+            "upstream_port": 19001
+        }"#;
+        let n: SharedNode = serde_json::from_str(json).expect("old entries still parse");
+        assert_eq!(n.protocol, PortProtocol::Http);
+        assert_eq!(n.port_name, None);
+        assert!(n.is_routed());
+        assert_eq!(n.label(), "app:host");
     }
 
     #[test]

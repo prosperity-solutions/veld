@@ -181,12 +181,40 @@ struct HistoryNode {
     exit_code: Option<String>,
 }
 
+/// One of a node's ports, as the dashboards need it.
+///
+/// `url` present means the port is routed (`protocol: "http"`) and can be opened;
+/// absent means it is a raw `tcp` port, reachable at `hostname:port` and at
+/// nothing else. The distinction is carried as a *value*, not inferred from a
+/// naming convention, because rendering a raw port as a link produces a URL that
+/// looks right and goes nowhere.
+#[derive(Serialize)]
+struct EndpointInfo {
+    /// Port name as declared in `ports` — `http` for the conventional default.
+    name: String,
+    hostname: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    url: Option<String>,
+    port: u16,
+    /// Whether this is the node's primary port — the one `${veld.url}` means and
+    /// the one `url` above repeats. Lets a client show it first without
+    /// re-deriving the rule.
+    primary: bool,
+}
+
 #[derive(Serialize)]
 struct NodeInfo {
     name: String,
     variant: String,
     status: NodeStatus,
+    /// The primary port's URL. Kept alongside `endpoints` (where it appears
+    /// again, flagged `primary`) because every existing client reads it, and a
+    /// single-port node — still the common case — needs nothing more.
     url: Option<String>,
+    /// Every port this node claimed, primary first. Empty for a node that
+    /// declared none, and for any run recorded before per-port endpoints.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    endpoints: Vec<EndpointInfo>,
     pid: Option<u32>,
     #[serde(skip_serializing_if = "is_zero")]
     recovery_count: u32,
@@ -209,6 +237,31 @@ struct ActionInfo {
 
 fn is_zero(v: &u32) -> bool {
     *v == 0
+}
+
+/// A node's ports for the dashboards, primary first.
+///
+/// The primary is matched **by value** against `NodeState::url`, the same rule
+/// `NodeState::routed_urls` uses, so the two never disagree about which port is
+/// the primary.
+fn endpoint_infos(ns: &NodeState) -> Vec<EndpointInfo> {
+    let mut out: Vec<EndpointInfo> = ns
+        .endpoints_or_legacy()
+        .iter()
+        .map(|(name, e)| EndpointInfo {
+            name: name.clone(),
+            // Port-stripped, as `raw_addresses` and the `hosts.<name>` builtin
+            // both are: a `url_template` carrying a literal port would
+            // otherwise render and copy `db.test:8443:5432`.
+            hostname: veld_core::url::hostname_of_url(&e.hostname).to_owned(),
+            url: e.url.clone(),
+            port: e.port,
+            primary: ns.is_primary(e),
+        })
+        .collect();
+    // Primary first; the rest keep the map's name order.
+    out.sort_by_key(|e| !e.primary);
+    out
 }
 
 /// Load a project's root config for action lookup. Returns `None` if the
@@ -273,6 +326,7 @@ async fn list_environments() -> Result<Json<EnvironmentList>, StatusCode> {
                                     // Routes die with the run — an ended
                                     // run's URLs must not render as links.
                                     url: if live { ns.url.clone() } else { None },
+                                    endpoints: if live { endpoint_infos(ns) } else { Vec::new() },
                                     pid: if live { ns.pid } else { None },
                                     recovery_count: ns.recovery_count,
                                     consecutive_failures: ns.consecutive_failures,
@@ -1666,6 +1720,7 @@ mod tests {
                     name: run.to_owned(),
                     status: RunStatus::Running,
                     urls: HashMap::new(),
+                    hostnames: Vec::new(),
                 },
             );
             (
@@ -1933,6 +1988,72 @@ mod tests {
             // Heaviest-first ordering means truncation keeps the head.
             assert_eq!(many[0], 0);
         }
+    }
+
+    /// The dashboards decide what to render as a link from `EndpointInfo`, so
+    /// three things have to hold: the primary is first, a raw port carries no
+    /// URL, and a row from before per-port endpoints still describes itself.
+    #[test]
+    fn endpoint_infos_puts_the_primary_first_and_keeps_raw_ports_unlinked() {
+        use veld_core::state::NodeEndpoint;
+
+        let mut ns = NodeState::new("web", "local");
+        ns.port = Some(3000);
+        ns.url = Some("https://web.dev.p.localhost".into());
+        // Inserted so that the primary is NOT the map's first key, which is what
+        // makes the ordering claim worth testing at all.
+        ns.endpoints.insert(
+            "admin".into(),
+            NodeEndpoint {
+                hostname: "web-admin.dev.p.localhost".into(),
+                url: Some("https://web-admin.dev.p.localhost".into()),
+                port: 3001,
+            },
+        );
+        ns.endpoints.insert(
+            "http".into(),
+            NodeEndpoint {
+                hostname: "web.dev.p.localhost".into(),
+                url: Some("https://web.dev.p.localhost".into()),
+                port: 3000,
+            },
+        );
+        ns.endpoints.insert(
+            "pg".into(),
+            NodeEndpoint {
+                hostname: "web-pg.dev.p.localhost".into(),
+                url: None,
+                port: 5432,
+            },
+        );
+
+        let eps = endpoint_infos(&ns);
+        assert_eq!(eps[0].name, "http", "the primary leads");
+        assert!(eps[0].primary);
+        assert_eq!(eps.len(), 3);
+        assert!(
+            eps[1..].iter().all(|e| !e.primary),
+            "exactly one endpoint is the primary"
+        );
+        let pg = eps
+            .iter()
+            .find(|e| e.name == "pg")
+            .expect("raw port listed");
+        assert!(pg.url.is_none(), "a raw port must never carry a URL");
+        assert_eq!(pg.port, 5432);
+
+        // A legacy row: `url` and `port`, no map. It still describes one port,
+        // or the node would render as having none.
+        let mut legacy = NodeState::new("web", "local");
+        legacy.port = Some(3000);
+        legacy.url = Some("https://web.dev.p.localhost".into());
+        let eps = endpoint_infos(&legacy);
+        assert_eq!(eps.len(), 1);
+        assert!(eps[0].primary && eps[0].url.is_some());
+        assert_eq!(eps[0].hostname, "web.dev.p.localhost");
+
+        // And a node that genuinely has no ports offers nothing.
+        assert!(endpoint_infos(&NodeState::new("watcher", "dev")).is_empty());
     }
 
     #[test]

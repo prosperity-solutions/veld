@@ -272,13 +272,19 @@ pub async fn join(ticket: String, label: Option<String>, remember: bool, json: b
                 serde_json::to_string_pretty(&resp).unwrap_or_default()
             );
         } else {
+            let total = resp.urls.len() + resp.addresses.len();
             output::print_success(&format!(
-                "Joined — {} URL(s) now reachable on this machine:",
-                resp.urls.len()
+                "Joined — {total} endpoint(s) now reachable on this machine:"
             ));
             println!();
             for url in &resp.urls {
                 println!("    {}", output::cyan(url));
+            }
+            // Raw endpoints are addresses, not URLs, and the port is this
+            // machine's listener rather than the origin's — printing them as
+            // URLs would send someone to a port nothing is listening on.
+            for addr in &resp.addresses {
+                println!("    {}  {}", output::cyan(addr), output::dim("(tcp)"));
             }
             for w in &resp.warnings {
                 println!("  {} {}", output::yellow("!"), w);
@@ -363,6 +369,24 @@ pub async fn list(json: bool) -> i32 {
                                 .collect::<Vec<_>>()
                                 .join(" ")
                         };
+                        // Raw ports have no scheme and no route, so they go in
+                        // the same column but marked — never as a bare token a
+                        // reader would paste into a browser.
+                        let urls = if s.addresses.is_empty() {
+                            urls
+                        } else {
+                            let raw = s
+                                .addresses
+                                .iter()
+                                .map(|a| format!("{a} (tcp)"))
+                                .collect::<Vec<_>>()
+                                .join(" ");
+                            if urls.is_empty() {
+                                raw
+                            } else {
+                                format!("{urls} {raw}")
+                            }
+                        };
                         vec![s.id.clone(), s.nodes.join(", "), urls]
                     })
                     .collect();
@@ -388,7 +412,12 @@ pub async fn list(json: bool) -> i32 {
                 let rows: Vec<Vec<String>> = list
                     .joins
                     .iter()
-                    .map(|j| vec![j.id.clone(), j.nodes.join(", "), j.urls.join(" ")])
+                    .map(|j| {
+                        let mut reachable = j.urls.clone();
+                        // The joiner's local listener address, not the origin's.
+                        reachable.extend(j.addresses.iter().map(|a| format!("{a} (tcp)")));
+                        vec![j.id.clone(), j.nodes.join(", "), reachable.join(" ")]
+                    })
                     .collect();
                 output::print_table(&["JOIN", "NODES", "URLS"], &rows);
                 for j in &list.joins {

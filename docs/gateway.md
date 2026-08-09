@@ -173,6 +173,20 @@ File form (all fields optional, `SecretSource` accepted for secrets):
   rewritten to their public URLs; `Set-Cookie` `Domain` attributes naming
   origin hostnames are stripped (host-only cookies work publicly). Bodies are
   never rewritten.
+- **HTTP only — a raw `tcp` port is never published here.** The gateway speaks
+  HTTP/1.1 over the tunnel: it parses a request, opens a stream, rewrites
+  headers, mints a slug host. A `"protocol": "tcp"` port (a database, a
+  debugger) has none of that, and a browser — the entire audience of a public
+  URL — could not speak the protocol even if the gateway forwarded the bytes.
+  This is what the `web` audience *is*, not a feature gap: sharing a raw port
+  is the `peer` audience's job (`veld share`, which reproduces it as a local
+  TCP port on the joiner). Three gates keep it out — `veld lint`'s
+  `web-share-needs-http` rejects the config, the origin daemon refuses the port
+  at `veld share --web` time and names it, and the gateway itself drops any
+  non-routed manifest entry at registration rather than publishing it as an
+  HTTP origin. An operator therefore never sees one; if a share seems to be
+  missing a service, check the developer's `veld share --web` output for the
+  exclusion line.
 - **Cleanup is layered**: the moment a developer unshares / stops the run /
   loses the daemon, the tunnel closes and the URLs die (the live connection is
   authoritative). The lease is a backstop that only reaps a registration whose

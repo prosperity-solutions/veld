@@ -3,7 +3,7 @@
 //! Persistence lives in [`crate::db`] — one central SQLite database replaces
 //! the old per-project `.veld/state.json` and global `registry.json` files.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
@@ -123,6 +123,31 @@ pub struct ReadinessPhase {
 // Node state
 // ---------------------------------------------------------------------------
 
+/// One named port of a running node, as the rest of veld sees it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeEndpoint {
+    /// The hostname veld minted for this port. Every port has one, whatever its
+    /// protocol — a `tcp` port's hostname is registered in DNS and never routed.
+    pub hostname: String,
+    /// The `https://` URL, when this port is routed (`protocol: "http"`).
+    /// `None` for a `tcp` port: nothing is in front of it, so the address is
+    /// `hostname` plus [`Self::port`].
+    ///
+    /// **This is the routed predicate.** Sharing, display and route teardown all
+    /// branch on it, so "has a URL" must keep meaning "Caddy is in front of it".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// The local TCP port. Caddy's upstream when routed; the port a client
+    /// connects to directly when not.
+    pub port: u16,
+}
+
+impl NodeEndpoint {
+    pub fn is_routed(&self) -> bool {
+        self.url.is_some()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeState {
     pub node_name: String,
@@ -130,7 +155,25 @@ pub struct NodeState {
     pub status: NodeStatus,
     pub pid: Option<u32>,
     pub port: Option<u16>,
+    /// The primary HTTP port's URL. `None` for a `command` node and for a
+    /// `long_running` node that declares `"ports": null` or only `tcp` ports.
     pub url: Option<String>,
+    /// Every named port this node claimed, keyed by port name — the primary
+    /// included, so this is the complete list and `url`/`port` are convenience
+    /// views of one entry.
+    ///
+    /// One map rather than a routed one and an unrouted one: the sharing layer
+    /// needs the *port number* alongside the hostname for every endpoint it may
+    /// expose, and splitting the two meant that number lived only in `outputs`
+    /// as a string. `NodeEndpoint::url` being `Some` is what "routed" means.
+    ///
+    /// **Teardown must iterate this, not `url`.** Each entry owns a DNS host and
+    /// (when routed) a Caddy route; a hostname missed at stop time leaves a
+    /// permanent `/etc/hosts` line and a route that shadows that name for every
+    /// later run. Absent on rows written before multi-port routing, which is
+    /// exactly the single-`url` case, so `hostnames()` folds `url` back in.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub endpoints: BTreeMap<String, NodeEndpoint>,
     pub outputs: HashMap<String, String>,
     /// Readiness probe phase tracking (renamed from `health_phases` in v7).
     #[serde(default, alias = "health_phases")]
@@ -158,6 +201,7 @@ impl NodeState {
             pid: None,
             port: None,
             url: None,
+            endpoints: BTreeMap::new(),
             outputs: HashMap::new(),
             readiness_phases: Vec::new(),
             recovery_count: 0,
@@ -165,6 +209,117 @@ impl NodeState {
             last_liveness_error: None,
             sensitive_keys: Vec::new(),
         }
+    }
+
+    /// Every endpoint this node serves, including the one a row written before
+    /// multi-port routing carries only as `url`/`port`.
+    ///
+    /// **Use this, not `endpoints`, anywhere the answer decides what a node can
+    /// do.** `veld update` deliberately does not stop running environments, so a
+    /// run that was live across the upgrade has an empty `endpoints` map and a
+    /// populated `url` for the rest of its life — and a consumer reading the map
+    /// alone sees a node with no ports at all. That cost `veld share` an entire
+    /// run's worth of services, refused with "no shareable (URL-bearing) nodes"
+    /// about nodes that all had URLs.
+    ///
+    /// The synthesised entry is named `http`, which is what the port would have
+    /// been called had it been recorded: a legacy row has exactly one port, and
+    /// `resolve_ports` names an undeclared one `http`.
+    pub fn endpoints_or_legacy(&self) -> BTreeMap<String, NodeEndpoint> {
+        if !self.endpoints.is_empty() {
+            return self.endpoints.clone();
+        }
+        let Some(url) = &self.url else {
+            return BTreeMap::new();
+        };
+        let Some(port) = self.port else {
+            return BTreeMap::new();
+        };
+        BTreeMap::from([(
+            "http".to_owned(),
+            NodeEndpoint {
+                hostname: crate::url::hostname_of_url(url).to_owned(),
+                url: Some(url.clone()),
+                port,
+            },
+        )])
+    }
+
+    /// Every URL this node serves, primary first.
+    ///
+    /// `None` in the first slot marks the primary — the one `${veld.url}` means
+    /// and the one a single-port node has always had; `Some(port_name)` is a
+    /// secondary `protocol: "http"` port. The primary is matched *by value*, so
+    /// a row persisted before per-port routing (empty `urls`, populated `url`)
+    /// yields exactly one entry and every display keeps its old shape.
+    ///
+    /// Every surface that shows a node's URL goes through here. Routing a
+    /// hostname that no command prints is a hostname nobody can discover.
+    pub fn routed_urls(&self) -> Vec<(Option<&str>, &str)> {
+        let mut out: Vec<(Option<&str>, &str)> = Vec::new();
+        if let Some(primary) = &self.url {
+            out.push((None, primary.as_str()));
+        }
+        for (name, endpoint) in &self.endpoints {
+            let Some(url) = &endpoint.url else { continue };
+            if self.is_primary(endpoint) {
+                continue;
+            }
+            out.push((Some(name.as_str()), url.as_str()));
+        }
+        out
+    }
+
+    /// Whether this endpoint is the node's primary — the one `${veld.url}` means
+    /// and the one [`NodeState::url`] repeats.
+    ///
+    /// Matched **by value**, because the primary's *name* is not recorded: a row
+    /// written before per-port endpoints has a `url` and no map, and every
+    /// display has to keep working on it. That is a rule three surfaces depend on
+    /// — this method exists so it is written once. A same-URL tie is impossible
+    /// upstream (`planned_hostnames` refuses two ports resolving to one hostname
+    /// within a run), and if it ever became possible, the first entry winning is
+    /// the same answer every caller would reach independently.
+    pub fn is_primary(&self, endpoint: &NodeEndpoint) -> bool {
+        endpoint.url.is_some() && endpoint.url == self.url
+    }
+
+    /// Every raw (`tcp`) endpoint this node serves, as `(port name, host:port)`.
+    ///
+    /// The counterpart to [`NodeState::routed_urls`], and it exists for the same
+    /// reason: a hostname veld mints and no command prints is a hostname nobody
+    /// can discover. A raw port is never a URL — it has no scheme and nothing
+    /// routes it — so it is returned as the address it actually is, for a caller
+    /// to display separately rather than fold in beside the links.
+    pub fn raw_addresses(&self) -> Vec<(&str, String)> {
+        self.endpoints
+            .iter()
+            .filter(|(_, e)| e.url.is_none())
+            .map(|(name, e)| {
+                (
+                    name.as_str(),
+                    format!("{}:{}", crate::url::hostname_of_url(&e.hostname), e.port),
+                )
+            })
+            .collect()
+    }
+
+    /// Every hostname this node claimed, port-stripped and deduplicated — the
+    /// one list teardown, GC and the collision check must all walk.
+    ///
+    /// Includes unrouted (`tcp`) endpoints, which own a DNS entry and no route,
+    /// and folds `url` in rather than trusting `endpoints` alone, so a run
+    /// persisted before multi-port routing still tears its single route down.
+    pub fn hostnames(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        let from_endpoints = self.endpoints.values().map(|e| e.hostname.as_str());
+        for u in from_endpoints.chain(self.url.as_deref()) {
+            let host = crate::url::hostname_of_url(u).to_owned();
+            if !out.contains(&host) {
+                out.push(host);
+            }
+        }
+        out
     }
 
     /// Encrypt sensitive output values in-place for storage at rest.
@@ -595,7 +750,20 @@ pub struct RegistryRunInfo {
     pub run_id: Uuid,
     pub name: String,
     pub status: RunStatus,
+    /// Reachable URLs, for display: `node` for a node's primary port and
+    /// `node#port` for every other one. **Routed ports only** — a `tcp` port has
+    /// a hostname but no URL, and anything that renders this map as links would
+    /// turn a scheme-less host into a dead one.
     pub urls: HashMap<String, String>,
+    /// Every hostname this run has claimed, routed or not.
+    ///
+    /// Separate from [`RegistryRunInfo::urls`] because the two questions differ:
+    /// collision detection has to see a `tcp` port (it owns a DNS entry, and a
+    /// DNS collision is the harder one to diagnose — nothing serves an error
+    /// page), while a URL list must not. Deriving one from the other cost the
+    /// UI a duplicate row per node and a scheme-less "link".
+    #[serde(default)]
+    pub hostnames: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

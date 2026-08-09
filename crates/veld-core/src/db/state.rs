@@ -144,7 +144,7 @@ fn load_nodes(conn: &Connection, run_row: i64) -> Result<HashMap<String, NodeSta
     let mut stmt = conn.prepare_cached(
         "SELECT node_key, node_name, variant, status, pid, port, url, outputs,
                 readiness_phases, recovery_count, consecutive_failures,
-                last_liveness_error, sensitive_keys
+                last_liveness_error, sensitive_keys, endpoints
          FROM nodes WHERE run_row = ?1",
     )?;
     let rows = stmt.query_map([run_row], |row| {
@@ -152,6 +152,7 @@ fn load_nodes(conn: &Connection, run_row: i64) -> Result<HashMap<String, NodeSta
         let outputs_json: String = row.get(7)?;
         let phases_json: String = row.get(8)?;
         let sensitive_json: String = row.get(12)?;
+        let endpoints_json: String = row.get(13)?;
         let status: String = row.get(3)?;
         Ok((
             key,
@@ -162,6 +163,7 @@ fn load_nodes(conn: &Connection, run_row: i64) -> Result<HashMap<String, NodeSta
                 pid: row.get(4)?,
                 port: row.get(5)?,
                 url: row.get(6)?,
+                endpoints: serde_json::from_str(&endpoints_json).unwrap_or_default(),
                 outputs: serde_json::from_str(&outputs_json).unwrap_or_default(),
                 readiness_phases: serde_json::from_str::<Vec<ReadinessPhase>>(&phases_json)
                     .unwrap_or_default(),
@@ -478,8 +480,9 @@ impl Db {
             let mut stmt = tx.prepare_cached(
                 "INSERT INTO nodes (run_row, node_key, node_name, variant, status, pid, port, url,
                                     outputs, readiness_phases, recovery_count,
-                                    consecutive_failures, last_liveness_error, sensitive_keys)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                                    consecutive_failures, last_liveness_error, sensitive_keys,
+                                    endpoints)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             )?;
             for (key, node) in &run.nodes {
                 let mut node = node.clone();
@@ -499,6 +502,7 @@ impl Db {
                     node.consecutive_failures,
                     node.last_liveness_error,
                     serde_json::to_string(&node.sensitive_keys)?,
+                    serde_json::to_string(&node.endpoints)?,
                 ])?;
             }
         }
@@ -747,17 +751,59 @@ impl Db {
             })?
             .collect::<Result<_, _>>()?;
 
+        // Both columns: `url` is the primary, `endpoints` carries every named
+        // port. Rows with neither claim nothing and are skipped.
         let mut url_stmt = conn.prepare_cached(
-            "SELECT node_key, url FROM nodes WHERE run_row = ?1 AND url IS NOT NULL",
+            "SELECT node_key, url, endpoints FROM nodes WHERE run_row = ?1
+             AND (url IS NOT NULL OR endpoints != '{}')",
         )?;
 
         let mut registry = GlobalRegistry::default();
         for (run_row, root, project_name, run_name, run_id, status) in rows {
-            let urls: HashMap<String, String> = url_stmt
-                .query_map([run_row], |r| {
-                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-                })?
-                .collect::<Result<_, _>>()?;
+            let mut urls: HashMap<String, String> = HashMap::new();
+            let mut hostnames: Vec<String> = Vec::new();
+            let per_node = url_stmt.query_map([run_row], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })?;
+            for row in per_node {
+                let (node_key, primary, endpoints_json) = row?;
+                let per_port: std::collections::BTreeMap<String, crate::state::NodeEndpoint> =
+                    serde_json::from_str(&endpoints_json).unwrap_or_default();
+
+                if let Some(primary) = &primary {
+                    urls.insert(node_key.clone(), primary.clone());
+                }
+                for (port_name, endpoint) in &per_port {
+                    // Every hostname, routed or not: an unrouted (`tcp`) port
+                    // owns a DNS entry, and a DNS collision is the harder one to
+                    // diagnose because nothing serves an error page.
+                    let host = crate::url::hostname_of_url(&endpoint.hostname).to_owned();
+                    if !hostnames.contains(&host) {
+                        hostnames.push(host);
+                    }
+                    // Display keys, so only routed ports appear — and the
+                    // primary is already in under its bare node key. The
+                    // primary-by-value rule is `NodeState::is_primary`; spelled
+                    // out here only because this reads columns, not a NodeState.
+                    let Some(url) = &endpoint.url else { continue };
+                    if Some(url) == primary.as_ref() {
+                        continue;
+                    }
+                    urls.insert(format!("{node_key}#{port_name}"), url.clone());
+                }
+                // A row persisted before per-port endpoints has a `url` and an
+                // empty map; its hostname would otherwise go unclaimed.
+                if let Some(primary) = &primary {
+                    let host = crate::url::hostname_of_url(primary).to_owned();
+                    if !hostnames.contains(&host) {
+                        hostnames.push(host);
+                    }
+                }
+            }
             let entry = registry
                 .projects
                 .entry(root.clone())
@@ -773,6 +819,7 @@ impl Db {
                     name: run_name,
                     status: parse_run_status(&status),
                     urls,
+                    hostnames,
                 },
             );
         }
@@ -1027,6 +1074,65 @@ mod tests {
         assert_eq!(
             entry.runs["dev"].urls["web:local"],
             "https://web.test.veld.localhost"
+        );
+    }
+
+    /// The two halves of a multi-port run's registry entry answer different
+    /// questions and must not be derived from each other: `urls` is what the
+    /// dashboards render as links, `hostnames` is what the collision check walks.
+    #[test]
+    fn registry_separates_display_urls_from_claimed_hostnames() {
+        let (_dir, db) = test_db();
+        let root = Path::new("/tmp/projPorts");
+        let mut run = sample_run("dev");
+        let node = run.nodes.get_mut("web:local").unwrap();
+        node.endpoints.insert(
+            "http".into(),
+            crate::state::NodeEndpoint {
+                hostname: "web.test.veld.localhost".into(),
+                url: Some("https://web.test.veld.localhost".into()),
+                port: 3000,
+            },
+        );
+        node.endpoints.insert(
+            "admin".into(),
+            crate::state::NodeEndpoint {
+                hostname: "web-admin.test.veld.localhost".into(),
+                url: Some("https://web-admin.test.veld.localhost".into()),
+                port: 3001,
+            },
+        );
+        node.endpoints.insert(
+            "db".into(),
+            crate::state::NodeEndpoint {
+                hostname: "web-db.test.veld.localhost".into(),
+                url: None,
+                port: 5432,
+            },
+        );
+        db.save_run(root, "proj", &run).unwrap();
+
+        let reg = db.registry().unwrap();
+        let info = &reg.projects["/tmp/projPorts"].runs["dev"];
+
+        // The primary keeps its bare node key — no second entry under `#http`,
+        // which would render the same service twice in the links menu.
+        let mut keys: Vec<&str> = info.urls.keys().map(String::as_str).collect();
+        keys.sort();
+        assert_eq!(keys, ["web:local", "web:local#admin"]);
+        // And no unrouted port: a scheme-less host opened as a link is dead.
+        assert!(info.urls.values().all(|u| u.starts_with("https://")));
+
+        // Every hostname is claimed, `tcp` included.
+        let mut hosts = info.hostnames.clone();
+        hosts.sort();
+        assert_eq!(
+            hosts,
+            [
+                "web-admin.test.veld.localhost",
+                "web-db.test.veld.localhost",
+                "web.test.veld.localhost",
+            ]
         );
     }
 
