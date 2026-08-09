@@ -129,6 +129,29 @@ pub fn socket_path_too_long(path: &std::path::Path) -> Option<String> {
 /// which has to stop them all.
 pub const PTY_DIR_PREFIX: &str = "pty-";
 
+/// Whether a path has the exact shape the daemon gives a holder socket: a
+/// 16-hex-digit lowercase digest of the session id, plus `.sock`.
+///
+/// Lives here rather than beside the code that *builds* the name because it is
+/// the gate on every scan of [`pty_dir`] — the daemon's adoption sweep, which
+/// deletes what does not answer, `veld uninstall`'s hangup sweep, and `veld
+/// doctor`'s liveness count. `VELD_PTY_DIR` is a plain environment variable, so
+/// a scan that trusts the extension alone will happily act on `daemon.sock` if
+/// somebody points that variable one level up at `~/.veld`. A name check, not a
+/// claim about what is behind the name: the greeting is what proves a socket is
+/// the session it should be.
+pub fn is_holder_socket_name(path: &std::path::Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .and_then(|n| n.strip_suffix(".sock"))
+        .is_some_and(|stem| {
+            stem.len() == 16
+                && stem
+                    .chars()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase())
+        })
+}
+
 /// Where this instance keeps the little executables it puts in a terminal's
 /// environment — today `veld-open`, plus `open`/`xdg-open` wrappers (see
 /// `veld-daemon/src/pty/shims.rs`).

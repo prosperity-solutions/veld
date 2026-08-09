@@ -365,6 +365,26 @@ and several were paid for in this codebase already.
   one that may signal it.** The daemon asks a holder to hang up over the socket
   and never signals the shell's process group itself — a `killpg` racing
   `child.wait()` can land on a recycled pid.
+
+  **Connecting to a holder is a probe, not a takeover.** Every piece of code that
+  wants to know whether a holder is alive says so the same way — by connecting to
+  its socket: `veld doctor` counts live holders, `holder::bind` tells a leftover
+  socket file from a running holder before it refuses to start, and the daemon's
+  own adoption sweep does it at boot. All of them close again immediately. So a
+  newly accepted connection is greeted at once (the connect-write-`HANGUP`-close
+  contract in `pty/wire.rs` depends on that) but does **not** displace the
+  attached daemon until it has either stayed connected for
+  `holder::TAKEOVER_PROBATION` or sent a frame only a daemon sends. While any
+  accepted connection displaced the incumbent on the spot, one `veld doctor` cut
+  every terminal on the machine loose from its daemon — and the daemon then
+  published exit code 1 for shells that were still running, which is the second
+  half of the rule: **losing the connection to a holder is not the same fact as
+  losing the holder.** `pump_holder` asks the holder before speaking for it, and
+  releases the session (`release_session`, no hangup, no exit) when the shell is
+  still there. Anything new that scans `instance::pty_dir()` inherits both rules,
+  and must gate on `instance::is_holder_socket_name` rather than on a `.sock`
+  extension — `VELD_PTY_DIR` is a plain environment variable, and pointed at
+  `~/.veld` the loose test connects to `daemon.sock`.
 - **`veld update` holds a lock, and nothing that the update replaces may own it.**
   One update at a time is enforced by `veld_core::update_lock`: a lock *directory*
   at `~/.veld/update.lock` (`mkdir` is the create-or-fail primitive, and already

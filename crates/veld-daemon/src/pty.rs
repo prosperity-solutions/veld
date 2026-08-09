@@ -648,22 +648,12 @@ fn socket_for(session_id: &str) -> PathBuf {
     pty_dir().join(format!("{:016x}.sock", session_digest(session_id)))
 }
 
-/// Whether a path has the exact shape [`socket_for`] produces.
-///
-/// The gate on anything destructive in [`adopt_existing_sessions`]. It is a
-/// name check, not a claim about the contents — the greeting is what proves a
-/// socket is the session it should be.
-fn is_holder_socket_name(path: &FsPath) -> bool {
-    path.file_name()
-        .and_then(|n| n.to_str())
-        .and_then(|n| n.strip_suffix(".sock"))
-        .is_some_and(|stem| {
-            stem.len() == 16
-                && stem
-                    .chars()
-                    .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase())
-        })
-}
+// Whether a path has the exact shape `socket_for` produces, and the gate on
+// anything destructive in `adopt_existing_sessions`. It lives in
+// `veld_core::instance` rather than next to `socket_for` because `veld doctor`
+// scans the same directory and has to apply the same rule — it did not, and
+// counted anything ending in `.sock` as a holder.
+use veld_core::instance::is_holder_socket_name;
 
 /// FNV-1a over the session id. A hash, not a hash *function* in the security
 /// sense — nothing here depends on it being hard to invert, only on distinct ids
@@ -1957,7 +1947,35 @@ async fn obtain_session(
         argv: ticket.pane.as_ref().map(|p| p.argv.clone()),
         pane_label: ticket.pane.as_ref().map(|p| p.label.clone()),
     };
-    let attached = start_holder(&cfg).await.map_err(SessionError::Spawn)?;
+    // A holder for this session id may still be running with a live shell in it:
+    // this daemon's link to it broke (a takeover, a socket error), or it started
+    // after the boot-time adoption sweep and this daemon has no record of it. Its
+    // socket is the one `cfg` names, so adopt it rather than spawning a second
+    // holder — the socket path has room for exactly one, so that spawn always
+    // fails to bind, and only reaches the right shell by accident: the doomed
+    // holder's own "is somebody already there?" probe lands on the live holder as
+    // a connection, and `await_holder` then poll-connects onto it. Before
+    // `TAKEOVER_PROBATION` those two connections displaced whatever the daemon had
+    // just attached, so every resume both worked *and* immediately reported the
+    // shell as exited — the loop the user sees as "it comes back for a moment and
+    // then drops".
+    let (attached, adopted) = match connect_holder(&cfg.socket).await {
+        Ok(attached) => {
+            // Never hung up on a mismatch: that holder belongs to another session
+            // and may have a live shell in it — the same rule `adopt_one` has.
+            verify_identity(&attached, &cfg).map_err(SessionError::Spawn)?;
+            debug!(session = %ticket.session_id, "adopted the holder already serving this session");
+            (attached, true)
+        }
+        Err(e) if is_unanswered(&e) => (
+            start_holder(&cfg).await.map_err(SessionError::Spawn)?,
+            false,
+        ),
+        // Something is listening but did not complete the handshake — a wedged
+        // holder, a protocol version this build refuses, `EMFILE`. Spawning would
+        // fail to bind against it, so the honest answer is the error itself.
+        Err(e) => return Err(SessionError::Spawn(e)),
+    };
 
     let mut sessions = SESSIONS.lock().await;
     if let Some(existing) = sessions.get(&ticket.session_id) {
@@ -1974,17 +1992,32 @@ async fn obtain_session(
     // Only now, with a holder actually running the command, does the pane's
     // identity become a fact worth remembering — the row is what makes this pane
     // resumable, and one written before the spawn would outlive a failure and
-    // offer a resume for a conversation that was never created.
-    if let Some(pane) = ticket.pane.as_ref().filter(|p| p.fresh) {
+    // offer a resume for a conversation that was never created. Never on an
+    // adoption: nothing was launched, the row for that launch already exists, and
+    // writing a second one would offer a resume for a conversation this attach
+    // did not start.
+    if let Some(pane) = ticket.pane.as_ref().filter(|p| p.fresh && !adopted) {
         record_pane_launch(ticket, pane);
     }
-    info!(
-        session = %session.id,
-        worktree = %ticket.label,
-        pid = session.pid,
-        "terminal session started"
-    );
-    Ok((session, false))
+    if adopted {
+        info!(
+            session = %session.id,
+            worktree = %ticket.label,
+            pid = session.pid,
+            "adopted a terminal session from its own holder"
+        );
+    } else {
+        info!(
+            session = %session.id,
+            worktree = %ticket.label,
+            pid = session.pid,
+            "terminal session started"
+        );
+    }
+    // An adopted shell is one that was already running, which is exactly what
+    // `resumed` means to the client — it is the difference between replaying a
+    // terminal and presenting a fresh one.
+    Ok((session, adopted))
 }
 
 /// Remember the identity a freshly launched pane is running under.
@@ -2281,6 +2314,23 @@ async fn pump_holder(session: Arc<Session>, mut reader: OwnedReadHalf) {
             session.exit.send_replace(Some(1));
             return;
         }
+        // Losing the connection is not the same fact as losing the holder, and
+        // the two used to be conflated here. A peer that connects to the holder
+        // displaces this connection, and the shell behind it is untouched —
+        // publishing an exit for it reports a live shell as dead, hands every
+        // attached socket a status nothing produced, and leaves the reaper to hang
+        // up a terminal somebody is still working in. So ask the holder before
+        // speaking for it.
+        if holder_is_alive(&session.id).await {
+            warn!(
+                session = %session.id,
+                pid,
+                "this daemon's connection to the holder was displaced; releasing the session \
+                 rather than reporting an exit — reattaching will pick the shell up again"
+            );
+            release_session(&session).await;
+            return;
+        }
         // The holder went away with the shell still running: it was killed, or
         // it crashed. The shell is gone with it (the master died with the
         // holder), so this is an exit like any other — reported, rather than
@@ -2297,6 +2347,50 @@ async fn pump_holder(session: Arc<Session>, mut reader: OwnedReadHalf) {
         warn!(session = %session.id, pid, "terminal holder disappeared");
         session.exit.send_replace(Some(1));
     }
+}
+
+/// Whether a holder is still serving `id`, asked by speaking its protocol.
+///
+/// Deliberately a full handshake rather than "does the socket accept?": a socket
+/// file outlives the process that bound it, and the answer decides whether a
+/// live shell is about to be declared dead. The connection is dropped
+/// immediately, which is exactly the probe shape `holder::TAKEOVER_PROBATION`
+/// makes harmless — it is greeted, never promoted, and the holder's own daemon
+/// keeps the session.
+async fn holder_is_alive(id: &str) -> bool {
+    match connect_holder(&socket_for(id)).await {
+        // The socket path is derived from the id, but a digest collision would
+        // put another session behind it — and that one being alive says nothing
+        // about this one.
+        Ok(attached) => attached.hello.session_id == id,
+        Err(_) => false,
+    }
+}
+
+/// Give a session up without ending its shell.
+///
+/// The counterpart to [`end_session`], for the case where this daemon has lost
+/// its link to a holder that is still running: the registry entry is useless
+/// (nothing can reach the shell through it any more) but the shell itself is
+/// fine, so nothing may be hung up and no exit may be published. Attached sockets
+/// are displaced so they close and can reattach — which goes through
+/// [`obtain_session`], finds the live holder at its socket, and adopts it.
+async fn release_session(session: &Arc<Session>) {
+    {
+        let mut sessions = SESSIONS.lock().await;
+        // Only if it is still *this* session: an entry re-registered under the
+        // same id in the meantime belongs to a working link, and removing it
+        // would strand the shell it is serving.
+        if sessions
+            .get(&session.id)
+            .is_some_and(|s| Arc::ptr_eq(s, session))
+        {
+            sessions.remove(&session.id);
+        }
+    }
+    // An epoch no socket holds, so every attached one sees the change and leaves.
+    let epoch = session.attach_seq.fetch_add(1, Ordering::AcqRel) + 1;
+    session.attach_epoch.send_replace(epoch);
 }
 
 // ---------------------------------------------------------------------------
@@ -2819,10 +2913,19 @@ mod tests {
             seen.push(errno);
             // Only a pressure errno earns another go; a genuinely wrong
             // classification must still fail the test rather than be retried away.
+            //
+            // `errno.is_none()` belongs in that set for the same reason, and it
+            // cannot hide the thing under test: an error with no errno is one the
+            // *handshake* produced, which means the connect succeeded — the failure
+            // being asserted (`ECONNREFUSED` ⇒ stale) is not even reachable through
+            // it. Observed as "holder closed before greeting" while the rest of
+            // this binary was forking real shells, i.e. the kernel answering for a
+            // listener that has been closed and whose descriptor something else is
+            // briefly keeping alive. Machine, not code.
             let pressure = matches!(
                 errno,
                 Some(libc::EMFILE | libc::ENFILE | libc::EINTR | libc::EAGAIN)
-            );
+            ) || errno.is_none();
             assert!(
                 pressure,
                 "dead socket misclassified: errno={errno:?} err={e}"
@@ -3569,6 +3672,109 @@ mod tests {
                 .await
                 .unwrap();
             read_until(&mut again, "mark=kept").await;
+            end_session(&sid, "test cleanup").await;
+        }
+
+        /// Somebody probing the holder's socket must not cost the user a
+        /// terminal.
+        ///
+        /// The daemon's half of `holder::tests::
+        /// a_probe_connection_does_not_take_a_terminal_from_its_daemon`, and the
+        /// level the bug was actually experienced at: `veld doctor` counts live
+        /// holders by connecting to each socket in the directory and closing
+        /// again. While any accepted connection displaced the attached daemon, one
+        /// `veld doctor` disconnected every terminal on the machine — the daemon
+        /// read EOF from the holder, published exit code 1 for shells that were
+        /// still running, and the reaper hung those shells up 30 minutes later.
+        /// The shape here is exactly doctor's: connect, drop, count.
+        #[tokio::test]
+        async fn a_probe_on_the_holder_socket_does_not_end_the_session() {
+            let addr = serve().await;
+            let dir = tempfile::tempdir().unwrap();
+            let sid = session_id();
+
+            let mut ws = open(addr, &sid, dir.path(), "&cols=90&rows=30").await;
+            read_control(&mut ws, "ready").await;
+            ws.send(WsMessage::Binary(
+                b"VELD_MARK=probed; printf 'set%s\\n' '-ok'\n"
+                    .to_vec()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+            read_until(&mut ws, "set-ok").await;
+
+            // Three, because doctor probes every socket it finds and a resume
+            // probes again on every retry.
+            let socket = socket_for(&sid);
+            for _ in 0..3 {
+                let probe = std::os::unix::net::UnixStream::connect(&socket)
+                    .expect("the holder must be listening");
+                drop(probe);
+            }
+
+            // Same socket, same shell, same variable. `read_until` fails loudly on
+            // an `exit` control frame, which is what the bug produced here.
+            ws.send(WsMessage::Binary(
+                b"printf 'mark=%s\\n' $VELD_MARK\n".to_vec().into(),
+            ))
+            .await
+            .unwrap();
+            read_until(&mut ws, "mark=probed").await;
+            end_session(&sid, "test cleanup").await;
+        }
+
+        /// A daemon that has lost its record of a session, while the holder for it
+        /// is still running, must adopt that holder rather than spawn a second one.
+        ///
+        /// The registry entry is removed by hand here because that is precisely the
+        /// state `release_session` leaves behind, and the state a daemon is in
+        /// whenever a holder started after its boot-time adoption sweep. What it
+        /// used to do instead was spawn a holder onto a socket path with room for
+        /// one: that holder fails to bind, and the session came back only by
+        /// accident — through the doomed holder's own liveness probe and
+        /// `await_holder`'s poll-connect, both of which then displaced the
+        /// connection the daemon had just made. The user saw their shell reappear
+        /// and drop again, several times a second.
+        #[tokio::test]
+        async fn a_lost_session_adopts_the_holder_that_is_still_serving_it() {
+            let addr = serve().await;
+            let dir = tempfile::tempdir().unwrap();
+            let sid = session_id();
+
+            let mut ws = open(addr, &sid, dir.path(), "&cols=90&rows=30").await;
+            read_control(&mut ws, "ready").await;
+            ws.send(WsMessage::Binary(
+                b"VELD_MARK=readopted; printf 'set%s\\n' '-ok'\n"
+                    .to_vec()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+            read_until(&mut ws, "set-ok").await;
+            drop(ws);
+
+            // The daemon forgets the session. The holder — and the shell in it —
+            // knows nothing about that.
+            SESSIONS.lock().await.remove(&sid);
+            assert!(
+                socket_for(&sid).exists(),
+                "the holder must still be serving its socket"
+            );
+
+            let mut again = open(addr, &sid, dir.path(), "&cols=90&rows=30").await;
+            let ready = read_control(&mut again, "ready").await;
+            assert_eq!(
+                ready["resumed"], true,
+                "adopting a running holder is a resume, not a fresh terminal"
+            );
+            again
+                .send(WsMessage::Binary(
+                    b"printf 'mark=%s\\n' $VELD_MARK\n".to_vec().into(),
+                ))
+                .await
+                .unwrap();
+            read_until(&mut again, "mark=readopted").await;
             end_session(&sid, "test cleanup").await;
         }
 

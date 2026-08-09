@@ -86,6 +86,25 @@ const GREETING_TIMEOUT: Duration = Duration::from_secs(5);
 /// cost of having no bound at all is a holder that cannot be hung up.
 const OUTPUT_SEND_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How long a newly accepted connection must stay open, while another daemon is
+/// already attached, before it is allowed to take the session over.
+///
+/// **This is what stops a liveness probe from killing a terminal.** Connecting
+/// to a holder is how everything decides whether one is alive: `veld doctor`
+/// walks the socket directory, and [`bind`] connects to a path already in use to
+/// tell a leftover file from a live holder. Both connect and close immediately.
+/// While *any* accepted connection displaced the attached daemon on the spot,
+/// each of those probes severed a live session — the daemon read EOF, published
+/// an exit for a shell that was still running, and the reaper eventually hung
+/// that shell up. One `veld doctor` did it to every terminal on the machine.
+///
+/// A real peer, by contrast, connects and stays. So a newcomer is greeted at
+/// once (which is what keeps the hangup-and-close contract in [`wire`] working)
+/// but does not displace the incumbent until it has been connected this long.
+/// Short enough that a genuine takeover is imperceptible, and four orders of
+/// magnitude longer than a probe's connection lives.
+const TAKEOVER_PROBATION: Duration = Duration::from_secs(1);
+
 /// How long the holder waits, after handing a daemon the exit code, for that
 /// daemon to close the connection.
 ///
@@ -134,6 +153,13 @@ pub async fn run(cfg: HolderConfig) -> anyhow::Result<()> {
 /// killed holder must not stop this one, but a socket somebody answers means a
 /// holder for this session is already running and this process must not fight it
 /// for the shell.
+///
+/// It is a connect-and-close, which is a *probe* and not a takeover — the live
+/// holder on the other side must not treat it as one. See
+/// [`TAKEOVER_PROBATION`]: while it did, this very check severed that holder's
+/// daemon connection, and the daemon then reported a live shell as exited. The
+/// spawn-then-fail-to-bind path this runs on is reached on every resume of a
+/// session whose holder outlived its daemon link, so it fired in a loop.
 fn bind(path: &std::path::Path) -> anyhow::Result<UnixListener> {
     // Before anything else, because `bind`'s own answer to this is "path must be
     // shorter than SUN_LEN" — true, and it names neither the path nor the way
@@ -184,7 +210,9 @@ fn bind(path: &std::path::Path) -> anyhow::Result<UnixListener> {
 /// What the main loop reacts to besides its PTY.
 enum Cmd {
     /// A daemon connected. It displaces whatever was connected before, the same
-    /// way a second WebSocket takes over from the first.
+    /// way a second WebSocket takes over from the first — but only once it has
+    /// held the connection open for [`TAKEOVER_PROBATION`], because a bare
+    /// connect is also how everything probes whether this holder is alive.
     Connected(UnixStream),
     /// A frame from the connection of the given generation.
     Frame(u64, Frame),
@@ -225,6 +253,10 @@ async fn serve(cfg: &HolderConfig, listener: UnixListener) -> anyhow::Result<()>
 
     let mut scrollback = Scrollback::new();
     let mut conn: Option<Conn> = None;
+    // Greeted, but not yet trusted with the session — see `TAKEOVER_PROBATION`.
+    // Only ever occupied while `conn` is, because a newcomer arriving with
+    // nothing attached has nothing to displace and is promoted immediately.
+    let mut pending: Option<Conn> = None;
     let mut generation = 0u64;
     let mut disconnected_since = Some(Instant::now());
     let mut exit_code: Option<u32> = None;
@@ -251,6 +283,12 @@ async fn serve(cfg: &HolderConfig, listener: UnixListener) -> anyhow::Result<()>
     // Set once the orphan path has done everything it can (hung up, then killed),
     // which disables its branch — see the guard on it below.
     let mut orphan_handled = false;
+    // Placeholder deadline, armed only while a probationary connection exists,
+    // for the same reason `drain` above is a `sleep` and not an `interval`. An
+    // elapsed `Sleep` polls `Ready` forever, so the branch is guarded on
+    // `pending.is_some()` as well — and every arming resets it.
+    let probation = tokio::time::sleep(Duration::from_secs(3600));
+    tokio::pin!(probation);
 
     /// Record that no daemon is connected, and re-arm the orphan deadline.
     ///
@@ -328,8 +366,10 @@ async fn serve(cfg: &HolderConfig, listener: UnixListener) -> anyhow::Result<()>
                             }
                         };
                         if dead {
-                            conn = None;
-                            mark_disconnected!();
+                            conn = pending.take();
+                            if conn.is_none() {
+                                mark_disconnected!();
+                            }
                         }
                     }
                 }
@@ -344,7 +384,7 @@ async fn serve(cfg: &HolderConfig, listener: UnixListener) -> anyhow::Result<()>
             Some(cmd) = cmd_rx.recv() => match cmd {
                 Cmd::Connected(stream) => {
                     generation += 1;
-                    conn = attach(
+                    let greeted = attach(
                         stream,
                         generation,
                         cmd_tx.clone(),
@@ -355,14 +395,57 @@ async fn serve(cfg: &HolderConfig, listener: UnixListener) -> anyhow::Result<()>
                         disconnected_since,
                     )
                     .await;
-                    if conn.is_some() {
-                        disconnected_since = None;
-                    } else {
-                        // The greeting failed, so nothing is attached after all.
-                        mark_disconnected!();
+                    match greeted {
+                        // Nothing attached: this newcomer is the one and only.
+                        Some(c) if conn.is_none() => {
+                            conn = Some(c);
+                            // A newcomer arriving with nothing attached cannot be
+                            // waiting behind anything, so any `pending` here would
+                            // be a leftover of a state that is not supposed to
+                            // exist. Dropped rather than kept, so "at most one
+                            // probationary connection" stays true by construction.
+                            pending = None;
+                            disconnected_since = None;
+                        }
+                        // A daemon is attached. Greet this one — a peer is allowed
+                        // to connect only to write `HANGUP`, and that still works
+                        // from here — but do not hand it the session until it has
+                        // proved it is a peer at all. See `TAKEOVER_PROBATION`.
+                        Some(c) => {
+                            // Replacing an earlier probationary connection, which
+                            // is the same last-one-wins rule takeover has always
+                            // had, applied one step earlier.
+                            pending = Some(c);
+                            probation
+                                .as_mut()
+                                .reset(tokio::time::Instant::now() + TAKEOVER_PROBATION);
+                        }
+                        // The greeting failed, so nothing changed: whoever was
+                        // attached still is, and if nobody was, the orphan clock
+                        // that started when they left keeps running. Re-arming it
+                        // here is what let a stream of failed connections — a
+                        // poll-connect against an over-cap daemon, a monitor —
+                        // keep an abandoned shell alive indefinitely.
+                        None => {}
                     }
                 }
                 Cmd::Frame(seq, frame) => {
+                    // A probationary peer that *speaks* has proved itself sooner
+                    // than the window could: only a daemon sends input or a resize,
+                    // and the probes the window exists to survive send nothing at
+                    // all. Promoting here rather than making it wait is what keeps
+                    // a takeover lossless — this very frame is then acted on below
+                    // instead of being dropped as a displaced peer's. `HANGUP` is
+                    // deliberately not in the list: it ends a session rather than
+                    // writing to it, and its whole contract is that it works
+                    // without being anybody's writer.
+                    if pending.as_ref().is_some_and(|c| c.generation == seq)
+                        && matches!(frame.kind, wire::INPUT | wire::RESIZE)
+                    {
+                        info!(session = %cfg.session_id, "a second daemon took the session over");
+                        conn = pending.take();
+                        disconnected_since = None;
+                    }
                     // `HANGUP` is honoured whatever the generation, and even when
                     // no connection is established at all. It is the one frame
                     // whose entire purpose is to work in degraded conditions — a
@@ -397,17 +480,44 @@ async fn serve(cfg: &HolderConfig, listener: UnixListener) -> anyhow::Result<()>
                             }
                             other => {
                                 warn!("dropping connection: unsupported frame {other:#x}");
-                                conn = None;
-                                mark_disconnected!();
+                                conn = pending.take();
+                                if conn.is_none() {
+                                    mark_disconnected!();
+                                }
                             }
                         }
+                    }
+                    // A probationary peer's frames are not acted on either — it is
+                    // not the writer — but one it cannot be served changes nothing
+                    // except that it is not a peer worth promoting.
+                    else if pending.as_ref().is_some_and(|c| c.generation == seq)
+                        && !frame.is_ignorable()
+                        && !matches!(frame.kind, wire::INPUT | wire::RESIZE)
+                    {
+                        warn!(
+                            "dropping a probationary connection: unsupported frame {:#x}",
+                            frame.kind
+                        );
+                        pending = None;
                     }
                 }
                 Cmd::Disconnected(seq) => {
                     if conn.as_ref().is_some_and(|c| c.generation == seq) {
                         debug!(session = %cfg.session_id, "daemon disconnected");
-                        conn = None;
-                        mark_disconnected!();
+                        // Whatever was waiting behind it takes over now rather
+                        // than serving its probation out: the point of the wait is
+                        // to protect the *incumbent*, and there no longer is one.
+                        conn = pending.take();
+                        if conn.is_none() {
+                            mark_disconnected!();
+                        }
+                    } else if pending.as_ref().is_some_and(|c| c.generation == seq) {
+                        // A probationary connection went away before proving
+                        // itself — a `veld doctor` probe, or a holder that found
+                        // this socket occupied and gave up. The attached daemon is
+                        // untouched, which is the entire point of the probation.
+                        debug!(session = %cfg.session_id, "a probationary peer disconnected");
+                        pending = None;
                     }
                 }
             },
@@ -431,6 +541,15 @@ async fn serve(cfg: &HolderConfig, listener: UnixListener) -> anyhow::Result<()>
             },
 
             _ = &mut drain, if exit_code.is_some() => break,
+
+            // Still connected after the probation window, so this is a peer and
+            // not a probe: hand it the session, which drops the incumbent's
+            // connection exactly as an immediate takeover always did.
+            _ = &mut probation, if pending.is_some() => {
+                info!(session = %cfg.session_id, "a second daemon took the session over");
+                conn = pending.take();
+                disconnected_since = None;
+            },
 
             // Guarded on `!orphan_handled` as well as being disconnected: a
             // `Sleep` that has elapsed returns `Ready` on **every** subsequent
@@ -1218,6 +1337,135 @@ mod tests {
             );
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
+    }
+
+    /// Build a holder for a session that echoes what is typed into it, and
+    /// return its socket path once it is listening.
+    ///
+    /// `cat` rather than a login shell: the assertions below are about bytes
+    /// coming back out of the PTY, and a developer's `.zshrc` is not a fixture.
+    async fn echo_holder(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+        let socket = dir.join(format!("{name}.sock"));
+        let cfg = HolderConfig {
+            session_id: name.to_owned(),
+            worktree_id: 1,
+            label: "test".to_owned(),
+            cwd: dir.to_path_buf(),
+            cols: 80,
+            rows: 24,
+            socket: socket.clone(),
+            // Long, so nothing in these tests can be explained by the orphan path.
+            orphan_grace_secs: 3600,
+            argv: Some(vec!["cat".to_owned()]),
+            env: std::collections::BTreeMap::new(),
+            pane_label: None,
+        };
+        tokio::spawn(run(cfg));
+        socket
+    }
+
+    /// Connect, and read frames until the greeting is complete.
+    async fn greet(socket: &std::path::Path) -> tokio::net::UnixStream {
+        let mut stream = loop {
+            match tokio::net::UnixStream::connect(socket).await {
+                Ok(s) => break s,
+                Err(_) => tokio::time::sleep(Duration::from_millis(20)).await,
+            }
+        };
+        for want in [wire::HELLO, wire::SCROLLBACK] {
+            let frame = wire::read_frame(&mut stream).await.unwrap().unwrap();
+            assert_eq!(frame.kind, want);
+        }
+        stream
+    }
+
+    /// Type `marker` and wait for the PTY to echo it back, or say what arrived
+    /// instead.
+    async fn echoes_back(stream: &mut tokio::net::UnixStream, marker: &str) -> bool {
+        wire::write_frame(stream, wire::INPUT, format!("{marker}\n").as_bytes())
+            .await
+            .unwrap();
+        let mut seen = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < deadline {
+            match tokio::time::timeout(Duration::from_secs(1), wire::read_frame(stream)).await {
+                // The connection ended: whatever this is, it is not an echo.
+                Ok(Ok(None)) | Ok(Err(_)) => return false,
+                Ok(Ok(Some(frame))) => {
+                    if frame.kind == wire::OUTPUT {
+                        seen.extend_from_slice(&frame.payload);
+                        if String::from_utf8_lossy(&seen).contains(marker) {
+                            return true;
+                        }
+                    }
+                }
+                Err(_) => {}
+            }
+        }
+        false
+    }
+
+    /// A bare connect — the shape of every liveness probe there is — must not
+    /// take the session away from the daemon that has it.
+    ///
+    /// This is the whole bug. `veld doctor` walks the holder directory and
+    /// connects to each socket to count the live ones; `bind` connects to a path
+    /// already in use to tell a stale file from a running holder, which happens on
+    /// every resume of a session whose holder outlived its daemon link. Both close
+    /// immediately. While an accepted connection displaced the attached daemon on
+    /// the spot, both severed live sessions: the daemon read EOF, published an exit
+    /// for a shell that was still running, and the reaper hung that shell up half
+    /// an hour later. One `veld doctor` did it to every terminal on the machine.
+    #[tokio::test]
+    async fn a_probe_connection_does_not_take_a_terminal_from_its_daemon() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = echo_holder(dir.path(), "probeprobe").await;
+        let mut daemon = greet(&socket).await;
+        assert!(
+            echoes_back(&mut daemon, "BEFORE-PROBE").await,
+            "the fixture must be working before the probe"
+        );
+
+        // Three of them, because doctor probes every socket it finds and a resume
+        // probes on every retry.
+        for _ in 0..3 {
+            let probe = std::os::unix::net::UnixStream::connect(&socket).unwrap();
+            drop(probe);
+        }
+
+        assert!(
+            echoes_back(&mut daemon, "AFTER-PROBE").await,
+            "a connect-and-close must leave the attached daemon's connection alone"
+        );
+    }
+
+    /// The other half of the same rule: a peer that stays is a peer, and takeover
+    /// still works. Deleting the probation would pass the test above trivially by
+    /// never handing a session over at all.
+    #[tokio::test]
+    async fn a_peer_that_stays_connected_still_takes_the_session_over() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = echo_holder(dir.path(), "takeoverprobe").await;
+        let mut first = greet(&socket).await;
+        assert!(echoes_back(&mut first, "FIRST").await);
+
+        let mut second = greet(&socket).await;
+        assert!(
+            echoes_back(&mut second, "SECOND").await,
+            "a peer that holds its connection open must get the session"
+        );
+        // And the displaced one is told, by the only means the protocol has: its
+        // connection ends.
+        let closed = tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                match wire::read_frame(&mut first).await {
+                    Ok(Some(_)) => continue,
+                    _ => return,
+                }
+            }
+        })
+        .await;
+        assert!(closed.is_ok(), "the displaced connection must be dropped");
     }
 
     #[test]

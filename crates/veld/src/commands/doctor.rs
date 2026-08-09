@@ -766,11 +766,28 @@ impl Diagnostics {
         let (mut live, mut stale) = (0usize, 0usize);
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("sock") {
+            // The digest-shaped name, not merely a `.sock` extension. `VELD_PTY_DIR`
+            // is a plain environment variable, and pointed one level up at
+            // `~/.veld` the extension test alone counts `daemon.sock` and
+            // `helper.sock` as terminals — and, worse, connects to them.
+            if !veld_core::instance::is_holder_socket_name(&path) {
                 continue;
             }
+            // Connect-and-close is the only way to tell a live holder from a
+            // leftover socket file, and it is a *probe*: this command must never
+            // cost somebody their terminal. It used to. The holder treated every
+            // accepted connection as a daemon taking the session over, so this
+            // loop severed the real daemon's connection to every terminal on the
+            // machine, which then reported each live shell as exited and, half an
+            // hour later, hung it up. The fix is on the holder's side — a
+            // connection has to stay open for `TAKEOVER_PROBATION` before it
+            // displaces anything — so what is required here is only that the
+            // connection be dropped at once, which it is.
             match std::os::unix::net::UnixStream::connect(&path) {
-                Ok(_) => live += 1,
+                Ok(stream) => {
+                    drop(stream);
+                    live += 1;
+                }
                 Err(_) => stale += 1,
             }
         }
