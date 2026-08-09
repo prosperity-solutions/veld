@@ -470,6 +470,11 @@ select:focus {
 .rail-group.lane-dragging {
   opacity: 0.45;
 }
+/* The dock's own version of the bar, drawn on its top edge while it owns the
+   hover. The last lane's bar lives inside the scroller, so in the case the dock
+   target exists for — a rail scrolled up, its last lane off-screen — the drop
+   would otherwise be accepted with nothing on screen saying where it lands. */
+.rail-dock.lane-drop-into::before,
 .rail-group.lane-drop-before::before,
 .rail-group.lane-drop-after::after {
   content: "";
@@ -494,6 +499,11 @@ select:focus {
 }
 .rail-group.lane-drop-after::after {
   bottom: -6px;
+}
+/* Just inside the dock's own border, since there is no gutter above it — the
+   list ends at that line. */
+.rail-dock.lane-drop-into::before {
+  top: 3px;
 }
 
 /* A hairline between sections, on top of the gap.
@@ -634,6 +644,8 @@ select:focus {
   flex-direction: column;
   gap: 2px;
   padding: 10px 8px;
+  /* Anchors the lane-drop bar on the dock's own top edge. */
+  position: relative;
   border-top: 1px solid var(--border);
 }
 

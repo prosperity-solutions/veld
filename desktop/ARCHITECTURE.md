@@ -167,28 +167,45 @@ requests at runtime — branding rule.
   - A checkout created from a header lands at the **top** of that section, not
     the end. Unplaced rows sort last (`WT_ORDER`), so the new one appeared
     furthest from both the button that made it and the work about to happen in
-    it. The client writes the section's order after the create — one full-list
-    `POST /api/worktree-order`, exactly like a drag — which is also what pins
-    that section's previously-alphabetical rows as hand-placed. A create that
-    succeeds and a placement that fails is reported, never thrown: the checkout
-    exists and only its position is wrong.
+    it. The client writes the order after the create with `POST
+    /api/worktree-order`, filtered to the rows that were **already hand-placed**
+    plus the new one. Sending the full order — what a drag sends — would give a
+    `sort_position` to every unplaced row in the repo, so one click of any "＋"
+    would silently freeze the label sort everywhere and break the promise that
+    what you have not placed stays alphabetical. The daemon clears the positions
+    it is not given, so the omitted rows keep exactly the state they had. A
+    create that succeeds and a placement that fails is reported, never thrown:
+    the checkout exists and only its position is wrong.
 - **A whole lane is dragged by its header, and the drop is resolved from the
   pointer.** The header is the handle (its ＋ and ⋮ drag it too, harmlessly —
   they act on click), and the lane's ⋮ menu keeps *Move lane up* / *Move lane
   down* as the keyboard path. Dropping is **displacement**: anywhere on a lane
-  means "take that lane's position", so `moveLane` speaks final positions and
-  both gestures share one write.
-  - **The scrollable list is the single drop zone**, not the sections. Per-element
-    hit testing made the gesture one-directional and shipped broken twice: a lane
-    is grabbed by the header at the *top* of its own section, so dragging up
-    enters the section above immediately while dragging down must clear the whole
-    dragged section first — and the 9px gutters, the list's padding and
-    everything below the last lane belonged to no section at all, so "pull it to
-    the bottom and let go" landed on nothing. `laneDropTarget` (model.ts, tested)
-    maps the pointer's Y onto the sections' bottom edges instead: above the first
-    lane is the first, below the last is the last, a gutter belongs to the lane
-    under it. The DOM read stays in the component; the choice is a pure function
-    because it is the part that kept being wrong.
+  means "take that lane's place", and `moveLane` says that with two lane
+  **names** — never an index. Which coordinate system an index was in (a final
+  position or an insertion point) is the thing that took three attempts to get
+  right, with the row drag next door handing out the other kind as the obvious
+  template; naming the target deletes the category, and both gestures share the
+  one write.
+  - **The scrollable list is the drop zone, not the sections.** Per-element
+    hit testing made the gesture one-directional and shipped broken twice: the
+    9px gutters, the list's padding and everything below the last lane belonged
+    to no section at all, so "pull it to the bottom and let go" landed on
+    nothing. `laneDropTarget` (model.ts, tested) maps the pointer's Y onto the
+    sections' bottom edges instead: above the first lane is the first, below the
+    last is the last, a gutter belongs to the lane under it. The DOM read stays
+    in the component; the choice is a pure function because it is the part that
+    kept being wrong. What this does *not* remove is the travel a downward move
+    costs — the dragged lane keeps its place and height while carried, so the
+    pointer must clear its own section before the lane below is the answer. That
+    is the price of not reflowing the rail under a pointer aiming at it.
+  - **The bottom dock is a second drop zone, and it hard-codes the last lane.**
+    It is the natural overshoot for "pull this lane to the bottom", so refusing
+    there made the last position the one place the gesture could miss — but it
+    must not reuse the list's geometry: `getBoundingClientRect` is layout and is
+    not clipped by the scroller, so with the rail scrolled up a section below the
+    fold has a bottom below the dock's own Y and the drop would land mid-rail.
+    The dock means "the bottom" and says so directly. Its whole area answers
+    that way, the Trash header included.
   - Lane positions are keyed on `RailGroup.lane` behind `editable`, **never on
     `key`**: the main checkout's key is the literal `"main"` and `"main"` is a
     legal lane name, so keying on it handed that pinned section a real lane's

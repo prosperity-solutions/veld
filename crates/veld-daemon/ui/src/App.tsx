@@ -4265,6 +4265,11 @@ function Rail(props: {
   // ask what kind it was before doing anything.
   const [dragLane, setDragLane] = useState<string | null>(null);
   const [laneDropAt, setLaneDropAt] = useState<number | null>(null);
+  // Whether the dock, rather than a section in the list, is the thing under the
+  // pointer. It resolves to the same last lane either way; what differs is where
+  // the bar can be seen, since the last lane's own bar is inside the scroller and
+  // the dock is used precisely when that lane is scrolled out of view.
+  const [onDock, setOnDock] = useState(false);
   // `dragend` fires on the source node, so the rail's own `onDragEnd` only ever
   // sees a drag whose source is still mounted. A lane renamed in ANOTHER window
   // changes the section's key, React unmounts it, and the event then fires on a
@@ -4349,6 +4354,7 @@ function Rail(props: {
     setDropAt(null);
     setDragLane(null);
     setLaneDropAt(null);
+    setOnDock(false);
   };
   // Dropping is disabled while the rail is collapsed. A 64px row shows only a
   // marker, so there is no way to see *where* a drop would land — and a reorder
@@ -4396,20 +4402,6 @@ function Rail(props: {
   });
 
   /**
-   * The lane drag's drop zone: the scrollable list as a whole, not the sections.
-   *
-   * One owner for the gesture. Every section and row bails out of its own
-   * handlers while a lane is in flight (each drop zone answers only to its own
-   * drag), so the event reaches here from anywhere in the column and
-   * [`laneTargetAt`] decides what it means. A dragged lane always has somewhere
-   * to land, which is what per-section targets could not promise.
-   *
-   * Dropping a lane means displacement — it takes the target lane's position —
-   * so there is no midpoint to consult: a lane is a block, and unlike a row it
-   * has no "above me" and "below me" halves. Which side the bar is drawn on is a
-   * rendering question, answered from the travel direction in `renderGroup`.
-   */
-  /**
    * The dock's own lane drop: always the last lane, never the geometry.
    *
    * The dock sits *outside* the scroller, and `getBoundingClientRect` is layout,
@@ -4417,7 +4409,14 @@ function Rail(props: {
    * so running the dock's pointer through `laneTargetAt` picks whichever section
    * happens to overhang rather than the last lane. That is wrong exactly when the
    * dock target is useful: a rail long enough to scroll, scrolled up, where the
-   * last lane is off-screen. The dock means "the bottom", so it says so directly.
+   * last lane is off-screen. The dock means "the bottom", so it says so directly
+   * — its whole area, the Trash header included, because a dock that answered
+   * differently depending on which of its two sections you were over would be a
+   * distinction nothing on screen makes.
+   *
+   * It draws its own bar, too (`onDock`): the last lane's bar lives inside the
+   * scroller, so in the very case this exists for it is scrolled out of sight and
+   * the dock would accept a drop while showing nothing.
    */
   const laneDockDrop = (() => {
     const last = props.lanes.at(-1);
@@ -4429,7 +4428,9 @@ function Rail(props: {
     };
     return {
       onDragOver: (e: React.DragEvent) => {
-        if (take(e)) setLaneDropAt(props.lanes.length - 1);
+        if (!take(e)) return;
+        setLaneDropAt(props.lanes.length - 1);
+        setOnDock(true);
       },
       onDrop: (e: React.DragEvent) => {
         if (!take(e)) return;
@@ -4439,6 +4440,22 @@ function Rail(props: {
     };
   })();
 
+  /**
+   * The lane drag's drop zone inside the scroller: the list as a whole, not the
+   * sections.
+   *
+   * One owner within the column. Every section and row bails out of its own
+   * handlers while a lane is in flight (each drop zone answers only to its own
+   * drag), so the event reaches here from anywhere in the list and
+   * [`laneTargetAt`] decides what it means. A dragged lane always has somewhere
+   * to land, which is what per-section targets could not promise; below the
+   * scroller, `laneDockDrop` above owns the same gesture.
+   *
+   * Dropping a lane means displacement — it takes the target lane's place — so
+   * there is no midpoint to consult: a lane is a block, and unlike a row it has
+   * no "above me" and "below me" halves. Which side the bar is drawn on is a
+   * rendering question, answered from the travel direction in `renderGroup`.
+   */
   const laneDrop = dragLane === null
     ? null
     : {
@@ -4448,6 +4465,7 @@ function Rail(props: {
           if (to === null) return;
           e.preventDefault();
           setLaneDropAt(to);
+          setOnDock(false);
         },
         onDrop: (e: React.DragEvent) => {
           // A nested handler that already claimed this drop wins, and says so
@@ -4482,7 +4500,9 @@ function Rail(props: {
     // dropping there is the one move that does nothing.
     const from = dragLane === null ? undefined : laneIndex.get(dragLane);
     let laneDropSide: "before" | "after" | null = null;
-    if (laneAt !== undefined && from !== undefined && laneDropAt === laneAt) {
+    // While the dock owns the hover it draws the bar itself, so the last lane
+    // must not draw a second one for the same target.
+    if (!onDock && laneAt !== undefined && from !== undefined && laneDropAt === laneAt) {
       if (from > laneAt) laneDropSide = "before";
       else if (from < laneAt) laneDropSide = "after";
     }
@@ -5017,7 +5037,14 @@ function Rail(props: {
           miss. Its own handler, not the list's: see `laneDockDrop`. */}
       {dockVisible && (
         <div
-          className="rail-dock"
+          className={`rail-dock${
+            // Not while the carried lane is already the last one: that drop is a
+            // no-op, and a bar promising a move that will not happen is worse
+            // than none.
+            onDock && dragLane !== null && props.lanes.at(-1)?.name !== dragLane
+              ? " lane-drop-into"
+              : ""
+          }`}
           onDragEnd={endDrag}
           {...(laneDockDrop ?? {})}
         >
