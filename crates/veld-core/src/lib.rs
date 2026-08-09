@@ -1,5 +1,6 @@
 pub mod config;
 pub use uuid;
+pub mod console;
 pub mod db;
 pub mod feedback;
 pub mod graph;
@@ -23,6 +24,7 @@ pub mod setup;
 pub mod share;
 pub mod state;
 pub mod stats;
+pub mod update_lock;
 pub mod url;
 pub mod user_path;
 pub mod values;

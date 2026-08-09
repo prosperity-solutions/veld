@@ -368,6 +368,22 @@ async fn run_liveness_checks(
                     .await;
                 }
 
+                // **Never spend a recovery attempt during an update.** Recovery
+                // execs `veld restart`, which refuses with `EX_TEMPFAIL` while
+                // `veld update` holds the lock — and the attempt is counted and
+                // persisted *before* that call, with nothing rolling it back. An
+                // update deliberately leaves environments running while it
+                // restarts the daemon and helper underneath them, so probes
+                // failing during that window are the expected case, not a sick
+                // node: without this, a single update could burn a node's whole
+                // budget and land it in `recovery_exhausted` having never
+                // actually restarted anything. Skipping (rather than counting a
+                // failed attempt) is the point — the next scan after the update
+                // recovers normally if the node really is unhealthy.
+                if veld_core::update_lock::current().is_some() {
+                    continue;
+                }
+
                 // Check if failure threshold is reached.
                 if node_state.consecutive_failures >= liveness.failure_threshold {
                     if node_state.recovery_count >= liveness.max_recoveries {
@@ -680,6 +696,16 @@ fn find_veld_binary() -> std::path::PathBuf {
 
 /// Run `veld restart --name <run>` and wait for completion.
 /// Captures stdout/stderr and logs the result.
+///
+/// **Precondition, enforced only at the call site: no `veld update` may be
+/// holding the update lock.** `veld restart` is not on the CLI's
+/// `command_survives_an_update` allow-list, so during an update it exits 75
+/// (`EX_TEMPFAIL`) without doing anything — while the caller has already
+/// incremented and *persisted* `recovery_count`. A second call site that forgets
+/// the check therefore burns a node's whole recovery budget over one update and
+/// lands it in `recovery_exhausted` having never restarted anything. The check
+/// lives at the caller because what it must do is **skip** the cycle rather than
+/// record a failed attempt, which is a decision this function cannot make for it.
 async fn run_veld_restart(
     project_root: &Path,
     run_name: &str,

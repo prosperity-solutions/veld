@@ -1,9 +1,13 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
 
 const {
+  CONSOLE_HANDOFF,
   FULL_UPDATE_HANDOFF,
   REPORT_MAX_AGE_MS,
+  UPDATE_PHASE_TIMEOUT_MS,
   capabilitiesFrom,
   cliCandidatePaths,
   compareVersions,
@@ -13,9 +17,21 @@ const {
   primaryAction,
   releasePageUrl,
   reportIsFresh,
+  updateInProgress,
   updateMode,
+  updatePhaseLabel,
   versionSkew,
 } = require("./updatePolicy");
+
+// A `phase_at` the staleness rule will accept, unless a test wants otherwise.
+const liveState = (over = {}) => ({
+  pid: 4242,
+  origin: "console",
+  version: "16.12.0",
+  phase: "installing",
+  phase_at: new Date().toISOString(),
+  ...over,
+});
 
 test("an unpackaged run never updates itself", () => {
   for (const platform of ["darwin", "linux"]) {
@@ -287,10 +303,14 @@ test("a CLI that advertises the handoff updates the whole release", () => {
   const stdout = JSON.stringify({
     installed: true,
     version: "16.7.1",
-    capabilities: [FULL_UPDATE_HANDOFF, "some-future-thing"],
+    capabilities: [FULL_UPDATE_HANDOFF, CONSOLE_HANDOFF, "some-future-thing"],
   });
   const capabilities = capabilitiesFrom(stdout);
-  assert.deepEqual(capabilities, [FULL_UPDATE_HANDOFF, "some-future-thing"]);
+  assert.deepEqual(capabilities, [
+    FULL_UPDATE_HANDOFF,
+    CONSOLE_HANDOFF,
+    "some-future-thing",
+  ]);
 
   const { args, full } = handoffCommand({
     capabilities,
@@ -301,6 +321,11 @@ test("a CLI that advertises the handoff updates the whole release", () => {
   assert.equal(full, true);
   assert.deepEqual(args, [
     "update",
+    // The reason this route is worth having at all now: the CLI re-runs itself
+    // in a terminal window, so the user sees the 1–4 minutes after this app
+    // quits, and `sudo` has somewhere to ask for the password a privileged
+    // install needs.
+    "--console",
     // The release the app was offered, from the feed that offered it. Without
     // it the CLI asks api.github.com — a second source, rate-limited per IP and
     // briefly out of step with the feed after a release.
@@ -343,4 +368,157 @@ test("the button never promises more than the mode can deliver", () => {
     primaryAction({ viaCli: false, canInstall: true, full: true }),
     "Download and Install",
   );
+});
+
+test("a live update stops the app from opening over it", () => {
+  const running = updateInProgress({ state: liveState(), pidAlive: () => true });
+  assert.deepEqual(running, {
+    pid: 4242,
+    phase: "installing",
+    version: "16.12.0",
+    origin: "console",
+  });
+});
+
+test("both staleness conditions free the app, and neither alone is enough", () => {
+  const now = Date.now();
+  // Dead holder, timestamp fresh — only the liveness check can catch this.
+  assert.equal(
+    updateInProgress({ state: liveState(), now, pidAlive: () => false }),
+    null,
+  );
+  // Live holder, timestamp old — the wedged-at-a-sudo-prompt case, which a
+  // liveness check cannot see at all.
+  assert.equal(
+    updateInProgress({
+      state: liveState({ phase_at: new Date(now - UPDATE_PHASE_TIMEOUT_MS - 1000).toISOString() }),
+      now,
+      pidAlive: () => true,
+    }),
+    null,
+  );
+  // Neither: still running.
+  assert.notEqual(
+    updateInProgress({
+      state: liveState({ phase_at: new Date(now - UPDATE_PHASE_TIMEOUT_MS + 60_000).toISOString() }),
+      now,
+      pidAlive: () => true,
+    }),
+    null,
+  );
+});
+
+test("a clock that moved forwards is not read as abandonment", () => {
+  const now = Date.now();
+  assert.notEqual(
+    updateInProgress({
+      state: liveState({ phase_at: new Date(now + 2 * 60 * 60 * 1000).toISOString() }),
+      now,
+      pidAlive: () => true,
+    }),
+    null,
+  );
+});
+
+test("garbage in ~/.veld never makes the app unopenable", () => {
+  // Every one of these must read as "no update": the consequence of this answer
+  // is that Veld Desktop opens, and a malformed file must not be able to lock a
+  // user out of their app.
+  for (const state of [
+    null,
+    undefined,
+    "nope",
+    42,
+    {},
+    { pid: "4242", phase_at: new Date().toISOString() },
+    { pid: 0, phase_at: new Date().toISOString() },
+    { pid: -1, phase_at: new Date().toISOString() },
+    { pid: 4242 },
+    { pid: 4242, phase_at: "not a date" },
+  ]) {
+    assert.equal(updateInProgress({ state, pidAlive: () => true }), null, JSON.stringify(state));
+  }
+});
+
+test("an unknown phase from a newer CLI still says something true", () => {
+  // The app and the CLI ship together, but a user can end up with a newer CLI
+  // and an older app for exactly the minutes this dialog exists to cover.
+  assert.equal(updatePhaseLabel("something-invented-later"), "in progress");
+  assert.equal(updatePhaseLabel("restarting-services"), "restarting the daemon and helper");
+});
+
+test("every phase the Rust side can write has its own wording here", () => {
+  // **Read out of `update_lock.rs` rather than restated.** A hand-copied list
+  // makes this test a claim it cannot hold: the first version of it enumerated
+  // six phases, silently omitted `starting` — which `acquire` writes on every
+  // single update — and passed. A seventh variant added in Rust would have shipped
+  // green too. This is the drift gate, in the shape `install_script_contract.rs`
+  // uses for the same reason.
+  const rust = fs.readFileSync(
+    path.join(__dirname, "..", "..", "crates", "veld-core", "src", "update_lock.rs"),
+    "utf8",
+  );
+  const asStr = rust.slice(
+    rust.indexOf("impl Phase {"),
+    rust.indexOf("/// One human clause"),
+  );
+  const phases = [...asStr.matchAll(/Phase::\w+ => "([a-z-]+)"/g)].map((m) => m[1]);
+
+  assert.ok(phases.length >= 7, `found only ${phases.length} phases — did the parse break?`);
+  assert.ok(phases.includes("starting"), "the phase `acquire` writes must be in the list");
+  // `unknown` is Rust's `#[serde(other)]` catch-all — the variant an OLD binary
+  // produces when it reads a NEW one's state file. Falling through to the
+  // default wording is the correct answer for it and the only honest one, so it
+  // is exempted by name rather than by loosening the rule for everything else.
+  assert.ok(phases.includes("unknown"), "the serde catch-all must still exist");
+  for (const phase of phases.filter((p) => p !== "unknown")) {
+    assert.notEqual(
+      updatePhaseLabel(phase),
+      "in progress",
+      `Phase::…"${phase}" falls through to the default label`,
+    );
+  }
+});
+
+test("an old CLI is never handed --console", () => {
+  // The skew is real, not theoretical: `veld desktop update` moves the app half
+  // *alone*, so a new app can be driving an old CLI. That CLI advertises
+  // full-update-handoff — it has always had those flags — but its clap rejects
+  // `--console` with a usage error and exit 2, after this app has already quit
+  // and with no report written. The user would reopen on the old version having
+  // been told nothing.
+  const { args, full } = handoffCommand({
+    capabilities: [FULL_UPDATE_HANDOFF],
+    version: "16.12.0",
+    pid: 99,
+    execPath: "/Applications/Veld.app/Contents/MacOS/Veld",
+  });
+  assert.equal(full, true, "the full route is still taken");
+  assert.equal(args.includes("--console"), false);
+  assert.deepEqual(args.slice(0, 2), ["update", "--target-version"]);
+});
+
+test("a CLI that advertises console-handoff gets the terminal window", () => {
+  const { args } = handoffCommand({
+    capabilities: [FULL_UPDATE_HANDOFF, CONSOLE_HANDOFF],
+    version: "16.12.0",
+    pid: 99,
+    execPath: "/Applications/Veld.app/Contents/MacOS/Veld",
+  });
+  assert.deepEqual(args.slice(0, 2), ["update", "--console"]);
+});
+
+test("console-handoff alone never invents the full route", () => {
+  // The two capabilities are independent, and `--console` is only ever a
+  // modifier on `veld update`. A CLI too old for the full handoff must still get
+  // `veld desktop update`, with no stray flag on it.
+  const { args, full } = handoffCommand({
+    capabilities: [CONSOLE_HANDOFF],
+    version: "16.12.0",
+    pid: 99,
+    execPath: "/Applications/Veld.app/Contents/MacOS/Veld",
+  });
+  assert.equal(full, false);
+  assert.equal(args.includes("--console"), false);
+  assert.deepEqual(args.slice(0, 2), ["desktop", "update"]);
 });

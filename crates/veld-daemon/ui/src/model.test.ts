@@ -6,7 +6,9 @@ import {
   diagnosticsRun,
   freshRunName,
   fuzzyMatch,
+  laneDropTarget,
   liveRuns,
+  moveLane,
   moveWorktree,
   needsAttention,
   parsePendingKey,
@@ -999,5 +1001,116 @@ describe("moveWorktree", () => {
       "/wts/b",
       "/wts/a",
     ]);
+  });
+});
+
+describe("laneDropTarget", () => {
+  // Three sections stacked with a 9px gutter between them, as the rail renders
+  // them: 0 spans 10-50, 1 spans 59-99, 2 spans 108-148.
+  const sections = [
+    { index: 0, bottom: 50 },
+    { index: 1, bottom: 99 },
+    { index: 2, bottom: 148 },
+  ];
+
+  it("aims at the lane the pointer is inside", () => {
+    expect(laneDropTarget(sections, 30)).toBe(0);
+    expect(laneDropTarget(sections, 70)).toBe(1);
+    expect(laneDropTarget(sections, 120)).toBe(2);
+  });
+
+  it("gives everything above the first lane to the first lane", () => {
+    // The ungrouped section and the list's own padding sit up there, and they
+    // are not lane targets — but a pointer over them still has to mean
+    // something, or "drag a lane to the top" is a gesture with nowhere to land.
+    expect(laneDropTarget(sections, 0)).toBe(0);
+    expect(laneDropTarget(sections, -400)).toBe(0);
+  });
+
+  it("gives everything below the last lane to the last lane", () => {
+    // The dead zone that made the whole feature look one-directional: dragging
+    // a lane to the bottom of the rail and letting go landed on nothing.
+    expect(laneDropTarget(sections, 149)).toBe(2);
+    expect(laneDropTarget(sections, 5000)).toBe(2);
+  });
+
+  it("gives a gutter to the lane under it", () => {
+    // 51-58 is between two sections and belongs to neither element.
+    expect(laneDropTarget(sections, 55)).toBe(1);
+  });
+
+  it("has nothing to aim at in a rail with no lanes", () => {
+    expect(laneDropTarget([], 42)).toBeNull();
+  });
+
+  it("skips a section whose index did not parse", () => {
+    // `data-lane-index` is read off the DOM, so a missing attribute arrives as
+    // NaN — which must not become the answer, or every drop lands nowhere.
+    expect(
+      laneDropTarget([{ index: Number.NaN, bottom: 50 }, ...sections], 30),
+    ).toBe(0);
+    expect(laneDropTarget([{ index: Number.NaN, bottom: 50 }], 30)).toBeNull();
+  });
+});
+
+describe("moveLane", () => {
+  const lanes = () => [lane("a", 0), lane("b", 1), lane("c", 2)];
+
+  it("takes the place of the lane it was dropped on, going up", () => {
+    expect(moveLane(lanes(), "c", "b")).toEqual(["a", "c", "b"]);
+    expect(moveLane(lanes(), "c", "a")).toEqual(["c", "a", "b"]);
+  });
+
+  it("takes the place of the lane it was dropped on, going down", () => {
+    // The case the first implementation could not reach at all: an insertion
+    // point past the dragged lane's own position resolved to where it already
+    // sat, so one step down did nothing whichever half of "b" was released on.
+    expect(moveLane(lanes(), "a", "b")).toEqual(["b", "a", "c"]);
+    expect(moveLane(lanes(), "a", "c")).toEqual(["b", "c", "a"]);
+  });
+
+  it("is a full order, not a delta", () => {
+    // `reorder_lanes` appends anything unmentioned, so a partial write would
+    // silently move every lane the drag did not touch.
+    expect(moveLane(lanes(), "b", "a")).toEqual(["b", "a", "c"]);
+  });
+
+  it("is one step per click for the ⋮ menu, said the same way", () => {
+    // The menu names the neighbour, exactly as a drop onto it would.
+    expect(moveLane(lanes(), "b", "a")).toEqual(["b", "a", "c"]);
+    expect(moveLane(lanes(), "b", "c")).toEqual(["a", "c", "b"]);
+  });
+
+  it("reports a drop on the lane itself as null", () => {
+    // The normal way to abandon a lane drag, and it must not cost a request and
+    // a refresh.
+    expect(moveLane(lanes(), "b", "b")).toBeNull();
+  });
+
+  it("returns null when either lane is unknown", () => {
+    // A stale render: the lane was renamed or deleted by another window between
+    // this drag starting and the drop.
+    expect(moveLane(lanes(), "ghost", "a")).toBeNull();
+    expect(moveLane(lanes(), "a", "ghost")).toBeNull();
+  });
+
+  it("has nothing to do with a single lane", () => {
+    expect(moveLane([lane("only", 0)], "only", "only")).toBeNull();
+  });
+
+  it("moves two lanes past each other in both directions", () => {
+    // The case that read as completely dead: with two lanes there is only one
+    // neighbour, so a defect in either direction removes half the feature.
+    const two = [lane("a", 0), lane("b", 1)];
+    expect(moveLane(two, "a", "b")).toEqual(["b", "a"]);
+    expect(moveLane(two, "b", "a")).toEqual(["b", "a"]);
+  });
+
+  it("moves a lane across several places in one go", () => {
+    // A drag is not limited to a neighbour, which is the whole reason it exists
+    // beside a menu that steps one at a time.
+    const four = [lane("a", 0), lane("b", 1), lane("c", 2), lane("d", 3)];
+    expect(moveLane(four, "d", "a")).toEqual(["d", "a", "b", "c"]);
+    expect(moveLane(four, "a", "d")).toEqual(["b", "c", "d", "a"]);
   });
 });
