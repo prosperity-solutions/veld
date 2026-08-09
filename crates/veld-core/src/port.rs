@@ -254,15 +254,12 @@ mod tests {
     /// port is free, where a sibling test can legitimately take it first. That is a
     /// test-harness artefact, not a bug in the allocator, so the tests take a lock
     /// rather than the allocator growing a global.
-    static PORT_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    /// Take the port lock, recovering from a poisoned mutex so one failing test
-    /// does not cascade into every other port test failing too.
-    fn port_guard() -> std::sync::MutexGuard<'static, ()> {
-        PORT_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
+    /// The crate-wide process-state lock, not a port-only one.
+    ///
+    /// `allocate` and `reserve_fixed` reach `instance::daemon_port()`, which
+    /// reads `VELD_DAEMON_PORT` — so these tests race `instance`'s env test
+    /// unless both take the *same* mutex. See `crate::test_support`.
+    use crate::test_support::process_state_guard as port_guard;
 
     #[test]
     fn test_available_port_is_detected() {

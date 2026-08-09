@@ -28,6 +28,19 @@ dev_daemon_port := "19898"
 # separates instances exactly as much as the port and the dashboard hostname
 # already do — two worktrees cannot both be the dev instance either way.
 dev_daemon_sock := env("HOME") + "/.veld/dev-" + dev_daemon_port + ".sock"
+# Clear the per-node variables veld injects, for every BOOTSTRAP recipe.
+#
+# These recipes are most useful from a terminal inside the dev stack's own /ide
+# — that is the documented escape hatch — and such a terminal inherits the
+# dev-daemon node's environment through the PTY holder. Left in place:
+# `VELD_PORT` makes `just dev-ui` try to bind the dev daemon's port and die on
+# `strictPort`, and `VELD_URL`/`VELD_PROXY_ORIGINS` make the bootstrap daemon
+# trust three origins that route to a DIFFERENT run's processes — origins that
+# provably do not proxy its own /api, which is the one thing that variable's
+# name promises. Assignment to empty, because a recipe cannot unset a variable;
+# `env_nonempty` on the Rust side and `||` in vite.config.ts both read empty as
+# absent.
+clear_stack_env := "VELD_PORT= VELD_URL= VELD_PROXY_ORIGINS="
 
 # ============================================================================
 # Veld Development Workflow
@@ -78,6 +91,7 @@ dev *ARGS:
     VELD_DB_PATH="{{dev_db}}" \
     VELD_DAEMON_PORT="{{dev_daemon_port}}" \
     VELD_DAEMON_SOCK="{{dev_daemon_sock}}" \
+    {{clear_stack_env}} \
         ./target/debug/veld {{ARGS}}
 
 # Run the daemon from source, foreground, ALONGSIDE the installed one — own
@@ -106,6 +120,7 @@ dev-daemon:
     VELD_DAEMON_PORT="{{dev_daemon_port}}" \
     VELD_DAEMON_SOCK="{{dev_daemon_sock}}" \
     VELD_MANAGEMENT_HOST="veld-dev.localhost" \
+    {{clear_stack_env}} \
         ./target/debug/veld-daemon
 
 # Run the source-built CLI against the REAL installed DB — for inspecting
@@ -385,7 +400,7 @@ shellcheck:
     bash -n install.sh
     bash -n tests/validate-install-contract.sh
     if command -v shellcheck >/dev/null 2>&1; then
-      shellcheck --severity=warning install.sh tests/validate-install-contract.sh
+      shellcheck --severity=warning install.sh tests/validate-install-contract.sh scripts/dev/*.sh
     else
       echo "shellcheck not installed — skipping (brew install shellcheck). CI runs it."
     fi
@@ -573,16 +588,16 @@ desktop-package: desktop-deps
 # upgrade (see `allowed_origins` in crates/veld-daemon/src/pty.rs). Deliberate —
 # a dev server must not be able to open a shell through the installed daemon.
 dev-ui: ui-deps
-    cd crates/veld-daemon/ui && npm run dev
+    cd crates/veld-daemon/ui && {{clear_stack_env}} npm run dev
 
 # Electron shell pointed at the vite dev server (start `just dev-ui` first).
 dev-desktop: desktop-deps
-    cd desktop && VELD_DESKTOP_URL=http://localhost:5199 npm start
+    cd desktop && {{clear_stack_env}} VELD_DESKTOP_URL=http://localhost:5199 npm start
 
 # Electron shell straight at the dev daemon's embedded /ide (no HMR) —
 # start `just dev-daemon` first.
 dev-desktop-embedded: desktop-deps
-    cd desktop && VELD_DESKTOP_URL=http://127.0.0.1:{{dev_daemon_port}} npm start
+    cd desktop && {{clear_stack_env}} VELD_DESKTOP_URL=http://127.0.0.1:{{dev_daemon_port}} npm start
 
 # Electron shell against the installed daemon's embedded /ide.
 desktop: desktop-deps

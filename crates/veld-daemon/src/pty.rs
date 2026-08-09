@@ -1669,6 +1669,17 @@ fn project_external_origins(
 /// path that already spawns a process, and the daemon's instance identity
 /// (port, management host) is read from the environment.
 fn allowed_origins() -> Vec<String> {
+    allowed_origins_with(veld_core::instance::dev_trusted_origins())
+}
+
+/// The allowlist, with the dev instance's contribution passed in.
+///
+/// Split out for one reason: `dev_trusted_origins` reads the environment and is
+/// empty in a test process, so a test calling [`allowed_origins`] can only ever
+/// assert things about the *base* list. The first version of the test below
+/// looped over an empty collection and would have stayed green if the `extend`
+/// were deleted — which is precisely the wiring it claimed to pin.
+fn allowed_origins_with(dev_origins: Vec<String>) -> Vec<String> {
     let port = veld_core::instance::daemon_port();
     let mut origins = vec![
         format!("http://127.0.0.1:{port}"),
@@ -1696,8 +1707,8 @@ fn allowed_origins() -> Vec<String> {
     }
     // A daemon running as a veld node: its own veld-assigned URL, plus any dev
     // server declared as proxying its /api. Empty on the installed instance —
-    // that gate lives inside the function, not here.
-    origins.extend(veld_core::instance::dev_trusted_origins());
+    // that gate lives inside `dev_trusted_origins`, not here.
+    origins.extend(dev_origins);
     origins
 }
 
@@ -2899,14 +2910,25 @@ mod tests {
             assert!(veld_core::instance::dev_trusted_origins().is_empty());
         }
 
-        // Whatever the instance, every origin the instance layer hands out has
-        // to actually reach the allowlist — the wiring is the easy half to drop
-        // in a refactor, and its failure mode is a 403 on a WebSocket handshake,
-        // whose reason a browser cannot show the user.
-        let allowed = allowed_origins();
-        for origin in veld_core::instance::dev_trusted_origins() {
-            assert!(allowed.contains(&origin), "{origin} never reached the list");
-        }
+        // Every origin the instance layer hands out has to actually reach the
+        // allowlist. The wiring is the easy half to drop in a refactor, and its
+        // failure mode is a 403 on a WebSocket handshake, whose reason a browser
+        // cannot show the user.
+        //
+        // Fed explicitly rather than through `dev_trusted_origins()`, which is
+        // empty in a test process: looping over that returned an empty
+        // collection and passed whether or not the `extend` existed at all.
+        let dev = "https://dev-daemon.somerun.veld.localhost".to_owned();
+        let allowed = allowed_origins_with(vec![dev.clone()]);
+        assert!(
+            allowed.contains(&dev),
+            "the dev origin never reached the list"
+        );
+        // …and the base list is still there beside it.
+        assert!(allowed.iter().any(|o| o == "https://veld.localhost"));
+        // A value NOT handed in is still not trusted — the extension must be
+        // exactly what it was given, not a widening.
+        assert!(!allowed.contains(&"https://other.veld.localhost".to_owned()));
     }
 
     fn planted(id: &str, ttl: Duration) -> String {

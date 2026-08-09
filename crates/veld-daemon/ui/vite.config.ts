@@ -27,13 +27,22 @@ const daemonPort = process.env.VELD_DAEMON_PORT ?? "19898";
 // allocation: something else already holds a reservation on it, the Caddy route
 // in front of us names it, and silently sliding to the next one would serve the
 // UI where nothing is looking for it.
-const devPort = Number(process.env.VELD_PORT ?? "5199");
+// `||`, not `??`. The bootstrap recipes clear these variables by assigning the
+// empty string (a `just` recipe cannot unset one), and `"" ?? "5199"` is `""`,
+// which `Number` turns into 0 — vite would bind a random port and `strictPort`
+// would not save you, because 0 is a port it was legitimately asked for.
+const devPort = Number(process.env.VELD_PORT || "5199");
 
 // Under veld this server is also reachable through Caddy at a hostname veld
-// minted (`https://dev-ui.<run>.veld.localhost`). Vite 6 refuses a Host header
-// it does not know, so the hostname has to be declared — and veld already told
-// us it, in the same VELD_URL every long-running node gets. Deriving it here
-// rather than taking a second env var keeps one definition point.
+// minted (`https://dev-ui.<run>.veld.localhost`), which is declared below.
+//
+// A FORWARD GUARD, not a present requirement — worth being honest about, since
+// the obvious reading is that it is load-bearing. Vite 6's host check allows any
+// IPv4 literal and anything ending in `.localhost` before it consults
+// `allowedHosts`, and every hostname this repo's `url_template` mints ends in
+// `.veld.localhost`. So the entry is inert today and becomes load-bearing the
+// moment `url_template` moves off `.localhost`. Derived from the VELD_URL every
+// long-running node already gets, rather than a second env var.
 //
 // Hand-parsed rather than `new URL`: this file's only ambient type is the
 // `process` shim above, so there are no Node globals to lean on.
@@ -54,15 +63,17 @@ export default defineConfig({
     // only (`wait_for_port` vs the `http` phase in veld-core's health.rs). So a
     // v6-only bind passes phase 1, fails phase 2 for the full 60s, and reports
     // "health check timed out" about a server that logged `ready in 176 ms`.
-    // 127.0.0.1 is also what the Caddy upstream, VELD_DESKTOP_URL and
-    // VELD_PROXY_ORIGINS all name, so this is the address the whole run agrees
-    // on. Left alone off a veld run: `just dev-ui` has no probe, and its users
-    // type `localhost:5199`.
+    // VELD_DESKTOP_URL and VELD_PROXY_ORIGINS name 127.0.0.1 too, so the run
+    // agrees on one address. (The Caddy upstream is the exception — veld writes
+    // `localhost:<port>` there — but Go's dialer falls back from `::1`, so a
+    // v4-only bind is still reachable through it. The readiness probe is what
+    // decides this, not Caddy.) Left alone off a veld run: `just dev-ui` has no
+    // probe, and its users type `localhost:5199`.
     ...(process.env.VELD_PORT ? { host: "127.0.0.1" } : {}),
     // Only what veld actually routes to us. Left undefined off a veld run so
-    // the bootstrap tier keeps vite's own localhost-only default — a blanket
-    // `true` here would let any hostname resolving to 127.0.0.1 reach a dev
-    // server that proxies the daemon's API.
+    // the bootstrap tier keeps vite's own default — a blanket `true` here would
+    // let any hostname resolving to 127.0.0.1 reach a dev server that proxies
+    // the daemon's API.
     ...(veldHost ? { allowedHosts: [veldHost] } : {}),
     proxy: {
       // `ws: true` so the terminal's `/api/pty/attach` upgrade is proxied

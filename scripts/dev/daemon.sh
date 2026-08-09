@@ -30,6 +30,20 @@ export VELD_DAEMON_SOCK="$HOME/.veld/dev-$port.sock"
 # nothing ever looks at again, and no terminal would survive a restart. The
 # `pty-` prefix is load-bearing: `veld uninstall` finds every instance's holders
 # by it.
-export VELD_PTY_DIR="$HOME/.veld/pty-dv-$run"
+#
+# A DIGEST of the run, not the run itself, because this path is the numerator of
+# the same 104-byte budget the header is about. A run name slugs to at most 48
+# characters, and `<home>/.veld/pty-dv-<48>/<16 hex>.sock` is 103 bytes for a
+# 19-character home — one byte inside the limit, and over it for any home longer
+# than that. The digest caps the run's contribution at 10 characters, and stays
+# stable across restarts, which is the property the directory needs.
+run_digest="$(printf '%s' "$run" | cksum | awk '{print $1}')"
+export VELD_PTY_DIR="$HOME/.veld/pty-dv-$run_digest"
+
+# The digest is not guessable from the run name, and `veld doctor` reports the
+# directory rather than the mapping — so say it once, here, where someone
+# chasing a stranded holder will find it in the node's log.
+echo "dev daemon: port $port, socket $VELD_DAEMON_SOCK" >&2
+echo "            terminals in $VELD_PTY_DIR (run '$run')" >&2
 
 exec "$root/target/debug/veld-daemon"

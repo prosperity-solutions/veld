@@ -264,7 +264,20 @@ fn normalize_origin(raw: &str) -> Option<String> {
     } else {
         match rest.rsplit_once(':') {
             Some((host, port)) => {
-                if port.is_empty() || port.parse::<u16>().is_err() {
+                // The port must be a port AND be spelled the way a browser
+                // spells it. `u16::from_str` also accepts `+80` and `080`, and
+                // an origin carrying a default port (`http://h:80`) is written
+                // without it — so all three would be stored as entries the
+                // exact match at the call site can never hit. A rejection is
+                // logged and a dead entry is not, which makes the loose version
+                // strictly worse than no entry: the symptom is a 403 on a
+                // WebSocket handshake, whose reason a browser cannot show.
+                let parsed = port.parse::<u16>().ok()?;
+                if parsed.to_string() != port {
+                    return None;
+                }
+                let default_port = if scheme == "https" { 443 } else { 80 };
+                if parsed == default_port {
                     return None;
                 }
                 host
@@ -290,10 +303,14 @@ mod tests {
     // default parallel test runner can't interleave them.
     #[test]
     fn overrides_and_defaults() {
-        // SAFETY: set_var's contract is process-wide — this is sound only
-        // because no other test in the WHOLE test binary reads or writes
-        // these variables (verified by grep), so no thread observes the
-        // mutation concurrently. Keep it that way.
+        // SAFETY: `set_var` races any concurrent `var()` in the process, and
+        // this is no longer the only place that reads these — `port.rs` reaches
+        // `daemon_port()` through `infrastructure_ports()` on every `allocate`
+        // and `reserve_fixed`. The exclusion is therefore the crate-wide
+        // process-state lock, which the port tests take too; holding it is what
+        // makes the mutations below sound. A grep-based "nobody else reads it"
+        // argument used to stand here and stopped being true.
+        let _guard = crate::test_support::process_state_guard();
         unsafe {
             std::env::remove_var("VELD_DAEMON_PORT");
             assert_eq!(daemon_port(), DEFAULT_DAEMON_PORT);
@@ -419,6 +436,13 @@ mod tests {
             "https://host:",
             "https://host:notaport",
             "https://host:99999", // not a u16
+            // Parses as a port, but is not how a browser spells one — so the
+            // entry could never match, and a dead entry with no warning is
+            // worse than a rejection with one.
+            "http://host:080",
+            "http://host:+80",
+            "http://host:80",   // a default port is omitted from an Origin
+            "https://host:443", // …likewise
             "https:// host",
             "://host",
             "https://",

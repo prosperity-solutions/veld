@@ -422,9 +422,16 @@ and several were paid for in this codebase already.
     one Cmd+Q on Electron took the dev daemon and vite down with it. So
     `dev-electron`'s node is `scripts/dev/electron.sh`, which outlives the quit
     and relaunches on `veld action open --node dev-electron`. Two consequences
-    to keep: it must forward SIGTERM to its child (a supervisor that just exits
-    orphans the app), and its readiness probe must ask whether *Electron* is up
-    — `settle` would only prove the supervisor survived, which it always does.
+    to keep. It must **forward SIGTERM to its child** — a supervisor that just
+    exits orphans the app. And it must **die with a failed first launch**: the
+    probe is `settle`, which asks only whether the node's process is still
+    alive after N seconds, and a supervisor would always pass that on its own.
+    So the supervisor adopts the probe's window as its own — an Electron that
+    exits inside it takes the script down and fails the node honestly, while an
+    exit after it is the user quitting and is absorbed. That coupling is why
+    the grace passed in `argv` must equal the `settle` seconds. A `command`
+    probe is *not* the alternative: a probe's argv is not interpolated, so it
+    could never be told which run's state to look at.
 
   The justfile's `just dev` / `just dev-daemon` tier is deliberately still a
   singleton on fixed ports. It is the **bootstrap** tier: the way to run the

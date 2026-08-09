@@ -314,6 +314,13 @@
         //
         // Both spellings of vite's loopback address, because which one you get
         // depends on how you opened the page, and the check is exact-match.
+        //
+        // This makes `dev-daemon` NOT independently startable: it references a
+        // node that does not depend on it (the edge runs the other way), and
+        // `build_env` is all-or-nothing, so `veld start dev-daemon` fails with
+        // `unresolved variable reference: ${nodes.dev-ui.url}`. Every preset
+        // pulls `dev-ui` in, so the supported paths are unaffected — but start
+        // it by hand and you must name `dev-ui` too.
         "VELD_PROXY_ORIGINS": "${nodes.dev-ui.url},http://localhost:${nodes.dev-ui.port},http://127.0.0.1:${nodes.dev-ui.port}"
         //
         // Deliberately NOT set: VELD_MANAGEMENT_HOST. It makes the daemon
