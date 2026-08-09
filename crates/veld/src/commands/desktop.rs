@@ -249,11 +249,27 @@ fn relaunch_app(app_dir: Option<&Path>) {
 ///
 /// Advertised **conditionally**, and the condition is the whole reason this is a
 /// capability rather than a version floor: see [`can_hand_off_full_update`].
+/// `console-handoff` — `veld update` accepts `--console` and will re-run itself
+/// in a terminal window. Unconditional, unlike its neighbour: it is a statement
+/// about this binary's *vocabulary*, not about whether the machine can deliver
+/// an unattended update, and the flag degrades to a headless run by itself when
+/// no terminal can be opened.
+///
+/// It exists because the app and the CLI can genuinely skew: `veld desktop
+/// update` moves the app half **alone**, so an app on the new release can be
+/// talking to a CLI on the old one. That CLI advertises `full-update-handoff`
+/// (it has always had those flags), so without a second capability the app would
+/// spawn `veld update --console …` at a binary whose clap rejects the unknown
+/// flag with a usage error and exit 2 — after the app has already quit, with no
+/// `desktop-update.json` written, so the user reopens on the old version and is
+/// told nothing. That is verbatim the failure the capability array was
+/// introduced to prevent.
 fn capabilities() -> Vec<&'static str> {
     let mut caps = Vec::new();
     if can_hand_off_full_update(&std::env::current_exe().unwrap_or_default()) {
         caps.push("full-update-handoff");
     }
+    caps.push("console-handoff");
     caps
 }
 

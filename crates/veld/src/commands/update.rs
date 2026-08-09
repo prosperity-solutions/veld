@@ -112,6 +112,36 @@ pub async fn run(
         .clone()
         .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
 
+    // **`sudo veld update` is refused, and the reason is not tidiness.** Under
+    // sudo, `dirs::home_dir()` is *root's* (this repo already relies on that at
+    // `setup.rs`'s `resolve_real_user_macos`), so the lock would be taken in
+    // `/var/root/.veld` while every other reader — a plain `veld update`, the
+    // command gate, `veld doctor`, the daemon monitor, Veld Desktop — looks in
+    // the user's `~/.veld`. Single-flight against a lock nobody else can see is
+    // no single-flight at all, and it is silent. The rest of `veld update`
+    // already assumes it runs unprivileged and escalates only for the helper
+    // restart, and `install.sh` does its own escalation for a `/usr/local`
+    // install, so nothing legitimate needs this — a root-run install would also
+    // leave root-owned binaries in the user's `~/.local`.
+    if let Ok(user) = std::env::var("SUDO_USER") {
+        if !user.is_empty() {
+            output::print_error(
+                "`veld update` must not run under sudo — run it as yourself.",
+                false,
+            );
+            println!(
+                "  {}",
+                output::dim(
+                    "It escalates on its own where it needs to (the privileged helper restart, \
+                     and a /usr/local install inside install.sh), and prompts for your password \
+                     when it does. Under sudo it would install root-owned files into your home \
+                     and take its lock in root's."
+                )
+            );
+            return 1;
+        }
+    }
+
     // Refused before the lock is taken, so that the message names *this* run's
     // problem rather than a lock it just created. `--force` skips it the same way
     // it skips the acquisition below — the two must agree, or `--force` would

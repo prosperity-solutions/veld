@@ -4,6 +4,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const {
+  CONSOLE_HANDOFF,
   FULL_UPDATE_HANDOFF,
   REPORT_MAX_AGE_MS,
   UPDATE_PHASE_TIMEOUT_MS,
@@ -302,10 +303,14 @@ test("a CLI that advertises the handoff updates the whole release", () => {
   const stdout = JSON.stringify({
     installed: true,
     version: "16.7.1",
-    capabilities: [FULL_UPDATE_HANDOFF, "some-future-thing"],
+    capabilities: [FULL_UPDATE_HANDOFF, CONSOLE_HANDOFF, "some-future-thing"],
   });
   const capabilities = capabilitiesFrom(stdout);
-  assert.deepEqual(capabilities, [FULL_UPDATE_HANDOFF, "some-future-thing"]);
+  assert.deepEqual(capabilities, [
+    FULL_UPDATE_HANDOFF,
+    CONSOLE_HANDOFF,
+    "some-future-thing",
+  ]);
 
   const { args, full } = handoffCommand({
     capabilities,
@@ -461,11 +466,59 @@ test("every phase the Rust side can write has its own wording here", () => {
 
   assert.ok(phases.length >= 7, `found only ${phases.length} phases — did the parse break?`);
   assert.ok(phases.includes("starting"), "the phase `acquire` writes must be in the list");
-  for (const phase of phases) {
+  // `unknown` is Rust's `#[serde(other)]` catch-all — the variant an OLD binary
+  // produces when it reads a NEW one's state file. Falling through to the
+  // default wording is the correct answer for it and the only honest one, so it
+  // is exempted by name rather than by loosening the rule for everything else.
+  assert.ok(phases.includes("unknown"), "the serde catch-all must still exist");
+  for (const phase of phases.filter((p) => p !== "unknown")) {
     assert.notEqual(
       updatePhaseLabel(phase),
       "in progress",
       `Phase::…"${phase}" falls through to the default label`,
     );
   }
+});
+
+test("an old CLI is never handed --console", () => {
+  // The skew is real, not theoretical: `veld desktop update` moves the app half
+  // *alone*, so a new app can be driving an old CLI. That CLI advertises
+  // full-update-handoff — it has always had those flags — but its clap rejects
+  // `--console` with a usage error and exit 2, after this app has already quit
+  // and with no report written. The user would reopen on the old version having
+  // been told nothing.
+  const { args, full } = handoffCommand({
+    capabilities: [FULL_UPDATE_HANDOFF],
+    version: "16.12.0",
+    pid: 99,
+    execPath: "/Applications/Veld.app/Contents/MacOS/Veld",
+  });
+  assert.equal(full, true, "the full route is still taken");
+  assert.equal(args.includes("--console"), false);
+  assert.deepEqual(args.slice(0, 2), ["update", "--target-version"]);
+});
+
+test("a CLI that advertises console-handoff gets the terminal window", () => {
+  const { args } = handoffCommand({
+    capabilities: [FULL_UPDATE_HANDOFF, CONSOLE_HANDOFF],
+    version: "16.12.0",
+    pid: 99,
+    execPath: "/Applications/Veld.app/Contents/MacOS/Veld",
+  });
+  assert.deepEqual(args.slice(0, 2), ["update", "--console"]);
+});
+
+test("console-handoff alone never invents the full route", () => {
+  // The two capabilities are independent, and `--console` is only ever a
+  // modifier on `veld update`. A CLI too old for the full handoff must still get
+  // `veld desktop update`, with no stray flag on it.
+  const { args, full } = handoffCommand({
+    capabilities: [CONSOLE_HANDOFF],
+    version: "16.12.0",
+    pid: 99,
+    execPath: "/Applications/Veld.app/Contents/MacOS/Veld",
+  });
+  assert.equal(full, false);
+  assert.equal(args.includes("--console"), false);
+  assert.deepEqual(args.slice(0, 2), ["desktop", "update"]);
 });

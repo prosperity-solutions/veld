@@ -613,6 +613,16 @@ fn find_veld_binary() -> std::path::PathBuf {
 
 /// Run `veld restart --name <run>` and wait for completion.
 /// Captures stdout/stderr and logs the result.
+///
+/// **Precondition, enforced only at the call site: no `veld update` may be
+/// holding the update lock.** `veld restart` is not on the CLI's
+/// `command_survives_an_update` allow-list, so during an update it exits 75
+/// (`EX_TEMPFAIL`) without doing anything — while the caller has already
+/// incremented and *persisted* `recovery_count`. A second call site that forgets
+/// the check therefore burns a node's whole recovery budget over one update and
+/// lands it in `recovery_exhausted` having never restarted anything. The check
+/// lives at the caller because what it must do is **skip** the cycle rather than
+/// record a failed attempt, which is a decision this function cannot make for it.
 async fn run_veld_restart(
     project_root: &Path,
     run_name: &str,

@@ -1054,11 +1054,11 @@ pub async fn run_command_streaming(
 /// **Only `ESRCH` means dead.** `EPERM` means the process exists and belongs to
 /// somebody this user may not signal, which is the opposite answer — and the one
 /// this function used to give, because every error collapsed into `false`. It
-/// bites where a `sudo veld update` leaves a root-owned artifact behind in the
-/// invoking user's `~/.veld`: an unprivileged veld would read the live root
-/// holder as gone, try to steal its update lock, and fail to remove a
-/// root-owned directory. `desktop/src/updater.js` has always read `EPERM` as
-/// alive, so this also stops the two halves answering the same question
+/// bites wherever veld reads a pid it did not spawn: a root-owned process, or one
+/// belonging to another account on a shared machine, was reported *gone* — and
+/// for the update lock that means a live holder judged abandoned and its lock
+/// stolen. `desktop/src/updater.js` has always read `EPERM` as alive, so this
+/// also stops the two halves of the same product answering the same question
 /// differently. Any other errno is unexpected and reads as dead, which is what
 /// the previous behaviour was for every case.
 pub fn is_alive(pid: u32) -> bool {

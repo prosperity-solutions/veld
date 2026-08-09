@@ -346,6 +346,17 @@ function looksLikeVeldCli(output) {
 const FULL_UPDATE_HANDOFF = "full-update-handoff";
 
 /**
+ * `veld update` understands `--console` — i.e. it can re-run itself in a terminal
+ * window so the user can watch the update and `sudo` has somewhere to prompt.
+ *
+ * Separate from {@link FULL_UPDATE_HANDOFF} because the two can genuinely differ:
+ * `veld desktop update` moves the app half alone, so an app on the new release
+ * can be driving a CLI on the old one, and that CLI advertises the full handoff
+ * (it has always had those flags) while rejecting `--console` outright.
+ */
+const CONSOLE_HANDOFF = "console-handoff";
+
+/**
  * What the CLI said it can do, from `veld desktop status --json`.
  *
  * Defensive to the point of pedantry because the parse happens on the path that
@@ -397,6 +408,13 @@ function capabilitiesFrom(stdout) {
  */
 function handoffCommand({ capabilities = [], version, pid, execPath }) {
   const full = capabilities.includes(FULL_UPDATE_HANDOFF);
+  // A **separate** capability from `full`, and the separation is load-bearing.
+  // `veld desktop update` moves the app half alone, so a new app can be driving
+  // an old CLI — one that has always had `--wait-pid`/`--relaunch` and therefore
+  // advertises `full-update-handoff`, but whose clap rejects `--console` with a
+  // usage error and exit 2. The app has quit by then and no report is written,
+  // so the user would reopen on the old version having been told nothing.
+  const console = capabilities.includes(CONSOLE_HANDOFF);
   const args = full
     ? [
         "update",
@@ -407,7 +425,7 @@ function handoffCommand({ capabilities = [], version, pid, execPath }) {
         // a child with no controlling terminal only ever gets `sudo -n`. The CLI
         // falls back to running headless when no terminal can be opened, so this
         // never makes an update fail that would otherwise have worked.
-        "--console",
+        ...(console ? ["--console"] : []),
         // The release the user was just offered, from the feed that offered it.
         // Without this the CLI asks `api.github.com/…/releases/latest` — a
         // second source, rate-limited per IP and briefly out of step with the
@@ -453,6 +471,7 @@ function primaryAction({ viaCli, canInstall, full }) {
 }
 
 module.exports = {
+  CONSOLE_HANDOFF,
   FULL_UPDATE_HANDOFF,
   GITHUB_REPO,
   REPORT_MAX_AGE_MS,

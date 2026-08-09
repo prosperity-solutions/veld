@@ -70,6 +70,20 @@ pub const PHASE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 /// Ordered as they happen, and each one is a thing a user recognises rather than
 /// a function name — this string is rendered in `veld doctor`, in a blocked
 /// command's error, and in the Electron app's "an update is in progress" dialog.
+///
+/// **The granularity stops at the `install.sh` boundary, and cannot be pushed
+/// past it here.** `Installing` covers the download, the checksum and the binary
+/// swap as one step because all three happen inside a script fetched and run as a
+/// single `bash -c` whose output veld inherits rather than parses
+/// (`veld_core::setup::run_install_script`). Adding a finer variant — a checksum
+/// phase, a percentage — and setting it around that call would publish a step
+/// that flips instantly and then sits unchanged for the whole multi-minute
+/// download: a progress indicator that is *wrong* rather than coarse. Finer
+/// progress needs the script to report back first.
+///
+/// Adding a variant also means adding its label to
+/// `updatePhaseLabel` in `desktop/src/updatePolicy.js`; a test there reads this
+/// enum's `as_str` arms and fails if one has no wording.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Phase {
@@ -87,6 +101,20 @@ pub enum Phase {
     UpdatingApp,
     /// Everything is installed; reopening the app / tidying up.
     Finishing,
+    /// A phase this binary has never heard of, written by a newer one.
+    ///
+    /// **Required, not defensive.** Without it, a single unknown variant fails
+    /// the whole `UpdateState` parse (verified against serde 1.x: an extra
+    /// *field* is ignored, an unknown *variant* is a hard error) — and every
+    /// consequence of that is the opposite of safe. `read_state` returns `None`,
+    /// `peek` reports `Unreadable`, the command gate reads "no update running"
+    /// and lets `veld start` through mid-restart, and `acquire` classifies a
+    /// **live** holder as stealable: two concurrent updates, from nothing worse
+    /// than a later release adding a phase. `veld update` runs the *old* binary,
+    /// so the old binary reading the new one's file is the normal case here, not
+    /// an edge one.
+    #[serde(other)]
+    Unknown,
 }
 
 impl Phase {
@@ -99,6 +127,7 @@ impl Phase {
             Phase::RestartingServices => "restarting-services",
             Phase::UpdatingApp => "updating-app",
             Phase::Finishing => "finishing",
+            Phase::Unknown => "unknown",
         }
     }
 
@@ -112,6 +141,10 @@ impl Phase {
             Phase::RestartingServices => "restarting the daemon and helper",
             Phase::UpdatingApp => "installing Veld Desktop",
             Phase::Finishing => "finishing up",
+            // Deliberately vague, because it is: a newer veld is doing something
+            // this binary has no name for. Still true, and still better than
+            // failing to read the file at all.
+            Phase::Unknown => "in progress",
         }
     }
 }
@@ -126,6 +159,10 @@ pub enum Origin {
     Desktop,
     /// Handed over by Veld Desktop into a terminal window it opened.
     Console,
+    /// An origin a newer binary knows about and this one does not. See
+    /// [`Phase::Unknown`] — same reason, same consequence if it is missing.
+    #[serde(other)]
+    Unknown,
 }
 
 impl Origin {
@@ -134,6 +171,7 @@ impl Origin {
             Origin::Cli => "cli",
             Origin::Desktop => "desktop",
             Origin::Console => "console",
+            Origin::Unknown => "unknown",
         }
     }
 
@@ -143,6 +181,7 @@ impl Origin {
             Origin::Cli => "a terminal",
             Origin::Desktop => "Veld Desktop",
             Origin::Console => "Veld Desktop, in a terminal window",
+            Origin::Unknown => "another veld",
         }
     }
 }
@@ -331,6 +370,16 @@ pub fn acquire(origin: Origin, version: Option<String>, force: bool) -> io::Resu
         fs::create_dir_all(parent)?;
     }
 
+    // **Resolved before the loop, and that is a fix rather than tidiness.** The
+    // window between `create_dir` succeeding and `write_state` landing is a lock
+    // directory with no state in it, which every reader has to interpret without
+    // being able to tell a fresh winner from a crashed corpse. `current_tty`
+    // spawns `/usr/bin/tty` — a fork and an exec — so computing it *inside* that
+    // window stretched it from a few microseconds to milliseconds, on every CLI
+    // run (it only spawns when stdin is a terminal, which is exactly the
+    // interactive case). Nothing here depends on having won.
+    let tty = current_tty();
+
     // Bounded rather than unbounded: each pass either wins, loses to a live
     // holder, or steals exactly one corpse. Three is room for a steal that races
     // another stealer and still converges, without a loop that could spin.
@@ -346,7 +395,7 @@ pub fn acquire(origin: Origin, version: Option<String>, force: bool) -> io::Resu
                     started_at: now,
                     phase: Phase::Starting,
                     phase_at: now,
-                    tty: current_tty(),
+                    tty: tty.clone(),
                 };
                 write_state(&dir, &state)?;
                 return Ok(Acquired::Ours(UpdateGuard {
@@ -376,8 +425,11 @@ pub fn acquire(origin: Origin, version: Option<String>, force: bool) -> io::Resu
                 // for "the lock could not be created" and exactly the wrong one
                 // here: a directory this process may not remove is one somebody
                 // else owns, and proceeding is the two-concurrent-updates case the
-                // whole module exists to prevent. Reached when a `sudo veld update`
-                // left a root-owned lock behind in the invoking user's `~/.veld`.
+                // whole module exists to prevent. `veld update` now refuses to run
+                // under sudo (see `commands/update.rs`), so the root-owned-lock
+                // route into this is closed — it stays because "somebody else's
+                // directory" is the general case and the consequence of getting
+                // it wrong is the one failure nothing else here catches.
                 if steal(&dir).is_err() {
                     return Ok(Acquired::Busy(Box::new(
                         last_seen.unwrap_or_else(unknown_holder),
@@ -496,22 +548,32 @@ impl UpdateGuard {
     ///
     /// Checked on every write rather than once, because losing the lock is an
     /// event that happens *to* a running guard from another process.
-    fn still_ours(&mut self) -> bool {
+    ///
+    /// `strict` is what an **unreadable** state file means, and the two callers
+    /// genuinely want opposite answers:
+    ///
+    /// - **Writing** (`set_phase`, `set_version`) passes `false`. A transiently
+    ///   unreadable file must not permanently silence a healthy guard's progress
+    ///   reporting, and the cost of being wrong is one stray write that the real
+    ///   owner's next `write_state` overwrites.
+    /// - **`Drop`** passes `true`, because it deletes. "No state file" is also
+    ///   exactly what a *thief's* directory looks like between its `create_dir`
+    ///   and its first `write_state` — so a lenient `Drop` in that window removes
+    ///   a live lock and lets a third update start. Deleting demands positive
+    ///   proof; a directory left behind because the proof was unavailable is
+    ///   already self-healing, since `peek` reports it `Unreadable` and the next
+    ///   `acquire` steals it.
+    fn still_ours(&mut self, strict: bool) -> bool {
         if self.lost {
             return false;
         }
-        // An unreadable state file is not evidence of a steal — a steal replaces
-        // the directory, so the read fails with `NotFound` only in the window
-        // between the thief's `create_dir` and its first `write_state`. Treating
-        // that as "still ours" is the safe direction: the thief's own state lands
-        // a moment later and the next check latches correctly, whereas treating
-        // it as lost would abandon a lock nobody actually took.
         match read_state(&self.dir) {
-            Some(state) if state.pid != self.state.pid => {
+            Some(state) if state.pid == self.state.pid => true,
+            Some(_) => {
                 self.lost = true;
                 false
             }
-            _ => true,
+            None => !strict,
         }
     }
 
@@ -524,7 +586,7 @@ impl UpdateGuard {
     pub fn set_phase(&mut self, phase: Phase) {
         self.state.phase = phase;
         self.state.phase_at = Utc::now();
-        if self.still_ours() {
+        if self.still_ours(false) {
             let _ = write_state(&self.dir, &self.state);
         }
     }
@@ -532,7 +594,7 @@ impl UpdateGuard {
     /// Record the release once it is known, so observers can name it.
     pub fn set_version(&mut self, version: &str) {
         self.state.version = Some(version.to_string());
-        if self.still_ours() {
+        if self.still_ours(false) {
             let _ = write_state(&self.dir, &self.state);
         }
     }
@@ -558,8 +620,9 @@ impl Drop for UpdateGuard {
         // it — in which case the directory now belongs to them and removing it
         // would delete a *live* lock. `still_ours` is the same predicate every
         // write uses, so a guard cannot be judged the owner by one path and not
-        // by the other.
-        if self.still_ours() {
+        // by the other, except on the deliberate strictness split `still_ours`
+        // documents.
+        if self.still_ours(true) {
             let _ = fs::remove_dir_all(&self.dir);
         }
     }
@@ -842,6 +905,46 @@ mod tests {
                 "a failed steal must be Busy, not Err ({e}) — the caller's Err arm continues without a lock"
             ),
         }
+    }
+
+    #[test]
+    fn a_state_file_from_a_newer_veld_still_reads_as_a_live_update() {
+        // `veld update` runs the **old** binary, so an old binary reading a newer
+        // one's state file is the normal case, not an edge one. Without
+        // `#[serde(other)]` a single unknown variant fails the whole parse, and
+        // every downstream consequence is the unsafe direction: the command gate
+        // reads "no update running" and lets `veld start` through mid-restart,
+        // and `acquire` treats a **live** holder as stealable.
+        let tmp = tempfile::tempdir().unwrap();
+        let _env = isolated(tmp.path());
+
+        let dir = lock_dir().unwrap();
+        fs::create_dir_all(&dir).unwrap();
+        // Exactly what a future release might write: two variants this binary has
+        // never heard of, plus a field it does not know.
+        fs::write(
+            state_path(&dir),
+            format!(
+                r#"{{"pid":{},"origin":"cron","version":"99.0.0",
+                    "started_at":"{now}","phase":"verifying-signature",
+                    "phase_at":"{now}","tty":null,"bytes_downloaded":41}}"#,
+                std::process::id(),
+                now = Utc::now().to_rfc3339()
+            ),
+        )
+        .unwrap();
+
+        let state = current().expect("a newer veld's lock must still read as live");
+        assert_eq!(state.phase, Phase::Unknown);
+        assert_eq!(state.origin, Origin::Unknown);
+        assert_eq!(state.version.as_deref(), Some("99.0.0"));
+        // And it must actually block, which is the whole point.
+        assert!(matches!(
+            acquire(Origin::Cli, None, false).unwrap(),
+            Acquired::Busy(_)
+        ));
+        // It still says something true to a user.
+        assert!(state.describe(Utc::now()).contains("in progress"));
     }
 
     #[test]
