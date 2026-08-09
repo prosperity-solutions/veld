@@ -932,7 +932,7 @@ body[data-fullscreen="true"] .topbar.electron {
 /* ---- run selector (top bar) ---------------------------------------------- */
 
 /* Which run the window is bound to. A square cell when there is one run (just
-   the dot, centred) that widens for the `x/x` chip beside it. `padding-inline`
+   the dot, centred) that widens for the `x/x` count beside it. `padding-inline`
    is symmetric so the dot sits dead centre; `min-width` keeps a lone dot from
    collapsing the cell below the bar's control height. */
 .run-select {

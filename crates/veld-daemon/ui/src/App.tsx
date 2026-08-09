@@ -4351,6 +4351,11 @@ function NodeActionsButton(props: {
       </Tooltip>
     );
   }
+  // Enabled implies a run is set (`disabled === !nodeActionProps`), so the guard
+  // below is defensive rather than reachable — it exists to keep the cast-free
+  // path through `NodeActions` rather than a `run as RunRef` that a future
+  // caller could trip.
+  if (!props.run) return null;
   return (
     <Menu position="bottom-start" width={280} withinPortal>
       <Menu.Target>
@@ -4363,7 +4368,7 @@ function NodeActionsButton(props: {
       <Menu.Dropdown>
         <Menu.Label>Actions on the running run</Menu.Label>
         <div className="node-actions-menu">
-          <NodeActions run={props.run as RunRef} nodes={props.nodes} onChanged={props.onChanged} />
+          <NodeActions run={props.run} nodes={props.nodes} onChanged={props.onChanged} />
         </div>
       </Menu.Dropdown>
     </Menu>
