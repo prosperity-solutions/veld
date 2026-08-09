@@ -4201,9 +4201,9 @@ function Rail(props: {
   onAddLane: () => void;
   onLaneMenu: (e: React.MouseEvent, lane: string) => void;
   onMove: (path: string, toLane: string, toIndex: number) => void;
-  /** Reorder whole lanes by dragging their headers. `toIndex` is an insertion
-   *  point in the current lane list — see `moveLane`. */
-  onMoveLane: (lane: string, toIndex: number) => void;
+  /** Reorder whole lanes by dragging their headers. `to` is the position the
+   *  lane ends up at — see `moveLane`. */
+  onMoveLane: (lane: string, to: number) => void;
   onRestore: (w: Worktree) => void;
   onEmptyTrash: () => void;
   /** Dropping a dragged worktree onto the trash — bins it (revertible), which is
@@ -4245,11 +4245,46 @@ function Rail(props: {
   // ask what kind it was before doing anything.
   const [dragLane, setDragLane] = useState<string | null>(null);
   const [laneDropAt, setLaneDropAt] = useState<number | null>(null);
-  // Insertion coordinates for the lane sections, by group key. Only real lanes
-  // are in here: the ungrouped section, the main checkout and the two pending
-  // -removal lanes hold no position in the lane order, so they are neither
-  // draggable nor lane drop targets.
+  // Positions of the lane sections, by group key. Only real lanes are in here:
+  // the ungrouped section, the main checkout and the two pending-removal lanes
+  // hold no position in the lane order, so they are neither draggable nor lane
+  // drop targets.
   const laneIndex = new Map(props.lanes.map((l, i) => [l.name, i]));
+  const listRef = useRef<HTMLDivElement>(null);
+
+  /**
+   * The lane a pointer at `clientY` is aiming at, or `null` when the rail holds
+   * no lanes.
+   *
+   * Measured against the sections' geometry rather than resolved from the
+   * element under the pointer, and that is the whole point. Per-element hit
+   * testing made the gesture directional: a lane is grabbed by its header, which
+   * sits at the *top* of its own section, so one pixel upwards is already inside
+   * the section above, while dragging downwards has to clear the dragged lane's
+   * entire height before anything registers — and the 9px gutters, the list's
+   * padding and everything below the last lane belonged to no section at all, so
+   * "pull it to the bottom and let go" landed on nothing. Reading the pointer
+   * against the lanes' boxes leaves no dead space in the column: above the first
+   * lane is the first, below the last is the last, and a gutter belongs to the
+   * lane under it.
+   *
+   * `data-lane-index` rather than refs because the sections are rendered by a
+   * plain map and the count changes as lanes come and go; the query runs on
+   * dragover, over a handful of elements.
+   */
+  const laneTargetAt = (clientY: number): number | null => {
+    const list = listRef.current;
+    if (!list) return null;
+    const sections = list.querySelectorAll<HTMLElement>("[data-lane-index]");
+    let last: number | null = null;
+    for (const el of sections) {
+      const index = Number(el.dataset.laneIndex);
+      if (Number.isNaN(index)) continue;
+      if (clientY < el.getBoundingClientRect().bottom) return index;
+      last = index;
+    }
+    return last;
+  };
   // Suppresses the rail's width transition for the duration of a resize drag. The
   // transition exists for the collapse/expand toggle, where 236px→64px should
   // animate; during a drag it re-animates on every pointer move, so the edge
@@ -4307,42 +4342,36 @@ function Rail(props: {
   });
 
   /**
-   * Drop handlers for a section receiving a dragged **lane**, or `null` when no
-   * lane drag is in flight or this section holds no place in the lane order.
+   * The lane drag's drop zone: the scrollable list as a whole, not the sections.
    *
-   * The whole section is one target and it means one thing: the dragged lane
-   * takes this lane's position. No midpoint — a lane is a block, and unlike a row
-   * it has no "above me" and "below me" halves to distinguish, so splitting it
-   * only creates a dead zone. It was split at first, and the upper half of the
-   * lane directly below resolved to the position the dragged lane already held:
-   * dragging a lane down one place did nothing, whichever half you released on,
-   * while dragging up worked. Which way the bar is drawn is a rendering question,
-   * answered from the travel direction — see `renderGroup`.
+   * One owner for the gesture. Every section and row bails out of its own
+   * handlers while a lane is in flight (each drop zone answers only to its own
+   * drag), so the event reaches here from anywhere in the column and
+   * [`laneTargetAt`] decides what it means. A dragged lane always has somewhere
+   * to land, which is what per-section targets could not promise.
    *
-   * The rows' own drop zones bail on a lane drag without stopping propagation, so
-   * a pointer anywhere in the section reaches this.
-   *
-   * Spread *after* `dropZone`, overriding it: the two drags are mutually exclusive
-   * (each handler bails unless its own drag is the live one), and this keeps the
-   * override in one place instead of a kind check inside every worktree handler.
+   * Dropping a lane means displacement — it takes the target lane's position —
+   * so there is no midpoint to consult: a lane is a block, and unlike a row it
+   * has no "above me" and "below me" halves. Which side the bar is drawn on is a
+   * rendering question, answered from the travel direction in `renderGroup`.
    */
-  const laneDropZone = (group: RailGroup) => {
-    const index = laneIndex.get(group.key);
-    if (dragLane === null || index === undefined) return null;
-    return {
-      onDragOver: (e: React.DragEvent) => {
-        e.preventDefault();
-        e.stopPropagation();
-        setLaneDropAt(index);
-      },
-      onDrop: (e: React.DragEvent) => {
-        e.preventDefault();
-        e.stopPropagation();
-        props.onMoveLane(dragLane, index);
-        endDrag();
-      },
-    };
-  };
+  const laneDrop = dragLane === null
+    ? null
+    : {
+        onDragOver: (e: React.DragEvent) => {
+          const to = laneTargetAt(e.clientY);
+          if (to === null) return;
+          e.preventDefault();
+          setLaneDropAt(to);
+        },
+        onDrop: (e: React.DragEvent) => {
+          const to = laneTargetAt(e.clientY);
+          if (to === null) return;
+          e.preventDefault();
+          props.onMoveLane(dragLane, to);
+          endDrag();
+        },
+      };
 
   /**
    * Render one rail section — a lane, a user lane, or one of the two
@@ -4384,7 +4413,10 @@ function Rail(props: {
             // Appending is still reachable, and unambiguously so: it is the lower
             // half of the last row.
             {...dropZone(group, 0)}
-            {...(laneDropZone(group) ?? {})}
+            /* What `laneTargetAt` measures. Only a real lane carries one, so the
+               ungrouped section and the pinned lanes are not lane targets — a
+               pointer over them resolves to the nearest lane instead. */
+            data-lane-index={laneAt}
           >
             {group.label !== null && props.wide && (
               <div
@@ -4866,7 +4898,12 @@ function Rail(props: {
           </ActionIcon>
         )}
       </div>
-      <div className="rail-list" onDragEnd={endDrag}>
+      <div
+        className="rail-list"
+        ref={listRef}
+        onDragEnd={endDrag}
+        {...(laneDrop ?? {})}
+      >
         {scroll.map((group) => renderGroup(group))}
       </div>
       {dockVisible && (
