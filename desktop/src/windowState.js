@@ -228,39 +228,41 @@ function restoreBudget(stored) {
 }
 
 // ---------------------------------------------------------------------------
-// Worktree ownership
+// Which window is displaying what
 // ---------------------------------------------------------------------------
 //
-// Two maps and the rules between them. `claims` is worktree → the one window
-// *showing* it; `holders` is worktree → every window still holding its panes,
-// which is a superset because a window keeps what it has visited so switching
-// back is instant rather than a reconnect. Pure bookkeeping, kept here rather
-// than in `windows.js`, because the failures are set arithmetic — a claim that
-// outlives its window, a holder never asked to let go — and `node --test` can
-// reach them here.
-
-/** Every window still holding `worktreeId` other than `keeper`: the ones that
- *  have to let go before `keeper` may attach to its terminals. */
-function othersHolding(holders, worktreeId, keeper) {
-  return [...(holders.get(worktreeId) ?? [])].filter((id) => id !== keeper);
-}
+// One map: worktree → the window showing it, reported by the renderer once the
+// *daemon* has granted it (`veld:window:shows`). **Not ownership** — who may
+// show a worktree, who has to let go, and what a click on a taken one does are
+// the daemon's, because `/ide` also runs in a browser tab this process cannot
+// see. What is left here is routing a cross-window tab drop at a window those
+// tabs belong in, which is a question about this process's own windows.
+//
+// Pure bookkeeping, kept here rather than in `windows.js`, because the failure
+// is set arithmetic — an entry that outlives its window — and `node --test` can
+// reach it here.
 
 /**
  * Whether `record` is a window this worktree's panes belong in.
  *
- * Two ways to qualify, and the second one is not a special case. A **main**
- * window qualifies by holding the claim, i.e. by *showing* the worktree — its
- * own `worktreeId` records what it was opened for, which is not what it shows
- * now, so that field must never be read for one. A **detached** window never
- * claims at all (it is a satellite of its origin's claim), so the field is the
- * only thing that says which worktree its dock is for — and matching on the
- * claim alone made a detached dock impossible to drop onto.
+ * The one question about worktrees this process still answers, and only because
+ * it is about *its own windows*: when tabs are dropped onto a window, do they
+ * belong there? Who may show a worktree moved to the daemon, which is the only
+ * party a browser tab also talks to.
+ *
+ * Two ways to qualify, and the second is not a special case. A **main** window
+ * qualifies by displaying the worktree — its own `worktreeId` records what it
+ * was opened for, which is not what it shows now, so that field must never be
+ * read for one. A **detached** window never reports what it displays (it is a
+ * satellite of its origin), so the field is the only thing that says which
+ * worktree its dock is for — and matching on the map alone made a detached dock
+ * impossible to drop onto.
  *
  * Liveness and "is this the window the drag started in" are the caller's, since
  * neither is set arithmetic.
  */
-function ownsWorktree(record, worktreeId, claims) {
-  if (claims.get(worktreeId) === record.id) return true;
+function ownsWorktree(record, worktreeId, showing) {
+  if (showing.get(worktreeId) === record.id) return true;
   return record.kind === "detached" && record.worktreeId === worktreeId;
 }
 
@@ -268,11 +270,13 @@ function ownsWorktree(record, worktreeId, claims) {
  * Whether a cross-window drop may be pushed at a window's drop listener, or has
  * to be queued for it.
  *
- * A window holds its claim from the moment it *asks* for a worktree, while the
- * listener that answers a drop does not exist until `/ide` has mounted and
- * `PaneArea` has registered its handler — so a claim is routable for a window
- * that cannot answer, and pushing there means `webContents.send` goes nowhere,
- * the ack times out, and the gesture reports `refused` after two seconds of
+ * A window reports what it displays only once the daemon has granted it *and*
+ * React has committed — which is after `PaneArea` registers its drop handler, so
+ * for a current bundle the two now arrive in the safe order. The gap that
+ * remains is a page that is **loading or reloading**: it is still in the map
+ * from before, its handler is gone, and pushing there means `webContents.send`
+ * goes nowhere, the ack times out, and the gesture reports `refused` after two
+ * seconds of
  * looking like a hang.
  *
  * **This is only half the question, and the smaller half.** A page that has not
@@ -297,8 +301,9 @@ function dropDelivery(dropListener) {
 /**
  * What one of a window's listener states becomes when its page navigates.
  *
- * Shared by both — the drop listener and the yield listener — because the question
- * is the same one and the trap in it is the same one.
+ * One listener now (the drop listener); it was two, and the yield listener went
+ * with the claim protocol to the daemon. Kept general because the question is
+ * about a page's listeners, not about which one.
  *
  * Only a main-frame, cross-document navigation counts. `did-start-loading` is the
  * tab spinner and an iframe's load turns it too; a same-document navigation
@@ -315,77 +320,11 @@ function nextListenerState(current, { isMainFrame, isSameDocument }) {
   return current === "ready" ? "gone" : current;
 }
 
-/**
- * Whether a holder's release is worth waiting for.
- *
- * Only `"ready"`, and the asymmetry with `dropDelivery` is the point. A drop can be
- * *pushed* at a window that has never reported, because an older `/ide` bundle
- * still answers `drop-here` perfectly well — the reporting is only about latency
- * there. A yield is different: an older bundle has no `yielded` channel at all, so
- * waiting for one would make every handover on a daemon-older-than-shell install
- * cost the full timeout. Not waiting is exactly what that build did.
- *
- * The state is reported by the effect that *sends* the acknowledgement, not
- * inferred from some other signal that happens to correlate with it. That is what
- * keeps this honest: remove the ack and the report goes with it, so the shell stops
- * waiting rather than waiting for something that will never come.
- */
-function answersYields(yieldListener) {
-  return yieldListener === "ready";
-}
-
-/** Record `recordId` as holding exactly `worktreeIds`, dropping whatever it held
- *  before. Emptied sets are deleted rather than left as debris. */
-function setHolds(holders, recordId, worktreeIds) {
-  for (const [worktreeId, set] of [...holders]) {
-    if (worktreeIds.includes(worktreeId)) continue;
-    set.delete(recordId);
-    if (set.size === 0) holders.delete(worktreeId);
-  }
-  for (const worktreeId of worktreeIds) {
-    const set = holders.get(worktreeId) ?? new Set();
-    set.add(recordId);
-    holders.set(worktreeId, set);
-  }
-}
-
-/** Forget `recordId` entirely — its window is gone. */
-function releaseHolds(holders, recordId) {
-  for (const [worktreeId, set] of [...holders]) {
-    set.delete(recordId);
-    if (set.size === 0) holders.delete(worktreeId);
-  }
-}
-
-/** Drop every claim held by `recordId`. A window shows one worktree at a time,
- *  so taking a new claim releases the old one through here too. */
+/** Drop every entry pointing at `recordId`. A window displays one worktree at a
+ *  time, so reporting a new one clears the old through here too. */
 function releaseClaims(claims, recordId) {
   for (const [worktreeId, id] of [...claims]) {
     if (id === recordId) claims.delete(worktreeId);
-  }
-}
-
-/**
- * Forget worktrees that no longer exist, whoever held them.
- *
- * Both maps are keyed by the database's worktree rowid, and `worktrees.id` is a
- * plain `INTEGER PRIMARY KEY` — **not** `AUTOINCREMENT` — so SQLite hands the
- * highest free rowid to the next insert. Delete the newest worktree, create
- * another, and it arrives wearing the dead one's id. With a claim left behind,
- * that brand-new worktree is reported as already open in another window: its rail
- * row is dimmed, and clicking it focuses a window that is showing something else
- * entirely.
- *
- * The stale entry does eventually clear itself — a claim is released when its
- * window claims anything else — which is why this is a small bug rather than a
- * stuck one, and why the fix belongs at the deletion rather than in a sweep: the
- * app knows the exact ids it just removed, so nothing has to be inferred from a
- * list that might be a poll behind.
- */
-function forgetWorktrees(claims, holders, worktreeIds) {
-  for (const worktreeId of worktreeIds) {
-    claims.delete(worktreeId);
-    holders.delete(worktreeId);
   }
 }
 
@@ -462,18 +401,13 @@ module.exports = {
   slotFor,
   nextSuffix,
   canOpenAnother,
-  answersYields,
   dropDelivery,
-  forgetWorktrees,
   handBackTarget,
   handBackTransfers,
   nextListenerState,
-  othersHolding,
   ownsWorktree,
   releaseClaims,
-  releaseHolds,
   restoreBudget,
-  setHolds,
   safeBounds,
   parseWindowRecord,
   parseWindowList,

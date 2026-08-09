@@ -365,6 +365,31 @@ and several were paid for in this codebase already.
   one that may signal it.** The daemon asks a holder to hang up over the socket
   and never signals the shell's process group itself — a `killpg` racing
   `child.wait()` can land on a recycled pid.
+- **Which client is showing a worktree is the daemon's answer, never a shell's.**
+  The IDE's ownership registry lives in `crates/veld-daemon/src/ide.rs`, behind a
+  control WebSocket (`/api/ide/channel`, ticket-authed like the PTY attach because
+  a handshake cannot carry the CSRF header), and a worktree's pane layout lives in
+  `pane_layouts` (migration v15) rather than in browser storage. Both moved out of
+  the Electron main process for the same structural reason: `/ide` is served to a
+  plain browser as well as to Veld Desktop, and a shell can only see its own
+  windows — so a browser tab was invisible to the arbitration, opened worktrees the
+  app already had, rendered a second set of panes for them, and fought the app for
+  every shell, since a second PTY attach *takes a session over* rather than
+  mirroring it. Anything that needs to know who is showing what belongs there.
+  Three properties are load-bearing and cheap to break: **the socket is the lease**
+  (a claim lives exactly as long as its connection, so there is no TTL to tune and
+  no reaper — resist adding one; the reload case is the short `RECONNECT_GRACE`
+  keyed on a per-tab `client_id`), **a layout write states the version it read**
+  (contention is prevented upstream, so the version is a hand-off guard against the
+  yielding client's debounced save landing after the claiming one starts editing),
+  and **the daemon never looks inside a layout** — it is an opaque JSON document, so
+  a new pane kind is a UI-only change instead of a migration and an older daemon
+  round-trips a newer client's fields instead of erasing them. What Electron kept is
+  only what a daemon cannot do: raise a window (`veld:window:focus-self`) and route
+  a cross-window tab drop. **A browser tab cannot be focused** — `window.focus()`
+  outside a user gesture is ignored — so a refusal carries the holder's *kind* and
+  the UI says where the worktree is instead of promising a raise that will not
+  happen; do not "fix" that by calling `focus()` anyway.
 - **`veld update` holds a lock, and nothing that the update replaces may own it.**
   One update at a time is enforced by `veld_core::update_lock`: a lock *directory*
   at `~/.veld/update.lock` (`mkdir` is the create-or-fail primitive, and already

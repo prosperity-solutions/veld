@@ -31,22 +31,22 @@ const {
   transferFromSeed,
 } = require("./validate");
 const {
-  answersYields,
+
   canOpenAnother,
   dropDelivery,
-  forgetWorktrees,
+
   handBackTarget,
   handBackTransfers,
   nextListenerState,
   nextSuffix,
-  othersHolding,
+
   ownsWorktree,
   parseWindowList,
   releaseClaims: releaseClaimsIn,
-  releaseHolds: releaseHoldsIn,
+
   restoreBudget,
   safeBounds,
-  setHolds: setHoldsIn,
+
   serializeWindowList,
   slotFor,
 } = require("./windowState");
@@ -79,19 +79,12 @@ const {
  *   record is still alive and matchable in that gap, and its adopt queue has
  *   already been handed on, so nothing may be given to it any more. Read by
  *   `queueDrop`, the drop target test, `handBack`'s target filter and
- *   `claimHolder`; `openSettings` and `focusPrimary` still match on
+ *   `showsWorktree`'s pruning; `openSettings` and `focusPrimary` still match on
  *   `isDestroyed()` alone, which is pre-existing and outside this change.
- * @property {number} claimSeq  which claim this window is currently making, so a
- *   claim that has finished waiting for its yields can tell that another has
- *   overtaken it. Absent until the window's first claim.
  * @property {"unknown" | "ready" | "gone"} dropListener
  *   whether this window has a live listener for a cross-window drop. `unknown`
  *   until the renderer says — which an older `/ide` bundle never does, and which
  *   is why "unknown" is not "gone"; see `dropDelivery` in `windowState.js`.
- * @property {"unknown" | "ready" | "gone"} yieldListener
- *   the same for the effect that acknowledges a yield, reported by that effect
- *   itself so the signal cannot drift from what it stands for. A claim waits only
- *   on `ready` holders; see `answersYields` in `windowState.js`.
  * @property {number | null} worktreeId
  * @property {string | null} repoRoot  which worktree a *detached* window is a
  *   dock for. Persisted and put back in its URL on restore: a bare dock has no
@@ -106,132 +99,24 @@ const windows = new Map();
 let nextRecordId = 1;
 
 /**
- * Which window is showing which worktree: `worktreeId → record id`.
+ * Which worktree each window is *displaying*: `worktreeId → record id`.
  *
- * **A worktree has one set of panes, and one window shows it.** Layouts live in
- * a store shared by every window (`LAYOUT_WORKTREE_KEY` in `panes/model.ts`), so
- * without this two windows would render the same set and both attach to its
- * terminals — and an attach *takes a session over*, so they would trade every
- * shell back and forth. The per-window layout store used to prevent that by
- * giving each window a private copy, which is worse: it prevented the collision
- * by creating the confusion, two independent sets of panes for one worktree with
- * no way to tell which window held which shells.
+ * **A routing hint, not an authority.** Ownership of a worktree — who may show
+ * it, who has to let go, and what happens when you click one that is taken —
+ * moved to the daemon (`crates/veld-daemon/src/ide.rs`), because this process
+ * can only ever see its own windows and the same page also runs in a plain
+ * browser tab. A tab was invisible to the arbitration that lived here, so it
+ * opened worktrees the app already had and fought it for every shell.
  *
- * A claim is *displayed*, not owned. A window that switches away releases, and
- * the layout stays in the shared store for whoever picks the worktree up next —
- * which is what makes "close that window and it comes back over here" work with
- * no hand-off protocol at all.
- *
- * Detached windows never claim: their tabs were transferred out of a worktree
- * their origin is showing, and they are a satellite of that claim.
+ * What is left is the one question only this process can answer: **when tabs are
+ * dropped onto a window, is that a window this worktree's panes belong in?** The
+ * renderer reports what it is showing (`veld:window:shows`) and `ownsWorktree`
+ * reads it. A stale entry costs a drop that opens a new window instead of moving
+ * tabs into an existing one — recoverable, and self-correcting on the next
+ * report — where a stale *claim* used to grey out a rail row with no window
+ * behind it.
  */
-const claims = new Map();
-
-/**
- * Which windows still *hold* a worktree's panes, as opposed to showing them:
- * `worktreeId → Set<record id>`.
- *
- * A window keeps the panes of worktrees it has visited, mounted and attached, so
- * switching back to one is instant rather than a reconnect-and-replay. That is
- * worth keeping, and it is also exactly what would make two windows fight: the
- * moment another window claims a worktree, every other holder has to let go of
- * that one — and only that one.
- *
- * Reported by each main window's renderer whenever its layouts change, because
- * the shell cannot see what a page is holding. A window that never reports (an
- * older build, a renderer that died) simply holds nothing here, which degrades
- * to the previous behaviour rather than to a wrong one.
- */
-const holders = new Map();
-
-/**
- * Yields waiting for a holder to confirm it has let go: `yieldId → {targetId,
- * settle}`.
- *
- * **The claimer must not attach until the previous holder has released.** Same
- * rule the drop path follows — the source never lets go until the destination
- * acknowledges — applied to the other direction. A bare `send` and a claim
- * recorded regardless leaves a window in which two renderers both hold the same
- * worktree's layout and both consider themselves the owner of its PTY sessions,
- * and a second attach *takes a session over* rather than mirroring it, so the
- * loser's terminal goes dead-but-visible. Short window, and exactly the shape of
- * thing that shows up on a loaded machine and nowhere else.
- *
- * The timeout resolves rather than rejecting: a holder that cannot answer must
- * not be able to block a claim forever, so the fallback is the behaviour this
- * replaced.
- */
-const pendingYields = new Map();
-let nextYieldId = 1;
-/** Monotonic, so a claim that finished waiting can tell whether it is still the
- *  one its window is making. See the `veld:window:claim` handler. */
-let nextClaimSeq = 0;
-/** Long enough for a renderer to drop a layout and release its terminals — this
- *  is a React commit, not a network round trip — and short enough that a wedged
- *  holder is not felt as a broken click. */
-const YIELD_ACK_MS = 1500;
-
-/**
- * Tell every window except `keeper` to let go of `worktreeId`, and resolve once
- * they have (or once the timeout gives up on them).
- *
- * "Let go", not "close": the renderer drops that worktree's layout and releases
- * its terminals without ending them, so the shells keep running and the layout
- * stays in the shared store for the window that just claimed it. Sent only for
- * the one worktree being claimed, so a window's other panes are untouched.
- */
-function yieldWorktree(worktreeId, keeper) {
-  const ids = othersHolding(holders, worktreeId, keeper);
-  const targets = allRecords().filter((r) => !r.win.isDestroyed() && ids.includes(r.id));
-  // **Only a holder whose acknowledging effect is mounted is waited for** — see
-  // `answersYields`. Reported by that effect itself rather than inferred from a
-  // neighbouring signal, so the two cannot drift apart: an older `/ide` bundle has
-  // no `yielded` channel and reports nothing, and gets the fire-and-forget send
-  // that is exactly what it did before.
-  const answering = targets.filter((r) => answersYields(r.yieldListener));
-  for (const record of targets) {
-    if (answering.includes(record)) continue;
-    record.win.webContents.send("veld:window:yield", { worktreeId });
-  }
-  return Promise.all(
-    answering.map(
-      (record) =>
-        new Promise((resolve) => {
-          const yieldId = nextYieldId++;
-          pendingYields.set(yieldId, { targetId: record.id, settle: resolve });
-          setTimeout(() => {
-            if (!pendingYields.delete(yieldId)) return;
-            // Proceeding anyway is the documented fallback, but it is also the one
-            // path that can still reinstate the race — so it says so. Without this
-            // line a dead-but-visible terminal has nothing behind it to look at,
-            // and the condition (a wedged or very slow renderer) is exactly the
-            // kind that is only ever reported second-hand.
-            console.warn(
-              `[veld] window ${record.id} did not acknowledge yielding worktree ${worktreeId} in ${YIELD_ACK_MS}ms; proceeding`,
-            );
-            resolve();
-          }, YIELD_ACK_MS);
-          record.win.webContents.send("veld:window:yield", { worktreeId, yieldId });
-        }),
-    ),
-  );
-}
-
-/**
- * Stop waiting on a window that is gone.
- *
- * Without this a claim waits out the full timeout for a holder that closed
- * mid-yield — the answer is already known, and making the user feel it as a
- * stalled click is the failure mode the timeout exists to bound, not one to
- * accept.
- */
-function settleYieldsFor(recordId) {
-  for (const [yieldId, pending] of [...pendingYields]) {
-    if (pending.targetId !== recordId) continue;
-    pendingYields.delete(yieldId);
-    pending.settle();
-  }
-}
+const showing = new Map();
 
 // ---------------------------------------------------------------------------
 // Cross-window tab drags
@@ -393,61 +278,11 @@ function endDrag() {
   }
 }
 
-/** The live record showing `worktreeId`, or `null`.
- *
- *  `closing` counts as gone: between `close` and `closed` the record is still here,
- *  and treating it as the holder refuses the asking window with `shown-elsewhere`
- *  and raises a window that is disappearing — while `closed` is about to release the
- *  claim anyway. Dropping it here just gets to the same answer without the detour.
- *  (`openSettings` and `focusPrimary` still match on `isDestroyed()` alone; that is
- *  pre-existing and outside this change.) */
-function claimHolder(worktreeId) {
-  const id = claims.get(worktreeId);
-  if (id === undefined) return null;
-  const holder = allRecords().find((r) => r.id === id && !r.win.isDestroyed() && !r.closing);
-  if (!holder) {
-    claims.delete(worktreeId);
-    return null;
-  }
-  return holder;
-}
-
-/**
- * Tell every main window which worktrees *other* windows are showing.
- *
- * Personalised per window on purpose: what a rail needs to grey out is "not
- * mine", and a window computing that from a shared map would first have to
- * learn its own record id — one more thing to keep in sync for no gain.
- *
- * Pushed rather than polled, and re-sent on every claim, every window close and
- * every load, because the interesting transitions all happen in another window:
- * a rail that only refreshed when *you* did something would stay wrong for as
- * long as you did nothing.
- */
-function pruneClaims() {
+/** Forget windows that are gone, so a dead entry cannot route a drop. */
+function pruneShowing() {
   const ids = new Set(allRecords().filter((r) => !r.win.isDestroyed()).map((r) => r.id));
-  let dropped = false;
-  // `claimHolder` prunes lazily, one worktree at a time, and it is not on every
-  // path — a dead window's claim left here would grey a rail row out with no
-  // window behind it and no way for the user to reach it again.
-  for (const [worktreeId, id] of claims) {
-    if (ids.has(id)) continue;
-    claims.delete(worktreeId);
-    dropped = true;
-  }
-  return dropped;
-}
-
-function broadcastClaims() {
-  pruneClaims();
-  const live = allRecords().filter((r) => !r.win.isDestroyed());
-  for (const record of live) {
-    if (record.kind !== "main") continue;
-    const worktreeIds = [];
-    for (const [worktreeId, id] of claims) {
-      if (id !== record.id) worktreeIds.push(worktreeId);
-    }
-    record.win.webContents.send("veld:window:claims", { worktreeIds });
+  for (const [worktreeId, id] of showing) {
+    if (!ids.has(id)) showing.delete(worktreeId);
   }
 }
 
@@ -783,44 +618,23 @@ function openWindow(options = {}) {
     snapshot: null,
     pendingAdopt: [],
     dropListener: "unknown",
-    yieldListener: "unknown",
     closing: false,
   };
   windows.set(win.id, record);
 
-  // A page navigating away takes its listeners with it, and the renderer gets no
-  // chance to say so — an unload handler is not a place to await an IPC round
-  // trip. So the shell notices instead. Which navigations count, and why `unknown`
-  // is not demoted, is `nextListenerState` in `windowState.js`, where it is a
-  // decision over plain values and therefore has tests. Both listeners take it:
-  // they live in one document and die with it.
+  // A page navigating away takes its drop listener with it, and the renderer
+  // gets no chance to say so — an unload handler is not a place to await an IPC
+  // round trip. So the shell notices instead. Which navigations count, and why
+  // `unknown` is not demoted, is `nextListenerState` in `windowState.js`, where
+  // it is a decision over plain values and therefore has tests.
+  //
+  // Nothing here touches worktree ownership any more: the daemon holds a
+  // client's claims for as long as its control socket is open, and a reload
+  // closes that socket. It also has a short grace in which the same client id
+  // reconnecting takes its claims back, which is a thing this process could
+  // never have done — it cannot tell a reload from a close.
   win.webContents.on("did-start-navigation", (details) => {
     record.dropListener = nextListenerState(record.dropListener, details);
-    record.yieldListener = nextListenerState(record.yieldListener, details);
-    if (!details.isMainFrame || details.isSameDocument) return;
-    // And it holds no panes either, which matters now that a claim *waits* for
-    // its holders: what a page reported stays in `holders` until the next page
-    // reports, so a reload left a claim asking a document that no longer exists
-    // to let go and then waiting out `YIELD_ACK_MS` for an answer nobody could
-    // give. The new page reports its own holds at mount.
-    //
-    // This removes the *wait*, not the takeover behind it. The reloading page's
-    // layouts survive in the shared store, so when it remounts it renders that
-    // worktree and attaches its sessions before its own claim is answered — and a
-    // window granted the worktree during the reload has its session taken over.
-    // That is the pre-existing boot-ordering hole (a claim answered after the panes
-    // are already mounted), which no ack can close and which is tracked separately;
-    // do not read this line as fixing it.
-    //
-    // Assumption, stated because it is one: a *started* main-frame navigation here
-    // replaces the document. A navigation that never commits (a 204, a download)
-    // would leave the old page alive and attached while `holders` says it holds
-    // nothing — and the next claim would then send no yield and attach alongside
-    // it, which is the very failure above. Nothing in `/ide` can produce one: it is
-    // a SPA with no downloads, cross-origin navigation is already blocked by the
-    // `will-navigate` guard below, and a failed load commits an error page. Add a
-    // `did-fail-load` re-request if that ever stops being true.
-    releaseHoldsIn(holders, record.id);
   });
 
   // Run URLs open in the user's real browser, never inside the shell.
@@ -891,17 +705,14 @@ function openWindow(options = {}) {
     // drop carets for a gesture that ended.
     if (drag?.sourceId === record.id) endDrag();
     // Anything still waiting on this window has its answer: it is not going to
-    // release, and it is not going to place a drop. Both fall back on their own,
-    // but only after a timeout the user would feel as a stalled gesture.
-    settleYieldsFor(record.id);
+    // place a drop. It falls back on its own, but only after a timeout the user
+    // would feel as a stalled gesture.
     settleDropsFor(record.id);
-    releaseClaimsIn(claims, record.id);
-    releaseHoldsIn(holders, record.id);
+    releaseClaimsIn(showing, record.id);
     windows.delete(win.id);
     persistWindows();
-    // Its worktrees are pickable again, and the rails saying otherwise are in
-    // other windows — nothing else would correct them.
-    broadcastClaims();
+    // Its worktrees becoming pickable again is the daemon's to notice — the
+    // page's control socket died with the window, which is what releases them.
   });
 
   // A window opened while a drag is in flight is polled and asked to resolve a
@@ -1245,202 +1056,98 @@ function registerWindowIpc(ipcMain) {
   });
 
   /**
-   * Ask to show a worktree.
+   * Which worktree this window is displaying.
    *
-   * `{ok: true}` and the window renders it — including when this window already
-   * held it, so a re-select is not a fight with itself. `{ok: false}` and
-   * another window is already showing it, which is not an error to report but a
-   * place to go: the shell **focuses that window**, and the caller stays where
-   * it is. That is the whole answer to "two sets of panes for one worktree" —
-   * there is only ever one, and picking it twice takes you to it.
+   * **Reporting, not asking.** Whether a window *may* show a worktree is the
+   * daemon's answer now (`crates/veld-daemon/src/ide.rs`); this is the page
+   * telling the shell what it settled on, and the only consumer is drop routing
+   * — `ownsWorktree`, which has to know whether a window the pointer is over is
+   * a place this worktree's tabs belong.
    *
-   * A detached window never claims; it is a satellite of its origin's claim.
-   *
-   * **It resolves only once every other holder has let go**, because the caller
-   * renders the worktree's panes — and attaches to the PTY sessions its layout
-   * names — on the strength of this answer. The claim itself is recorded first
-   * and synchronously: it is what makes a third window's claim arriving during
-   * the wait get refused rather than granted alongside this one, and the greyed
-   * rail row in every other window is true from that moment on. A claim from
-   * *this* window during the wait supersedes rather than refuses — see `claimSeq`
-   * at the bottom of the handler.
+   * A detached window never reports: its `worktreeId` is fixed at creation and
+   * is what `ownsWorktree` reads for it.
    */
-  ipcMain.handle("veld:window:claim", async (event, payload) => {
+  ipcMain.handle("veld:window:shows", (event, payload) => {
+    const record = recordFor(senderWindow(event));
+    if (!record || record.kind !== "main") return false;
+    releaseClaimsIn(showing, record.id);
+    const worktreeId = safeWorktreeId(payload?.worktreeId);
+    if (worktreeId !== null) showing.set(worktreeId, record.id);
+    pruneShowing();
+    return true;
+  });
+
+  /**
+   * Ask to show a worktree — **for an `/ide` bundle older than this shell only.**
+   *
+   * A current bundle asks the daemon, which arbitrates across browser tabs too.
+   * This exists because that older bundle keeps its main-window layouts in one
+   * `localStorage` key shared between windows, so without an answer here two
+   * windows render one worktree's panes and trade every shell in it. Answering a
+   * blanket yes would have been worse than not stubbing at all.
+   *
+   * `showing` is the same map drop routing uses; the older bundle populates it
+   * through this call rather than through `veld:window:shows`, which it does not
+   * know about. No yield handshake — see the preload comment.
+   */
+  ipcMain.handle("veld:window:legacy-claim", (event, payload) => {
     const record = recordFor(senderWindow(event));
     if (!record) return { ok: false, reason: "no-window" };
     if (record.kind !== "main") return { ok: true };
     const worktreeId = safeWorktreeId(payload?.worktreeId);
     if (worktreeId === null) return { ok: false, reason: "invalid" };
-
-    const holder = claimHolder(worktreeId);
-    if (holder && holder.id !== record.id) {
-      // Only a *deliberate* pick raises the other window. A window working out
-      // what it may display asks about several worktrees in a row, and having
-      // each refusal yank a different window forward would be a window manager
-      // fighting the user over a question they did not ask.
-      if (payload?.focusHolder !== false) {
-        if (holder.win.isMinimized()) holder.win.restore();
-        holder.win.show();
-        holder.win.focus();
+    pruneShowing();
+    const holderId = showing.get(worktreeId);
+    if (holderId !== undefined && holderId !== record.id) {
+      const holder = allRecords().find(
+        (r) => r.id === holderId && !r.win.isDestroyed() && !r.closing,
+      );
+      if (holder) {
+        // Only a deliberate pick raises the other window; a window working out
+        // what it may display asks about several in a row.
+        if (payload?.focusHolder !== false) {
+          if (holder.win.isMinimized()) holder.win.restore();
+          holder.win.show();
+          holder.win.focus();
+        }
+        return { ok: false, reason: "shown-elsewhere" };
       }
-      return { ok: false, reason: "shown-elsewhere" };
+      showing.delete(worktreeId);
     }
-    // One *displayed* worktree per window. Releasing the old claim does not
-    // make this window let go of that worktree's panes — it keeps them mounted
-    // so switching back is instant, and only lets go when somebody else claims
-    // that one.
-    releaseClaimsIn(claims, record.id);
-    claims.set(worktreeId, record.id);
-    // Both halves changed: the worktree this window let go of is free for
-    // everyone, and the one it took is now spoken for.
-    broadcastClaims();
-    // Which is now. Any other window still holding this worktree's panes has to
-    // let go before this one attaches, or the two would trade its shells — so
-    // this is awaited, and the caller learns it may proceed only afterwards.
-    const seq = ++nextClaimSeq;
-    record.claimSeq = seq;
-    // Nothing is re-read after the await, so a claimer that closed during it
-    // needs no guard here: `closed` has already dropped its claim, and this
-    // answer goes to a renderer that is gone.
-    await yieldWorktree(worktreeId, record.id);
-    // **But a claim from the same window during the wait supersedes this one**,
-    // and the wait is now long enough for that to be a click rather than a
-    // coincidence. The later claim released this reservation on its way in
-    // (`releaseClaimsIn` above), so answering `ok` here would tell the renderer to
-    // display a worktree the shell no longer records it as showing — and another
-    // window asking for that one would then be granted it. Answers do not even
-    // come back in call order: a claim with a silent holder waits out
-    // `YIELD_ACK_MS` while one with no holder returns at once.
-    if (record.claimSeq !== seq) return { ok: false, reason: "superseded" };
+    releaseClaimsIn(showing, record.id);
+    showing.set(worktreeId, record.id);
     return { ok: true };
   });
 
-  /**
-   * What this window currently holds the panes of.
-   *
-   * The shell cannot see inside a page, and "who would I have to ask to let go"
-   * is a question only the pages can answer. Pushed on every layouts change,
-   * which is cheap — a list of numbers.
-   */
-  ipcMain.handle("veld:window:holds", (event, payload) => {
-    const record = recordFor(senderWindow(event));
-    if (!record || record.kind !== "main") return false;
-    // Bounded like every other payload crossing this boundary — a renderer
-    // reporting an unbounded list would grow `holders` without limit.
-    const ids = Array.isArray(payload?.worktreeIds)
-      ? payload.worktreeIds.slice(0, MAX_HELD_WORKTREES).map(safeWorktreeId).filter((id) => id !== null)
-      : [];
-    setHoldsIn(holders, record.id, ids);
-    return true;
-  });
-
-  /**
-   * A holder confirming it has let go of a worktree.
-   *
-   * Sent *after* the release has actually happened — the renderer drops the
-   * layout and releases its terminals in one commit and acknowledges once that
-   * commit is on screen, not when the message arrived. That is the whole content
-   * of the ack: before it, the claiming window must not attach.
-   *
-   * Bound to the window the yield was sent to, like `drop-applied` beside it: ids
-   * are sequential from 1, so without the check any renderer could answer for a
-   * holder that has not released and hand the claimer a false all-clear.
-   */
-  ipcMain.handle("veld:window:yielded", (event, payload) => {
-    const record = recordFor(senderWindow(event));
-    const pending = record ? pendingYields.get(payload?.yieldId) : undefined;
-    if (!pending || pending.targetId !== record.id) return false;
-    pendingYields.delete(payload.yieldId);
-    pending.settle();
-    return true;
-  });
-
-  /**
-   * Whether this window has a listener for a cross-window drop.
-   *
-   * Reported by the renderer around the lifetime of the handler itself, because
-   * that is the only thing that knows: a claim says which worktree a window is
-   * showing, not whether the page holding it has mounted. See `dropDelivery` in
-   * `windowState.js` for why a window that has never reported is *sent* to rather
-   * than queued for.
-   */
-  ipcMain.handle("veld:window:drops-ready", (event, payload) => {
-    const record = recordFor(senderWindow(event));
-    if (!record) return false;
-    record.dropListener = payload?.ready === true ? "ready" : "gone";
-    return true;
-  });
-
-  /**
-   * Whether this window can acknowledge a yield.
-   *
-   * Reported by the effect that *sends* the acknowledgement, which is the whole
-   * value of it: a claim waits only for holders that report `ready`, so if that
-   * effect is ever removed or moved the report goes with it and the shell stops
-   * waiting — degrading to the fire-and-forget send this replaced — rather than
-   * waiting `YIELD_ACK_MS` for an answer that can no longer come. Inferring it from
-   * some other signal that happens to correlate would have been one refactor away
-   * from silently reinstating the race. See `answersYields` in `windowState.js`.
-   */
-  ipcMain.handle("veld:window:yields-ready", (event, payload) => {
-    const record = recordFor(senderWindow(event));
-    if (!record) return false;
-    record.yieldListener = payload?.ready === true ? "ready" : "gone";
-    return true;
-  });
-
-  /**
-   * Worktrees that have just been deleted, so nothing keeps claiming them.
-   *
-   * Sent by whichever window did the deleting, because it is the only place the
-   * exact ids are known. Not restricted to what the sender itself holds — the
-   * claim being dropped usually belongs to *another* window, which is the window
-   * that was showing the worktree that has now been removed.
-   *
-   * See `forgetWorktrees` for why a leftover entry matters: worktree rowids are
-   * reused, so the ghost lands on a *new* worktree and reports it as open
-   * somewhere it is not.
-   */
-  ipcMain.handle("veld:window:worktrees-gone", (event, payload) => {
-    const record = recordFor(senderWindow(event));
-    // Main windows only, like `holds` beside it. A detached window is a satellite
-    // with no rail and no delete surface, so it has no business editing global
-    // ownership — and this handler is the one that accepts ids the sender does not
-    // hold, which is exactly why it should accept them from fewer callers.
-    if (!record || record.kind !== "main") return false;
-    const ids = Array.isArray(payload?.worktreeIds)
-      ? payload.worktreeIds
-          .slice(0, MAX_HELD_WORKTREES)
-          .map(safeWorktreeId)
-          .filter((id) => id !== null)
-      : [];
-    if (ids.length === 0) return false;
-    forgetWorktrees(claims, holders, ids);
-    // Every rail is showing the old answer until it is told otherwise.
-    broadcastClaims();
-    return true;
-  });
-
-  /**
-   * Which worktrees another window is showing.
-   *
-   * The push in `broadcastClaims` covers every change from here on; this covers
-   * the state a page boots into, which no push can — the window may well have
-   * been opened after the claims it needs to know about were made.
-   */
-  ipcMain.handle("veld:window:claims", (event) => {
+  /** Which worktrees another window of this app is showing — older bundles. */
+  ipcMain.handle("veld:window:legacy-elsewhere", (event) => {
     const record = recordFor(senderWindow(event));
     if (!record) return [];
-    // Every other mutator of `claims` broadcasts, and a read that prunes is a
-    // mutator: dropping an entry here and telling nobody would leave the *other*
-    // rails greying out a worktree whose window is gone.
-    const dropped = pruneClaims();
-    const worktreeIds = [];
-    for (const [worktreeId, id] of claims) {
-      if (id !== record.id) worktreeIds.push(worktreeId);
+    pruneShowing();
+    const ids = [];
+    for (const [worktreeId, id] of showing) {
+      if (id !== record.id) ids.push(worktreeId);
     }
-    if (dropped) broadcastClaims();
-    return worktreeIds;
+    return ids;
+  });
+
+  /**
+   * Bring this window to the front.
+   *
+   * The daemon decides *who* is wanted — somebody clicked a worktree this window
+   * is showing — and this is the part only the shell can do. Deliberately not
+   * gated on which window asks: the page asking is the page the daemon told to
+   * raise itself, and a window raising itself is not a capability worth
+   * defending. What it replaces is the shell reaching into another window on a
+   * refusal it computed itself, which a browser tab could never take part in.
+   */
+  ipcMain.handle("veld:window:focus-self", (event) => {
+    const win = senderWindow(event);
+    if (!win || win.isDestroyed()) return false;
+    if (win.isMinimized()) win.restore();
+    win.show();
+    win.focus();
+    return true;
   });
 
   /** A tab drag started here. Every window freezes its views; the cursor starts
@@ -1519,7 +1226,7 @@ function registerWindowIpc(ipcMain) {
       !over.win.isDestroyed() &&
       !over.closing &&
       over.id !== fromRecord.id &&
-      ownsWorktree(over, worktreeId, claims);
+      ownsWorktree(over, worktreeId, showing);
     const target = owns ? over : undefined;
 
     if (target) {

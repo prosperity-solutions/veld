@@ -130,7 +130,6 @@ import {
   defaultLayout,
   diagTab,
   dockOf,
-  forgetWorktreeLayouts,
   lastBlankBrowserId,
   loadLayouts,
   newTabId,
@@ -138,7 +137,6 @@ import {
   paneTabLabel,
   parseSessionSets,
   parseTransferTabs,
-  readWorktreeLayout,
   revealDiagPane,
   saveLayouts,
   serializeSessionSets,
@@ -148,11 +146,24 @@ import {
   updateTab,
   urlLabel,
 } from "./panes/model";
+import { acquireWorktree } from "./ide/acquire";
+import { channel, type ClientInfo } from "./ide/channel";
+import {
+  adoptLegacyLayouts,
+  cancelPendingWrite,
+  dropLayout,
+  flushPendingOnUnload,
+  onExternalLayoutChange,
+  readLayout,
+  refreshLayout,
+  syncLayouts,
+} from "./ide/layoutStore";
 import {
   applyTerminalTheme,
   onTerminalOpenUrl,
   openExternally,
   pruneTerminals,
+  noteExpectedResumes,
   releaseTerminal,
   restartTerminal,
 } from "./panes/terminalHost";
@@ -191,6 +202,7 @@ import {
   chromeless,
   desktopApp,
   desktopWindow,
+  isElectron,
   layoutSlot,
   openSettingsOnBoot,
   topbarClass,
@@ -199,6 +211,95 @@ import {
 } from "./shell";
 
 const POLL_MS = 5000;
+
+/**
+ * How this client is described to the others when it is holding a worktree they
+ * want.
+ *
+ * Only ever *rendered* for a browser holder — a desktop window is raised, so
+ * there is nothing to tell the user about where it is — and a browser tab is
+ * named by its browser, because that is the whole of what can honestly be said
+ * about a client nothing can raise. The Electron string exists so the daemon's
+ * log and any future surface have something better than an empty field; it is
+ * deliberately not `document.title`, which the shell never sets (it sets the
+ * *native* title) and which is therefore the same word in every window.
+ */
+function clientLabel(): string {
+  // An Electron window that cannot raise itself is described as the place it is
+  // rather than as a window that will come forward — see `clientKind`.
+  if (canRaiseSelf()) return "Veld Desktop";
+  if (isElectron) return "another Veld Desktop window";
+  const ua = navigator.userAgent;
+  for (const [name, probe] of [
+    ["Firefox", /Firefox\//],
+    ["Edge", /Edg\//],
+    ["Chrome", /Chrome\//],
+    ["Safari", /Safari\//],
+  ] as const) {
+    if (probe.test(ua)) return name;
+  }
+  return "a browser tab";
+}
+
+/**
+ * Whether this client can bring itself to the front when the daemon asks.
+ *
+ * **A capability, not a platform.** `isElectron` is a URL parameter and is true
+ * on any shell, including one older than `focusSelf` — so reporting the kind
+ * from it told the daemon a window could be raised when nothing was there to
+ * raise it, and the client that was refused promised "switched to it" for a
+ * switch that visibly did not happen. Asking what this page can actually do
+ * cannot drift from what it does.
+ */
+function canRaiseSelf(): boolean {
+  return typeof desktopWindow?.focusSelf === "function";
+}
+
+/** How the daemon should describe this client to the others. */
+function clientKind(): "electron" | "browser" {
+  return canRaiseSelf() ? "electron" : "browser";
+}
+
+/**
+ * What to tell someone whose click was refused.
+ *
+ * The distinction is the point, and it is why the daemon sends the holder's
+ * kind rather than just refusing. A desktop window has been raised and is now in
+ * front of them, so the notice explains where they went. A **browser tab cannot
+ * be raised** — `window.focus()` outside a user gesture is ignored by every
+ * browser — so promising "switched to it" there would be a lie about something
+ * they can see did not happen. It says where the worktree is instead, and the
+ * tab marks itself so it is findable.
+ */
+function holderNotice(w: Worktree, holder?: ClientInfo): string {
+  const label = worktreeLabel(w);
+  if (holder?.kind === "browser") {
+    const where = holder.label || "a browser tab";
+    return `${label} is open in ${where} — switch to it there`;
+  }
+  return `${label} is open in another window — switched to it`;
+}
+
+/**
+ * Mark this page as wanted, for a client that cannot raise itself.
+ *
+ * The title, because it is the one thing a background tab still shows. Cleared
+ * on the next interaction rather than a timer: the marker's job is to survive
+ * until the person looks, and a timeout that fires while they are in another
+ * app is a marker that was never seen.
+ */
+function flashAttention(): void {
+  const original = document.title;
+  if (original.startsWith("\u25CF ")) return;
+  document.title = `\u25CF ${original}`;
+  const clear = () => {
+    document.title = original;
+    window.removeEventListener("focus", clear);
+    window.removeEventListener("pointerdown", clear);
+  };
+  window.addEventListener("focus", clear);
+  window.addEventListener("pointerdown", clear);
+}
 
 /** How long an optimistic pending marker survives without an observed run
  *  signature change. Several polls' worth, so a slow `veld start` isn't cut
@@ -801,31 +902,122 @@ function AppInner(props: {
    * two.
    */
   const [elsewhere, setElsewhere] = useState<Set<number>>(new Set());
+
+  /**
+   * Open this client's control socket and keep it open for the life of the page.
+   *
+   * Deliberately not torn down on a dependency change: the socket **is** this
+   * client's membership of the daemon's claim registry, so a lifecycle tied to
+   * anything that re-renders would release every claim the page holds. It is
+   * closed by the page going away, which is exactly the event a claim should not
+   * survive.
+   *
+   * A detached window has no part in this: its tabs were transferred out of a
+   * worktree its origin owns, so it is a satellite of that claim rather than a
+   * claimant.
+   */
   useEffect(() => {
-    const shell = desktopWindow;
-    if (chromeless || !shell?.onClaimsChanged) return;
-    let cancelled = false;
-    let pushed = false;
-    // Both, and in this order: the subscription first, so a claim made while
-    // the initial query is in flight is not lost, then the query for the state
-    // that predates this window. `pushed` because the answer to the query can
-    // land after an update that supersedes it — and "nobody else has anything"
-    // is a real answer, so an empty set cannot stand in for "not yet asked".
-    const off = shell.onClaimsChanged((p) => {
-      pushed = true;
-      setElsewhere(new Set(p.worktreeIds));
+    if (chromeless) return;
+    // Before anything else touches a layout: whichever client still holds the
+    // old browser store is the only one that can move it, and the first client
+    // to open a worktree creates its row.
+    void adoptLegacyLayouts();
+    channel.start(clientKind(), clientLabel(), {
+      // `mine` is the daemon's per-recipient answer, so the rail never needs to
+      // know any client's identity to work out which rows are not its own.
+      onClaims: (claims) => {
+        setElsewhere(new Set(claims.filter((c) => !c.mine).map((c) => c.worktree_id)));
+      },
+      onYield: (worktreeId, ack) => onYield.current(worktreeId, ack),
+      onFocus: () => {
+        // An Electron window raises itself through its shell. A browser tab
+        // **cannot** — `window.focus()` without a user gesture is ignored — so it
+        // marks itself instead of pretending, and the client that asked was told
+        // the holder is a browser and said so (see `holderNotice`).
+        if (desktopWindow?.focusSelf) {
+          void desktopWindow.focusSelf().catch(() => {});
+          return;
+        }
+        flashAttention();
+      },
+      onLayoutChanged: (worktreeId) => {
+        // Only for a worktree this client is showing. Anything else is a
+        // notification about panes it does not have mounted, and re-reading it
+        // would put a layout into state that nothing is attached to.
+        if (layoutsRef.current[worktreeId]) void refreshLayout(worktreeId);
+      },
+      /**
+       * **Ask for the worktree back on every connect.**
+       *
+       * A claim lives on the socket, so a socket that went away took this
+       * client's claims with it — including across a daemon restart, where the
+       * PTY holder processes keep the shells alive and two clients can each be
+       * showing a worktree with nothing arbitrating between them. Re-claiming is
+       * what resolves that, and it is why a reconnect is not a no-op.
+       *
+       * `sameEpoch` is deliberately *not* used to reset the layout store's
+       * cached versions. Those describe rows in a database that outlives the
+       * daemon, and clearing them made the next save present version 0, lose the
+       * check against a row still at N, and adopt the pre-restart document —
+       * silently reverting whatever the user had just done, and unmounting (and
+       * hanging up) any terminal they had opened in the meantime.
+       */
+      onReady: (sameEpoch) => {
+        // What to ask for. The worktree this client holds, first. Otherwise the
+        // selection — but only when asking again cannot take a worktree off
+        // somebody: either this client was never granted anything (the boot
+        // claim ran before the socket was up), or the daemon **restarted**, in
+        // which case its registry is empty and nobody holds anything. Without
+        // the second case a window that had yielded sat empty for good: the boot
+        // effect is keyed on a selection that has not changed, and nothing else
+        // re-acquires.
+        const mayAskAgain = !grantedRef.current || !sameEpoch;
+        const wanted = shownRef.current ?? (mayAskAgain ? selectedRef.current : null);
+        const target = worktreesRef.current.find((w) => w.id === wanted);
+        // Gone from the list between the disconnect and now — a `git worktree
+        // remove` in a terminal, say. Nothing to ask for.
+        if (!target) return;
+        void acquireRef.current(target);
+      },
+      onClosed: () => {
+        // Nobody's claims are knowable now, and rendering the last table would
+        // grey out rows whose holders may already be gone.
+        setElsewhere(new Set());
+      },
     });
-    void shell
-      .claimedElsewhere()
-      .then((ids) => {
-        if (!cancelled && !pushed) setElsewhere(new Set(ids));
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-      off();
-    };
   }, [chromeless]);
+
+  /**
+   * Write anything still sitting in the layout store's debounce before the page
+   * goes.
+   *
+   * `pagehide` rather than `beforeunload`: it fires for a bfcache eviction and on
+   * mobile Safari, where `beforeunload` does not, and the whole window being
+   * closed is precisely when the last thing the user did (moved a tab, dragged a
+   * split) would otherwise be lost.
+   */
+  useEffect(() => {
+    const flush = () => flushPendingOnUnload();
+    window.addEventListener("pagehide", flush);
+    return () => window.removeEventListener("pagehide", flush);
+  }, []);
+
+  // Adopt layouts this client did not write: a save that lost its version check
+  // (the hand-off race) and the daemon's push for a worktree it is showing.
+  useEffect(() => {
+    onExternalLayoutChange((worktreeId, next) => {
+      setLayouts((prev) => {
+        if (!prev[worktreeId]) return prev;
+        if (!next) {
+          const without = { ...prev };
+          delete without[worktreeId];
+          return without;
+        }
+        noteExpectedResumes(terminalIds(next));
+        return { ...prev, [worktreeId]: next };
+      });
+    });
+  }, []);
 
   /**
    * Show a worktree — or go to the window that already is.
@@ -846,35 +1038,58 @@ function AppInner(props: {
    * worktree's layout would open a pane in a set of panes another window owns.
    */
   const selectWorktree = async (w: Worktree): Promise<boolean> => {
-    if (!desktopWindow) {
+    // A detached window shows one dock of a worktree its origin owns; it is a
+    // satellite of that claim and never makes one of its own.
+    if (chromeless) {
       setActiveRepoRoot(w.repo_root);
       setActiveWtKey(String(w.id));
+      setShownId(w.id);
       return true;
     }
-    return desktopWindow
-      .claimWorktree(w.id)
-      .then((result) => {
-        if (!result?.ok) {
-          // Without this the click reads as ignored: the row does not open,
-          // and a *different* window comes forward with nothing tying the two
-          // together. The toast is in this window, not the one that took
-          // focus — it is what you find when you come back, and the greyed
-          // rail row (`elsewhere`) is what warns you before you click.
-          if (result?.reason === "shown-elsewhere") {
-            notifyRedirect(`${worktreeLabel(w)} is open in another window — switched to it`);
-          }
-          return false;
-        }
-        setActiveRepoRoot(w.repo_root);
-        setActiveWtKey(String(w.id));
-        return true;
-      })
-      .catch(() => {
-        // An older shell without the channel: behave as it did before.
-        setActiveRepoRoot(w.repo_root);
-        setActiveWtKey(String(w.id));
-        return true;
-      });
+    // A click owns the outcome from here: cancel whatever acquire is running, so
+    // a hunt still waiting on somebody's yield cannot land afterwards and move
+    // the window off the row that was just picked.
+    acquireGenRef.current++;
+    const result = await channel.claim(w.id);
+    if (!result.ok) {
+      // Without this the click reads as ignored: the row does not open, and
+      // either a different window comes forward with nothing tying the two
+      // together, or — when the holder is a browser tab — nothing visibly
+      // happens at all. The notice is in *this* client, which is where the
+      // person is looking.
+      if (result.reason === "shown_elsewhere") notifyRedirect(holderNotice(w, result.holder));
+      // Nothing to say for `superseded` — a later click owns the outcome — but
+      // an unreachable daemon has to be said, or the click reads as ignored.
+      else if (result.reason === "offline") {
+        notifyRedirect("Not connected to the Veld daemon yet — try that again in a moment");
+      }
+      // **The click cancelled whatever was running, and then failed.** The bump
+      // above is pre-emptive by necessity — a hunt has to stop the moment the
+      // user picks something, not when the daemon eventually answers — so a
+      // refused click can leave this client having cancelled its own acquire and
+      // acquired nothing, with the boot effect keyed on a selection that did not
+      // change. Re-arm, unless something was granted in the meantime.
+      //
+      // **Only when somebody else has it.** `superseded` means a *later* request
+      // from this client owns the outcome, so re-arming there starts an acquire
+      // whose claim outranks the one still in flight — and that one is then
+      // refused as superseded, which the UI deliberately says nothing about. The
+      // user's second click would vanish, which is the symptom two earlier
+      // rounds of this review already removed once.
+      if (result.reason === "shown_elsewhere" && shownRef.current === null && worktreeRef.current) {
+        void acquireRef.current(worktreeRef.current);
+      }
+      return false;
+    }
+    setActiveRepoRoot(w.repo_root);
+    setActiveWtKey(String(w.id));
+    // Both, and `grantedRef` is not redundant: it is what stops a reconnect
+    // asking for a worktree this client *yielded* (where `shownId` is also
+    // null), and a click can be the only grant this client ever gets — it
+    // supersedes a boot claim without changing the selection.
+    grantedRef.current = true;
+    setShownId(w.id);
+    return true;
   };
 
   // Self-heal the URL to the RESOLVED selection: a stale/deep-linked
@@ -1840,10 +2055,53 @@ function AppInner(props: {
   /** Every worktree is shown by another window, so this one has nothing to
    *  display that is its own. */
   const [claimBlocked, setClaimBlocked] = useState(false);
-  /** Yields whose release has been scheduled but not yet committed. State rather
-   *  than a ref, because the point is to have something an effect can run after —
-   *  see the yield handler below. */
-  const [yieldAcks, setYieldAcks] = useState<number[]>([]);
+  /**
+   * The worktree this client has actually been **granted**, as opposed to the
+   * one it has selected.
+   *
+   * The two are not the same and conflating them was a real defect: the panes of
+   * a worktree name live PTY sessions, and attaching to one *takes it over*, so
+   * a client that renders a layout before its claim is answered steals the
+   * shells of whichever client legitimately holds it. On boot the gap is wide —
+   * the selection is restored from `?wt=`/storage immediately while the claim
+   * waits out every other holder's yield — which is exactly when a second client
+   * is most likely to be up.
+   *
+   * So nothing reads a layout until this is set, and only a granted claim sets
+   * it. A detached window sets it directly: it is a satellite of its origin's
+   * claim and makes none of its own.
+   */
+  const [shownId, setShownId] = useState<number | null>(null);
+  /** …and through a ref, for the reconnect handler, which is registered once. */
+  const shownRef = useRef<number | null>(null);
+  shownRef.current = shownId;
+  /**
+   * Whether this client has ever been granted a worktree.
+   *
+   * The difference between the two ways `shownId` can be `null`, and they need
+   * opposite answers on reconnect. **Never granted** — the boot claim ran while
+   * the socket was still connecting and answered `offline` — means the window is
+   * showing nothing and must try again, or it stays blank forever with the boot
+   * effect keyed on a selection that has not changed. **Granted and then
+   * yielded** means another client has it now, and re-claiming on reconnect
+   * would take it straight back off them.
+   */
+  const grantedRef = useRef(false);
+  /** Bumped by anything that supersedes a running acquire — a newer acquire, or
+   *  a rail click. See `acquireRef`. */
+  const acquireGenRef = useRef(0);
+  /** The selection, for the reconnect handler — see `grantedRef`. */
+  const selectedRef = useRef<number | null>(null);
+  /** …and the row itself, for the paths that re-acquire it. */
+  const worktreeRef = useRef<Worktree | null>(null);
+  // Assigned during render, like `layoutsRef`: an acquire started from a socket
+  // handler must see the selection this render was built from.
+  selectedRef.current = worktree?.id ?? null;
+  worktreeRef.current = worktree;
+  /** Acknowledgements for yields whose release has been scheduled but not yet
+   *  committed. State rather than a ref, because the point is to have something
+   *  an effect can run *after* — see the yield handler below. */
+  const [yieldAcks, setYieldAcks] = useState<(() => void)[]>([]);
 
   // Mirrored into a ref, the same idiom `dialogRef` uses above: an effect with `[]`
   // deps closes over the first render's `layouts` forever, and a decision that has to
@@ -1895,26 +2153,78 @@ function AppInner(props: {
   }, [diagnoseFor, worktree?.id, layouts]);
 
   useEffect(() => {
+    // A detached window's panes are its own (`saveLayouts`); a main window's
+    // belong to the worktree and go to the daemon, which is what makes them the
+    // same panes in a browser tab and in the app.
     saveLayouts(layoutSlot, layouts, chromeless);
+    if (!chromeless) syncLayouts(layouts);
   }, [layouts]);
 
-  // Give a newly selected worktree a layout. New worktrees inherit the split
-  // of one already open, so the proportions the user chose carry across
-  // instead of snapping back to 50/50 on every new worktree.
+  /**
+   * Give a newly selected worktree a layout. New worktrees inherit the split of
+   * one already open, so the proportions the user chose carry across instead of
+   * snapping back to 50/50 on every new worktree.
+   *
+   * **Read from the daemon, at the moment of showing it.** A worktree has one
+   * set of panes and the database holds it, so this is where a browser tab picks
+   * up the very terminals the desktop app has running rather than inventing a
+   * second set beside them. Reading it now rather than at boot is the same
+   * discipline the shared store needed and for a stronger reason: another
+   * *client* may have been using this worktree since, and there is no longer any
+   * local copy that could stand in for what it left.
+   *
+   * **Keyed on the granted claim, never on the selection.** The selection is
+   * restored from `?wt=`/storage the moment the worktree list resolves, while
+   * the claim is still waiting out other clients' yields — so keying this on
+   * `worktree?.id` fetched and mounted the panes first and learned they belonged
+   * to somebody else afterwards, by which time this client had already taken
+   * over their shells. On boot with a second client up, that is the common case
+   * rather than a race.
+   */
   useEffect(() => {
-    if (!worktree) return;
-    setLayouts((prev) => {
-      if (prev[worktree.id]) return prev;
-      // The shared store first, read *now* rather than at boot: another window
-      // may have been using this worktree since, and its panes are the ones
-      // that exist. Defaulting straight to a fresh layout here is precisely how
-      // a second set would appear.
-      const existing = readWorktreeLayout(worktree.id, chromeless, layoutSlot);
-      if (existing) return { ...prev, [worktree.id]: existing };
-      const seed = Object.values(prev)[0]?.ratio ?? DEFAULT_RATIO;
-      return { ...prev, [worktree.id]: defaultLayout(seed) };
-    });
-  }, [worktree?.id]);
+    const id = shownId;
+    if (id === null) return;
+    // A detached window's panes came with it and are not the worktree's.
+    if (chromeless) {
+      setLayouts((prev) =>
+        prev[id]
+          ? prev
+          : { ...prev, [id]: defaultLayout(Object.values(prev)[0]?.ratio ?? DEFAULT_RATIO) },
+      );
+      return;
+    }
+    // Through the ref, not `layouts`: this effect is keyed on the selection
+    // alone, so the render's `layouts` can be a commit behind a layout that has
+    // just been adopted — and re-fetching one already on screen would restore an
+    // older version over the user's last change.
+    if (layoutsRef.current[id]) return;
+    let cancelled = false;
+    void (async () => {
+      let stored: PaneLayout | null = null;
+      try {
+        stored = await readLayout(id);
+      } catch {
+        // The daemon is unreachable. Seeding a default is the same answer as
+        // "nothing stored", and it cannot destroy anything: the first save
+        // presents version 0, loses the check against whatever is really there,
+        // and adopts it.
+      }
+      if (cancelled) return;
+      // **Before the panes render.** These shells were expected to be running
+      // when this client found them, so a terminal that cannot reattach says so
+      // instead of quietly opening a fresh prompt — which is exactly what a
+      // browser tab used to do for every terminal the app had open.
+      if (stored) noteExpectedResumes(terminalIds(stored));
+      setLayouts((prev) => {
+        if (prev[id]) return prev;
+        if (stored) return { ...prev, [id]: stored };
+        return { ...prev, [id]: defaultLayout(Object.values(prev)[0]?.ratio ?? DEFAULT_RATIO) };
+      });
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [shownId, chromeless]);
 
   /**
    * Let go of one worktree's panes, because another window is taking it.
@@ -1938,10 +2248,10 @@ function AppInner(props: {
    * `setLayouts` updater, i.e. during the render React schedules from here, so
    * the ack is queued for the effect below and sent after that commit.
    */
+  const onYield = useRef<(worktreeId: number, ack: () => void) => void>(() => {});
   useEffect(() => {
-    const shell = desktopWindow;
-    if (chromeless || !shell) return;
-    const off = shell.onYieldWorktree(({ worktreeId, yieldId }) => {
+    if (chromeless) return;
+    onYield.current = (worktreeId: number, ack: () => void) => {
       // A pending "reveal node health" request for this worktree can never be
       // satisfied now, and its own guard cannot see that: a yield deletes the
       // layout without touching the *selection*, so `worktree?.id` still equals
@@ -1950,6 +2260,13 @@ function AppInner(props: {
       // too. Left set, the request would fire on some later visit and open a
       // Nodes pane nobody asked for then.
       setDiagnoseFor((cur) => (cur === worktreeId ? null : cur));
+      // It is not granted to this client any more, so nothing may re-seed it —
+      // and a reconnect must not ask for it back.
+      setShownId((cur) => (cur === worktreeId ? null : cur));
+      // Nor may a save composed before the release still land: it would be sent
+      // at a version the *claiming* client has not moved yet, be accepted, and
+      // replace the panes this handler just handed over.
+      cancelPendingWrite(worktreeId);
       setLayouts((prev) => {
         const giving = prev[worktreeId];
         if (!giving) return prev;
@@ -1964,17 +2281,13 @@ function AppInner(props: {
       // effect below run *after* the release rather than beside it. Queued even
       // when there was no layout to give up: the claimer is waiting either way,
       // and the answer is "nothing to let go of".
-      if (typeof yieldId === "number") setYieldAcks((q) => [...q, yieldId]);
-    });
-    // **The shell waits for a release only if this is here**, and it learns that
-    // from here rather than from a neighbouring signal — so removing or moving this
-    // effect withdraws the promise with it, and a claim goes back to not waiting
-    // instead of waiting for an acknowledgement nothing will send. Reported after
-    // the listener, withdrawn before it: the safe order in both directions.
-    void shell.yieldsReady?.(true).catch(() => {});
+      setYieldAcks((q) => [...q, ack]);
+    };
     return () => {
-      void shell.yieldsReady?.(false).catch(() => {});
-      off();
+      // Back to a handler that releases nothing, which is what an unmounted app
+      // can honestly promise. The daemon waits out its acknowledgement timeout
+      // and proceeds — the documented fallback.
+      onYield.current = () => {};
     };
   }, [chromeless]);
 
@@ -1989,85 +2302,116 @@ function AppInner(props: {
   useEffect(() => {
     if (yieldAcks.length === 0) return;
     const sent = new Set(yieldAcks);
-    for (const yieldId of sent) {
-      void desktopWindow?.yielded?.(yieldId).catch(() => {});
-    }
+    for (const ack of sent) ack();
     // **Filtered, never cleared.** React flushes a passive effect in a later task
-    // than the commit it belongs to, so an IPC callback can append a yield in
+    // than the commit it belongs to, so a socket frame can append a yield in
     // between — and `setYieldAcks([])` would discard it. That yield is then never
-    // acknowledged at all and its claimer waits out the full `YIELD_ACK_MS` for a
-    // release that has already happened, which is the one thing this channel
-    // exists to avoid. Two review angles found this line independently.
-    setYieldAcks((q) => q.filter((id) => !sent.has(id)));
+    // acknowledged at all and its claimer waits out the full acknowledgement
+    // timeout for a release that has already happened, which is the one thing
+    // this channel exists to avoid. Two review angles found this line
+    // independently.
+    setYieldAcks((q) => q.filter((ack) => !sent.has(ack)));
   }, [yieldAcks]);
 
   /**
-   * Tell the shell what this window is holding, so it knows who to ask.
+   * Tell the daemon what this client is holding, so it knows who to ask.
    *
    * Only a main window: a detached one holds tabs transferred out of a worktree
    * its origin owns, and must never be asked to yield them — they are already
    * where they belong.
    */
   useEffect(() => {
-    if (chromeless || !desktopWindow) return;
-    void desktopWindow.holdsWorktrees(Object.keys(layouts).map(Number)).catch(() => {});
+    if (chromeless) return;
+    channel.holds(Object.keys(layouts).map(Number));
   }, [chromeless, layouts]);
+
+  /**
+   * Tell the *shell* which worktree is on screen, which is a different question.
+   *
+   * The daemon arbitrates ownership; Electron only needs this to route a
+   * cross-window tab drop at a window those tabs belong in — a question about
+   * its own windows, and the one thing it can still answer better than anyone.
+   * A detached window never reports: its worktree is fixed at creation and the
+   * shell reads it from the window record.
+   */
+  useEffect(() => {
+    if (chromeless) return;
+    // The *granted* worktree, not the selected one: a drop routed at a window
+    // that has asked for a worktree but not been given it would put tabs into a
+    // set of panes it is about to stop showing.
+    void desktopWindow?.showsWorktree?.(shownId).catch(() => {});
+  }, [chromeless, shownId]);
+
+  /**
+   * Take a worktree, or the next free one — the single path by which this client
+   * comes to be showing anything.
+   *
+   * Shared by boot and by every reconnect, and that sharing is the point. It was
+   * two code paths, and the second one was wrong in two ways at once: it refused
+   * on one worktree without ever hunting, and it set `claimBlocked` — which
+   * replaces the whole workspace, rail included — for a single refusal. Waking a
+   * laptop whose worktree somebody had opened in a browser meanwhile left the
+   * window with no way back except ⌘K.
+   *
+   * Held in a ref because the socket's handlers are registered once, at boot, and
+   * would otherwise close over the first render's state forever.
+   */
+  const acquireRef = useRef<(preferred: Worktree) => Promise<void>>(async () => {});
+  acquireRef.current = (preferred: Worktree) => {
+    const gen = ++acquireGenRef.current;
+    return acquireWorktree(preferred, {
+      claim: (id, focusHolder) => channel.claim(id, focusHolder),
+      release: (id, seq) => channel.release(id, seq),
+      candidates: () => worktreesRef.current,
+      show: (target) => {
+        grantedRef.current = true;
+        setActiveRepoRoot(target.repo_root);
+        setActiveWtKey(String(target.id));
+        setShownId(target.id);
+        setClaimBlocked(false);
+      },
+      blocked: () => setClaimBlocked(true),
+      // Refused, so this client is not showing it — and `preferred` is the
+      // worktree it *was* showing whenever a reconnect asks for it back.
+      notGranted: (id) => setShownId((cur) => (cur === id ? null : cur)),
+      // **A generation, not a condition about the current state.** The first
+      // attempt asked "is anything shown yet", and that was wrong in a way worth
+      // recording: nothing nulls `shownId` when the *selection* changes without a
+      // claim — switching repo, importing one, creating a worktree — so the
+      // acquire for the new selection cancelled itself before it started, the
+      // worktree was never claimed, and the workspace rendered empty until the
+      // user clicked a rail row. "Has something newer started" is the question,
+      // and only a counter answers it without depending on what that newer thing
+      // has managed to do yet.
+      live: () => acquireGenRef.current === gen,
+    });
+  };
 
   /**
    * Claim the worktree this window resolved to on its own, without a click.
    *
    * `selectWorktree` covers the rail; this covers boot, a restored `?wt=`, and
    * the fallback that lands on the first repo — all of which put a worktree on
-   * screen without anyone choosing it. Without it the first window to open
-   * claims nothing, and the second one is free to show the same worktree.
+   * screen without anyone choosing it.
    *
-   * **Keyed on the selection, never on the worktree list.** `worktrees` gets a new
-   * identity on every 5s poll (`repoList` is replaced, so `repos` → `repo` →
-   * `worktrees` are all new), so having it in the deps re-claimed the same worktree
-   * every five seconds for the life of the window. That was invisible churn while a
-   * claim was synchronous; it stopped being invisible once a claim could be
-   * *superseded*, because the poll's claim then overtook a rail click that was
-   * waiting on a holder and the click was silently dropped. The hunt below reads
-   * the list through a ref, where a five-second-old candidate list is harmless.
+   * **Keyed on the selection, never on the worktree list.** `worktrees` gets a
+   * new identity on every 5s poll, so having it in the deps re-claimed the same
+   * worktree every five seconds for the life of the window — invisible while a
+   * claim was synchronous, and not once a claim could be *superseded*, because
+   * the poll's claim then overtook a rail click that was waiting on a holder.
    */
   useEffect(() => {
-    const shell = desktopWindow;
-    if (chromeless || !shell || !worktree) return;
-    let cancelled = false;
-    void (async () => {
-      const mine = await shell.claimWorktree(worktree.id, false).catch(() => null);
-      // `superseded` is not a refusal to act on: it means a *later* claim from
-      // this window overtook this one while it waited for the previous holders to
-      // let go, and that claim owns the outcome. Reacting to it would hunt for a
-      // free worktree and move the window off one it had just been granted —
-      // `cancelled` does not cover it, because clicking the row that is already
-      // selected supersedes the claim without changing `worktree?.id`.
-      if (cancelled || mine?.ok !== false || mine.reason === "superseded") return;
-      // **Refused, so this window must show something else.** Ignoring the
-      // answer here was the hole that made the whole ownership model a
-      // suggestion: `⌘N` opens on the last-selected worktree by design, which
-      // is the one the window you pressed it in is showing — so the claim was
-      // always refused, always ignored, and the new window rendered the same
-      // panes and took their shells. `selectWorktree` honoured the refusal
-      // because a click has somewhere to stay; a window opening has not.
-      for (const candidate of worktreesRef.current) {
-        if (candidate.id === worktree.id) continue;
-        const free = await shell.claimWorktree(candidate.id, false).catch(() => null);
-        // Same rule inside the hunt: overtaken means stop, not try the next one.
-        if (cancelled || free?.reason === "superseded") return;
-        if (free?.ok) {
-          setActiveRepoRoot(candidate.repo_root);
-          setActiveWtKey(String(candidate.id));
-          return;
-        }
-      }
-      // Every worktree in this repo is already on screen somewhere. Say so
-      // rather than showing a set of panes that belongs to another window.
-      if (!cancelled) setClaimBlocked(true);
-    })();
-    return () => {
-      cancelled = true;
-    };
+    if (chromeless || !worktree) return;
+    // Already granted, so there is nothing to ask for — this effect re-runs on
+    // every selection change, including the one `selectWorktree` has just been
+    // granted, and asking again costs a second round trip plus a second yield
+    // ask to anyone still listing that worktree. A *skip*, not a cancel: it
+    // cannot reproduce the self-cancelling predicate this replaced, because it
+    // never starts an acquire that then refuses to act.
+    if (shownRef.current === worktree.id) return;
+    // No cleanup: a selection change re-runs this effect, and starting a new
+    // acquire is itself what cancels the old one.
+    void acquireRef.current(worktree);
   }, [chromeless, worktree?.id]);
 
   // Cleared as soon as this window is showing something it owns.
@@ -2190,12 +2534,15 @@ function AppInner(props: {
   /**
    * Forget worktrees that no longer exist — everywhere they are recorded.
    *
-   * In memory, so their terminals get collected below. In the shared layout
-   * store, because that write is a *merge*: dropping a worktree from `layouts`
-   * leaves its stored panes untouched. And in the shell's claim map, so no window
-   * goes on reporting a deleted worktree as one it is showing.
+   * In memory, so their terminals get collected below; in the layout store,
+   * because omission is deliberately *not* deletion there (a client that yields
+   * a worktree drops it from `layouts` while its panes go on existing); and in
+   * the daemon's claim registry, so no client goes on being recorded as showing
+   * a worktree that is gone. The daemon's foreign key collects the layout *row*
+   * with the worktree, so that half needs nothing from here; the shell's own
+   * display map is cleared by `showsWorktree` when the selection moves off.
    *
-   * All three matter for the same reason: `worktrees.id` is a plain `INTEGER
+   * They matter for the same reason: `worktrees.id` is a plain `INTEGER
    * PRIMARY KEY`, so SQLite reuses the highest free rowid and the *next* worktree
    * created can arrive wearing a deleted one's id — inheriting its panes, and
    * being greyed out in the rail as "open in another window".
@@ -2219,8 +2566,11 @@ function AppInner(props: {
     setLayouts((prev) =>
       Object.fromEntries(Object.entries(prev).filter(([id]) => alive.has(Number(id)))),
     );
-    forgetWorktreeLayouts(gone);
-    void desktopWindow?.worktreesGone(gone).catch(() => {});
+    // The daemon's foreign key collects the layout row with the worktree, so
+    // this is only about the claim registry and this client's cached versions.
+    for (const id of gone) dropLayout(id);
+    setShownId((cur) => (cur !== null && gone.includes(cur) ? null : cur));
+    channel.forget(gone);
     // `layouts` is a dependency on purpose: the ids to forget come from it, and
     // reading them inside the updater would be too late — React runs that during
     // the next render, not here. Converges, because the run after this one finds

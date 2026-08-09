@@ -82,46 +82,22 @@ export interface DesktopWindowApi {
     repoRoot: string;
     worktreeId: number;
   }): Promise<{ opened: boolean; reason?: string | null }>;
-  /** Ask to show a worktree. `ok: false` with `reason: "shown-elsewhere"` means
-   *  the shell focused the window that already has it, and this one should not
-   *  switch — a worktree has one set of panes and one window showing them.
+  /**
+   * Which worktree this window is displaying.
    *
-   *  It resolves only once every other window holding that worktree's panes has
-   *  let go, so it can take up to the shell's yield timeout: the caller attaches
-   *  to live PTY sessions on the strength of this answer. Which is also why
-   *  answers do not arrive in call order, and why a later claim from this window
-   *  supersedes an earlier one — `reason: "superseded"`, which every caller
-   *  already handles correctly by treating a non-`ok` answer as "stay put". */
-  claimWorktree(
-    worktreeId: number,
-    /** Whether a refusal should raise the window that has it. False while a
-     *  window is working out what it may display — it asks about several. */
-    focusHolder?: boolean,
-  ): Promise<{ ok: boolean; reason?: string | null }>;
-  /** Which worktrees some *other* window is showing right now. The state this
-   *  page boots into; changes come through `onClaimsChanged`. */
-  claimedElsewhere(): Promise<number[]>;
-  /** …and every change to it. Nearly all of them happen in another window. */
-  onClaimsChanged(fn: (payload: { worktreeIds: number[] }) => void): () => void;
-  /** Which worktrees this window holds the panes of. Reported so the shell can
-   *  ask the right window to let go when another one claims a worktree. */
-  holdsWorktrees(worktreeIds: number[]): Promise<boolean>;
-  /** These worktrees have been deleted: drop every claim and hold on them. A
-   *  worktree id is a database rowid and gets **reused**, so a claim left on a
-   *  removed worktree greys out whichever one is created next. */
-  worktreesGone(worktreeIds: number[]): Promise<boolean>;
-  /** Let go of one worktree's panes — another window is taking it. Answer with
-   *  `yielded` once the release has actually happened: the window that asked does
-   *  not attach to those terminals until it hears back, and a second attach takes
-   *  a session over rather than mirroring it. `yieldId` is absent on an older
-   *  shell, which waits for nothing. */
-  onYieldWorktree(fn: (payload: { worktreeId: number; yieldId?: number }) => void): () => void;
-  /** That release is on screen. Optional: an older shell has no such channel. */
-  yielded?(yieldId: number): Promise<boolean>;
-  /** Whether this page can send that acknowledgement at all — reported by the very
-   *  effect that sends it, so the shell never waits on a window whose acknowledging
-   *  half is absent. Optional: an older shell has no such channel. */
-  yieldsReady?(ready: boolean): Promise<boolean>;
+   * **Reporting, not asking.** Whether a client *may* show a worktree, who has
+   * to let go of it, and what a click on a taken one does are the daemon's —
+   * see `ide/channel.ts`. They moved there because this shell can only see its
+   * own windows, and the same page also runs in a plain browser tab, which was
+   * therefore invisible to the whole arrangement.
+   *
+   * What is left is the one question only the shell can answer: when tabs are
+   * dropped onto a window, is that a window this worktree's panes belong in?
+   *
+   * Optional: an older shell has no such channel, and routes drops by the
+   * detached window's own worktree alone.
+   */
+  showsWorktree?(worktreeId: number | null): Promise<boolean>;
   detach(payload: {
     worktreeId: number;
     repoRoot: string;
@@ -171,6 +147,21 @@ export interface DesktopWindowApi {
   fullScreen?: boolean;
   /** …and every change to it. Optional for the same reason. */
   onFullScreen?(fn: (p: { fullScreen: boolean }) => void): () => void;
+  /**
+   * Bring this window to the front, because somebody asked to be taken to the
+   * worktree it is showing.
+   *
+   * The daemon decides *who* is wanted — it owns the claim registry — and this
+   * is the one thing only the shell can do about it. A plain browser tab has no
+   * such capability, which is not a gap to fill: `window.focus()` outside a user
+   * gesture is ignored by every browser, so the refusal the asking client got
+   * names the holder's kind and says where the worktree is instead of promising
+   * a raise that will not happen.
+   *
+   * Optional: an older shell has no such channel, and a page that finds it
+   * absent simply marks itself the way a browser tab does.
+   */
+  focusSelf?(): Promise<boolean>;
   snapshot(payload: TabTransfer): Promise<boolean>;
   setTitle(title: string): Promise<boolean>;
   close(): Promise<boolean>;

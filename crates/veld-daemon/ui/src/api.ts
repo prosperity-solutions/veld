@@ -684,6 +684,32 @@ export interface PtyTicket {
   resumed: boolean;
 }
 
+/**
+ * A worktree's stored panes, as the daemon holds them.
+ *
+ * The daemon never looks inside `layout` — see `migrate_v15_pane_layouts` — so
+ * this is `unknown` here too rather than `PaneLayout`: it is data that has been
+ * round-tripped through a database and possibly written by a different build,
+ * and `parseLayout` is the gate it goes through.
+ */
+export interface PaneLayoutDoc {
+  /** `0` means the worktree has no stored layout. No stored row carries it. */
+  version: number;
+  /** `null` exactly when `version` is 0. */
+  layout: unknown | null;
+}
+
+/**
+ * What a layout save did.
+ *
+ * A conflict is not an error and is deliberately not thrown: it is the hand-off
+ * case, and it carries the winning document so the loser can adopt it in the
+ * same round trip.
+ */
+export type LayoutSaveResult =
+  | { ok: true; doc: PaneLayoutDoc }
+  | { ok: false; conflict: PaneLayoutDoc };
+
 /** Where a URL from a terminal is going. See `api.ptyOpenUrl`. */
 export interface PtyOpenUrl {
   target: "pane" | "system";
@@ -1092,12 +1118,81 @@ export const api = {
       }),
     }),
   /**
+   * Mint a single-use ticket for the IDE control socket.
+   *
+   * Same handshake as `ptyTicket` and for the same reason: a WebSocket upgrade
+   * cannot carry the `X-Veld-Request` header, so this CSRF-gated POST is what
+   * proves the request came from this page. One ticket per connection,
+   * including every reconnect.
+   */
+  ideTicket: () =>
+    request<{ ticket: string; expires_in_ms: number; client_id: string }>("/api/ide/tickets", {
+      method: "POST",
+    }),
+  /**
+   * A worktree's panes.
+   *
+   * `version: 0` with a `null` layout means nobody has arranged this worktree
+   * yet, which is the only case in which a client seeds a default. An empty
+   * layout is a different answer and is not one of these.
+   */
+  paneLayout: (worktreeId: number) =>
+    request<PaneLayoutDoc>(`/api/worktrees/${worktreeId}/layout`),
+  /**
+   * Store a worktree's panes, if `version` is still the current one.
+   *
+   * Resolves with `{ ok: false, conflict }` when it is not — see
+   * [`LayoutSaveResult`]. It does not *reject*, deliberately: a conflict is an
+   * outcome to reconcile, not a failure. That is a hand-off, not a merge
+   * conflict: one client shows a worktree at a time, so the only way to
+   * see this is a debounced save from the client that just let go racing the
+   * one that just took it — and the loser must adopt what it is told rather
+   * than overwrite it.
+   *
+   * `layout: null` forgets the worktree's panes, so the next client to open it
+   * seeds a default instead of restoring an empty screen.
+   */
+  putPaneLayout: async (
+    worktreeId: number,
+    version: number,
+    layout: unknown | null,
+    clientId: string | null,
+  ): Promise<LayoutSaveResult> => {
+    const res = await fetch(`/api/worktrees/${worktreeId}/layout`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", "X-Veld-Request": "1" },
+      body: JSON.stringify({
+        version,
+        layout,
+        // So the daemon pushes the change to the *other* clients and not back
+        // to this one, which already has the answer in this response.
+        ...(clientId ? { client_id: clientId } : {}),
+      }),
+    });
+    // Not routed through `request`, which collapses every failure into an
+    // `Error` and drops the body — and the body is the whole value of a 409
+    // here. Reconciling from it costs no second round trip, and a re-read
+    // would race the write that just beat us all over again.
+    if (res.status === 409) {
+      const body = (await res.json().catch(() => ({}))) as Partial<PaneLayoutDoc>;
+      return {
+        ok: false,
+        conflict: {
+          version: typeof body.version === "number" ? body.version : 0,
+          layout: body.layout ?? null,
+        },
+      };
+    }
+    if (!res.ok) throw new Error(await errorMessage(res));
+    return { ok: true, doc: (await res.json()) as PaneLayoutDoc };
+  },
+  /**
    * Which of a worktree's config-declared panes have a session to resume.
    *
-   * The pane layout comes from browser storage; whether a pane ever launched
-   * is in the daemon's database. One request per worktree answers it for every
-   * pane at once, so a restored dock can label its buttons before anything
-   * connects.
+   * The layout says which panes exist; whether a pane ever launched is a
+   * separate row in the daemon's database. One request per worktree answers it
+   * for every pane at once, so a restored dock can label its buttons before
+   * anything connects.
    */
   paneSessions: (worktreeId: number) =>
     request<{ resumable: { session_id: string; pane: string }[] }>(
