@@ -1901,6 +1901,139 @@ mod tests {
         );
     }
 
+    // -----------------------------------------------------------------------
+    // The wire
+    // -----------------------------------------------------------------------
+
+    /// **Every frame the client sends, parsed from the literal JSON it sends.**
+    ///
+    /// The rest of this module tests the registry by calling it directly, and
+    /// the UI tests call an injected `deps.release` — so between them nothing
+    /// touched the serde contract at all. A renamed or newly-required field
+    /// makes the daemon discard the whole frame at `debug!` level, with both
+    /// suites green and the behaviour silently back to what it was before the
+    /// message existed. Demonstrated: renaming `Release::seq` left 29 Rust and
+    /// 59 TypeScript tests passing against a broken protocol.
+    ///
+    /// Keep these literals hand-written. Deriving them from the types would test
+    /// serde against itself; the point is that they match `ui/src/ide/channel.ts`.
+    #[test]
+    fn every_client_frame_parses_from_the_json_the_ui_sends() {
+        let parse = |raw: &str| serde_json::from_str::<ClientMsg>(raw).expect(raw);
+
+        match parse(r#"{"type":"claim","worktree_id":7,"request_id":3,"focus_holder":false}"#) {
+            ClientMsg::Claim {
+                worktree_id,
+                request_id,
+                focus_holder,
+            } => {
+                assert_eq!((worktree_id, request_id, focus_holder), (7, 3, false));
+            }
+            other => panic!("expected a claim, got {other:?}"),
+        }
+        // `focus_holder` defaults to true — a client that omits it is asking for
+        // the deliberate pick, which is what the rail does.
+        match parse(r#"{"type":"claim","worktree_id":7,"request_id":3}"#) {
+            ClientMsg::Claim { focus_holder, .. } => assert!(focus_holder),
+            other => panic!("expected a claim, got {other:?}"),
+        }
+        match parse(r#"{"type":"holds","worktree_ids":[7,9]}"#) {
+            ClientMsg::Holds { worktree_ids } => assert_eq!(worktree_ids, vec![7, 9]),
+            other => panic!("expected holds, got {other:?}"),
+        }
+        match parse(r#"{"type":"yielded","yield_id":42}"#) {
+            ClientMsg::Yielded { yield_id } => assert_eq!(yield_id, 42),
+            other => panic!("expected yielded, got {other:?}"),
+        }
+        match parse(r#"{"type":"forget","worktree_ids":[7]}"#) {
+            ClientMsg::Forget { worktree_ids } => assert_eq!(worktree_ids, vec![7]),
+            other => panic!("expected forget, got {other:?}"),
+        }
+        match parse(r#"{"type":"release","worktree_id":7,"seq":3}"#) {
+            ClientMsg::Release { worktree_id, seq } => assert_eq!((worktree_id, seq), (7, 3)),
+            other => panic!("expected release, got {other:?}"),
+        }
+    }
+
+    /// …and every frame the daemon sends, by the field names the client reads.
+    #[test]
+    fn every_server_frame_carries_the_field_names_the_ui_reads() {
+        let json = |m: &ServerMsg| serde_json::to_value(m).unwrap();
+
+        let ready = json(&ServerMsg::Ready {
+            epoch: "e".into(),
+            client_id: "c".into(),
+        });
+        assert_eq!(ready["type"], "ready");
+        assert_eq!(ready["epoch"], "e");
+        assert_eq!(ready["client_id"], "c");
+
+        let claims = json(&ServerMsg::Claims {
+            claims: vec![ClaimView {
+                worktree_id: 7,
+                mine: true,
+                client: ClientInfo {
+                    kind: ClientKind::Browser,
+                    label: "Safari".into(),
+                },
+            }],
+        });
+        assert_eq!(claims["type"], "claims");
+        assert_eq!(claims["claims"][0]["worktree_id"], 7);
+        assert_eq!(claims["claims"][0]["mine"], true);
+        assert_eq!(claims["claims"][0]["client"]["kind"], "browser");
+        assert_eq!(claims["claims"][0]["client"]["label"], "Safari");
+        // The identity is the credential a reconnect resumes with — see
+        // `the_claims_broadcast_never_carries_a_client_id`.
+        assert!(claims["claims"][0]["client"].get("client_id").is_none());
+
+        let granted = json(&ServerMsg::ClaimResult {
+            request_id: 3,
+            ok: true,
+            seq: Some(9),
+            reason: None,
+            holder: None,
+        });
+        assert_eq!(granted["type"], "claim_result");
+        assert_eq!(granted["ok"], true);
+        assert_eq!(granted["seq"], 9, "a grant must be releasable by name");
+
+        let refused = json(&ServerMsg::ClaimResult {
+            request_id: 3,
+            ok: false,
+            seq: None,
+            reason: Some("shown_elsewhere"),
+            holder: Some(ClientInfo {
+                kind: ClientKind::Electron,
+                label: "Veld Desktop".into(),
+            }),
+        });
+        assert_eq!(refused["reason"], "shown_elsewhere");
+        assert_eq!(refused["holder"]["kind"], "electron");
+        assert!(
+            refused["seq"].is_null(),
+            "a refusal has nothing to give back"
+        );
+
+        let asked = json(&ServerMsg::Yield {
+            worktree_id: 7,
+            yield_id: 42,
+        });
+        assert_eq!(asked["type"], "yield");
+        assert_eq!(asked["worktree_id"], 7);
+        assert_eq!(asked["yield_id"], 42);
+
+        assert_eq!(json(&ServerMsg::Focus)["type"], "focus");
+
+        let moved = json(&ServerMsg::LayoutChanged {
+            worktree_id: 7,
+            version: 4,
+        });
+        assert_eq!(moved["type"], "layout_changed");
+        assert_eq!(moved["worktree_id"], 7);
+        assert_eq!(moved["version"], 4);
+    }
+
     #[test]
     fn client_ids_are_bounded_to_a_charset_that_cannot_carry_a_payload() {
         assert!(valid_client_id("abc-123_XYZ"));
