@@ -4,6 +4,12 @@
   "name": "veld",
   "url_template": "{service}.{run}.veld.localhost",
   "ide": {
+    // This repo merges often and its agents live in worktrees, so "behind"
+    // should read urgent sooner rather than later — the staleness pill colours
+    // at half the baseline thresholds.
+    "git": {
+      "stalenessSensitivity": 2
+    },
     "quicklinks": [
       { "label": "veld.oss.life.li", "url": "https://veld.oss.life.li" },
       { "label": "GitHub", "url": "https://github.com/prosperity-solutions/veld" },
