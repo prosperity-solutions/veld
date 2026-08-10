@@ -681,8 +681,103 @@ fn end_detail_for_error(e: &OrchestratorError) -> EndDetail {
 
 /// A port name as it appears in an environment variable suffix
 /// (`VELD_PORT_<NAME>`, `VELD_URL_<NAME>`).
-fn env_suffix(port_name: &str) -> String {
+pub fn env_suffix(port_name: &str) -> String {
     port_name.to_uppercase().replace('-', "_")
+}
+
+/// The veld-owned context every surface of a node is built from, so the same
+/// `VELD_*` variables reach the node process, its readiness probe, its
+/// `on_stop` hook, and `veld action`.
+#[derive(Debug, Clone)]
+pub struct NodeEnvContext {
+    /// `VELD_RUN` — the run name.
+    pub run_name: String,
+    /// `VELD_RUN_ID` — the run's uuid, when the run row is still live.
+    pub run_id: Option<String>,
+    /// `VELD_ROOT` — the project root.
+    pub project_root: std::path::PathBuf,
+    /// `VELD_PROJECT` — the config's project name.
+    pub project_name: String,
+    /// `VELD_NODE` — this node's name.
+    pub node: String,
+    /// `VELD_VARIANT` — this node's active variant.
+    pub variant: String,
+    /// `VELD_PORT` — the primary port.
+    pub port: Option<u16>,
+    /// `VELD_URL` — the primary routed URL.
+    pub primary_url: Option<String>,
+    /// `VELD_PORT_<NAME>` for each named port.
+    pub named_ports: Vec<(String, u16)>,
+    /// `VELD_HOST_<NAME>` + `VELD_URL_<NAME>` per endpoint
+    /// `(name, hostname, https_url)`.
+    pub endpoints: Vec<(String, String, Option<String>)>,
+}
+
+impl NodeEnvContext {
+    /// From a persisted [`crate::state::NodeState`] — used by the `on_stop`
+    /// hook, the liveness monitor, and `veld action`, which have the node's
+    /// recorded port, url and endpoints rather than the pre-computed start-time
+    /// server info.
+    pub fn from_node_state(
+        run_name: &str,
+        run_id: Option<String>,
+        project_root: &std::path::Path,
+        project_name: &str,
+        node_state: &crate::state::NodeState,
+    ) -> Self {
+        let mut named_ports = Vec::new();
+        let mut endpoints = Vec::new();
+        for (name, e) in node_state.endpoints_or_legacy() {
+            named_ports.push((name.clone(), e.port));
+            endpoints.push((name, e.hostname, e.url));
+        }
+        Self {
+            run_name: run_name.to_owned(),
+            run_id,
+            project_root: project_root.to_owned(),
+            project_name: project_name.to_owned(),
+            node: node_state.node_name.clone(),
+            variant: node_state.variant.clone(),
+            port: node_state.port,
+            primary_url: node_state.url.clone(),
+            named_ports,
+            endpoints,
+        }
+    }
+}
+
+/// Build the veld-owned environment (`VELD_RUN`, `VELD_ROOT`, the port/url/host
+/// family) shared by every surface of a node. One builder, used by all of them,
+/// so a variable cannot be reachable in one place and not another.
+pub fn veld_owned_env(ctx: &NodeEnvContext) -> std::collections::HashMap<String, String> {
+    let mut env = std::collections::HashMap::new();
+    env.insert("VELD_RUN".to_owned(), ctx.run_name.clone());
+    if let Some(rid) = &ctx.run_id {
+        env.insert("VELD_RUN_ID".to_owned(), rid.clone());
+    }
+    env.insert(
+        "VELD_ROOT".to_owned(),
+        ctx.project_root.to_string_lossy().into_owned(),
+    );
+    env.insert("VELD_PROJECT".to_owned(), ctx.project_name.clone());
+    env.insert("VELD_NODE".to_owned(), ctx.node.clone());
+    env.insert("VELD_VARIANT".to_owned(), ctx.variant.clone());
+    if let Some(port) = ctx.port {
+        env.insert("VELD_PORT".to_owned(), port.to_string());
+    }
+    if let Some(url) = &ctx.primary_url {
+        env.insert("VELD_URL".to_owned(), url.clone());
+    }
+    for (name, port) in &ctx.named_ports {
+        env.insert(format!("VELD_PORT_{}", env_suffix(name)), port.to_string());
+    }
+    for (name, host, url) in &ctx.endpoints {
+        env.insert(format!("VELD_HOST_{}", env_suffix(name)), host.clone());
+        if let Some(url) = url {
+            env.insert(format!("VELD_URL_{}", env_suffix(name)), url.clone());
+        }
+    }
+    env
 }
 
 /// One routed HTTP port: the hostname veld minted for it and the URL that
@@ -1858,13 +1953,25 @@ impl Orchestrator {
                 .unwrap_or_else(|| config::CommandSpec::Shell(String::new())),
         };
         let resolved_cmd = raw_cmd.interpolate(&var_ctx)?;
-        let (env, env_secret_keys) = build_env(
+        let (mut env, env_secret_keys) = build_env(
             resolved.env.as_ref(),
             &var_ctx,
             &format!("nodes.{}.variants.{}", sel.node, sel.variant),
             &self.project_root,
         )
         .await?;
+        env.extend(veld_owned_env(&NodeEnvContext {
+            run_name: run_name.to_owned(),
+            run_id: Some(run.run_id.to_string()),
+            project_root: self.project_root.clone(),
+            project_name: self.config.name.clone(),
+            node: sel.node.clone(),
+            variant: sel.variant.clone(),
+            port: None,
+            primary_url: None,
+            named_ports: Vec::new(),
+            endpoints: Vec::new(),
+        }));
 
         let key = RunState::node_key(&sel.node, &sel.variant);
 
@@ -2240,6 +2347,48 @@ impl Orchestrator {
             run.execution_order.clone()
         };
 
+        // Snapshot every node's recorded outputs so a stop-time
+        // `${nodes.<node>.<field>}` reference — e.g. the dev-daemon's port a
+        // wrapper hook must forget — resolves from persisted state. The node it
+        // names may already be stopped by the time the referencing hook runs,
+        // but its recorded outputs are exactly what teardown needs.
+        //
+        // Rebuild the same accessors the start path published per node
+        // (`port`, `ports.<name>`, `url` + pieces, `hosts.<name>`, `urls.<name>`)
+        // from each persisted state, because `NodeState.outputs` alone holds
+        // only `ports.<name>` — the bare `${nodes.X.port}` a teardown is most
+        // likely to reference is a separate field.
+        let all_node_outputs: std::collections::HashMap<
+            String,
+            std::collections::HashMap<String, String>,
+        > = run
+            .nodes
+            .values()
+            .map(|ns| {
+                let mut out = ns.outputs.clone();
+                if let Some(port) = ns.port {
+                    out.insert("port".to_owned(), port.to_string());
+                }
+                if let Some(url) = &ns.url {
+                    for (key, value) in url_builtins(url) {
+                        out.insert(key.to_owned(), value);
+                    }
+                }
+                for (name, endpoint) in ns.endpoints_or_legacy() {
+                    out.insert(
+                        format!("hosts.{name}"),
+                        url::hostname_of_url(&endpoint.hostname).to_owned(),
+                    );
+                    if let Some(url) = &endpoint.url {
+                        for (key, value) in port_url_builtins(&name, url) {
+                            out.insert(key, value);
+                        }
+                    }
+                }
+                (ns.node_name.clone(), out)
+            })
+            .collect();
+
         for key in node_keys.iter().rev() {
             if let Some(node_state) = run.nodes.get_mut(key) {
                 self.internal_log(&format!(
@@ -2262,8 +2411,14 @@ impl Orchestrator {
 
                 // Run on_stop hook if defined (skip nodes that never ran).
                 if node_state.status != NodeStatus::Pending {
-                    self.run_on_stop_hook(run_name, Some(run_id), &stop_vars, node_state)
-                        .await;
+                    self.run_on_stop_hook(
+                        run_name,
+                        Some(run_id),
+                        &stop_vars,
+                        &all_node_outputs,
+                        node_state,
+                    )
+                    .await;
                 }
 
                 node_state.status = NodeStatus::Stopped;
@@ -2541,11 +2696,17 @@ impl Orchestrator {
     }
 
     /// Run the `on_stop` hook for a node if one is defined in the config.
+    ///
+    /// `all_outputs` is every node's recorded outputs (keyed by node name), so
+    /// a stop-time `${nodes.<node>.<field>}` reference — the half of the
+    /// vocabulary that historically did *not* resolve at stop — finds the value
+    /// from persisted state just as the node's own `on_stop` did at start.
     async fn run_on_stop_hook(
         &self,
         run_name: &str,
         run_id: Option<uuid::Uuid>,
         vars: &HashMap<String, String>,
+        all_outputs: &HashMap<String, HashMap<String, String>>,
         node_state: &NodeState,
     ) {
         let variant_cfg = match self
@@ -2616,6 +2777,17 @@ impl Orchestrator {
                 ctx.set_builtin(k, v.clone());
             }
         }
+        // Cross-node `${nodes.<node>.<field>}` references resolve here too, from
+        // the persisted run state. This is the half of the vocabulary that used
+        // to *not* resolve at stop: `build_env` was all-or-nothing, so a single
+        // `${nodes.dev-daemon.port}` emptied the whole map and the hook ran
+        // blind. A node's teardown references a sibling's output precisely
+        // because that sibling is being torn down alongside it.
+        for (other_node, outputs) in all_outputs {
+            for (field, value) in outputs {
+                ctx.set_node_output(&format!("nodes.{other_node}.{field}"), value.clone());
+            }
+        }
         if let Some(port) = node_state.port {
             ctx.set_builtin("port", port.to_string());
         }
@@ -2679,10 +2851,10 @@ impl Orchestrator {
             }
         };
 
-        // Build env (variant > node > project).
+        // Build env (variant > node > project), then add the veld-owned vars.
         let node_cfg_opt = self.config.nodes.get(&node_state.node_name);
         let merged_env = resolved.env.clone();
-        let env = match build_env(
+        let mut env = match build_env(
             merged_env.as_ref(),
             &ctx,
             &format!(
@@ -2695,14 +2867,32 @@ impl Orchestrator {
         {
             Ok((env, _)) => env,
             Err(e) => {
+                // A teardown hook that cannot resolve its environment must NOT
+                // run with an empty one: the hook would execute and still be
+                // blind, which is how the wrapper it was meant to clean up
+                // outlives its run. Skip the hook and say so loudly, exactly as
+                // the command-interpolation failure path above does.
+                eprintln!(
+                    "  ! teardown hook for {}:{} was SKIPPED: could not resolve its environment: {e}\n    \
+                     Anything it was meant to clean up (containers, volumes, \
+                     temp state) has been left behind.",
+                    node_state.node_name, node_state.variant,
+                );
                 tracing::warn!(
                     node = node_state.node_name,
                     error = %e,
-                    "failed to resolve on_stop env variables, using empty env"
+                    "failed to resolve on_stop env variables — hook skipped"
                 );
-                HashMap::new()
+                return;
             }
         };
+        env.extend(veld_owned_env(&NodeEnvContext::from_node_state(
+            run_name,
+            run_id.map(|id| id.to_string()),
+            &self.project_root,
+            &self.config.name,
+            node_state,
+        )));
 
         // Resolve working directory (variant > node > project root).
         let working_dir = resolve_working_dir(
@@ -3654,28 +3844,29 @@ async fn execute_start_server_isolated(
     // Env keys declared `secret: true` are masked and encrypted at rest just like
     // sensitive outputs — same machinery, extended rather than duplicated.
     node_state.sensitive_keys.extend(env_secret_keys);
-    if let Some(port) = port {
-        env.insert("VELD_PORT".to_owned(), port.to_string());
-    }
-    for (name, value) in &precomputed.named_ports {
-        env.insert(format!("VELD_PORT_{}", env_suffix(name)), value.to_string());
-    }
-    if let Some(url) = &https_url {
-        env.insert("VELD_URL".to_owned(), url.clone());
-    }
-    // Mirrors `VELD_PORT_<NAME>`: a child can find a sibling endpoint without
-    // the config threading it through `env`. `VELD_HOST_<NAME>` exists for every
-    // port — it is the piece a connection string needs and the only one a `tcp`
-    // port has — while `VELD_URL_<NAME>` is routed ports only.
-    for (name, endpoint) in &precomputed.endpoints {
-        env.insert(
-            format!("VELD_HOST_{}", env_suffix(name)),
-            endpoint.hostname.clone(),
-        );
-        if let Some(url) = &endpoint.https_url {
-            env.insert(format!("VELD_URL_{}", env_suffix(name)), url.clone());
-        }
-    }
+    // The veld-owned environment — `VELD_RUN`/`VELD_ROOT`/`VELD_NODE`/… plus the
+    // port/url/host family — from the single builder every surface shares, so a
+    // var cannot be reachable in the node process but not its `on_stop` hook.
+    env.extend(veld_owned_env(&NodeEnvContext {
+        run_name: ctx.run_name.clone(),
+        run_id: Some(ctx.run_id.to_string()),
+        project_root: ctx.project_root.to_path_buf(),
+        project_name: ctx.config.name.clone(),
+        node: sel.node.clone(),
+        variant: sel.variant.clone(),
+        port,
+        primary_url: https_url.clone(),
+        named_ports: precomputed
+            .named_ports
+            .iter()
+            .map(|(n, v)| (n.clone(), *v))
+            .collect(),
+        endpoints: precomputed
+            .endpoints
+            .iter()
+            .map(|(n, e)| (n.clone(), e.hostname.clone(), e.https_url.clone()))
+            .collect(),
+    }));
 
     // Resolve synthetic outputs.
     //
@@ -3785,6 +3976,29 @@ async fn execute_start_server_isolated(
     .await;
     // Use probes.readiness if available, falling back to legacy health_check.
     if let Some(hc) = resolved.readiness.clone() {
+        // Interpolate the probe's `path`/`argv`/`shell` with the node's context,
+        // exactly as the node's own `argv` and `env` are. A `${vars.…}` that
+        // cannot resolve is a config the node could never pass, so fail it
+        // loudly here rather than 404-ing forever against a literal reference.
+        let hc = match hc.interpolate(var_ctx) {
+            Ok(hc) => hc,
+            Err(e) => {
+                return Err(OrchestratorError::NodeFailed {
+                    node: sel.node.clone(),
+                    variant: sel.variant.clone(),
+                    reason: format!("readiness probe could not be resolved: {e}"),
+                });
+            }
+        };
+        // The probe is an operation *on this node*, so it gets the node's own
+        // environment (declared `env` + veld-owned vars) plus the node's
+        // outputs as `$KEY` — the same `$KEY` an action on the node gets. A
+        // `command` probe must be able to see `VELD_PORT` and the node's env,
+        // or it cannot check anything parameterised.
+        let mut probe_env = env.clone();
+        for (k, v) in &node_state.outputs {
+            probe_env.insert(k.clone(), v.clone());
+        }
         node_state.status = NodeStatus::HealthChecking;
         node_state.readiness_phases.push(ReadinessPhase {
             phase: 1,
@@ -4023,6 +4237,7 @@ async fn execute_start_server_isolated(
                         health::wait_for_command_check(
                             &cmd,
                             &working_dir,
+                            &probe_env,
                             &hc,
                             Some(&phase2_notifier),
                         )
@@ -4170,7 +4385,7 @@ async fn execute_command_isolated(
     let resolved_cmd = raw_cmd.interpolate(var_ctx)?;
 
     // Build env (variant > node > project).
-    let (env, env_secret_keys) = build_env(
+    let (mut env, env_secret_keys) = build_env(
         resolved.env.as_ref(),
         var_ctx,
         &format!("nodes.{}.variants.{}", sel.node, sel.variant),
@@ -4178,6 +4393,20 @@ async fn execute_command_isolated(
     )
     .await?;
     node_state.sensitive_keys.extend(env_secret_keys);
+    // The veld-owned vars reach a `command` node too — it has no port, but it
+    // still gets VELD_RUN/VELD_ROOT/VELD_NODE/VELD_VARIANT.
+    env.extend(veld_owned_env(&NodeEnvContext {
+        run_name: ctx.run_name.clone(),
+        run_id: Some(ctx.run_id.to_string()),
+        project_root: ctx.project_root.to_path_buf(),
+        project_name: ctx.config.name.clone(),
+        node: sel.node.clone(),
+        variant: sel.variant.clone(),
+        port: None,
+        primary_url: None,
+        named_ports: Vec::new(),
+        endpoints: Vec::new(),
+    }));
 
     if let Some(files) = &resolved.files {
         crate::values::deliver_files(
@@ -4358,6 +4587,37 @@ async fn execute_command_isolated(
     if result.exit_code == 0 {
         // Run readiness probe if configured (probes.readiness on command nodes).
         if let Some(hc) = resolved.readiness.clone() {
+            // Interpolate the probe's `argv`/`shell` with the node's context.
+            let hc = match hc.interpolate(var_ctx) {
+                Ok(hc) => hc,
+                Err(e) => {
+                    return Err(OrchestratorError::NodeFailed {
+                        node: sel.node.clone(),
+                        variant: sel.variant.clone(),
+                        reason: format!("readiness probe could not be resolved: {e}"),
+                    });
+                }
+            };
+            // The probe sees the node's declared env plus the veld-owned vars
+            // (a command node has no port, but it still gets VELD_RUN/VELD_ROOT)
+            // plus the node's outputs as `$KEY`.
+            let mut probe_env = env.clone();
+            probe_env.extend(veld_owned_env(&NodeEnvContext {
+                run_name: ctx.run_name.clone(),
+                run_id: Some(ctx.run_id.to_string()),
+                project_root: ctx.project_root.to_path_buf(),
+                project_name: ctx.config.name.clone(),
+                node: sel.node.clone(),
+                variant: sel.variant.clone(),
+                port: None,
+                primary_url: None,
+                named_ports: Vec::new(),
+                endpoints: Vec::new(),
+            }));
+            for (k, v) in &node_state.outputs {
+                probe_env.insert(k.clone(), v.clone());
+            }
+
             node_state.status = NodeStatus::HealthChecking;
             emit_progress(
                 &ctx.progress_tx,
@@ -4373,8 +4633,14 @@ async fn execute_command_isolated(
             let probe_result = match hc.check_type.as_str() {
                 "command" | "bash" => {
                     if let Some(cmd) = hc.cmd.spec() {
-                        health::wait_for_command_check(&cmd, &working_dir, &hc, Some(&notifier))
-                            .await
+                        health::wait_for_command_check(
+                            &cmd,
+                            &working_dir,
+                            &probe_env,
+                            &hc,
+                            Some(&notifier),
+                        )
+                        .await
                     } else {
                         Ok(())
                     }
@@ -4509,7 +4775,10 @@ async fn wait_for_process_exit(pid: u32) {
 ///
 /// Returns the resolved values plus the keys declared `secret`, so the caller can
 /// mark them sensitive without the values themselves needing a wrapper type.
-async fn build_env(
+/// Resolve a node's declared `env` map against a context — the single resolver
+/// for every surface, so a value means the same thing in the node process, its
+/// `on_stop` hook, and `veld action`.
+pub async fn build_env(
     env_config: Option<&HashMap<String, config::ConfigValue>>,
     ctx: &VariableContext,
     at_prefix: &str,
@@ -4571,6 +4840,47 @@ fn whoami_hostname() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The veld-owned env must reach every surface from one builder, with the
+    /// same names — `VELD_RUN`/`VELD_ROOT`/`VELD_NODE`/… plus the port/url/host
+    /// family wherever the node has ports.
+    #[test]
+    fn veld_owned_env_builds_the_shared_variables() {
+        let tmp = tempfile::tempdir().unwrap();
+        let env = veld_owned_env(&NodeEnvContext {
+            run_name: "dev".to_owned(),
+            run_id: Some("abc-123".to_owned()),
+            project_root: tmp.path().to_path_buf(),
+            project_name: "myproj".to_owned(),
+            node: "api".to_owned(),
+            variant: "local".to_owned(),
+            port: Some(3456),
+            primary_url: Some("https://api.dev.localhost".to_owned()),
+            named_ports: vec![("debug".to_owned(), 9999)],
+            endpoints: vec![("db".to_owned(), "db.localhost".to_owned(), None)],
+        });
+        assert_eq!(env.get("VELD_RUN").map(String::as_str), Some("dev"));
+        assert_eq!(env.get("VELD_RUN_ID").map(String::as_str), Some("abc-123"));
+        assert_eq!(env.get("VELD_NODE").map(String::as_str), Some("api"));
+        assert_eq!(env.get("VELD_VARIANT").map(String::as_str), Some("local"));
+        assert_eq!(
+            env.get("VELD_ROOT").map(String::as_str),
+            Some(tmp.path().to_str().unwrap())
+        );
+        assert_eq!(env.get("VELD_PROJECT").map(String::as_str), Some("myproj"));
+        assert_eq!(env.get("VELD_PORT").map(String::as_str), Some("3456"));
+        assert_eq!(
+            env.get("VELD_URL").map(String::as_str),
+            Some("https://api.dev.localhost")
+        );
+        assert_eq!(env.get("VELD_PORT_DEBUG").map(String::as_str), Some("9999"));
+        assert_eq!(
+            env.get("VELD_HOST_DB").map(String::as_str),
+            Some("db.localhost")
+        );
+        // A `tcp` port has a hostname but no URL — that key must be absent.
+        assert!(!env.contains_key("VELD_URL_DB"));
+    }
 
     /// Records what a [`stats::StepObserver`] was told, in order.
     #[derive(Default)]
@@ -5498,6 +5808,71 @@ mod tests {
             resolved, "testrun|12345|svc|local|SHADOW|9999",
             "${{veld.run}} must stay the run name and ${{veld.port}} the allocated \
              port; the same-named outputs are reachable only as ${{output.*}}"
+        );
+    }
+
+    /// The second half of §4: a stop-time `${nodes.<other>.<field>}` reference
+    /// used to fail to resolve — `build_env` was all-or-nothing, so one
+    /// `${nodes.dev-daemon.port}` emptied the whole map and the hook ran blind.
+    /// Cross-node refs, including the bare `port` accessor, must now resolve
+    /// from the persisted run state.
+    #[tokio::test]
+    async fn on_stop_resolves_cross_node_references() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = tmp.path();
+        let marker = project_root.join("stop-marker");
+
+        let config: VeldConfig = serde_json::from_str(&format!(
+            r#"{{
+                "schemaVersion": "3",
+                "name": "testcfg",
+                "nodes": {{
+                    "dev-daemon": {{"default_variant": "local", "variants": {{
+                        "local": {{"type": "start_server", "shell": "sleep 30"}}
+                    }}}},
+                    "dev-link": {{"default_variant": "local", "variants": {{
+                        "local": {{
+                            "type": "command",
+                            "shell": "true",
+                            "on_stop": "printf '%s' \"${{nodes.dev-daemon.port}}|${{nodes.dev-daemon.url.hostname}}\" > {}"
+                        }}
+                    }}}}
+                }}
+            }}"#,
+            marker.display()
+        ))
+        .unwrap();
+
+        let mut orch = test_orchestrator(project_root, config.clone());
+        let mut run = RunState::new("testrun", &config.name);
+        run.status = RunStatus::Running;
+
+        let mut daemon = NodeState::new("dev-daemon", "local");
+        daemon.status = NodeStatus::Healthy;
+        daemon.port = Some(12345);
+        daemon.url = Some("https://dev-daemon.testrun.testcfg.localhost".to_owned());
+        run.nodes
+            .insert(RunState::node_key("dev-daemon", "local"), daemon);
+
+        let mut link = NodeState::new("dev-link", "local");
+        link.status = NodeStatus::Healthy;
+        run.nodes
+            .insert(RunState::node_key("dev-link", "local"), link);
+
+        // Started first, torn down last — so dev-link's hook runs while the
+        // daemon's state is still present.
+        run.execution_order
+            .push(RunState::node_key("dev-daemon", "local"));
+        run.execution_order
+            .push(RunState::node_key("dev-link", "local"));
+        orch.save_state(&run).unwrap();
+
+        orch.stop("testrun").await.expect("stop");
+
+        let resolved = std::fs::read_to_string(&marker).expect("dev-link on_stop must have run");
+        assert_eq!(
+            resolved, "12345|dev-daemon.testrun.testcfg.localhost",
+            "${{nodes.dev-daemon.port}} and its url.hostname must resolve at stop time"
         );
     }
 

@@ -507,6 +507,8 @@ Every `long_running` variant requires a readiness probe — including a portless
 - `command`: Exit 0 = healthy.
 - `settle`: The process was still alive `seconds` after spawn (default 3). For a **portless** node. Deliberately a weak claim, but raced against process exit, so a command that dies on startup still fails the run. Prefer `command` whenever the process publishes something observable (a socket, a built file, a pid file).
 - `http`/`port` probe the **primary** port unless `"port": "<name>"` names another one from the node's `ports` map. On a node with no such port they are a `probe-needs-port` error and fail the run — they no longer report healthy. An unrecognised `type` is `unknown-probe-type`, for the same reason: a typo must never be the quiet way to turn a probe off.
+- **Probe fields are interpolated**: an `http` probe's `path` and a `command` probe's `argv`/`shell` resolve `${…}` with the node's context, like the node's own `argv`/`env` (`schema/v3/examples/vars-and-values.json` proves it).
+- A **`command` probe runs with the node's declared `env`**, the veld-owned `VELD_*` variables (including `VELD_PORT`), and the node's outputs as `$KEY`, so it can be parameterised. On failure its **stderr and exit code are included in the timeout error** rather than discarded.
 - Defaults: `timeout_seconds`: 60, `interval_ms`: 1000 (min: 100).
 
 ### Liveness (ongoing)
@@ -567,6 +569,7 @@ Substitution available inside `command` and `parameters` values:
 - `${output.KEY}` — the same outputs, interpolated by Veld into the command string before it runs
 - `${param.KEY}` — this action's parameters
 - `${veld.run}`, `${veld.node}`, `${veld.variant}`, `${veld.project}`, `${veld.root}`, `${veld.port}`, `${veld.url}`
+- The node's declared `env` (as `$KEY`, below the node outputs in precedence) and the veld-owned `VELD_*` variables — `VELD_RUN`, `VELD_RUN_ID`, `VELD_ROOT`, `VELD_PROJECT`, `VELD_NODE`, `VELD_VARIANT`, plus `VELD_PORT`/`VELD_URL`/`VELD_PORT_<NAME>`/`VELD_URL_<NAME>`/`VELD_HOST_<NAME>` on a node that has ports
 
 **Secrets — `$KEY` beats `${output.KEY}`, but is not automatically safe.** `${output.DB_PASS}` is interpolated by veld into the command string, so it is in `ps` for certain — a `secret-in-command` **error**. `$DB_PASS` is expanded by the *shell*, and where the expansion lands decides the outcome: `echo $DB_PASS` (builtin) and `PGPASSWORD=$DB_PASS psql -U u db` (environment assignment) leak nothing, while `psql "postgres://u:$DB_PASS@host/db"` makes the shell `execve` `psql` with the expanded value in *that* program's argv. The shell's own `ps` entry shows the literal `$DB_PASS`; the program it runs shows the value. veld cannot distinguish them, so this is a `secret-shell-expansion` **warning**. Prefer giving the program the variable *name* (`PGPASSWORD=`, `--password-file`, `-e NAME`). GUI clients launched with a connection URL (`open -a Postico "postgresql://$DB_USER:$DB_PASS@…"`) always expand into the launcher's argv — omit the password and let the client prompt.
 
@@ -597,7 +600,7 @@ real `//` comment.
 | `proxy` | project, node, variant | `{request?: {remove?: [str], set?: {k: v}}, response?: {...}}`. Reverse-proxy header rules for the local Caddy proxy + web gateway (NOT peer shares). Cascades: `remove` lists union, `set` maps merge (variant > node > project). Absent = no manipulation. See [Proxy](#proxy). |
 | `type` | node, variant | `long_running` (alias: `start_server`) or `command`. Lifecycle only — ports decide whether the node serves anything. Declare once on the node if all its variants agree. |
 | `argv` / `shell` | node, variant | What to run — exactly one of them. |
-| `on_stop` | node, variant | Per-node teardown, run on `veld stop`, in reverse dependency order. `{argv\|shell}`. |
+| `on_stop` | node, variant | Per-node teardown, run on `veld stop`, in reverse dependency order. `{argv\|shell}`. Cross-node `${nodes.<node>.<field>}` references resolve at stop time from the run's persisted state, and the veld-owned `VELD_*` vars are exported. A hook whose command **or environment** cannot be resolved is skipped loudly (it never runs with an empty env). |
 | `depends_on` | node, variant | `{node: variant}`. Both **literal** — no `${...}`; the graph is read before variables exist. `"node": null` erases. |
 | `outputs` | node, variant | List of captured names, or a map of computed values (both node types). Replaced wholesale by a variant. |
 | `share` | node, variant | Replaced wholesale by a variant, never merged — sharing is a consent decision. |

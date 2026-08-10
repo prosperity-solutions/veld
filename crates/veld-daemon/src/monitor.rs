@@ -276,8 +276,17 @@ async fn run_liveness_checks(
                 .await;
         }
 
-        let check_result =
-            run_single_liveness_check(liveness, &working_dir, run, key, user_path).await;
+        let check_result = run_single_liveness_check(
+            liveness,
+            &working_dir,
+            run,
+            key,
+            project_root,
+            project_name,
+            run_name,
+            user_path,
+        )
+        .await;
 
         let node_state = match run.nodes.get_mut(key) {
             Some(ns) => ns,
@@ -513,11 +522,15 @@ impl LivenessFailure {
 
 /// Run a single liveness check for a node.
 /// Returns `Ok(())` if healthy, else why it did not pass — see [`LivenessFailure`].
+#[allow(clippy::too_many_arguments)]
 async fn run_single_liveness_check(
     liveness: &LivenessProbe,
     working_dir: &Path,
     run: &veld_core::state::RunState,
     node_key: &str,
+    project_root: &Path,
+    project_name: &str,
+    run_name: &str,
     user_path: &str,
 ) -> Result<(), LivenessFailure> {
     let node_state = match run.nodes.get(node_key) {
@@ -541,7 +554,18 @@ async fn run_single_liveness_check(
                         .current_dir(working_dir)
                         .stdout(std::process::Stdio::null())
                         .stderr(std::process::Stdio::piped())
-                        .env("PATH", user_path);
+                        .env("PATH", user_path)
+                        // The veld-owned vars — VELD_RUN, VELD_ROOT, the
+                        // port/url/host family — from the shared builder.
+                        .envs(veld_core::orchestrator::veld_owned_env(
+                            &veld_core::orchestrator::NodeEnvContext::from_node_state(
+                                run_name,
+                                Some(run.run_id.to_string()),
+                                project_root,
+                                project_name,
+                                node_state,
+                            ),
+                        ));
                     // Inject node outputs as environment variables so probe
                     // commands can reference them (e.g., pg_isready -h $DB_HOST).
                     for (key, value) in &node_state.outputs {
@@ -861,9 +885,18 @@ mod tests {
         // No port to connect to: unrunnable, whatever the node is doing.
         for check_type in ["port", "http"] {
             let run = run_with_node(None);
-            let err = run_single_liveness_check(&probe(check_type), &dir, &run, "web:local", "")
-                .await
-                .expect_err("a port-shaped probe with no port cannot pass");
+            let err = run_single_liveness_check(
+                &probe(check_type),
+                &dir,
+                &run,
+                "web:local",
+                &dir,
+                "proj",
+                "dev",
+                "",
+            )
+            .await
+            .expect_err("a port-shaped probe with no port cannot pass");
             assert!(
                 matches!(err, LivenessFailure::Unrunnable(_)),
                 "{check_type}: {}",
@@ -873,9 +906,18 @@ mod tests {
 
         // A type veld does not implement: also unrunnable, not "unhealthy".
         let run = run_with_node(Some(3000));
-        let err = run_single_liveness_check(&probe("htpp"), &dir, &run, "web:local", "")
-            .await
-            .expect_err("an unknown probe type cannot pass");
+        let err = run_single_liveness_check(
+            &probe("htpp"),
+            &dir,
+            &run,
+            "web:local",
+            &dir,
+            "proj",
+            "dev",
+            "",
+        )
+        .await
+        .expect_err("an unknown probe type cannot pass");
         assert!(
             matches!(err, LivenessFailure::Unrunnable(_)),
             "{}",
@@ -885,9 +927,18 @@ mod tests {
         // A real check against a port nothing is listening on DID run, and
         // failed — that one counts, because a restart can fix it.
         let run = run_with_node(Some(1));
-        let err = run_single_liveness_check(&probe("port"), &dir, &run, "web:local", "")
-            .await
-            .expect_err("nothing is listening on port 1");
+        let err = run_single_liveness_check(
+            &probe("port"),
+            &dir,
+            &run,
+            "web:local",
+            &dir,
+            "proj",
+            "dev",
+            "",
+        )
+        .await
+        .expect_err("nothing is listening on port 1");
         assert!(
             matches!(err, LivenessFailure::Failed(_)),
             "{}",

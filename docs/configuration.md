@@ -659,6 +659,13 @@ object:
 "skip_if": { "shell": "test -f .migrated" }
 ```
 
+Probe fields — an `http` probe's `path`, and a `command` probe's `argv`/`shell`
+— are interpolated with the node's context too, exactly like the node's own
+`argv`/`env`. A `${vars.health_path}` in a probe `path` resolves to the var's
+value rather than being sent to the server as literal text. (The committed
+example `schema/v3/examples/vars-and-values.json` does exactly this and is the
+proof the fix works.)
+
 #### `command` (removed)
 
 `command` was the single shell-string form in `schemaVersion` 1 and 2. Neither
@@ -741,7 +748,16 @@ stop.
 
 #### Strategy: `command`
 
-Runs a shell command and checks the exit code. Exit code `0` means healthy.
+Runs a shell command and checks the exit code. Exit code `0` means healthy. The
+command runs with the node's declared `env`, the veld-owned `VELD_*` variables
+(including `VELD_PORT` on a node that has one), and the node's outputs as
+`$KEY` — so a probe can be parameterised the same way the node it probes is.
+
+When a `command` probe fails, its **stderr and exit code are included in the
+timeout error** rather than thrown away: `health check timed out after 30s —
+last attempt exited with code 1 — last stderr:
+    DATABASE_URL is not set`. A probe that prints why it failed no longer makes
+you re-derive the answer.
 
 ```json
 "health_check": {
@@ -821,7 +837,7 @@ Runs continuously after the node becomes healthy. Detects failures like dropped 
 
 - **`http`**: Polls an HTTP endpoint. Passes when the expected status code is returned.
 - **`port`**: Checks if a TCP port is accepting connections.
-- **`command`**: Runs an arbitrary shell command (via `sh -c`). Exit code `0` means healthy, non-zero means unhealthy. Pipes, redirects, and `&&` chains all work. The node's outputs are injected as environment variables, so you can reference them directly (e.g., `pg_isready -h $DB_HOST -p $DB_PORT`).
+- **`command`**: Runs an arbitrary shell command (via `sh -c`). Exit code `0` means healthy, non-zero means unhealthy. Pipes, redirects, and `&&` chains all work. The node's outputs, its declared `env`, and the veld-owned `VELD_*` variables are injected as environment variables, so you can reference them directly (e.g., `pg_isready -h $DB_HOST -p $DB_PORT`). A failing probe's stderr and exit code appear in the health message.
 
 `settle` is **not** one of them: it describes startup, so a liveness `settle`
 would pass forever. A node with no port has exactly one usable liveness type,
@@ -873,6 +889,23 @@ Extra environment variables injected into the process. Values support Veld varia
 **Precedence:** The merged `env` block takes strict precedence over the inherited shell environment. Shell variables not overridden by `env` are passed through unchanged.
 
 **Which shell environment gets inherited depends on who started the run.** `veld start` in a terminal passes your terminal's environment straight through, including anything exported from `.zprofile`/`.profile` and `.zshrc`. A run started from the management UI or Veld Desktop is spawned by the Veld daemon, which inherits only `PATH` — resolved from your login shell so `npx`, `pg_isready`, `op` and version-manager shims are found — and not the rest of your shell environment. So a node that depends on a variable you export from a shell rc file works from the terminal and not from the UI. Declare it in `env` and it works from both; that is the only form that doesn't depend on how the run was launched.
+
+#### The veld-owned environment
+
+In addition to your declared `env`, Veld injects a set of `VELD_*` variables on **every** surface of a node — the node's own process, its readiness and liveness probes, its `on_stop` hook, and `veld action` — so a variable is never reachable in one place and not another. The always-on ones:
+
+| Variable | Meaning |
+|---|---|
+| `VELD_RUN` | The run name (`--name`) |
+| `VELD_RUN_ID` | The run's UUID (absent on a stop path that has no live run row) |
+| `VELD_ROOT` | The project root |
+| `VELD_PROJECT` | The config's project name |
+| `VELD_NODE` | This node's name |
+| `VELD_VARIANT` | This node's active variant |
+
+A `long_running` node with ports gets the port/url/host family too, exactly the ones its process already had: `VELD_PORT` (primary), `VELD_PORT_<NAME>`, `VELD_URL` (primary), `VELD_URL_<NAME>` (routed ports only), and `VELD_HOST_<NAME>` (every port, `tcp` included). Port names are upper-cased with `-` → `_`.
+
+**Reachability:** an `action` on a node also receives the node's declared `env` (it previously did not), and a `command` probe receives the node's declared `env`, the veld-owned vars, and the node's outputs as `$KEY`. So an action can read the `CONTAINER_NAME` its node was started with, and a probe can check against `VELD_PORT` or any env the node itself has.
 
 ### `outputs`
 
@@ -995,7 +1028,14 @@ declaring its own, and **disables it with `"on_stop": null`**:
 The `on_stop` command receives the same variable context that was available during start:
 - Every `${veld.*}` built-in the node itself had — for a `long_running` node that includes `${veld.port}`, `${veld.url}`, `${veld.url.hostname}` and the rest of the URL family, and `${veld.ports.<name>}`. See [Availability](#availability).
 - This node's outputs as `${output.KEY}`, and its own as `${nodes.<self>.KEY}` (including the automatic `exit_code` of a `command` node)
-- Environment variables from the variant's `env` block
+- **Any** node's outputs as `${nodes.<node>.<field>}` — a cross-node reference resolves at stop time from the run's persisted state, so a teardown can forget the sibling it was told to point at (e.g. the `dev-daemon`'s port a wrapper must stop serving)
+- Environment variables from the variant's `env` block, plus the veld-owned `VELD_*` variables
+
+> **Changed in this release.** `on_stop` used to fail to resolve `${nodes.<other>.<field>}`
+> at stop time — only the node's own outputs were loaded. A single such reference used
+> to empty the hook's *whole* environment, which then ran anyway, blind. Both halves are
+> fixed: cross-node references now resolve, and a hook whose environment cannot be
+> resolved is **skipped loudly** rather than run with an empty one.
 
 Naming a resource after the same built-ins in `argv` and in `on_stop` is the point:
 a container called `${veld.project}-${veld.node}-${veld.run}` in both places cannot
@@ -2755,6 +2795,13 @@ An action's context is deliberately the smallest: it also has no `${vars.*}` and
 no `${nodes.<other>.…}`, because an action runs against one live node long after
 the plan that built it. `${veld.url}` and its pieces, and `${veld.ports.*}`, do
 resolve there — they come from the node's recorded state.
+
+The action's **environment** is richer than its interpolation context: it
+inherits your shell, then layers the node's declared `env` (so an action can
+read the `CONTAINER_NAME` its node was started with), the node's live outputs as
+`$KEY`, the action's `parameters`, and the veld-owned `VELD_*` variables.
+Precedence (lowest to highest): inherited parent env < node `env` < node outputs
+< action `parameters`.
 
 Notes:
 

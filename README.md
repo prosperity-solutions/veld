@@ -328,6 +328,8 @@ Add or strip HTTP headers as requests and responses pass through the reverse pro
 
 Declare `env` at the project, node, or variant level. Variables cascade: variant > node > project (per-key merge, most specific wins). Values support `${...}` variable substitution.
 
+Veld also injects a `VELD_*` environment on **every** surface of a node — the node's process, its readiness and liveness probes, its `on_stop` hook, and `veld action`: `VELD_RUN`, `VELD_RUN_ID`, `VELD_ROOT`, `VELD_PROJECT`, `VELD_NODE`, `VELD_VARIANT`, plus `VELD_PORT`/`VELD_URL`/`VELD_PORT_<NAME>`/`VELD_URL_<NAME>`/`VELD_HOST_<NAME>` on a `long_running` node that has ports. A `command` probe also gets the node's declared `env` and outputs as `$KEY`, and so does an `action` on the node. Probe fields (`path`, `argv`/`shell`) are interpolated like the node's own `argv`/`env`. See [Environment variables](docs/configuration.md#env) in the config reference.
+
 ```json
 {
   "env": { "FEATURE_FLAG": "1" },

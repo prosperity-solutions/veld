@@ -160,9 +160,14 @@ pub async fn wait_for_http(
 // ---------------------------------------------------------------------------
 
 /// Run a command as a health check. Exit 0 = healthy.
+///
+/// `env` is the environment the probe command runs with — the node's veld-owned
+/// vars plus its declared `env`, so a probe can be parameterised the same way
+/// the node it probes is. Pass an empty map for no extra environment.
 pub async fn wait_for_command_check(
     command: &CommandSpec,
     working_dir: &Path,
+    env: &std::collections::HashMap<String, String>,
     hc: &HealthCheck,
     on_attempt: Option<&AttemptNotifier>,
 ) -> Result<(), HealthError> {
@@ -172,6 +177,15 @@ pub async fn wait_for_command_check(
     let cmd = command.clone();
     let dir = working_dir.to_path_buf();
 
+    // A probe's stderr is the *diagnosis* when it fails, so it cannot be thrown
+    // at /dev/null: capture the last few lines of each failing attempt and the
+    // most recent exit status, and surface them in the timeout error. Without
+    // this a probe that prints "DATABASE_URL is not set" to stderr reports
+    // only "health check timed out after 60s".
+    const TAIL_LINES: usize = 5;
+    let mut tail: Vec<String> = Vec::new();
+    let mut last_exit: Option<i32> = None;
+
     let result = timeout(deadline, async {
         let mut attempt: u32 = 0;
         loop {
@@ -179,13 +193,14 @@ pub async fn wait_for_command_check(
             if let Some(f) = &on_attempt {
                 f(attempt);
             }
-            // Rebuilt each attempt: a `Command` is consumed by `status()`.
-            let status = match crate::process::tokio_command(&cmd) {
+            // Rebuilt each attempt: a `Command` is consumed by `output()`.
+            let output = match crate::process::tokio_command(&cmd) {
                 Ok(mut c) => {
                     c.current_dir(&dir)
+                        .envs(env)
                         .stdout(std::process::Stdio::null())
-                        .stderr(std::process::Stdio::null())
-                        .status()
+                        .stderr(std::process::Stdio::piped())
+                        .output()
                         .await
                 }
                 Err(e) => {
@@ -197,12 +212,26 @@ pub async fn wait_for_command_check(
                 }
             };
 
-            match status {
-                Ok(s) if s.success() => return Ok(()),
-                Ok(s) => {
+            match output {
+                Ok(out) if out.status.success() => return Ok(()),
+                Ok(out) => {
+                    last_exit = Some(out.status.code().unwrap_or(-1));
+                    if !out.stderr.is_empty() {
+                        let stderr = String::from_utf8_lossy(&out.stderr);
+                        for line in stderr.lines() {
+                            let line = line.trim_end();
+                            if !line.is_empty() {
+                                tail.push(line.to_owned());
+                            }
+                        }
+                        let drop = tail.len().saturating_sub(TAIL_LINES);
+                        if drop > 0 {
+                            tail.drain(..drop);
+                        }
+                    }
                     tracing::debug!(
                         command = cmd.display(),
-                        exit_code = s.code().unwrap_or(-1),
+                        exit_code = out.status.code().unwrap_or(-1),
                         "command health check: not yet healthy"
                     );
                 }
@@ -217,10 +246,24 @@ pub async fn wait_for_command_check(
 
     match result {
         Ok(inner) => inner,
-        Err(_) => Err(HealthError::Timeout {
-            timeout_seconds: hc.timeout_seconds,
-            hint: String::new(),
-        }),
+        Err(_) => {
+            let mut hint = String::new();
+            if let Some(code) = last_exit {
+                hint.push_str(&format!(" — last attempt exited with code {code}"));
+            }
+            if !tail.is_empty() {
+                hint.push_str(" — last stderr:\n");
+                for line in &tail {
+                    hint.push_str("    ");
+                    hint.push_str(line);
+                    hint.push('\n');
+                }
+            }
+            Err(HealthError::Timeout {
+                timeout_seconds: hc.timeout_seconds,
+                hint,
+            })
+        }
     }
 }
 
@@ -266,7 +309,14 @@ pub async fn run_health_check(
                     command = cmd.display(),
                     "health check phase 2: running command check"
                 );
-                wait_for_command_check(&cmd, working_dir, hc, None).await?;
+                wait_for_command_check(
+                    &cmd,
+                    working_dir,
+                    &std::collections::HashMap::new(),
+                    hc,
+                    None,
+                )
+                .await?;
                 tracing::info!("health check phase 2: command check passed");
             }
         }
@@ -282,4 +332,68 @@ pub async fn run_health_check(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{CommandKeys, HealthCheck};
+
+    fn failing_probe() -> HealthCheck {
+        HealthCheck {
+            check_type: "command".to_owned(),
+            path: None,
+            expect_status: None,
+            cmd: CommandKeys {
+                shell: Some("echo boom-to-stderr >&2; exit 3".to_owned()),
+                ..Default::default()
+            },
+            port: None,
+            seconds: None,
+            timeout_seconds: 1,
+            interval_ms: 100,
+        }
+    }
+
+    /// A failing command probe used to report only "health check timed out
+    /// after 1s" — its stderr went to /dev/null and its exit status was
+    /// discarded. The whole diagnosis (an echo, a missing env var, a typo'd
+    /// binary) had to be re-derived by hand. The timeout error must carry the
+    /// exit code and the last few stderr lines.
+    #[tokio::test]
+    async fn a_failing_command_probe_reports_its_stderr_and_exit_code() {
+        let hc = failing_probe();
+        let cmd = hc.cmd.spec().expect("probe declares a shell command");
+        let env = std::collections::HashMap::new();
+        let err = wait_for_command_check(&cmd, std::path::Path::new("."), &env, &hc, None)
+            .await
+            .expect_err("a probe that always exits 3 must time out");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("code 3"),
+            "timeout error should name the exit code, got: {msg}"
+        );
+        assert!(
+            msg.contains("boom-to-stderr"),
+            "timeout error should include the captured stderr, got: {msg}"
+        );
+    }
+
+    /// A passing probe still succeeds, and the captured-output machinery must
+    /// not change that.
+    #[tokio::test]
+    async fn a_passing_command_probe_succeeds() {
+        let hc = HealthCheck {
+            cmd: CommandKeys {
+                shell: Some("exit 0".to_owned()),
+                ..Default::default()
+            },
+            ..failing_probe()
+        };
+        let cmd = hc.cmd.spec().unwrap();
+        let env = std::collections::HashMap::new();
+        wait_for_command_check(&cmd, std::path::Path::new("."), &env, &hc, None)
+            .await
+            .expect("an exit-0 probe is healthy");
+    }
 }
