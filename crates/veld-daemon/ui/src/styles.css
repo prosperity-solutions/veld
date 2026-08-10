@@ -725,6 +725,15 @@ body[data-fullscreen="true"] .topbar.electron {
   background: var(--elev);
   color: var(--text);
 }
+/* The Detached lane's question mark is informational, not a button — it opens a
+   tooltip but takes no action, so it reads as a hint rather than a control and
+   must not invite a click that does nothing. */
+.lane-help {
+  cursor: help;
+}
+.lane-help:hover {
+  background: none;
+}
 /* Pending removal is a state, not a lane — coloured so it does not read as a
    group the user made. */
 .rail-group.trash .lane-head {
@@ -2874,6 +2883,86 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
   flex-direction: column;
 }
 
+/* The two-mode framing of the sharing modal: side-by-side cards, each explaining
+   one way to share and offering its start button. */
+.share-mode-cards {
+  display: flex;
+  gap: 12px;
+  padding: 12px;
+}
+.share-mode-card {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--mantine-radius-md);
+  background: var(--elev);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+.share-mode-card:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+.share-mode-card:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+.share-mode-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.share-mode-li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text);
+}
+.share-mode-li svg {
+  color: var(--accent);
+  flex: none;
+}
+.share-mode-note {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--faint);
+  margin-bottom: 14px;
+}
+.share-mode-note svg {
+  flex: none;
+}
+/* The one real caveat ("they need Veld installed") reads as a warning, not a
+   neutral note — red, so a user scanning the two cards sees the cost up front. */
+.share-mode-note.warn {
+  color: var(--danger);
+}
+.share-mode-note.warn svg {
+  color: var(--danger);
+}
+.share-mode-cta {
+  /* Full-width, so the start action is unmistakable inside the card. `margin-top:
+     auto` keeps both cards' buttons bottom-aligned; the note's `margin-bottom`
+     guarantees a fixed gap above it even when the card is full height. */
+  align-self: stretch;
+  text-align: center;
+  margin-top: auto;
+  padding: 6px 12px;
+  border-radius: var(--mantine-radius-sm);
+  background: var(--accent);
+  color: var(--bg);
+  font-size: 12px;
+  font-weight: 600;
+}
+.share-mode-cta.starting {
+  opacity: 0.8;
+}
+
 /* Pending join requests, above the panes: a prompt someone is waiting on, so it
    sits in the layout rather than behind a popover. `flex: none` for the same
    reason the offline banner has it — the panes below own the remaining height. */
@@ -3161,6 +3250,30 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
   gap: 4px;
   max-height: 320px;
   overflow-y: auto;
+}
+
+/* The two big choice cards in the Start-configuration modal, shown when a
+   worktree has no selection yet. Clickable like buttons, sized like cards, so
+   the "pick how to start" moment reads as a real choice rather than a list. */
+.start-mode-card {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: flex-start;
+  text-align: left;
+  padding: 18px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--mantine-radius-md);
+  background: var(--elev);
+  color: var(--text);
+  cursor: pointer;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+.start-mode-card:hover {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--elev) 60%, var(--accent) 8%);
 }
 
 .emoji-cell {

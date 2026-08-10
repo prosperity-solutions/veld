@@ -15,8 +15,10 @@
 
 import { Badge, Button, Checkbox, Group, Stack, Text, Tooltip } from "@mantine/core";
 import {
+  IconAlertCircle,
   IconChevronDown,
   IconChevronRight,
+  IconCircleCheck,
   IconEye,
   IconEyeOff,
 } from "@tabler/icons-react";
@@ -139,10 +141,17 @@ export function ConnBadges(props: { share: ShareInfo }) {
 /**
  * Start/stop controls for a run's shares.
  *
- * Starting a peer share copies the join link straight to the clipboard — that is
- * the entire point of starting one — and confirms it with a toast, because the
- * button that was clicked is replaced by "Stop sharing" in the same breath and so
- * cannot carry the confirmation itself.
+ * The two modes are independent, so each stays available even while the other is
+ * live: "share with another Veld user" is offered whenever there is no peer
+ * share, and "share publicly" whenever there is no web share. Starting a peer
+ * share copies the join link straight to the clipboard — that is the entire
+ * point of starting one — and confirms it with a toast, because the button that
+ * was clicked is replaced by "Stop sharing" in the same breath and so cannot
+ * carry the confirmation itself.
+ *
+ * Stop buttons are deliberately the loudest thing here (`filled` red): the
+ * first test's user read "share privately" at the top and missed the stop
+ * control a beat, so a live share's exit must not be one more quiet button.
  */
 export function ShareControls(props: {
   run: RunRef;
@@ -182,18 +191,18 @@ export function ShareControls(props: {
             })
           }
         >
-          Share privately
+          Share with another Veld user
         </Button>
       )}
       {props.peer && (
         <Button
           size="compact-xs"
           color="red"
-          variant="light"
+          variant="filled"
           loading={busy === "stop-share"}
           onClick={() => void act("stop-share", "Stop sharing", () => api.stopShare(props.peer!.id))}
         >
-          Stop private share
+          {MODE_COPY.peer.stop}
         </Button>
       )}
       {props.running && props.web.length === 0 && (
@@ -204,10 +213,112 @@ export function ShareControls(props: {
           title="A public URL anyone can open in a browser, no Veld needed — routed through the veld gateway"
           onClick={() => void act("web-share", "Share to the web", () => api.startShare(props.run, { web: true }))}
         >
-          Share to the web
+          Share publicly
         </Button>
       )}
     </>
+  );
+}
+
+/** The structured copy for one sharing mode — kept as data so the card is
+ *  scannable (a short use case, a short pros list, one requirement) instead of
+ *  one long paragraph. The same mode names are the start buttons' copy, and the
+ *  stop buttons mirror them. */
+const MODE_COPY = {
+  peer: {
+    title: "Share with another Veld user",
+    bestFor: "Real access — databases, internal tools",
+    pros: [
+      "More services are eligible",
+      "Safer: direct end-to-end encrypted tunnel",
+      "No public URL",
+    ],
+    requires: "They need Veld installed",
+    warning: true,
+    cta: "Start sharing",
+    stop: "Stop sharing with Veld user",
+  },
+  web: {
+    title: "Share publicly",
+    bestFor: "People without Veld — or your phone, via QR",
+    pros: [
+      "No Veld needed on the other end",
+      "Open it on any device from a link or QR code",
+      "Perfect for mobile testing on your phone",
+    ],
+    requires: undefined,
+    warning: false,
+    cta: "Start sharing",
+    stop: "Stop public share",
+  },
+} as const;
+
+type ShareModeKind = keyof typeof MODE_COPY;
+
+/**
+ * One big card explaining a sharing mode — and the button that starts it.
+ *
+ * The whole card is the button (a nested button would be invalid HTML), with a
+ * short scannable layout: a one-line use case, a pros list, and one requirement.
+ * That replaces the earlier terse-but-paragraph form, which a first user read
+ * as a label rather than an action.
+ */
+export function ShareStartCard(props: {
+  kind: ShareModeKind;
+  /** The live run to share. */
+  run: RunRef;
+  onChanged: () => void;
+}) {
+  const { busy, act } = useShareAction(props.onChanged);
+  const copy = MODE_COPY[props.kind];
+  const starting = busy === "share" || busy === "web-share";
+  const start = () => {
+    if (props.kind === "peer") {
+      void act("share", "Start sharing", async () => {
+        const r = await api.startShare(props.run);
+        if (!r?.join_url) return;
+        try {
+          await navigator.clipboard.writeText(r.join_url);
+          notifyDone("Sharing — join link copied to the clipboard");
+        } catch {
+          notifyDone("Sharing — use Copy link to get the invite");
+        }
+      });
+    } else {
+      void act("web-share", "Share to the web", () =>
+        api.startShare(props.run, { web: true }),
+      );
+    }
+  };
+  return (
+    <button
+      type="button"
+      className="share-mode-card"
+      onClick={start}
+      disabled={starting}
+    >
+      <Text size="sm" fw={700}>
+        {copy.title}
+      </Text>
+      <Text size="xs" c="dimmed" className="share-mode-bestfor">
+        <b>Main use case:</b> {copy.bestFor}
+      </Text>
+      <div className="share-mode-list">
+        {copy.pros.map((p) => (
+          <Text size="xs" key={p} className="share-mode-li">
+            <IconCircleCheck size={12} /> {p}
+          </Text>
+        ))}
+      </div>
+      {copy.requires && (
+        <Text size="xs" className={`share-mode-note${copy.warning ? " warn" : ""}`}>
+          <IconAlertCircle size={12} /> {copy.requires}
+        </Text>
+      )}
+      <span className={`share-mode-cta${starting ? " starting" : ""}`}>
+        {starting ? "Starting…" : copy.cta}
+      </span>
+    </button>
   );
 }
 
@@ -400,10 +511,10 @@ export function WebShareStrip(props: {
         <Button
           size="compact-xs"
           color="red"
-          variant="light"
+          variant="filled"
           onClick={() => void act("stop-share", "Stop the web share", () => api.stopShare(w.id))}
         >
-          Stop web
+          {MODE_COPY.web.stop}
         </Button>
       </Group>
       {/* Scrolls past four services rather than growing without limit: a run can share
@@ -538,29 +649,46 @@ export function RunSharePanel(props: {
   }
   const { peer, web } = sharesForRun(props.shares, props.runId);
   const idle = !peer && web.length === 0;
+  // The two-mode framing, only in the modal's idle state: a first user is
+  // choosing *how* to share, so each approach gets a card that says what it is
+  // for. Once something is live, compact controls take over and the strips carry
+  // the detail.
+  const startCards =
+    idle && props.running && props.run ? (
+      <>
+        <Text size="xs" c="dimmed" px={12} pt={10}>
+          Share this run two ways. Pick the one that fits who you are sharing with.
+        </Text>
+        <div className="share-mode-cards">
+          <ShareStartCard kind="peer" run={props.run} onChanged={props.onChanged} />
+          <ShareStartCard kind="web" run={props.run} onChanged={props.onChanged} />
+        </div>
+        {props.unknown && (
+          <Text size="xs" c="dimmed" px={12} pb={8}>
+            Can&apos;t read the share list right now — retrying.
+          </Text>
+        )}
+      </>
+    ) : null;
+
   return (
     <div className="share-panel">
-      <Group gap={6} px={12} pt={10} pb={idle ? 10 : 6} wrap="wrap">
-        <ShareControls
-          run={props.run}
-          running={props.running}
-          peer={peer}
-          web={web}
-          onChanged={props.onChanged}
-        />
-        {idle && !props.running && (
-          <Text size="xs" c="dimmed">
-            {props.emptyHint}
-          </Text>
-        )}
-        {idle && props.running && (
-          <Text size="xs" c="dimmed">
-            {props.unknown
-              ? "Can't read the share list right now — retrying."
-              : "This run has nothing shared yet."}
-          </Text>
-        )}
-      </Group>
+      {startCards ?? (
+        <Group gap={6} px={12} pt={10} pb={idle ? 10 : 6} wrap="wrap">
+          <ShareControls
+            run={props.run}
+            running={props.running}
+            peer={peer}
+            web={web}
+            onChanged={props.onChanged}
+          />
+          {idle && !props.running && (
+            <Text size="xs" c="dimmed">
+              {props.emptyHint}
+            </Text>
+          )}
+        </Group>
+      )}
       {peer && (
         <PeerShareStrip share={peer} onChanged={props.onChanged} />
       )}

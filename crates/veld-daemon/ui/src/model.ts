@@ -471,6 +471,29 @@ export const TRASH_LANE = "\u0000trash";
 export const DELETING_LANE = "\u0000deleting";
 
 /**
+ * Group key for the virtual "Detached" lane — checkouts with a detached HEAD.
+ *
+ * Like [`TRASH_LANE`] / [`DELETING_LANE`], not a lane name: a leading NUL cannot
+ * occur in a lane name, so a repo lane can never collide with it.
+ *
+ * A detached checkout is a git state, not a lane the user filed something into,
+ * so it gets a section of its own (between the ungrouped worktrees and the real
+ * lanes) and never joins the lane it was assigned while detached — being detached
+ * is the more important thing to say about it. `branch === "(detached)"` is the
+ * daemon's spelling (`crates/veld-daemon/src/desktop.rs`); the constant below is
+ * the one place the UI names it, so a rename lives here rather than at call sites.
+ */
+export const DETACHED_LANE = "\u0000detached";
+
+/** The branch a checkout carries when its HEAD is detached. Mirrors the daemon. */
+export const DETACHED_BRANCH = "(detached)";
+
+/** Whether a worktree is on a detached HEAD — the thing the Detached lane groups. */
+export function isDetached(w: Worktree): boolean {
+  return w.branch === DETACHED_BRANCH;
+}
+
+/**
  * Header for the section that holds every worktree the user has not filed into a
  * lane.
  *
@@ -488,8 +511,9 @@ export const DELETING_LANE = "\u0000deleting";
 export const UNGROUPED_LABEL = "Worktrees";
 
 /**
- * Split a repo's worktrees into rail sections: ungrouped first, then each lane in
- * its own order, then the terminal "Deleting" lane, then the trash.
+ * Split a repo's worktrees into rail sections: ungrouped first, then the detached
+ * checkouts, then each lane in its own order, then the terminal "Deleting" lane,
+ * then the trash.
  *
  * The daemon already sorts the worktrees into this order (`WT_ORDER`), so this
  * only *segments* the list — it must not re-sort, or the manual order the user
@@ -499,8 +523,8 @@ export const UNGROUPED_LABEL = "Worktrees";
  * still needs somewhere to drop a worktree. The **trash is always kept too** — it
  * is the rail's permanent bottom anchor, rendered as an empty lane rather than
  * hidden — so the user always has a place that means "trash exists". The
- * Deleting lane is conditional: it is a transient state, so an empty one would be
- * permanent clutter.
+ * Deleting lane and the Detached lane are conditional: each is a state, so an
+ * empty one would be permanent clutter.
  */
 export function railGroups(worktrees: Worktree[], lanes: Lane[]): RailGroup[] {
   const live = worktrees.filter((w) => !w.trashed_at);
@@ -509,17 +533,27 @@ export function railGroups(worktrees: Worktree[], lanes: Lane[]): RailGroup[] {
   // but the two states are not the same thing and must not share a lane.
   const deleting = worktrees.filter((w) => w.deleting);
   const trashed = worktrees.filter((w) => w.trashed_at && !w.deleting);
+  // Detached checkouts come out of every other section, whatever lane they were
+  // filed into: a detached HEAD is a state that overrides where a row belongs
+  // (same rule the trash applies to trashed rows).
+  const detached = live.filter((w) => isDetached(w) && !w.is_main);
   const known = new Set(lanes.map((l) => l.name));
   // A worktree whose lane no longer exists counts as ungrouped rather than
   // vanishing. `delete_lane` clears assignments in the same transaction, so this
   // should not arise — but a row the client cannot place is a row the user cannot
   // reach, and that is the worse failure.
-  const ungrouped = live.filter((w) => !w.lane || !known.has(w.lane));
+  const ungrouped = live.filter(
+    (w) => !w.is_main && !isDetached(w) && (!w.lane || !known.has(w.lane)),
+  );
   // The main checkout gets a section of its own — it is the repository, not one of
   // the branches you are juggling, and a divider under it says so. Only while it is
   // ungrouped: assigned to a lane it belongs in that lane, because the user put it
-  // there on purpose.
-  const main = ungrouped.filter((w) => w.is_main);
+  // there on purpose. A *detached* main leads the rail too (and is never a
+  // throwaway in the Detached lane — it is the repo), but is not a lane member
+  // while detached, because detached overrides lane like every other row.
+  const main = live.filter(
+    (w) => w.is_main && (isDetached(w) || !w.lane || !known.has(w.lane)),
+  );
   const groups: RailGroup[] = [];
   if (main.length > 0) {
     groups.push({
@@ -545,7 +579,26 @@ export function railGroups(worktrees: Worktree[], lanes: Lane[]): RailGroup[] {
     editable: false,
     worktrees: ungrouped.filter((w) => !w.is_main),
   });
+  // The virtual Detached lane, between the ungrouped worktrees and the real
+  // lanes. Conditional like Deleting: an empty one would be permanent clutter.
+  // Pinned and not a drop target — a checkout cannot be *filed* as detached, it
+  // is detected. It carries the group's action (trash all) in its header, so
+  // `addable`/`editable` both stay false and the section renders header actions
+  // by `key` instead.
+  if (detached.length > 0) {
+    groups.push({
+      key: DETACHED_LANE,
+      lane: DETACHED_LANE,
+      label: "Detached",
+      pinned: true,
+      addable: false,
+      editable: false,
+      worktrees: detached,
+    });
+  }
   for (const l of lanes) {
+    // A detached checkout stays out of its lane while it is detached; it returns
+    // when it is put back on a branch.
     groups.push({
       key: l.name,
       lane: l.name,
@@ -553,7 +606,7 @@ export function railGroups(worktrees: Worktree[], lanes: Lane[]): RailGroup[] {
       pinned: false,
       addable: true,
       editable: true,
-      worktrees: live.filter((w) => w.lane === l.name),
+      worktrees: live.filter((w) => w.lane === l.name && !isDetached(w)),
     });
   }
   if (deleting.length > 0) {

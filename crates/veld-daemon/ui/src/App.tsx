@@ -59,6 +59,8 @@ import {
   worktreeStatus,
   worstStatus,
   DELETING_LANE,
+  DETACHED_LANE,
+  isDetached,
   TRASH_LANE,
   type PendingAction,
   type RailGroup,
@@ -108,6 +110,7 @@ import {
   IconWorld,
   IconListDetails,
   IconX,
+  IconHelp,
 } from "@tabler/icons-react";
 import { Notifications } from "@mantine/notifications";
 import { ContextMenuProvider, useContextMenu } from "mantine-contextmenu";
@@ -197,6 +200,7 @@ import {
   parseStartSelection,
   pruneStartSelection,
   resolveStartSelection,
+  resolveStoredSelection,
   startBody,
   startSelectionLabel,
   startStorageKey,
@@ -1363,10 +1367,19 @@ function AppInner(props: {
   // hook can't be called per row.
   const startKey = startStorageKey(worktree?.path ?? "_");
   const [startRaw, setStartRaw] = usePersisted(startKey, "");
-  const effectiveStart = worktree
-    ? (pruneStartSelection(worktree, parseStartSelection(startRaw)) ??
-      defaultStartSelection(worktree))
+  // The user's *deliberate* choice, if any. `null` on a worktree that has never
+  // been started here — the point of the first-user-test change: nothing is
+  // pre-selected, and the start button offers the picker instead of guessing.
+  const storedStart = worktree
+    ? pruneStartSelection(worktree, parseStartSelection(startRaw))
     : null;
+  const effectiveStart = worktree
+    ? (storedStart ?? defaultStartSelection(worktree))
+    : null;
+  // Whether the Start-configuration modal is open, and whether Done should start
+  // (true when it was opened from the ▶ start button on a selection-less worktree).
+  const [startConfigOpen, setStartConfigOpen] = useState(false);
+  const startAfterDone = useRef(false);
 
   // Worktrees this window has asked to delete *permanently* and that have not
   // yet vanished. The daemon reports the true point of no return as
@@ -1713,6 +1726,28 @@ function AppInner(props: {
     const r = target ?? targetRun(w);
     if (r) void act(w, r.name, "stop", () => api.stopRun(runRef(w.path, r)));
   };
+
+  /**
+   * The rail's per-row ▶. With a stored choice it starts straight through, like
+   * the top bar; with **no** choice yet it selects the worktree and opens the
+   * same picker the top bar uses, so a first start is "choose, then Done" on the
+   * row you clicked — not a silent default run of the first preset.
+   */
+  const onRailStart = (w: Worktree) => {
+    if (resolveStoredSelection(w)) {
+      startWorktree(w);
+      return;
+    }
+    // No deliberate choice yet. Claim the row first (a row another window holds
+    // cannot be driven from here), then open the picker for it.
+    void (async () => {
+      const ok = await selectWorktree(w);
+      if (!ok) return;
+      startAfterDone.current = true;
+      setStartConfigOpen(true);
+    })();
+  };
+
   const restartWorktree = (w: Worktree, target?: RunInfo | null) => {
     const r = target ?? targetRun(w);
     if (!r) return;
@@ -3333,6 +3368,37 @@ function AppInner(props: {
     await refresh();
   };
 
+  /** Move every detached checkout to the trash, in one go (revertible).
+   *
+   *  The Detached lane exists because detached checkouts are usually
+   *  throwaways, so this is the action that matches the lane's point: clear them
+   *  out without deleting each one by hand. Clean ones bin immediately; a dirty
+   *  one (uncommitted changes) refuses, as `git worktree remove` does, and stays
+   *  in the lane with the reason on its row. */
+  const trashAllDetached = async () => {
+    const detached = worktrees.filter((w) => isDetached(w) && !w.trashed_at);
+    if (detached.length === 0) return;
+    let trashed = 0;
+    for (const w of detached) {
+      // Never the main checkout: it cannot be detached in the first place (git
+      // keeps a repo's main on a branch) and binning it would take the
+      // repository with it.
+      if (w.is_main) continue;
+      try {
+        await api.deleteWorktree(w.id, false);
+        trashed += 1;
+      } catch (e) {
+        notifyError(`Could not move ${worktreeLabel(w)} to the trash`, e);
+      }
+    }
+    if (trashed > 0) {
+      notifyDone(
+        trashed === 1 ? "Moved 1 detached worktree to the trash" : `Moved ${trashed} detached worktrees to the trash`,
+      );
+    }
+    await refresh();
+  };
+
   // Above both bars so the crossfade survives ModeSwitch remounting as it moves
   // between them — see the component's own note. Focus does *not* survive that
   // remount either, which is a real gap the `:focus-visible` rules make more
@@ -4019,8 +4085,20 @@ function AppInner(props: {
           worktree && canRunWorktreeNow(worktree) ? (
             <StartConfig
               worktree={worktree}
-              value={effectiveStart}
+              value={storedStart}
+              opened={startConfigOpen}
+              onOpen={() => setStartConfigOpen(true)}
+              onClose={() => {
+                setStartConfigOpen(false);
+                startAfterDone.current = false;
+              }}
               onChange={(sel) => setStartRaw(JSON.stringify(sel))}
+              onDone={() => {
+                setStartConfigOpen(false);
+                const shouldStart = startAfterDone.current;
+                startAfterDone.current = false;
+                if (shouldStart && worktree) startWorktree(worktree);
+              }}
             />
           ) : null
         }
@@ -4085,7 +4163,17 @@ function AppInner(props: {
         // The bound run, named explicitly: the top bar is the run-level surface,
         // and ■ here must end the run whose name the selector is showing — never
         // whichever one `activeRun` would have picked.
-        onStart={() => worktree && startWorktree(worktree)}
+        onStart={() => {
+          // A worktree with no selection yet opens the picker instead of
+          // guessing: the user asked to run, so the first gesture is choosing
+          // what. Once a choice exists, ▶ starts it directly.
+          if (worktree && !storedStart) {
+            startAfterDone.current = true;
+            setStartConfigOpen(true);
+          } else if (worktree) {
+            startWorktree(worktree);
+          }
+        }}
         onStop={() => worktree && stopWorktree(worktree, run)}
         onRestart={() => worktree && restartWorktree(worktree, run)}
         onSearch={() => setDialog({ kind: "search" })}
@@ -4174,7 +4262,7 @@ function AppInner(props: {
             onSelect={(w) => void selectWorktree(w)}
             onAdd={(lane) => setDialog({ kind: "new-worktree", lane })}
             onMenu={(e, w) => worktreeMenu(w)(e)}
-            onStart={startWorktree}
+            onStart={onRailStart}
             onStop={stopWorktree}
             onDiagnose={diagnoseWorktree}
             onAddLane={() => setDialog({ kind: "new-lane" })}
@@ -4183,6 +4271,7 @@ function AppInner(props: {
             onMoveLane={(lane, onto) => void moveLaneTo(lane, onto)}
             onRestore={restoreWorktree}
             onEmptyTrash={emptyTrash}
+            onTrashAllDetached={trashAllDetached}
             onTrashDrop={trashWorktree}
             deleting={deletingIds}
           />
@@ -4264,6 +4353,7 @@ function AppInner(props: {
           usedBy={markerUsedBy.emoji}
           colorUsedBy={markerUsedBy.color}
           markerStyle={markerStyle(settings ?? {})}
+          onStyleChange={(style) => void saveSettings({ "worktree.markerStyle": style })}
           createFrom={gitCreateFrom(settings ?? {})}
           onCreate={async (body) => {
             let created: Worktree;
@@ -4403,6 +4493,7 @@ function AppInner(props: {
           usedBy={markerUsedBy.emoji}
           colorUsedBy={markerUsedBy.color}
           style={markerStyle(settings ?? {})}
+          onStyleChange={(style) => void saveSettings({ "worktree.markerStyle": style })}
           onClose={closeDialog}
           onPick={async (patch) => {
             await api.patchWorktree(dialog.worktree.id, patch);
@@ -5284,6 +5375,9 @@ function Rail(props: {
   onMoveLane: (lane: string, onto: string) => void;
   onRestore: (w: Worktree) => void;
   onEmptyTrash: () => void;
+  /** Move every detached checkout to the trash (revertible) — the Detached
+   *  lane's one batch action. */
+  onTrashAllDetached: () => void;
   /** Dropping a dragged worktree onto the trash — bins it (revertible), which is
    *  not a lane move. Receives the dragged worktree's path. */
   onTrashDrop: (path: string) => void;
@@ -5637,65 +5731,104 @@ function Rail(props: {
                     its note): a hover-revealed control discovers nothing, and it
                     cannot be reached by keyboard. */}
                 {group.addable && (
-                  <button
-                    type="button"
-                    className="lane-edit"
-                    /* Described by the *lane*, not by the header text, because
-                       `UNGROUPED_LABEL` is itself a legal lane name — a repo with
-                       a lane called "Worktrees" would otherwise give two sections
-                       byte-identical accessible names, which a screen reader
-                       cannot tell apart at all. */
-                    title={
+                  <Tooltip
+                    label={
                       group.lane === ""
                         ? "New worktree, not in a lane"
                         : `New worktree in ${group.lane}`
                     }
-                    aria-label={
-                      group.lane === ""
-                        ? "New worktree, not in a lane"
-                        : `New worktree in lane ${group.lane}`
-                    }
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      props.onAdd(group.lane);
-                    }}
                   >
-                    <IconPlus size={12} />
-                  </button>
+                    <button
+                      type="button"
+                      className="lane-edit"
+                      /* Described by the *lane*, not by the header text, because
+                         `UNGROUPED_LABEL` is itself a legal lane name — a repo with
+                         a lane called "Worktrees" would otherwise give two sections
+                         byte-identical accessible names, which a screen reader
+                         cannot tell apart at all. */
+                      aria-label={
+                        group.lane === ""
+                          ? "New worktree, not in a lane"
+                          : `New worktree in lane ${group.lane}`
+                      }
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        props.onAdd(group.lane);
+                      }}
+                    >
+                      <IconPlus size={12} />
+                    </button>
+                  </Tooltip>
                 )}
                 {/* The trash's own action, in the place a lane keeps its menu:
                     emptying it is the only thing the section as a whole can do. */}
                 {group.key === TRASH_LANE && (
-                  <button
-                    type="button"
-                    className="lane-edit"
-                    title="Delete everything in the trash"
-                    aria-label="Empty the trash"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      props.onEmptyTrash();
-                    }}
-                  >
-                    <IconTrash size={12} />
-                  </button>
+                  <Tooltip label="Delete everything in the trash">
+                    <button
+                      type="button"
+                      className="lane-edit"
+                      aria-label="Empty the trash"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        props.onEmptyTrash();
+                      }}
+                    >
+                      <IconTrash size={12} />
+                    </button>
+                  </Tooltip>
+                )}
+                {/* The Detached lane's own header actions: a question mark that
+                    says what the lane is, and the batch trash that matches its
+                    point (detached checkouts are usually throwaways). The trash
+                    button sits where a lane keeps its menu — like the trash lane,
+                    this section has no real menu, so its one action lives there. */}
+                {group.key === DETACHED_LANE && (
+                  <>
+                    <Tooltip
+                      label="Detached: these checkouts are not on any branch (a detached HEAD). They can’t be pulled or committed to a branch until one is checked out — usually they’re throwaway, so you can clear them all at once."
+                      maw={260}
+                    >
+                      <span
+                        className="lane-edit lane-help"
+                        role="img"
+                        aria-label="What are detached worktrees?"
+                      >
+                        <IconHelp size={12} />
+                      </span>
+                    </Tooltip>
+                    <Tooltip label="Move all detached worktrees to the trash">
+                      <button
+                        type="button"
+                        className="lane-edit"
+                        aria-label="Move all detached worktrees to the trash"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          props.onTrashAllDetached();
+                        }}
+                      >
+                        <IconTrash size={12} />
+                      </button>
+                    </Tooltip>
+                  </>
                 )}
                 {/* Right-click alone is not an affordance — nothing on screen says
                     the header has a menu. The same ⋮ the rows carry, so the two read
                     as the same gesture. Only on a real lane: the trash and the
                     ungrouped section have nothing to rename or delete. */}
                 {group.editable && (
-                  <button
-                    type="button"
-                    className="lane-edit"
-                    title={`Lane menu for ${group.label}`}
-                    aria-label={`Menu for lane ${group.label}`}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      props.onLaneMenu(e, group.lane);
-                    }}
-                  >
-                    <IconDotsVertical size={12} />
-                  </button>
+                  <Tooltip label={`Menu for lane ${group.label}`}>
+                    <button
+                      type="button"
+                      className="lane-edit"
+                      aria-label={`Menu for lane ${group.label}`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        props.onLaneMenu(e, group.lane);
+                      }}
+                    >
+                      <IconDotsVertical size={12} />
+                    </button>
+                  </Tooltip>
                 )}
               </div>
             )}
@@ -6042,25 +6175,45 @@ function Rail(props: {
       style={props.wide ? { width: props.width } : undefined}
     >
       <div className="rail-head">
-        <ActionIcon
-          size="sm"
-          variant="subtle"
-          color="gray"
-          title="Expand / collapse"
-          onClick={props.onToggle}
-        >
-          {props.wide ? <IconChevronLeft size={13} /> : <IconChevronRight size={13} />}
-        </ActionIcon>
-        {props.wide && (
+        <Tooltip label={props.wide ? "Collapse the worktree rail" : "Expand the worktree rail"}>
           <ActionIcon
             size="sm"
             variant="subtle"
             color="gray"
-            title="New lane"
-            onClick={props.onAddLane}
+            aria-label={props.wide ? "Collapse the worktree rail" : "Expand the worktree rail"}
+            onClick={props.onToggle}
           >
-            <IconFolderPlus size={14} />
+            {props.wide ? <IconChevronLeft size={13} /> : <IconChevronRight size={13} />}
           </ActionIcon>
+        </Tooltip>
+        {/* Push the create actions to the right edge of the head — collapse stays
+            put on the left, and the two creates sit together at the far end. */}
+        <div style={{ flex: 1 }} />
+        {props.wide && (
+          <>
+            <Tooltip label="New lane">
+              <ActionIcon
+                size="sm"
+                variant="subtle"
+                color="gray"
+                aria-label="New lane"
+                onClick={props.onAddLane}
+              >
+                <IconFolderPlus size={14} />
+              </ActionIcon>
+            </Tooltip>
+            <Tooltip label="New worktree">
+              <ActionIcon
+                size="sm"
+                variant="subtle"
+                color="gray"
+                aria-label="New worktree"
+                onClick={() => props.onAdd("")}
+              >
+                <IconPlus size={14} />
+              </ActionIcon>
+            </Tooltip>
+          </>
         )}
         {/* Collapsed only, mirroring "New lane" above it — and for the same
             reason, inverted. Expanded, every section that can hold a worktree
@@ -6070,15 +6223,17 @@ function Rail(props: {
             files into the ungrouped section, which is where the old toolbar
             button always put things anyway. */}
         {!props.wide && (
-          <ActionIcon
-            size="sm"
-            variant="subtle"
-            color="gray"
-            title="New worktree"
-            onClick={() => props.onAdd("")}
-          >
-            <IconPlus size={14} />
-          </ActionIcon>
+          <Tooltip label="New worktree">
+            <ActionIcon
+              size="sm"
+              variant="subtle"
+              color="gray"
+              aria-label="New worktree"
+              onClick={() => props.onAdd("")}
+            >
+              <IconPlus size={14} />
+            </ActionIcon>
+          </Tooltip>
         )}
       </div>
       <div

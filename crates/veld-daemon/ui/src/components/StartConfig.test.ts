@@ -2,7 +2,9 @@ import { beforeEach, describe, expect, it } from "vitest";
 import type { Preset, Worktree } from "../api";
 import {
   defaultStartSelection,
+  modeForSelection,
   parseStartSelection,
+  resolveStoredSelection,
   presetHeading,
   pruneStartSelection,
   resolveStartSelection,
@@ -47,6 +49,15 @@ const wt = (over: Partial<Worktree> = {}): Worktree => ({
   machine_vars: 0,
   ide: { quicklinks: [], permissions: [], panes: [] },
   ...over,
+});
+
+describe("modeForSelection", () => {
+  it("maps a selection to the panel the modal opens on", () => {
+    expect(modeForSelection({ kind: "preset", name: "a" })).toBe("preset");
+    expect(modeForSelection({ kind: "nodes", selections: ["api:dev"] })).toBe("nodes");
+    // No selection yet → the two-card choice screen.
+    expect(modeForSelection(null)).toBe("choose");
+  });
 });
 
 describe("parseStartSelection", () => {
@@ -168,6 +179,37 @@ const store = (() => {
     },
   } satisfies Storage;
 })();
+
+describe("resolveStoredSelection", () => {
+  beforeEach(() => {
+    globalThis.localStorage = store;
+    store.clear();
+  });
+
+  const w = wt({
+    presets: [preset("full")],
+    nodes: [{ name: "api", variants: ["dev"], default_variant: "dev" }],
+  });
+
+  it("returns the stored choice, without the default fallback", () => {
+    // The top bar's ▶ (and the rail's) open the picker on this state instead of
+    // silently running the first preset — the point of the change.
+    expect(resolveStoredSelection(w)).toBeNull();
+    store.setItem(
+      startStorageKey(w.path),
+      JSON.stringify({ kind: "preset", name: "full" }),
+    );
+    expect(resolveStoredSelection(w)).toEqual({ kind: "preset", name: "full" });
+  });
+
+  it("returns null for a stored choice the config no longer offers", () => {
+    store.setItem(
+      startStorageKey(w.path),
+      JSON.stringify({ kind: "preset", name: "renamed-away" }),
+    );
+    expect(resolveStoredSelection(w)).toBeNull();
+  });
+});
 
 describe("resolveStartSelection", () => {
   beforeEach(() => {
