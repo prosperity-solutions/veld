@@ -291,6 +291,16 @@ export function PaneArea(props: {
   const { layout, onLayout } = props;
   const areaRef = useRef<HTMLDivElement>(null);
   const bothVisible = dockVisible(layout, 0) && dockVisible(layout, 1);
+  /**
+   * The same fact, readable from a closure captured once at mount.
+   *
+   * `resolveRemote` is registered with the shell in a `[]` effect, so it closes
+   * over the first render — reading `bothVisible` there directly would freeze
+   * the split-mode decision at mount. The ref carries the live value instead,
+   * the same pattern `dragOutsideRef` uses for the same reason.
+   */
+  const bothVisibleRef = useRef(bothVisible);
+  bothVisibleRef.current = bothVisible;
 
   /**
    * A terminal tab whose close is waiting on a confirmation, or `null`.
@@ -429,7 +439,7 @@ export function PaneArea(props: {
       setRemoteTarget(at ? { at: { dock, ...at } } : { zone: { where: "into", dock } });
       return;
     }
-    setRemoteTarget({ zone: zoneAt(area.getBoundingClientRect(), x, dock) });
+    setRemoteTarget({ zone: zoneAt(area.getBoundingClientRect(), x, dock, !bothVisibleRef.current) });
   };
 
   // Same backstop as the per-dock indicator below: a committed layout retires
@@ -668,7 +678,7 @@ export function PaneArea(props: {
     e.dataTransfer.dropEffect = "move";
     const area = areaRef.current?.getBoundingClientRect();
     if (!area) return;
-    const next = zoneAt(area, e.clientX, dock);
+    const next = zoneAt(area, e.clientX, dock, !bothVisible);
     setDropZone((prev) => (sameZone(prev, next) ? prev : next));
   };
 
@@ -679,7 +689,7 @@ export function PaneArea(props: {
     endTabDragEverywhere();
     if (!id || !area) return;
     e.preventDefault();
-    const zone = zoneAt(area, e.clientX, dock);
+    const zone = zoneAt(area, e.clientX, dock, !bothVisible);
     onLayout(
       zone.where === "into"
         ? moveTab(layout, id, zone.dock)

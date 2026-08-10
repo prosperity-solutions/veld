@@ -49,8 +49,23 @@ export function edgeWidth(areaWidth: number): number {
   return Math.max(28, Math.min(96, areaWidth * 0.16));
 }
 
-/** Which zone a pointer at `clientX` is in, given the dock it is over. */
-export function zoneAt(area: Rect, clientX: number, dock: DockIndex): DropZone {
+/**
+ * Which zone a pointer at `clientX` is in, given the dock it is over.
+ *
+ * `single` is true when the view shows one pane — the view is not split yet.
+ * Then there is nowhere to drop "into" (the whole area *is* the one dock), so
+ * the only useful targets are the two splits, decided by the center line
+ * rather than the narrow edge zones. That is the discovery behaviour: on an
+ * unsplit view a drag into either half visibly promises the split that half
+ * will create, instead of a whole-area "into" that hides the feature. With two
+ * docks visible the edge zones return, because "into" then means something
+ * real (joining the dock under the cursor) and the split is the outlying aim.
+ */
+export function zoneAt(area: Rect, clientX: number, dock: DockIndex, single: boolean): DropZone {
+  if (single) {
+    const mid = area.left + area.width / 2;
+    return clientX < mid ? { where: "left" } : { where: "right" };
+  }
   const edge = edgeWidth(area.width);
   if (clientX <= area.left + edge) return { where: "left" };
   if (clientX >= area.right - edge) return { where: "right" };

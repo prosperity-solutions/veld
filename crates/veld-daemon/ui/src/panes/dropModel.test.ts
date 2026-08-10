@@ -38,29 +38,29 @@ describe("edgeWidth", () => {
 describe("zoneAt", () => {
   it("reads the edges off the pane area, not the dock under the cursor", () => {
     // The whole point: the same x means the same thing whichever dock is there.
-    expect(zoneAt(area, 150, 0)).toEqual({ where: "left" });
-    expect(zoneAt(area, 150, 1)).toEqual({ where: "left" });
-    expect(zoneAt(area, 1050, 0)).toEqual({ where: "right" });
-    expect(zoneAt(area, 1050, 1)).toEqual({ where: "right" });
+    expect(zoneAt(area, 150, 0, false)).toEqual({ where: "left" });
+    expect(zoneAt(area, 150, 1, false)).toEqual({ where: "left" });
+    expect(zoneAt(area, 1050, 0, false)).toEqual({ where: "right" });
+    expect(zoneAt(area, 1050, 1, false)).toEqual({ where: "right" });
   });
 
   it("is 'into' everywhere between the edges, carrying the hovered dock", () => {
-    expect(zoneAt(area, 600, 0)).toEqual({ where: "into", dock: 0 });
-    expect(zoneAt(area, 600, 1)).toEqual({ where: "into", dock: 1 });
+    expect(zoneAt(area, 600, 0, false)).toEqual({ where: "into", dock: 0 });
+    expect(zoneAt(area, 600, 1, false)).toEqual({ where: "into", dock: 1 });
   });
 
   it("puts the boundary itself in the edge zone", () => {
     // Inclusive on purpose: the pixel where the highlight appears must be one
     // the drop honours, or the preview and the result disagree by one pixel.
-    expect(zoneAt(area, 196, 0)).toEqual({ where: "left" });
-    expect(zoneAt(area, 197, 0)).toEqual({ where: "into", dock: 0 });
-    expect(zoneAt(area, 1004, 1)).toEqual({ where: "right" });
-    expect(zoneAt(area, 1003, 1)).toEqual({ where: "into", dock: 1 });
+    expect(zoneAt(area, 196, 0, false)).toEqual({ where: "left" });
+    expect(zoneAt(area, 197, 0, false)).toEqual({ where: "into", dock: 0 });
+    expect(zoneAt(area, 1004, 1, false)).toEqual({ where: "right" });
+    expect(zoneAt(area, 1003, 1, false)).toEqual({ where: "into", dock: 1 });
   });
 
   it("resolves a pointer outside the area to the nearer edge", () => {
-    expect(zoneAt(area, -20, 0)).toEqual({ where: "left" });
-    expect(zoneAt(area, 5000, 1)).toEqual({ where: "right" });
+    expect(zoneAt(area, -20, 0, false)).toEqual({ where: "left" });
+    expect(zoneAt(area, 5000, 1, false)).toEqual({ where: "right" });
   });
 
   it("prefers left when the zones would overlap in a tiny area", () => {
@@ -68,7 +68,28 @@ describe("zoneAt", () => {
     // order of the checks is what decides. Left is the one that also exists in
     // the one-dock case, so it is the safer answer to make deterministic.
     const tiny = { left: 0, right: 40, width: 40 };
-    expect(zoneAt(tiny, 20, 0)).toEqual({ where: "left" });
+    expect(zoneAt(tiny, 20, 0, false)).toEqual({ where: "left" });
+  });
+
+  it("splits a single pane on the center line instead of an 'into' zone", () => {
+    // The discovery behaviour: on an unsplit view every drop is a split, and
+    // which side is decided by the center line, not the narrow edges.
+    expect(zoneAt(area, 100, 0, true)).toEqual({ where: "left" });
+    expect(zoneAt(area, 599, 0, true)).toEqual({ where: "left" });
+    expect(zoneAt(area, 601, 0, true)).toEqual({ where: "right" });
+    expect(zoneAt(area, 1100, 0, true)).toEqual({ where: "right" });
+  });
+
+  it("puts the center line itself in the right half", () => {
+    // Deterministic choice for the ambiguous pixel: at the exact midpoint the
+    // preview must agree with the drop, and right is the one chosen.
+    expect(zoneAt(area, 600, 0, true)).toEqual({ where: "right" });
+  });
+
+  it("ignores the hovered dock when the view is a single pane", () => {
+    // Whatever dock is under the cursor, the split is decided by the center.
+    expect(zoneAt(area, 200, 1, true)).toEqual({ where: "left" });
+    expect(zoneAt(area, 900, 1, true)).toEqual({ where: "right" });
   });
 });
 
