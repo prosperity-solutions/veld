@@ -110,7 +110,7 @@ import { theme as mantineTheme } from "./theme";
 import { RunsMode } from "./runs/RunsMode";
 import { PaneArea } from "./panes/PaneArea";
 import type { RunPaneContext } from "./panes/RunPanes";
-import { notifyDone, notifyError, notifyRedirect } from "./shared/notify";
+import { notifyDone, notifyError, notifyRedirect, notifyTerminal, showSystemNotification } from "./shared/notify";
 import {
   JoinRequestRow,
   RunSharePanel,
@@ -167,7 +167,9 @@ import {
 } from "./ide/layoutStore";
 import {
   applyTerminalTheme,
+  onTerminalNotify,
   onTerminalOpenUrl,
+  onTerminalTitleChange,
   openExternally,
   pruneTerminals,
   noteExpectedResumes,
@@ -2742,6 +2744,79 @@ function AppInner(props: {
     () =>
       onBrowserAccelerator((accelerator) => {
         if (accelerator === "palette") setDialog({ kind: "search" });
+      }),
+    [],
+  );
+
+  // A shell set its own tab title (OSC 0/2). The host has already gated it on
+  // the pane allowing renaming (a plain terminal always may; a config pane only
+  // with its flag), so this is a pure write: adopt the title onto the tab the
+  // session lives in. Keyed off the layouts so a shell in a worktree the user
+  // has switched away from still renames its own tab.
+  useEffect(
+    () =>
+      onTerminalTitleChange(({ sessionId, title }) => {
+        setLayouts((prev) => {
+          for (const [key, l] of Object.entries(prev)) {
+            if (dockOf(l, sessionId) === null) continue;
+            const idx = Number(key);
+            const next = updateTab(prev[idx], sessionId, { termTitle: title });
+            return next === prev[idx] ? prev : { ...prev, [idx]: next };
+          }
+          return prev;
+        });
+      }),
+    [],
+  );
+
+  // A process asked to be noticed (OSC 9). This is the terminal ergonomics
+  // surface, not a coding-agent dashboard: the notification names the worktree
+  // and pane so it is navigable across several open worktrees, and clicking it
+  // focuses the pane. Stateless by design — there is no inbox, nothing is
+  // persisted, and the daemon never sees it.
+  //
+  // Two surfaces, for the two windows it has to reach:
+  //  - an in-app toast for a window that is on screen, click → focus the pane
+  //  - an OS banner when this window is backgrounded (or the user is looking at
+  //    another worktree's window or browser tab), click → focus the pane
+  useEffect(
+    () =>
+      onTerminalNotify(({ sessionId, message }) => {
+        let wtId: number | null = null;
+        let label = "Terminal";
+        for (const [key, l] of Object.entries(layoutsRef.current)) {
+          const tab = allTabs(l).find((t) => t.id === sessionId);
+          if (!tab) continue;
+          wtId = Number(key);
+          label = paneTabLabel(l, tab);
+          break;
+        }
+        // A session this window does not hold is not ours to answer. The host
+        // only fires for a session mounted here, so this is defensive.
+        if (wtId === null) return;
+        const worktree = worktreesRef.current.find((w) => w.id === wtId);
+        const title = worktree ? worktreeLabel(worktree) : `Worktree ${wtId}`;
+        const heading = `${title} · ${label}`;
+        const body = message.trim() || "Terminal activity";
+
+        const focusPane = () => {
+          if (worktree) void selectWorktree(worktree);
+          setLayouts((prev) => {
+            const cur = prev[wtId as number];
+            if (!cur) return prev;
+            const next = activateTab(cur, sessionId);
+            return next === cur ? prev : { ...prev, [wtId as number]: next };
+          });
+        };
+
+        // In-app toast always: a focused window reads it in place.
+        notifyTerminal({ title: heading, message: body, onClick: focusPane });
+        // The banner is for the case the toast cannot reach — this window is
+        // not the one on screen. A focused window already has the toast, so a
+        // banner on top of it would be double-notifying.
+        if (!document.hasFocus()) {
+          showSystemNotification({ title: heading, body, onClick: focusPane });
+        }
       }),
     [],
   );

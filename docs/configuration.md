@@ -2293,6 +2293,7 @@ browser, run logs, node health); `ide.panes` lets a project add its own to the
 | `resume` | An object with `argv` or `shell`: what to run instead when the pane is restored and its shell is gone. |
 | `auto_resume` | Whether veld may run `resume` without being asked. Defaults to `false`. |
 | `close_on_exit` | Whether a **clean** exit closes the pane. Defaults to `true`. A non-zero exit never closes it. |
+| `allow_terminal_renaming` | Whether the process in the pane may rename its own tab with the terminal title it sets (OSC 0/2). Defaults to `false`. A plain terminal (a login shell, not a pane) always adopts its title; this opts a config pane in, because its `label` is how you navigate a rail full of agent panes. |
 
 Nothing about this is specific to a vendor. Veld knows how to run a command in a
 terminal and how to hand it a stable token; which tool that is, and what its

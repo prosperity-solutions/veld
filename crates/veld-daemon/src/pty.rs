@@ -3191,6 +3191,7 @@ mod tests {
                 resume: None,
                 auto_resume: false,
                 close_on_exit: true,
+                allow_terminal_renaming: false,
             }),
         };
         let cfg: veld_core::config::VeldConfig = serde_json::from_value(serde_json::json!({

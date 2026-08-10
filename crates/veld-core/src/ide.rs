@@ -127,6 +127,7 @@ pub const PANE_ICON_NAMES: &[&str] = &[
 /// (`auto_resume` false, `close_on_exit` true), which is the worst shape for a
 /// silent one.
 pub const TERMINAL_PANE_KEYS: &[&str] = &[
+    "allow_terminal_renaming",
     "argv",
     "auto_resume",
     "close_on_exit",
@@ -275,6 +276,20 @@ pub struct TerminalPane {
     /// disappears with it is the oldest complaint about terminal emulators.
     #[serde(default = "default_true")]
     pub close_on_exit: bool,
+    /// Whether the process in the pane may rename its own tab with the terminal
+    /// title it sets (OSC 0/2), instead of the pane's configured `label`.
+    ///
+    /// A config-declared pane's `label` is intentional — it is how the user
+    /// navigates a rail full of agent panes — so a tool like Claude Code that
+    /// sets a dynamic title is kept off the label by default. Plain terminals
+    /// (a login shell, not a pane) always adopt their OSC title. This flag is
+    /// the opt-in for a pane whose own title is more useful than its fixed one.
+    ///
+    /// The stored `title` is only ever a *display* override: the pane's
+    /// identity on the wire and in `${veld.pane.id}` stays its `id`, and the
+    /// config `label` is what a fresh pane is born with.
+    #[serde(default)]
+    pub allow_terminal_renaming: bool,
 }
 
 fn default_true() -> bool {
@@ -599,6 +614,18 @@ fn parse_terminal_pane(
         }
     };
 
+    let allow_terminal_renaming = match entry.get("allow_terminal_renaming") {
+        None => false,
+        Some(serde_json::Value::Bool(b)) => *b,
+        Some(_) => {
+            out.problems.push(IdeProblem {
+                location: format!("{at}.allow_terminal_renaming"),
+                message: "must be true or false".to_owned(),
+            });
+            return None;
+        }
+    };
+
     let auto_resume = if auto_resume && resume.is_none() {
         out.problems.push(IdeProblem {
             location: format!("{at}.auto_resume"),
@@ -615,6 +642,7 @@ fn parse_terminal_pane(
         resume,
         auto_resume,
         close_on_exit,
+        allow_terminal_renaming,
     })
 }
 
@@ -1988,6 +2016,38 @@ mod tests {
         let PaneBody::Terminal(terminal) = &pane.body;
         assert!(terminal.resume.is_none());
         assert!(!terminal.auto_resume, "auto_resume must default to false");
+        assert!(
+            !terminal.allow_terminal_renaming,
+            "a config pane must not let its process rename the tab by default"
+        );
+    }
+
+    #[test]
+    fn allow_terminal_renaming_round_trips_and_is_fail_closed() {
+        let parsed = one_pane(json!({ "id": "claude", "type": "terminal", "argv": ["claude"] }));
+        let PaneBody::Terminal(terminal) = &parsed.panes[0].body;
+        assert!(!terminal.allow_terminal_renaming);
+
+        let parsed = one_pane(
+            json!({ "id": "claude", "type": "terminal", "argv": ["claude"], "allow_terminal_renaming": true }),
+        );
+        assert!(parsed.problems.is_empty(), "{:?}", parsed.problems);
+        let PaneBody::Terminal(terminal) = &parsed.panes[0].body;
+        assert!(terminal.allow_terminal_renaming);
+
+        // A non-boolean is a problem, not a silent default.
+        let parsed = one_pane(
+            json!({ "id": "claude", "type": "terminal", "argv": ["claude"], "allow_terminal_renaming": "yes" }),
+        );
+        assert_eq!(parsed.panes.len(), 0);
+        assert!(
+            parsed
+                .problems
+                .iter()
+                .any(|p| p.location.ends_with("allow_terminal_renaming")),
+            "{:?}",
+            parsed.problems
+        );
     }
 
     #[test]

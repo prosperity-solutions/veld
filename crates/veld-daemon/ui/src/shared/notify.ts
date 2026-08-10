@@ -96,3 +96,69 @@ export function notifyRedirect(message: string): void {
     "data-veld-overlay": true,
   });
 }
+
+/**
+ * An OS-level notification (a banner) via the Web Notification API.
+ *
+ * The "different window or browser" half of terminal notifications: a banner
+ * surfaces even when the tab or window that owns the pane is backgrounded, and
+ * clicking it focuses that window (the OS does this) and then runs `onClick`,
+ * which is how the pane comes up. The in-app toast is the other half, for a
+ * window that is already on screen.
+ *
+ * One helper covers both builds: in the Electron renderer `new Notification`
+ * maps to a native notification, and in a plain browser it is the standard
+ * permission-gated API. Permission is requested lazily on first use and never
+ * prompted again once denied — a notification a user has refused is not worth
+ * re-asking for on every bell.
+ */
+export interface SystemNotificationOptions {
+  title: string;
+  body?: string;
+  onClick?: () => void;
+}export function showSystemNotification(opts: SystemNotificationOptions): void {
+  if (typeof Notification === "undefined") return;
+  const show = () => {
+    try {
+      const n = new Notification(opts.title, { body: opts.body });
+      if (opts.onClick) {
+        n.onclick = () => {
+          // Focus the owning window/tab, then hand to the caller.
+          window.focus();
+          opts.onClick?.();
+        };
+      }
+    } catch {
+      // A notification that cannot be shown is not worth a toast of its own.
+    }
+  };
+  if (Notification.permission === "granted") {
+    show();
+  } else if (Notification.permission === "default") {
+    void Notification.requestPermission().then((p) => {
+      if (p === "granted") show();
+    });
+  }
+}
+
+/**
+ * The in-app half of a terminal notification: a clickable toast naming the
+ * worktree and pane, so a pane that finished while you were looking at it is
+ * one click away. Clicking focuses the pane; the system banner (for a
+ * backgrounded window or tab) is the other half, via [`showSystemNotification`].
+ */
+export interface TerminalNotifyOptions {
+  title: string;
+  message: string;
+  onClick: () => void;
+}
+
+export function notifyTerminal(opts: TerminalNotifyOptions): void {
+  notifications.show({
+    title: opts.title,
+    message: opts.message,
+    color: "teal",
+    onClick: opts.onClick,
+    autoClose: 8000,
+  });
+}

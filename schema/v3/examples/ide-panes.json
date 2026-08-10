@@ -21,7 +21,12 @@
         "requires_bin": ["claude"],
         "argv": ["claude", "--session-id", "${veld.pane.token}"],
         "resume": { "argv": ["claude", "--resume", "${veld.pane.token}"] },
-        "auto_resume": true
+        "auto_resume": true,
+        // Claude sets a dynamic terminal title (OSC 0/2) naming the task it is
+        // working on. Off by default because a config pane's `label` is how you
+        // navigate a rail full of agent panes — opt in when the live title is
+        // more useful than the fixed one.
+        "allow_terminal_renaming": true
       },
       {
         // A second mode is a second pane, not a variant: panes have no

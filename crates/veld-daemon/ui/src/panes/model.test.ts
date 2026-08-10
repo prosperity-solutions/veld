@@ -1060,6 +1060,21 @@ describe("paneTabLabel", () => {
     expect(paneTabLabel(l, { ...withTitle, title: "" })).toBe("x.test");
     expect(paneTabLabel(l, { ...withTitle, title: "", url: undefined })).toBe("Browser");
   });
+
+  it("prefers a shell's OSC title when the pane may rename itself", () => {
+    const l = twoDock();
+    // A plain terminal adopts its OSC 0/2 title over "Terminal N".
+    const plain = term();
+    expect(paneTabLabel(l, { ...plain, termTitle: "build: npm run dev" })).toBe(
+      "build: npm run dev",
+    );
+    // A config pane that opted in does too, over its configured label.
+    const cfg = configPaneTab({ id: "claude", label: "Claude" });
+    expect(paneTabLabel(l, { ...cfg, termTitle: "fix login flow" })).toBe("fix login flow");
+    // Without a termTitle, both keep what they were born with.
+    expect(paneTabLabel(l, cfg)).toBe("Claude");
+    expect(paneTabLabel(l, plain)).toBe("Terminal");
+  });
 });
 
 describe("lastBlankBrowserId", () => {
@@ -1659,7 +1674,12 @@ describe("paneAnswerFor", () => {
 });
 
 describe("startPlanFor", () => {
-  const pane = { spec: "claude", autoResume: false, closeOnExit: true };
+  const pane = {
+    spec: "claude",
+    autoResume: false,
+    closeOnExit: true,
+    allowTerminalRenaming: false,
+  };
 
   it("runs a login shell when there is no pane spec", () => {
     expect(startPlanFor("t1", undefined)).toBe("shell");

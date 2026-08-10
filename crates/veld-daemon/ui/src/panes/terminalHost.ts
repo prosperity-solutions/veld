@@ -115,6 +115,12 @@ interface Session {
    *  the host or it is silently deferred until the user next clicks the tab,
    *  which reads as "clicking the tab closed my pane". */
   closeOnExit: boolean;
+  /** Whether this pane's process may rename its tab with an OSC 0/2 title.
+   *  A plain terminal (no `spec`) always may; a config pane only when its
+   *  `allow_terminal_renaming` is set. Captured at mount like `closeOnExit`,
+   *  for the same reason: the decision belongs to the host, which runs even
+   *  while no pane component is mounted. */
+  allowTerminalRenaming: boolean;
   term: Terminal;
   fit: FitAddon;
   /** Detached until a pane mounts it; never destroyed by a mere unmount. */
@@ -359,6 +365,33 @@ export function setPaneCloseHandler(
   paneCloseHandler = fn;
 }
 
+// One AudioContext, reused across every terminal — creating one per bell (and
+// per terminal) is the kind of churn that gets autoplay-policy-throttled. A
+// short 800 Hz tone is the classic terminal bell; Web Audio needs no asset.
+let bellCtx: AudioContext | null = null;
+
+/** Ring the terminal bell as a short tone. Best-effort: a browser that
+ *  autoplay-policies audio into silence loses the sound, never the terminal. */
+function playBell(): void {
+  try {
+    bellCtx ??= new AudioContext();
+    const ctx = bellCtx;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = "sine";
+    osc.frequency.value = 800;
+    const t = ctx.currentTime;
+    gain.gain.setValueAtTime(0.08, t);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.12);
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start(t);
+    osc.stop(t + 0.12);
+  } catch {
+    // Silent bell is acceptable.
+  }
+}
+
 /** Create the session (idempotent) without touching the DOM. */
 function ensure(
   id: string,
@@ -424,6 +457,11 @@ function ensure(
     exitCode: null,
     launched: false,
     closeOnExit: pane?.closeOnExit ?? false,
+    // A plain terminal always adopts its OSC title; a config pane only when
+    // the project opted in. `spec` is the discriminator: undefined means login
+    // shell, and login shells are free to rename themselves.
+    allowTerminalRenaming:
+      pane?.spec === undefined || (pane?.allowTerminalRenaming ?? false),
     state: "connecting",
     detail: "",
     observer: null,
@@ -472,6 +510,35 @@ function ensure(
     if (s.ws?.readyState === WebSocket.OPEN) {
       s.ws.send(JSON.stringify({ type: "resize", cols, rows }));
     }
+  });
+
+  // A process sets its own tab title with OSC 0/2 (`ESC ] 0;title BEL`). xterm
+  // parses the sequence and reports the result here — the only parser worth
+  // trusting, since BEL doubles as an OSC terminator and a naive byte scan
+  // would misread it. Fired only when this pane is allowed to rename itself
+  // (a plain terminal always is; a config pane only with its flag), so the
+  // consumer never re-checks the decision.
+  term.onTitleChange((title) => {
+    if (!s.allowTerminalRenaming) return;
+    for (const fn of titleListeners) fn({ sessionId: id, title });
+  });
+  // A BEL (U+0007) is the "something finished" baseline — a terminal rings it
+  // and the user should hear it. xterm 5 exposed the bell only as `onBell` (its
+  // `bellStyle`/`bellSound` options are gone), so the sound is played here.
+  // Sound only: the richer notification half is OSC 9 below.
+  term.onBell(playBell);
+  // OSC 9 (`ESC ] 9;message BEL`) is the "show a notification" sequence — the
+  // one macOS Terminal and iTerm2 turn into a system banner, and the thing
+  // Claude Code's "task finished" notification rides on. xterm does not act on
+  // it, so this is where it becomes one. Return true so xterm treats it as
+  // consumed rather than passing it through.
+  term.parser.registerOscHandler(9, (data) => {
+    // During a reattach the scrollback is replayed through xterm; an OSC 9 in
+    // it would otherwise re-notify for output that has already been seen.
+    if (!s.replaying) {
+      for (const fn of notifyListeners) fn({ sessionId: id, message: data });
+    }
+    return true;
   });
 
   // `shell` and `reattach` both mean "no command to choose" — a login shell has
@@ -638,6 +705,14 @@ export function openExternally(url: string): void {
 /** Subscribers to `open_url` frames — see `onTerminalOpenUrl`. */
 const openUrlListeners = new Set<(event: { sessionId: string; url: string }) => void>();
 
+/** Subscribers to a shell's OSC 0/2 title — see `onTerminalTitleChange`. */
+const titleListeners = new Set<(event: { sessionId: string; title: string }) => void>();
+
+/** Subscribers to an OSC 9 notification — see `onTerminalNotify`. */
+const notifyListeners = new Set<
+  (event: { sessionId: string; message: string }) => void
+>();
+
 /**
  * A URL the daemon routed to this page, and which terminal it came from.
  *
@@ -652,6 +727,35 @@ export function onTerminalOpenUrl(
 ): () => void {
   openUrlListeners.add(fn);
   return () => openUrlListeners.delete(fn);
+}
+
+/**
+ * A shell set its own tab title with OSC 0/2.
+ *
+ * The session id *is* the terminal tab's id, so the consumer can find the tab
+ * in the layout and adopt the title — but only when the pane is allowed to
+ * rename itself (`allowTerminalRenaming`); the host already decided that, and
+ * this event only fires for a plain terminal or an opted-in config pane.
+ */
+export function onTerminalTitleChange(
+  fn: (event: { sessionId: string; title: string }) => void,
+): () => void {
+  titleListeners.add(fn);
+  return () => titleListeners.delete(fn);
+}
+
+/**
+ * A process asked to be noticed (OSC 9 — the "show a notification" sequence).
+ *
+ * `message` is the payload the process sent (often empty). The consumer adds
+ * the worktree and pane context and decides how to surface it (toast, system
+ * banner) — this host only reports that a notification was *requested*.
+ */
+export function onTerminalNotify(
+  fn: (event: { sessionId: string; message: string }) => void,
+): () => void {
+  notifyListeners.add(fn);
+  return () => notifyListeners.delete(fn);
 }
 
 function handleControl(s: Session, raw: string): void {

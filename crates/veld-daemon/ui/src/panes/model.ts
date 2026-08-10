@@ -158,6 +158,17 @@ export interface PaneTab {
    * purpose — so this parser is the only gate it has to clear.
    */
   spec?: string;
+  /**
+   * `terminal` only: the title the shell set with an OSC 0/2 sequence, when the
+   * pane is allowed to rename itself.
+   *
+   * Kept **off** the config-declared `title` so the pane's configured `label`
+   * survives as the thing a fresh pane (and a non-allowing pane) is named by:
+   * `allow_terminal_renaming` decides at *write time* whether this field is ever
+   * set, and `paneTabLabel` just prefers it when present. A plain terminal
+   * always fills it; a config pane only when its flag is on.
+   */
+  termTitle?: string;
   /** `browser` only: where the pane opens, and where it returns after a
    *  reload. Kept in the layout rather than in `browserHost` because it is the
    *  one piece of a pane worth restoring — the page itself is re-fetchable. */
@@ -932,6 +943,8 @@ export interface PaneMount {
   spec: string;
   autoResume: boolean;
   closeOnExit: boolean;
+  /** Whether the pane's process may rename its tab with an OSC 0/2 title. */
+  allowTerminalRenaming: boolean;
 }
 
 /**
@@ -1094,7 +1107,12 @@ export function paneTabLabel(layout: PaneLayout, tab: PaneTab): string {
     case "terminal":
       // A config-declared pane is named by its spec, not numbered among the
       // shells: "Claude" and "Terminal 2" are different things in one strip.
-      return tab.spec ? tab.title : terminalLabel(layout, tab.id);
+      // `termTitle` is the title the process set via OSC 0/2 — written to the
+      // layout only when the pane is allowed to rename itself (a plain
+      // terminal always is; a config pane only with
+      // `allow_terminal_renaming`), so reaching for it here is safe without
+      // re-checking the flag.
+      return tab.termTitle || (tab.spec ? tab.title : terminalLabel(layout, tab.id));
     case "new":
       return "New pane";
     case "logs":
