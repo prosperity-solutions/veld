@@ -4,10 +4,10 @@
     ["@semantic-release/commit-analyzer", { "preset": "conventionalcommits" }],
     ["@semantic-release/release-notes-generator", { "preset": "conventionalcommits" }],
     ["@semantic-release/exec", {
-      "prepareCmd": "sed -i'' -e 's/Requires veld v[0-9][0-9.]*/Requires veld v${nextRelease.version}/' -e 's/version: \"[0-9][0-9.]*\"/version: \"${nextRelease.version}\"/' skills/veld/SKILL.md && sed -i'' -e \"s/^version = \\\"[^\\\"]*\\\"/version = \\\"${nextRelease.version}\\\"/\" Cargo.toml && (cd desktop && npm version --no-git-tag-version --allow-same-version ${nextRelease.version})"
+      "prepareCmd": "sed -i'' -e 's/Requires veld v[0-9][0-9.]*/Requires veld v${nextRelease.version}/' -e 's/version: \"[0-9][0-9.]*\"/version: \"${nextRelease.version}\"/' skills/veld/SKILL.md && sed -i'' -e \"s/^version = \\\"[^\\\"]*\\\"/version = \\\"${nextRelease.version}\\\"/\" Cargo.toml && cargo update -w && (cd desktop && npm version --no-git-tag-version --allow-same-version ${nextRelease.version})"
     }],
     ["@semantic-release/git", {
-      "assets": ["skills/veld/SKILL.md", "Cargo.toml", "desktop/package.json", "desktop/package-lock.json"],
+      "assets": ["skills/veld/SKILL.md", "Cargo.toml", "Cargo.lock", "desktop/package.json", "desktop/package-lock.json"],
       "message": "chore(release): v${nextRelease.version} [skip ci]"
     }]
   ]

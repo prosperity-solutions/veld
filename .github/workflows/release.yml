@@ -307,6 +307,12 @@ jobs:
         with:
           node-version: "22"
 
+      # The `prepareCmd` regenerates Cargo.lock (`cargo update -w`) for the
+      # version bump, so cargo must be available here. Pin the same toolchain
+      # the build job uses. This is the `release` job only — the `plan` job's
+      # dry run never runs `prepare`, so it needs no toolchain.
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+
       - uses: cycjimmy/semantic-release-action@16ca923e6ccbb50770c415a0ccd43709a8c5f7a4
         id: semantic
         with:
