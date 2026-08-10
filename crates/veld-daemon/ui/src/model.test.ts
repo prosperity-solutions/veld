@@ -32,6 +32,7 @@ import {
   worktreeStatus,
   worstStatus,
   DELETING_LANE,
+  DETACHED_LANE,
   TRASH_LANE,
 } from "./model";
 
@@ -896,6 +897,59 @@ describe("railGroups", () => {
   it("omits the deleting lane when nothing is being deleted", () => {
     const groups = railGroups([rw("/wts/a")], []);
     expect(groups.some((g) => g.key === DELETING_LANE)).toBe(false);
+  });
+
+  it("groups detached checkouts into their own lane, between ungrouped and lanes", () => {
+    // A detached HEAD is a state worth surfacing on its own, so detached
+    // checkouts get a virtual lane of their own after the ungrouped worktrees
+    // and before the real lanes.
+    const groups = railGroups(
+      [
+        rw("/wts/a"),
+        rw("/wts/det", { branch: "(detached)" }),
+        rw("/wts/b", { lane: "review" }),
+      ],
+      [lane("review", 0)],
+    );
+    const live = groups.filter(
+      (g) => g.key !== TRASH_LANE && g.key !== DELETING_LANE,
+    );
+    expect(live.map((g) => g.key)).toEqual(["", DETACHED_LANE, "review"]);
+    const det = live.find((g) => g.key === DETACHED_LANE)!;
+    expect(det.label).toBe("Detached");
+    expect(det.pinned).toBe(true);
+    // Pinned and not a drop target — you cannot file a checkout *as* detached.
+    expect(det.addable).toBe(false);
+    expect(det.editable).toBe(false);
+    expect(det.worktrees.map((w) => w.path)).toEqual(["/wts/det"]);
+  });
+
+  it("pulls a detached checkout out of its lane while it is detached", () => {
+    // Being detached overrides where the row belongs (same rule the trash
+    // applies to trashed rows): it leaves the lane and returns when a branch is
+    // checked out again.
+    const groups = railGroups(
+      [rw("/wts/det", { branch: "(detached)", lane: "review" })],
+      [lane("review", 0)],
+    );
+    expect(groups.find((g) => g.key === DETACHED_LANE)?.worktrees).toHaveLength(1);
+    expect(groups.find((g) => g.key === "review")?.worktrees).toHaveLength(0);
+  });
+
+  it("omits the detached lane when nothing is detached", () => {
+    const groups = railGroups([rw("/wts/a")], []);
+    expect(groups.some((g) => g.key === DETACHED_LANE)).toBe(false);
+  });
+
+  it("keeps a detached main checkout out of the detached lane", () => {
+    // git keeps a repo's main on a branch, so a detached main is not a real
+    // state — but the row must not silently disappear from the rail either.
+    const groups = railGroups([rw("/repo", { is_main: true, branch: "(detached)" })], []);
+    const live = groups.filter(
+      (g) => g.key !== TRASH_LANE && g.key !== DELETING_LANE,
+    );
+    expect(live.map((g) => g.key)).toEqual(["main", ""]);
+    expect(live[0].worktrees.map((w) => w.path)).toEqual(["/repo"]);
   });
 });
 

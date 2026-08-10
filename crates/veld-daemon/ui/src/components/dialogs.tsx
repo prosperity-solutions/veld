@@ -8,6 +8,7 @@ import {
   Loader,
   Modal as MantineModal,
   ScrollArea,
+  SegmentedControl,
   Stack,
   Text,
   TextInput,
@@ -226,6 +227,10 @@ export function NewWorktreeDialog(props: {
   colorUsedBy: Record<string, EmojiHolder[]>;
   /** Which marker face the rail renders, so the grids can label it. */
   markerStyle: MarkerStyle;
+  /** Switch the rail's marker face — a settings change, offered right in the
+   *  dialog so a user who sees one face never has to find Settings to reach the
+   *  other (the first test's confusion). */
+  onStyleChange: (style: MarkerStyle) => void;
   /** Where a new branch is cut from (`git.createFrom`) — shown so the create
    *  states where the worktree starts, rather than leaving it a guess. */
   createFrom: GitCreateFrom;
@@ -418,6 +423,7 @@ export function NewWorktreeDialog(props: {
               usedBy={props.usedBy}
               colorUsedBy={props.colorUsedBy}
               style={props.markerStyle}
+              onStyleChange={props.onStyleChange}
               // Local until the worktree exists, so nothing is ever in flight.
               busy={null}
               loaded={loaded}
@@ -429,8 +435,8 @@ export function NewWorktreeDialog(props: {
               }
             />
             <Text size="xs" c="dimmed">
-              A free colour and glyph are picked at random — change either, or leave
-              them.
+              A free one is picked at random — change it, or leave it. The other
+              face is saved too, so it is there if you switch.
             </Text>
           </Stack>
         </Stack>
@@ -541,6 +547,9 @@ export function MarkerGrids(props: {
   busy: string | null;
   /** The lists from [`useMarkerChoices`], hoisted so a caller can preselect. */
   loaded: ReturnType<typeof useMarkerChoices>;
+  /** Switch the rail's marker face — a settings change, offered *inside* the picker
+   *  so a user who sees one face never has to find the setting to reach the other. */
+  onStyleChange: (style: MarkerStyle) => void;
   onPick: (patch: { emoji?: string; marker_color?: string }) => void;
 }) {
   const busy = props.busy;
@@ -549,116 +558,140 @@ export function MarkerGrids(props: {
   const pick = (patch: { emoji?: string; marker_color?: string }) =>
     props.onPick(patch);
 
+  const colourGrid = colors !== null ? (
+    <>
+      <Text size="xs" fw={600} c="dimmed">
+        Colour
+      </Text>
+      <div className="swatch-grid">
+        {colors.map((color) => {
+          const isCurrent = color === props.color;
+          // Same treatment as the glyph grid. It matters more here: eight
+          // colours against a repo that can hold more checkouts than that
+          // means a within-repo duplicate is likely, and within-repo is the
+          // only scope where distinctness is claimed.
+          const others = (props.colorUsedBy[color] ?? []).filter(
+            (h) => h.id !== props.worktreeId,
+          );
+          const taken = others.map((h) => h.label).join(", ");
+          return (
+            <button
+              key={color}
+              type="button"
+              className={`swatch-cell${isCurrent ? " current" : ""}`}
+              disabled={busy !== null}
+              aria-pressed={isCurrent}
+              aria-label={
+                taken
+                  ? `Colour ${color} — in use by ${taken}`
+                  : `Colour ${color}${isCurrent ? " — current" : ""}`
+              }
+              title={
+                [
+                  isCurrent ? "Current" : color,
+                  taken ? `In use by ${taken}` : "",
+                ]
+                  .filter(Boolean)
+                  .join(" · ") || undefined
+              }
+              onClick={() => pick({ marker_color: color })}
+            >
+              {busy === color ? (
+                <Loader size={14} />
+              ) : (
+                /* Classed, not styled by position. `.swatch-cell > span`
+                   also matched the `.marker-taken` marker below and — being
+                   the more specific selector — inflated that 4px dot to a
+                   16px circle. */
+                <span className="swatch-dot" style={{ background: color }} />
+              )}
+              {taken && <span className="marker-taken" />}
+            </button>
+          );
+        })}
+      </div>
+    </>
+  ) : null;
+
+  const emojiGrid = choices ? (
+    <>
+      <Text size="xs" fw={600} c="dimmed">
+        Glyph
+      </Text>
+      <div className="emoji-grid">
+        {choices.map((e) => {
+          const isCurrent = e === props.emoji;
+          // Every holder that isn't this worktree. Compared by id, not
+          // alias, and covering all holders rather than the first: a
+          // collision with another project's identically-named worktree
+          // is precisely what the picker exists to surface.
+          const others = (props.usedBy[e] ?? []).filter(
+            (h) => h.id !== props.worktreeId,
+          );
+          const taken = others.map((h) => h.label).join(", ");
+          return (
+            <button
+              key={e}
+              type="button"
+              className={`emoji-cell${isCurrent ? " current" : ""}`}
+              disabled={busy !== null}
+              aria-pressed={isCurrent}
+              aria-label={taken ? `${e} — in use by ${taken}` : e}
+              title={
+                [
+                  isCurrent ? "Current" : "",
+                  taken ? `In use by ${taken}` : "",
+                ]
+                  .filter(Boolean)
+                  .join(" · ") || undefined
+              }
+              onClick={() => pick({ emoji: e })}
+            >
+              {busy === e ? (
+                <Loader size={14} />
+              ) : (
+                <span aria-hidden="true">{e}</span>
+              )}
+              {taken && <span className="marker-taken" />}
+            </button>
+          );
+        })}
+      </div>
+    </>
+  ) : null;
+
   return (
     <>
       {loadError && <ErrorText error={loadError} />}
-        {colors !== null && (
-          <>
-            <Text size="xs" fw={600} c="dimmed">
-              Colour{props.style === "color" ? " (shown in the rail)" : ""}
-            </Text>
-            <div className="swatch-grid">
-              {colors.map((color) => {
-                const isCurrent = color === props.color;
-                // Same treatment as the glyph grid. It matters more here: eight
-                // colours against a repo that can hold more checkouts than that
-                // means a within-repo duplicate is likely, and within-repo is the
-                // only scope where distinctness is claimed.
-                const others = (props.colorUsedBy[color] ?? []).filter(
-                  (h) => h.id !== props.worktreeId,
-                );
-                const taken = others.map((h) => h.label).join(", ");
-                return (
-                  <button
-                    key={color}
-                    type="button"
-                    className={`swatch-cell${isCurrent ? " current" : ""}`}
-                    disabled={busy !== null}
-                    aria-pressed={isCurrent}
-                    aria-label={
-                      taken
-                        ? `Colour ${color} — in use by ${taken}`
-                        : `Colour ${color}${isCurrent ? " — current" : ""}`
-                    }
-                    title={
-                      [
-                        isCurrent ? "Current" : color,
-                        taken ? `In use by ${taken}` : "",
-                      ]
-                        .filter(Boolean)
-                        .join(" · ") || undefined
-                    }
-                    onClick={() => pick({ marker_color: color })}
-                  >
-                    {busy === color ? (
-                      <Loader size={14} />
-                    ) : (
-                      /* Classed, not styled by position. `.swatch-cell > span`
-                         also matched the `.marker-taken` marker below and — being
-                         the more specific selector — inflated that 4px dot to a
-                         16px circle. */
-                      <span className="swatch-dot" style={{ background: color }} />
-                    )}
-                    {taken && <span className="marker-taken" />}
-                  </button>
-                );
-              })}
-            </div>
-            <Text size="xs" fw={600} c="dimmed">
-              Glyph{props.style === "emoji" ? " (shown in the rail)" : ""}
-            </Text>
-          </>
-        )}
-        {!choices && !loadError && (
-          <Group justify="center" py="lg">
-            <Loader size="sm" aria-label="Loading emoji" />
-          </Group>
-        )}
-        {choices && (
-          <div className="emoji-grid">
-            {choices.map((e) => {
-              const isCurrent = e === props.emoji;
-              // Every holder that isn't this worktree. Compared by id, not
-              // alias, and covering all holders rather than the first: a
-              // collision with another project's identically-named worktree
-              // is precisely what the picker exists to surface.
-              const others = (props.usedBy[e] ?? []).filter(
-                (h) => h.id !== props.worktreeId,
-              );
-              const taken = others.map((h) => h.label).join(", ");
-              return (
-                <button
-                  key={e}
-                  type="button"
-                  className={`emoji-cell${isCurrent ? " current" : ""}`}
-                  disabled={busy !== null}
-                  aria-pressed={isCurrent}
-                  aria-label={taken ? `${e} — in use by ${taken}` : e}
-                  title={
-                    [
-                      isCurrent ? "Current" : "",
-                      taken ? `In use by ${taken}` : "",
-                    ]
-                      .filter(Boolean)
-                      .join(" · ") || undefined
-                  }
-                  onClick={() => pick({ emoji: e })}
-                >
-                  {busy === e ? (
-                    <Loader size={14} />
-                  ) : (
-                    <span aria-hidden="true">{e}</span>
-                  )}
-                  {taken && <span className="marker-taken" />}
-                </button>
-              );
-            })}
-          </div>
-        )}
-        <Text size="xs" c="dimmed">
-          A dot marks a colour or glyph another checkout of this repo already uses.
-          Picking it is allowed — the rail just won&apos;t identify them apart.
-        </Text>
+      {/* The two faces, switchable right here. The first user test confused the
+          two marker types when both grids sat in one dialog, so only the face
+          the rail renders is shown — and the other face is switched to by
+          changing the setting in place, so nobody has to go find Settings. */}
+      <SegmentedControl
+        size="xs"
+        fullWidth
+        value={props.style}
+        onChange={(v) => props.onStyleChange(v as MarkerStyle)}
+        data={[
+          { value: "color", label: "Colour" },
+          { value: "emoji", label: "Emoji" },
+        ]}
+      />
+      <Text size="xs" c="dimmed">
+        {props.style === "color"
+          ? "This is what the rail shows. The glyph is still saved, so it is there if you switch."
+          : "This is what the rail shows. The colour is still saved, so it is there if you switch."}
+      </Text>
+      {props.style === "color" ? colourGrid : emojiGrid}
+      {props.style === "emoji" && !choices && !loadError && (
+        <Group justify="center" py="lg">
+          <Loader size="sm" aria-label="Loading emoji" />
+        </Group>
+      )}
+      <Text size="xs" c="dimmed">
+        A dot marks a colour or glyph another checkout of this repo already uses.
+        Picking it is allowed — the rail just won&apos;t identify them apart.
+      </Text>
     </>
   );
 }
@@ -679,6 +712,8 @@ export function ChangeMarkerDialog(props: {
   usedBy: Record<string, EmojiHolder[]>;
   colorUsedBy: Record<string, EmojiHolder[]>;
   style: MarkerStyle;
+  /** Switch the rail's marker face — see `MarkerGrids`. */
+  onStyleChange: (style: MarkerStyle) => void;
   onPick: (patch: { emoji?: string; marker_color?: string }) => Promise<void>;
   onClose: () => void;
 }) {
@@ -708,15 +743,15 @@ export function ChangeMarkerDialog(props: {
           colorUsedBy={props.colorUsedBy}
           worktreeId={props.worktreeId}
           style={props.style}
+          onStyleChange={props.onStyleChange}
           busy={busy}
           loaded={loaded}
           onPick={(patch) => void pick(patch)}
         />
         <ErrorText error={error} />
         <Text size="xs" c="dimmed">
-          Both halves are always saved, so you can set the one you aren&apos;t
-          currently showing and it will be waiting if you switch. Which one the
-          rail renders is under Settings → General.
+          Both halves are always saved, so the one you aren&apos;t currently
+          showing is waiting if you switch the face up top.
         </Text>
       </Stack>
     </Modal>
