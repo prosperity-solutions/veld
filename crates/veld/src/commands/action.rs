@@ -142,7 +142,7 @@ pub async fn run(
         variant_cfg.and_then(|v| v.cwd.as_deref()),
     );
 
-    let env = match build_env(node_state, action, &ctx) {
+    let env = match build_env(&cfg, run_state, &project_root, node_state, action, &ctx).await {
         Ok(env) => env,
         Err(e) => {
             output::print_error(&format!("Failed to resolve action parameters: {e}"), json);
@@ -386,14 +386,57 @@ fn build_context(
 }
 
 /// Build the environment for the spawned shell: inherit the parent env, then
-/// export the node's live outputs and the action's resolved parameters as
-/// `$KEY` variables, plus a few `VELD_*` context variables.
-fn build_env(
+/// the node's declared `env`, the node's live outputs as `$KEY`, the action's
+/// resolved parameters, and the veld-owned `VELD_*` variables.
+///
+/// Precedence (lowest to highest): inherited parent env < node `env` < node
+/// outputs < action parameters. Outputs are the freshest truth about the live
+/// node, so they win over the env it was started with; the action's own params
+/// win over both. This is the same ordering the orchestrator uses, so an action
+/// sees what the node it runs against sees.
+async fn build_env(
+    config: &VeldConfig,
+    run_state: &RunState,
+    project_root: &Path,
     node_state: &NodeState,
     action: &ActionConfig,
     ctx: &VariableContext,
-) -> Result<HashMap<String, String>, variables::VariableError> {
+) -> Result<HashMap<String, String>, String> {
     let mut env: HashMap<String, String> = std::env::vars().collect();
+
+    // The node's declared `env` (variant > node > project), resolved with the
+    // same builder the node process uses, so an action on a node can read the
+    // very variables the node was started with — a `stop-container` action
+    // needs the `CONTAINER_NAME` the node was given. Previously an action had
+    // to re-derive it in its own argv.
+    //
+    // Best-effort, never action-fatal: an action's interpolation context has no
+    // `${vars.*}` (by design — see the Availability notes), so a node env that
+    // references a var cannot resolve here. That must not block the action it
+    // was attached to; it just means that env doesn't reach the action.
+    if let Some(resolved) = config.resolved(&node_state.node_name, &node_state.variant) {
+        if let Some(env_cfg) = resolved.env {
+            if let Ok((node_env, _)) = veld_core::orchestrator::build_env(
+                Some(&env_cfg),
+                ctx,
+                &format!(
+                    "nodes.{}.variants.{}",
+                    node_state.node_name, node_state.variant
+                ),
+                project_root,
+            )
+            .await
+            {
+                env.extend(node_env);
+            } else {
+                tracing::warn!(
+                    node = node_state.node_name,
+                    variant = node_state.variant,
+                    "action could not resolve the node's declared env — it will not be exposed to the action"
+                );
+            }
+        }
+    }
 
     // Node outputs first; parameters can intentionally override them.
     for (k, v) in &node_state.outputs {
@@ -401,12 +444,25 @@ fn build_env(
     }
     if let Some(params) = &action.parameters {
         for (k, v) in params {
-            env.insert(k.clone(), variables::interpolate(v, ctx)?);
+            env.insert(
+                k.clone(),
+                variables::interpolate(v, ctx).map_err(|e| e.to_string())?,
+            );
         }
     }
 
-    env.insert("VELD_NODE".to_owned(), node_state.node_name.clone());
-    env.insert("VELD_VARIANT".to_owned(), node_state.variant.clone());
+    // The veld-owned vars — `VELD_RUN`, `VELD_ROOT`, `VELD_PORT`/`VELD_URL`/
+    // `VELD_HOST_*`, `VELD_NODE`, `VELD_VARIANT` — from the shared builder, so
+    // an action sees the same family the node's own process and `on_stop` do.
+    env.extend(veld_core::orchestrator::veld_owned_env(
+        &veld_core::orchestrator::NodeEnvContext::from_node_state(
+            run_state.name.as_str(),
+            Some(run_state.run_id.to_string()),
+            project_root,
+            &config.name,
+            node_state,
+        ),
+    ));
 
     Ok(env)
 }

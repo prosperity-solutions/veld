@@ -2731,6 +2731,40 @@ pub struct HealthCheck {
     pub interval_ms: u64,
 }
 
+impl HealthCheck {
+    /// Interpolate `${…}` in the string fields of a resolved probe — the HTTP
+    /// `path` and the `command` probe's `argv`/`shell` — exactly as a node's own
+    /// `argv` and `env` are resolved. Port names and the numeric knobs
+    /// (`expect_status`, `seconds`, `timeout_seconds`, `interval_ms`) are not
+    /// templates and are left untouched.
+    ///
+    /// Without this, `${vars.health_path}` in a probe `path` reached the server
+    /// as the literal text `${vars.health_path}` and the node failed with a 404
+    /// — structurally perfect, semantically impossible.
+    pub fn interpolate(
+        &self,
+        ctx: &crate::variables::VariableContext,
+    ) -> Result<Self, crate::variables::VariableError> {
+        let mut out = self.clone();
+        if let Some(path) = &self.path {
+            out.path = Some(crate::variables::interpolate(path, ctx)?);
+        }
+        if let Some(cmd) = self.cmd.spec() {
+            out.cmd = match cmd.interpolate(ctx)? {
+                CommandSpec::Argv(argv) => CommandKeys {
+                    argv: Some(argv),
+                    ..Default::default()
+                },
+                CommandSpec::Shell(shell) => CommandKeys {
+                    shell: Some(shell),
+                    ..Default::default()
+                },
+            };
+        }
+        Ok(out)
+    }
+}
+
 /// Default `settle` window. Long enough to catch a command that fails on
 /// startup (a missing binary, a bad flag, an occupied resource), short enough
 /// that it does not dominate a cold start.
@@ -8789,6 +8823,36 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(liveness.check_type, "command");
+    }
+
+    /// The example the schema ships (`${vars.health_path}` in a probe `path`)
+    /// used to reach the server as literal text — the corpus checked shape and
+    /// serde but never executed a probe. Interpolation must resolve the probe's
+    /// string fields (HTTP `path`, command `argv`/`shell`) with the node's
+    /// context, exactly as `argv` and `env` are.
+    #[test]
+    fn probe_string_fields_are_interpolated() {
+        let mut ctx = crate::variables::VariableContext::new();
+        ctx.set_var("health_path", "/healthz".to_owned());
+        ctx.set_var("probe_cmd", "pg_isready -h localhost".to_owned());
+
+        let hc: HealthCheck = serde_json::from_str(
+            r#"{
+                "type": "http",
+                "path": "${vars.health_path}"
+            }"#,
+        )
+        .unwrap();
+        let resolved = hc.interpolate(&ctx).unwrap();
+        assert_eq!(resolved.path.as_deref(), Some("/healthz"));
+
+        let cmd_hc: HealthCheck =
+            serde_json::from_str(r#"{ "type": "command", "shell": "${vars.probe_cmd}" }"#).unwrap();
+        let resolved = cmd_hc.interpolate(&ctx).unwrap();
+        assert_eq!(
+            resolved.cmd.shell.as_deref(),
+            Some("pg_isready -h localhost")
+        );
     }
 
     // -- Action config tests ---------------------------------------------------

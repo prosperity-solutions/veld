@@ -584,6 +584,19 @@ Declare `env` at the project, node, or variant level. Variables cascade: variant
 }
 ```
 
+**The veld-owned environment** — `VELD_RUN`, `VELD_RUN_ID`, `VELD_ROOT`,
+`VELD_PROJECT`, `VELD_NODE`, `VELD_VARIANT`, plus `VELD_PORT`/`VELD_URL`/
+`VELD_PORT_<NAME>`/`VELD_URL_<NAME>`/`VELD_HOST_<NAME>` on a `long_running` node
+with ports — is injected on **every** surface of a node: the node's process, its
+readiness and liveness probes, its `on_stop` hook, and `veld action`. A
+`command` probe and an `action` also receive the node's declared `env` (and the
+probe gets the node's outputs as `$KEY`). Probe fields (`path`, `argv`/`shell`)
+are interpolated with the node's context, and a failing `command` probe's stderr
+and exit code appear in the health error. An `on_stop` hook resolves
+`${nodes.<node>.<field>}` cross-node references at stop time, and is skipped
+loudly — never run with an empty env — if its command or environment cannot be
+resolved.
+
 ### Outputs
 
 For `long_running` variants — object (synthetic templates):

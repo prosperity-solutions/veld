@@ -120,6 +120,7 @@ attached to. Inside `command` you can reference:
 - `${output.KEY}` — the same outputs, interpolated by Veld into the command string before it runs
 - `${param.KEY}` — the action's static `parameters`
 - `${veld.run}`, `${veld.node}`, `${veld.project}`, `${veld.root}`, `${veld.port}`, `${veld.url}`
+- The node's declared `env` (as `$KEY`, below the outputs in precedence) and the veld-owned `VELD_*` variables (`VELD_RUN`, `VELD_ROOT`, `VELD_NODE`, `VELD_VARIANT`, `VELD_PROJECT`, and the port/url/host family) — so an action can read the `CONTAINER_NAME` its node was started with
 
 > **Secrets — `$KEY` is better than `${output.KEY}`, but it is not automatically
 > safe.** `${output.DB_PASS}` is interpolated by Veld into the command string, so
