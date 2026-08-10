@@ -21,6 +21,7 @@ import {
   gitCreateFrom,
   hideDisabledActions,
   logsTimeZone,
+  stalenessHue,
   markerFace,
   markerStyle,
   quickSwitchPrefs,
@@ -4917,13 +4918,30 @@ function TopBar(props: {
                     aria-label="Update main"
                   >
                     <IconRefreshDot size={14} />
-                    {props.gitStatus.behind > 0 && (
-                      <span className="git-sync-badge" aria-hidden="true">
-                        {props.gitStatus.behind > 99 ? "99+" : props.gitStatus.behind}
-                      </span>
-                    )}
                   </ActionIcon>
                 </Tooltip>
+                {/* A sibling of the button, not a child: the ActionIcon clips its
+                    own overflow, and a pill that straddles the button's corner was
+                    cut off by its border. Positioned against the `.git-sync-btn`
+                    wrapper instead, so it is fully visible. Colour is the severity
+                    curve (green→orange→red) from how far and how long the main
+                    checkout has drifted. */}
+                {props.gitStatus.behind > 0 && (
+                  <span
+                    className="git-sync-badge"
+                    aria-hidden="true"
+                    style={{
+                      background: `hsl(${stalenessHue(
+                        props.gitStatus.behind,
+                        props.gitStatus.latest_commit != null
+                          ? Math.max(0, Date.now() / 1000 - props.gitStatus.latest_commit)
+                          : 0,
+                      )} 70% 45%)`,
+                    }}
+                  >
+                    {props.gitStatus.behind > 99 ? "99+" : props.gitStatus.behind}
+                  </span>
+                )}
               </span>
             )}
           {canRun && props.startConfig}

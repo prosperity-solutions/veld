@@ -377,6 +377,23 @@ export function gitCreateFrom(doc: SettingsDoc): GitCreateFrom {
 }
 
 /**
+ * The hue for the "update main" staleness pill, green → orange → red.
+ *
+ * Mixed from two facts the daemon exposes: how many commits the main checkout is
+ * behind, and how old the newest missing commit is. Few-and-recent is green;
+ * many-and-old is red; a single 200-commit-a-week-ago branch is far more urgent
+ * than one commit from this morning, and neither fact alone captures that.
+ * Pure so it is testable and so a future extension badge can reuse the curve.
+ */
+export function stalenessHue(behind: number, ageSeconds: number): number {
+  const countFactor = Math.min(behind / 25, 1);
+  const ageFactor = Math.min(ageSeconds / (14 * 86_400), 1);
+  const score = 0.5 * countFactor + 0.5 * ageFactor;
+  // 140 is green, 0 is red; the linear sweep passes through orange (~30).
+  return Math.round(140 * (1 - score));
+}
+
+/**
  * Origins that open in the system browser instead of a pane — the global half of
  * the exempt list, unioned with the project's `ide.externalOrigins`.
  *

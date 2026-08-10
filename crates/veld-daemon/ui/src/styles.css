@@ -421,9 +421,10 @@ body[data-fullscreen="true"] .topbar.electron {
 }
 
 /* The "update main" button: how far the main checkout is behind origin, as a
-   count pill on the control's corner. Text colour is `--bg` so it flips with
-   the theme — accent is bright in the dark theme (dark text) and darker in the
-   light theme (light text). */
+   count pill on the control's corner. The pill is a sibling of the button
+   (positioned against this wrapper, which does not clip) so it straddles the
+   corner fully visible, and its background is set inline from the severity
+   curve (green→orange→red); white text holds on every hue at that lightness. */
 .git-sync-btn {
   position: relative;
   display: inline-flex;
@@ -436,8 +437,7 @@ body[data-fullscreen="true"] .topbar.electron {
   height: 15px;
   padding: 0 4px;
   border-radius: 8px;
-  background: var(--accent);
-  color: var(--bg);
+  color: #fff;
   border: 1px solid var(--panel2);
   font-size: 9px;
   font-weight: 700;

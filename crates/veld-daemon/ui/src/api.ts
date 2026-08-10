@@ -481,6 +481,9 @@ export interface RepoGitStatus {
   default_branch: string | null;
   /** Commits in `origin/<default>` not in the local `<default>`. */
   behind: number | null;
+  /** Unix seconds of the newest commit the main checkout is missing — mixed
+   *  with `behind` to colour the staleness pill. */
+  latest_commit: number | null;
 }
 
 /**

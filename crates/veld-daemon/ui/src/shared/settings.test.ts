@@ -13,6 +13,7 @@ import {
   terminalPrefs,
   hideDisabledActions,
   gitCreateFrom,
+  stalenessHue,
 } from "./settings";
 
 describe("terminalPrefs", () => {
@@ -208,6 +209,25 @@ describe("gitCreateFrom", () => {
         gitCreateFrom({ "git.createFrom": bad as unknown as string }),
       ).toBe("origin");
     }
+  });
+});
+
+describe("stalenessHue", () => {
+  it("is green for few-and-recent and red for many-and-old", () => {
+    // 1 commit from this morning → near-green.
+    expect(stalenessHue(1, 60 * 60 * 4)).toBeGreaterThan(100);
+    // 200 commits, three weeks stale → red.
+    expect(stalenessHue(200, 21 * 86_400)).toBeLessThan(20);
+  });
+
+  it("mixes count and age — a big pile is urgent even if recent", () => {
+    // 200 commits, all from today: still far more red than one commit today.
+    expect(stalenessHue(200, 0)).toBeLessThan(stalenessHue(1, 0));
+  });
+
+  it("clamps so extreme values stay on the scale", () => {
+    expect(stalenessHue(1000, 999 * 86_400)).toBeGreaterThanOrEqual(0);
+    expect(stalenessHue(0, 0)).toBeLessThanOrEqual(140);
   });
 });
 

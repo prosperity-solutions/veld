@@ -907,6 +907,12 @@ struct RepoGitStatus {
     /// cannot be computed (no remote, or `origin/<default>` has never been
     /// fetched). `0` is a real, current answer.
     behind: Option<i64>,
+    /// Unix seconds of the **newest** commit the main checkout is missing — the
+    /// latest thing in `origin/<default>` it does not have yet. `None` when it
+    /// cannot be computed (or when `behind` is `0`, where there is nothing to
+    /// be behind on). The UI mixes this with [`Self::behind`] to colour the
+    /// staleness pill — few-and-recent is green, many-and-old is red.
+    latest_commit: Option<i64>,
 }
 
 #[derive(Serialize)]
@@ -1296,9 +1302,24 @@ async fn repo_git_status(db: &Db, repo_root: &FsPath) -> RepoGitStatus {
     .await
     .ok()
     .and_then(|s| s.trim().parse::<i64>().ok());
+    // Committer timestamp (`%ct`, seconds since epoch) of the newest commit in
+    // the same range — the most recent thing the main checkout is missing.
+    let latest_commit = git(
+        repo_root,
+        &[
+            "log",
+            "-1",
+            "--format=%ct",
+            &format!("{default_branch}..origin/{default_branch}"),
+        ],
+    )
+    .await
+    .ok()
+    .and_then(|s| s.trim().parse::<i64>().ok());
     RepoGitStatus {
         default_branch: Some(default_branch),
         behind,
+        latest_commit,
     }
 }
 
@@ -3084,6 +3105,18 @@ mod tests {
             status.behind,
             Some(1),
             "main is one commit behind origin/main"
+        );
+        // The newest missing commit is the one we just pushed, so it must be
+        // present and recent — the age is what the UI colours the pill with.
+        let latest = status.latest_commit.expect("newest missing commit");
+        let age = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+            - latest;
+        assert!(
+            age < 600,
+            "commit B was just made, so the newest missing commit should be recent (age {age}s)"
         );
     }
 }
