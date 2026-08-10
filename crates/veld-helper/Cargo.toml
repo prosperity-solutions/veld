@@ -21,6 +21,7 @@ thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 nix.workspace = true
+libc = "0.2"
 reqwest.workspace = true
 
 [dev-dependencies]

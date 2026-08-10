@@ -52,6 +52,11 @@ struct HelperConfig {
     http_port: u16,
     /// Override the Caddy binary path (avoids lib_dir() resolution issues under sudo).
     caddy_bin: Option<PathBuf>,
+    /// When set, only this uid (and root, uid 0 — privileged setup connects as
+    /// root to verify the socket) may drive this helper over its socket. Only
+    /// the privileged system daemon is given one; an unprivileged helper relies
+    /// on its 0o700 owner-only socket instead.
+    allow_uid: Option<u32>,
 }
 
 fn default_socket_path() -> PathBuf {
@@ -68,6 +73,7 @@ fn parse_args() -> Result<HelperConfig> {
     let mut https_port: u16 = 443;
     let mut http_port: u16 = 80;
     let mut caddy_bin: Option<PathBuf> = None;
+    let mut allow_uid: Option<u32> = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -100,6 +106,11 @@ fn parse_args() -> Result<HelperConfig> {
                 let path = args.get(i).context("--caddy-bin requires a value")?;
                 caddy_bin = Some(PathBuf::from(path));
             }
+            "--allow-uid" => {
+                i += 1;
+                let value = args.get(i).context("--allow-uid requires a value")?;
+                allow_uid = Some(value.parse().context("--allow-uid must be a numeric uid")?);
+            }
             other => anyhow::bail!("unknown argument: {other}"),
         }
         i += 1;
@@ -110,6 +121,7 @@ fn parse_args() -> Result<HelperConfig> {
         https_port,
         http_port,
         caddy_bin,
+        allow_uid,
     })
 }
 
@@ -274,6 +286,34 @@ async fn main() -> Result<()> {
             result = listener.accept() => {
                 match result {
                     Ok((stream, _addr)) => {
+                        // Peer-credential gate, applied to the *privileged* system
+                        // daemon only (the one with `--allow-uid`). The socket is
+                        // world-writable (0o777) so the unprivileged CLI can connect,
+                        // which means *any* local process can currently drive a root
+                        // helper — including `shutdown`, which stops Caddy and drops
+                        // every live URL. The kernel attests the connecting process's
+                        // uid at connect time, so this cannot be spoofed by holding the
+                        // socket open. Only the installing user (and root, which
+                        // privileged setup connects as to verify the socket) is allowed.
+                        if let Some(allowed) = config.allow_uid {
+                            match peer_uid(&stream) {
+                                Some(uid) if peer_allowed(uid, allowed) => {}
+                                Some(uid) => {
+                                    warn!(
+                                        peer_uid = uid,
+                                        allowed_uid = allowed,
+                                        "rejecting connection from untrusted uid on privileged helper socket"
+                                    );
+                                    reject_connection(stream).await;
+                                    continue;
+                                }
+                                None => {
+                                    warn!("could not read peer uid; rejecting connection on privileged helper socket");
+                                    reject_connection(stream).await;
+                                    continue;
+                                }
+                            }
+                        }
                         let state = Arc::clone(&state);
                         tokio::spawn(async move {
                             if let Err(e) = handle_connection(stream, state).await {
@@ -343,6 +383,83 @@ impl SignalStream {
             let _ = tokio::signal::ctrl_c().await;
         }
     }
+}
+
+/// The effective uid of the process that opened `stream`. On macOS this is
+/// `getpeereid`; on Linux, `SO_PEERCRED`. The kernel fills these from the
+/// connecting process's identity at connect time, so a peer cannot fake them
+/// by arranging to hold the socket open. `None` when the platform has no such
+/// primitive or the call fails — the caller must treat that as a rejection,
+/// never as "allow".
+fn peer_uid(stream: &tokio::net::UnixStream) -> Option<u32> {
+    use std::os::unix::io::AsRawFd;
+    peer_uid_fd(stream.as_raw_fd())
+}
+
+/// Whether a peer with `peer` uid may drive a helper whose `--allow-uid` is
+/// `allowed`. Root (uid 0) is always permitted: privileged setup connects as
+/// root to verify the socket, and a process that is already root needs no
+/// further privilege from this helper.
+fn peer_allowed(peer: u32, allowed: u32) -> bool {
+    peer == 0 || peer == allowed
+}
+
+/// The effective uid of the process that opened the socket on `fd`. On macOS
+/// this is `getpeereid`; on Linux, `SO_PEERCRED`. The kernel fills these from
+/// the connecting process's identity at connect time, so a peer cannot fake
+/// them by arranging to hold the socket open. `None` when the platform has no
+/// such primitive or the call fails — the caller must treat that as a
+/// rejection, never as "allow".
+fn peer_uid_fd(fd: i32) -> Option<u32> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut uid: libc::uid_t = 0;
+        let mut gid: libc::gid_t = 0;
+        // Safe: getpeereid writes into the two out-params and returns 0 on
+        // success; the raw fd is owned by the caller, which outlives this call.
+        if unsafe { libc::getpeereid(fd, &mut uid, &mut gid) } == 0 {
+            Some(uid)
+        } else {
+            None
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
+        let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+        // Safe: getsockopt fills `cred` (a properly sized out-param) and the
+        // raw fd is owned by the caller, which outlives this call.
+        let rc = unsafe {
+            libc::getsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_PEERCRED,
+                &mut cred as *mut libc::ucred as *mut libc::c_void,
+                &mut len,
+            )
+        };
+        if rc == 0 { Some(cred.uid) } else { None }
+    }
+    // The helper only targets macOS and Linux; on any other unix there is no
+    // kernel-attested peer identity we can read, so report "unknown" and let
+    // the caller reject rather than open the door.
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = fd;
+        None
+    }
+}
+
+/// Best-effort refusal on a rejected connection, then drop it. The peer is not
+/// trusted, so this is only for diagnosis (e.g. a legitimately misconfigured
+/// setup whose uid no longer matches the plist) — it must never be relied on by
+/// the client, which treats a dropped connection as a failure.
+async fn reject_connection(stream: tokio::net::UnixStream) {
+    use tokio::io::AsyncWriteExt;
+    let mut stream = stream;
+    let _ = stream
+        .write_all(b"{\"ok\":false,\"error\":\"permission denied: untrusted peer uid\"}\n")
+        .await;
 }
 
 /// Poll the helper's own executable; when its size/mtime changes and settles,
@@ -544,4 +661,38 @@ async fn handle_connection(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::peer_allowed;
+    use std::os::unix::io::AsRawFd;
+    use std::os::unix::net::UnixStream;
+
+    /// The peer-credential gate's policy, as pure logic.
+    #[test]
+    fn gate_allows_only_the_installing_user_and_root() {
+        const INSTALLING: u32 = 501;
+        // The installing user is allowed.
+        assert!(peer_allowed(INSTALLING, INSTALLING));
+        // Root is always allowed — privileged setup connects as root to verify
+        // the socket, and a root process needs nothing this helper could give it.
+        assert!(peer_allowed(0, INSTALLING));
+        // Any other uid is rejected.
+        assert!(!peer_allowed(502, INSTALLING));
+        // A root helper whose --allow-uid is root-only still allows root.
+        assert!(peer_allowed(0, 0));
+    }
+
+    /// The kernel-attested peer uid of a same-process peer is this process's
+    /// own effective uid — proving the primitive reads a real identity rather
+    /// than a constant.
+    #[test]
+    fn peer_uid_reads_the_connecting_process_identity() {
+        let (a, b) = UnixStream::pair().unwrap();
+        let me = unsafe { libc::geteuid() };
+        // Each end's peer is this same process.
+        assert_eq!(super::peer_uid_fd(a.as_raw_fd()), Some(me));
+        assert_eq!(super::peer_uid_fd(b.as_raw_fd()), Some(me));
+    }
 }
