@@ -7,6 +7,7 @@ members = [
     "crates/veld-share",
     "crates/veld-stats",
     "crates/veld-gateway",
+    "crates/veld-sign",
 ]
 resolver = "2"
 
@@ -51,6 +52,7 @@ reqwest = { version = "0.12", features = ["rustls-tls", "json"], default-feature
 # enabled feature turns on, so they are recorded but never compiled or linked.
 x509-cert = { version = "0.3", default-features = false, features = ["std"] }
 sha2 = "0.10"
+ed25519-dalek = "2"
 base64 = "0.22"
 petname = "2"
 indicatif = "0.17"

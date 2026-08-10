@@ -1,0 +1,15 @@
+[package]
+name = "veld-sign"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Sign veld helper binaries with the org ed25519 key (CI release tool)"
+
+[[bin]]
+name = "veld-sign"
+path = "src/main.rs"
+
+[dependencies]
+ed25519-dalek = { workspace = true, features = ["pkcs8", "pem"] }

@@ -2,6 +2,7 @@ mod caddy;
 mod dns;
 mod handler;
 mod protocol;
+mod signing;
 mod sleep;
 
 use std::path::{Path, PathBuf};
@@ -187,6 +188,9 @@ async fn main() -> Result<()> {
         config.http_port,
         config.caddy_bin,
         shutdown_tx,
+        // The privileged system daemon (root) is the only one the swap-relaunch
+        // signing gate protects; an unprivileged user helper relaunches as the
+        // user and needs no signature to shut down.
         is_system_socket(&config.socket_path),
     ));
 
@@ -535,9 +539,9 @@ async fn watch_own_binary() {
 /// the same reasons — the `restart` caller gets the string back and can fall
 /// back instead of guessing why nothing happened.
 ///
-/// Both checks are "refuse unless proven safe": a query that fails or times out
-/// blocks the exit, because staying on an old binary is recoverable and exiting
-/// into a hole is not.
+/// Every check here is "refuse unless proven safe": a query that fails or times
+/// out blocks the exit, because staying on an old binary is recoverable and
+/// exiting into a hole is not.
 pub(crate) async fn restart_blocker() -> Option<String> {
     if !service_manager_owns_us().await {
         return Some(
@@ -553,6 +557,13 @@ pub(crate) async fn restart_blocker() -> Option<String> {
             "the binary at {} does not execute yet",
             exe.display()
         ));
+    }
+    // The on-disk binary must carry a valid org signature (the fail-closed
+    // signing gate from #261): relaunching onto a swapped, unsigned binary is
+    // the #247 escalation. Shared by the watcher and the `restart` command so
+    // neither can exit onto a binary the other refuses.
+    if let Some(reason) = signing::relaunch_guard(&exe) {
+        return Some(reason);
     }
     None
 }
