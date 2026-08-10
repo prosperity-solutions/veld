@@ -4569,6 +4569,7 @@ name = "veld-helper"
 version = "16.49.1"
 dependencies = [
  "anyhow",
+ "libc",
  "nix 0.29.0",
  "reqwest 0.12.28",
  "serde",
