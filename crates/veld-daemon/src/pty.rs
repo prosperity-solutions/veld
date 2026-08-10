@@ -41,7 +41,9 @@
 //! mean any page in any tab could run `new WebSocket("ws://127.0.0.1:19899/…")`
 //! and get a shell on the user's machine. "It's only on loopback" was never
 //! the mitigation, and it isn't one here: the helper also publishes this
-//! daemon at `https://veld.localhost` (`crates/veld-helper/src/caddy.rs`).
+//! daemon at `veld.localhost` (`crates/veld-helper/src/caddy.rs`) — over HTTP
+//! as well as HTTPS, since one Caddy server block owns both listeners. See
+//! [`management_ports`] for what that means for the allowlist.
 //!
 //! Two independent gates replace the one that doesn't apply:
 //!
@@ -1801,6 +1803,169 @@ fn project_external_origins(
 // Origin allowlist
 // ---------------------------------------------------------------------------
 
+/// The ports the helper's Caddy is listening on, once it has told us.
+///
+/// **The allowlist cannot ask.** [`origin_allowed`] is synchronous and runs on an
+/// upgrade; the helper is a unix-socket round trip. So the daemon learns the pair
+/// on its own timer ([`track_helper_ports`]) and this is where the answer waits.
+/// `None` until the first successful status — see [`dashboard_ports`] for what
+/// stands in until then.
+static HELPER_WEB_PORTS: std::sync::RwLock<Option<(u16, u16)>> = std::sync::RwLock::new(None);
+
+/// Keep [`HELPER_WEB_PORTS`] current. Spawned once by the daemon at startup.
+///
+/// **Polls rather than reading once, because of the order `veld setup` does
+/// things in.** It reinstalls (and so restarts) the daemon in step 4, installs the
+/// helper in step 5, and writes the new mode to `setup.json` after that
+/// (`veld/src/commands/setup/privileged.rs`) — so a fresh daemon's first look at
+/// the world finds no helper and a mode file that still describes the *previous*
+/// setup, or none at all. A value read once at boot would therefore be wrong for
+/// the whole life of that daemon, and being wrong here means refusing every
+/// upgrade the dashboard makes, silently.
+///
+/// What this does **not** need to cover, stated because the obvious reading is
+/// that it does: nothing ships a way to move a machine's ports without restarting
+/// this process. Both setup commands go through `install_daemon`. So the long
+/// interval is a cheap re-check, and the short one is the half that matters.
+pub async fn track_helper_ports() {
+    // Faster while nothing is known (a cold boot races the helper's own start),
+    // then slow: this is a status call on a unix socket, not free, and the answer
+    // changes only when someone re-runs `veld setup`.
+    const UNKNOWN: Duration = Duration::from_secs(5);
+    const KNOWN: Duration = Duration::from_secs(60);
+    loop {
+        let mut learned = false;
+        if let Ok(helper) = veld_core::helper::HelperClient::connect().await
+            && let Ok(Some(ports)) = helper.web_ports().await
+        {
+            learned = true;
+            let changed = *HELPER_WEB_PORTS.read().expect("helper ports poisoned") != Some(ports);
+            if changed {
+                info!(
+                    https = ports.0,
+                    http = ports.1,
+                    "dashboard ports, from the helper"
+                );
+                *HELPER_WEB_PORTS.write().expect("helper ports poisoned") = Some(ports);
+            }
+        }
+        tokio::time::sleep(if learned { KNOWN } else { UNKNOWN }).await;
+    }
+}
+
+/// The HTTPS and HTTP ports the dashboard is served on.
+///
+/// The helper's answer when there is one, because the setup mode and the helper
+/// **can disagree** — a helper started by hand, a `veld setup privileged` that
+/// died after writing the mode file, or a stray user helper on the high pair while
+/// the privileged LaunchDaemon is down, which `veld doctor` has a check for. The
+/// mode is the fallback for the window before the first status lands, and for a
+/// daemon running with no helper at all.
+fn dashboard_ports() -> (u16, u16) {
+    if let Some(ports) = *HELPER_WEB_PORTS.read().expect("helper ports poisoned") {
+        return ports;
+    }
+    ports_for_mode(veld_core::setup::read_setup_mode().as_deref())
+}
+
+/// The pair a given setup mode puts in front.
+///
+/// Split out so the mapping is testable without a `~/.veld/setup.json` on the
+/// machine running the test. Every failure to read that file — absent, mid-write,
+/// unparseable, an unknown mode, a `HOME` that is not the user's — collapses to
+/// `None` here and takes the privileged pair, which is the conservative answer:
+/// those ports are root-only, so trusting an origin on one cannot hand anything to
+/// a process that merely happens to be running.
+fn ports_for_mode(mode: Option<&str>) -> (u16, u16) {
+    match mode {
+        // `veld setup unprivileged`, and the auto-bootstrap that writes
+        // `{"mode":"auto"}` — both run Caddy on the high pair.
+        Some("unprivileged") | Some("auto") => (
+            veld_core::instance::UNPRIVILEGED_HTTPS_PORT,
+            veld_core::instance::UNPRIVILEGED_HTTP_PORT,
+        ),
+        _ => (443, 80),
+    }
+}
+
+/// The scheme/port pairs a management hostname may be reached at.
+///
+/// **HTTP as well as HTTPS, and that is not a concession.** One Caddy server block
+/// listens on both ports (`veld-helper/src/caddy.rs`), which is how Caddy is told
+/// not to install its automatic HTTP→HTTPS redirects — so `http://veld.localhost`
+/// is a fully served surface, not a mistake, and a browser that lands there (Chrome
+/// does not HTTPS-upgrade a loopback host you type) got a dashboard whose every
+/// WebSocket was refused: 229 rejected upgrades in one session's daemon log, with
+/// nothing on screen saying why, because a browser cannot read a failed
+/// handshake's status.
+///
+/// **The plaintext half only on a root-only port.** Not because a plaintext origin
+/// is weaker in itself — the name resolves on loopback, so nothing is on the path —
+/// but because an origin is only as trustworthy as the port it names: a port in the
+/// unprivileged range that Caddy is not currently bound to (before the helper
+/// starts, during a `veld update`, after a crash) can be bound by any process on
+/// the machine, which then serves a page holding an allowlisted origin and can
+/// reverse-proxy `/api` to make [`mint_ticket`]'s header check same-origin.
+///
+/// The limit of that rule, since it is a number standing in for a property:
+/// `port < 1024` means root-only on macOS, and on Linux it is one writable
+/// `sysctl net.ipv4.ip_unprivileged_port_start` (or a `CAP_NET_BIND_SERVICE` on any
+/// binary) away from meaning nothing. It is still the best test available here —
+/// the helper reports which ports it is *configured* for, not which are bound — and
+/// the window it leaves needs Caddy to be down on a machine whose sysctl has been
+/// lowered.
+///
+/// This costs the no-sudo install a plaintext dashboard origin on 18080. Caddy does
+/// serve the dashboard there, and nothing advertises it (`veld ui`, the share join
+/// base, `veld doctor` and the setup tip all print `https://…:18443`), so nobody
+/// arrives by typing a hostname — which was the whole reason the plaintext surface
+/// mattered. A page that *does* arrive there is now told rather than left to
+/// wonder: no control socket means the UI's channel banner
+/// (`CHANNEL_DOWN_NOTICE_MS` in `ui/src/App.tsx`) says so on screen.
+///
+/// Stated plainly, because the first version of this comment overclaimed: the
+/// `Origin` gate defends against a **browser-mediated** attacker only. A local
+/// process can set any `Origin` it likes on a handcrafted upgrade, and
+/// `mint_ticket`'s CSRF check is header-presence, not origin — so a local attacker
+/// never needed a squatted port. What the narrowing removes is a page in the user's
+/// *own browser* being handed the dashboard's authority.
+fn management_ports() -> Vec<(&'static str, u16)> {
+    let (https, http) = dashboard_ports();
+    management_ports_from(https, http)
+}
+
+/// [`management_ports`] with the pair passed in — the whole of the rule, without
+/// the helper or the filesystem.
+fn management_ports_from(https: u16, http: u16) -> Vec<(&'static str, u16)> {
+    let mut ports = vec![("https", https)];
+    if http < 1024 {
+        ports.push(("http", http));
+    }
+    ports
+}
+
+/// The origins one management hostname can legitimately be reached at.
+fn management_origins(host: &str) -> Vec<String> {
+    management_origins_for(host, &management_ports())
+}
+
+/// [`management_origins`] with the ports passed in, which is the whole of the
+/// formatting rule and the half worth testing.
+///
+/// Exact pairs, never a cross product: nothing serves HTTPS on the HTTP port, so
+/// `http://veld.localhost:18443` is not an origin any page can have and does not
+/// belong on an allowlist. The default port for the scheme is omitted, because
+/// that is how a browser serialises it.
+fn management_origins_for(host: &str, ports: &[(&str, u16)]) -> Vec<String> {
+    ports
+        .iter()
+        .map(|(scheme, port)| match (*scheme, *port) {
+            ("https", 443) | ("http", 80) => format!("{scheme}://{host}"),
+            _ => format!("{scheme}://{host}:{port}"),
+        })
+        .collect()
+}
+
 /// Origins allowed to open a terminal socket.
 ///
 /// Built per request rather than cached: it is a handful of `format!`s on a
@@ -1823,12 +1988,30 @@ fn allowed_origins_with(dev_origins: Vec<String>) -> Vec<String> {
         format!("http://127.0.0.1:{port}"),
         format!("http://localhost:{port}"),
         format!("http://[::1]:{port}"),
-        // The installed instance's Caddy route (veld-helper's base config).
-        "https://veld.localhost".to_owned(),
     ];
+    // The installed instance's Caddy route (veld-helper's base config).
+    origins.extend(management_origins(veld_core::instance::MANAGEMENT_HOST));
     // A dev instance registers its own management hostname with the helper.
+    //
+    // **The plaintext half only for a `.localhost` name.** `management_host`
+    // accepts any hostname-shaped value, so `VELD_MANAGEMENT_HOST=dev.example.com`
+    // would otherwise put `http://dev.example.com` on the allowlist — an origin an
+    // on-path attacker on the developer's network can serve, where the `https` one
+    // needs that name's key. A `.localhost` name resolves on loopback and cannot be
+    // reached from off the machine, which is what makes dropping the scheme safe
+    // for the dashboard's own host.
     if let Some(host) = veld_core::instance::management_host() {
-        origins.push(format!("https://{host}"));
+        // ASCII-lowered because `management_host` accepts uppercase, and a
+        // case-sensitive suffix test would send `Dev.LOCALHOST` down the
+        // treat-as-remote branch.
+        let local = host.to_ascii_lowercase().ends_with(".localhost");
+        let (https, _) = dashboard_ports();
+        let ports = if local {
+            management_ports()
+        } else {
+            vec![("https", https)]
+        };
+        origins.extend(management_origins_for(&host, &ports));
     }
     // The vite dev server proxies /api (including this upgrade) to the daemon
     // it was pointed at, so the browser's Origin is vite's, not ours. Trust it
@@ -1869,6 +2052,23 @@ pub(super) fn origin_allowed(headers: &HeaderMap) -> bool {
     allowed_origins().iter().any(|a| a == origin)
 }
 
+/// Log a refused upgrade, with the list it was refused against.
+///
+/// **The allowlist goes in the log, and it has to.** The response cannot say
+/// anything — a browser will not show a failed handshake's status, let alone a
+/// body — so this line is the only account of a refusal that exists. Terse was
+/// the rule and it produced 229 identical lines naming an origin that *looked*
+/// right, with no way to see that the list had a different scheme in it. The
+/// daemon's own log is not a disclosure channel: reading it already means reading
+/// the user's files.
+pub(super) fn log_rejected_origin(what: &str, headers: &HeaderMap) {
+    warn!(
+        origin = ?headers.get(header::ORIGIN),
+        allowed = ?allowed_origins(),
+        "rejected {what} from a disallowed origin"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Attach
 // ---------------------------------------------------------------------------
@@ -1889,12 +2089,9 @@ async fn attach(
     Query(q): Query<AttachQuery>,
 ) -> Response {
     if !origin_allowed(&headers) {
-        // Deliberately terse: an attacker learns nothing about the allowlist,
-        // and a developer sees the real origin in the daemon log.
-        warn!(
-            origin = ?headers.get(header::ORIGIN),
-            "rejected terminal upgrade from a disallowed origin"
-        );
+        // The response stays terse — an attacker learns nothing from it, and a
+        // browser could not read it anyway. The log carries the diagnosis.
+        log_rejected_origin("terminal upgrade", &headers);
         return (StatusCode::FORBIDDEN, "origin not allowed").into_response();
     }
 
@@ -3220,17 +3417,12 @@ mod tests {
 
     #[test]
     fn origin_must_be_present_and_exact() {
-        let allowed = allowed_origins();
-        let installed = "https://veld.localhost";
-        assert!(allowed.iter().any(|o| o == installed));
-
         let origin_of = |v: &str| {
             let mut h = HeaderMap::new();
             h.insert(header::ORIGIN, v.parse().unwrap());
             h
         };
 
-        assert!(origin_allowed(&origin_of(installed)));
         // Absent Origin fails closed — the whole point of the gate.
         assert!(!origin_allowed(&HeaderMap::new()));
         // Substring and suffix tricks must not pass an exact-match check.
@@ -3238,8 +3430,89 @@ mod tests {
             "https://veld.localhost.evil.com"
         )));
         assert!(!origin_allowed(&origin_of("https://evil.veld.localhost")));
-        assert!(!origin_allowed(&origin_of("http://veld.localhost")));
         assert!(!origin_allowed(&origin_of("null")));
+        // A port no mode serves, in either scheme.
+        assert!(!origin_allowed(&origin_of("https://veld.localhost:8443")));
+        assert!(!origin_allowed(&origin_of("http://veld.localhost:8080")));
+
+        // **Every origin the dashboard is actually served at.** Asked for through
+        // `management_origins` rather than written out, because the answer depends
+        // on this machine's helper and `~/.veld/setup.json` — a test that hardcoded
+        // 443 would pass on CI and fail on a no-sudo install. Which ports those are
+        // is pinned in `the_port_fallback_follows_the_setup_mode`, and which schemes
+        // in `the_plaintext_origin_is_only_trusted_on_port_80`.
+        let host = veld_core::instance::MANAGEMENT_HOST;
+        let served = management_origins(host);
+        assert!(!served.is_empty());
+        for origin in &served {
+            assert!(
+                origin_allowed(&origin_of(origin)),
+                "the dashboard's own origin {origin} must be allowed — over plaintext \
+                 too where that is a served surface (see `management_ports`), whose \
+                 refusal cost a whole session's terminals and worktree arbitration"
+            );
+            assert!(allowed_origins().iter().any(|o| o == origin));
+        }
+        assert!(served.iter().any(|o| o.starts_with("https://")));
+    }
+
+    /// Which ports each setup mode puts in front.
+    ///
+    /// The mapping is the fallback for "the helper has not answered yet", and it is
+    /// pinned separately from the formatting because it is the half that decides
+    /// *what is trusted* — see `the_plaintext_origin_is_only_trusted_on_port_80`.
+    #[test]
+    fn the_port_fallback_follows_the_setup_mode() {
+        let hi = veld_core::instance::UNPRIVILEGED_HTTPS_PORT;
+        let lo = veld_core::instance::UNPRIVILEGED_HTTP_PORT;
+        for mode in [Some("unprivileged"), Some("auto")] {
+            assert_eq!(ports_for_mode(mode), (hi, lo), "the no-sudo pair");
+        }
+        // Privileged, unset, and anything unrecognised: the pair Caddy owns as
+        // root. Every way of failing to read `setup.json` arrives here as `None`,
+        // and this is the answer that trusts an origin nothing can squat.
+        for mode in [Some("privileged"), None, Some("something-new")] {
+            assert_eq!(ports_for_mode(mode), (443, 80), "mode {mode:?}");
+        }
+    }
+
+    /// The plaintext origin is trusted **only** on a root-only port.
+    ///
+    /// Listing the unprivileged pair's HTTP port was the first version of this fix
+    /// and it opens a window: Caddy is not bound to 18080 before the helper starts,
+    /// during a `veld update`, or after a crash, and `veld.localhost` resolves to
+    /// loopback — so any process could bind it, serve a page holding an allowlisted
+    /// origin, and reverse-proxy `/api` to make `mint_ticket`'s header check
+    /// same-origin. 443/80 cannot be taken that way without root — see
+    /// `management_ports` for what that claim rests on. Two review angles found the
+    /// unconditional version independently.
+    #[test]
+    fn the_plaintext_origin_is_only_trusted_on_port_80() {
+        let host = veld_core::instance::MANAGEMENT_HOST;
+        let hi = veld_core::instance::UNPRIVILEGED_HTTPS_PORT;
+        let lo = veld_core::instance::UNPRIVILEGED_HTTP_PORT;
+
+        // Privileged: both schemes, ports omitted the way a browser serialises
+        // them. `http://veld.localhost` is the origin whose refusal cost a whole
+        // session's terminals and worktree arbitration.
+        assert_eq!(
+            management_origins_for(host, &management_ports_from(443, 80)),
+            vec![format!("https://{host}"), format!("http://{host}")]
+        );
+
+        // No-sudo: HTTPS only. Nothing advertises the plaintext high port, so this
+        // costs a URL nobody arrives at by typing a hostname.
+        assert_eq!(
+            management_origins_for(host, &management_ports_from(hi, lo)),
+            vec![format!("https://{host}:{hi}")]
+        );
+
+        // Exact pairs, never a cross product: nothing serves HTTPS on the HTTP port
+        // or the other way round, so neither crossing may appear.
+        let unprivileged = management_origins_for(host, &management_ports_from(hi, lo));
+        assert!(!unprivileged.contains(&format!("http://{host}:{hi}")));
+        assert!(!unprivileged.contains(&format!("https://{host}:{lo}")));
+        assert!(!unprivileged.contains(&format!("http://{host}:{lo}")));
     }
 
     #[test]
@@ -3272,8 +3545,13 @@ mod tests {
             allowed.contains(&dev),
             "the dev origin never reached the list"
         );
-        // …and the base list is still there beside it.
-        assert!(allowed.iter().any(|o| o == "https://veld.localhost"));
+        // …and the base list is still there beside it. Asked for by the same
+        // function the runtime uses, because which port the dashboard is on depends
+        // on this machine's helper and setup mode — see
+        // `the_port_fallback_follows_the_setup_mode`.
+        for origin in management_origins(veld_core::instance::MANAGEMENT_HOST) {
+            assert!(allowed.contains(&origin));
+        }
         // A value NOT handed in is still not trusted — the extension must be
         // exactly what it was given, not a widening.
         assert!(!allowed.contains(&"https://other.veld.localhost".to_owned()));

@@ -197,12 +197,23 @@ impl Diagnostics {
             Ok(client) => {
                 let status_data = client.status().await.ok().and_then(|r| r.data);
 
+                // Both ports as the helper itself reports them. The HTTP one used
+                // to be *derived* from the HTTPS one, which is a guess about a
+                // value that is right there in the same response.
                 let port_info = status_data
                     .as_ref()
                     .and_then(|d| d.get("https_port"))
                     .and_then(|v| v.as_u64())
                     .map(|https| {
-                        let http = if https == 443 { 80 } else { 18080 };
+                        let http = status_data
+                            .as_ref()
+                            .and_then(|d| d.get("http_port"))
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(if https == 443 {
+                                80
+                            } else {
+                                veld_core::instance::UNPRIVILEGED_HTTP_PORT as u64
+                            });
                         format!("port {https}/{http}")
                     })
                     .unwrap_or_default();
@@ -427,7 +438,7 @@ impl Diagnostics {
         let fallback_port: u16 = if mode.as_deref() == Some("privileged") {
             443
         } else {
-            18443
+            veld_core::instance::UNPRIVILEGED_HTTPS_PORT
         };
         let https_port: u16 = if let Ok(client) = veld_core::helper::HelperClient::connect().await {
             client.https_port().await.unwrap_or(fallback_port)

@@ -52,6 +52,19 @@ pub async fn shutdown_terminal_sessions() {
     pty::shutdown_sessions().await;
 }
 
+/// Keep the ports the dashboard is served on current, for the `Origin` allowlist
+/// the terminal and IDE-channel upgrades share.
+///
+/// Re-exported for `main`, which spawns it beside the other background timers. It
+/// is a timer rather than a startup read because `veld setup` restarts this daemon
+/// *before* it installs the helper and *before* it writes the new mode — so a
+/// fresh daemon's first look finds neither, and an allowlist stuck on that answer
+/// refuses every upgrade the dashboard makes, which a browser cannot report. See
+/// `pty::track_helper_ports`.
+pub async fn track_dashboard_ports() {
+    pty::track_helper_ports().await;
+}
+
 /// Serve one terminal session as a holder process (`veld-daemon --pty-holder`).
 ///
 /// Re-exported for `main`, which dispatches to it before any of the daemon's own

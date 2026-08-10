@@ -1287,9 +1287,15 @@ pub(crate) fn join_base() -> String {
         .and_then(|h| std::fs::read_to_string(h.join(".veld").join("setup.json")).ok())
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
         .and_then(|v| v.get("mode").and_then(|m| m.as_str()).map(String::from));
+    let host = veld_core::instance::MANAGEMENT_HOST;
     match mode.as_deref() {
-        Some("unprivileged") => "https://veld.localhost:18443".to_string(),
-        _ => "https://veld.localhost".to_string(),
+        Some("unprivileged") => {
+            format!(
+                "https://{host}:{}",
+                veld_core::instance::UNPRIVILEGED_HTTPS_PORT
+            )
+        }
+        _ => format!("https://{host}"),
     }
 }
 

@@ -27,6 +27,30 @@ use std::path::PathBuf;
 /// client-logs, share control API).
 pub const DEFAULT_DAEMON_PORT: u16 = 19899;
 
+/// Hostname the installed instance's dashboard is served on, through Caddy.
+///
+/// Reserved: [`management_host`] refuses it, so a dev instance cannot
+/// self-register the route and hijack it. The helper's base Caddy config uses
+/// this same constant for the route itself (`veld-helper/src/caddy.rs`) — change
+/// it here and both halves move together, which they must: a hostname the daemon
+/// does not know is a hostname whose every WebSocket upgrade it refuses.
+pub const MANAGEMENT_HOST: &str = "veld.localhost";
+
+/// Ports Caddy serves on without root: `veld setup unprivileged`, and the
+/// auto-bootstrap.
+///
+/// **The one definition point**, because three places have to agree and two of
+/// them cannot see each other: `veld setup unprivileged` and the auto-bootstrap
+/// tell the helper which ports to listen on, and the daemon's `Origin` allowlist
+/// (`veld-daemon/src/pty.rs`, `management_ports`) decides which origins that
+/// makes real. They were four independent string literals; changing the setup's
+/// pair would have silently refused every terminal and every IDE channel on a
+/// no-sudo install, with the allowlist's own test still green because it pinned
+/// its copy against itself.
+pub const UNPRIVILEGED_HTTPS_PORT: u16 = 18443;
+/// See [`UNPRIVILEGED_HTTPS_PORT`].
+pub const UNPRIVILEGED_HTTP_PORT: u16 = 18080;
+
 fn env_nonempty(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|v| !v.is_empty())
 }
@@ -221,7 +245,7 @@ pub fn management_host() -> Option<String> {
         && host
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.')
-        && host != "veld.localhost";
+        && host != MANAGEMENT_HOST;
     if !valid {
         tracing::warn!(
             host,
