@@ -185,6 +185,17 @@ and several were paid for in this codebase already.
   Design context that must outlive a working document belongs in the PR
   description, commit messages, or `docs/` — don't cite `notes/` files from
   code comments, since readers of the repo can't see them.
+- **Leave a worktree clean before you stop in it.** Building and running tests
+  drifts `Cargo.lock`, and experiment scaffolding lands untracked (`.idea/`,
+  a scratch dir, a prototype). A worktree carrying uncommitted changes or
+  untracked files can't be trashed and deleted in the IDE — `git worktree
+  remove` refuses on them — so an agent that leaves incidental `Cargo.lock`
+  drift or untracked scaffolding behind is the reason a stale worktree can't
+  be cleaned up. Run `git status --short` before a hand-off/draft/PR-ready and
+  revert the incidental stuff; deliberate uncommitted work is fine while a PR
+  is in flight. The IDE surfaces these files at trash/delete time (the
+  `git status` / `revert` worktree endpoints), so a clean tree is the happy
+  path for both.
 - **CI runs only on a PR that is ready for review, so marking one ready is a
   spending decision.** Every job in `ci.yml` and `release.yml` carries
   `if: github.event_name != 'pull_request' || github.event.pull_request.draft == false`,

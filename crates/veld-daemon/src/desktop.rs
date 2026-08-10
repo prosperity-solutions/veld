@@ -46,6 +46,8 @@ pub fn routes() -> Router {
         )
         .route("/api/worktrees/{id}/start", post(start_worktree_run))
         .route("/api/worktrees/{id}/restore", post(restore_worktree))
+        .route("/api/worktrees/{id}/status", get(worktree_status))
+        .route("/api/worktrees/{id}/revert", post(revert_worktree))
         .route("/api/worktrees/{id}/delete", post(delete_trashed_worktree))
         .route("/api/trash", delete(empty_trash))
         .route(
@@ -386,9 +388,13 @@ fn open_desktop_db() -> Result<Db, ApiError> {
 // Git plumbing
 // ---------------------------------------------------------------------------
 
-/// Run `git -C <dir> <args…>` with the user's login-shell PATH. Returns
-/// trimmed stdout, or the trimmed stderr as the error message.
-pub(super) async fn git(dir: &FsPath, args: &[&str]) -> Result<String, String> {
+/// Run `git -C <dir> <args…>` with the user's login-shell PATH and return the
+/// raw stdout bytes, **untrimmed**. Trimming is done by [`git`] for callers that
+/// want a clean line; this raw form exists for [`git_status`], whose porcelain
+/// codes carry a significant leading space (` M` is an unstaged edit) that a
+/// `.trim()` would silently destroy — which is exactly the bug that shipped
+/// when `git_status` used [`git`] and plain edits went undetected.
+async fn git_raw(dir: &FsPath, args: &[&str]) -> Result<Vec<u8>, String> {
     let path_env = cached_user_path().await;
     let output = tokio::process::Command::new("git")
         .arg("-C")
@@ -399,7 +405,7 @@ pub(super) async fn git(dir: &FsPath, args: &[&str]) -> Result<String, String> {
         .await
         .map_err(|e| format!("failed to run git: {e}"))?;
     if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+        Ok(output.stdout)
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         Err(if stderr.is_empty() {
@@ -408,6 +414,143 @@ pub(super) async fn git(dir: &FsPath, args: &[&str]) -> Result<String, String> {
             stderr
         })
     }
+}
+
+/// Run `git -C <dir> <args…>` with the user's login-shell PATH. Returns
+/// trimmed stdout, or the trimmed stderr as the error message.
+pub(super) async fn git(dir: &FsPath, args: &[&str]) -> Result<String, String> {
+    Ok(String::from_utf8_lossy(&git_raw(dir, args).await?)
+        .trim()
+        .to_string())
+}
+
+/// One file that stops `git worktree remove` from succeeding, as reported by
+/// [`git_status`].
+///
+/// The two fields are the two things the UI needs to let the user decide:
+/// *what* is in the way (`path`) and *why* (`kind`). `kind` is a stable
+/// short label, not the raw porcelain code, so the client renders "modified"
+/// rather than decoding `" M"` itself — and so a future porcelain code that
+/// appears in the wild cannot silently become an empty label.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct DirtyFile {
+    /// Path relative to the worktree root.
+    path: String,
+    /// Human label: `modified`, `untracked`, `deleted`, `added`, `renamed`,
+    /// `copied`, `conflicted`, or `changed` for anything unclassified.
+    kind: &'static str,
+}
+
+/// The dirty state of a worktree, as the trash/delete flow needs it.
+#[derive(Debug, Serialize)]
+struct StatusView {
+    /// Whether `git worktree remove` would refuse this checkout right now.
+    dirty: bool,
+    /// The files in the way, in git's own (path) order. Empty when `dirty` is
+    /// false.
+    files: Vec<DirtyFile>,
+}
+
+/// Map a porcelain v1 status pair to the label [`DirtyFile::kind`] carries.
+///
+/// The porcelain codes are `<index><worktree>`; either side being non-space is
+/// a change, and untracked is the literal `??`. Unmerged/conflicted codes
+/// (`DD`, `AU`, `UD`, `UU`, …) all carry a `U` in one of the two positions, so
+/// they are caught before the single-letter tests below.
+fn dirty_kind(code: &str) -> &'static str {
+    let b = code.as_bytes();
+    if code == "??" {
+        return "untracked";
+    }
+    // Unmerged/conflicted states. Most carry a `U`, but the `AA` (both added)
+    // and `DD` (both deleted) unmerged codes do not — so the literal pair must
+    // be matched too, not just the `U` presence.
+    let any = |c: u8| b[0] == c || b[1] == c;
+    if any(b'U') || code == "AA" || code == "DD" {
+        return "conflicted";
+    }
+    // Rename/copy before the single-letter tests: a staged rename that is also
+    // modified (`RM`) should read "renamed", not "modified" — the move is the
+    // story the file list is telling.
+    if any(b'R') {
+        return "renamed";
+    }
+    if any(b'C') {
+        return "copied";
+    }
+    if any(b'M') {
+        return "modified";
+    }
+    if any(b'A') {
+        return "added";
+    }
+    if any(b'D') {
+        return "deleted";
+    }
+    "changed"
+}
+
+/// Parse `git status --porcelain=v1 -z` output into a file list.
+///
+/// The `-z` form is NUL-delimited and path-safe (no quoting, no mangled
+/// spaces or newlines), which is why it is chosen over the line-oriented
+/// `--porcelain` for something that renders paths back to a human. Each record
+/// is `<XY> <path>\0`; a rename or copy adds a trailing `<original>\0` (the
+/// origin), which is not a record of its own and must be skipped.
+///
+/// The paths reported are the *destination* paths, exactly as `git worktree
+/// remove` would refuse them — this list is the set of files that are in the
+/// way, not a diff summary, so showing the dest for a rename is the honest
+/// answer to "what would be discarded?"
+fn parse_git_status(porcelain: &str) -> Vec<DirtyFile> {
+    let mut files = Vec::new();
+    let mut i = 0usize;
+    let fields: Vec<&str> = porcelain.split('\0').collect();
+    while i < fields.len() {
+        let f = fields[i];
+        i += 1;
+        if f.is_empty() {
+            continue;
+        }
+        // The record is `<XY> <path>` where `XY` is two status characters and
+        // **the first of them may itself be a space** (e.g. `" M a.txt"`), so
+        // the separator is at byte 2, not the first space. Splitting on the
+        // first space would read `" M a.txt"` as an empty code and a path of
+        // `"M a.txt"` — dropping every leading-space code.
+        if f.len() < 4 || f.as_bytes()[2] != b' ' {
+            continue;
+        }
+        let code = &f[..2];
+        let path = &f[3..];
+        if path.is_empty() {
+            continue;
+        }
+        files.push(DirtyFile {
+            path: path.to_string(),
+            kind: dirty_kind(code),
+        });
+        // A rename/copy record is followed by its `<original>` as its own
+        // NUL-delimited field with no `<XY> ` prefix; skip it so it is not
+        // rendered as a second (pathless) file.
+        if code.as_bytes()[1] == b'R' || code.as_bytes()[1] == b'C' {
+            i += 1;
+        }
+    }
+    files
+}
+
+/// Run `git status --porcelain=v1 -z` in a directory and parse the result.
+///
+/// Returns an empty list for a clean worktree. An error means git could not
+/// run at all (a missing checkout, a broken repo), which the caller surfaces
+/// rather than guessing at the dirty state.
+async fn git_status(dir: &FsPath) -> Result<Vec<DirtyFile>, String> {
+    // Via `git_raw`, not `git`: the porcelain codes for unstaged changes begin
+    // with a space (` M`), and the shared helper's `.trim()` would strip it,
+    // turning an unstaged edit into an empty-looking record. This is the bug
+    // the integration test below pins.
+    let out = git_raw(dir, &["status", "--porcelain=v1", "-z"]).await?;
+    Ok(parse_git_status(&String::from_utf8_lossy(&out)))
 }
 
 /// Parse `git worktree list --porcelain` output. The first entry is the main
@@ -1610,6 +1753,95 @@ async fn delete_worktree(
     }
 }
 
+/// Report the git dirty state of a worktree: the files that would stop
+/// `git worktree remove` from succeeding, and why.
+///
+/// Deliberately a separate, on-demand endpoint rather than a field on
+/// `WorktreeView`: the listing is polled by every IDE window, and running git
+/// in every checkout on every poll is the kind of cost that only shows up as a
+/// slow rail. The trash/delete flow fetches it when a decision is being made.
+///
+/// The read-only contract (`GET`s on this router have no side effects) is what
+/// makes it safe to call here — no CSRF header needed, and no state written.
+async fn worktree_status(Path(id): Path<i64>) -> Result<Json<StatusView>, ApiError> {
+    let db = open_desktop_db()?;
+    let wt = db
+        .get_worktree(id)
+        .map_err(db_err)?
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "worktree not found"))?;
+    let files = git_status(FsPath::new(&wt.path))
+        .await
+        .map_err(|e| err(StatusCode::UNPROCESSABLE_ENTITY, e))?;
+    Ok(Json(StatusView {
+        dirty: !files.is_empty(),
+        files,
+    }))
+}
+
+/// Discard a worktree's uncommitted changes so its deletion can succeed.
+///
+/// This is the "revert the changes" half of the trash/delete flow: it resets
+/// tracked files (staged and unstaged) to HEAD with `git restore`, then removes
+/// untracked files and directories with `git clean -fd`. **Ignored files are
+/// deliberately left alone** — `git worktree remove` does not refuse on those
+/// (verified, git 2.50), so removing them would discard work for nothing.
+///
+/// Destructive by nature, so it is gated the same way the force-delete path is:
+/// only on a non-main worktree, and only on an explicit request. The caller is
+/// expected to have shown the file list first — this endpoint does not ask a
+/// second question, but the UI that reaches it must. It returns the post-revert
+/// status so the caller can confirm the checkout is now clean rather than
+/// assuming the commands succeeded.
+///
+/// **Why not use `git worktree remove --force`?** Forcing discards the files as
+/// a side effect of deletion; this is the *reversible-in-spirit* alternative
+/// that leaves the worktree itself intact and lets the user change their mind
+/// (restore, or keep it) afterwards. The two answer different questions, and the
+/// trash flow now offers both.
+async fn revert_worktree(Path(id): Path<i64>) -> Result<Json<StatusView>, ApiError> {
+    let db = open_desktop_db()?;
+    let wt = db
+        .get_worktree(id)
+        .map_err(db_err)?
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "worktree not found"))?;
+    if wt.is_main {
+        return Err(err(
+            StatusCode::CONFLICT,
+            "the main checkout is never reverted — it is the repository itself",
+        ));
+    }
+    revert_git_changes(FsPath::new(&wt.path))
+        .await
+        .map_err(|e| err(StatusCode::UNPROCESSABLE_ENTITY, e))?;
+    let files = git_status(FsPath::new(&wt.path))
+        .await
+        .map_err(|e| err(StatusCode::UNPROCESSABLE_ENTITY, e))?;
+    Ok(Json(StatusView {
+        dirty: !files.is_empty(),
+        files,
+    }))
+}
+
+/// Discard a worktree's uncommitted changes: reset tracked files (staged and
+/// unstaged) to HEAD, then remove untracked files and directories.
+///
+/// Split out of [`revert_worktree`] so the destructive sequence can be pinned
+/// against real git rather than trusted to a hand-written command list.
+///
+/// **Ignored files are deliberately left alone** — `git worktree remove` does
+/// not refuse on them (verified, git 2.50), so removing them would discard work
+/// for nothing. Hence `clean -fd`, not `clean -fdx`.
+async fn revert_git_changes(path: &FsPath) -> Result<(), String> {
+    // Reset the index and working tree to HEAD: clears staged additions and
+    // staged/unstaged modifications to tracked files alike.
+    git(path, &["restore", "--staged", "--worktree", "."]).await?;
+    // Remove untracked files and directories. No `-x`: that would also remove
+    // ignored files, which `git worktree remove` does not refuse on and which
+    // may be the user's own tooling or notes.
+    git(path, &["clean", "-fd"]).await?;
+    Ok(())
+}
+
 /// Take a worktree out of the trash (undo).
 ///
 /// A real undo for the whole retention period, since binning deletes nothing. It can
@@ -2062,6 +2294,158 @@ mod tests {
         let wts = parse_worktree_list(out);
         assert_eq!(wts.len(), 1);
         assert!(!wts[0].is_main);
+    }
+
+    /// The reported shape: a worktree blocked from deletion carries a mix of
+    /// tracked modifications, staged additions, deletions, untracked files and
+    /// renames. `-z` records are NUL-separated, so the fixture is built with the
+    /// literal `\0`, and the rename's origin (`src.txt`) must not be rendered as
+    /// a file of its own.
+    #[test]
+    fn git_status_parses_the_files_that_block_removal() {
+        let out = [
+            " M a.txt",       // unstaged modification
+            "M  staged.txt",  // staged modification
+            "A  new.txt",     // staged addition
+            " D gone.txt",    // unstaged deletion
+            "RM renamed.txt", // staged+unstaged rename; origin follows
+            "src.txt",        // the rename's origin — must be skipped
+            "?? untracked/",  // untracked directory
+        ]
+        .join("\0");
+        let files = parse_git_status(&out);
+        let paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec![
+                "a.txt",
+                "staged.txt",
+                "new.txt",
+                "gone.txt",
+                "renamed.txt",
+                "untracked/"
+            ],
+            "the rename origin must not appear as a file"
+        );
+        let kinds: Vec<&str> = files.iter().map(|f| f.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                "modified",
+                "modified",
+                "added",
+                "deleted",
+                "renamed",
+                "untracked"
+            ]
+        );
+    }
+
+    #[test]
+    fn git_status_is_empty_for_a_clean_worktree() {
+        assert!(parse_git_status("").is_empty());
+        // A lone trailing NUL (git emits one after the last record) is not a file.
+        assert!(parse_git_status("\0").is_empty());
+    }
+
+    #[test]
+    fn git_status_labels_conflicts_distinct_from_modifications() {
+        // All the unmerged codes carry a `U` in one position; the test pins that
+        // they are not misread as plain modifications.
+        for code in ["UU", "AA", "DD", "AU", "UD", "UA", "DU"] {
+            assert_eq!(
+                parse_git_status(&format!("{code} f\0"))[0].kind,
+                "conflicted",
+                "unmerged code {code} must be labelled conflicted"
+            );
+        }
+    }
+
+    /// The generated-status path, run against **real git**, not a hand-built
+    /// fixture: ``git_status`` is what the endpoint serves, and this pins that a
+    /// plain unstaged edit is reported just as reliably as a staged one (a
+    /// regression would show only staged changes, because those have no leading
+    /// space in the porcelain code).
+    #[tokio::test]
+    async fn git_status_reports_plain_edits_and_staged_changes_against_real_git() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = FsPath::new(dir.path());
+        // A tracked file, two commits apart is irrelevant — one commit suffices.
+        run_git(root, &["init", "-q"]).await;
+        run_git(root, &["config", "user.email", "t@t"]).await;
+        run_git(root, &["config", "user.name", "t"]).await;
+        std::fs::write(root.join("tracked.txt"), "one").unwrap();
+        run_git(root, &["add", "tracked.txt"]).await;
+        run_git(root, &["commit", "-qm", "init"]).await;
+
+        // Clean: nothing in the way.
+        assert!(git_status(root).await.unwrap().is_empty());
+
+        // A plain edit (unstaged, ` M`) — the case reported as not detected.
+        std::fs::write(root.join("tracked.txt"), "one-two").unwrap();
+        let unstaged = git_status(root).await.unwrap();
+        assert_eq!(unstaged.len(), 1, "a plain edit must be reported dirty");
+        assert_eq!(unstaged[0].path, "tracked.txt");
+        assert_eq!(unstaged[0].kind, "modified");
+
+        // Same file staged (`M `), still one file.
+        run_git(root, &["add", "tracked.txt"]).await;
+        let staged = git_status(root).await.unwrap();
+        assert_eq!(staged.len(), 1);
+        assert_eq!(staged[0].kind, "modified");
+
+        // A brand-new file nobody has `git add`ed (`??`) joins the list; the
+        // staged `tracked.txt` is still there, so the total is two.
+        std::fs::write(root.join("untracked.txt"), "new").unwrap();
+        let untracked = git_status(root).await.unwrap();
+        assert!(
+            untracked
+                .iter()
+                .any(|f| f.path == "untracked.txt" && f.kind == "untracked")
+        );
+    }
+
+    /// The destructive half, pinned against real git: after a revert the
+    /// worktree must be clean enough for `git worktree remove`, with staged,
+    /// unstaged and untracked changes all gone — but **ignored** files kept.
+    #[tokio::test]
+    async fn revert_git_changes_discards_uncommitted_but_keeps_ignored() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = FsPath::new(dir.path());
+        run_git(root, &["init", "-q"]).await;
+        run_git(root, &["config", "user.email", "t@t"]).await;
+        run_git(root, &["config", "user.name", "t"]).await;
+        std::fs::write(root.join("tracked.txt"), "one").unwrap();
+        std::fs::write(root.join(".gitignore"), "*.log\n").unwrap();
+        run_git(root, &["add", "."]).await;
+        run_git(root, &["commit", "-qm", "init"]).await;
+
+        // Make it dirty in every way a deletion can be blocked: unstaged edit,
+        // staged addition, and an untracked directory.
+        std::fs::write(root.join("tracked.txt"), "one-two").unwrap(); // unstaged
+        std::fs::write(root.join("staged.txt"), "s").unwrap();
+        run_git(root, &["add", "staged.txt"]).await; // staged addition
+        std::fs::create_dir(root.join("scratch")).unwrap();
+        std::fs::write(root.join("scratch/x"), "x").unwrap(); // untracked
+        std::fs::write(root.join("keep.log"), "k").unwrap(); // ignored — survives
+
+        assert_eq!(git_status(root).await.unwrap().len(), 3);
+        revert_git_changes(root)
+            .await
+            .expect("revert should succeed");
+        assert!(
+            git_status(root).await.unwrap().is_empty(),
+            "revert must leave nothing blocking a delete"
+        );
+        assert!(
+            root.join("keep.log").exists(),
+            "ignored files are not blocked by remove and must survive"
+        );
+    }
+
+    /// Wrapper so the integration test reads as assertions rather than shell.
+    async fn run_git(dir: &FsPath, args: &[&str]) {
+        git(dir, args).await.expect("git should succeed");
     }
 
     #[test]

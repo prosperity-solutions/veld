@@ -125,6 +125,28 @@ export interface EnvironmentList {
   projects: ProjectInfo[];
 }
 
+/**
+ * One file that stops `git worktree remove` from succeeding.
+ *
+ * `kind` is a stable short label — `modified`, `untracked`, `deleted`,
+ * `added`, `renamed`, `conflicted`, `copied` — rendered beside the path so
+ * the user can tell a throwaway untracked file from real work.
+ */
+export interface DirtyFile {
+  path: string;
+  kind: string;
+}
+
+/**
+ * The git dirty state of a worktree, as reported by
+ * {@link api.worktreeGitStatus}.
+ */
+export interface WorktreeGitStatus {
+  /** Whether `git worktree remove` would refuse this checkout right now. */
+  dirty: boolean;
+  files: DirtyFile[];
+}
+
 export interface Worktree {
   id: number;
   repo_root: string;
@@ -968,6 +990,22 @@ export const api = {
    */
   deleteWorktree: (id: number, force: boolean) =>
     request<void>(`/api/worktrees/${id}?force=${force}`, { method: "DELETE" }),
+  /**
+   * The git dirty state of a worktree: the files that would stop
+   * `git worktree remove` from succeeding. Fetched on demand by the trash and
+   * delete flows, not carried on the (polled) listing.
+   */
+  worktreeGitStatus: (id: number) =>
+    request<WorktreeGitStatus>(`/api/worktrees/${id}/status`),
+  /**
+   * Discard a worktree's uncommitted changes so its deletion can succeed:
+   * tracked files (staged and unstaged) are reset to HEAD and untracked files
+   * are removed. Ignored files are left alone. Returns the post-revert status,
+   * so the caller can confirm the checkout is now clean. Destructive — the
+   * UI must ask before calling this.
+   */
+  revertWorktree: (id: number) =>
+    request<WorktreeGitStatus>(`/api/worktrees/${id}/revert`, { method: "POST" }),
   /**
    * Take a worktree out of the trash. Fails with 404 only if an explicit deletion
    * already got there.

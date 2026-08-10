@@ -1,15 +1,26 @@
 import { type FormEvent, type ReactNode, useEffect, useRef, useState } from "react";
 import {
+  Alert,
+  Badge,
   Button,
   Checkbox,
   Group,
   Loader,
   Modal as MantineModal,
+  ScrollArea,
   Stack,
   Text,
   TextInput,
+  Tooltip,
 } from "@mantine/core";
-import { api, MAX_LANE_NAME_LEN, type EmojiHolder, type Repo } from "../api";
+import {
+  api,
+  MAX_LANE_NAME_LEN,
+  type DirtyFile,
+  type EmojiHolder,
+  type Repo,
+  type WorktreeGitStatus,
+} from "../api";
 import type { MarkerStyle } from "../shared/settings";
 import {
   aliasCollides,
@@ -708,6 +719,152 @@ export function ChangeMarkerDialog(props: {
  * it. The placeholder says which alias it would fall back to, so "empty" never
  * looks like "nameless".
  */
+/**
+ * One file that would stop `git worktree remove`, with a stable label.
+ *
+ * Used by both the trash confirmation and the delete confirmation, so the two
+ * surfaces cannot drift apart in how they present the same list.
+ */
+function DirtyFileList(props: { files: DirtyFile[] }) {
+  return (
+    <ScrollArea.Autosize mah={150} type="hover" scrollbarSize={6}>
+      <Stack gap={2}>
+        {props.files.map((f) => (
+          <Group key={f.path} gap={8} wrap="nowrap" align="center">
+            <Badge
+              size="xs"
+              variant="light"
+              color={kindColor(f.kind)}
+              style={{ flex: "none" }}
+            >
+              {f.kind}
+            </Badge>
+            <Text
+              size="xs"
+              style={{
+                fontFamily: "var(--mantine-font-family-monospace)",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+              }}
+            >
+              {f.path}
+            </Text>
+          </Group>
+        ))}
+      </Stack>
+    </ScrollArea.Autosize>
+  );
+}
+
+/** Colour the change kind so untracked throwaways read differently from edits. */
+function kindColor(kind: string): string {
+  switch (kind) {
+    case "modified":
+    case "deleted":
+      return "red";
+    case "untracked":
+      return "orange";
+    case "added":
+      return "blue";
+    case "renamed":
+    case "copied":
+      return "teal";
+    case "conflicted":
+      return "grape";
+    default:
+      return "gray";
+  }
+}
+
+/**
+ * The destructive confirm for deleting a *trashed* worktree that is dirty.
+ *
+ * Deletion is where the dirty state actually bites: `git worktree remove`
+ * refuses on uncommitted files, so today the user only found out *after* the
+ * attempt failed and the row came back with `trash_error`. This surfaces the
+ * files up front and turns the refusal into a choice — delete and discard, or
+ * revert first and delete cleanly.
+ */
+export function ConfirmDeleteWorktreeDialog(props: {
+  /** The rail label, so the dialog says which worktree it means. */
+  label: string;
+  status: WorktreeGitStatus;
+  onClose: () => void;
+  /** Delete now, discarding the uncommitted changes (`git worktree remove --force`). */
+  onDeleteDiscard: () => Promise<void>;
+  /** Revert the changes, then delete the now-clean worktree. */
+  onRevertThenDelete: () => Promise<void>;
+}) {
+  const discard = useSubmit(props.onDeleteDiscard);
+  const revert = useSubmit(props.onRevertThenDelete);
+  const count = props.status.files.length;
+  const error = discard.error ?? revert.error;
+  return (
+    <Modal title="Delete worktree" onClose={props.onClose}>
+      <Stack gap="md">
+        <Alert color="yellow" variant="light" p="sm">
+          <Text size="sm" fw={600}>
+            “{props.label}” has {count} uncommitted change
+            {count === 1 ? "" : "s"} a delete would discard.
+          </Text>
+          <Text size="xs" c="dimmed" mt={2}>
+            These files are not saved to git yet.
+          </Text>
+          <div style={{ marginTop: 8 }}>
+            <DirtyFileList files={props.status.files} />
+          </div>
+        </Alert>
+        <Text size="sm" c="dimmed">
+          How do you want to proceed?
+        </Text>
+        <Group>
+          <Tooltip
+            label="Deletes the worktree now and discards these uncommitted changes. This cannot be undone."
+            multiline
+            w={260}
+          >
+            <Button
+              color="red"
+              loading={discard.busy}
+              onClick={(e) => {
+                e.preventDefault();
+                void discard.submit(e);
+              }}
+            >
+              Delete and discard changes
+            </Button>
+          </Tooltip>
+          <Tooltip
+            label="Reverts these changes first (reset to the last commit, remove untracked files), then deletes the worktree."
+            multiline
+            w={260}
+          >
+            <Button
+              color="yellow"
+              variant="light"
+              loading={revert.busy}
+              onClick={(e) => {
+                e.preventDefault();
+                void revert.submit(e);
+              }}
+            >
+              Revert, then delete
+            </Button>
+          </Tooltip>
+        </Group>
+        <ErrorText error={error} />
+      </Stack>
+    </Modal>
+  );
+}
+
+/**
+ * Edit a worktree's name and alias. Purely editing — trashing/deletion has its
+ * own dialog ([`TrashWorktreeDialog`]), so a rename action can never
+ * accidentally read as a delete, and the trash flow is never buried under a
+ * rename form.
+ */
 export function RenameWorktreeDialog(props: {
   currentAlias: string;
   /** The stored `display_name`, `""` when the row renders its alias. */
@@ -717,28 +874,10 @@ export function RenameWorktreeDialog(props: {
     alias?: string;
     display_name?: string;
   }) => Promise<void>;
-  onDelete: (force: boolean) => Promise<void>;
-  isMain: boolean;
-  /**
-   * Why the last deletion failed, or `""`.
-   *
-   * Load-bearing, not decoration. Deletion happens later than the click — on the
-   * retention sweep or from the trash — so git's refusal arrives on the row and can
-   * never land in this dialog's own `useSubmit` error. Gating the force checkbox on
-   * that error made `?force=true` unreachable: click → 202 → dialog closes →
-   * reopening gives a fresh, empty error. This is the durable record of the refusal,
-   * and it is what keeps forcing an answer to something the user has been shown
-   * rather than a checkbox offered up front.
-   */
-  trashError: string;
-  /** Open with the remove confirmation already expanded (context menu). */
-  deleteFocus: boolean;
   onClose: () => void;
 }) {
   const [alias, setAlias] = useState(props.currentAlias);
   const [name, setName] = useState(props.currentName);
-  const [confirmDelete, setConfirmDelete] = useState(props.deleteFocus);
-  const [force, setForce] = useState(false);
   const rename = useSubmit(() => {
     // **Only the fields that changed.** Both values are a snapshot taken when
     // the dialog opened, and this app runs up to eight windows against one
@@ -759,10 +898,6 @@ export function RenameWorktreeDialog(props: {
     }
     return props.onRename(patch);
   });
-  const del = useSubmit(() => props.onDelete(force));
-  // Either source of a refusal: this attempt's own (a 4xx from the forced path, or
-  // a rejected precondition) or the last background attempt's.
-  const refusal = del.error ?? (props.trashError || null);
   return (
     <Modal title="Edit worktree" onClose={props.onClose}>
       <form onSubmit={rename.submit}>
@@ -773,7 +908,7 @@ export function RenameWorktreeDialog(props: {
             placeholder={props.currentAlias}
             value={name}
             onChange={(e) => setName(e.currentTarget.value)}
-            data-autofocus={!props.deleteFocus}
+            data-autofocus
           />
           <TextInput
             label="Alias"
@@ -788,60 +923,164 @@ export function RenameWorktreeDialog(props: {
           </Button>
         </Stack>
       </form>
-      {!props.isMain && (
-        <Stack
-          gap="sm"
-          mt="md"
-          pt="md"
-          style={{ borderTop: "1px solid var(--border)" }}
-        >
-          {confirmDelete ? (
-            <>
-              <Text size="sm" c="dimmed">
-                Moves the checkout to the trash. Nothing is deleted yet — it
-                stays on disk and you can restore it from the rail. It is
-                deleted for good when its retention period runs out (Settings →
-                General, off by default) or when you delete it from the trash.
-                The branch itself is always kept.
-                {force
-                  ? " Forcing deletes it right now and discards uncommitted changes; it will not start if an environment is still running."
-                  : ""}
-              </Text>
-              <ErrorText error={refusal} />
-              {refusal && (
-                <Checkbox
-                  color="red"
-                  label="Delete now, discarding uncommitted changes"
-                  checked={force}
-                  onChange={(e) => setForce(e.currentTarget.checked)}
-                />
-              )}
-              <Button
-                color="red"
-                variant="light"
-                loading={del.busy}
-                onClick={(e) => {
-                  e.preventDefault();
-                  void del.submit(e);
-                }}
-              >
-                {force ? "Delete permanently" : "Move to trash"}
-              </Button>
-            </>
-          ) : (
+    </Modal>
+  );
+}
+
+/**
+ * The dedicated trash confirmation, split out of the edit dialog.
+ *
+ * Opens straight into the decision (no collapsed button): it exists to be shown
+ * when the user chooses to trash a checkout, so it fetches the dirty state on
+ * mount and turns the refusal the user would otherwise hit later into a choice
+ * now — trash anyway, or revert first.
+ */
+export function TrashWorktreeDialog(props: {
+  /** The row's id, to fetch this worktree's git dirty state on demand. */
+  worktreeId: number;
+  /** Fetch the worktree's git dirty state (the files blocking deletion). */
+  onStatus: (id: number) => Promise<WorktreeGitStatus>;
+  /** Discard the worktree's uncommitted changes; returns the new status. */
+  onRevert: (id: number) => Promise<WorktreeGitStatus>;
+  /** Bin the worktree, or with `force` delete it outright. */
+  onTrash: (force: boolean) => Promise<void>;
+  /**
+   * Why the last deletion failed, or `""`.
+   *
+   * Load-bearing, not decoration. Deletion happens later than the click — on the
+   * retention sweep or from the trash — so git's refusal arrives on the row and can
+   * never land in this dialog's own `useSubmit` error. Gating the force checkbox on
+   * that error made `?force=true` unreachable: click → 202 → dialog closes →
+   * reopening gives a fresh, empty error. This is the durable record of the refusal,
+   * and it is what keeps forcing an answer to something the user has been shown
+   * rather than a checkbox offered up front.
+   */
+  trashError: string;
+  onClose: () => void;
+}) {
+  const [force, setForce] = useState(false);
+  const [dirty, setDirty] = useState<WorktreeGitStatus | null>(null);
+  const [statusLoading, setStatusLoading] = useState(true);
+  useEffect(() => {
+    let cancelled = false;
+    props
+      .onStatus(props.worktreeId)
+      .then((s) => {
+        if (!cancelled) setDirty(s);
+      })
+      // An unavailable status (git error, checkout gone) must not block the
+      // trash: binning is non-destructive, so the panel degrades to the plain
+      // "Move to trash" flow and any refusal surfaces later on the row.
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) setStatusLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.worktreeId]);
+
+  const del = useSubmit(() => props.onTrash(force));
+  // Either source of a refusal: this attempt's own (a 4xx from the forced path, or
+  // a rejected precondition) or the last background attempt's.
+  const refusal = del.error ?? (props.trashError || null);
+
+  // Discard the worktree's changes, then bin it. Destructive by nature, which
+  // is exactly what the tooltip on the button spells out — see the button below.
+  const revertAndTrash = useSubmit(async () => {
+    await props.onRevert(props.worktreeId); // throws on failure; dialog stays open
+    await props.onTrash(false); // bin the now-clean worktree
+  });
+
+  const dirtyFiles = dirty && dirty.dirty ? dirty.files : [];
+  return (
+    <Modal title="Move to trash" onClose={props.onClose}>
+      <Stack gap="sm">
+        <Text size="sm" c="dimmed">
+          Moves the checkout to the trash. Nothing is deleted yet — it stays on
+          disk and you can restore it from the rail. It is deleted for good when
+          its retention period runs out (Settings → General, off by default) or
+          when you delete it from the trash. The branch itself is always kept.
+          {force
+            ? " Forcing deletes it right now and discards uncommitted changes; it will not start if an environment is still running."
+            : ""}
+        </Text>
+
+        {statusLoading && (
+          <Group gap="xs">
+            <Loader size="xs" />
+            <Text size="sm" c="dimmed">
+              Checking for uncommitted changes…
+            </Text>
+          </Group>
+        )}
+
+        {!statusLoading && dirtyFiles.length > 0 && (
+          <Alert color="yellow" variant="light" p="sm">
+            <Text size="sm" fw={600}>
+              {dirtyFiles.length} uncommitted change
+              {dirtyFiles.length === 1 ? "" : "s"} would block a permanent
+              delete
+            </Text>
+            <Text size="xs" c="dimmed" mt={2}>
+              Trashing keeps these on disk — you can still change your mind.
+              But a later permanent delete will refuse until they are reverted
+              or discarded.
+            </Text>
+            <div style={{ marginTop: 8 }}>
+              <DirtyFileList files={dirtyFiles} />
+            </div>
+          </Alert>
+        )}
+
+        <ErrorText error={refusal} />
+        {refusal && (
+          <Checkbox
+            color="red"
+            label="Delete now, discarding uncommitted changes"
+            checked={force}
+            onChange={(e) => setForce(e.currentTarget.checked)}
+          />
+        )}
+
+        {!statusLoading && dirtyFiles.length > 0 && (
+          <Tooltip
+            label="Discards this worktree's uncommitted changes: tracked files are reset to the last commit and untracked files are removed. This cannot be undone — but it is what lets a later delete succeed cleanly."
+            multiline
+            w={280}
+          >
             <Button
-              color="red"
-              variant="subtle"
+              color="yellow"
+              variant="light"
+              loading={revertAndTrash.busy}
               onClick={(e) => {
                 e.preventDefault();
-                setConfirmDelete(true);
+                void revertAndTrash.submit(e);
               }}
             >
-              Move to trash…
+              Revert changes, then trash
             </Button>
-          )}
-        </Stack>
-      )}
+          </Tooltip>
+        )}
+        {revertAndTrash.error && <ErrorText error={revertAndTrash.error} />}
+
+        <Button
+          color="red"
+          variant="light"
+          loading={del.busy}
+          onClick={(e) => {
+            e.preventDefault();
+            void del.submit(e);
+          }}
+        >
+          {force
+            ? "Delete permanently"
+            : dirtyFiles.length > 0
+              ? "Trash anyway"
+              : "Move to trash"}
+        </Button>
+      </Stack>
     </Modal>
   );
 }
