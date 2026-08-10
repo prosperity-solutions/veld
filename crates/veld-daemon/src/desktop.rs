@@ -1459,15 +1459,14 @@ async fn update_main(Json(body): Json<UpdateMainBody>) -> Result<Json<RepoView>,
         ));
     }
     // Empty porcelain output is a clean tree; anything else is uncommitted work
-    // that a fast-forward would fight.
-    let dirty = git(&repo_root, &["status", "--porcelain"])
-        .await
-        .map_err(|e| {
-            err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("git status failed: {e}"),
-            )
-        })?;
+    // that a fast-forward would fight. Reuses the shared `git_status` helper the
+    // worktree delete flow uses (one spelling of `status --porcelain`, not two).
+    let dirty = git_status(&repo_root).await.map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("git status failed: {e}"),
+        )
+    })?;
     if !dirty.is_empty() {
         return Err(err(
             StatusCode::CONFLICT,
@@ -1746,7 +1745,26 @@ async fn create_worktree(
             .find(|w| w.is_main)
             .map(|w| w.branch);
         if let Some(dbranch) = default_branch {
-            if git(&repo_root, &["fetch", "origin"]).await.is_ok() {
+            // Base on origin only if the remote actually has that branch. The
+            // fetch succeeding is not enough: a repo whose main checkout sits on
+            // a local-only branch (never pushed) would otherwise fail the create
+            // against a `refs/remotes/origin/<branch>` that does not exist,
+            // instead of falling back to local HEAD as the comment promises.
+            // `--quiet` keeps the probe off stderr (the `git` helper surfaces
+            // stderr on failure).
+            if git(&repo_root, &["fetch", "origin"]).await.is_ok()
+                && git(
+                    &repo_root,
+                    &[
+                        "rev-parse",
+                        "--verify",
+                        "--quiet",
+                        &format!("refs/remotes/origin/{dbranch}"),
+                    ],
+                )
+                .await
+                .is_ok()
+            {
                 start_point = Some(format!("origin/{dbranch}"));
             }
         }
