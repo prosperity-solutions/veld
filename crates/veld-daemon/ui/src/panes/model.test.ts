@@ -61,6 +61,7 @@ import {
   terminalLabel,
   writeLayouts,
   updateTab,
+  urlForProfile,
   urlLabel,
 } from "./model";
 
@@ -744,6 +745,59 @@ describe("browser tabs", () => {
       kind: "terminal",
       title: "t",
     });
+  });
+
+  it("restores per-session URLs, re-validated, and falls back for a bare session", () => {
+    const restore = (tab: unknown) =>
+      parseLayouts(
+        JSON.stringify({
+          1: {
+            docks: [
+              { tabs: [tab], activeId: "a" },
+              { tabs: [], activeId: null },
+            ],
+            ratio: 0.5,
+            focused: 0,
+          },
+        }),
+      )[1]?.docks[0].tabs[0];
+
+    // The point of storing them: a session switch recreates the view, and the
+    // layout is the only thing that survives it, so each session's own place is
+    // re-read from here rather than inherited from whatever `url` was last.
+    const tab = restore({
+      id: "a",
+      kind: "browser",
+      title: "t",
+      url: "http://default.test/",
+      profile: "otter",
+      urls: {
+        default: "http://default.test/dashboard",
+        otter: "http://otter.test/",
+        bogus: "http://bogus.test/",
+      },
+    })!;
+    expect(tab.urls).toEqual({
+      default: "http://default.test/dashboard",
+      otter: "http://otter.test/",
+    });
+    // Each session opens where it was, not where the other one left the pane.
+    expect(urlForProfile(tab, "otter")).toBe("http://otter.test/");
+    expect(urlForProfile(tab, "default")).toBe("http://default.test/dashboard");
+    // A session never visited in this tab falls back to the pane's `url`.
+    expect(urlForProfile(tab, "wombat")).toBe("http://default.test/");
+
+    // A hostile or malformed per-session URL is dropped, not handed to a view.
+    const hostile = restore({
+      id: "a",
+      kind: "browser",
+      title: "t",
+      url: "http://x.test/",
+      profile: "default",
+      urls: { otter: "javascript:alert(1)", wombat: "not a url", gecko: 42 },
+    })!;
+    expect(hostile.urls).toBeUndefined();
+    expect(urlForProfile(hostile, "otter")).toBe("http://x.test/");
   });
 
   it("restores the emulated device and the zoom, re-validated", () => {

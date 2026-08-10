@@ -51,6 +51,7 @@ import {
   MAX_EXTRA_SESSIONS,
   type PaneTab,
   browserProfileLabel,
+  urlForProfile,
   urlLabel,
 } from "./model";
 import { VeldLinks } from "./VeldLinks";
@@ -249,14 +250,6 @@ export function BrowserPane(props: {
   const [, bump] = useReducer((n: number) => n + 1, 0);
   const iframeBackend = browserBackend === "iframe";
 
-  // Read through a ref rather than as a dependency: `mountBrowser` only uses the
-  // URL when it *creates* a view, and re-running the effect on every navigation
-  // would remount the view on its own output. It has to track `tab.url` all the
-  // same, because a profile switch creates a new view and it must open where the
-  // pane currently is, not where it was first opened.
-  const currentUrl = useRef(tab.url);
-  currentUrl.current = tab.url;
-
   // The layout is the record for the emulated device and the zoom; `browserHost`
   // holds the live copy. Read here so both the chrome and the mount below work
   // off the state that gets persisted.
@@ -288,7 +281,11 @@ export function BrowserPane(props: {
     // (dropping its listeners) and creates a new one, so subscribing first
     // would attach to the view that is about to go away.
     mountBrowser(id, el, {
-      url: currentUrl.current,
+      // A session's own remembered position, falling back to the pane's current
+      // `url` for a session never visited in this tab. A profile change
+      // re-runs this effect and recreates the view, so it is here — not in a
+      // navigation — that the per-session URL is chosen.
+      url: urlForProfile(tab, profile),
       profile,
       emulation: currentEmulation.current,
       media: currentMedia.current,
@@ -317,6 +314,12 @@ export function BrowserPane(props: {
   useEffect(() => {
     const patch: Partial<Omit<PaneTab, "id" | "kind">> = {};
     if (state.url && state.url !== tab.url) patch.url = state.url;
+    // Record the session's own position too, so switching back to this session
+    // restores where it was rather than inheriting whatever another session's
+    // navigation left on `url`.
+    if (state.url && state.url !== tab.urls?.[profile]) {
+      patch.urls = { ...(tab.urls ?? {}), [profile]: state.url };
+    }
     if (state.title && state.title !== tab.title) patch.title = state.title;
     if (Object.keys(patch).length > 0) onTab(patch);
   }, [state.url, state.title]);
