@@ -4936,6 +4936,9 @@ function TopBar(props: {
                         props.gitStatus.latest_commit != null
                           ? Math.max(0, Date.now() / 1000 - props.gitStatus.latest_commit)
                           : 0,
+                        // The selected worktree's project config tunes how
+                        // sensitive the colouring is (`ide.stalenessSensitivity`).
+                        props.worktree?.ide.staleness_sensitivity ?? 1,
                       )} 70% 45%)`,
                     }}
                   >

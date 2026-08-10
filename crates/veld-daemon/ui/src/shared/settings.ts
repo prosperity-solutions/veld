@@ -379,16 +379,32 @@ export function gitCreateFrom(doc: SettingsDoc): GitCreateFrom {
 /**
  * The hue for the "update main" staleness pill, green → orange → red.
  *
- * Mixed from two facts the daemon exposes: how many commits the main checkout is
- * behind, and how old the newest missing commit is. Few-and-recent is green;
- * many-and-old is red; a single 200-commit-a-week-ago branch is far more urgent
- * than one commit from this morning, and neither fact alone captures that.
+ * Two facts the daemon exposes are blended: how many commits the main checkout
+ * is behind, and how old the newest missing commit is. `sensitivity` (the
+ * project's `ide.stalenessSensitivity`, default 1) scales both thresholds, so a
+ * project tunes how urgent its own drift looks without changing the shape.
+ *
+ * The baseline (`sensitivity = 1`) is deliberately hot: **a single commit a
+ * week old, or fifty commits in a day, are both at the top of the scale (red)**.
+ * That is what makes the default usable — the pill is a nag, and the nag should
+ * come on early. The two facts combine as a union (`1 - (1−a)(1−b)`) rather
+ * than an average, because either reaching the top alone must read red; small
+ * contributions still combine smoothly.
+ *
  * Pure so it is testable and so a future extension badge can reuse the curve.
  */
-export function stalenessHue(behind: number, ageSeconds: number): number {
-  const countFactor = Math.min(behind / 25, 1);
-  const ageFactor = Math.min(ageSeconds / (14 * 86_400), 1);
-  const score = 0.5 * countFactor + 0.5 * ageFactor;
+export function stalenessHue(
+  behind: number,
+  ageSeconds: number,
+  sensitivity = 1,
+): number {
+  // `sensitivity` is floored by the daemon to `0.1`, but floor here too so a
+  // caller that passes 0 (or an unreadable config reading as 0) never divides
+  // by zero or inverts the curve.
+  const s = Math.max(sensitivity, 0.1);
+  const countFactor = Math.min(behind / (50 / s), 1);
+  const ageFactor = Math.min(ageSeconds / ((7 * 86_400) / s), 1);
+  const score = 1 - (1 - countFactor) * (1 - ageFactor);
   // 140 is green, 0 is red; the linear sweep passes through orange (~30).
   return Math.round(140 * (1 - score));
 }

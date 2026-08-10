@@ -2034,8 +2034,9 @@ already lost its leading zero, so it is refused rather than guessed at.
 ## `ide`: quicklinks, permissions, external origins and panes
 
 `ide` is where a project configures Veld's own IDE surfaces — Veld Desktop and
-the `/ide` view in a browser. Three keys under it are interpreted; the rest of
-`ide` stays reserved and opaque (see
+the `/ide` view in a browser. Four keys under it are interpreted — `quicklinks`,
+`permissions`, `externalOrigins` and `stalenessSensitivity`; the rest of `ide`
+stays reserved and opaque (see
 [below](#reserved-hooks-and-the-rest-of-ide)), so a JSON-defined IDE extension is
 free to use whatever shape it likes.
 
@@ -2235,6 +2236,30 @@ nothing under `ide.permissions` applies there — an `<iframe>`'s permissions ar
 the embedding document's business, not veld's.
 
 ---
+
+### `ide.stalenessSensitivity`
+
+How sensitively the IDE's worktree-staleness indicator — the "update main" pill
+in the top bar — is coloured. A multiplier on the severity curve (green →
+orange → red) that blends how many commits the main checkout is behind with how
+old the newest missing commit is:
+
+- `1` (the default) is the baseline: a single commit a week old, **or** fifty
+  commits in a day, both read as urgent (red).
+- `2` doubles the sensitivity — half the thresholds, so a 3.5-day-old commit or
+  25 commits already read red. For a project living on a fast-moving trunk.
+- `0.5` halves it, for a project whose worktrees naturally drift.
+
+```jsonc
+"ide": {
+  // A trunk that merges hourly? Flag it sooner rather than later.
+  "stalenessSensitivity": 2
+}
+```
+
+Values outside `0.1`–`10` are clamped; a non-number falls back to `1`. This is
+project config, not a global setting, so two projects can disagree about what
+"behind" means. The value is read from the *selected* worktree's config.
 
 ### Splitting `ide` across files
 

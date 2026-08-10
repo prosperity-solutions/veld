@@ -1043,6 +1043,11 @@ struct IdeView {
     /// Pane types this project adds to the pane menu, with the commands
     /// stripped out.
     panes: Vec<PaneView>,
+    /// The project's staleness-sensitivity multiplier (default 1), so the UI
+    /// colours the "update main" pill per the project's `ide` config rather than
+    /// a global curve. Floored to `0.1` so a hand-written `0` cannot divide by
+    /// zero or invert the curve.
+    staleness_sensitivity: f64,
 }
 
 /// A config-declared pane as the UI needs to see it.
@@ -1189,10 +1194,14 @@ fn worktree_view(wt: WorktreeRecord) -> WorktreeView {
                     }
                 })
                 .collect();
+            // Read the floored scalar before the vec fields are moved below, so
+            // the partial moves do not leave `section` half-borrowed.
+            let staleness_sensitivity = section.staleness_sensitivity_safe();
             IdeView {
                 quicklinks: section.quicklinks,
                 permissions: section.permissions,
                 panes,
+                staleness_sensitivity,
             }
         })
         .unwrap_or_default();

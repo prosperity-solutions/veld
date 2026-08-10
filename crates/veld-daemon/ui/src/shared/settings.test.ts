@@ -213,21 +213,40 @@ describe("gitCreateFrom", () => {
 });
 
 describe("stalenessHue", () => {
-  it("is green for few-and-recent and red for many-and-old", () => {
-    // 1 commit from this morning → near-green.
+  // The baseline: a single commit a week old, or fifty commits today, are both
+  // at the top of the scale (red).
+  const WEEK = 7 * 86_400;
+
+  it("baseline: a week-old single commit is red", () => {
+    expect(stalenessHue(1, WEEK)).toBeLessThan(20);
+  });
+
+  it("baseline: fifty commits in a day is red", () => {
+    expect(stalenessHue(50, 86_400)).toBeLessThan(20);
+  });
+
+  it("a fresh single commit stays green", () => {
     expect(stalenessHue(1, 60 * 60 * 4)).toBeGreaterThan(100);
-    // 200 commits, three weeks stale → red.
-    expect(stalenessHue(200, 21 * 86_400)).toBeLessThan(20);
   });
 
   it("mixes count and age — a big pile is urgent even if recent", () => {
-    // 200 commits, all from today: still far more red than one commit today.
-    expect(stalenessHue(200, 0)).toBeLessThan(stalenessHue(1, 0));
+    // 50 commits from today: far more red than one commit today.
+    expect(stalenessHue(50, 0)).toBeLessThan(stalenessHue(1, 0));
   });
 
-  it("clamps so extreme values stay on the scale", () => {
+  it("sensitivity scales both thresholds", () => {
+    // 25 commits today is half of the baseline's 50, so it reads mid-scale at
+    // sensitivity 1 but red at sensitivity 2.
+    expect(stalenessHue(25, 0, 1)).toBeGreaterThan(stalenessHue(25, 0, 2));
+    // A half-week-old commit: green at 0.5, red at 2.
+    expect(stalenessHue(1, WEEK / 2, 0.5)).toBeGreaterThan(stalenessHue(1, WEEK / 2, 2));
+  });
+
+  it("clamps so extreme values stay on the scale and never divide by zero", () => {
     expect(stalenessHue(1000, 999 * 86_400)).toBeGreaterThanOrEqual(0);
     expect(stalenessHue(0, 0)).toBeLessThanOrEqual(140);
+    // A 0 sensitivity must not invert or throw.
+    expect(stalenessHue(10, WEEK, 0)).toBeLessThanOrEqual(140);
   });
 });
 

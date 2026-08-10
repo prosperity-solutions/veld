@@ -295,6 +295,10 @@ export interface IdeSection {
    * nothing the client holds can change what gets run.
    */
   panes: PaneSpec[];
+  /** The project's staleness-sensitivity multiplier for the "update main"
+   *  pill (`ide.stalenessSensitivity`, default 1). Optional in the type so a
+   *  fixture or an older daemon that omits it falls back to the default. */
+  staleness_sensitivity?: number;
 }
 
 /** Mirrors `PaneView` in `crates/veld-daemon/src/desktop.rs`. */
