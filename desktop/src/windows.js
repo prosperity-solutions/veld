@@ -42,6 +42,7 @@ const {
 
   ownsWorktree,
   parseWindowList,
+  readLastMainBounds,
   releaseClaims: releaseClaimsIn,
 
   restoreBudget,
@@ -365,6 +366,13 @@ function readStateRaw() {
  * intermediate position is not a bug.
  */
 let persistTimer = null;
+/**
+ * The bounds a fresh main window starts at, kept alive across a macOS close
+ * that empties the window set. Updated from the live main window on every
+ * persist, loaded from disk at init, and written back in `serializeWindowList`
+ * — the one field in the state file that survives having no windows.
+ */
+let lastMainBounds = null;
 function persistWindows() {
   // A quit closes every window one by one, and each `closed` would shrink the
   // recorded set — the last write winning would be "one window", which is what
@@ -380,6 +388,15 @@ function persistWindows() {
     // point some windows are already destroyed and would be filtered out of the
     // very list the next launch reopens.
     if (!deps || quitting) return;
+    // The last live main window's normal bounds, captured *while it is still
+    // alive* — the fallback bounds a fresh main window opens at. Captured here
+    // rather than in `close` so it is current by the time the last window is
+    // being torn down: when `closed` empties the set this has already been
+    // updated by the resizes that led up to it, and writing it is what lets a
+    // macOS red-X close followed by a reopen recall the size. Normal bounds, so
+    // a window remembered while maximised restores to the size it had before.
+    const main = allRecords().find((r) => r.kind === "main" && !r.win.isDestroyed());
+    if (main) lastMainBounds = safeBounds(main.win.getNormalBounds());
     try {
       const records = allRecords()
         .filter((r) => !r.win.isDestroyed())
@@ -401,7 +418,10 @@ function persistWindows() {
       // window's layout — and the live shells its terminal ids name —
       // permanent.
       const tmp = `${deps.stateFile}.tmp`;
-      fs.writeFileSync(tmp, serializeWindowList(readStateRaw(), deps.slotBase, records));
+      fs.writeFileSync(
+        tmp,
+        serializeWindowList(readStateRaw(), deps.slotBase, records, undefined, lastMainBounds),
+      );
       fs.renameSync(tmp, deps.stateFile);
     } catch {
       // An unwritable userData costs the window set on the next launch and
@@ -524,6 +544,31 @@ function takenSuffixes() {
 }
 
 /**
+ * Clamp remembered bounds to a display, so a fresh window cannot be restored
+ * off-screen. A window remembered on a monitor that is gone (or on a smaller
+ * one) would otherwise open with its title bar unreachable — unrecoverable on
+ * macOS — so the position is moved onto whichever display the stored rect
+ * overlaps most, and the size is capped to that display's work area.
+ *
+ * `null` in, `null` out: nothing remembered is the first-launch case, and the
+ * caller falls back to the default size.
+ */
+function boundsOnScreen(bounds) {
+  if (!bounds) return null;
+  const area = screen.getDisplayMatching(bounds).workArea;
+  const width = Math.min(bounds.width, area.width);
+  const height = Math.min(bounds.height, area.height);
+  return {
+    width,
+    height,
+    // Clamped to the work area so the title bar can never land off-screen — the
+    // same rule `detachBounds` applies for the same reason.
+    x: Math.round(Math.max(area.x, Math.min(bounds.x, area.x + area.width - width))),
+    y: Math.round(Math.max(area.y, Math.min(bounds.y, area.y + area.height - height))),
+  };
+}
+
+/**
  * Open a window.
  *
  * `suffix === undefined` allocates the next free one; pass an explicit suffix
@@ -549,7 +594,9 @@ function openWindow(options = {}) {
 
   const bounds =
     safeBounds(options.bounds) ??
-    (detached ? detachBounds(options.originWindow ?? null) : { width: 1280, height: 800 });
+    (detached
+      ? detachBounds(options.originWindow ?? null)
+      : boundsOnScreen(lastMainBounds) ?? { width: 1280, height: 800 });
 
   const win = new BrowserWindow({
     // Titled by the app for a main window (the page's <title> is the daemon
@@ -1464,6 +1511,11 @@ function registerWindowIpc(ipcMain) {
 
 function initWindows(dependencies) {
   deps = dependencies;
+  // The size/position a fresh main window starts at. Read once, at init: the
+  // only path that needs it is opening a window without an explicit bounds
+  // (the macOS reopen, a restore fallback, ⌘N), and each of those writes it
+  // back the moment it has a live main window to read from.
+  lastMainBounds = readLastMainBounds(readStateRaw());
 }
 
 // Exactly what `main.js` calls. `recordFor` and `persistWindows` are internal:
