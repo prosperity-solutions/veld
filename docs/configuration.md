@@ -2269,6 +2269,31 @@ Values outside `0.1`–`10` are clamped; a non-number falls back to `1`. This is
 project config, not a global setting, so two projects can disagree about what
 "behind" means. The value is read from the *selected* worktree's config.
 
+**Choosing a value.** The knob scales two thresholds, both at half the baseline
+per doubling of `s`:
+
+| `s` | a commit this old reads red | or this many commits read red |
+|---|---|---|
+| `0.5` | 2 weeks | 100 |
+| `1` (default) | 1 week | 50 |
+| `2` | ~3.5 days | 25 |
+| `3` | ~2.3 days | ~17 |
+
+Start at `1` and tune by feel — the pill is a nag, and the two failure modes are
+on opposite sides:
+
+- **It nags you too early.** A freshly cloned repo or a long-lived release
+  branch always sits a few commits behind, and the pill is always orange. Drop
+  to `0.5` (or `0.25`) so it only lights up for genuine drift.
+- **It hides real drift.** The pill stays green while your worktrees are born
+  stale and PRs conflict late. Raise to `2`–`3` so "behind" reads urgent
+  sooner. This is the right call for a fast-moving trunk whose agents live in
+  worktrees (this repo runs `2`).
+
+A useful calibration: `s` should be high enough that a normal worktree-creation
+cycle never trips it, but low enough that a `main` nobody has updated for a
+sprint reads clearly red.
+
 ### Splitting `ide` across files
 
 `ide` may appear in any file an `include` glob picks up — `veld.d/ide.jsonc` is
