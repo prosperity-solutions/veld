@@ -27,6 +27,13 @@ use std::path::PathBuf;
 /// client-logs, share control API).
 pub const DEFAULT_DAEMON_PORT: u16 = 19899;
 
+/// Hostname the installed instance's dashboard is served on, through Caddy.
+///
+/// Reserved: [`management_host`] refuses it, so a dev instance cannot
+/// self-register the route and hijack it. The helper's base Caddy config owns
+/// the route itself (`veld-helper/src/caddy.rs`, same literal).
+pub const MANAGEMENT_HOST: &str = "veld.localhost";
+
 fn env_nonempty(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|v| !v.is_empty())
 }
@@ -221,7 +228,7 @@ pub fn management_host() -> Option<String> {
         && host
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.')
-        && host != "veld.localhost";
+        && host != MANAGEMENT_HOST;
     if !valid {
         tracing::warn!(
             host,

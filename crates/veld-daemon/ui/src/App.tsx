@@ -154,6 +154,7 @@ import {
 } from "./panes/model";
 import { acquireWorktree } from "./ide/acquire";
 import { channel, type ClientInfo } from "./ide/channel";
+import { awayNote, openableWorktrees, worktreeSetKey } from "./ide/ownership";
 import {
   adoptLegacyLayouts,
   cancelPendingWrite,
@@ -311,6 +312,19 @@ function flashAttention(): void {
  *  signature change. Several polls' worth, so a slow `veld start` isn't cut
  *  off. */
 const PENDING_TTL_MS = 60_000;
+
+/**
+ * How long the control socket may be down before the page says so.
+ *
+ * Long enough to cover a reconnect (the channel's own backoff starts at 300ms)
+ * and a daemon restart, so `veld update` does not flash a warning at everyone;
+ * short enough that a page whose upgrade is being *refused* — a scheme the
+ * daemon's origin allowlist does not know, a proxy that drops upgrades — says
+ * something while the person is still looking at it. That case is why this
+ * exists: without arbitration the dashboard loads, polls and renders a rail, and
+ * then quietly refuses to open a worktree or attach a terminal.
+ */
+const CHANNEL_DOWN_NOTICE_MS = 4000;
 
 /**
  * A worktree's marker, in whichever face the `worktree.markerStyle` setting asks
@@ -899,15 +913,49 @@ function AppInner(props: {
   }, []);
 
   /**
-   * Worktrees another window is showing.
+   * Worktrees another client is showing, and **which** client each one is in.
    *
    * Only for the rail's benefit — the shell is the authority on who may show
    * what, and `selectWorktree` still asks it. Rendering this is what stops the
    * ownership model reading as a bug: without it, a row simply refuses to open
    * and some other window jumps forward with no stated connection between the
    * two.
+   *
+   * A map rather than a set of ids, because "somewhere else" and "in Veld
+   * Desktop" are different things to be told: the daemon already sends the
+   * holder's kind and label with every row (it decides `focus` on the kind), and
+   * throwing them away here left the rail with one greyed row and one tooltip
+   * for a browser tab and a desktop window alike.
    */
-  const [elsewhere, setElsewhere] = useState<Set<number>>(new Set());
+  const [elsewhere, setElsewhere] = useState<Map<number, ClientInfo>>(new Map());
+
+  /**
+   * Whether to tell the user the control socket is not up.
+   *
+   * Reported on a delay rather than on the first drop — see
+   * [`CHANNEL_DOWN_NOTICE_MS`] — so a reconnect is silent and a refusal is not.
+   * The timer is the flag's only writer towards `true`, which is what keeps a
+   * reconnect storm from re-arming it repeatedly.
+   */
+  const [channelDown, setChannelDown] = useState(false);
+  const channelTimer = useRef<number | null>(null);
+  const noteChannelDown = () => {
+    // Already counting down: the retry that just failed is the same outage, and
+    // restarting the timer on every attempt would push the notice past the
+    // backoff for as long as the daemon keeps refusing.
+    if (channelTimer.current !== null) return;
+    channelTimer.current = window.setTimeout(() => {
+      channelTimer.current = null;
+      setChannelDown(true);
+    }, CHANNEL_DOWN_NOTICE_MS);
+  };
+  const noteChannelUp = () => {
+    if (channelTimer.current !== null) {
+      clearTimeout(channelTimer.current);
+      channelTimer.current = null;
+    }
+    setChannelDown(false);
+  };
 
   /**
    * Open this client's control socket and keep it open for the life of the page.
@@ -932,7 +980,9 @@ function AppInner(props: {
       // `mine` is the daemon's per-recipient answer, so the rail never needs to
       // know any client's identity to work out which rows are not its own.
       onClaims: (claims) => {
-        setElsewhere(new Set(claims.filter((c) => !c.mine).map((c) => c.worktree_id)));
+        setElsewhere(
+          new Map(claims.filter((c) => !c.mine).map((c) => [c.worktree_id, c.client])),
+        );
       },
       onYield: (worktreeId, ack) => onYield.current(worktreeId, ack),
       onFocus: () => {
@@ -969,6 +1019,7 @@ function AppInner(props: {
        * hanging up) any terminal they had opened in the meantime.
        */
       onReady: (sameEpoch) => {
+        noteChannelUp();
         // What to ask for. The worktree this client holds, first. Otherwise the
         // selection — but only when asking again cannot take a worktree off
         // somebody: either this client was never granted anything (the boot
@@ -988,7 +1039,19 @@ function AppInner(props: {
       onClosed: () => {
         // Nobody's claims are knowable now, and rendering the last table would
         // grey out rows whose holders may already be gone.
-        setElsewhere(new Set());
+        setElsewhere(new Map());
+        // "Every worktree is open somewhere else" is a claim about a table this
+        // client can no longer read, so it must not stay on screen — with the
+        // socket down it is indistinguishable from "the arbitration is gone",
+        // which the banner below says truthfully.
+        setClaimBlocked(false);
+        // **Say so on screen.** A page whose channel cannot come up still loads,
+        // still polls, and still renders a rail — it simply has no arbitration,
+        // so worktrees do not open and terminals do not attach. The only report
+        // was a `WebSocket connection failed` in the devtools console, whose
+        // status a browser will not show; a dashboard served over plaintext
+        // spent a whole session like that. See `channelDown`.
+        noteChannelDown();
       },
     });
   }, [chromeless]);
@@ -2440,7 +2503,12 @@ function AppInner(props: {
     return acquireWorktree(preferred, {
       claim: (id, focusHolder) => channel.claim(id, focusHolder),
       release: (id, seq) => channel.release(id, seq),
-      candidates: () => worktreesRef.current,
+      // **Openable ones only.** This was the repo's whole list, so a hunt could
+      // land on a worktree in the trash or one this window had just confirmed the
+      // removal of — opening panes, terminals and a browser rooted at a directory
+      // on its way off the disk. The rail already refuses to select those on a
+      // click; the hunt reaches the same rows without one.
+      candidates: () => openableWorktrees(worktreesRef.current, isDeleting),
       show: (target) => {
         grantedRef.current = true;
         setActiveRepoRoot(target.repo_root);
@@ -2496,6 +2564,38 @@ function AppInner(props: {
   useEffect(() => {
     if (claimBlocked) setClaimBlocked(false);
   }, [worktree?.id]);
+
+  /**
+   * Worktrees no other client is showing — what this window could take.
+   *
+   * Derived from the claims table rather than asked for: the point is to notice
+   * when the answer *changes*, and `freeKey` is what an effect can depend on
+   * without re-running on every 5s poll's new object identities.
+   */
+  const freeWorktrees = openableWorktrees(worktrees, isDeleting, elsewhere);
+  const freeKey = worktreeSetKey(freeWorktrees);
+
+  /**
+   * Try again when a worktree this window could have appears.
+   *
+   * **`claimBlocked` was latched.** It is set by a hunt that ran out of
+   * candidates, and until this it was cleared only by the selection changing —
+   * so a window that opened into a repo whose every worktree was taken sat on
+   * the empty state through the other client closing, through a `veld worktree`
+   * created in a terminal, and through the row being handed back to it by a
+   * yield. The state it reported had stopped being true and nothing was going to
+   * look again.
+   *
+   * Keyed on the free set, which is what makes this terminate: a retry that is
+   * refused leaves the set as it was, so this does not re-run until something
+   * genuinely changes. A grant clears `claimBlocked` through `show`.
+   */
+  useEffect(() => {
+    if (chromeless || !claimBlocked) return;
+    const target = freeWorktrees[0];
+    if (!target) return;
+    void acquireRef.current(target);
+  }, [chromeless, claimBlocked, freeKey]);
 
   // Accepts an updater as well as a value: two panes can report a change in the
   // same commit (two browser panes both finishing a navigation), and a value
@@ -3801,6 +3901,24 @@ function AppInner(props: {
           Can&apos;t reach the veld daemon — is it running? Retrying…
         </div>
       )}
+      {/* The daemon is reachable over HTTP but its control socket is not, which
+          is a state the page can otherwise only report to the devtools console.
+          Suppressed while `offline` is up: a daemon that is not there explains
+          both, and two banners about one outage is worse than either. */}
+      {channelDown && !offline && (
+        <div
+          style={{
+            padding: "6px 14px",
+            background: "var(--warn-bg)",
+            color: "var(--warn)",
+            fontSize: 12,
+            flex: "none",
+          }}
+        >
+          Not connected to Veld&apos;s worktree channel — opening a worktree and
+          attaching a terminal will not work until it is back. Retrying…
+        </div>
+      )}
       {/* Join requests are a prompt, so they go where they are visible without
           opening anything — someone is sitting on the other end waiting for an
           answer, and a badge on a popover is not that. Every share's requests,
@@ -3827,20 +3945,6 @@ function AppInner(props: {
         <div className="center-page">
           <Button size="md" onClick={() => setDialog({ kind: "import" })}>
             Import your first project
-          </Button>
-        </div>
-      ) : claimBlocked ? (
-        // Every worktree is already on screen in another window. Saying so beats
-        // the alternative this replaced — rendering a set of panes that belongs
-        // to a different window, and taking its shells on the way.
-        <div className="center-page">
-          <p>Every worktree is already open in another window.</p>
-          <Button
-            size="md"
-            variant="default"
-            onClick={() => setDialog({ kind: "new-worktree", lane: "" })}
-          >
-            Create a worktree
           </Button>
         </div>
       ) : (
@@ -3874,7 +3978,14 @@ function AppInner(props: {
             onTrashDrop={trashWorktree}
             deleting={deletingIds}
           />
-          {worktree && layout && (
+          {/* **Beside the rail, never instead of it.** This used to replace the
+              whole workspace, which took away the one control that resolves the
+              state it is reporting: the rail is where another worktree is
+              picked, where a "＋" per lane creates one, and where the rows this
+              window cannot have are visibly marked as belonging to somebody. A
+              window with one worktree in the repo therefore lost its rail on
+              open and got it back only by ⌘K. */}
+          {worktree && layout ? (
             <PaneArea
               layout={layout}
               onLayout={setLayout}
@@ -3898,7 +4009,21 @@ function AppInner(props: {
                 nodeActionProps ? <NodeActions {...nodeActionProps} /> : null
               }
             />
-          )}
+          ) : claimBlocked ? (
+            // Every worktree is on screen in another client. Saying so beats the
+            // alternative this replaced — rendering a set of panes that belongs
+            // to another window, and taking its shells on the way.
+            <div className="center-page">
+              <p>Every worktree is already open somewhere else.</p>
+              <Button
+                size="md"
+                variant="default"
+                onClick={() => setDialog({ kind: "new-worktree", lane: "" })}
+              >
+                Create a worktree
+              </Button>
+            </div>
+          ) : null}
         </div>
       )}
 
@@ -4819,9 +4944,11 @@ function Rail(props: {
   canRun: (w: Worktree) => boolean;
   canStart: (w: Worktree) => boolean;
   pendingFor: (w: Worktree) => PendingAction | null;
-  /** Worktrees another window is showing. Clicking one goes there instead of
-   *  opening it here, so it is marked rather than left to surprise. */
-  elsewhere: Set<number>;
+  /** Worktrees another client is showing, and which one has each. Clicking one
+   *  goes there instead of opening it here, so it is marked — and named, because
+   *  a desktop window is somewhere the click can take you and a browser tab is
+   *  not. */
+  elsewhere: Map<number, ClientInfo>;
   onToggle: () => void;
   onWidth: (w: number) => void;
   onSelect: (w: Worktree) => void;
@@ -5339,7 +5466,8 @@ function Rail(props: {
               // A worktree on its way out gets none: it cannot be started, and a
               // run control on it would be a button that only ever fails.
               const showRunControl = props.wide && !trashed && props.canRun(w);
-              const away = props.elsewhere.has(w.id);
+              const holder = props.elsewhere.get(w.id);
+              const away = holder !== undefined;
               return (
                 /* A Fragment so the carets are the row's SIBLINGS. Drawn on the row
                    they were clipped by its `overflow: hidden` and rounded by its
@@ -5370,7 +5498,7 @@ function Rail(props: {
                         : w.trash_error
                           ? `${worktreeLabel(w)} — could not be deleted: ${w.trash_error}`
                           : away
-                            ? `${worktreeLabel(w)} — ${w.branch}${stateNote} (open in another window)`
+                            ? `${worktreeLabel(w)} — ${w.branch}${stateNote} (${awayNote(holder)})`
                             : `${worktreeLabel(w)} — ${w.branch}${stateNote}`
                   }
                   /* Pending removals are not draggable: they are leaving, so a

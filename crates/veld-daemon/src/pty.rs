@@ -41,7 +41,9 @@
 //! mean any page in any tab could run `new WebSocket("ws://127.0.0.1:19899/…")`
 //! and get a shell on the user's machine. "It's only on loopback" was never
 //! the mitigation, and it isn't one here: the helper also publishes this
-//! daemon at `https://veld.localhost` (`crates/veld-helper/src/caddy.rs`).
+//! daemon at `veld.localhost` (`crates/veld-helper/src/caddy.rs`) — over HTTP
+//! as well as HTTPS, since one Caddy server block owns both listeners. See
+//! [`MANAGEMENT_PORTS`] for what that means for the allowlist.
 //!
 //! Two independent gates replace the one that doesn't apply:
 //!
@@ -1801,6 +1803,55 @@ fn project_external_origins(
 // Origin allowlist
 // ---------------------------------------------------------------------------
 
+/// The scheme/port pairs Caddy serves a management hostname on.
+///
+/// **Both schemes, and that is not a concession.** One Caddy server block
+/// listens on the HTTP *and* the HTTPS port (`veld-helper/src/caddy.rs`), which
+/// is how Caddy is told not to install its automatic HTTP→HTTPS redirects — so
+/// `http://veld.localhost` is a fully served surface, not a mistake, and a
+/// browser that lands there (Chrome does not HTTPS-upgrade a loopback host you
+/// type) got a dashboard whose every WebSocket was refused: 229 rejected
+/// upgrades in one session's daemon log, and nothing on screen saying why,
+/// because a browser cannot read a failed handshake's status.
+///
+/// Rejecting the plaintext origin bought nothing here. The name resolves only
+/// on the loopback interface, so there is no path for it to be on, and the only
+/// page that can *hold* this origin is one this daemon served itself — which is
+/// the property the check is for. What it did buy was two silently
+/// scheme-dependent features (terminals, worktree arbitration) on a dashboard
+/// that otherwise worked.
+///
+/// Both port pairs, because the setup mode decides which Caddy is in front and
+/// asking would mean reading a file on every upgrade. An origin on a port
+/// nothing is listening on cannot exist, so listing it trusts nothing extra —
+/// and the unprivileged pair was missing outright, which is the same bug on the
+/// no-sudo install.
+const MANAGEMENT_PORTS: [(&str, u16); 4] = [
+    // Privileged setup: Caddy owns 443/80, so the default ports are omitted
+    // from the origin — browsers serialise it that way.
+    ("https", 443),
+    ("http", 80),
+    // Unprivileged (no-sudo) setup: `veld setup unprivileged` runs Caddy on
+    // these (`veld/src/commands/setup/unprivileged.rs`).
+    ("https", 18443),
+    ("http", 18080),
+];
+
+/// The origins one management hostname can legitimately be reached at.
+///
+/// Exact pairs, never a cross product: nothing serves HTTPS on the HTTP port,
+/// so `http://veld.localhost:18443` is not an origin any page can have and does
+/// not belong on an allowlist.
+fn management_origins(host: &str) -> Vec<String> {
+    MANAGEMENT_PORTS
+        .iter()
+        .map(|(scheme, port)| match (*scheme, *port) {
+            ("https", 443) | ("http", 80) => format!("{scheme}://{host}"),
+            _ => format!("{scheme}://{host}:{port}"),
+        })
+        .collect()
+}
+
 /// Origins allowed to open a terminal socket.
 ///
 /// Built per request rather than cached: it is a handful of `format!`s on a
@@ -1823,12 +1874,12 @@ fn allowed_origins_with(dev_origins: Vec<String>) -> Vec<String> {
         format!("http://127.0.0.1:{port}"),
         format!("http://localhost:{port}"),
         format!("http://[::1]:{port}"),
-        // The installed instance's Caddy route (veld-helper's base config).
-        "https://veld.localhost".to_owned(),
     ];
+    // The installed instance's Caddy route (veld-helper's base config).
+    origins.extend(management_origins(veld_core::instance::MANAGEMENT_HOST));
     // A dev instance registers its own management hostname with the helper.
     if let Some(host) = veld_core::instance::management_host() {
-        origins.push(format!("https://{host}"));
+        origins.extend(management_origins(&host));
     }
     // The vite dev server proxies /api (including this upgrade) to the daemon
     // it was pointed at, so the browser's Origin is vite's, not ours. Trust it
@@ -3238,8 +3289,23 @@ mod tests {
             "https://veld.localhost.evil.com"
         )));
         assert!(!origin_allowed(&origin_of("https://evil.veld.localhost")));
-        assert!(!origin_allowed(&origin_of("http://veld.localhost")));
         assert!(!origin_allowed(&origin_of("null")));
+
+        // The same dashboard over plaintext. Caddy serves it on the HTTP port
+        // too (one server block, both listeners), so this is the origin a
+        // browser that was not talked into HTTPS actually presents — and every
+        // socket on that page was refused while the rest of it worked. See
+        // `MANAGEMENT_PORTS`.
+        assert!(origin_allowed(&origin_of("http://veld.localhost")));
+        // The no-sudo setup's ports, which were missing entirely.
+        assert!(origin_allowed(&origin_of("https://veld.localhost:18443")));
+        assert!(origin_allowed(&origin_of("http://veld.localhost:18080")));
+        // Exact pairs only: nothing serves HTTPS on the HTTP port or the other
+        // way round, so neither crossing is an origin that can exist.
+        assert!(!origin_allowed(&origin_of("http://veld.localhost:18443")));
+        assert!(!origin_allowed(&origin_of("https://veld.localhost:18080")));
+        // And a port nobody in this scheme's list serves.
+        assert!(!origin_allowed(&origin_of("https://veld.localhost:8443")));
     }
 
     #[test]

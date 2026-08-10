@@ -127,6 +127,7 @@ pub fn routes() -> Router {
     Router::new()
         .route("/api/ide/tickets", post(mint_ticket))
         .route("/api/ide/channel", get(channel))
+        .route("/api/ide/state", get(get_state))
         .route("/api/worktrees/{id}/layout", get(get_layout))
         .route("/api/worktrees/{id}/layout", put(put_layout))
 }
@@ -281,6 +282,191 @@ fn conflict(cur: veld_core::db::PaneLayout) -> ApiError {
             "layout": serde_json::from_str::<serde_json::Value>(&cur.layout).ok(),
         })),
     )
+}
+
+// ---------------------------------------------------------------------------
+// Diagnostics
+// ---------------------------------------------------------------------------
+
+/// One connected client, as a diagnostic reads it.
+#[derive(Serialize)]
+struct ClientState {
+    kind: ClientKind,
+    label: String,
+    /// Which worktrees this client is *recorded as showing*.
+    claims: Vec<i64>,
+    /// Which worktrees it has told us it has panes mounted for. Client-declared
+    /// — the difference between this and `claims` is normal (a client keeps
+    /// visited worktrees mounted), and a `holds` entry with no live socket
+    /// behind it is what makes a claimer wait for a yield that never comes.
+    holds: Vec<i64>,
+    /// Yields asked of this client that it has not acknowledged. Non-zero here
+    /// while a claim is stuck is the whole answer.
+    unacked_yields: usize,
+}
+
+/// A claim waiting out [`RECONNECT_GRACE`].
+#[derive(Serialize)]
+struct OrphanState {
+    worktree_id: i64,
+    kind: ClientKind,
+    label: String,
+    age_ms: u128,
+}
+
+/// What the database says about a worktree the registry has an opinion on.
+///
+/// The correlation is the point: a rowid SQLite has reused, or a claim on a
+/// worktree that no longer exists, greys out a row in every rail and cannot be
+/// seen from either side alone.
+#[derive(Serialize)]
+struct WorktreeState {
+    worktree_id: i64,
+    /// `null` when no such row exists — a stale claim, or a worktree deleted
+    /// without the client noticing yet.
+    path: Option<String>,
+    alias: Option<String>,
+    /// The stored layout's version, or `0` when the worktree has no panes row.
+    layout_version: i64,
+}
+
+#[derive(Serialize)]
+struct StateResponse {
+    /// This daemon process's identity. A change means every claim was dropped —
+    /// see [`EPOCH`].
+    epoch: String,
+    clients: Vec<ClientState>,
+    orphaned: Vec<OrphanState>,
+    worktrees: Vec<WorktreeState>,
+    /// Whether the `worktrees` correlation hit [`MAX_STATE_WORKTREES`] and
+    /// stopped. Reported rather than left to be inferred from a length: a
+    /// silently truncated diagnostic reads as "nothing else is going on", which
+    /// is the opposite of what it means.
+    worktrees_truncated: bool,
+}
+
+/// Cap on the worktrees one diagnostic read resolves against the database.
+///
+/// Two queries per worktree on an ungated `GET`, and the input is
+/// client-declared: [`MAX_HELD`] bounds *one* client's `holds`, and nothing
+/// bounds the number of clients. Without a cap a page could open sockets,
+/// declare 256 holds on each, and turn one request into thousands of SQLite
+/// reads — this repo has shipped exactly that shape of ungated-GET amplification
+/// once before. The number is well past any real registry (eight windows, a
+/// handful of tabs).
+const MAX_STATE_WORKTREES: usize = 256;
+
+/// Who is showing what, right now — the live registry, beside what the database
+/// holds for the same worktrees.
+///
+/// **Because the registry is not in the database and cannot be.** The socket is
+/// the lease (see the module docs), so "who has this worktree" exists only in
+/// this process's memory, and the state that made a rail grey out a row or a
+/// window refuse to open one was previously observable only by adding a
+/// `tracing` line and restarting the daemon. `pane_layouts` *is* in the database,
+/// which is exactly why the two have to be read together.
+///
+/// Carries **no `client_id`**, the same rule the claims broadcast follows: the id
+/// is the credential a reconnect resumes with. Safe, so no CSRF header — and the
+/// daemon sends no `Access-Control-Allow-Origin`, so another origin can issue
+/// this request and never read the answer, as `get_layout` above relies on too.
+async fn get_state() -> Json<StateResponse> {
+    let (clients, orphaned, interesting) = {
+        let reg = REGISTRY.lock().await;
+        let mut clients: Vec<ClientState> = reg
+            .clients
+            .iter()
+            .map(|(id, c)| {
+                let mut claims: Vec<i64> = reg
+                    .claims
+                    .iter()
+                    .filter(|(_, owner)| *owner == id)
+                    .map(|(worktree_id, _)| *worktree_id)
+                    .collect();
+                claims.sort_unstable();
+                let mut holds: Vec<i64> = c.holds.iter().copied().collect();
+                holds.sort_unstable();
+                ClientState {
+                    kind: c.info.kind,
+                    label: c.info.label.clone(),
+                    claims,
+                    holds,
+                    unacked_yields: c.pending.len(),
+                }
+            })
+            .collect();
+        // Stable output so two reads a second apart can be diffed by eye; a
+        // HashMap's order changes for no reason.
+        clients.sort_by(|a, b| a.label.cmp(&b.label).then(a.claims.cmp(&b.claims)));
+
+        let now = Instant::now();
+        let mut orphaned: Vec<OrphanState> = reg
+            .orphaned
+            .iter()
+            .map(|(worktree_id, o)| OrphanState {
+                worktree_id: *worktree_id,
+                kind: o.info.kind,
+                label: o.info.label.clone(),
+                age_ms: now.duration_since(o.since).as_millis(),
+            })
+            .collect();
+        orphaned.sort_by_key(|o| o.worktree_id);
+
+        // Every worktree either side has an opinion about, which is the set worth
+        // resolving against the database.
+        let mut interesting: Vec<i64> = reg
+            .claims
+            .keys()
+            .chain(reg.orphaned.keys())
+            .chain(reg.clients.values().flat_map(|c| c.holds.iter()))
+            .copied()
+            .collect::<HashSet<i64>>()
+            .into_iter()
+            .collect();
+        interesting.sort_unstable();
+        (clients, orphaned, interesting)
+    };
+
+    // Lowest ids first, so what survives the cap is stable between two reads
+    // rather than whichever the hash order offered.
+    let truncated = interesting.len() > MAX_STATE_WORKTREES;
+    if truncated {
+        warn!(
+            resolved = MAX_STATE_WORKTREES,
+            total = interesting.len(),
+            "ide state: too many worktrees to correlate; reporting the first"
+        );
+    }
+
+    // Outside the lock: this opens the database and does two reads per worktree,
+    // and nothing in this module may hold the registry across that.
+    let db = open_db().ok();
+    let worktrees = interesting
+        .into_iter()
+        .take(MAX_STATE_WORKTREES)
+        .map(|worktree_id| {
+            let record = db
+                .as_ref()
+                .and_then(|db| db.get_worktree(worktree_id).ok().flatten());
+            WorktreeState {
+                worktree_id,
+                path: record.as_ref().map(|w| w.path.clone()),
+                alias: record.as_ref().map(|w| w.alias.clone()),
+                layout_version: db
+                    .as_ref()
+                    .and_then(|db| db.pane_layout(worktree_id).ok().flatten())
+                    .map_or(0, |l| l.version),
+            }
+        })
+        .collect();
+
+    Json(StateResponse {
+        epoch: EPOCH.clone(),
+        clients,
+        orphaned,
+        worktrees,
+        worktrees_truncated: truncated,
+    })
 }
 
 // ---------------------------------------------------------------------------
