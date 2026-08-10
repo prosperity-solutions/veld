@@ -66,9 +66,22 @@ pub(crate) fn verify_own_binary(exe: &Path) -> bool {
 /// [`verify_own_binary`] with an explicit key, so the file-verification logic
 /// (not just the crypto primitive) is testable without the org private key.
 pub(crate) fn verify_own_binary_with(pubkey: &[u8; 32], exe: &Path) -> bool {
-    let Ok(sig) = std::fs::read(sig_path_for(exe)) else {
+    // Bound the `.sig` read: the file sits in the user-writable lib dir, so an
+    // attacker who can place a huge one would otherwise make the helper slurp it
+    // on every relaunch attempt (memory DoS) before the length check runs. A
+    // valid ed25519 signature is exactly 64 bytes, so read only that much.
+    use std::io::Read;
+    let Ok(mut file) = std::fs::File::open(sig_path_for(exe)) else {
         return false;
     };
+    let mut sig = [0u8; 64];
+    let n = match file.read(&mut sig) {
+        Ok(n) => n,
+        Err(_) => return false,
+    };
+    if n != 64 {
+        return false;
+    }
     let Ok(data) = std::fs::read(exe) else {
         return false;
     };
@@ -139,6 +152,21 @@ mod tests {
             sig_path_for(Path::new("/x/veld-helper")),
             PathBuf::from("/x/veld-helper.sig")
         );
+    }
+
+    #[test]
+    fn an_oversized_sig_is_rejected_without_slurping_it() {
+        // The .sig sits in the user-writable lib dir; a huge one must not be
+        // read into memory (DoS) before the length check. The bounded read
+        // rejects it by returning != 64 bytes.
+        let dir =
+            std::env::temp_dir().join(format!("veld-signing-oversize-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let binary = dir.join("veld-helper");
+        std::fs::write(&binary, b"binary").unwrap();
+        std::fs::write(sig_path_for(&binary), vec![0u8; 1 << 20]).unwrap();
+        assert!(!verify_own_binary_with(&[0u8; 32], &binary));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
