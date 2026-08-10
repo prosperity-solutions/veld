@@ -353,7 +353,7 @@ function livePid(pid) {
   }
 }
 
-function serializeWindowList(previousRaw, base, records, isPidAlive = livePid) {
+function serializeWindowList(previousRaw, base, records, isPidAlive = livePid, lastMainBounds = null) {
   let all = {};
   try {
     const parsed = JSON.parse(previousRaw);
@@ -390,7 +390,31 @@ function serializeWindowList(previousRaw, base, records, isPidAlive = livePid) {
     const pid = key.match(/^(?:main|dev)-(\d+)$/);
     if (pid && !isPidAlive(Number(pid[1]))) delete all[key];
   }
+  // The last main window's bounds, kept apart from the window set: closing the
+  // last window on macOS empties the set, and without this the next fresh main
+  // window would open at the default size. It is not a base — it is never
+  // reopened, only recalled as the size/position a new main window starts at.
+  all.lastMainBounds = lastMainBounds ? safeBounds(lastMainBounds) : null;
   return JSON.stringify(all);
+}
+
+/**
+ * The bounds a fresh main window should start at, or `null` when nothing has
+ * ever been remembered (a first launch, or an unreadable file).
+ *
+ * `safeBounds` guards the same way it does for a window record: a corrupted
+ * value must not render the app unresizable-in-practice.
+ */
+function readLastMainBounds(raw) {
+  try {
+    const parsed = JSON.parse(raw);
+    if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+      return safeBounds(parsed.lastMainBounds);
+    }
+  } catch {
+    // Unreadable or absent: nothing remembered, which is the first-launch case.
+  }
+  return null;
 }
 
 module.exports = {
@@ -411,5 +435,6 @@ module.exports = {
   safeBounds,
   parseWindowRecord,
   parseWindowList,
+  readLastMainBounds,
   serializeWindowList,
 };

@@ -892,7 +892,16 @@ Minimal by design. Main process only does:
    `userData/windows.json` (written to a temp file and renamed, since a torn file
    reopens as one window and the next persist makes that permanent) and reopened
    on launch, because a detached window holds live shells and reopening only the
-   main one abandons them to the detach grace.
+   main one abandons them to the detach grace. The file also carries
+   `lastMainBounds` — the last main window's size and position, kept apart from
+   the window set so a macOS red-X close (which empties the set while the tray
+   keeps the app alive) still lets the next fresh main window open at the size it
+   had. It is the fallback bounds for any main window opened with no explicit
+   bounds (the reopen, a restore fallback, ⌘N), clamped onto a display so a
+   monitor that has since been unplugged cannot strand the title bar off-screen;
+   a quit/relaunch path doesn't need it, because there the per-window bounds in
+   the set already survive. It is not a base — it is never reopened, only
+   recalled.
    `before-quit` stops both the hand-back and the persist: a quit is not a series
    of window closes, and treating it as one would record the app as having one
    window and reopen exactly that. That latch is **one-way**, cleared only by

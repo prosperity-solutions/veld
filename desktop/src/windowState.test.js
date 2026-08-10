@@ -14,6 +14,7 @@ const {
   ownsWorktree,
   parseWindowList,
   parseWindowRecord,
+  readLastMainBounds,
   releaseClaims,
   restoreBudget,
   safeBounds,
@@ -167,8 +168,11 @@ test("serializeWindowList leaves the other base alone", () => {
 
   // An unreadable previous file starts a fresh one rather than refusing to
   // write. An empty list is not worth a key: a base with no windows and a base
-  // that is absent reopen identically.
-  assert.deepEqual(JSON.parse(serializeWindowList("{oops", "main", [])), {});
+  // that is absent reopen identically. (`lastMainBounds` is null on a first
+  // launch, so it is always present but says nothing.)
+  assert.deepEqual(JSON.parse(serializeWindowList("{oops", "main", [])), {
+    lastMainBounds: null,
+  });
 });
 
 test("serializeWindowList prunes bases nobody will read again", () => {
@@ -194,7 +198,7 @@ test("serializeWindowList prunes bases nobody will read again", () => {
   );
   // `dev` is a real base, not a pid-derived one, so it survives whatever its
   // instance is doing; the two dead pid bases and the empty list go.
-  assert.deepEqual(Object.keys(written).sort(), ["dev", "main"]);
+  assert.deepEqual(Object.keys(written).sort(), ["dev", "lastMainBounds", "main"]);
 });
 
 test("serializeWindowList does not delete a live instance's windows", () => {
@@ -227,7 +231,37 @@ test("serializeWindowList keeps the pid-derived base it is currently writing", (
       () => false,
     ),
   );
-  assert.deepEqual(Object.keys(written), ["dev-41231"]);
+  assert.deepEqual(Object.keys(written), ["dev-41231", "lastMainBounds"]);
+});
+
+test("serializeWindowList writes the last main window's bounds", () => {
+  // The recalled size/position of a fresh main window, kept apart from the
+  // window set so it survives a macOS close that empties the set.
+  const written = JSON.parse(
+    serializeWindowList("", "main", [], () => false, { x: 40, y: 33, width: 1500, height: 887 }),
+  );
+  assert.deepEqual(written.lastMainBounds, { x: 40, y: 33, width: 1500, height: 887 });
+  // No remembered bounds yet (first launch): the key is present but null.
+  assert.equal(JSON.parse(serializeWindowList("", "main", [])).lastMainBounds, null);
+});
+
+test("lastMainBounds survives a close that empties the window set", () => {
+  // The macOS red-X path: the only window closes, the base is pruned to an
+  // empty array, but the recalled bounds must still be there for the next
+  // fresh window. This is the regression the fix exists for.
+  const bounds = { x: 12, y: 33, width: 1500, height: 887 };
+  const written = JSON.parse(serializeWindowList("", "main", [], () => false, bounds));
+  assert.deepEqual(Object.keys(written), ["lastMainBounds"]);
+  assert.deepEqual(readLastMainBounds(JSON.stringify(written)), bounds);
+});
+
+test("readLastMainBounds degrades to null", () => {
+  // Nothing remembered, unreadable, or corrupt all mean "no recall", which is
+  // the first-launch fallback to the default size.
+  assert.equal(readLastMainBounds(""), null);
+  assert.equal(readLastMainBounds("{oops"), null);
+  assert.equal(readLastMainBounds(JSON.stringify({})), null);
+  assert.equal(readLastMainBounds(JSON.stringify({ lastMainBounds: { width: 1, height: 1 } })), null);
 });
 
 test("handBackTarget prefers the window the tabs actually came from", () => {
