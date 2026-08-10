@@ -3253,11 +3253,11 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        INSTALL_SCRIPT_ATTEMPTS, download_install_script, first_existing_file, github_outage_hint, helper_plist_program_args,
-        init_lua_loads_veld_spoon, install_script_override_from, is_install_script_unavailable,
-        is_transient_status, linux_desktop_candidates, looks_like_install_script,
-        parse_launchctl_pid, parse_launchctl_program, parse_systemd_exec_start,
-        parse_systemd_main_pid, pids_running_from, remove_spoon_files,
+        INSTALL_SCRIPT_ATTEMPTS, download_install_script, first_existing_file, github_outage_hint,
+        helper_plist_program_args, init_lua_loads_veld_spoon, install_script_override_from,
+        is_install_script_unavailable, is_transient_status, linux_desktop_candidates,
+        looks_like_install_script, parse_launchctl_pid, parse_launchctl_program,
+        parse_systemd_exec_start, parse_systemd_main_pid, pids_running_from, remove_spoon_files,
     };
 
     /// Byte-for-byte what `raw.githubusercontent.com` served during the GitHub
