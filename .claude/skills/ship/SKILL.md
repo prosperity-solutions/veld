@@ -180,6 +180,17 @@ Three rules that make it worth the spend rather than theatre:
   as you go. For a JS/TS change, run the Biome `lint` + `typecheck`/`test` in the
   affected surface too (`desktop/`, `crates/veld-daemon/ui`, `crates/veld-daemon/frontend`)
   — `just lint` and `just test` cover all of it in one command each.
+- **Leave the worktree clean before you stop.** Building and running tests
+  drifts `Cargo.lock`, and experiment scaffolding lands untracked (`.idea/`,
+  a scratch dir, a prototype) — but a worktree carrying uncommitted changes or
+  untracked files cannot be trashed and deleted in the IDE: `git worktree
+  remove` refuses on them. Before a checkpoint hand-off, before a draft, and
+  before `gh pr ready`, run `git status --short` and revert incidental
+  `Cargo.lock`/build drift and untracked scaffolding. Deliberate uncommitted
+  work is fine while the PR is in flight — it is the *incidental* mess that
+  blocks the user (and future agents) from cleaning up. This is also what makes
+  the trash flow surface these files: the IDE now lists them at trash/delete
+  time, so a clean tree is the happy path for everyone.
 - If Step 0 chose a pre-review checkpoint — the default *one checkpoint, before
   review*, or the two-checkpoint variant: this is **checkpoint one**. Finish the
   whole feature (including the docs audit in Step 3), leave it building and

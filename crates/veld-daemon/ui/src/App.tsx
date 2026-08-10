@@ -14,6 +14,7 @@ import {
   type SettingsDoc,
   type StatsResponse,
   type Worktree,
+  type WorktreeGitStatus,
 } from "./api";
 import {
   hideDisabledActions,
@@ -199,12 +200,14 @@ import {
 import { ConfigVarsDialog } from "./components/ConfigVars";
 import {
   ChangeMarkerDialog,
+  ConfirmDeleteWorktreeDialog,
   ImportRepoDialog,
   LaneNameDialog,
   Modal,
   NewWorktreeDialog,
   RemoveRepoDialog,
   RenameWorktreeDialog,
+  TrashWorktreeDialog,
 } from "./components/dialogs";
 
 import {
@@ -1804,7 +1807,18 @@ function AppInner(props: {
      *  section, so "which lane" is decided by the click, not by the dialog. */
     | { kind: "new-worktree"; lane: string }
     | { kind: "sharing" }
-    | { kind: "rename"; worktree: Worktree; deleteFocus?: boolean }
+    | { kind: "rename"; worktree: Worktree }
+    /**
+     * The trash confirmation, split out of the edit dialog: fetches the git
+     * dirty state and offers trash-anyway vs revert-first.
+     */
+    | { kind: "trash"; worktree: Worktree }
+    /**
+     * A trashed worktree that is dirty, opened by the delete flow instead of
+     * enqueueing a removal that would refuse. `status` is the fetched dirty
+     * state; the dialog turns it into a choice (discard vs revert first).
+     */
+    | { kind: "confirm-delete"; worktree: Worktree; status: WorktreeGitStatus }
     | { kind: "marker"; worktree: Worktree }
     /** `worktree` set means "create it, then move this one into it". */
     | { kind: "new-lane"; worktree?: Worktree }
@@ -2053,8 +2067,7 @@ function AppInner(props: {
               // refusal and the force checkbox beside it. Without this entry the
               // only way back to a forced removal was a dialog that no longer
               // knew a removal had been refused.
-              onClick: () =>
-                setDialog({ kind: "rename", worktree: w, deleteFocus: true }),
+              onClick: () => setDialog({ kind: "trash", worktree: w }),
             },
             {
               key: "trash-error",
@@ -2070,8 +2083,7 @@ function AppInner(props: {
         title: "Move to trash…",
         color: "red",
         disabled: w.is_main,
-        onClick: () =>
-          setDialog({ kind: "rename", worktree: w, deleteFocus: true }),
+        onClick: () => setDialog({ kind: "trash", worktree: w }),
       },
     ]);
   };
@@ -3200,23 +3212,45 @@ function AppInner(props: {
     await refresh();
   };
 
+  /** Enqueue the worker to delete a trashed worktree, optimistically moving it
+   *  to the terminal "Deleting" lane (see the comment on the caller). */
+  const enqueueDelete = async (w: Worktree) => {
+    await api.deleteTrashedWorktree(w.id);
+    // Move it to the terminal "Deleting" lane immediately: the daemon only
+    // reports `deleting` once the removal is actually running, and the run
+    // teardown in between can take a while. From the confirm, the row is
+    // committed and must not read as recoverable trash.
+    setDeletingIds((cur) => {
+      const next = new Set(cur);
+      next.add(w.id);
+      return next;
+    });
+    notifyDone(`Deleting ${worktreeLabel(w)}`);
+    await refresh();
+  };
+
   const deleteTrashedWorktree = async (w: Worktree) => {
+    // Proactively check for a dirty state before enqueueing. `git worktree
+    // remove` refuses on uncommitted files, so enqueueing a dirty worktree
+    // fails a moment later and the row comes back with a `trash_error` the user
+    // has to chase down. If it is dirty, surface the files and ask how to
+    // proceed instead — discard, or revert first.
     try {
-      await api.deleteTrashedWorktree(w.id);
-      // Move it to the terminal "Deleting" lane immediately: the daemon only
-      // reports `deleting` once the removal is actually running, and the run
-      // teardown in between can take a while. From the confirm, the row is
-      // committed and must not read as recoverable trash.
-      setDeletingIds((cur) => {
-        const next = new Set(cur);
-        next.add(w.id);
-        return next;
-      });
-      notifyDone(`Deleting ${worktreeLabel(w)}`);
+      const status = await api.worktreeGitStatus(w.id);
+      if (status.dirty) {
+        setDialog({ kind: "confirm-delete", worktree: w, status });
+        return;
+      }
+    } catch {
+      // Status unavailable (git error, checkout gone): fall through to the
+      // enqueue and let the worker surface any refusal on the row, as before.
+    }
+    try {
+      await enqueueDelete(w);
     } catch (e) {
       notifyError(`Could not delete ${worktreeLabel(w)}`, e);
+      await refresh();
     }
-    await refresh();
   };
 
   const emptyTrash = async () => {
@@ -3271,6 +3305,20 @@ function AppInner(props: {
     // first place (the row gates on `!w.is_main`), so a drop can't reach here;
     // this is defence in depth so binning main can never be invoked silently.
     if (w.is_main) return;
+    // A dirty worktree can't be deleted later without either discarding or
+    // reverting its changes, so a drag-to-trash must not bin it silently —
+    // surface the files and let the user choose, the same as the context-menu
+    // "Remove worktree…". A clean worktree still bins immediately, as before.
+    try {
+      const status = await api.worktreeGitStatus(w.id);
+      if (status.dirty) {
+        setDialog({ kind: "trash", worktree: w });
+        return;
+      }
+    } catch {
+      // Status unavailable (git error, checkout gone): bin directly; any
+      // refusal surfaces later on the row.
+    }
     try {
       await api.deleteWorktree(w.id, false);
     } catch (e) {
@@ -3517,8 +3565,7 @@ function AppInner(props: {
           id: "wt:remove",
           group: "Worktree",
           label: `Remove worktree ${worktreeLabel(w)}…`,
-          run: () =>
-            setDialog({ kind: "rename", worktree: w, deleteFocus: true }),
+          run: () => setDialog({ kind: "trash", worktree: w }),
         });
       }
     }
@@ -4273,23 +4320,46 @@ function AppInner(props: {
              key. Without this the dialog crashed on `undefined.trim()` at save
              time — `worktreeLabel` already tolerates the same skew. */
           currentName={dialog.worktree.display_name ?? ""}
-          isMain={dialog.worktree.is_main}
-          /* Read off the LIVE row, not the one captured when the dialog opened: a
-             background removal can fail while it is open, and the force affordance
-             has to appear when the refusal arrives. */
-          trashError={
-            worktrees.find((w) => w.id === dialog.worktree.id)?.trash_error ?? ""
-          }
-          deleteFocus={dialog.deleteFocus ?? false}
           onClose={closeDialog}
           onRename={async (patch) => {
             await api.patchWorktree(dialog.worktree.id, patch);
             await refresh();
             closeDialog();
           }}
-          onDelete={async (force) => {
+        />
+      )}
+      {dialog.kind === "trash" && (
+        <TrashWorktreeDialog
+          /* Read off the LIVE row, not the one captured when the dialog opened: a
+             background removal can fail while it is open, and the force affordance
+             has to appear when the refusal arrives. */
+          trashError={
+            worktrees.find((w) => w.id === dialog.worktree.id)?.trash_error ?? ""
+          }
+          worktreeId={dialog.worktree.id}
+          onStatus={(id) => api.worktreeGitStatus(id)}
+          onRevert={(id) => api.revertWorktree(id)}
+          onClose={closeDialog}
+          onTrash={async (force) => {
             await api.deleteWorktree(dialog.worktree.id, force);
             await refresh();
+            closeDialog();
+          }}
+        />
+      )}
+      {dialog.kind === "confirm-delete" && (
+        <ConfirmDeleteWorktreeDialog
+          label={worktreeLabel(dialog.worktree)}
+          status={dialog.status}
+          onClose={closeDialog}
+          onDeleteDiscard={async () => {
+            await api.deleteWorktree(dialog.worktree.id, true);
+            await refresh();
+            closeDialog();
+          }}
+          onRevertThenDelete={async () => {
+            await api.revertWorktree(dialog.worktree.id);
+            await enqueueDelete(dialog.worktree);
             closeDialog();
           }}
         />
