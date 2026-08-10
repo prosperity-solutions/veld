@@ -183,14 +183,16 @@ pub struct IdeSection {
     #[serde(default)]
     pub external_origins: Vec<OriginPattern>,
     /// How sensitively the IDE's worktree-staleness indicator is coloured
-    /// (`ide.stalenessSensitivity`).
+    /// (`ide.git.stalenessSensitivity`).
     ///
     /// A multiplier on the "update main" count pill's severity curve. `1` is the
     /// baseline — a single commit a week old, or fifty commits in a day, are both
     /// at the top of the scale (red); `2` halves both thresholds (a 3.5-day-old
     /// commit or 25 commits read red); `0.5` halves the sensitivity. Clamped to
     /// `[0.1, 10]`. A project that lives on a fast-moving trunk tunes it up; a
-    /// project whose worktrees naturally drift tunes it down.
+    /// project whose worktrees naturally drift tunes it down. Lives under the
+    /// `ide.git` subscope so other per-project git knobs (create-from-origin, …)
+    /// have a home rather than each squatting at the top of `ide`.
     #[serde(default = "default_staleness_sensitivity")]
     pub staleness_sensitivity: f64,
     /// Top-level keys under `ide` that this version still does not interpret, in
@@ -413,13 +415,32 @@ pub struct IdeProblem {
 /// value stays the single source of truth: `ide` is round-tripped verbatim by the
 /// loader, and the config's opaque-`ide` exemption in the v3 legacy-`command` check
 /// depends on nothing here reshaping it.
-#[must_use]
 /// The baseline sensitivity for the staleness indicator: `1`.
 fn default_staleness_sensitivity() -> f64 {
     1.0
 }
 
-/// Parse `ide.stalenessSensitivity` — a positive multiplier, clamped to
+/// Parse `ide.git` — a per-project subscope for git-related IDE knobs. Only
+/// `stalenessSensitivity` is read today; other keys under `git` are reserved
+/// and parked in [`IdeSection::uninterpreted`] (as `git.<key>`) so `veld lint`
+/// can still tell a reserved key from a typo.
+fn parse_git(value: &serde_json::Value, out: &mut IdeSection) {
+    let Some(map) = value.as_object() else {
+        out.problems.push(IdeProblem {
+            location: "ide.git".to_owned(),
+            message: "must be an object; it was ignored".to_owned(),
+        });
+        return;
+    };
+    for (key, child) in map {
+        match key.as_str() {
+            "stalenessSensitivity" => parse_staleness_sensitivity(child, out),
+            other => out.uninterpreted.push(format!("git.{other}")),
+        }
+    }
+}
+
+/// Parse `ide.git.stalenessSensitivity` — a non-negative multiplier, clamped to
 /// `[0.1, 10]`. Lenient like every other `ide` field: an unparseable value
 /// reports a problem and keeps the default, never a load error.
 fn parse_staleness_sensitivity(value: &serde_json::Value, out: &mut IdeSection) {
@@ -433,7 +454,7 @@ fn parse_staleness_sensitivity(value: &serde_json::Value, out: &mut IdeSection) 
             out.staleness_sensitivity = n.clamp(0.1, 10.0);
         }
         _ => out.problems.push(IdeProblem {
-            location: "ide.stalenessSensitivity".to_owned(),
+            location: "ide.git.stalenessSensitivity".to_owned(),
             message: "must be a non-negative number; the default (1) is used".to_owned(),
         }),
     }
@@ -465,7 +486,7 @@ pub fn parse(value: Option<&serde_json::Value>) -> IdeSection {
             "permissions" => parse_permissions(child, &mut section),
             "panes" => parse_panes(child, &mut section),
             "externalOrigins" => parse_external_origins(child, &mut section),
-            "stalenessSensitivity" => parse_staleness_sensitivity(child, &mut section),
+            "git" => parse_git(child, &mut section),
             other => section.uninterpreted.push(other.to_owned()),
         }
     }
@@ -1744,29 +1765,46 @@ mod tests {
 
     #[test]
     fn staleness_sensitivity_is_parsed_clamped_and_lenient() {
-        let parsed = section(json!({ "stalenessSensitivity": 2 }));
+        let parsed = section(json!({ "git": { "stalenessSensitivity": 2 } }));
         assert_eq!(parsed.staleness_sensitivity, 2.0);
         assert!(parsed.problems.is_empty(), "{:?}", parsed.problems);
+        assert!(
+            parsed.uninterpreted.is_empty(),
+            "{:?}",
+            parsed.uninterpreted
+        );
 
         // Clamped to [0.1, 10].
-        let parsed = section(json!({ "stalenessSensitivity": 500 }));
+        let parsed = section(json!({ "git": { "stalenessSensitivity": 500 } }));
         assert_eq!(parsed.staleness_sensitivity, 10.0);
-        let parsed = section(json!({ "stalenessSensitivity": 0 }));
+        let parsed = section(json!({ "git": { "stalenessSensitivity": 0 } }));
         assert_eq!(parsed.staleness_sensitivity, 0.1);
 
         // A non-number is a problem and keeps the default — never a load error.
-        let parsed = section(json!({ "stalenessSensitivity": "fast" }));
+        let parsed = section(json!({ "git": { "stalenessSensitivity": "fast" } }));
         assert_eq!(parsed.staleness_sensitivity, 1.0);
         assert!(
             parsed
                 .problems
                 .iter()
-                .any(|p| p.location == "ide.stalenessSensitivity"),
+                .any(|p| p.location == "ide.git.stalenessSensitivity"),
             "{:?}",
             parsed.problems
         );
-        // And it is interpreted, not parked in `uninterpreted`.
-        assert!(parsed.uninterpreted.is_empty());
+
+        // `ide.git` itself must be an object; a scalar is a problem.
+        let parsed = section(json!({ "git": 3 }));
+        assert_eq!(parsed.staleness_sensitivity, 1.0);
+        assert!(
+            parsed.problems.iter().any(|p| p.location == "ide.git"),
+            "{:?}",
+            parsed.problems
+        );
+
+        // An unknown key under `git` stays reserved (reported, not dropped into
+        // the interpreted set) and is prefixed so lint names it under `git`.
+        let parsed = section(json!({ "git": { "autoUpdate": true } }));
+        assert_eq!(parsed.uninterpreted, vec!["git.autoUpdate"]);
     }
 
     #[test]

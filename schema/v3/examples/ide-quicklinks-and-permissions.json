@@ -15,7 +15,9 @@
     "externalOrigins": ["https://accounts.google.com", "https://*.okta.com"],
     // How urgently the top-bar "update main" pill colours: 2 is more sensitive
     // than the baseline of 1 (a week-old commit or 50 commits in a day read red).
-    "stalenessSensitivity": 2,
+    "git": {
+      "stalenessSensitivity": 2
+    },
     "permissions": [
       // Veld's own URLs carry the RUN NAME in the hostname, and run names change
       // with the worktree, the branch or --name — so a leading `*.` is how a

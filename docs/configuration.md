@@ -2035,7 +2035,7 @@ already lost its leading zero, so it is refused rather than guessed at.
 
 `ide` is where a project configures Veld's own IDE surfaces — Veld Desktop and
 the `/ide` view in a browser. Four keys under it are interpreted — `quicklinks`,
-`permissions`, `externalOrigins` and `stalenessSensitivity`; the rest of `ide`
+`permissions`, `externalOrigins` and the `git` subscope; the rest of `ide`
 stays reserved and opaque (see
 [below](#reserved-hooks-and-the-rest-of-ide)), so a JSON-defined IDE extension is
 free to use whatever shape it likes.
@@ -2237,7 +2237,13 @@ the embedding document's business, not veld's.
 
 ---
 
-### `ide.stalenessSensitivity`
+### `ide.git` — per-project git knobs
+
+The subscope for git-related IDE surfaces. Today it holds one knob, with room
+for more (a per-project "create worktrees from origin" toggle, say) rather than
+each squatting at the top of `ide`.
+
+#### `ide.git.stalenessSensitivity`
 
 How sensitively the IDE's worktree-staleness indicator — the "update main" pill
 in the top bar — is coloured. A multiplier on the severity curve (green →
@@ -2252,8 +2258,10 @@ old the newest missing commit is:
 
 ```jsonc
 "ide": {
-  // A trunk that merges hourly? Flag it sooner rather than later.
-  "stalenessSensitivity": 2
+  "git": {
+    // A trunk that merges hourly? Flag it sooner rather than later.
+    "stalenessSensitivity": 2
+  }
 }
 ```
 

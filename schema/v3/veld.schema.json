@@ -136,7 +136,7 @@
     },
     "ide": {
       "type": "object",
-      "description": "Per-project settings for Veld's own IDE surfaces — Veld Desktop and the /ide view in a browser. `quicklinks`, `permissions`, `externalOrigins` and `stalenessSensitivity` are rendered; every other key here is RESERVED — parsed and stored, but not rendered by this version, and `veld lint` says so. Spelled `ui` while the whole key was reserved; renamed in the release that first gave it a meaning, so a config carrying the old spelling gets an unknown-top-level-key error naming the rename.",
+      "description": "Per-project settings for Veld's own IDE surfaces — Veld Desktop and the /ide view in a browser. `quicklinks`, `permissions`, `externalOrigins` and the `git` subscope are rendered; every other key here is RESERVED — parsed and stored, but not rendered by this version, and `veld lint` says so. Spelled `ui` while the whole key was reserved; renamed in the release that first gave it a meaning, so a config carrying the old spelling gets an unknown-top-level-key error naming the rename.",
       "additionalProperties": true,
       "properties": {
         "quicklinks": {
@@ -230,13 +230,20 @@
             ]
           ]
         },
-        "stalenessSensitivity": {
-          "type": "number",
-          "minimum": 0.1,
-          "maximum": 10,
-          "default": 1,
-          "description": "How sensitively the IDE's worktree-staleness indicator (the \"update main\" pill in the top bar) is coloured. A multiplier on the severity curve: 1 is the baseline — a single commit a week old, or fifty commits in a day, both read as urgent (red); 2 halves those thresholds (a 3.5-day-old commit or 25 commits read red); 0.5 halves the sensitivity. Tune it up on a fast-moving trunk, down where worktrees naturally drift. Values outside 0.1–10 are clamped; a non-number falls back to 1.",
-          "examples": [2]
+        "git": {
+          "type": "object",
+          "description": "Per-project knobs for Veld's git-powered IDE surfaces. Only the keys below are interpreted; other keys here are RESERVED (parsed and stored, not rendered).",
+          "additionalProperties": true,
+          "properties": {
+            "stalenessSensitivity": {
+              "type": "number",
+              "minimum": 0.1,
+              "maximum": 10,
+              "default": 1,
+              "description": "How sensitively the IDE's worktree-staleness indicator (the \"update main\" pill in the top bar) is coloured. A multiplier on the severity curve: 1 is the baseline — a single commit a week old, or fifty commits in a day, both read as urgent (red); 2 halves those thresholds (a 3.5-day-old commit or 25 commits read red); 0.5 halves the sensitivity. Tune it up on a fast-moving trunk, down where worktrees naturally drift. Values outside 0.1–10 are clamped; a non-number falls back to 1.",
+              "examples": [2]
+            }
+          }
         }
       }
     }

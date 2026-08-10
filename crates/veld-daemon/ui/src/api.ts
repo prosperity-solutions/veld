@@ -296,8 +296,8 @@ export interface IdeSection {
    */
   panes: PaneSpec[];
   /** The project's staleness-sensitivity multiplier for the "update main"
-   *  pill (`ide.stalenessSensitivity`, default 1). Optional in the type so a
-   *  fixture or an older daemon that omits it falls back to the default. */
+   *  pill (`ide.git.stalenessSensitivity`, default 1). Optional in the type so
+   *  a fixture or an older daemon that omits it falls back to the default. */
   staleness_sensitivity?: number;
 }
 

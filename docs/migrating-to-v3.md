@@ -151,7 +151,8 @@ position named — which is a useful final check in its own right.
   veld's key and must not be touched — the loader deliberately does not look
   there. (This is the rule the removed converter broke.) Four keys under `ide`
   are now interpreted — `quicklinks`, `permissions`, `externalOrigins`, `panes`
-  and `stalenessSensitivity`, see [configuration.md](configuration.md#ide-quicklinks-permissions-external-origins-and-panes) — but they are additions
+  and the `git` subscope (`ide.git.stalenessSensitivity`), see
+  [configuration.md](configuration.md#ide-quicklinks-permissions-external-origins-and-panes) — but they are additions
   rather than a migration: a config that has none of them is unaffected, and the
   rest of `ide` stays opaque, including the `command` exemption. Note that
   `ide.panes[]` entries *do* use `argv`/`shell` and are read by veld, so unlike
