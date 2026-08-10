@@ -507,6 +507,38 @@ commit-subjects base="origin/main":
         exit 1
     fi
 
+# Is this worktree's branch behind origin's default branch? This repo's
+# worktrees drift when `main` is not updated, and a stale branch lacks the
+# latest DB migrations — so its schema tests fail and its PRs conflict late,
+# exactly the failure `docs/extensions-vision.md` and the `/ship` pre-flight
+# exist to catch early. Fetches first so "behind" means behind *the remote's
+# current state*, not whatever was last fetched.
+#
+# The agentic harness (`.claude/skills/ship`) runs this before starting work,
+# before the review loop, and before opening a PR; it exits nonzero when the
+# branch is behind, so a gate can stop on it. Fix by
+# `git fetch origin && git rebase origin/<default>` (fast-forward if unpushed).
+stale-check base="origin/main":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    git fetch origin
+    # Authoritative default branch: what origin says HEAD is, falling back to the
+    # caller's {{base}} when the remote does not advertise it.
+    default=$(git ls-remote --symref origin HEAD 2>/dev/null | awk '$1=="ref:" {print $2}' | sed 's#refs/heads/##') || true
+    if [ -z "$default" ]; then
+        default={{base}}
+        echo "origin does not advertise a default branch — using $default" >&2
+    fi
+    # Commits in origin/<default> not in HEAD — how far *behind* the branch is.
+    # (`origin/$default..HEAD` would be the reverse: commits in HEAD not in
+    # origin, which is 0 exactly when the branch is behind, the case to catch.)
+    behind=$(git rev-list --count "HEAD..origin/$default")
+    echo "HEAD is $behind commit(s) behind origin/$default" >&2
+    if [ "$behind" -gt 0 ]; then
+        echo "⚠  Branch is behind origin/$default — update main before working (git fetch origin && git rebase origin/$default)" >&2
+        exit 1
+    fi
+
 build-frontend:
     cd crates/veld-daemon/frontend && npm run build
 

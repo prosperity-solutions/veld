@@ -18,7 +18,9 @@ use axum::routing::{delete, get, patch, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
-use veld_core::db::{Db, DiscoveredWorktree, RepoRecord, WorktreeRecord, default_alias};
+use veld_core::db::{
+    Db, DiscoveredWorktree, GitCreateSource, RepoRecord, WorktreeRecord, default_alias,
+};
 use veld_core::user_path::cached_user_path;
 
 use super::management::{check_csrf, is_safe_identifier, open_db, spawn_veld, validate_run_name};
@@ -38,6 +40,7 @@ pub fn routes() -> Router {
     Router::new()
         .route("/api/repos", get(list_repos).delete(remove_repo))
         .route("/api/repos/refresh", post(refresh_repos))
+        .route("/api/repos/update-main", post(update_main))
         .route("/api/repos/import", post(import_repo))
         .route("/api/worktrees", post(create_worktree))
         .route(
@@ -881,6 +884,35 @@ struct RepoView {
     /// means a frame where a worktree's `lane` names a lane the client has not
     /// heard of yet.
     lanes: Vec<veld_core::db::LaneRecord>,
+    /// How far the repo's main checkout has drifted from its remote. The IDE
+    /// surfaces this as the "update main" control in the top bar. It is *core*
+    /// data (computed by the git CLI — see `docs/extensions-vision.md`); the
+    /// per-worktree badge an extension might render on top of it is not.
+    ///
+    /// `None` everywhere a GET is the caller (see [`list_repos`]): GETs on this
+    /// router must not spawn subprocesses, and git status is computed only by
+    /// the CSRF-gated POST paths.
+    git: Option<RepoGitStatus>,
+}
+
+/// Git-derived staleness for one repo's main checkout.
+#[derive(Serialize, Default)]
+struct RepoGitStatus {
+    /// The default branch — the main checkout's branch. This is what the IDE
+    /// means by "main" even when the project calls its default branch something
+    /// else.
+    default_branch: Option<String>,
+    /// Commits in `origin/<default>` not in the local `<default>` — how far the
+    /// main checkout is behind the remote *as of the last fetch*. `None` when it
+    /// cannot be computed (no remote, or `origin/<default>` has never been
+    /// fetched). `0` is a real, current answer.
+    behind: Option<i64>,
+    /// Unix seconds of the **newest** commit the main checkout is missing — the
+    /// latest thing in `origin/<default>` it does not have yet. `None` when it
+    /// cannot be computed (or when `behind` is `0`, where there is nothing to
+    /// be behind on). The UI mixes this with [`Self::behind`] to colour the
+    /// staleness pill — few-and-recent is green, many-and-old is red.
+    latest_commit: Option<i64>,
 }
 
 #[derive(Serialize)]
@@ -1011,6 +1043,11 @@ struct IdeView {
     /// Pane types this project adds to the pane menu, with the commands
     /// stripped out.
     panes: Vec<PaneView>,
+    /// The project's staleness-sensitivity multiplier (default 1), so the UI
+    /// colours the "update main" pill per the project's `ide` config rather than
+    /// a global curve. Floored to `0.1` so a hand-written `0` cannot divide by
+    /// zero or invert the curve.
+    staleness_sensitivity: f64,
 }
 
 /// A config-declared pane as the UI needs to see it.
@@ -1157,10 +1194,14 @@ fn worktree_view(wt: WorktreeRecord) -> WorktreeView {
                     }
                 })
                 .collect();
+            // Read the floored scalar before the vec fields are moved below, so
+            // the partial moves do not leave `section` half-borrowed.
+            let staleness_sensitivity = section.staleness_sensitivity_safe();
             IdeView {
                 quicklinks: section.quicklinks,
                 permissions: section.permissions,
                 panes,
+                staleness_sensitivity,
             }
         })
         .unwrap_or_default();
@@ -1185,7 +1226,12 @@ fn worktree_view(wt: WorktreeRecord) -> WorktreeView {
     }
 }
 
-async fn repo_view(db: &Db, repo: RepoRecord, available: bool) -> Result<RepoView, ApiError> {
+async fn repo_view(
+    db: &Db,
+    repo: RepoRecord,
+    available: bool,
+    git: Option<RepoGitStatus>,
+) -> Result<RepoView, ApiError> {
     let worktrees = db
         .list_worktrees(FsPath::new(&repo.root))
         .map_err(db_err)?
@@ -1198,7 +1244,92 @@ async fn repo_view(db: &Db, repo: RepoRecord, available: bool) -> Result<RepoVie
         available,
         worktrees,
         lanes,
+        git,
     })
+}
+
+/// Fetch a repo's remote, at most once per [`FETCH_INTERVAL`] per repo, so the
+/// staleness signal tracks the remote without hammering it (and only while the
+/// IDE is open — this runs on the UI's poll). Failures are swallowed: offline,
+/// or a repo with no remote, leaves the last successful fetch's refs in place
+/// and `behind` still computes against them. A fetch is deliberately **not** a
+/// fast-forward — it never touches a working tree — which is the line that keeps
+/// a background fetch safe where the auto-update the maintainer rejected is not.
+const FETCH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+static LAST_FETCH: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+async fn maybe_fetch(repo_root: &FsPath) {
+    let key = repo_root.to_string_lossy().into_owned();
+    // The guard is dropped before the await: a `std::sync::MutexGuard` is not
+    // `Send`, and holding one across an await would make this future non-Send,
+    // which axum rejects for a handler.
+    let due = {
+        let last = LAST_FETCH.lock().expect("last-fetch mutex poisoned");
+        last.get(&key)
+            .map(|t| t.elapsed() >= FETCH_INTERVAL)
+            .unwrap_or(true)
+    };
+    if due {
+        let _ = git(repo_root, &["fetch", "origin"]).await;
+        LAST_FETCH
+            .lock()
+            .expect("last-fetch mutex poisoned")
+            .insert(key, std::time::Instant::now());
+    }
+}
+
+/// How far a repo's main checkout is behind `origin/<default>`, computed by the
+/// git CLI (not the DB). `None` for every field it cannot determine.
+///
+/// The count is against the remote-tracking refs as they are *right now* — it
+/// does not fetch. Fetching is the caller's job (see the throttled fetch in
+/// [`refresh_repos`]), because a GET here would spawn git and this helper is
+/// also reachable from paths that must not.
+async fn repo_git_status(db: &Db, repo_root: &FsPath) -> RepoGitStatus {
+    let default_branch = db
+        .list_worktrees(repo_root)
+        .ok()
+        .and_then(|wts| wts.into_iter().find(|w| w.is_main).map(|w| w.branch));
+    let Some(default_branch) = default_branch else {
+        return RepoGitStatus::default();
+    };
+    // Commits in origin/<default> not in local <default> — how far *behind* the
+    // main checkout is. (The other direction, `<default>..origin/<default>`,
+    // would be how far ahead.) Fails — `None` — when `origin/<default>` does
+    // not exist, which means the remote has never been fetched or has no such
+    // branch.
+    let behind = git(
+        repo_root,
+        &[
+            "rev-list",
+            "--count",
+            &format!("{default_branch}..origin/{default_branch}"),
+        ],
+    )
+    .await
+    .ok()
+    .and_then(|s| s.trim().parse::<i64>().ok());
+    // Committer timestamp (`%ct`, seconds since epoch) of the newest commit in
+    // the same range — the most recent thing the main checkout is missing.
+    let latest_commit = git(
+        repo_root,
+        &[
+            "log",
+            "-1",
+            "--format=%ct",
+            &format!("{default_branch}..origin/{default_branch}"),
+        ],
+    )
+    .await
+    .ok()
+    .and_then(|s| s.trim().parse::<i64>().ok());
+    RepoGitStatus {
+        default_branch: Some(default_branch),
+        behind,
+        latest_commit,
+    }
 }
 
 /// List repos from the database — a pure read (GETs on this router carry no
@@ -1210,7 +1341,9 @@ async fn list_repos() -> Result<Json<RepoList>, ApiError> {
     let mut repos = Vec::new();
     for repo in db.list_repos().map_err(db_err)? {
         let available = FsPath::new(&repo.root).is_dir();
-        repos.push(repo_view(&db, repo, available).await?);
+        // `None`: this GET must not spawn git, so the top bar's git status
+        // arrives on the next CSRF-gated `refresh_repos` poll.
+        repos.push(repo_view(&db, repo, available, None).await?);
     }
     Ok(Json(RepoList { repos }))
 }
@@ -1248,12 +1381,127 @@ async fn refresh_repos() -> Result<Json<RepoList>, ApiError> {
             None => sync_repo_worktrees(&db, &root).await.is_ok(),
         };
         availability.insert(repo.root.clone(), available);
-        repos.push(repo_view(&db, repo, available).await?);
+        // Keep the remote-tracking refs fresh enough that the staleness signal
+        // tracks the remote, without hammering it: fetch at most once a minute
+        // per repo, and only while the IDE is open (this is the UI's poll). A
+        // fetch is non-destructive — it only updates remote-tracking refs, it
+        // never touches a working tree — which is what makes a background fetch
+        // safe where a background *fast-forward* is not.
+        maybe_fetch(root.as_path()).await;
+        let git = repo_git_status(&db, &root).await;
+        repos.push(repo_view(&db, repo, available, Some(git)).await?);
     }
     if memo.is_none() {
         LAST_SYNC.record(availability);
     }
     Ok(Json(RepoList { repos }))
+}
+
+#[derive(Deserialize)]
+struct UpdateMainBody {
+    root: String,
+}
+
+/// Bring the repo's main checkout up to date with `origin/<default>`: fetch,
+/// then fast-forward-only.
+///
+/// This is the **one-click "update main"** control — deliberately human-initiated
+/// and never scheduled, the anti-guardian position (see
+/// `docs/extensions-vision.md`). It is also deliberately narrow about when it
+/// will touch the working tree:
+///
+/// - the main checkout must be *on* the default branch (it fast-forwards the
+///   checkout's current branch);
+/// - the tree must be clean (`merge --ff-only` would otherwise clobber
+///   uncommitted work, and refusing is cheaper than a surprise);
+/// - no run may be live in the repo root (a fast-forward mutates files a live
+///   run reads config from);
+/// - `--ff-only`, so a diverged branch is refused rather than silently rewritten
+///   or turned into a merge commit.
+///
+/// Returns the fresh [`RepoView`] so the top bar's staleness badge clears in the
+/// same round trip as the action.
+async fn update_main(Json(body): Json<UpdateMainBody>) -> Result<Json<RepoView>, ApiError> {
+    let db = open_desktop_db()?;
+    let repo = db
+        .get_repo(FsPath::new(&body.root))
+        .map_err(db_err)?
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "repo not imported"))?;
+    let repo_root = PathBuf::from(&repo.root);
+
+    // The default branch is the main checkout's branch — what the IDE means by
+    // "main" even when the project calls it something else.
+    let default_branch = db
+        .list_worktrees(&repo_root)
+        .map_err(db_err)?
+        .into_iter()
+        .find(|w| w.is_main)
+        .map(|w| w.branch)
+        .ok_or_else(|| err(StatusCode::CONFLICT, "cannot determine the default branch"))?;
+
+    // Fast-forwarding only moves the checkout's *current* branch, so it must be
+    // the default. A detached HEAD fails `symbolic-ref` and lands here too.
+    let head_branch = git(&repo_root, &["symbolic-ref", "--short", "HEAD"])
+        .await
+        .map_err(|e| {
+            err(
+                StatusCode::CONFLICT,
+                format!("repo root is not on a branch: {e}"),
+            )
+        })?;
+    if head_branch != default_branch {
+        return Err(err(
+            StatusCode::CONFLICT,
+            format!(
+                "repo root is on \"{head_branch}\", not \"{default_branch}\" — \
+                 switch it to update {default_branch}"
+            ),
+        ));
+    }
+    // Empty porcelain output is a clean tree; anything else is uncommitted work
+    // that a fast-forward would fight. Reuses the shared `git_status` helper the
+    // worktree delete flow uses (one spelling of `status --porcelain`, not two).
+    let dirty = git_status(&repo_root).await.map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("git status failed: {e}"),
+        )
+    })?;
+    if !dirty.is_empty() {
+        return Err(err(
+            StatusCode::CONFLICT,
+            "the repo root has uncommitted changes — commit or stash them first",
+        ));
+    }
+    let live = db.live_run_names(&repo_root).map_err(db_err)?;
+    if !live.is_empty() {
+        return Err(err(
+            StatusCode::CONFLICT,
+            format!(
+                "a run is live in the repo root ({}) — stop it before updating main",
+                live.join(", ")
+            ),
+        ));
+    }
+    // Explicit fetch: this is the human asking, so there is no throttle. Then
+    // fast-forward-only — a diverged branch is refused, never rewritten.
+    git(&repo_root, &["fetch", "origin"]).await.map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("fetch failed: {e}"),
+        )
+    })?;
+    let origin_ref = format!("origin/{default_branch}");
+    git(&repo_root, &["merge", "--ff-only", &origin_ref])
+        .await
+        .map_err(|e| {
+            err(
+                StatusCode::CONFLICT,
+                format!("could not fast-forward {default_branch}: {e}"),
+            )
+        })?;
+    let git = repo_git_status(&db, &repo_root).await;
+    Ok(Json(repo_view(&db, repo, true, Some(git)).await?))
 }
 
 #[derive(Deserialize)]
@@ -1304,7 +1552,8 @@ async fn import_repo(Json(body): Json<ImportBody>) -> Result<Json<RepoView>, Api
         .get_repo(&root)
         .map_err(db_err)?
         .ok_or_else(|| db_err("repo vanished after import"))?;
-    Ok(Json(repo_view(&db, repo, true).await?))
+    let git = repo_git_status(&db, FsPath::new(&repo.root)).await;
+    Ok(Json(repo_view(&db, repo, true, Some(git)).await?))
 }
 
 #[derive(Deserialize)]
@@ -1473,12 +1722,80 @@ async fn create_worktree(
     }
 
     let path_str = checkout_path.to_string_lossy().into_owned();
-    let git_args: Vec<&str> = if body.create_branch {
-        vec!["worktree", "add", "-b", &body.branch, "--", &path_str]
+    // Born-current create (`git.createFrom = "origin"`, the default): fetch the
+    // remote and cut the new branch from `origin/<default>` rather than the local
+    // HEAD, so a worktree is never *born* behind the remote — missing the latest
+    // DB migrations, conflicting with open PRs. The compounding failure this
+    // addresses is that nobody goes back to update `main`, so each new worktree
+    // used to be as stale as the last fetch of main.
+    //
+    // Falls back to local HEAD (the previous behaviour) when the fetch or the
+    // origin ref fails — offline, a repo with no remote, or the main checkout on
+    // a branch with no origin counterpart — never silently, but never blocking
+    // the create either.
+    let base_on_origin = body.create_branch && db.git_create_from() == GitCreateSource::Origin;
+    let mut start_point: Option<String> = None;
+    if base_on_origin {
+        // The default branch is the main checkout's branch — the same thing the
+        // "update main" control fast-forwards.
+        let default_branch = db
+            .list_worktrees(&repo_root)
+            .map_err(db_err)?
+            .into_iter()
+            .find(|w| w.is_main)
+            .map(|w| w.branch);
+        if let Some(dbranch) = default_branch {
+            // Base on origin only if the remote actually has that branch. The
+            // fetch succeeding is not enough: a repo whose main checkout sits on
+            // a local-only branch (never pushed) would otherwise fail the create
+            // against a `refs/remotes/origin/<branch>` that does not exist,
+            // instead of falling back to local HEAD as the comment promises.
+            // `--quiet` keeps the probe off stderr (the `git` helper surfaces
+            // stderr on failure).
+            if git(&repo_root, &["fetch", "origin"]).await.is_ok()
+                && git(
+                    &repo_root,
+                    &[
+                        "rev-parse",
+                        "--verify",
+                        "--quiet",
+                        &format!("refs/remotes/origin/{dbranch}"),
+                    ],
+                )
+                .await
+                .is_ok()
+            {
+                start_point = Some(format!("origin/{dbranch}"));
+            }
+        }
+    }
+    let git_args: Vec<String> = if body.create_branch {
+        let mut a = vec![
+            "worktree".into(),
+            "add".into(),
+            "-b".into(),
+            body.branch.clone(),
+            "--".into(),
+            path_str.clone(),
+        ];
+        // `git worktree add -b <branch> <path> <start-point>`. The new branch
+        // tracks `origin/<default>` as its upstream, which is what makes a later
+        // staleness check against the base well-defined.
+        if let Some(sp) = start_point {
+            a.push(sp);
+        }
+        a
     } else {
-        vec!["worktree", "add", "--", &path_str, &body.branch]
+        vec![
+            "worktree".into(),
+            "add".into(),
+            "--".into(),
+            path_str.clone(),
+            body.branch.clone(),
+        ]
     };
-    git(&repo_root, &git_args)
+    let git_refs: Vec<&str> = git_args.iter().map(String::as_str).collect();
+    git(&repo_root, &git_refs)
         .await
         .map_err(|e| err(StatusCode::UNPROCESSABLE_ENTITY, e))?;
 
@@ -2731,5 +3048,102 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The staleness computation, against a real git repo: the direction of
+    /// `rev-list --count <local>..origin/<local>` is the easy thing to get
+    /// backwards (flipping it reports how far *ahead* the main checkout is,
+    /// which makes an updated main read as "behind"). `origin` here is a bare
+    /// clone of `work` with one extra commit, so `main` is exactly 1 behind.
+    #[tokio::test]
+    async fn repo_git_status_counts_commits_behind_origin() {
+        use std::process::Command;
+
+        fn git(cwd: &std::path::Path, args: &[&str]) {
+            let out = Command::new("git")
+                .arg("-C")
+                .arg(cwd)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let work = dir.path().join("work");
+        let origin = dir.path().join("origin");
+        std::fs::create_dir_all(&work).unwrap();
+
+        // `work`: main with one commit.
+        git(&work, &["init", "-b", "main"]);
+        git(&work, &["config", "user.email", "t@t"]);
+        git(&work, &["config", "user.name", "t"]);
+        std::fs::write(work.join("a.txt"), "a").unwrap();
+        git(&work, &["add", "a.txt"]);
+        git(&work, &["commit", "-m", "A"]);
+
+        // `origin`: a bare clone, then a second commit pushed through a scratch
+        // clone (a bare repo has no working tree to commit in).
+        let out = Command::new("git")
+            .arg("clone")
+            .arg("--bare")
+            .arg(&work)
+            .arg(&origin)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "bare clone failed");
+        let scratch = dir.path().join("scratch");
+        let out = Command::new("git")
+            .arg("clone")
+            .arg(&origin)
+            .arg(&scratch)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "scratch clone failed");
+        git(&scratch, &["config", "user.email", "t@t"]);
+        git(&scratch, &["config", "user.name", "t"]);
+        std::fs::write(scratch.join("b.txt"), "b").unwrap();
+        git(&scratch, &["add", "b.txt"]);
+        git(&scratch, &["commit", "-m", "B"]);
+        git(&scratch, &["push", "origin", "main"]);
+
+        // `work` learns about the new commit.
+        git(
+            &work,
+            &["remote", "add", "origin", origin.to_str().unwrap()],
+        );
+        git(&work, &["fetch", "origin"]);
+
+        // Reconcile worktree rows so `repo_git_status` can find the main branch.
+        // The worktrees table is keyed by an imported repo, so import first (the
+        // same order `import_repo` uses).
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = veld_core::db::Db::open_at(&db_dir.path().join("veld.db")).unwrap();
+        db.upsert_repo(&work, "test").unwrap();
+        sync_repo_worktrees(&db, &work).await.unwrap();
+
+        let status = repo_git_status(&db, &work).await;
+        assert_eq!(status.default_branch.as_deref(), Some("main"));
+        assert_eq!(
+            status.behind,
+            Some(1),
+            "main is one commit behind origin/main"
+        );
+        // The newest missing commit is the one we just pushed, so it must be
+        // present and recent — the age is what the UI colours the pill with.
+        let latest = status.latest_commit.expect("newest missing commit");
+        let age = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+            - latest;
+        assert!(
+            age < 600,
+            "commit B was just made, so the newest missing commit should be recent (age {age}s)"
+        );
     }
 }

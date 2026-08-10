@@ -394,6 +394,16 @@ map entry. See the merge table in [reference/config.md](reference/config.md#node
 }
 ```
 
+**Staleness sensitivity** — `ide.git.stalenessSensitivity` (default `1`) tunes
+how urgently the top-bar "update main" pill colours when the main checkout is
+behind `origin/<default>`. It scales two thresholds: a commit reads red at ~7
+days old (`1`), and ~50 commits reads red; doubling `s` halves both, halving it
+doubles them. When a user says the pill is always orange on a freshly cloned
+repo or a long-lived release branch, lower it (`0.5`/`0.25`); when worktrees are
+being born stale and PRs conflict late, raise it (`2`–`3`). See
+[reference/config.md](reference/config.md) and
+[configuration.md](docs/configuration.md#idegit-per-project-git-knobs).
+
 ## Feedback Loop
 
 For the full feedback workflow, the `next` output schema, thread fields, and the resolve policy, see [reference/feedback.md](reference/feedback.md).

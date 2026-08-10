@@ -2034,8 +2034,9 @@ already lost its leading zero, so it is refused rather than guessed at.
 ## `ide`: quicklinks, permissions, external origins and panes
 
 `ide` is where a project configures Veld's own IDE surfaces — Veld Desktop and
-the `/ide` view in a browser. Three keys under it are interpreted; the rest of
-`ide` stays reserved and opaque (see
+the `/ide` view in a browser. Four keys under it are interpreted — `quicklinks`,
+`permissions`, `externalOrigins` and the `git` subscope; the rest of `ide`
+stays reserved and opaque (see
 [below](#reserved-hooks-and-the-rest-of-ide)), so a JSON-defined IDE extension is
 free to use whatever shape it likes.
 
@@ -2235,6 +2236,63 @@ nothing under `ide.permissions` applies there — an `<iframe>`'s permissions ar
 the embedding document's business, not veld's.
 
 ---
+
+### `ide.git` — per-project git knobs
+
+The subscope for git-related IDE surfaces. Today it holds one knob, with room
+for more (a per-project "create worktrees from origin" toggle, say) rather than
+each squatting at the top of `ide`.
+
+#### `ide.git.stalenessSensitivity`
+
+How sensitively the IDE's worktree-staleness indicator — the "update main" pill
+in the top bar — is coloured. A multiplier on the severity curve (green →
+orange → red) that blends how many commits the main checkout is behind with how
+old the newest missing commit is:
+
+- `1` (the default) is the baseline: a single commit a week old, **or** fifty
+  commits in a day, both read as urgent (red).
+- `2` doubles the sensitivity — half the thresholds, so a 3.5-day-old commit or
+  25 commits already read red. For a project living on a fast-moving trunk.
+- `0.5` halves it, for a project whose worktrees naturally drift.
+
+```jsonc
+"ide": {
+  "git": {
+    // A trunk that merges hourly? Flag it sooner rather than later.
+    "stalenessSensitivity": 2
+  }
+}
+```
+
+Values outside `0.1`–`10` are clamped; a non-number falls back to `1`. This is
+project config, not a global setting, so two projects can disagree about what
+"behind" means. The value is read from the *selected* worktree's config.
+
+**Choosing a value.** The knob scales two thresholds, both at half the baseline
+per doubling of `s`:
+
+| `s` | a commit this old reads red | or this many commits read red |
+|---|---|---|
+| `0.5` | 2 weeks | 100 |
+| `1` (default) | 1 week | 50 |
+| `2` | ~3.5 days | 25 |
+| `3` | ~2.3 days | ~17 |
+
+Start at `1` and tune by feel — the pill is a nag, and the two failure modes are
+on opposite sides:
+
+- **It nags you too early.** A freshly cloned repo or a long-lived release
+  branch always sits a few commits behind, and the pill is always orange. Drop
+  to `0.5` (or `0.25`) so it only lights up for genuine drift.
+- **It hides real drift.** The pill stays green while your worktrees are born
+  stale and PRs conflict late. Raise to `2`–`3` so "behind" reads urgent
+  sooner. This is the right call for a fast-moving trunk whose agents live in
+  worktrees (this repo runs `2`).
+
+A useful calibration: `s` should be high enough that a normal worktree-creation
+cycle never trips it, but low enough that a `main` nobody has updated for a
+sprint reads clearly red.
 
 ### Splitting `ide` across files
 

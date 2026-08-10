@@ -51,6 +51,7 @@ import {
 import {
   IconAdjustments,
   IconAppWindow,
+  IconGitBranch,
   IconLink,
   IconTerminal2,
 } from "@tabler/icons-react";
@@ -64,6 +65,7 @@ import {
 import {
   detachGraceMinutes,
   externalOrigins,
+  gitCreateFrom,
   hideDisabledActions,
   logsTimeZone,
   terminalInterceptSystemOpen,
@@ -73,6 +75,7 @@ import {
   markerStyle,
   quickSwitchPrefs,
   terminalPrefs,
+  type GitCreateFrom,
   type LogTimeZone,
   type MarkerStyle,
 } from "../shared/settings";
@@ -114,7 +117,7 @@ function SectionTitle(props: { children: ReactNode }) {
   );
 }
 
-type GroupId = "general" | "terminal" | "links" | "browser";
+type GroupId = "general" | "git" | "terminal" | "links" | "browser";
 
 /**
  * The groups, in sidebar order. `general` is first and is the one the dialog opens
@@ -130,6 +133,7 @@ type GroupId = "general" | "terminal" | "links" | "browser";
  */
 const GROUPS: { id: GroupId; label: string; icon: ReactNode }[] = [
   { id: "general", label: "General", icon: <IconAdjustments size={15} /> },
+  { id: "git", label: "Git", icon: <IconGitBranch size={15} /> },
   { id: "terminal", label: "Terminal", icon: <IconTerminal2 size={15} /> },
   { id: "links", label: "Links", icon: <IconLink size={15} /> },
   { id: "browser", label: "Browser panes", icon: <IconAppWindow size={15} /> },
@@ -450,6 +454,35 @@ export function SettingsDialog(props: {
                   disabled={locked}
                   onChange={(e) =>
                     set({ "ui.hideDisabledActions": e.currentTarget.checked })
+                  }
+                />
+              </Row>
+            </Stack>
+          </Tabs.Panel>
+
+          <Tabs.Panel
+            value="git"
+            style={PANEL_STYLE}
+            pl={{ base: 0, sm: "lg" }}
+          >
+            <Stack gap="md">
+              <Row
+                label="Create worktrees from"
+                help="Origin (recommended): fetching the remote and cutting the new branch from origin's default branch, so a worktree is never born behind the latest database migrations and open PRs. Local: the main checkout's current HEAD — handy when you are offline or deliberately basing on un-pushed local work."
+              >
+                <NativeSelect
+                  size="xs"
+                  w={140}
+                  value={gitCreateFrom(settings ?? {})}
+                  disabled={locked}
+                  data={[
+                    { value: "origin", label: "Latest origin" },
+                    { value: "local", label: "Local main" },
+                  ]}
+                  onChange={(e) =>
+                    set({
+                      "git.createFrom": e.currentTarget.value as GitCreateFrom,
+                    })
                   }
                 />
               </Row>

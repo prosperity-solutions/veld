@@ -42,6 +42,17 @@ use super::{Db, DbError, now_str};
 /// the column exists so per-project overrides do not need a migration later.
 pub const SCOPE_GLOBAL: &str = "global";
 
+/// Where a new worktree's branch is cut from — the `git.createFrom` setting.
+///
+/// `Origin` fetches the remote and bases the new branch on `origin/<default>`,
+/// so a worktree is never born behind the remote. `Local` uses the main
+/// checkout's current HEAD.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GitCreateSource {
+    Origin,
+    Local,
+}
+
 /// Terminal sessions are reaped this long after their last client detaches.
 ///
 /// Quoted in `README.md` and `website/llms-full.txt`. Those copies are pinned by
@@ -234,6 +245,7 @@ pub enum SettingKey {
     BrowserQuickSwitchColorScheme,
     BrowserExternalOrigins,
     UiHideDisabledActions,
+    GitCreateFrom,
     Unknown(String),
 }
 
@@ -267,6 +279,7 @@ impl SettingKey {
         Self::BrowserQuickSwitchColorScheme,
         Self::BrowserExternalOrigins,
         Self::UiHideDisabledActions,
+        Self::GitCreateFrom,
     ];
 
     pub fn as_str(&self) -> &str {
@@ -289,6 +302,7 @@ impl SettingKey {
             Self::BrowserQuickSwitchColorScheme => "browser.quickSwitch.colorScheme",
             Self::BrowserExternalOrigins => "browser.externalOrigins",
             Self::UiHideDisabledActions => "ui.hideDisabledActions",
+            Self::GitCreateFrom => "git.createFrom",
             Self::Unknown(k) => k,
         }
     }
@@ -313,6 +327,7 @@ impl SettingKey {
             "browser.quickSwitch.colorScheme" => Self::BrowserQuickSwitchColorScheme,
             "browser.externalOrigins" => Self::BrowserExternalOrigins,
             "ui.hideDisabledActions" => Self::UiHideDisabledActions,
+            "git.createFrom" => Self::GitCreateFrom,
             other => Self::Unknown(other.to_string()),
         }
     }
@@ -402,6 +417,11 @@ impl SettingKey {
                 one_of(value, &["block", "underline", "bar"]).ok_or_else(bad)?
             }
             Self::WorktreeMarkerStyle => one_of(value, &["color", "emoji"]).ok_or_else(bad)?,
+            // Where a *new* worktree's branch is cut from. Rejected rather than
+            // coerced (same as the other enums here): the daemon acts on this
+            // directly in `create_worktree`, so a stored value neither surface
+            // honours would silently change where branches come from.
+            Self::GitCreateFrom => one_of(value, &["origin", "local"]).ok_or_else(bad)?,
             // Rejected rather than coerced, like every other enum here: the CLI reads
             // this key too, and a stored `"UTC"` that the reader then treats as the
             // default would mean the daemon reporting a saved preference neither
@@ -553,6 +573,14 @@ pub fn defaults() -> BTreeMap<String, Value> {
         // nothing still has to be read before it is dismissed. This is a rendering
         // choice only; nothing the daemon enforces reads it.
         (SettingKey::UiHideDisabledActions, Value::from(true)),
+        // Where a new worktree's branch is cut from. `origin` is the point of
+        // this setting: a worktree created from a stale local `main` is born
+        // behind the remote — missing the latest DB migrations, conflicting with
+        // open PRs — and it compounds, because nobody goes back to update `main`.
+        // Fetch-then-base-on-origin makes each new worktree current at birth. The
+        // daemon acts on this in `create_worktree`, so it is validated above like
+        // `TerminalDetachGrace`, not trusted from the wire.
+        (SettingKey::GitCreateFrom, Value::from("origin")),
     ]
     .into_iter()
     .map(|(k, v)| (k.as_str().to_string(), v))
@@ -691,6 +719,28 @@ impl Db {
             .flatten()
             .and_then(|v| v.as_bool())
             .unwrap_or(true)
+    }
+
+    /// Where a new worktree's branch is cut from (`git.createFrom`).
+    ///
+    /// Read by the daemon's `create_worktree`, so it goes through the same
+    /// "anything not a real value is the default" path the other daemon-read
+    /// keys take rather than trusting the stored bytes. The stored value is
+    /// validated by [`SettingKey::GitCreateFrom`], so a value that is not
+    /// `"local"` here is `"origin"` (the default).
+    pub fn git_create_from(&self) -> GitCreateSource {
+        if self
+            .setting(&SettingKey::GitCreateFrom)
+            .ok()
+            .flatten()
+            .and_then(|v| v.as_str().map(str::to_owned))
+            .as_deref()
+            == Some("local")
+        {
+            GitCreateSource::Local
+        } else {
+            GitCreateSource::Origin
+        }
     }
 
     /// The global half of the exempt list: origins that must open in the system

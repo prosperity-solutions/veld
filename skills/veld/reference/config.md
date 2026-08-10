@@ -58,7 +58,7 @@ unreadable.
   // "default_preset": "<preset-name>",  // root file only
   "nodes": { },
   "hooks": { },   // reserved: parsed, stored, NOT executed by this version
-  "ide": { }      // quicklinks + permissions + externalOrigins + panes are rendered; every other key is reserved
+  "ide": { }      // quicklinks + permissions + externalOrigins + git (stalenessSensitivity) are rendered; every other key is reserved
 }
 ```
 

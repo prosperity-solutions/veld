@@ -295,6 +295,10 @@ export interface IdeSection {
    * nothing the client holds can change what gets run.
    */
   panes: PaneSpec[];
+  /** The project's staleness-sensitivity multiplier for the "update main"
+   *  pill (`ide.git.stalenessSensitivity`, default 1). Optional in the type so
+   *  a fixture or an older daemon that omits it falls back to the default. */
+  staleness_sensitivity?: number;
 }
 
 /** Mirrors `PaneView` in `crates/veld-daemon/src/desktop.rs`. */
@@ -463,6 +467,27 @@ export interface Repo {
    * frame where a worktree's `lane` names a group it has not heard of.
    */
   lanes: Lane[];
+  /**
+   * How far the repo's main checkout has drifted from its remote — the data
+   * behind the top bar's "update main" control. `null` until the next CSRF-
+   * gated `refreshRepos` poll computes it (the plain GET must not spawn git).
+   */
+  git: RepoGitStatus | null;
+}
+
+/**
+ * Git-derived staleness for one repo's main checkout — see `RepoGitStatus` in
+ * `crates/veld-daemon/src/desktop.rs`. `None`/`null` fields mean "cannot be
+ * computed" (no remote, or `origin/<default>` never fetched); `0` is a real,
+ * current answer.
+ */
+export interface RepoGitStatus {
+  default_branch: string | null;
+  /** Commits in `origin/<default>` not in the local `<default>`. */
+  behind: number | null;
+  /** Unix seconds of the newest commit the main checkout is missing — mixed
+   *  with `behind` to colour the staleness pill. */
+  latest_commit: number | null;
 }
 
 /**
@@ -916,6 +941,18 @@ export const api = {
   removeRepo: (root: string) =>
     request<void>("/api/repos", {
       method: "DELETE",
+      body: JSON.stringify({ root }),
+    }),
+  /**
+   * Bring the repo's main checkout up to date with `origin/<default>`: fetch,
+   * then fast-forward-only. Human-initiated only — this is the top bar's
+   * "update main" action, and the daemon refuses to touch a dirty tree, a
+   * repo root not on the default branch, or a root with a live run.
+   * Returns the fresh repo, so the staleness badge clears in the same trip.
+   */
+  updateMain: (root: string) =>
+    request<Repo>("/api/repos/update-main", {
+      method: "POST",
       body: JSON.stringify({ root }),
     }),
   /**

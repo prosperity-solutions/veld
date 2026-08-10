@@ -420,6 +420,31 @@ body[data-fullscreen="true"] .topbar.electron {
   border: 2px solid var(--panel2);
 }
 
+/* The "update main" button: how far the main checkout is behind origin, as a
+   count pill on the control's corner. The pill is a sibling of the button
+   (positioned against this wrapper, which does not clip) so it straddles the
+   corner fully visible, and its background is set inline from the severity
+   curve (green→orange→red); white text holds on every hue at that lightness. */
+.git-sync-btn {
+  position: relative;
+  display: inline-flex;
+}
+.git-sync-btn .git-sync-badge {
+  position: absolute;
+  top: -5px;
+  right: -6px;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 4px;
+  border-radius: 8px;
+  color: #fff;
+  border: 1px solid var(--panel2);
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 13px;
+  text-align: center;
+}
+
 /* Node actions in a menu (top bar) and the new-pane chooser. Each node is its
    own labelled group so overlapping action labels stay attributable. */
 .node-actions-menu {
