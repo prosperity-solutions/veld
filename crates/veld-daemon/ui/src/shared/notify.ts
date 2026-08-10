@@ -22,7 +22,17 @@
  * already suspended the panes while the toast appears under it.
  */
 
+import { createElement } from "react";
 import { notifications } from "@mantine/notifications";
+import type { DesktopAppApi } from "../shell";
+
+/** The Electron shell's app bridge, looked up lazily so this module stays
+ *  import-safe in a node test environment (no `window`). */
+function desktopAppBridge(): DesktopAppApi | null {
+  return (
+    (window as { veldDesktop?: { app?: DesktopAppApi } }).veldDesktop?.app ?? null
+  );
+}
 
 /**
  * How long a toast stays.
@@ -115,8 +125,35 @@ export function notifyRedirect(message: string): void {
 export interface SystemNotificationOptions {
   title: string;
   body?: string;
+  /** The pane that produced the notification — echoed back on click so the
+   *  page can focus it. `sessionId` *is* the terminal tab id. */
+  worktreeId: number;
+  sessionId: string;
+  /** Browser-only click handler. In Veld Desktop the click comes back through
+   *  `desktopApp.onNotifyClick` instead, which the app subscribes to. */
   onClick?: () => void;
-}export function showSystemNotification(opts: SystemNotificationOptions): void {
+}
+
+export function showSystemNotification(opts: SystemNotificationOptions): void {
+  // Veld Desktop: the MAIN process owns the native banner, so the click can
+  // reliably focus the window even when it is backgrounded. The shell echoes
+  // the click back through `desktopApp.onNotifyClick` (with the worktree and
+  // session echoed), and the page's click handler runs there.
+  const bridge = desktopAppBridge();
+  // `notify` is optional: an older shell (or a shell not yet restarted onto
+  // this build) exposes the app bridge without it, and must fall back to the
+  // browser path rather than throwing on a missing method.
+  if (typeof bridge?.notify === "function") {
+    void bridge.notify({
+      title: opts.title,
+      body: opts.body ?? "",
+      worktreeId: opts.worktreeId,
+      sessionId: opts.sessionId,
+    });
+    return;
+  }
+  // A plain browser tab: the Web Notification API, permission-gated. Clicking
+  // focuses the tab (the OS does this) and runs `onClick`.
   if (typeof Notification === "undefined") return;
   const show = () => {
     try {
@@ -135,9 +172,22 @@ export interface SystemNotificationOptions {
   if (Notification.permission === "granted") {
     show();
   } else if (Notification.permission === "default") {
+    // Ask once. A granted answer shows the banner; a denied one is a real
+    // signal the user has chosen (or the browser blocks) — say why rather than
+    // silently staying quiet.
     void Notification.requestPermission().then((p) => {
-      if (p === "granted") show();
+      if (p === "granted") {
+        show();
+      } else if (p === "denied") {
+        console.warn(
+          "[veld] terminal notification blocked — this site is not allowed to send notifications. Click the lock in the address bar → Notifications.",
+        );
+      }
     });
+  } else {
+    console.warn(
+      "[veld] terminal notification blocked — this site is not allowed to send notifications. Click the lock in the address bar → Notifications.",
+    );
   }
 }
 
@@ -156,7 +206,14 @@ export interface TerminalNotifyOptions {
 export function notifyTerminal(opts: TerminalNotifyOptions): void {
   notifications.show({
     title: opts.title,
-    message: opts.message,
+    // The toast's whole surface is clickable, but that is only discoverable if
+    // it says so — a visible "click to focus" hint on its own line.
+    message: createElement(
+      "span",
+      { className: "term-notify-body" },
+      opts.message,
+      createElement("span", { className: "term-notify-focus" }, "Click to focus"),
+    ),
     color: "teal",
     onClick: opts.onClick,
     autoClose: 8000,

@@ -371,7 +371,8 @@ export function setPaneCloseHandler(
 let bellCtx: AudioContext | null = null;
 
 /** Ring the terminal bell as a short tone. Best-effort: a browser that
- *  autoplay-policies audio into silence loses the sound, never the terminal. */
+ *  autoplay-policies audio into silence loses the sound, never the terminal.
+ *  Volume is the user's `terminal.bellVolume` percentage (0–100). */
 function playBell(): void {
   try {
     bellCtx ??= new AudioContext();
@@ -381,12 +382,15 @@ function playBell(): void {
     osc.type = "sine";
     osc.frequency.value = 800;
     const t = ctx.currentTime;
-    gain.gain.setValueAtTime(0.08, t);
-    gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.12);
+    // Percentage → peak gain. A full-scale sine is harsh, so 0.5 at 100% is
+    // loud without clipping; 0 stays silent.
+    const peak = (prefs().bellVolume / 100) * 0.5;
+    gain.gain.setValueAtTime(peak, t);
+    gain.gain.exponentialRampToValueAtTime(Math.max(peak * 0.01, 0.0001), t + 0.15);
     osc.connect(gain);
     gain.connect(ctx.destination);
     osc.start(t);
-    osc.stop(t + 0.12);
+    osc.stop(t + 0.15);
   } catch {
     // Silent bell is acceptable.
   }

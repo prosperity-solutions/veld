@@ -227,6 +227,10 @@ contextBridge.exposeInMainWorld("veldDesktop", {
    */
   app: {
     onOpenSettings: (fn) => on("veld:app:settings", fn),
+    /** Show a native OS notification (terminal OSC 9); echoes the payload back
+     *  on click via `onNotifyClick` so the page can focus the pane. */
+    notify: (payload) => ipcRenderer.invoke("veld:app:notify", payload),
+    onNotifyClick: (fn) => on("veld:app:notify-click", fn),
   },
   browser: {
     /** Drop views left behind by a previous page. Called once, before any

@@ -41,6 +41,7 @@ import {
   Group,
   NativeSelect,
   NumberInput,
+  Slider,
   Stack,
   Tabs,
   Text,
@@ -184,6 +185,7 @@ export function SettingsDialog(props: {
   // clamp lands in the box rather than leaving the rejected number on screen.
   const [fontSize, setFontSize] = useState<number | string>(term.fontSize);
   const [scrollback, setScrollback] = useState<number | string>(term.scrollback);
+  const [bellVolume, setBellVolume] = useState(term.bellVolume);
   const graceValue = detachGraceMinutes(settings ?? {});
   const [grace, setGrace] = useState<number | string>(graceValue);
   const retentionValue = trashRetentionDays(settings ?? {});
@@ -213,6 +215,7 @@ export function SettingsDialog(props: {
   useEffect(() => {
     setFontSize(term.fontSize);
     setScrollback(term.scrollback);
+    setBellVolume(term.bellVolume);
     setFontFamily(term.fontFamily);
     setGrace(graceValue);
     setRetention(retentionValue);
@@ -608,6 +611,23 @@ export function SettingsDialog(props: {
                   onChange={(e) =>
                     set({ "terminal.shiftEnterNewline": e.currentTarget.checked })
                   }
+                />
+              </Row>
+              <Row
+                label="Bell volume"
+                help="How loud the terminal bell rings when a process sends a BEL — the baseline 'something finished' signal. 0 is silent. Takes effect immediately for new bells."
+              >
+                <Slider
+                  size="sm"
+                  w={200}
+                  min={0}
+                  max={100}
+                  step={5}
+                  label={(v) => `${v}%`}
+                  value={bellVolume}
+                  disabled={locked}
+                  onChange={setBellVolume}
+                  onChangeEnd={(v) => set({ "terminal.bellVolume": v })}
                 />
               </Row>
               <Row

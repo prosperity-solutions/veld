@@ -72,6 +72,13 @@ pub const MAX_DETACH_GRACE_MINUTES: i64 = 10_080;
 /// above that is history for the life of the page, not across a reload.
 pub const DEFAULT_SCROLLBACK: i64 = 10_000;
 
+/// Terminal bell volume, as a percentage 0–100.
+///
+/// Scales the Web-Audio tone a `BEL` plays. A percentage rather than a linear
+/// amplitude because that is what a slider is: 0 is silent, 100 is the loudest
+/// this build will play. `playBell` in the UI maps it onto a gain.
+pub const DEFAULT_BELL_VOLUME: i64 = 50;
+
 /// Upper bound on scrollback.
 ///
 /// 100 000 lines is ~144 MB per terminal at 120 columns — generous past any real
@@ -215,6 +222,7 @@ pub enum SettingKey {
     TerminalCursorBlink,
     TerminalScrollback,
     TerminalShiftEnterNewline,
+    TerminalBellVolume,
     TerminalDetachGrace,
     TerminalOpenUrlsInApp,
     TerminalInterceptSystemOpen,
@@ -247,6 +255,7 @@ impl SettingKey {
         Self::TerminalCursorBlink,
         Self::TerminalScrollback,
         Self::TerminalShiftEnterNewline,
+        Self::TerminalBellVolume,
         Self::TerminalDetachGrace,
         Self::TerminalOpenUrlsInApp,
         Self::TerminalInterceptSystemOpen,
@@ -268,6 +277,7 @@ impl SettingKey {
             Self::TerminalCursorBlink => "terminal.cursorBlink",
             Self::TerminalScrollback => "terminal.scrollback",
             Self::TerminalShiftEnterNewline => "terminal.shiftEnterNewline",
+            Self::TerminalBellVolume => "terminal.bellVolume",
             Self::TerminalDetachGrace => "terminal.detachGraceMinutes",
             Self::TerminalOpenUrlsInApp => "terminal.openUrlsInApp",
             Self::TerminalInterceptSystemOpen => "terminal.interceptSystemOpen",
@@ -291,6 +301,7 @@ impl SettingKey {
             "terminal.cursorBlink" => Self::TerminalCursorBlink,
             "terminal.scrollback" => Self::TerminalScrollback,
             "terminal.shiftEnterNewline" => Self::TerminalShiftEnterNewline,
+            "terminal.bellVolume" => Self::TerminalBellVolume,
             "terminal.detachGraceMinutes" => Self::TerminalDetachGrace,
             "terminal.openUrlsInApp" => Self::TerminalOpenUrlsInApp,
             "terminal.interceptSystemOpen" => Self::TerminalInterceptSystemOpen,
@@ -326,6 +337,7 @@ impl SettingKey {
             Self::TerminalScrollback => {
                 Value::from(clamp_i64(value, 0, MAX_SCROLLBACK).ok_or_else(bad)?)
             }
+            Self::TerminalBellVolume => Value::from(clamp_i64(value, 0, 100).ok_or_else(bad)?),
             Self::TerminalDetachGrace => Value::from(
                 clamp_i64(value, MIN_DETACH_GRACE_MINUTES, MAX_DETACH_GRACE_MINUTES)
                     .ok_or_else(bad)?,
@@ -464,6 +476,10 @@ pub fn defaults() -> BTreeMap<String, Value> {
         (
             SettingKey::TerminalScrollback,
             Value::from(DEFAULT_SCROLLBACK),
+        ),
+        (
+            SettingKey::TerminalBellVolume,
+            Value::from(DEFAULT_BELL_VOLUME),
         ),
         // Ships on: #197 established `ESC CR` as the default because it is what
         // Claude Code's `/terminal-setup` configures, so matching it means no

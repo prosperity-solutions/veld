@@ -2776,9 +2776,24 @@ function AppInner(props: {
   // persisted, and the daemon never sees it.
   //
   // Two surfaces, for the two windows it has to reach:
-  //  - an in-app toast for a window that is on screen, click → focus the pane
-  //  - an OS banner when this window is backgrounded (or the user is looking at
-  //    another worktree's window or browser tab), click → focus the pane
+  //  - an in-app toast with a visible "click to focus" hint, click → the pane
+  //  - an OS banner — always, because OSC 9 is an explicit "notify me" and the
+  //    banner is the half that reaches you across windows and tabs
+  //
+  // Focus a terminal pane: select its worktree (which raises the window in the
+  // desktop app) and activate its tab. Shared by the toast, the browser banner,
+  // and the native-notification click below.
+  const focusPane = (wtId: number, sessionId: string) => {
+    const worktree = worktreesRef.current.find((w) => w.id === wtId);
+    if (worktree) void selectWorktree(worktree);
+    setLayouts((prev) => {
+      const cur = prev[wtId];
+      if (!cur) return prev;
+      const next = activateTab(cur, sessionId);
+      return next === cur ? prev : { ...prev, [wtId]: next };
+    });
+  };
+
   useEffect(
     () =>
       onTerminalNotify(({ sessionId, message }) => {
@@ -2798,26 +2813,31 @@ function AppInner(props: {
         const title = worktree ? worktreeLabel(worktree) : `Worktree ${wtId}`;
         const heading = `${title} · ${label}`;
         const body = message.trim() || "Terminal activity";
+        const click = () => focusPane(wtId as number, sessionId);
 
-        const focusPane = () => {
-          if (worktree) void selectWorktree(worktree);
-          setLayouts((prev) => {
-            const cur = prev[wtId as number];
-            if (!cur) return prev;
-            const next = activateTab(cur, sessionId);
-            return next === cur ? prev : { ...prev, [wtId as number]: next };
-          });
-        };
-
-        // In-app toast always: a focused window reads it in place.
-        notifyTerminal({ title: heading, message: body, onClick: focusPane });
-        // The banner is for the case the toast cannot reach — this window is
-        // not the one on screen. A focused window already has the toast, so a
-        // banner on top of it would be double-notifying.
+        notifyTerminal({ title: heading, message: body, onClick: click });
+        // The OS banner is for the window you are NOT looking at — the half
+        // that reaches you across windows and tabs. A focused window already
+        // has the toast on screen, so a banner on top of it would be
+        // double-notifying.
         if (!document.hasFocus()) {
-          showSystemNotification({ title: heading, body, onClick: focusPane });
+          showSystemNotification({
+            title: heading,
+            body,
+            worktreeId: wtId as number,
+            sessionId,
+            onClick: click,
+          });
         }
       }),
+    [],
+  );
+
+  // A native notification (Veld Desktop's main-process banner) was clicked. The
+  // shell focused its window; focus the pane it names. Optional: an older shell
+  // has no such channel.
+  useEffect(
+    () => desktopApp?.onNotifyClick?.(({ worktreeId, sessionId }) => focusPane(worktreeId, sessionId)) ?? (() => {}),
     [],
   );
 

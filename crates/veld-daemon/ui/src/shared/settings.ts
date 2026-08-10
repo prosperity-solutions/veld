@@ -69,6 +69,7 @@ const FALLBACK = {
   cursorStyle: "block" as CursorStyle,
   cursorBlink: true,
   scrollback: 10000,
+  bellVolume: 50,
   shiftEnterNewline: true,
   markerStyle: "color" as MarkerStyle,
   detachGraceMinutes: 30,
@@ -145,6 +146,7 @@ export interface TerminalPrefs {
   cursorStyle: CursorStyle;
   cursorBlink: boolean;
   scrollback: number;
+  bellVolume: number;
   shiftEnterNewline: boolean;
 }
 
@@ -160,6 +162,7 @@ export function terminalPrefs(doc: SettingsDoc): TerminalPrefs {
     ),
     cursorBlink: bool(doc, "terminal.cursorBlink", FALLBACK.cursorBlink),
     scrollback: num(doc, "terminal.scrollback", FALLBACK.scrollback),
+    bellVolume: num(doc, "terminal.bellVolume", FALLBACK.bellVolume),
     shiftEnterNewline: bool(
       doc,
       "terminal.shiftEnterNewline",
