@@ -173,6 +173,18 @@ export interface PaneTab {
    *  reload. Kept in the layout rather than in `browserHost` because it is the
    *  one piece of a pane worth restoring — the page itself is re-fetchable. */
   url?: string;
+  /**
+   * `browser` only: each session's own last-visited URL, keyed by profile.
+   *
+   * `url` is the pane's single current position, shared by every session the
+   * tab is switched onto — and a session switch destroys and recreates the view
+   * with that same `url`. So a session that got redirected (a logged-out
+   * session bouncing to a login route, say) dragged its URL onto every other
+   * session the pane was switched to. `urls` lets each session remember where
+   * it was, so switching back restores it instead. `url` stays the current
+   * position and the fallback for a session never visited in this tab.
+   */
+  urls?: Partial<Record<BrowserProfile, string>>;
   /** `browser` only; defaults to `default`. */
   profile?: BrowserProfile;
   /**
@@ -859,6 +871,15 @@ export function browserTab(opts: {
 }
 
 /**
+ * The URL a browser tab should open for a given session: the session's own
+ * remembered position, or the pane's current `url` as the fallback for a
+ * session never visited in this tab.
+ */
+export function urlForProfile(tab: PaneTab, profile: BrowserProfile): string | undefined {
+  return tab.urls?.[profile] ?? tab.url;
+}
+
+/**
  * Which of a worktree's config panes the daemon holds a resume token for, and
  * **which worktree the answer is about**.
  *
@@ -1385,6 +1406,18 @@ function parseTab(value: unknown): PaneTab | null {
     const url = typeof t.url === "string" ? normalizeBrowserUrl(t.url) : null;
     if (url) tab.url = url;
     tab.profile = isBrowserProfile(t.profile) ? t.profile : "default";
+    // Per-session remembered URLs, each re-validated like `url` — a hand-edited
+    // `javascript:` value would otherwise be handed to a view on a session
+    // switch. A slot with an invalid or missing URL is simply not remembered.
+    const urls: Partial<Record<BrowserProfile, string>> = {};
+    if (typeof t.urls === "object" && t.urls !== null && !Array.isArray(t.urls)) {
+      for (const [slot, raw] of Object.entries(t.urls as Record<string, unknown>)) {
+        if (!isBrowserProfile(slot)) continue;
+        const u = typeof raw === "string" ? normalizeBrowserUrl(raw) : null;
+        if (u) urls[slot as BrowserProfile] = u;
+      }
+    }
+    if (Object.keys(urls).length > 0) tab.urls = urls;
     // Same rule for the emulation: every number is clamped and the user-agent
     // string is re-checked, because this one ends up in a request header.
     const emulation = sanitizeEmulation(t.emulation);
