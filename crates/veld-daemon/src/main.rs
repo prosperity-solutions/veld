@@ -258,6 +258,12 @@ async fn main() -> Result<()> {
     // Desktop's start, share start — must never pay that on a click.
     let user_path_handle = tokio::spawn(veld_core::user_path::warm_user_path_cache());
 
+    // Which ports the dashboard is actually served on, learned from the helper and
+    // kept current, because the `Origin` gate on the terminal and IDE-channel
+    // upgrades is synchronous and cannot ask — and the setup mode file it would
+    // otherwise infer from can disagree with the helper in front.
+    let dashboard_ports_handle = tokio::spawn(feedback_server::track_dashboard_ports());
+
     // Resource-stats sampling runs on its own timer, deliberately separate from
     // the health monitor: liveness probes there can block for tens of seconds,
     // which would stretch the sampling gap and make live stats read as stale.
@@ -300,6 +306,7 @@ async fn main() -> Result<()> {
     monitor_handle.abort();
     gc_handle.abort();
     stats_handle.abort();
+    dashboard_ports_handle.abort();
     user_path_handle.abort();
     accept_handle.abort();
     feedback_handle.abort();

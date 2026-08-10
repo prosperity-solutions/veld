@@ -153,7 +153,7 @@ import {
   urlLabel,
 } from "./panes/model";
 import { acquireWorktree } from "./ide/acquire";
-import { channel, type ClientInfo } from "./ide/channel";
+import { channel, type ClaimResult, type ClientInfo } from "./ide/channel";
 import { awayNote, openableWorktrees, worktreeSetKey } from "./ide/ownership";
 import {
   adoptLegacyLayouts,
@@ -1119,7 +1119,15 @@ function AppInner(props: {
     // a hunt still waiting on somebody's yield cannot land afterwards and move
     // the window off the row that was just picked.
     acquireGenRef.current++;
-    const result = await channel.claim(w.id);
+    // Counted, not just awaited: the re-acquire effect must not start an acquire
+    // while this click's own claim is unanswered. See `claimsInFlight`.
+    claimsInFlight.current++;
+    let result: ClaimResult;
+    try {
+      result = await channel.claim(w.id);
+    } finally {
+      claimsInFlight.current--;
+    }
     if (!result.ok) {
       // Without this the click reads as ignored: the row does not open, and
       // either a different window comes forward with nothing tying the two
@@ -2231,6 +2239,18 @@ function AppInner(props: {
   /** Bumped by anything that supersedes a running acquire — a newer acquire, or
    *  a rail click. See `acquireRef`. */
   const acquireGenRef = useRef(0);
+  /**
+   * How many claims this window is waiting on an answer for.
+   *
+   * **Read by the re-acquire effect, which must not fire into an open question.**
+   * The daemon broadcasts the claims table as soon as it *records* a claim, up to
+   * `YIELD_ACK` before it answers the claimer — so the click that wins a worktree
+   * changes `freeKey` while `claimBlocked` is still set, and an effect keyed on
+   * that alone would start an acquire that supersedes the very click that woke it.
+   * A superseded claim is answered with `superseded`, which the UI deliberately
+   * says nothing about: the user's click would simply vanish.
+   */
+  const claimsInFlight = useRef(0);
   /** The selection, for the reconnect handler — see `grantedRef`. */
   const selectedRef = useRef<number | null>(null);
   /** …and the row itself, for the paths that re-acquire it. */
@@ -2501,7 +2521,17 @@ function AppInner(props: {
   acquireRef.current = (preferred: Worktree) => {
     const gen = ++acquireGenRef.current;
     return acquireWorktree(preferred, {
-      claim: (id, focusHolder) => channel.claim(id, focusHolder),
+      // Counted around the claim itself rather than around the whole acquire, so
+      // the window between a granted claim and the next question is not counted as
+      // one — see `claimsInFlight`.
+      claim: async (id, focusHolder) => {
+        claimsInFlight.current++;
+        try {
+          return await channel.claim(id, focusHolder);
+        } finally {
+          claimsInFlight.current--;
+        }
+      },
       release: (id, seq) => channel.release(id, seq),
       // **Openable ones only.** This was the repo's whole list, so a hunt could
       // land on a worktree in the trash or one this window had just confirmed the
@@ -2589,9 +2619,16 @@ function AppInner(props: {
    * Keyed on the free set, which is what makes this terminate: a retry that is
    * refused leaves the set as it was, so this does not re-run until something
    * genuinely changes. A grant clears `claimBlocked` through `show`.
+   *
+   * **Never while a claim of this window's is unanswered.** The daemon broadcasts
+   * the claims table when it *records* a claim, up to `YIELD_ACK` before it
+   * answers — so a rail click from this state changes `freeKey` first, and firing
+   * here would supersede the click that caused it. The cost of skipping is a
+   * retry not taken until the next change, and the claim in flight is already
+   * asking the question this effect would ask.
    */
   useEffect(() => {
-    if (chromeless || !claimBlocked) return;
+    if (chromeless || !claimBlocked || claimsInFlight.current > 0) return;
     const target = freeWorktrees[0];
     if (!target) return;
     void acquireRef.current(target);
@@ -3984,8 +4021,31 @@ function AppInner(props: {
               picked, where a "＋" per lane creates one, and where the rows this
               window cannot have are visibly marked as belonging to somebody. A
               window with one worktree in the repo therefore lost its rail on
-              open and got it back only by ⌘K. */}
-          {worktree && layout ? (
+              open and got it back only by ⌘K.
+
+              **`claimBlocked` still outranks the panes**, which is the ordering
+              the old branch had by construction and this one has to keep on
+              purpose. `layout` is `layouts[worktree.id]`, and a worktree this
+              window was refused can still have an entry there — it held that
+              worktree until a moment ago. Rendering the panes then attaches to
+              PTY sessions another client is driving, and an attach *takes a
+              session over*: the exact failure the arbitration exists to
+              prevent. */}
+          {claimBlocked ? (
+            // Every worktree is on screen in another client. Saying so beats the
+            // alternative above — rendering a set of panes that belongs to
+            // another window, and taking its shells on the way.
+            <div className="center-page">
+              <p>Every worktree is already open somewhere else.</p>
+              <Button
+                size="md"
+                variant="default"
+                onClick={() => setDialog({ kind: "new-worktree", lane: "" })}
+              >
+                Create a worktree
+              </Button>
+            </div>
+          ) : worktree && layout ? (
             <PaneArea
               layout={layout}
               onLayout={setLayout}
@@ -4009,20 +4069,6 @@ function AppInner(props: {
                 nodeActionProps ? <NodeActions {...nodeActionProps} /> : null
               }
             />
-          ) : claimBlocked ? (
-            // Every worktree is on screen in another client. Saying so beats the
-            // alternative this replaced — rendering a set of panes that belongs
-            // to another window, and taking its shells on the way.
-            <div className="center-page">
-              <p>Every worktree is already open somewhere else.</p>
-              <Button
-                size="md"
-                variant="default"
-                onClick={() => setDialog({ kind: "new-worktree", lane: "" })}
-              >
-                Create a worktree
-              </Button>
-            </div>
           ) : null}
         </div>
       )}

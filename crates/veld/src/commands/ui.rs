@@ -2,10 +2,11 @@ use crate::output;
 
 /// The management UI URL. Uses HTTPS on the reserved `veld.localhost` domain.
 fn management_url(https_port: u16) -> String {
+    let host = veld_core::instance::MANAGEMENT_HOST;
     if https_port == 443 {
-        "https://veld.localhost".to_string()
+        format!("https://{host}")
     } else {
-        format!("https://veld.localhost:{https_port}")
+        format!("https://{host}:{https_port}")
     }
 }
 
@@ -13,7 +14,10 @@ fn management_url(https_port: u16) -> String {
 pub async fn run() -> i32 {
     // Determine HTTPS port from the helper.
     let https_port = match veld_core::helper::HelperClient::connect().await {
-        Ok(client) => client.https_port().await.unwrap_or(18443),
+        Ok(client) => client
+            .https_port()
+            .await
+            .unwrap_or(veld_core::instance::UNPRIVILEGED_HTTPS_PORT),
         Err(_) => {
             output::print_error("Veld helper not running. Run `veld setup` first.", false);
             return 1;

@@ -121,8 +121,10 @@ const MAX_FRAME_BYTES: usize = 64 * 1024;
 /// CSRF, as in `pty::routes`, is per route and not a layer — for the same
 /// reason: the load-bearing route here is a WebSocket upgrade, which is a GET
 /// that a method-keyed layer waves through. `mint_ticket` and the layout `PUT`
-/// call [`check_csrf`] themselves; the layout `GET` relies on the absent CORS
-/// layer, exactly as `pty::list_pane_sessions` does.
+/// call [`check_csrf`] themselves; the layout `GET` and the diagnostic
+/// `GET /api/ide/state` rely on the absent CORS layer, exactly as
+/// `pty::list_pane_sessions` does — and [`get_state`] states the limit of that
+/// argument.
 pub fn routes() -> Router {
     Router::new()
         .route("/api/ide/tickets", post(mint_ticket))
@@ -295,13 +297,17 @@ struct ClientState {
     label: String,
     /// Which worktrees this client is *recorded as showing*.
     claims: Vec<i64>,
-    /// Which worktrees it has told us it has panes mounted for. Client-declared
-    /// — the difference between this and `claims` is normal (a client keeps
-    /// visited worktrees mounted), and a `holds` entry with no live socket
-    /// behind it is what makes a claimer wait for a yield that never comes.
+    /// Which worktrees it has told us it has panes mounted for. Client-declared,
+    /// and having more of these than `claims` is normal — a client keeps the panes
+    /// of worktrees it has visited mounted so switching back is instant.
     holds: Vec<i64>,
-    /// Yields asked of this client that it has not acknowledged. Non-zero here
-    /// while a claim is stuck is the whole answer.
+    /// Yields asked of this client that it has not acknowledged.
+    ///
+    /// **The field to read when a claim is stuck.** A holder that does not answer
+    /// is what a claimer waits out [`YIELD_ACK`] for, and this is the only place
+    /// that is visible from outside — `holds` cannot show it, because a
+    /// disconnected client's record is removed together with its holds (see
+    /// [`disconnect`]).
     unacked_yields: usize,
 }
 
@@ -323,11 +329,22 @@ struct OrphanState {
 struct WorktreeState {
     worktree_id: i64,
     /// `null` when no such row exists — a stale claim, or a worktree deleted
-    /// without the client noticing yet.
+    /// without the client noticing yet. Only meaningful while `db_error` is
+    /// `false`.
     path: Option<String>,
     alias: Option<String>,
     /// The stored layout's version, or `0` when the worktree has no panes row.
     layout_version: i64,
+    /// At least one of the two reads behind this row failed, so what it says is not
+    /// to be trusted — `false` is the only value that makes the fields above mean
+    /// what their own docs say.
+    ///
+    /// **Absence and failure must not be spelled the same way.** Without this, a
+    /// locked database made every row report `path: null, layout_version: 0` —
+    /// which this struct defines as "the worktree is gone", the exact fault the
+    /// endpoint exists to detect. The repo has paid for a swallowed layout error
+    /// before; [`layout_write_error`] exists for the same reason on the write path.
+    db_error: bool,
 }
 
 #[derive(Serialize)]
@@ -368,67 +385,21 @@ const MAX_STATE_WORKTREES: usize = 256;
 ///
 /// Carries **no `client_id`**, the same rule the claims broadcast follows: the id
 /// is the credential a reconnect resumes with. Safe, so no CSRF header — and the
-/// daemon sends no `Access-Control-Allow-Origin`, so another origin can issue
-/// this request and never read the answer, as `get_layout` above relies on too.
+/// daemon sends no `Access-Control-Allow-Origin`, so an *unrelated* origin can
+/// issue this request and never read the answer, as `get_layout` above relies on
+/// too. What that argument does **not** cover, stated because it reads as if it
+/// did: a page a veld run serves reaches this daemon same-origin through the
+/// run's own `/__veld__/*` Caddy route, so any script on the user's own dev app
+/// can read this. It says the same things `GET /api/repos` already says on that
+/// surface — paths, aliases — plus the registry's shape, and no credential.
 async fn get_state() -> Json<StateResponse> {
     let (clients, orphaned, interesting) = {
         let reg = REGISTRY.lock().await;
-        let mut clients: Vec<ClientState> = reg
-            .clients
-            .iter()
-            .map(|(id, c)| {
-                let mut claims: Vec<i64> = reg
-                    .claims
-                    .iter()
-                    .filter(|(_, owner)| *owner == id)
-                    .map(|(worktree_id, _)| *worktree_id)
-                    .collect();
-                claims.sort_unstable();
-                let mut holds: Vec<i64> = c.holds.iter().copied().collect();
-                holds.sort_unstable();
-                ClientState {
-                    kind: c.info.kind,
-                    label: c.info.label.clone(),
-                    claims,
-                    holds,
-                    unacked_yields: c.pending.len(),
-                }
-            })
-            .collect();
-        // Stable output so two reads a second apart can be diffed by eye; a
-        // HashMap's order changes for no reason.
-        clients.sort_by(|a, b| a.label.cmp(&b.label).then(a.claims.cmp(&b.claims)));
-
-        let now = Instant::now();
-        let mut orphaned: Vec<OrphanState> = reg
-            .orphaned
-            .iter()
-            .map(|(worktree_id, o)| OrphanState {
-                worktree_id: *worktree_id,
-                kind: o.info.kind,
-                label: o.info.label.clone(),
-                age_ms: now.duration_since(o.since).as_millis(),
-            })
-            .collect();
-        orphaned.sort_by_key(|o| o.worktree_id);
-
-        // Every worktree either side has an opinion about, which is the set worth
-        // resolving against the database.
-        let mut interesting: Vec<i64> = reg
-            .claims
-            .keys()
-            .chain(reg.orphaned.keys())
-            .chain(reg.clients.values().flat_map(|c| c.holds.iter()))
-            .copied()
-            .collect::<HashSet<i64>>()
-            .into_iter()
-            .collect();
-        interesting.sort_unstable();
-        (clients, orphaned, interesting)
+        snapshot(&reg, Instant::now())
     };
 
-    // Lowest ids first, so what survives the cap is stable between two reads
-    // rather than whichever the hash order offered.
+    // Lowest ids first (`snapshot` sorts), so what survives the cap is stable
+    // between two reads rather than whichever the hash order offered.
     let truncated = interesting.len() > MAX_STATE_WORKTREES;
     if truncated {
         warn!(
@@ -440,24 +411,13 @@ async fn get_state() -> Json<StateResponse> {
 
     // Outside the lock: this opens the database and does two reads per worktree,
     // and nothing in this module may hold the registry across that.
-    let db = open_db().ok();
+    let db = open_db()
+        .inspect_err(|e| warn!("ide state: cannot open the database: {e}"))
+        .ok();
     let worktrees = interesting
         .into_iter()
         .take(MAX_STATE_WORKTREES)
-        .map(|worktree_id| {
-            let record = db
-                .as_ref()
-                .and_then(|db| db.get_worktree(worktree_id).ok().flatten());
-            WorktreeState {
-                worktree_id,
-                path: record.as_ref().map(|w| w.path.clone()),
-                alias: record.as_ref().map(|w| w.alias.clone()),
-                layout_version: db
-                    .as_ref()
-                    .and_then(|db| db.pane_layout(worktree_id).ok().flatten())
-                    .map_or(0, |l| l.version),
-            }
-        })
+        .map(|worktree_id| worktree_state(db.as_ref(), worktree_id))
         .collect();
 
     Json(StateResponse {
@@ -467,6 +427,118 @@ async fn get_state() -> Json<StateResponse> {
         worktrees,
         worktrees_truncated: truncated,
     })
+}
+
+/// The registry half of [`get_state`], as a function of the registry.
+///
+/// Split out so the promises in the response types have somewhere to be tested
+/// from: every other test in this module drives a local [`Registry`], while
+/// `get_state` reads the process-wide one.
+fn snapshot(reg: &Registry, now: Instant) -> (Vec<ClientState>, Vec<OrphanState>, Vec<i64>) {
+    // Sorted with the identity as the last key, which is what makes the order
+    // total. Labels are **not** distinct — `clientLabel()` in the UI answers "Veld
+    // Desktop" for every desktop window and "Chrome" for every tab — and a client
+    // showing nothing ties on `claims` too, which is precisely the N-windows,
+    // one-worktree state this endpoint gets read for. Without the id, tied rows
+    // fell back to `HashMap` order and moved between two reads, defeating the point
+    // of sorting at all. The id orders the output and never enters it.
+    let mut rows: Vec<(&String, ClientState)> = reg
+        .clients
+        .iter()
+        .map(|(id, c)| {
+            let mut claims: Vec<i64> = reg
+                .claims
+                .iter()
+                .filter(|(_, owner)| *owner == id)
+                .map(|(worktree_id, _)| *worktree_id)
+                .collect();
+            claims.sort_unstable();
+            let mut holds: Vec<i64> = c.holds.iter().copied().collect();
+            holds.sort_unstable();
+            (
+                id,
+                ClientState {
+                    kind: c.info.kind,
+                    label: c.info.label.clone(),
+                    claims,
+                    holds,
+                    unacked_yields: c.pending.len(),
+                },
+            )
+        })
+        .collect();
+    rows.sort_by(|(a_id, a), (b_id, b)| {
+        a.label
+            .cmp(&b.label)
+            .then(a.claims.cmp(&b.claims))
+            .then(a.holds.cmp(&b.holds))
+            .then(a_id.cmp(b_id))
+    });
+    let clients: Vec<ClientState> = rows.into_iter().map(|(_, c)| c).collect();
+
+    let mut orphaned: Vec<OrphanState> = reg
+        .orphaned
+        .iter()
+        .map(|(worktree_id, o)| OrphanState {
+            worktree_id: *worktree_id,
+            kind: o.info.kind,
+            label: o.info.label.clone(),
+            age_ms: now.duration_since(o.since).as_millis(),
+        })
+        .collect();
+    orphaned.sort_by_key(|o| o.worktree_id);
+
+    // Every worktree either side has an opinion about, which is the set worth
+    // resolving against the database.
+    let mut interesting: Vec<i64> = reg
+        .claims
+        .keys()
+        .chain(reg.orphaned.keys())
+        .chain(reg.clients.values().flat_map(|c| c.holds.iter()))
+        .copied()
+        .collect::<HashSet<i64>>()
+        .into_iter()
+        .collect();
+    interesting.sort_unstable();
+    (clients, orphaned, interesting)
+}
+
+/// One worktree's database side, with a failed read reported as a failure.
+///
+/// The two reads are reported independently: a layout read that fails does not
+/// throw away a worktree row that was resolved a line earlier, because half an
+/// answer is what a diagnostic is for.
+fn worktree_state(db: Option<&veld_core::db::Db>, worktree_id: i64) -> WorktreeState {
+    let Some(db) = db else {
+        return WorktreeState {
+            worktree_id,
+            path: None,
+            alias: None,
+            layout_version: 0,
+            db_error: true,
+        };
+    };
+    let (record, wt_failed) = match db.get_worktree(worktree_id) {
+        Ok(r) => (r, false),
+        Err(e) => {
+            warn!(worktree_id, "ide state: worktree lookup failed: {e}");
+            (None, true)
+        }
+    };
+    let (layout_version, layout_failed) = match db.pane_layout(worktree_id) {
+        Ok(l) => (l.map_or(0, |l| l.version), false),
+        Err(e) => {
+            warn!(worktree_id, "ide state: layout lookup failed: {e}");
+            (0, true)
+        }
+    };
+    WorktreeState {
+        worktree_id,
+        path: record.as_ref().map(|w| w.path.clone()),
+        alias: record.as_ref().map(|w| w.alias.clone()),
+        layout_version,
+        db_error: wt_failed || layout_failed,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1111,12 +1183,9 @@ async fn channel(
     Query(q): Query<ChannelQuery>,
 ) -> Response {
     if !super::pty::origin_allowed(&headers) {
-        // Terse for the same reason the terminal upgrade is: an attacker learns
-        // nothing about the allowlist, and the real origin is in the daemon log.
-        warn!(
-            origin = ?headers.get(axum::http::header::ORIGIN),
-            "rejected ide channel upgrade from a disallowed origin"
-        );
+        // Terse response, diagnostic log — the same split the terminal upgrade
+        // makes, through the same function so the two cannot drift.
+        super::pty::log_rejected_origin("ide channel upgrade", &headers);
         return (StatusCode::FORBIDDEN, "origin not allowed").into_response();
     }
     let Some(minted) = redeem(&q.ticket) else {
@@ -1896,6 +1965,67 @@ mod tests {
             !json.contains("secret-id-a"),
             "an identity must never reach another client: {json}"
         );
+    }
+
+    /// Same rule, the other reader of the registry.
+    ///
+    /// `GET /api/ide/state` is the second place a client id could leak, and it is
+    /// reachable by any page a veld run serves (see [`get_state`]) — so the
+    /// invariant is pinned here as well as on the broadcast, rather than resting on
+    /// [`ClientState`] happening to have no such field today.
+    #[test]
+    fn the_diagnostic_snapshot_never_carries_a_client_id() {
+        let mut reg = Registry::default();
+        let a = connect(&mut reg, "secret-id-a", ClientKind::Electron);
+        reg.clients.get_mut(&a.id).unwrap().info.label = "Window 1".to_owned();
+        claim_for(&mut reg, &a, 7, 1, true).unwrap();
+        holds(&mut reg, &a.id, &[7, 9]);
+        reg.orphaned.insert(
+            4,
+            Orphan {
+                client_id: "secret-id-b".to_owned(),
+                info: ClientInfo {
+                    kind: ClientKind::Browser,
+                    label: "Chrome".to_owned(),
+                },
+                since: Instant::now(),
+            },
+        );
+        reg.claims.insert(4, "secret-id-b".to_owned());
+
+        let (clients, orphaned, interesting) = snapshot(&reg, Instant::now());
+        let json = serde_json::to_string(&(&clients, &orphaned)).unwrap();
+        assert!(
+            !json.contains("secret-id-a") && !json.contains("secret-id-b"),
+            "an identity must never reach a reader of this endpoint: {json}"
+        );
+        // …and it still answers the questions it exists for: what the client
+        // holds, and every worktree either side has an opinion about — the ids
+        // the database half is then resolved against.
+        assert_eq!(clients[0].claims, vec![7]);
+        assert_eq!(clients[0].holds, vec![7, 9]);
+        assert_eq!(interesting, vec![4, 7, 9]);
+        assert_eq!(orphaned.len(), 1);
+        assert_eq!(orphaned[0].worktree_id, 4);
+    }
+
+    /// A stuck claim is visible as an unacknowledged yield and nowhere else — see
+    /// [`ClientState::unacked_yields`], whose doc says so.
+    #[test]
+    fn the_diagnostic_snapshot_shows_a_yield_nobody_answered() {
+        let mut reg = Registry::default();
+        let a = connect(&mut reg, "a", ClientKind::Electron);
+        let b = connect(&mut reg, "b", ClientKind::Browser);
+        // A shows 9 and keeps 7's panes mounted from an earlier visit, so 7 is
+        // free to claim but somebody still has to let go of it.
+        claim_for(&mut reg, &a, 9, 1, true).unwrap();
+        holds(&mut reg, &a.id, &[7, 9]);
+        let waits = claim_for(&mut reg, &b, 7, 2, true).expect("7 is not claimed");
+        assert_eq!(waits.len(), 1, "A had to be asked to let go of 7");
+
+        let (clients, _, _) = snapshot(&reg, Instant::now());
+        let stuck: usize = clients.iter().map(|c| c.unacked_yields).sum();
+        assert_eq!(stuck, 1, "the yield A never acknowledged has to be visible");
     }
 
     /// The rail's question is "is this one mine", and it is answered per

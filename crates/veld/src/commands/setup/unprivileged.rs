@@ -3,6 +3,7 @@ use tokio::process::Command;
 
 use crate::output;
 use veld_core::helper::HelperClient;
+use veld_core::instance::{UNPRIVILEGED_HTTP_PORT, UNPRIVILEGED_HTTPS_PORT};
 
 /// `veld setup unprivileged` -- run the unprivileged (no-sudo) setup sequence.
 ///
@@ -14,9 +15,9 @@ pub async fn run() -> i32 {
 
     let total = 5;
 
-    // Step 1: Check port availability (18443, 18080, 2019)
+    // Step 1: Check port availability (the unprivileged pair, 2019)
     print_step(1, total, "Checking port availability...");
-    match veld_core::setup::check_ports(18443, 18080).await {
+    match veld_core::setup::check_ports(UNPRIVILEGED_HTTPS_PORT, UNPRIVILEGED_HTTP_PORT).await {
         Ok(info) => print_step_ok(&info.message),
         Err(e) => {
             print_step_fail(&format!("{e:#}"));
@@ -76,7 +77,9 @@ pub async fn run() -> i32 {
     println!();
     output::print_success("Setup complete! Run `veld start` to get going.");
     println!();
-    let tip = "Run `veld setup privileged` for clean URLs without :18443 (one-time sudo)";
+    let tip = format!(
+        "Run `veld setup privileged` for clean URLs without :{UNPRIVILEGED_HTTPS_PORT} (one-time sudo)"
+    );
     eprintln!("  {} {tip}", output::bold("Tip:"));
 
     0
@@ -109,9 +112,9 @@ async fn install_unprivileged_helper() -> Result<String, anyhow::Error> {
             .arg("--socket-path")
             .arg(&socket_path)
             .arg("--https-port")
-            .arg("18443")
+            .arg(UNPRIVILEGED_HTTPS_PORT.to_string())
             .arg("--http-port")
-            .arg("18080")
+            .arg(UNPRIVILEGED_HTTP_PORT.to_string())
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -175,9 +178,9 @@ async fn install_helper_launchagent(
         <string>--socket-path</string>
         <string>{}</string>
         <string>--https-port</string>
-        <string>18443</string>
+        <string>{UNPRIVILEGED_HTTPS_PORT}</string>
         <string>--http-port</string>
-        <string>18080</string>
+        <string>{UNPRIVILEGED_HTTP_PORT}</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
@@ -275,7 +278,8 @@ async fn install_helper_systemd_user(
          Description=Veld Helper (unprivileged)\n\
          \n\
          [Service]\n\
-         ExecStart={} --socket-path {} --https-port 18443 --http-port 18080\n\
+         ExecStart={} --socket-path {} --https-port {UNPRIVILEGED_HTTPS_PORT} \
+         --http-port {UNPRIVILEGED_HTTP_PORT}\n\
          Restart=always\n\
          \n\
          [Install]\n\

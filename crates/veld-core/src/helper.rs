@@ -374,6 +374,33 @@ impl HelperClient {
             .unwrap_or(443) as u16)
     }
 
+    /// Both ports the helper's Caddy is listening on, as it reports them.
+    ///
+    /// **The authoritative answer, and the reason it is worth one round trip.**
+    /// Everything else infers the pair from `~/.veld/setup.json`, and the two can
+    /// disagree: a helper started by hand, a `veld setup privileged` that died
+    /// after writing the mode, or a stray user helper on the high pair while the
+    /// privileged LaunchDaemon is down (`veld doctor` reports exactly that state).
+    /// The daemon's `Origin` allowlist has to know which pair is really in front —
+    /// an origin it does not recognise is a WebSocket upgrade it refuses, and a
+    /// browser cannot show the user why.
+    ///
+    /// `None` for a helper too old to report `http_port`, so a caller can keep its
+    /// own fallback rather than being handed a plausible guess.
+    pub async fn web_ports(&self) -> Result<Option<(u16, u16)>, HelperError> {
+        let resp = self.status().await?;
+        let data = resp.data;
+        let get = |key: &str| {
+            data.as_ref()
+                .and_then(|d| d.get(key))
+                .and_then(|v| v.as_u64())
+        };
+        Ok(match (get("https_port"), get("http_port")) {
+            (Some(https), Some(http)) => Some((https as u16, http as u16)),
+            _ => None,
+        })
+    }
+
     /// Query the running helper's version string from its status response.
     /// Older helpers that predate this field return `None`.
     pub async fn version(&self) -> Result<Option<String>, HelperError> {

@@ -10,8 +10,12 @@ use tracing::{debug, info, warn};
 /// Caddy admin API base URL.
 const CADDY_ADMIN_API: &str = "http://localhost:2019";
 
-/// Reserved hostname for the browser management UI.
-const MANAGEMENT_HOST: &str = "veld.localhost";
+// Reserved hostname for the browser management UI — **veld-core's constant, not a
+// second literal.** The daemon's `Origin` allowlist derives the origins it accepts
+// a WebSocket upgrade from out of the same one (`veld-daemon/src/pty.rs`), so a
+// hostname served here that the daemon does not know is a dashboard whose every
+// terminal and IDE channel is refused — exactly the fault this coupling closes.
+use veld_core::instance::MANAGEMENT_HOST;
 
 /// Port the daemon's HTTP server listens on (feedback + management).
 const DAEMON_HTTP_PORT: u16 = 19899;
