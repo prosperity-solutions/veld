@@ -21,6 +21,9 @@ import type { SettingsDoc } from "../api";
 
 export type CursorStyle = "block" | "underline" | "bar";
 export type MarkerStyle = "color" | "emoji";
+/** Where a new worktree's branch is cut from. Mirrors the Rust `one_of` for
+ *  `git.createFrom`; a value the daemon acts on. */
+export type GitCreateFrom = "origin" | "local";
 /**
  * Which zone a log timestamp is *shown* in — never which zone it is stored in.
  *
@@ -97,6 +100,10 @@ const FALLBACK = {
   // key that decides whether controls appear takes the shipped default so an older
   // daemon (which cannot know the key) does not look like a broken new UI.
   hideDisabledActions: true,
+  // The shipped default for a new control, by the file's `quickSwitch*`
+  // exception: the create dialog renders "based on the latest origin" unless an
+  // older daemon says otherwise, which is the behaviour this setting ships with.
+  gitCreateFrom: "origin" as GitCreateFrom,
 } as const;
 
 function strings(doc: SettingsDoc, key: string): string[] {
@@ -353,6 +360,20 @@ export function logsTimeZone(doc: SettingsDoc): LogTimeZone {
  */
 export function hideDisabledActions(doc: SettingsDoc): boolean {
   return bool(doc, "ui.hideDisabledActions", FALLBACK.hideDisabledActions);
+}
+
+/**
+ * Where a new worktree's branch is cut from: `origin` (fetch, then base on
+ * `origin/<default>`) or `local` (the main checkout's current HEAD).
+ *
+ * `origin` is the default and the point of the setting — a worktree created
+ * from a stale local `main` is born behind the remote. The daemon enforces this
+ * in `create_worktree`; this read is what the create dialog and the settings
+ * surface show.
+ */
+export function gitCreateFrom(doc: SettingsDoc): GitCreateFrom {
+  const v = doc["git.createFrom"];
+  return v === "local" ? "local" : "origin";
 }
 
 /**

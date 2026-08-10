@@ -12,6 +12,7 @@ import {
   terminalOpenUrlsInApp,
   terminalPrefs,
   hideDisabledActions,
+  gitCreateFrom,
 } from "./settings";
 
 describe("terminalPrefs", () => {
@@ -187,6 +188,25 @@ describe("hideDisabledActions", () => {
       expect(
         hideDisabledActions({ "ui.hideDisabledActions": bad as unknown as boolean }),
       ).toBe(true);
+    }
+  });
+});
+
+describe("gitCreateFrom", () => {
+  it("defaults to origin (the born-current behaviour for a new worktree)", () => {
+    expect(gitCreateFrom({})).toBe("origin");
+  });
+
+  it("reads the stored value", () => {
+    expect(gitCreateFrom({ "git.createFrom": "local" })).toBe("local");
+    expect(gitCreateFrom({ "git.createFrom": "origin" })).toBe("origin");
+  });
+
+  it("degrades to origin for anything that is not a real value", () => {
+    for (const bad of ["origin ", "", 0, null, "merge"]) {
+      expect(
+        gitCreateFrom({ "git.createFrom": bad as unknown as string }),
+      ).toBe("origin");
     }
   });
 });

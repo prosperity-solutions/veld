@@ -21,7 +21,7 @@ import {
   type Repo,
   type WorktreeGitStatus,
 } from "../api";
-import type { MarkerStyle } from "../shared/settings";
+import type { GitCreateFrom, MarkerStyle } from "../shared/settings";
 import {
   aliasCollides,
   deriveAlias,
@@ -226,6 +226,9 @@ export function NewWorktreeDialog(props: {
   colorUsedBy: Record<string, EmojiHolder[]>;
   /** Which marker face the rail renders, so the grids can label it. */
   markerStyle: MarkerStyle;
+  /** Where a new branch is cut from (`git.createFrom`) — shown so the create
+   *  states where the worktree starts, rather than leaving it a guess. */
+  createFrom: GitCreateFrom;
   onClose: () => void;
 }) {
   const [name, setName] = useState("");
@@ -359,7 +362,11 @@ export function NewWorktreeDialog(props: {
             </Text>
           )}
           <Checkbox
-            label="Create the branch (from the repo's current HEAD)"
+            label={
+              props.createFrom === "origin"
+                ? "Create the branch (from the latest origin/main)"
+                : "Create the branch (from the repo's current HEAD)"
+            }
             checked={createBranch}
             onChange={(e) => {
               setCreateBranch(e.currentTarget.checked);
@@ -369,6 +376,17 @@ export function NewWorktreeDialog(props: {
               if (!e.currentTarget.checked && branchEdit === null) setBranchEdit("");
             }}
           />
+          {/* The receipt for where the branch starts. `git.createFrom` is the
+              project-wide policy (Settings → Git); saying it here means a new
+              worktree is never born behind the remote without the dialog having
+              said so. Offline, or no remote, the daemon falls back to local HEAD. */}
+          {createBranch && props.createFrom === "origin" && (
+            <Text size="xs" c="dimmed">
+              The branch is fetched from the remote first, so it starts from the
+              latest <Text span ff="monospace">origin/main</Text> — change this in
+              Settings → Git.
+            </Text>
+          )}
           <TextInput
             label={branchRequired ? "Existing branch" : "Branch"}
             placeholder={branchRequired ? "feat/checkout-v2" : derivedBranch || "feat/checkout-v2"}

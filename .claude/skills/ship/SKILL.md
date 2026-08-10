@@ -139,8 +139,21 @@ Rules that make it work:
 
 ## Step 1 — Understand before touching code
 
+- **Stale-check first.** This repo's worktrees drift when `main` is not updated,
+  and a stale branch lacks the latest DB migrations (so its schema tests fail
+  and its PRs conflict late). Run `just stale-check` before starting work, again
+  before the review loop, and again before opening the PR. If it reports the
+  branch is behind, `git fetch origin && git rebase origin/main` (or fast-forward
+  if unpushed) before proceeding — do not build on a stale base.
 - Prefer a read-only investigator (`Explore` sub-agent) for "where is X / what
   calls Y" so main context holds decisions, not file dumps.
+- **Classify the feature as core or customization** using
+  [`docs/extensions-vision.md`](../../../docs/extensions-vision.md) — the
+  universal-primitive / data-contract tests. State the verdict in one sentence.
+  A **core** feature proceeds normally. A **customization** feature (anything
+  that needs a provider API, a provider-specific schema, or provider-specific
+  auth) is *not built here*; instead it is added to the extension backlog in
+  that doc in Step 3. Do not silently drop a customization feature request.
 - State the root cause / design in one paragraph before editing. If you can't,
   keep investigating.
 - Think from the two angles this repo cares about:
@@ -211,6 +224,13 @@ stay a current picture of what veld does, not drift behind the CLI. State your
 call either way. When the change is website-facing, prefer serving it locally
 (`veld start website:local`) and collaborating through `veld feedback` before
 shipping.
+
+If Step 1 classified the change as **customization** (or it includes a
+customization-shaped request), add a row to the extension backlog in
+`docs/extensions-vision.md` in this same PR — feature, data contract, UI
+surface, status. The backlog is the record the future config-driven system is
+built against; a feature request that lands in the customization realm must be
+captured there, not dropped. Never delete a backlog row without the maintainer.
 
 ## Step 4 — Review loop
 

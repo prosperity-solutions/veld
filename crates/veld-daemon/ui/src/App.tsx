@@ -7,6 +7,7 @@ import {
   type Lane,
   type Preset,
   type Repo,
+  type RepoGitStatus,
   type RepoList,
   type RunInfo,
   type RunRef,
@@ -17,6 +18,7 @@ import {
   type WorktreeGitStatus,
 } from "./api";
 import {
+  gitCreateFrom,
   hideDisabledActions,
   logsTimeZone,
   markerFace,
@@ -92,6 +94,7 @@ import {
   IconPlayerStopFilled,
   IconPlus,
   IconRefresh,
+  IconRefreshDot,
   IconSearch,
   IconBraces,
   IconSettings,
@@ -1471,6 +1474,8 @@ function AppInner(props: {
    */
   const [configVarsOverridden, setConfigVarsOverridden] = useState(false);
   const [varsTick, setVarsTick] = useState(0);
+  /** The "update main" action is in flight (the top bar button spins). */
+  const [updatingMain, setUpdatingMain] = useState(false);
   useEffect(() => {
     const path = worktree?.path;
     // No config (or one that declares nothing) cannot be overridden. `null`
@@ -3979,6 +3984,26 @@ function AppInner(props: {
     );
   }
 
+  /**
+   * The one-click "update main": fetch + fast-forward the main checkout, then
+   * re-read the repo so the staleness badge clears in the same breath. The
+   * daemon refuses a dirty tree, a root not on the default branch, or a root
+   * with a live run — the error is the "why" a greyed button cannot say.
+   */
+  const updateMain = async () => {
+    if (!repo || updatingMain) return;
+    setUpdatingMain(true);
+    try {
+      await api.updateMain(repo.root);
+      await refresh();
+    } catch (e) {
+      notifyError("Could not update main", e);
+      await refresh();
+    } finally {
+      setUpdatingMain(false);
+    }
+  };
+
   return (
     <div className="frame">
       <TopBar
@@ -3986,6 +4011,9 @@ function AppInner(props: {
         repos={repos}
         repo={repo}
         worktree={worktree}
+        gitStatus={repo?.git ?? null}
+        updateMain={updateMain}
+        updatingMain={updatingMain}
         startConfig={
           worktree && canRunWorktreeNow(worktree) ? (
             <StartConfig
@@ -4235,6 +4263,7 @@ function AppInner(props: {
           usedBy={markerUsedBy.emoji}
           colorUsedBy={markerUsedBy.color}
           markerStyle={markerStyle(settings ?? {})}
+          createFrom={gitCreateFrom(settings ?? {})}
           onCreate={async (body) => {
             let created: Worktree;
             try {
@@ -4716,6 +4745,12 @@ function TopBar(props: {
   repos: Repo[];
   repo: Repo | null;
   worktree: Worktree | null;
+  /** The repo's main-checkout staleness, or `null` before the first CSRF-gated
+   *  refresh computed it. */
+  gitStatus: RepoGitStatus | null;
+  /** One-click "update main": fetch + fast-forward (human-initiated only). */
+  updateMain: () => void;
+  updatingMain: boolean;
   startConfig: React.ReactNode;
   canStart: boolean;
   running: boolean;
@@ -4843,6 +4878,54 @@ function TopBar(props: {
       {worktree && (
         <>
           <div className="sep" />
+          {/* The repo's staleness + one-click update. Beside the run controls,
+              not over with search/settings: it is a *project* action, and the
+              bar reads "what this project needs, what I'll run, run it".
+
+              Shown only when the daemon could compute a count — a repo with no
+              remote has no origin refs, and a permanently-greyed "update" is
+              noise. Behind: enabled with the count visible. Up to date: an
+              inapplicable action, hidden per `ui.hideDisabledActions` or shown
+              greyed with a reason when that is off — exactly like restart.
+
+              The `<span>` wrapper is load-bearing: a disabled Mantine control
+              has `pointer-events: none`, so the tooltip explaining *why* it is
+              disabled would never open — the #205 trap. */}
+          {props.gitStatus &&
+            props.gitStatus.behind !== null &&
+            (props.gitStatus.behind > 0 || !props.hideDisabled) && (
+              <span className="git-sync-btn">
+                <Tooltip
+                  label={
+                    props.updatingMain
+                      ? "Updating…"
+                      : props.gitStatus.behind > 0
+                        ? `${props.gitStatus.default_branch ?? "main"} is ${
+                            props.gitStatus.behind
+                          } ${
+                            props.gitStatus.behind === 1 ? "commit" : "commits"
+                          } behind origin — click to fast-forward`
+                        : "Up to date"
+                  }
+                >
+                  <ActionIcon
+                    size="md"
+                    variant="default"
+                    loading={props.updatingMain}
+                    disabled={props.gitStatus.behind === 0 || props.updatingMain}
+                    onClick={props.updateMain}
+                    aria-label="Update main"
+                  >
+                    <IconRefreshDot size={14} />
+                    {props.gitStatus.behind > 0 && (
+                      <span className="git-sync-badge" aria-hidden="true">
+                        {props.gitStatus.behind > 99 ? "99+" : props.gitStatus.behind}
+                      </span>
+                    )}
+                  </ActionIcon>
+                </Tooltip>
+              </span>
+            )}
           {canRun && props.startConfig}
           {/* The runs button sits between the preset picker and the start control
               — the bar reads "what I'll run, which run, run it". Disabled (or
