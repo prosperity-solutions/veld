@@ -1210,6 +1210,18 @@ export const api = {
       method: "DELETE",
     }),
   /**
+   * Whether a terminal has a foreground job running.
+   *
+   * The signal the UI uses to decide whether closing the tab warrants a
+   * confirmation dialog, and the one a future sidebar rail would poll. It is
+   * derived on demand by the holder (`tcgetpgrp` on the master), never stored.
+   *
+   * A session that cannot be answered (gone, or an old holder that does not
+   * speak the query) reports `false`, so a close is never blocked on an unknown.
+   */
+  ptyBusy: (sessionId: string) =>
+    request<{ busy: boolean }>(`/api/pty/sessions/${encodeURIComponent(sessionId)}/busy`),
+  /**
    * Ask where a URL a terminal produced should open.
    *
    * The **daemon** decides, not this page, and that is the point: half the exempt

@@ -78,6 +78,10 @@ pub const SCROLLBACK: u8 = 0x02;
 pub const OUTPUT: u8 = 0x03;
 /// The shell exited; payload is its status as `u32` big-endian.
 pub const EXIT: u8 = 0x04;
+/// The holder's answer to [`QUERY_BUSY`]: a single byte, `0` = idle, `1` =
+/// busy. Holder-numbered, so an older daemon that does not know it treats it as
+/// ignorable ([`Frame::is_ignorable`]) and nothing breaks.
+pub const BUSY: u8 = 0x05;
 
 // Daemon → holder.
 /// Keystrokes for the PTY, raw bytes.
@@ -87,6 +91,11 @@ pub const RESIZE: u8 = 0x82;
 /// End the shell and exit. **Stable across every protocol version** — see the
 /// module docs before touching this.
 pub const HANGUP: u8 = 0x83;
+/// Ask the holder whether a foreground job is running; it answers with
+/// [`BUSY`]. Sent only to a holder that advertised [`Hello::supports_busy`] —
+/// an older holder that does not know the kind would drop the connection
+/// rather than ignore it, which is the one outcome that must never happen.
+pub const QUERY_BUSY: u8 = 0x84;
 
 /// Cap on one frame's payload, matching the WebSocket frame cap the daemon
 /// applies on the other side of the bridge. The largest legitimate frame is a
@@ -144,6 +153,15 @@ pub struct Hello {
     /// The shell's pid, for log lines. The daemon never signals it — the holder
     /// owns every signal, because it owns the unreaped child.
     pub pid: i32,
+    /// Whether this holder answers [`QUERY_BUSY`] with a [`BUSY`] reply.
+    ///
+    /// `#[serde(default)]`, so this is additive and needs no [`PROTOCOL`] bump
+    /// (see its docs). A daemon never sends `QUERY_BUSY` to a holder that does
+    /// not advertise it — an old holder that cannot answer would drop the
+    /// connection rather than ignore the frame — so an old holder adopted after
+    /// an update defaults to false and its sessions simply report as idle.
+    #[serde(default)]
+    pub supports_busy: bool,
     /// `Some(code)` if the shell has already exited.
     pub exited: Option<u32>,
     /// Seconds since a daemon was last connected, or `None` if one is attached
@@ -297,6 +315,20 @@ pub fn decode_size(payload: &[u8]) -> Option<(u16, u16)> {
     ))
 }
 
+/// Encode a busy answer. `true` = a foreground job is running.
+pub fn encode_busy(busy: bool) -> [u8; 1] {
+    [u8::from(busy)]
+}
+
+/// Decode a busy answer, rejecting a payload that is not a single byte.
+pub fn decode_busy(payload: &[u8]) -> Option<bool> {
+    match payload {
+        [0] => Some(false),
+        [1] => Some(true),
+        _ => None,
+    }
+}
+
 /// Decode an exit payload.
 pub fn decode_exit(payload: &[u8]) -> Option<u32> {
     if payload.len() != 4 {
@@ -391,7 +423,7 @@ mod tests {
         // An instruction the holder cannot carry out must fail the connection,
         // not be skipped: a silently-dropped resize is a terminal stuck at the
         // wrong size with nothing in any log.
-        for kind in [INPUT, RESIZE, HANGUP, 0x99] {
+        for kind in [INPUT, RESIZE, HANGUP, QUERY_BUSY, 0x99] {
             assert!(
                 !Frame {
                     kind,
@@ -401,7 +433,7 @@ mod tests {
                 "{kind:#x} must not be ignorable"
             );
         }
-        for kind in [HELLO, SCROLLBACK, OUTPUT, EXIT, 0x7f] {
+        for kind in [HELLO, SCROLLBACK, OUTPUT, EXIT, BUSY, 0x7f] {
             assert!(
                 Frame {
                     kind,
@@ -423,9 +455,11 @@ mod tests {
             ("SCROLLBACK", SCROLLBACK),
             ("OUTPUT", OUTPUT),
             ("EXIT", EXIT),
+            ("BUSY", BUSY),
             ("INPUT", INPUT),
             ("RESIZE", RESIZE),
             ("HANGUP", HANGUP),
+            ("QUERY_BUSY", QUERY_BUSY),
         ];
         let unique: std::collections::HashSet<u8> = kinds.iter().map(|(_, k)| *k).collect();
         assert_eq!(
@@ -436,7 +470,7 @@ mod tests {
         // And the direction split `is_ignorable` keys on must hold: holder-sent
         // kinds below 0x80, daemon-sent kinds at or above it.
         for (name, kind) in kinds {
-            let holder_sent = matches!(name, "HELLO" | "SCROLLBACK" | "OUTPUT" | "EXIT");
+            let holder_sent = matches!(name, "HELLO" | "SCROLLBACK" | "OUTPUT" | "EXIT" | "BUSY");
             assert_eq!(
                 kind < 0x80,
                 holder_sent,
@@ -451,5 +485,15 @@ mod tests {
         // strands shells behind daemons that cannot ask them to stop.
         assert_eq!(HANGUP, 0x83);
         assert_eq!(PROTOCOL, 1);
+    }
+
+    #[test]
+    fn busy_payloads_round_trip_and_short_payloads_are_rejected() {
+        assert_eq!(decode_busy(&encode_busy(true)), Some(true));
+        assert_eq!(decode_busy(&encode_busy(false)), Some(false));
+        // Reading a byte out of an empty payload would guess at the answer.
+        assert_eq!(decode_busy(&[]), None);
+        assert_eq!(decode_busy(&[0, 1]), None);
+        assert_eq!(decode_busy(&[2]), None);
     }
 }

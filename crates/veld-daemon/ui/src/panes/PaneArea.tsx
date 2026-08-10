@@ -49,7 +49,7 @@
  * (`VeldLinks.tsx`).
  */
 
-import { ActionIcon, Menu } from "@mantine/core";
+import { ActionIcon, Button, Menu, Modal, Text } from "@mantine/core";
 import {
   IconActivityHeartbeat,
   IconArrowsExchange,
@@ -106,6 +106,7 @@ import {
 import { notifyError } from "../shared/notify";
 import type { QuickSwitchPrefs } from "../shared/settings";
 import type { PaneSpec, Quicklink } from "../api";
+import { api } from "../api";
 import { paneIcon } from "./paneIcons";
 import { desktopWindow } from "../shell";
 import { type DropZone, sameZone, zoneAt } from "./dropModel";
@@ -290,6 +291,55 @@ export function PaneArea(props: {
   const { layout, onLayout } = props;
   const areaRef = useRef<HTMLDivElement>(null);
   const bothVisible = dockVisible(layout, 0) && dockVisible(layout, 1);
+
+  /**
+   * A terminal tab whose close is waiting on a confirmation, or `null`.
+   *
+   * Only ever set when the tab is a terminal *with a foreground job* — an idle
+   * terminal closes without being asked. Clearing it on the next layout change
+   * would dismiss the dialog if the tab is closed by another path meanwhile;
+   * it is not cleared here because the modal's own Cancel is the dismissal.
+   */
+  const [pendingClose, setPendingClose] = useState<string | null>(null);
+
+  /**
+   * Close a tab — asking first when it is a terminal running a foreground job.
+   *
+   * A terminal is not re-creatable state: closing it hangs up the shell and
+   * anything running in it, so a real terminal asks before doing that. This is
+   * the same signal, derived on demand by the daemon (`/api/pty/sessions/{id}/busy`);
+   * only a genuinely busy terminal interrupts the close with a dialog.
+   *
+   * Every other case closes immediately — a non-terminal kind, an idle
+   * terminal, or a terminal the daemon cannot answer for (the session is gone,
+   * or its holder predates the busy query). An unknown answer never blocks a
+   * close. The busy check is async, so the close uses a functional update to
+   * read the layout as it is when it lands, not as it was when the click fired.
+   */
+  const requestClose = (tabId: string) => {
+    const dock = dockOf(layout, tabId);
+    const tab =
+      dock === null ? null : layout.docks[dock].tabs.find((t) => t.id === tabId);
+    if (tab?.kind !== "terminal") {
+      onLayout(closeTab(layout, tabId));
+      return;
+    }
+    api
+      .ptyBusy(tabId)
+      .then(({ busy }) => {
+        if (busy) setPendingClose(tabId);
+        else onLayout((prev) => closeTab(prev, tabId));
+      })
+      .catch(() => onLayout((prev) => closeTab(prev, tabId)));
+  };
+
+  /** The terminal pending confirmation, for the dialog's label. */
+  const pendingTab = pendingClose
+    ? ([0, 1] as DockIndex[])
+        .flatMap((i) => layout.docks[i].tabs)
+        .find((t) => t.id === pendingClose)
+    : null;
+
   /** Where the tab currently being dragged would land, or `null`. */
   const [localDropZone, setDropZone] = useState<DropZone | null>(null);
   /**
@@ -807,6 +857,7 @@ export function PaneArea(props: {
               width={width}
               layout={layout}
               onLayout={onLayout}
+              requestClose={requestClose}
               worktreeId={props.worktreeId}
               serviceUrls={props.serviceUrls}
               quicklinks={props.quicklinks}
@@ -855,6 +906,45 @@ export function PaneArea(props: {
           <span>Release over another Veld window to move it there — or anywhere else for a new one</span>
         </div>
       )}
+
+      {/* Confirm before hanging up a shell that is running a foreground job.
+          Portalled, so overlayGuard hides any embedded browser pane underneath
+          it the way it does every other Mantine modal. */}
+      {pendingTab && pendingTab.kind === "terminal" && (
+        <Modal
+          opened
+          onClose={() => setPendingClose(null)}
+          title="Close this terminal?"
+          centered
+        >
+          <Text size="sm">
+            A process is still running in “{pendingTab.title}”. Closing the terminal will
+            hang up that process. Close anyway?
+          </Text>
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "flex-end",
+              gap: 8,
+              marginTop: 20,
+            }}
+          >
+            <Button variant="default" onClick={() => setPendingClose(null)}>
+              Cancel
+            </Button>
+            <Button
+              color="red"
+              onClick={() => {
+                const id = pendingTab.id;
+                setPendingClose(null);
+                onLayout((prev) => closeTab(prev, id));
+              }}
+            >
+              Close terminal
+            </Button>
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }
@@ -864,6 +954,8 @@ function DockView(props: {
   width: string;
   layout: PaneLayout;
   onLayout: (next: PaneLayoutUpdate) => void;
+  /** Close a tab, confirming first if a terminal has a foreground job. */
+  requestClose: (tabId: string) => void;
   worktreeId: number;
   serviceUrls: Array<[string, string]>;
   /** The project's own links from `ide.quicklinks`, shown beside the veld URLs. */
@@ -1029,7 +1121,7 @@ function DockView(props: {
         key: "close",
         icon: <IconX size={14} />,
         title: "Close",
-        onClick: () => onLayout(closeTab(layout, tab.id)),
+        onClick: () => props.requestClose(tab.id),
       },
     ]);
 
@@ -1112,7 +1204,7 @@ function DockView(props: {
                   : null
             }
             onSelect={() => onLayout(activateTab(layout, tab.id))}
-            onClose={() => onLayout(closeTab(layout, tab.id))}
+            onClose={() => props.requestClose(tab.id)}
             onMove={() => onLayout(moveTabToOtherDock(layout, tab.id))}
             onMenu={(e) => tabMenu(tab)(e)}
             canMove={dock.tabs.length > 1}

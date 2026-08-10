@@ -104,7 +104,7 @@ use portable_pty::PtySize;
 use serde::{Deserialize, Serialize};
 use tokio::net::UnixStream;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::sync::{broadcast, mpsc, watch};
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tracing::{debug, info, warn};
 
 use super::management::{check_csrf, open_db};
@@ -228,6 +228,13 @@ const EXIT_DRAIN: Duration = Duration::from_millis(250);
 /// Grace between hanging up the terminal's process group and killing it.
 const KILL_GRACE: Duration = Duration::from_secs(2);
 
+/// How long a busy query waits for the holder to answer.
+///
+/// Long enough that a loaded machine cannot miss it (the reply is one frame on
+/// a local socket), short enough that a wedged holder does not stall the close
+/// gesture. On timeout the caller treats the terminal as idle.
+const BUSY_QUERY_TIMEOUT: Duration = Duration::from_millis(1000);
+
 /// How long a holder gets to start, bind its socket and answer.
 ///
 /// Generous relative to what it costs (a fork/exec, a bind and a connect —
@@ -296,6 +303,7 @@ pub fn routes() -> Router {
         .route("/api/pty/tickets", post(mint_ticket))
         .route("/api/pty/attach", get(attach))
         .route("/api/pty/panes/{worktree_id}", get(list_pane_sessions))
+        .route("/api/pty/sessions/{id}/busy", get(session_busy_status))
         .route("/api/pty/sessions/{id}", delete(close_session))
         .route("/api/pty/sessions/{id}/open-url", post(open_url))
 }
@@ -482,6 +490,18 @@ struct Session {
     /// The shell's pid, for log lines only — it is a pid in *another* process's
     /// child list, and nothing here may signal it.
     pid: i32,
+    /// Whether the holder answers a [`wire::QUERY_BUSY`]. Held so the daemon
+    /// never sends that frame to an older holder that would drop the connection
+    /// rather than ignore it.
+    busy_supported: bool,
+    /// Slot for one in-flight busy query: the handler stores a oneshot sender
+    /// here before sending [`wire::QUERY_BUSY`], and [`pump_holder`] completes it
+    /// with the [`wire::BUSY`] reply. Serialised by [`Session::busy_lock`], so
+    /// there is never more than one outstanding.
+    busy_query: Mutex<Option<oneshot::Sender<bool>>>,
+    /// Serialises busy queries. An `async` mutex because a query awaits the
+    /// holder's reply while holding it.
+    busy_lock: tokio::sync::Mutex<()>,
     /// Held for the session's lifetime so the [`MAX_SESSIONS`] budget is
     /// released exactly when the session is dropped.
     _slot: SessionSlot,
@@ -657,6 +677,42 @@ async fn hang_up_released_holder(id: &str, reason: &str) -> bool {
     discard_holder(attached, reason).await;
     RELEASED.lock().expect("released set poisoned").remove(id);
     true
+}
+
+/// Ask the holder whether a foreground job is running in this session.
+///
+/// This is the "is something running?" signal a real terminal uses — the
+/// foreground process group differs from the shell's while a command executes,
+/// and the holder reads it with `tcgetpgrp` on the master. It is *derived on
+/// demand* from the live process, never stored: a foreground job starts and
+/// stops constantly, so a persisted value would be stale the moment it was
+/// written, and the future sidebar rail just calls the same endpoint.
+///
+/// `None` when the answer cannot be learned: the session is gone, the holder is
+/// an older build that does not speak `QUERY_BUSY`, or it did not answer in
+/// time. Callers treat `None` as *idle* — never block a close on a terminal we
+/// cannot read.
+async fn session_busy(session: Arc<Session>) -> Option<bool> {
+    if !session.busy_supported || session.exited().is_some() {
+        return None;
+    }
+    // One in flight at a time: a reply is matched to a sender, so two
+    // simultaneous queries would race for the slot.
+    let _guard = session.busy_lock.lock().await;
+    let (tx, rx) = oneshot::channel();
+    *session.busy_query.lock().expect("busy query poisoned") = Some(tx);
+    if session
+        .to_holder
+        .send((wire::QUERY_BUSY, Vec::new()))
+        .await
+        .is_err()
+    {
+        return None;
+    }
+    tokio::time::timeout(BUSY_QUERY_TIMEOUT, rx)
+        .await
+        .ok()
+        .and_then(|r| r.ok())
 }
 
 /// Collect sessions that have had nobody attached for `grace`.
@@ -1602,6 +1658,29 @@ fn redeem(ticket: &str) -> Option<Ticket> {
 // Closing
 // ---------------------------------------------------------------------------
 
+/// Report whether a terminal has a foreground job running.
+///
+/// Read-only — the UI calls this before offering to close a tab, and the future
+/// sidebar rail will poll it. No CSRF gate, for the reason `list_pane_sessions`
+/// documents: it is a safe GET, and the daemon sends no CORS headers, so another
+/// origin can issue it but never read the answer.
+///
+/// A session the daemon cannot answer for (gone, or an old holder that does not
+/// speak the query) reports `false`, never an error: the caller is deciding
+/// whether to *ask* before closing, and an unknown answer must not block a
+/// close.
+async fn session_busy_status(Path(id): Path<String>) -> Result<Json<serde_json::Value>, ApiError> {
+    if !valid_session_id(&id) {
+        return Err(err(StatusCode::BAD_REQUEST, "invalid session id"));
+    }
+    let session = SESSIONS.lock().await.get(&id).cloned();
+    let Some(session) = session else {
+        return Ok(Json(serde_json::json!({ "busy": false })));
+    };
+    let busy = session_busy(session).await.unwrap_or(false);
+    Ok(Json(serde_json::json!({ "busy": busy })))
+}
+
 /// End a session now, because its tab was closed.
 ///
 /// The distinction this endpoint draws is the whole point of the detach model:
@@ -2499,6 +2578,9 @@ fn register(
         closing,
         released,
         pid: hello.pid,
+        busy_supported: hello.supports_busy,
+        busy_query: Mutex::new(None),
+        busy_lock: tokio::sync::Mutex::new(()),
         _slot: slot,
     });
     sessions.insert(session.id.clone(), session.clone());
@@ -2673,6 +2755,23 @@ async fn pump_holder(session: Arc<Session>, mut reader: OwnedReadHalf) {
                 session.exit.send_replace(Some(code));
                 debug!(session = %session.id, pid, code, "terminal shell exited");
                 return;
+            }
+            wire::BUSY => {
+                let Some(busy) = wire::decode_busy(&frame.payload) else {
+                    warn!(session = %session.id, "ignoring a malformed busy frame");
+                    continue;
+                };
+                // Completes a pending query, if any. A reply nobody asked for
+                // (a stale one, or a duplicated holder) is dropped — there is
+                // nothing to do with it.
+                if let Some(tx) = session
+                    .busy_query
+                    .lock()
+                    .expect("busy query poisoned")
+                    .take()
+                {
+                    let _ = tx.send(busy);
+                }
             }
             other if frame.is_ignorable() => {
                 debug!(session = %session.id, "ignoring holder frame {other:#x}");
@@ -4921,6 +5020,80 @@ mod tests {
 
             let mut again = open(addr, &sid, dir.path(), "").await;
             assert_eq!(read_control(&mut again, "exit").await["code"], 5);
+            end_session(&sid, "test cleanup").await;
+        }
+
+        /// The confirmation signal: idle at the prompt, busy while a foreground
+        /// job runs, idle again once it finishes. Runs through the real holder
+        /// (in-process under test) and the real `/api/pty/sessions/{id}/busy`
+        /// route, so it pins the whole chain from the endpoint to `tcgetpgrp`.
+        #[tokio::test]
+        async fn busy_tracks_a_foreground_job() {
+            use axum::body::Body;
+            use tower::ServiceExt;
+
+            let addr = serve().await;
+            let dir = tempfile::tempdir().unwrap();
+            let sid = session_id();
+            let mut ws = open(addr, &sid, dir.path(), "").await;
+            read_control(&mut ws, "ready").await;
+
+            async fn busy(uri: &str) -> bool {
+                let res = routes()
+                    .oneshot(
+                        axum::http::Request::builder()
+                            .method("GET")
+                            .uri(uri)
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    res.status(),
+                    StatusCode::OK,
+                    "busy check must be a safe GET"
+                );
+                let bytes = axum::body::to_bytes(res.into_body(), 64).await.unwrap();
+                serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["busy"]
+                    .as_bool()
+                    .expect("busy is a bool")
+            }
+
+            // Idle at the prompt: nothing to warn about.
+            assert!(
+                !busy(&format!("/api/pty/sessions/{sid}/busy")).await,
+                "a prompt must not read as busy"
+            );
+
+            // A foreground `sleep` must read as busy while it runs. The shell
+            // does not switch the foreground pgrp instantly, so poll until it
+            // does rather than race it.
+            ws.send(WsMessage::Binary(
+                b"sleep 5; printf 'veld%s\\n' '-idle-again'\n"
+                    .to_vec()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let mut saw_busy = false;
+            while Instant::now() < deadline {
+                if busy(&format!("/api/pty/sessions/{sid}/busy")).await {
+                    saw_busy = true;
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            assert!(saw_busy, "a foreground job must read as busy");
+
+            // Once the job finishes the prompt is idle again — the signal must
+            // not stick.
+            read_until(&mut ws, "veld-idle-again").await;
+            assert!(
+                !busy(&format!("/api/pty/sessions/{sid}/busy")).await,
+                "an idle prompt must not read as busy"
+            );
             end_session(&sid, "test cleanup").await;
         }
     }

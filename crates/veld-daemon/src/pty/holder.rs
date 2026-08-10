@@ -498,6 +498,21 @@ async fn serve(cfg: &HolderConfig, listener: UnixListener) -> anyhow::Result<()>
                                 Some((cols, rows)) => resize(master.as_ref(), cols, rows),
                                 None => warn!("ignoring a malformed resize frame"),
                             },
+                            wire::QUERY_BUSY => {
+                                // The answer rides the *current* connection's out
+                                // queue; the daemon that asked is the one attached
+                                // (the guard above proved the generation).
+                                if let Some(c) = conn.as_ref() {
+                                    let _ = c
+                                        .out
+                                        .send((
+                                            wire::BUSY,
+                                            wire::encode_busy(session_busy(master.as_ref(), pid))
+                                                .to_vec(),
+                                        ))
+                                        .await;
+                                }
+                            }
                             other if frame.is_ignorable() => {
                                 debug!("ignoring holder-numbered frame {other:#x}");
                             }
@@ -862,6 +877,9 @@ async fn attach(
         cwd: cfg.cwd.display().to_string(),
         pid,
         exited,
+        // This build answers QUERY_BUSY; an older holder that cannot would
+        // drop the connection if asked, so the daemon gates on this flag.
+        supports_busy: true,
         // Measured from *this* holder's clock, not the daemon's: the daemon that
         // is connecting may never have seen this session before.
         detached_secs: disconnected_since
@@ -1137,6 +1155,28 @@ async fn pty_write(fd: &AsyncFd<File>, data: &[u8]) -> std::io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Whether a foreground job other than the shell itself is running.
+///
+/// `tcgetpgrp` on the master reports the terminal's *foreground* process group:
+/// the shell's own pgrp while it sits at a prompt, the running job's pgrp while
+/// a command executes. The shell is a session leader ([`setsid`] in
+/// [`spawn_shell`]), so its pgrp equals its pid — a different value means a
+/// foreground job. This is the same signal a real terminal uses to decide
+/// whether closing would lose a running process.
+///
+/// Works from the master even though the holder is not the controlling
+/// terminal: the foreground pgrp is a property of the tty, not of the caller.
+fn session_busy(master: &dyn MasterPty, shell_pid: i32) -> bool {
+    let Some(fd) = master.as_raw_fd() else {
+        return false;
+    };
+    // -1 on error (no foreground group yet, or the fd is gone). Treat that as
+    // idle: there is no job to warn about, and reporting busy here would block
+    // a close on a terminal we cannot actually read.
+    let fg = unsafe { libc::tcgetpgrp(fd) };
+    fg >= 0 && fg != shell_pid
 }
 
 /// Hang up the terminal's process group, the way closing a real terminal does.
