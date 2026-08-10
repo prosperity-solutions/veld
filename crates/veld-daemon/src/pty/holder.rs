@@ -502,15 +502,23 @@ async fn serve(cfg: &HolderConfig, listener: UnixListener) -> anyhow::Result<()>
                                 // The answer rides the *current* connection's out
                                 // queue; the daemon that asked is the one attached
                                 // (the guard above proved the generation).
+                                //
+                                // `try_send`, not `send().await`: this branch is the
+                                // holder's control loop, and a blocking send on a full
+                                // out channel would park it — taking `HANGUP` handling
+                                // down with it, the exact failure the OUTPUT path's
+                                // timeout exists to prevent. A busy reply is not screen
+                                // data; dropping it is fine, because the daemon's own
+                                // query times out and reports idle.
                                 if let Some(c) = conn.as_ref() {
-                                    let _ = c
-                                        .out
-                                        .send((
-                                            wire::BUSY,
-                                            wire::encode_busy(session_busy(master.as_ref(), pid))
-                                                .to_vec(),
-                                        ))
-                                        .await;
+                                    let reply = (
+                                        wire::BUSY,
+                                        wire::encode_busy(session_busy(master.as_ref(), pid))
+                                            .to_vec(),
+                                    );
+                                    if c.out.try_send(reply).is_err() {
+                                        debug!("dropping a busy reply: the daemon is behind");
+                                    }
                                 }
                             }
                             other if frame.is_ignorable() => {
