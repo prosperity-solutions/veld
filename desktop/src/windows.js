@@ -18,7 +18,7 @@
 // same step that seeds the new window, and closing a detached window hands its
 // tabs *back* rather than ending them.
 
-const { BrowserWindow, screen, shell } = require("electron");
+const { BrowserWindow, Notification, screen, shell } = require("electron");
 const fs = require("node:fs");
 const path = require("node:path");
 const {
@@ -1410,6 +1410,54 @@ function registerWindowIpc(ipcMain) {
     const record = recordFor(senderWindow(event));
     if (!record || record.kind !== "detached") return false;
     record.win.close();
+    return true;
+  });
+
+  /**
+   * Show a native OS notification from a terminal's OSC 9 request.
+   *
+   * Shown from the **main** process rather than the renderer so it is a real
+   * native banner regardless of how the window was opened, and so the click can
+   * focus this window even when it is backgrounded. On click the window comes
+   * forward and the requesting renderer is told which worktree/pane to focus
+   * (the payload is echoed back, so the click handler needs no other state).
+   */
+  ipcMain.handle("veld:app:notify", (event, payload) => {
+    const win = BrowserWindow.fromWebContents(event.sender);
+    if (!win || win.isDestroyed() || !Notification.isSupported()) {
+      // macOS silently drops a notification it cannot show; say why so a
+      // missing banner is diagnosable rather than a mystery.
+      console.warn(
+        "[veld] cannot show a notification: ",
+        Notification.isSupported()
+          ? "the window is gone"
+          : "this OS/app build has no notification support",
+      );
+      return false;
+    }
+    const title = String(payload?.title ?? "");
+    const body = String(payload?.body ?? "");
+    const n = new Notification({ title, body, silent: true });
+    n.on("click", () => {
+      if (!win.isDestroyed()) {
+        if (win.isMinimized()) win.restore();
+        win.show();
+        win.focus();
+      }
+      win.webContents.send("veld:app:notify-click", {
+        worktreeId: safeWorktreeId(payload?.worktreeId),
+        sessionId: String(payload?.sessionId ?? ""),
+      });
+    });
+    // On macOS the system can refuse to display a banner (no notification
+    // permission, or "Do Not Disturb") without throwing — this is the only
+    // signal. Report it where the user can find it.
+    n.on("failed", () => {
+      console.warn(
+        "[veld] macOS refused to display a notification — grant this app notification permission in System Settings → Notifications (Veld / Electron), and check Do Not Disturb / Focus.",
+      );
+    });
+    n.show();
     return true;
   });
 }

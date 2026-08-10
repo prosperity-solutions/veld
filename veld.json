@@ -88,6 +88,34 @@
         "auto_resume": true
       },
       {
+        // A third shape variant, but the same family as `claude` above: `pi`
+        // also accepts a caller-chosen session id (`--session-id`, which the
+        // CLI creates if missing), so it gets a real token and a real resume
+        // rather than codex's `--last` guess.
+        "id": "pi",
+        "type": "terminal",
+        "label": "Pi - auto",
+        "description": "Pi CLI in this worktree, resumable",
+        "icon": "robot",
+        "requires_bin": ["pi"],
+        "argv": [
+          "pi",
+          "--session-id",
+          "${veld.pane.token}"
+        ],
+        // Same flag on resume: `--session-id` both selects an existing
+        // session and creates one if the id is somehow unknown, so there is
+        // no separate "resume" invocation to write, unlike claude's `--resume`.
+        "resume": {
+          "argv": [
+            "pi",
+            "--session-id",
+            "${veld.pane.token}"
+          ]
+        },
+        "auto_resume": true
+      },
+      {
         // The other shape. `codex` has no launch-time session-id flag — it
         // mints its own UUID — so there is nothing to interpolate
         // `${veld.pane.token}` into, and the pane simply does not use one.

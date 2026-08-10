@@ -1890,6 +1890,7 @@ function TerminalPane(props: {
             spec: specId,
             autoResume: resumable && (spec?.auto_resume ?? false),
             closeOnExit: spec?.close_on_exit ?? false,
+            allowTerminalRenaming: spec?.allow_terminal_renaming ?? false,
           }
         : undefined,
     );

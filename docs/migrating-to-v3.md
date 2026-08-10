@@ -427,6 +427,16 @@ ports at all, `protocol` and `host` on a named port, the `settle` readiness prob
 and per-port sharing consent. All of it is additive *within* `schemaVersion: "3"`:
 there is no v4, and no config that loads today stops loading tomorrow.
 
+### Terminal ergonomics
+
+`ide.panes[]` gained `allow_terminal_renaming` (default `false`), which lets the
+process inside a config-declared pane rename its own tab with the terminal title
+it sets (OSC 0/2). A plain terminal — a login shell, not a pane — always adopts
+its title; this is the opt-in for a pane whose own title is more useful than its
+fixed `label`. Veld's terminals also ring the bell (BEL) and raise a notification
+on the OSC 9 "notify" sequence, naming the worktree and pane with a click that
+focuses the pane — terminal ergonomics, not a persisted inbox. All additive.
+
 It has its own page, because it is a menu rather than a migration:
 **[docs/adopting-long-running-and-ports.md](adopting-long-running-and-ports.md)**.
 

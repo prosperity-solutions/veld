@@ -207,6 +207,19 @@ export interface DesktopAppApi {
    * likely to be pressed. Returns its own unsubscribe.
    */
   onOpenSettings(fn: () => void): () => void;
+  /**
+   * Show a native OS notification (a terminal's OSC 9 request). `silent` — the
+   * terminal bell is the sound; this is the banner. The click focuses this
+   * window and reports back through [`onNotifyClick`](`onNotifyClick`).
+   */
+  notify(payload: { title: string; body: string; worktreeId: number; sessionId: string }): Promise<boolean>;
+  /**
+   * A native notification this window showed was clicked — focus the pane.
+   *
+   * `sessionId` *is* the terminal tab id; the payload was echoed back by the
+   * shell so the handler needs no other state. Returns its own unsubscribe.
+   */
+  onNotifyClick(fn: (p: { worktreeId: number; sessionId: string }) => void): () => void;
 }
 
 export const desktopApp: DesktopAppApi | null =

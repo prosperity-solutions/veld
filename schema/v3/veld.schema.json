@@ -351,6 +351,11 @@
                 "type": "boolean",
                 "default": true,
                 "description": "Close the pane when its command exits cleanly (status 0) — what a terminal emulator does, and what quitting the tool usually means. Only ever fires on an exit somebody was there to see, so it never competes with `auto_resume`: a reboot, a quit app or a reaped session leave the pane to be restored from the layout instead. A NON-ZERO exit never closes the pane, whatever this says — the reason a tool died is printed on the screen it dies on, and a pane that disappears with it takes the error with it."
+              },
+              "allow_terminal_renaming": {
+                "type": "boolean",
+                "default": false,
+                "description": "Let the process inside the pane rename its own tab with the terminal title it sets (OSC 0/2). Defaults to false: a config-declared pane's `label` is how you navigate a rail full of agent panes, so a tool like Claude Code that sets a dynamic title stays on its fixed name unless you opt in. Plain terminals (a login shell, not a pane) always adopt their OSC title."
               }
             }
           }

@@ -22,7 +22,17 @@
  * already suspended the panes while the toast appears under it.
  */
 
+import { createElement } from "react";
 import { notifications } from "@mantine/notifications";
+import type { DesktopAppApi } from "../shell";
+
+/** The Electron shell's app bridge, looked up lazily so this module stays
+ *  import-safe in a node test environment (no `window`). */
+function desktopAppBridge(): DesktopAppApi | null {
+  return (
+    (window as { veldDesktop?: { app?: DesktopAppApi } }).veldDesktop?.app ?? null
+  );
+}
 
 /**
  * How long a toast stays.
@@ -94,5 +104,118 @@ export function notifyRedirect(message: string): void {
     message,
     autoClose: INFO_MS,
     "data-veld-overlay": true,
+  });
+}
+
+/**
+ * An OS-level notification (a banner) via the Web Notification API.
+ *
+ * The "different window or browser" half of terminal notifications: a banner
+ * surfaces even when the tab or window that owns the pane is backgrounded, and
+ * clicking it focuses that window (the OS does this) and then runs `onClick`,
+ * which is how the pane comes up. The in-app toast is the other half, for a
+ * window that is already on screen.
+ *
+ * One helper covers both builds: in the Electron renderer `new Notification`
+ * maps to a native notification, and in a plain browser it is the standard
+ * permission-gated API. Permission is requested lazily on first use and never
+ * prompted again once denied — a notification a user has refused is not worth
+ * re-asking for on every bell.
+ */
+export interface SystemNotificationOptions {
+  title: string;
+  body?: string;
+  /** The pane that produced the notification — echoed back on click so the
+   *  page can focus it. `sessionId` *is* the terminal tab id. */
+  worktreeId: number;
+  sessionId: string;
+  /** Browser-only click handler. In Veld Desktop the click comes back through
+   *  `desktopApp.onNotifyClick` instead, which the app subscribes to. */
+  onClick?: () => void;
+}
+
+export function showSystemNotification(opts: SystemNotificationOptions): void {
+  // Veld Desktop: the MAIN process owns the native banner, so the click can
+  // reliably focus the window even when it is backgrounded. The shell echoes
+  // the click back through `desktopApp.onNotifyClick` (with the worktree and
+  // session echoed), and the page's click handler runs there.
+  const bridge = desktopAppBridge();
+  // `notify` is optional: an older shell (or a shell not yet restarted onto
+  // this build) exposes the app bridge without it, and must fall back to the
+  // browser path rather than throwing on a missing method.
+  if (typeof bridge?.notify === "function") {
+    void bridge.notify({
+      title: opts.title,
+      body: opts.body ?? "",
+      worktreeId: opts.worktreeId,
+      sessionId: opts.sessionId,
+    });
+    return;
+  }
+  // A plain browser tab: the Web Notification API, permission-gated. Clicking
+  // focuses the tab (the OS does this) and runs `onClick`.
+  if (typeof Notification === "undefined") return;
+  const show = () => {
+    try {
+      const n = new Notification(opts.title, { body: opts.body });
+      if (opts.onClick) {
+        n.onclick = () => {
+          // Focus the owning window/tab, then hand to the caller.
+          window.focus();
+          opts.onClick?.();
+        };
+      }
+    } catch {
+      // A notification that cannot be shown is not worth a toast of its own.
+    }
+  };
+  if (Notification.permission === "granted") {
+    show();
+  } else if (Notification.permission === "default") {
+    // Ask once. A granted answer shows the banner; a denied one is a real
+    // signal the user has chosen (or the browser blocks) — say why rather than
+    // silently staying quiet.
+    void Notification.requestPermission().then((p) => {
+      if (p === "granted") {
+        show();
+      } else if (p === "denied") {
+        console.warn(
+          "[veld] terminal notification blocked — this site is not allowed to send notifications. Click the lock in the address bar → Notifications.",
+        );
+      }
+    });
+  } else {
+    console.warn(
+      "[veld] terminal notification blocked — this site is not allowed to send notifications. Click the lock in the address bar → Notifications.",
+    );
+  }
+}
+
+/**
+ * The in-app half of a terminal notification: a clickable toast naming the
+ * worktree and pane, so a pane that finished while you were looking at it is
+ * one click away. Clicking focuses the pane; the system banner (for a
+ * backgrounded window or tab) is the other half, via [`showSystemNotification`].
+ */
+export interface TerminalNotifyOptions {
+  title: string;
+  message: string;
+  onClick: () => void;
+}
+
+export function notifyTerminal(opts: TerminalNotifyOptions): void {
+  notifications.show({
+    title: opts.title,
+    // The toast's whole surface is clickable, but that is only discoverable if
+    // it says so — a visible "click to focus" hint on its own line.
+    message: createElement(
+      "span",
+      { className: "term-notify-body" },
+      opts.message,
+      createElement("span", { className: "term-notify-focus" }, "Click to focus"),
+    ),
+    color: "teal",
+    onClick: opts.onClick,
+    autoClose: 8000,
   });
 }

@@ -819,6 +819,7 @@ so none of this applies there.
 | `resume` | `{ argv }` or `{ shell }` — what to run when the pane is restored and its shell is gone. |
 | `auto_resume` | Default `false`. Ignored (with a lint problem) without `resume`. |
 | `close_on_exit` | Default `true`. Closes the pane on a **clean** exit only; a non-zero exit always keeps it so the error stays readable. Only fires on an exit someone saw, so it never competes with `auto_resume`. Note it also means a deliberate `/exit` never shows the Resume button — set `false` to stop and choose. |
+| `allow_terminal_renaming` | Default `false`. Whether the process in the pane may rename its own tab with the terminal title it sets (OSC 0/2). A plain terminal always adopts its title; this opts a config pane in, because its `label` is how you navigate a rail full of agent panes. |
 
 **`${veld.pane.token}` is the whole trick.** Veld mints a UUID the first time a
 pane launches, remembers it against that pane in its database, and interpolates

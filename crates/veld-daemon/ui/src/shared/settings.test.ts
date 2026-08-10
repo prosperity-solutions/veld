@@ -22,6 +22,7 @@ describe("terminalPrefs", () => {
       "terminal.cursorStyle": "bar",
       "terminal.cursorBlink": false,
       "terminal.scrollback": 1000,
+      "terminal.bellVolume": 60,
       "terminal.shiftEnterNewline": false,
     });
     expect(p).toEqual({
@@ -30,6 +31,7 @@ describe("terminalPrefs", () => {
       cursorStyle: "bar",
       cursorBlink: false,
       scrollback: 1000,
+      bellVolume: 60,
       shiftEnterNewline: false,
     });
   });

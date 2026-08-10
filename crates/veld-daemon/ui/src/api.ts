@@ -294,6 +294,9 @@ export interface PaneSpec {
   /** Whether a clean (status 0) exit closes the pane. Never applies to a
    *  non-zero exit, which keeps the pane so the error stays readable. */
   close_on_exit: boolean;
+  /** Whether the pane's process may rename its tab with an OSC 0/2 title.
+   *  A plain terminal always may; this opts a config pane in. */
+  allow_terminal_renaming: boolean;
   /** The `requires_bin` executables that were not found. Omitted when empty.
    *  The pane's id is not a substitute — `claude-yolo` needs `claude`. */
   missing?: string[];

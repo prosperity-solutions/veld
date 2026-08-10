@@ -3218,3 +3218,16 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
   font-weight: 700;
 }
 
+
+/* Terminal notification toast: the message and a visible "click to focus"
+   affordance, since the toast's whole surface is clickable. */
+.term-notify-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.term-notify-focus {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent);
+}
