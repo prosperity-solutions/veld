@@ -39,7 +39,9 @@ const PATH_RESOLVE_TIMEOUT: Duration = Duration::from_secs(10);
 /// if even that is empty — the result is never empty) when resolution fails
 /// or times out.
 ///
-/// Spawns `$SHELL -l -i -c 'command env'` and parses the `PATH=` line, so it
+/// Spawns `<shell> -l -i -c 'command env'` — the user's chosen shell where one
+/// has been published ([`set_preferred_shell`]), their login shell otherwise —
+/// and parses the `PATH=` line, so it
 /// captures
 /// `PATH` after `.zprofile`/`.zshrc`/`.bash_profile`/`brew shellenv` etc. have
 /// run — the value the user's own terminal would have. Parsing `env` output
@@ -57,12 +59,82 @@ const PATH_RESOLVE_TIMEOUT: Duration = Duration::from_secs(10);
 /// rather than one per call. Note that a caller shared between the two, like
 /// `endpoint::resolve_secret`, counts as daemon-side and uses the cache.
 pub async fn resolve_user_path() -> String {
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_owned());
-    if let Some(path) = login_shell_path(&shell).await {
+    if let Some(path) = resolve_with_fallback().await {
         info!(path = %path, "resolved user PATH from login shell");
         return path;
     }
     process_path_fallback()
+}
+
+/// Ask the preferred shell, and — only if it answered nothing — the login shell.
+///
+/// **A shell someone picked for their *terminals* need not be able to answer this
+/// question.** `terminal.shell` can be any executable, and the picker offers what
+/// `/etc/shells` lists: on stock macOS that includes `/bin/csh` and `/bin/tcsh`,
+/// neither of which prints a `PATH=` line for `-l -i -c 'command env'` (measured:
+/// zsh/bash/ksh/dash print one, csh/tcsh print none). Without the second attempt,
+/// choosing tcsh for terminals would silently take the user's `PATH` away from
+/// every *node command*, `SecretSource::Command` and health probe — and only after
+/// the next daemon restart, since [`publish_value`] keeps a good value alive until
+/// then, which is about the least diagnosable shape a bug can have.
+///
+/// The extra spawn happens only on the failing path, so the common case still
+/// costs exactly one shell.
+async fn resolve_with_fallback() -> Option<String> {
+    let preferred = resolution_shell();
+    if let Some(path) = login_shell_path(&preferred).await {
+        return Some(path);
+    }
+    let login = crate::shell::auto_shell();
+    if login == preferred {
+        return None;
+    }
+    debug!(
+        preferred = %preferred,
+        falling_back_to = %login,
+        "the preferred shell answered no PATH — asking the login shell"
+    );
+    login_shell_path(&login).await
+}
+
+/// The user's chosen shell, published by whoever knows about it.
+///
+/// `None` — the state in the CLI, the gateway and every test — means
+/// [`crate::shell::auto_shell`], which is what this module always did (plus a
+/// `passwd` fallback for a `$SHELL` that launchd never set).
+fn preferred_shell() -> &'static std::sync::Mutex<Option<String>> {
+    static SHELL: std::sync::OnceLock<std::sync::Mutex<Option<String>>> =
+        std::sync::OnceLock::new();
+    SHELL.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// Tell this module which shell to spawn — the daemon's `terminal.shell`.
+///
+/// Pushed in rather than read from the database here, and that is the point: this
+/// module is linked into the **gateway** (through `veld-share`'s secret
+/// resolution) and into the CLI, neither of which has a user database — a
+/// `Db::open()` on this path would have a gateway create and migrate a SQLite file
+/// as a side effect of working out its `PATH`. The one process that has the
+/// setting is the one that sets it.
+///
+/// Called at daemon startup and again whenever the setting is patched, so a change
+/// reaches the *next* resolution rather than the next daemon restart. Values that
+/// are not usable are already filtered by [`crate::shell::resolve`] upstream; an
+/// empty string here is treated as `None`.
+pub fn set_preferred_shell(shell: Option<String>) {
+    let shell = shell.map(|s| s.trim().to_owned()).filter(|s| !s.is_empty());
+    if let Ok(mut guard) = preferred_shell().lock() {
+        *guard = shell;
+    }
+}
+
+/// The shell [`login_shell_path`] is spawned as.
+fn resolution_shell() -> String {
+    preferred_shell()
+        .lock()
+        .ok()
+        .and_then(|g| g.clone())
+        .unwrap_or_else(crate::shell::auto_shell)
 }
 
 /// The value used when the login shell can't be consulted: this process's own
@@ -105,8 +177,8 @@ fn cell() -> &'static std::sync::Mutex<Option<String>> {
 /// **A resolution that learned nothing never displaces one that did.** This is
 /// the whole correctness argument. `login_shell_path` returns `None` on a stall,
 /// a spawn failure or a non-zero exit, and can also succeed while contributing
-/// nothing (an answer byte-identical to this process's `PATH`: `SHELL` unset so
-/// `sh` ran, or an rc file whose version-manager block is gated on a terminal
+/// nothing (an answer byte-identical to this process's `PATH`: no user shell
+/// config at all, or an rc file whose version-manager block is gated on a terminal
 /// that resolution deliberately does not provide). On a daemon that unhelpful
 /// value *is* the bug — the bare launchd `PATH` that cannot find `npx` — so it
 /// may seed an empty cell, but it must never overwrite a real answer, however
@@ -166,8 +238,7 @@ pub async fn cached_user_path() -> String {
 
 /// Re-resolve and publish per [`publish_value`].
 async fn refresh_user_path_cache() {
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_owned());
-    let resolved = login_shell_path(&shell).await;
+    let resolved = resolve_with_fallback().await;
     if let Some(path) = &resolved {
         info!(path = %path, "resolved user PATH from login shell");
     }

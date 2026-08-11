@@ -275,16 +275,57 @@ and several were paid for in this codebase already.
 `spawn_shell` skips the helper when the thing it spawns *is* a login shell,
 which computes the same `PATH` itself. A config-declared pane (`ide.panes`) is
 **not** spawned as a bare `argv` any more: `resolve_pane` wraps its command in
-the user's login+interactive shell (`$SHELL -l -i -c '<command>'`) — the exact
+the user's login+interactive shell (`<shell> -l -i -c '<command>'`) — the exact
 shell a plain terminal opens — so it inherits the *whole* environment a
-terminal gives (`.zprofile` *and* `.zshrc` exports), not just `PATH`. The
+terminal gives (`.zprofile` *and* `.zshrc`/`.bashrc` exports), not just `PATH`. The
 daemon still injects a `cached_user_path()` `PATH` at ticket-mint time as a
 **floor** for a shell with no rc files, plus `VELD_PANE_ID`/`VELD_PANE_TOKEN`;
 that injection is what `a_pane_command_runs_instead_of_a_shell_and_gets_the_injected_path`
 pins with a real process, at the holder's level (the holder spawns whatever
 `argv` it is handed and layers the env on top). Get that floor wrong and a pane
 with no rc files fails with `command not found` for the exact CLI it exists to
-run, while a plain terminal in the same app works perfectly. Scope: the rule covers daemon/gateway/helper spawns only — commands the `veld` CLI itself spawns (orchestrator `command`/`long_running` steps, setup checks, actions) already inherit the terminal's `PATH` and are exempt. Only `PATH` is inherited, never the rest of the shell environment — and note that this genuinely differs from the CLI path, where a macOS terminal's zsh *is* a login shell, so `.zprofile` exports (`JAVA_HOME`, `LANG`, tool tokens) do reach a terminal-run `veld` and its node commands but not a daemon-spawned one. A node that needs such a variable must declare it in its `env`; "works in my terminal, fails from the UI" for a non-PATH variable is this asymmetry, not a bug.
+run, while a plain terminal in the same app works perfectly.
+
+  **Which shell that is, is a user setting, and it has exactly one resolver.**
+  `terminal.shell` (`"auto"` or an absolute path) is resolved by
+  `veld_core::shell::resolve` and reached through `Db::terminal_shell`, which
+  degrades to `shell::auto_shell()` — `$SHELL`, then the `passwd` entry, then
+  `/bin/sh` — for a value whose binary is not executable, so a shell someone
+  uninstalled can never leave a user unable to open the terminal they would fix
+  the setting from. The **daemon** resolves it once per ticket (`mint_ticket`,
+  where the database is already open) and it rides the ticket to three places
+  that must not disagree: the pane wrapper above, the startup-handoff decision in
+  `pty::shims` (`ZDOTDIR` for zsh, posix-mode `$ENV` for a bash **probed** to
+  honour it — macOS's bash 3.2 does not, and `--posix` there only costs a session
+  stuck in posix mode), and `HolderConfig.shell_argv`, which carries the flags too
+  because bash parses a GNU long option only ahead of the short ones. The holder never reads the
+  setting — it has no database and must outlive the daemon — and its own
+  `login_shell()` is only the fallback for a config an older daemon wrote. The
+  bash handoff replaces bash's whole startup rather than adding to it, so
+  `bashenv()` replays `/etc/profile` and the first of
+  `~/.bash_profile`/`~/.bash_login`/`~/.profile` itself — get that wrong and the
+  user's environment is gone, not merely the shim, which is why
+  `a_bash_session_runs_the_users_startup_and_still_wins_the_path` runs a real bash
+  and asserts both halves. That replay also sources `~/.bashrc`, which a *login*
+  bash never reads — the one deliberate departure from bash's own order, because
+  macOS ships no `~/.bash_profile` and a user with `~/.profile` plus `~/.bashrc`
+  would otherwise pick bash in the picker and get none of their config. It is
+  skipped when the sourced profile's text mentions `bashrc`, so the conventional
+  setup is not sourced twice; `a_bashrc_no_profile_reaches_is_still_loaded_and_only_once`
+  pins both directions. And **the verifier is driven through stdin, never `-c`**:
+  zsh's half is a `precmd` hook, which only runs before a prompt, so a `-c` probe
+  reports `/usr/bin/open` on a machine whose terminals resolve the shim correctly —
+  it shipped that way once and told users to edit a `.zshrc` to fix nothing.
+  `veld_core::user_path` learns the same answer by injection
+  (`set_preferred_shell`, called from the daemon's startup and its settings
+  handler) rather than by opening the database, because that module is linked
+  into the gateway and the CLI, and a `Db::open()` there would have a gateway
+  create and migrate a SQLite file as a side effect of working out its `PATH`.
+  Never guess a shell from rc-file presence: `~/.bashrc` exists on nearly every
+  machine, so that heuristic switches contented zsh users and is worse than the
+  bug it would fix.
+
+  Scope: the rule covers daemon/gateway/helper spawns only — commands the `veld` CLI itself spawns (orchestrator `command`/`long_running` steps, setup checks, actions) already inherit the terminal's `PATH` and are exempt. Only `PATH` is inherited, never the rest of the shell environment — and note that this genuinely differs from the CLI path, where a macOS terminal's zsh *is* a login shell, so `.zprofile` exports (`JAVA_HOME`, `LANG`, tool tokens) do reach a terminal-run `veld` and its node commands but not a daemon-spawned one. A node that needs such a variable must declare it in its `env`; "works in my terminal, fails from the UI" for a non-PATH variable is this asymmetry, not a bug.
 - **A transient PID is measured, never persisted — and the two stats producers
   stay disjoint by node kind.** Resource samples come from two places:
   `veld-daemon` samples every node with a persisted `NodeState.pid`, and the

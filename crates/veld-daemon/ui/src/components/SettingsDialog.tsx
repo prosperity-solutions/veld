@@ -56,7 +56,12 @@ import {
   IconTerminal2,
 } from "@tabler/icons-react";
 
-import type { SettingsDoc } from "../api";
+import {
+  api,
+  type SettingsDoc,
+  type ShellIntercept,
+  type ShellList,
+} from "../api";
 import { searchTarget } from "../panes/model";
 import { Modal } from "./dialogs";
 import {
@@ -73,6 +78,7 @@ import {
   terminalInterceptSystemOpen,
   runHistoryDays,
   terminalOpenUrlsInApp,
+  terminalShell,
   trashRetentionDays,
   markerStyle,
   quickSwitchPrefs,
@@ -102,6 +108,19 @@ function Row(props: {
     </Stack>
   );
 }
+
+/**
+ * Sentinel for the shell picker's "Custom path…" option.
+ *
+ * A `\u0000` prefix like `CUSTOM_FONT` below, and for the same reason: every real
+ * value in that select is something the daemon would accept, and the daemon refuses
+ * a shell path containing a NUL — so this sentinel cannot collide with one.
+ *
+ * Written as an escape, never as a literal NUL byte: a NUL in a source file makes
+ * ripgrep and grep classify it as binary and skip it silently (see the AGENTS.md
+ * note about `App.tsx`).
+ */
+const CUSTOM_SHELL = "\u0000custom-shell";
 
 /** Sentinel for the "Custom…" option; not a font stack. */
 const CUSTOM_FONT = "\u0000custom";
@@ -211,6 +230,71 @@ export function SettingsDialog(props: {
   const historyValue = runHistoryDays(settings ?? {});
   const [history, setHistory] = useState<number | string>(historyValue);
   const [fontFamily, setFontFamily] = useState(term.fontFamily);
+  const shellValue = terminalShell(settings ?? {});
+  const [shellPath, setShellPath] = useState(shellValue);
+  // This dialog's own intent — "I clicked Custom path…" — and nothing else. It is
+  // deliberately **not** reset from the settings document, which is the last piece
+  // of machinery this row had and the source of its fourth consecutive review
+  // finding: `save` updates the document optimistically, so resetting on every
+  // document change closed the field the moment a custom path was saved, whenever
+  // the shells list happened to be absent. Intent belongs to the window that
+  // expressed it and dies with the dialog, which is remounted on every open.
+  const [customShell, setCustomShell] = useState(false);
+  // What this machine has. Fetched once per open rather than read from the
+  // settings document, because it is not a setting — see `api.shells`. A failure
+  // leaves it null, which still renders a working picker: the stored value is
+  // always an option, so the only thing lost is the list of alternatives.
+  const [shells, setShells] = useState<ShellList | null>(null);
+  // **A positive fact, never a negation.** This asks only "do we *know* the stored
+  // shell is not one of the listed ones", which is answerable exactly when a list
+  // actually arrived. Every previous shape of this was some flavour of "not
+  // listed", which had to decide what an absent list meant and got it wrong three
+  // times running: sticky-only went stale when another window changed the shell;
+  // treating a missing list as listed hid the field for ever when the fetch
+  // failed; treating it as unlisted flashed the field open on every dialog open
+  // and, on a failed fetch, opened it for ordinary listed shells. With the
+  // question posed positively there is no third state to get wrong — no list means
+  // no claim, and the user can still open the field from the select.
+  const knownUnlisted =
+    shells !== null &&
+    shellValue !== "auto" &&
+    !shells.shells.some((s) => s.path === shellValue);
+  const showCustomShell = customShell || knownUnlisted;
+  useEffect(() => {
+    let live = true;
+    api
+      .shells()
+      .then((list) => {
+        if (live) setShells(list);
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, []);
+  // Does the `open` shim actually win in this shell? Re-asked whenever the stored
+  // shell changes, because the answer is per shell — and the daemon does not cache
+  // it, so pasting the suggested line and reopening this dialog shows the change.
+  // Null while in flight: the row says nothing rather than flashing a warning it is
+  // about to withdraw.
+  const [shimStatus, setShimStatus] = useState<ShellIntercept | null>(null);
+  useEffect(() => {
+    let live = true;
+    setShimStatus(null);
+    api
+      .shellIntercept()
+      .then((r) => {
+        if (live) setShimStatus(r);
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+    // Not just the shell: the endpoint's answer is gated on both Links switches,
+    // and both are editable in this same mounted dialog. Without them, turning
+    // interception off leaves a warning on screen telling the user to edit
+    // ~/.bashrc for a feature they just disabled.
+  }, [shellValue, openInApp, intercept]);
   // One origin per line, which is what an exempt list reads as. Held locally and
   // committed on blur like every other text field here — the daemon refuses the
   // whole list if one entry is not an origin, and its error lands in `props.error`.
@@ -252,6 +336,7 @@ export function SettingsDialog(props: {
     setReconnectFirst(reconnectFirstValue);
     setRetention(retentionValue);
     setHistory(historyValue);
+    setShellPath(shellValue);
     setExempt(exemptValue.join("\n"));
     setSearch(searchValue);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -645,6 +730,125 @@ export function SettingsDialog(props: {
 
               <SectionTitle>Behaviour</SectionTitle>
               <Row
+                label="Shell"
+                help={
+                  shellValue === "auto"
+                    ? "Your login shell. Pick another if your aliases and integrations live in a different shell's startup files — a terminal already open keeps the shell it started with."
+                    : "A terminal already open keeps the shell it started with."
+                }
+              >
+                <NativeSelect
+                  size="xs"
+                  w={220}
+                  value={
+                    customShell
+                      ? CUSTOM_SHELL
+                      : // The stored value is always one of the options below, so a
+                        // shell that is not on this machine's list — uninstalled, or
+                        // somewhere unusual — still shows as chosen rather than
+                        // silently reading as "Automatic".
+                        shellValue
+                  }
+                  disabled={locked}
+                  data={[
+                    {
+                      value: "auto",
+                      // Named, not just "Automatic": the whole question this setting
+                      // answers is "which shell am I actually getting?", and the
+                      // client cannot work that out itself.
+                      label: shells
+                        ? `Automatic (${shells.auto.split("/").pop()})`
+                        : "Automatic",
+                    },
+                    ...(shells?.shells ?? []).map((s) => ({
+                      value: s.path,
+                      label: `${s.name} (${s.path})`,
+                    })),
+                    ...(shellValue !== "auto" &&
+                    !(shells?.shells ?? []).some((s) => s.path === shellValue)
+                      ? [{ value: shellValue, label: shellValue }]
+                      : []),
+                    { value: CUSTOM_SHELL, label: "Custom path…" },
+                  ]}
+                  onChange={(e) => {
+                    const v = e.currentTarget.value;
+                    if (v === CUSTOM_SHELL) {
+                      // Seed the field with what is in effect, so "Custom" starts
+                      // from the current shell rather than from empty.
+                      setCustomShell(true);
+                      setShellPath(shellValue === "auto" ? "" : shellValue);
+                      return;
+                    }
+                    setCustomShell(false);
+                    setShellPath(v);
+                    set({ "terminal.shell": v });
+                  }}
+                />
+              </Row>
+              {shimStatus?.enabled && shimStatus.works === false && (
+                <Stack gap={4}>
+                  <Text size="xs" c="var(--warning, #d08770)">
+                    Programs in {shimStatus.name} that call{" "}
+                    <code>open</code> directly — an agent running{" "}
+                    <code>open https://…</code>, for instance — will use your
+                    system browser rather than a Veld pane.{" "}
+                    {shimStatus.resolved
+                      ? `open resolves to ${shimStatus.resolved}.`
+                      : ""}{" "}
+                    Links you click, and anything reading <code>$BROWSER</code>,
+                    are unaffected.
+                  </Text>
+                  {shimStatus.hint && (
+                    <>
+                      <Text size="xs" c="dimmed">
+                        To catch them too, add this to {shimStatus.hint.file}:
+                      </Text>
+                      <Text
+                        size="xs"
+                        ff="monospace"
+                        style={{
+                          background: "var(--surface-2, rgba(127,127,127,0.12))",
+                          padding: "4px 8px",
+                          borderRadius: 4,
+                          // A shell line is wide and must not widen the panel;
+                          // the file's own flexbox note explains why.
+                          overflowX: "auto",
+                          whiteSpace: "pre",
+                        }}
+                      >
+                        {shimStatus.hint.line}
+                      </Text>
+                    </>
+                  )}
+                </Stack>
+              )}
+              {showCustomShell && (
+                <Row
+                  label="Custom shell path"
+                  help="An absolute path — a bare name would be looked up on the daemon's own PATH, which is not your terminal's."
+                >
+                  <TextInput
+                    size="xs"
+                    w={240}
+                    placeholder="/opt/homebrew/bin/fish"
+                    value={shellPath}
+                    disabled={locked}
+                    onChange={(e) => setShellPath(e.currentTarget.value)}
+                    onBlur={() => {
+                      const v = shellPath.trim();
+                      // Clearing the box is "never mind", not a value to send: the
+                      // daemon would refuse an empty string and the user would see
+                      // an error for having deleted their own typing.
+                      if (!v) {
+                        setShellPath(shellValue === "auto" ? "" : shellValue);
+                        return;
+                      }
+                      if (v !== shellValue) set({ "terminal.shell": v });
+                    }}
+                  />
+                </Row>
+              )}
+              <Row
                 label="Scrollback"
                 help="Lines kept per terminal. Lowering this drops the oldest lines from every live terminal immediately."
               >
@@ -812,7 +1016,7 @@ export function SettingsDialog(props: {
               </Row>
               <Row
                 label="Also catch programs that call open / xdg-open"
-                help="Most tools read $BROWSER, but some call the system opener directly — including an agent's shell tool (Bash(open “https://…”)). For those, Veld puts a small shim directory on the PATH of each terminal. It needs the last word after your shell's startup files, so Veld points ZDOTDIR at a directory of its own holding one .zshenv: that file hands ZDOTDIR straight back, sources your real .zshenv, and registers a hook. Your .zprofile, .zshrc and .zlogin are read normally, in order, and nothing of yours is edited. zsh only; other shells keep $BROWSER and can add $VELD_SHIM_DIR to PATH by hand. Takes effect for new terminals."
+                help="Most tools read $BROWSER, but some call the system opener directly — including an agent's shell tool (Bash(open “https://…”)). For those, Veld puts a small shim directory on the PATH of each terminal. It needs the last word after your shell's startup files, so Veld points ZDOTDIR at a directory of its own holding one .zshenv: that file hands ZDOTDIR straight back, sources your real .zshenv, and registers a hook. Your .zprofile, .zshrc and .zlogin are read normally, in order, and nothing of yours is edited. In bash it uses the equivalent seam — posix mode’s $ENV, the only startup file an interactive --posix bash reads — replaying your own startup itself; that is probed per binary, because macOS ships bash 3.2 as /bin/bash and 3.2 ignores $ENV. Other shells keep $BROWSER and can add $VELD_SHIM_DIR to PATH by hand. The Shell row above reports whether it actually worked. Takes effect for new terminals."
               >
                 <Checkbox
                   size="xs"

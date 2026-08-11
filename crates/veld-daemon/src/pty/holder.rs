@@ -239,8 +239,19 @@ async fn serve(cfg: &HolderConfig, listener: UnixListener) -> anyhow::Result<()>
         pid,
         read_fd,
         write_fd,
-    } = spawn_shell(&cfg.cwd, size, cfg.argv.as_deref(), &cfg.env)
-        .context("failed to open a pty")?;
+    } = spawn_shell(
+        &cfg.cwd,
+        size,
+        cfg.argv.as_deref(),
+        // The daemon's answer when it has one, and this process's own only when it
+        // does not — an older daemon's holder config carries no `shell_argv`. See
+        // [`HolderConfig::shell_argv`].
+        &cfg.shell_argv
+            .clone()
+            .unwrap_or_else(|| vec![login_shell(), "-l".to_owned()]),
+        &cfg.env,
+    )
+    .context("failed to open a pty")?;
     info!(
         session = %cfg.session_id,
         worktree = %cfg.label,
@@ -987,9 +998,11 @@ struct Spawned {
 ///
 /// Two shapes, and the difference decides who computes `PATH`:
 ///
-/// - **No `argv`** — the user's login shell, which is the ordinary terminal.
+/// - **No `argv`** — `shell_argv`, which is the ordinary terminal. The daemon
+///   resolved it from `terminal.shell` and chose its flags (see
+///   [`wire::HolderConfig::shell_argv`]); this process only spawns it.
 /// - **An `argv`** — a config-declared pane's command. `resolve_pane` has
-///   already wrapped it in the user's **login+interactive** shell (`$SHELL -l -i
+///   already wrapped it in the user's **login+interactive** shell (`<shell> -l -i
 ///   -c '<command>'`), so this is what actually runs here; the pane command
 ///   inherits the same environment a real terminal gives, and `PATH` is the
 ///   login shell's own to compute. The daemon still injects a resolved `PATH`
@@ -998,6 +1011,7 @@ fn spawn_shell(
     cwd: &std::path::Path,
     size: PtySize,
     argv: Option<&[String]>,
+    shell_argv: &[String],
     env: &std::collections::BTreeMap<String, String>,
 ) -> anyhow::Result<Spawned> {
     let PtyPair { master, slave } = native_pty_system().openpty(size)?;
@@ -1012,18 +1026,33 @@ fn spawn_shell(
         // daemon re-checks), but falling back to a shell beats panicking in a
         // process whose whole job is to outlive things.
         Some([]) | None => {
-            let mut cmd = CommandBuilder::new(login_shell());
-            // A *login* shell, which is also what makes this an exception to the
-            // AGENTS.md "resolve the user's PATH with `resolve_user_path()`" rule.
-            // That helper exists because a daemon running `sh -c '<config command>'`
-            // inherits launchd's bare PATH; it gets the real one by spawning
-            // `$SHELL -l -i -c 'command env'` and scraping it. Here the thing being
-            // spawned *is* that login shell, so it computes the same PATH itself —
-            // calling the helper first would spawn a second shell and add its startup
-            // cost (up to its 10s timeout on a wedged rc file) to every terminal, to
-            // arrive at the value this shell is about to compute anyway.
-            cmd.arg("-l");
-            cmd
+            // A *login* shell — the daemon put the `-l` (and, for a bash with the
+            // `$ENV` handoff, the leading `--posix`) in `shell_argv`. That is also
+            // what makes this an exception to the AGENTS.md "resolve the user's
+            // PATH with `resolve_user_path()`" rule. That helper exists because a
+            // daemon running `sh -c '<config command>'` inherits launchd's bare
+            // PATH; it gets the real one by spawning `<shell> -l -i -c 'command
+            // env'` and scraping it. Here the thing being spawned *is* that login
+            // shell, so it computes the same PATH itself — calling the helper first
+            // would spawn a second shell and add its startup cost (up to its 10s
+            // timeout on a wedged rc file) to every terminal, to arrive at the
+            // value this shell is about to compute anyway.
+            // An empty or program-less `shell_argv` cannot reach here — the daemon
+            // always sends one and the fallback above builds one — but falling back
+            // to a plain login shell beats panicking in a process whose whole job is
+            // to outlive things.
+            match shell_argv.split_first() {
+                Some((program, args)) if !program.is_empty() => {
+                    let mut cmd = CommandBuilder::new(program);
+                    cmd.args(args);
+                    cmd
+                }
+                _ => {
+                    let mut cmd = CommandBuilder::new(login_shell());
+                    cmd.arg("-l");
+                    cmd
+                }
+            }
         }
     };
     cmd.cwd(cwd);
@@ -1074,19 +1103,19 @@ fn spawn_shell(
     })
 }
 
-/// The user's shell, falling back to a POSIX shell that is present on every
-/// supported platform. `SHELL` comes from this process's environment, inherited
-/// from the daemon (launchd/systemd propagate the user's), never from a client.
+/// This process's own idea of the user's shell — `$SHELL`, then the `passwd`
+/// entry, then `/bin/sh`.
 ///
-/// `pub` because the daemon needs the same answer *before* it spawns a holder: which
-/// shell this is decides whether the session's environment carries the `ZDOTDIR`
-/// handoff (`pty::shims`). One function, so the two cannot disagree about which
-/// shell is about to run.
+/// **Only the fallback.** Which shell a terminal opens is a user preference
+/// (`terminal.shell`), and the preference lives in the database, which this
+/// process deliberately does not open: a holder is a dumb PTY owner that must
+/// outlive the daemon, and `Db::open()` on the session-spawn path is the thing
+/// AGENTS.md warns about. So the daemon resolves the shell once, at ticket-mint
+/// time, and sends it in [`HolderConfig::shell_argv`]. This is what a holder spawned by
+/// an older daemon — one whose config carries no `shell_argv` — falls back to, which is
+/// exactly the behaviour that daemon had.
 pub fn login_shell() -> String {
-    std::env::var("SHELL")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "/bin/sh".to_owned())
+    veld_core::shell::auto_shell()
 }
 
 /// Push a new window size into the kernel.
@@ -1253,6 +1282,7 @@ mod tests {
             rows: 24,
             socket: socket.clone(),
             orphan_grace_secs: grace,
+            shell_argv: None,
             argv: None,
             env: std::collections::BTreeMap::new(),
             pane_label: None,
@@ -1323,6 +1353,7 @@ mod tests {
             rows: 24,
             socket: socket.clone(),
             orphan_grace_secs: 30,
+            shell_argv: None,
             argv: Some(vec![
                 "sh".to_owned(),
                 "-c".to_owned(),
@@ -1374,6 +1405,71 @@ mod tests {
         );
     }
 
+    /// An ordinary terminal opens the shell the **daemon** chose, not this
+    /// process's `$SHELL`.
+    ///
+    /// The whole `terminal.shell` preference rests on this hop: the setting lives
+    /// in the database, the holder has none, so the value travels in
+    /// [`HolderConfig::shell_argv`] and a holder that ignored it would leave the picker
+    /// changing nothing while every unit test still passed. Asserted with a stub
+    /// shell that prints its own `argv`, which also pins the `-l` — a bash spawned
+    /// without it reads no `~/.bash_profile`, i.e. none of the startup files the
+    /// setting exists to load.
+    #[tokio::test]
+    async fn the_daemon_chosen_shell_is_what_a_terminal_spawns() {
+        let dir = tempfile::tempdir().unwrap();
+        let stub = dir.path().join("stub-shell");
+        std::fs::write(&stub, "#!/bin/sh\nprintf 'ARGV[%s][%s]' \"$0\" \"$1\"\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let socket = dir.path().join("sh.sock");
+        let cfg = HolderConfig {
+            session_id: "shellprobe".to_owned(),
+            worktree_id: 1,
+            label: "test".to_owned(),
+            cwd: dir.path().to_path_buf(),
+            cols: 80,
+            rows: 24,
+            socket: socket.clone(),
+            orphan_grace_secs: 30,
+            shell_argv: Some(vec![stub.display().to_string(), "-l".to_owned()]),
+            // No argv: this is the ordinary-terminal path, the one the preference
+            // governs.
+            argv: None,
+            env: std::collections::BTreeMap::new(),
+            pane_label: None,
+        };
+        tokio::spawn(run(cfg));
+
+        let mut stream = loop {
+            match tokio::net::UnixStream::connect(&socket).await {
+                Ok(s) => break s,
+                Err(_) => tokio::time::sleep(Duration::from_millis(20)).await,
+            }
+        };
+        let mut seen = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            assert!(Instant::now() < deadline, "no exit frame; saw {seen:?}");
+            let Some(frame) = wire::read_frame(&mut stream).await.unwrap() else {
+                break;
+            };
+            match frame.kind {
+                wire::OUTPUT | wire::SCROLLBACK => seen.extend_from_slice(&frame.payload),
+                wire::EXIT => break,
+                _ => {}
+            }
+        }
+        let text = String::from_utf8_lossy(&seen);
+        assert!(
+            text.contains(&format!("ARGV[{}][-l]", stub.display())),
+            "the holder must spawn the daemon's shell as a login shell, got: {text:?}"
+        );
+    }
+
     /// A peer may connect, write the five bytes of `HANGUP`, and close
     /// immediately — the contract `veld uninstall`'s sweep, the recovery test's
     /// cleanup guard and the version-refusal path all rely on.
@@ -1400,6 +1496,7 @@ mod tests {
             socket: socket.clone(),
             // Long, so nothing but the hangup can be what ends this shell.
             orphan_grace_secs: 3600,
+            shell_argv: None,
             argv: None,
             env: std::collections::BTreeMap::new(),
             pane_label: None,
@@ -1457,6 +1554,7 @@ mod tests {
             socket: socket.clone(),
             // Long, so nothing in these tests can be explained by the orphan path.
             orphan_grace_secs: 3600,
+            shell_argv: None,
             argv: Some(vec!["cat".to_owned()]),
             env: std::collections::BTreeMap::new(),
             pane_label: None,

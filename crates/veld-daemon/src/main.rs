@@ -252,6 +252,16 @@ async fn main() -> Result<()> {
         gc::run_gc_scheduler(gc_manager).await;
     });
 
+    // Which shell that resolution — and every terminal — uses. Published from
+    // here because `veld_core::user_path` is linked into the gateway and the CLI
+    // too, neither of which has a database to read a setting from; a failure to
+    // open ours leaves it unset, which means the user's login shell, i.e. the
+    // behaviour before the setting existed. Re-published by the settings handler
+    // on every patch.
+    veld_core::user_path::set_preferred_shell(
+        veld_core::db::Db::open().ok().map(|db| db.terminal_shell()),
+    );
+
     // The user's login-shell PATH, kept warm on its own timer for the same
     // reason stats is: resolving it spawns a login shell (up to 10s on a stalled
     // rc file), and the request handlers that need it — stop/restart/action,

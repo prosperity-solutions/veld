@@ -881,10 +881,11 @@ is a lint problem: `${veld.pane.id}`, `${veld.pane.label}`, `${veld.pane.token}`
 `${veld.username}`. `VELD_PANE_ID` and `VELD_PANE_TOKEN` are in the environment
 too, for a `shell` pane.
 
-**A pane command runs inside your login+interactive shell** (`$SHELL -l -i -c
-'<command>'`) — the same shell a plain terminal opens — so it inherits
-**everything** your `.zprofile`/`.zshrc` export (model tokens, `JAVA_HOME`, tool
-paths), not just `PATH`. That is why an agent pane picks up your environment.
+**A pane command runs inside your login+interactive shell** (`<shell> -l -i -c
+'<command>'`) — the same shell a plain terminal opens, i.e. the one the
+`terminal.shell` setting names (default: your login shell) — so it inherits
+**everything** your `.zprofile`/`.zshrc`/`.bashrc` export (model tokens,
+`JAVA_HOME`, tool paths), not just `PATH`. That is why an agent pane picks up your environment.
 The wrapper shell exits with the command's status, so `close_on_exit` and exit
 reporting are unaffected.
 

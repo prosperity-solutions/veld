@@ -198,10 +198,33 @@ pub struct HolderConfig {
     /// compiled in so the two sides cannot disagree about it, and so a test can
     /// shorten it.
     pub orphan_grace_secs: u64,
+    /// Which shell an ordinary terminal opens — `terminal.shell`, already
+    /// resolved by the daemon (`veld_core::shell::resolve`, via
+    /// `Db::terminal_shell`).
+    ///
+    /// Resolved by the daemon and sent, rather than read by the holder, for the
+    /// reason [`Self::env`] is: the holder is a dumb PTY owner with no database.
+    /// It is also what keeps the two sides from disagreeing — the daemon has
+    /// already decided, from this same value, whether the session's environment
+    /// carries the zsh-only `ZDOTDIR` handoff.
+    ///
+    /// The **full argv** — program and flags — rather than just the path, because
+    /// the flags are not fixed any more: bash gets a leading `--posix` when the
+    /// daemon put an `$ENV` handoff in [`Self::env`] (see `pty::shims`), and bash
+    /// parses GNU long options only ahead of the short ones, so the order is the
+    /// daemon's to get right in one place rather than the holder's to reconstruct.
+    ///
+    /// `#[serde(default)]`, so this is additive and needs no [`PROTOCOL`] bump
+    /// (see its docs): a holder started by an older daemon has no entry and falls
+    /// back to `<its own $SHELL> -l`, which is what that daemon did anyway. Ignored
+    /// entirely when [`Self::argv`] is set — a pane's command has the shell
+    /// wrapped around it already.
+    #[serde(default)]
+    pub shell_argv: Option<Vec<String>>,
     /// What to run instead of the user's login shell — a config-declared pane's
     /// command, already resolved and interpolated by the daemon.
     ///
-    /// `None` is the ordinary terminal: `$SHELL -l`. Additive with a default, so
+    /// `None` is the ordinary terminal: `<shell> -l`. Additive with a default, so
     /// this did not bump [`PROTOCOL`] (see its docs) — an old holder adopted by a
     /// new daemon simply keeps running the shell it already started, which is the
     /// correct outcome, since the command only ever matters at spawn time.

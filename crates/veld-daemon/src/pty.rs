@@ -81,12 +81,16 @@
 pub mod holder;
 
 #[path = "pty/shims.rs"]
-mod shims;
+// `pub(super)` so the settings module can build the same session environment the
+// verifier has to probe with. One owner for "what veld puts in a shell" —
+// duplicating it there would let the probe report on an environment no terminal
+// actually gets.
+pub(super) mod shims;
 
 #[path = "pty/wire.rs"]
 mod wire;
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
@@ -1135,15 +1139,29 @@ struct Ticket {
     /// Resolved here, from the project's own config, so the client never gets
     /// to say what the daemon executes.
     pane: Option<PaneLaunch>,
-    /// `terminal.openUrlsInApp`, read at the same moment and for the same reason as
-    /// the field below. It gates the session's whole environment: with the feature
-    /// off, veld puts nothing in the shell.
-    open_urls_in_app: bool,
-    /// `terminal.interceptSystemOpen`, read while [`mint_ticket`] already had the
-    /// database open. It rides the ticket rather than being read at spawn time so
-    /// that nothing puts a `Db::open()` on the session-spawn path — see the comment
-    /// where it is read, and the AGENTS.md note it points at.
-    intercept_system_open: bool,
+    /// `terminal.shell`, already resolved (`Db::terminal_shell`), read while
+    /// [`mint_ticket`] already had the database open — nothing may put a
+    /// `Db::open()` on the session-spawn path (AGENTS.md).
+    ///
+    /// One value, decided once: it is what the holder spawns, what a pane command
+    /// is wrapped in, and what decides whether the session environment carries a
+    /// startup handoff (`ZDOTDIR` for zsh, `$ENV` for bash). Resolving it three
+    /// times could answer three different ways — the setting can change, and a
+    /// shell can be uninstalled, between the reads.
+    shell: String,
+    /// Flags that must precede `-l` — today only bash's `--posix`, and only when
+    /// [`Self::shim_env`] carries the `$ENV` handoff it depends on. bash parses GNU
+    /// long options **only ahead of** the short ones, so `<shell> -l --posix` is a
+    /// usage error, not a shell.
+    shell_flags: Vec<String>,
+    /// The session's environment, computed at mint time because
+    /// [`shims::session_env`] needs the shell, the two settings **and** the bash
+    /// probe, and the probe is async while the spawn path is not.
+    ///
+    /// A pane's own entries are layered on top at spawn time, not here: they are
+    /// per-launch (`VELD_PANE_TOKEN`) and must win over anything the shim env
+    /// carries.
+    shim_env: BTreeMap<String, String>,
     expires_at: Instant,
 }
 
@@ -1221,6 +1239,10 @@ struct TicketResponse {
 /// project's own `veld.json`, read here from the worktree the ticket already
 /// resolved. That is the same boundary the actions API keeps — the daemon never
 /// executes a command a request body contained.
+// Nine, and each one is a distinct fact the caller already knows: bundling them
+// would build a struct whose only purpose is to be destructured one line later.
+// The repo's idiom for that is this allow (see `commands/logs.rs`, `core::url`).
+#[allow(clippy::too_many_arguments)]
 async fn resolve_pane(
     db: &veld_core::db::Db,
     spec_id: &str,
@@ -1229,6 +1251,13 @@ async fn resolve_pane(
     session_id: &str,
     worktree_path: &FsPath,
     branch: &str,
+    // The resolved `terminal.shell` — the same value the ordinary terminal in this
+    // worktree would open, passed in rather than resolved here so one ticket cannot
+    // wrap a pane in one shell and spawn another. `shell_flags` travels with it for
+    // the same reason: a pane wrapped in a bash *without* the `--posix` its `$ENV`
+    // expects would read none of the user's startup.
+    shell: &str,
+    shell_flags: &[String],
 ) -> Result<PaneLaunch, ApiError> {
     // `root_config_in`, not `discover_config`: the worktree *is* the project
     // root here, and walking upward would find a parent repo's config and offer
@@ -1313,13 +1342,13 @@ async fn resolve_pane(
         )
     })?;
     // A pane runs inside the user's **login+interactive** shell — the exact
-    // shell a real terminal opens — rather than being spawned directly. That is
-    // what makes a pane inherit the whole environment a terminal gives: the
-    // `.zprofile`/`.zshrc` exports (model tokens, tool paths, `JAVA_HOME`) that
-    // a directly-spawned `argv` on the daemon's bare service environment never
-    // saw. The shell runs the command and exits with its status, so
-    // `close_on_exit` and exit reporting are unchanged.
-    let shell = holder::login_shell();
+    // shell a real terminal opens, which since `terminal.shell` means the one the
+    // user chose — rather than being spawned directly. That is what makes a pane
+    // inherit the whole environment a terminal gives: the
+    // `.zprofile`/`.zshrc`/`.bashrc` exports (model tokens, tool paths,
+    // `JAVA_HOME`) that a directly-spawned `argv` on the daemon's bare service
+    // environment never saw. The shell runs the command and exits with its
+    // status, so `close_on_exit` and exit reporting are unchanged.
     let argv = match resolved {
         veld_core::config::CommandSpec::Argv(argv) => {
             if argv.is_empty() || argv[0].is_empty() {
@@ -1328,7 +1357,7 @@ async fn resolve_pane(
                     format!("the {} pane's command is empty", pane.label),
                 ));
             }
-            login_shell_command(&shell, &argv)
+            login_shell_command(shell, shell_flags, &argv)
         }
         // A `shell` spec is already a command string, so it is handed to the
         // login shell as-is — no re-quoting, and `shell` keeps meaning exactly
@@ -1336,13 +1365,10 @@ async fn resolve_pane(
         // runs under the user's shell now, like a terminal command, instead of
         // a bare `sh` with no rc files.
         veld_core::config::CommandSpec::Shell(script) => {
-            vec![
-                shell,
-                "-l".to_owned(),
-                "-i".to_owned(),
-                "-c".to_owned(),
-                script,
-            ]
+            let mut argv = vec![shell.to_owned()];
+            argv.extend(shell_flags.iter().cloned());
+            argv.extend(["-l".to_owned(), "-i".to_owned(), "-c".to_owned(), script]);
+            argv
         }
     };
 
@@ -1365,26 +1391,40 @@ async fn resolve_pane(
 }
 
 /// Wrap an `argv` pane command for the user's login shell:
-/// `$SHELL -l -i -c '<each argv element single-quoted>'`.
+/// `<shell> -l -i -c '<each argv element single-quoted>'`.
 ///
 /// `-l -i` are the flags a terminal's shell runs with, so `.zprofile` *and*
 /// `.zshrc` both load — the `-l -i -c 'command env'` shape `resolve_user_path`
 /// relies on for the same reason. Each argument is re-quoted with
 /// [`veld_core::console::quote`] so spaces, `$`, backticks or a single quote in
 /// a value can never become a second command.
-fn login_shell_command(shell: &str, argv: &[String]) -> Vec<String> {
+/// The argv of an ordinary terminal's login shell: `<shell> <flags…> -l`.
+///
+/// A function rather than three lines at the one call site, so the flag ordering
+/// that bash enforces is reachable from a test. Getting it backwards is not a
+/// degradation — `bash -l --posix` exits printing its usage, so every terminal on a
+/// bash with the handoff would fail to open — and nothing else in the codebase
+/// would have caught it, because both existing call-site tests pass no flags.
+fn login_shell_argv(shell: &str, shell_flags: &[String]) -> Vec<String> {
+    let mut argv = vec![shell.to_owned()];
+    // Ahead of `-l`: bash parses GNU long options **only** before the short ones.
+    argv.extend(shell_flags.iter().cloned());
+    argv.push("-l".to_owned());
+    argv
+}
+
+fn login_shell_command(shell: &str, shell_flags: &[String], argv: &[String]) -> Vec<String> {
     let command = argv
         .iter()
         .map(|arg| veld_core::console::quote(arg))
         .collect::<Vec<_>>()
         .join(" ");
-    vec![
-        shell.to_owned(),
-        "-l".to_owned(),
-        "-i".to_owned(),
-        "-c".to_owned(),
-        command,
-    ]
+    let mut out = vec![shell.to_owned()];
+    // Ahead of `-l`, which bash requires of a GNU long option and which is the
+    // whole reason these travel as a list rather than being appended here.
+    out.extend(shell_flags.iter().cloned());
+    out.extend(["-l".to_owned(), "-i".to_owned(), "-c".to_owned(), command]);
+    out
 }
 
 /// The variables a pane command may interpolate.
@@ -1615,6 +1655,29 @@ async fn mint_ticket(
     // a real user database as a side effect.
     let open_urls_in_app = db.terminal_open_urls_in_app();
     let intercept_system_open = db.terminal_intercept_system_open();
+    let shell = db.terminal_shell();
+    // The session's environment is built here, not at spawn time, because the bash
+    // half of it needs a **probe** — does this bash honour `$ENV` in posix mode? —
+    // and that is an async spawn. A definitive answer is cached per shell path, so
+    // the cost is one ~10ms non-interactive probe the first time a given shell is
+    // used and nothing after that; a probe that could not *run* is remembered only
+    // briefly, so a wedged shell costs at most one slow open a minute rather than
+    // one per terminal. Skipped entirely unless the answer could matter.
+    let bash_handoff = intercept_system_open
+        && open_urls_in_app
+        && veld_core::shell::kind(&shell) == veld_core::shell::Kind::Bash
+        && veld_core::shell::supports_posix_env_handoff(&shell).await;
+    let shim_env = shims::session_env(
+        &body.session_id,
+        &shell,
+        open_urls_in_app,
+        intercept_system_open,
+        bash_handoff,
+    );
+    // Derived from the environment rather than from `bash_handoff` directly, so the
+    // flag and the variable it depends on can never disagree: `--posix` without an
+    // `ENV` is a bash session in posix mode reading none of the user's startup.
+    let shell_flags = veld_core::shell::interactive_flags(&shell, &shim_env);
 
     let cwd = PathBuf::from(&wt.path);
     // Only a new session needs the directory to exist. A resumed one already has
@@ -1649,6 +1712,8 @@ async fn mint_ticket(
                 &body.session_id,
                 &cwd,
                 &wt.branch,
+                &shell,
+                &shell_flags,
             )
             .await?,
         ),
@@ -1670,8 +1735,9 @@ async fn mint_ticket(
                 cwd,
                 label: wt.alias.clone(),
                 pane,
-                open_urls_in_app,
-                intercept_system_open,
+                shell,
+                shell_flags,
+                shim_env,
                 expires_at: now + TICKET_TTL,
             },
         );
@@ -2404,8 +2470,10 @@ async fn obtain_session(
         socket: socket_for(&ticket.session_id),
         // What lets a process inside the shell open a URL in Veld: `$BROWSER`
         // pointing at a generated shim, the session id it names when it does, and —
-        // for zsh, unless the setting is off — the `ZDOTDIR` handoff that gets the
-        // shim directory onto `PATH` after the user's own startup files have run.
+        // unless the setting is off — the startup handoff that gets the shim
+        // directory onto `PATH` after the user's own startup files have run
+        // (`ZDOTDIR` for zsh, posix-mode `$ENV` for a bash that was probed to
+        // honour it).
         // Computed here rather than in the holder because the holder is a dumb PTY
         // owner — it knows nothing about instances, ports or the CLI's location.
         //
@@ -2414,12 +2482,7 @@ async fn obtain_session(
         // rc files typically refine it) and `VELD_PANE_*` are this pane's alone,
         // so they must win over anything the shim env carries.
         env: {
-            let mut env = shims::session_env(
-                &ticket.session_id,
-                &holder::login_shell(),
-                ticket.open_urls_in_app,
-                ticket.intercept_system_open,
-            );
+            let mut env = ticket.shim_env.clone();
             if let Some(pane) = ticket.pane.as_ref() {
                 env.extend(pane.env.iter().cloned());
             }
@@ -2432,6 +2495,11 @@ async fn obtain_session(
         // running, and reaching into them would mean a protocol message whose only
         // job is to move a timer nobody is waiting on.
         orphan_grace_secs: detach_grace_hint().as_secs(),
+        // The shell this session was minted against, with its flags. Read at spawn,
+        // like every other value here: changing `terminal.shell` applies to
+        // terminals opened afterwards, and cannot reach into a shell that is
+        // already running.
+        shell_argv: Some(login_shell_argv(&ticket.shell, &ticket.shell_flags)),
         argv: ticket.pane.as_ref().map(|p| p.argv.clone()),
         pane_label: ticket.pane.as_ref().map(|p| p.label.clone()),
     };
@@ -3307,6 +3375,28 @@ fn clamp_dimension(v: Option<u16>, default: u16) -> u16 {
 
 #[cfg(test)]
 mod tests {
+    /// The shell these fixtures spawn.
+    ///
+    /// **Deliberately not the machine's.** These are plumbing tests — sockets,
+    /// adoption, replay, exit reporting — and the shell is only a process that
+    /// has to start cleanly and echo what it is told. A fixture that named
+    /// `/bin/zsh` passed on a developer's Mac and failed *every* e2e test on
+    /// Linux CI, because a zsh with no `~/.zshrc` runs `zsh-newuser-install`,
+    /// an interactive wizard that swallowed the bytes the test typed. `/bin/sh`
+    /// is present everywhere, reads no user startup files, and has no
+    /// first-run anything. A test that wants to exercise a *particular* shell
+    /// says so itself, as the bash and zsh handoff tests in `pty::shims` do.
+    ///
+    /// `/bin/bash` rather than `/bin/sh`, because several of these tests assert on
+    /// **job control and hangup** — a background job survives a detach, the shell
+    /// dies on close — and `/bin/sh` is dash on Debian and Ubuntu, which does not
+    /// answer those the way an interactive shell does. bash is on every platform
+    /// this repo supports (3.2 on macOS, 5.x on Linux) and needs no rc file to
+    /// behave. The daemon's own bash `$ENV` handoff cannot reach these tests: it
+    /// requires a shim directory, and a test binary resolves no `veld` CLI to
+    /// build one.
+    const TEST_SHELL: &str = "/bin/bash";
+
     use super::*;
 
     /// An `argv` pane runs inside the user's login+interactive shell — the
@@ -3315,10 +3405,54 @@ mod tests {
     /// `$SHELL -l -i -c '<quoted argv>'`, and every argv element must be
     /// single-quoted so spaces, `$`, backticks or a quote in a value can never
     /// become a second command.
+    /// A GNU long option comes **before** the short ones, in both places that
+    /// compose a shell argv.
+    ///
+    /// `bash -l --posix` is not a shell with a flag in an odd order — it is a
+    /// usage error, so bash exits and the terminal never opens. The order is
+    /// therefore load-bearing and, until this test, invisible: every other test of
+    /// these two functions passes no flags at all, so swapping the two `extend`
+    /// calls would leave the whole suite green and break every bash terminal that
+    /// takes the `$ENV` handoff.
+    #[test]
+    fn a_long_option_precedes_the_short_ones_in_every_composed_argv() {
+        let flags = vec!["--posix".to_owned()];
+
+        // The ordinary terminal.
+        assert_eq!(
+            login_shell_argv("/opt/homebrew/bin/bash", &flags),
+            vec![
+                "/opt/homebrew/bin/bash".to_owned(),
+                "--posix".to_owned(),
+                "-l".to_owned(),
+            ]
+        );
+
+        // A config-declared pane's command.
+        let pane = login_shell_command("/opt/homebrew/bin/bash", &flags, &["claude".to_owned()]);
+        assert_eq!(
+            &pane[..4],
+            &[
+                "/opt/homebrew/bin/bash".to_owned(),
+                "--posix".to_owned(),
+                "-l".to_owned(),
+                "-i".to_owned(),
+            ],
+            "the long option must precede -l -i, or bash prints its usage and exits"
+        );
+
+        // And with no flags — the zsh and bash-3.2 path — nothing is inserted.
+        assert_eq!(
+            login_shell_argv("/bin/zsh", &[]),
+            vec!["/bin/zsh".to_owned(), "-l".to_owned()]
+        );
+    }
+
     #[test]
     fn a_pane_argv_is_wrapped_in_the_login_shell() {
         let argv = login_shell_command(
             "/bin/zsh",
+            &[],
             &[
                 "pi".to_owned(),
                 "--session-id".to_owned(),
@@ -3340,6 +3474,7 @@ mod tests {
         // shell parses the re-quoted line.
         let tricky = login_shell_command(
             "/bin/zsh",
+            &[],
             &[
                 "pi".to_owned(),
                 "My Projects/veld".to_owned(),
@@ -3752,8 +3887,9 @@ mod tests {
                 cwd: std::env::temp_dir(),
                 label: "t".to_owned(),
                 pane: None,
-                open_urls_in_app: true,
-                intercept_system_open: true,
+                shell: TEST_SHELL.to_owned(),
+                shell_flags: Vec::new(),
+                shim_env: shims::session_env(id, TEST_SHELL, true, true, false),
                 expires_at: Instant::now() + ttl,
             },
         );
@@ -3777,8 +3913,9 @@ mod tests {
                 cwd: std::env::temp_dir(),
                 label: "t".to_owned(),
                 pane: None,
-                open_urls_in_app: true,
-                intercept_system_open: true,
+                shell: TEST_SHELL.to_owned(),
+                shell_flags: Vec::new(),
+                shim_env: shims::session_env("s2", TEST_SHELL, true, true, false),
                 expires_at: Instant::now() - Duration::from_secs(1),
             },
         );
@@ -4015,8 +4152,9 @@ mod tests {
                     cwd: cwd.to_path_buf(),
                     label: "test".to_owned(),
                     pane: None,
-                    open_urls_in_app: true,
-                    intercept_system_open: true,
+                    shell: TEST_SHELL.to_owned(),
+                    shell_flags: Vec::new(),
+                    shim_env: shims::session_env(session, TEST_SHELL, true, true, false),
                     expires_at: Instant::now() + TICKET_TTL,
                 },
             );
@@ -4112,16 +4250,18 @@ mod tests {
 
             // Minted, but already past its TTL.
             let stale = uuid::Uuid::new_v4().simple().to_string();
+            let stale_session = session_id();
             TICKETS.lock().unwrap().insert(
                 stale.clone(),
                 Ticket {
-                    session_id: session_id(),
+                    session_id: stale_session.clone(),
                     worktree_id: 1,
                     cwd: std::env::temp_dir(),
                     label: "test".to_owned(),
                     pane: None,
-                    open_urls_in_app: true,
-                    intercept_system_open: true,
+                    shell: TEST_SHELL.to_owned(),
+                    shell_flags: Vec::new(),
+                    shim_env: shims::session_env(&stale_session, TEST_SHELL, true, true, false),
                     expires_at: Instant::now() - Duration::from_secs(1),
                 },
             );
@@ -4656,6 +4796,7 @@ mod tests {
                 rows: 24,
                 socket: socket_for(&ours),
                 orphan_grace_secs: 3600,
+                shell_argv: None,
                 argv: Some(vec!["cat".to_owned()]),
                 env: std::collections::BTreeMap::new(),
                 pane_label: None,

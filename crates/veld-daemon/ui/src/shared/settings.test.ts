@@ -12,6 +12,7 @@ import {
   terminalInterceptSystemOpen,
   terminalOpenUrlsInApp,
   terminalPrefs,
+  terminalShell,
   hideDisabledActions,
   gitCreateFrom,
   stalenessHue,
@@ -276,6 +277,25 @@ describe("detachGraceMinutes", () => {
     expect(
       detachGraceMinutes({ "terminal.detachGraceMinutes": "soon" as unknown as number }),
     ).toBe(30);
+  });
+});
+
+describe("terminalShell", () => {
+  it("returns the stored path verbatim and defaults to auto", () => {
+    expect(terminalShell({ "terminal.shell": "/bin/bash" })).toBe("/bin/bash");
+    expect(terminalShell({})).toBe("auto");
+    // A path this machine does not have is still returned: the picker shows it as
+    // the chosen value rather than silently resetting a choice the user made, and
+    // the *daemon* is what falls back at spawn time.
+    expect(terminalShell({ "terminal.shell": "/opt/gone/fish" })).toBe(
+      "/opt/gone/fish",
+    );
+    // A wrong-typed or empty value falls back rather than reaching the picker as
+    // a selected option with no label.
+    expect(terminalShell({ "terminal.shell": "" })).toBe("auto");
+    expect(
+      terminalShell({ "terminal.shell": 7 as unknown as string }),
+    ).toBe("auto");
   });
 });
 

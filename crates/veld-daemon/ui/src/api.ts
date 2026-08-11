@@ -279,6 +279,38 @@ export interface Worktree {
  */
 export type SettingsDoc = Record<string, string | number | boolean | string[]>;
 
+/**
+ * What `terminal.shell` can be set to on this machine — see `GET /api/shells`.
+ *
+ * Not part of [`SettingsDoc`] because it is not a setting: it is what the machine
+ * has, it changes when a shell is installed rather than when a preference is
+ * saved, and it must not be re-probed on every settings read.
+ */
+export interface ShellList {
+  /** What `"auto"` resolves to right now, so the picker can name it. */
+  auto: string;
+  shells: { path: string; name: string }[];
+}
+
+/**
+ * Whether `open`/`xdg-open` are actually caught in the chosen shell — measured by
+ * the daemon spawning that shell, not inferred from its name.
+ *
+ * `works: null` means the shell could not be asked, which is deliberately not
+ * `false`: "we do not know" must not be rendered as "this is broken".
+ */
+export interface ShellIntercept {
+  shell: string;
+  name: string;
+  /** False when the feature is switched off, in which case `works` says nothing. */
+  enabled: boolean;
+  works: boolean | null;
+  /** What `open` resolved to, for the case where a human wants to see why. */
+  resolved: string | null;
+  /** Present only when it would help: the file to edit and the line to add. */
+  hint: { file: string; line: string } | null;
+}
+
 /** Mirrors `IdeView` in `crates/veld-daemon/src/desktop.rs`. */
 export interface IdeSection {
   quicklinks: Quicklink[];
@@ -1117,6 +1149,27 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify(patch),
     }),
+  /**
+   * The shells this machine offers for `terminal.shell`, plus what `"auto"`
+   * resolves to. Read once when the settings dialog opens: a client cannot work
+   * either out itself — a browser has no `$SHELL`, and Veld Desktop's is
+   * Electron's, not the user's terminal's.
+   */
+  shells: () => request<ShellList>("/api/shells"),
+  /**
+   * Ask whether the shim actually wins in the chosen shell. Costs a login shell,
+   * so it is a separate call from the list and is made only when the settings
+   * surface is open.
+   *
+   * A `POST` even though it reads: it spawns the user's shell, and a safe method
+   * with that side effect is reachable from any page the user visits via a bare
+   * `<img src=…>`. The method is what makes `request` send `X-Veld-Request`, which
+   * is the header the daemon requires. The daemon single-flights it and caches the
+   * answer for ten seconds, so pasting the suggested line and reopening the dialog
+   * still shows the change.
+   */
+  shellIntercept: () =>
+    request<ShellIntercept>("/api/shells/intercept", { method: "POST" }),
   /**
    * Open the OS folder picker (hosted by the daemon — it runs in the user's
    * GUI session). Resolves to the chosen absolute path, or null on cancel.

@@ -574,7 +574,37 @@ impl Diagnostics {
         // warning if it cannot, and a `OnceLock` means it never tries again — so a
         // machine with no `veld` beside the daemon, or a `~/.veld` it cannot write,
         // has terminal URL opening switched off with nothing anywhere to say so.
-        self.checks.push(self.terminal_shims_check());
+        self.checks.push(self.terminal_shims_check().await);
+    }
+
+    /// Which generated file catches `open`/`xdg-open` for this shell, and what to
+    /// call the mechanism — or `None` when veld has none for it.
+    ///
+    /// Returns a path *relative to the shim directory*, so the caller reports the
+    /// same `~/.veld/...` prefix either way. The bash arm is **probed**, not assumed
+    /// from the basename: macOS ships bash 3.2 as `/bin/bash`, which ignores `$ENV`
+    /// in posix mode, so the file exists and would never be read — reporting it as
+    /// the working mechanism would be the exact silent-success this row exists to
+    /// prevent.
+    async fn handoff_for(shell: &str) -> Option<(String, &'static str)> {
+        match veld_core::shell::kind(shell) {
+            veld_core::shell::Kind::Zsh => Some(("zdotdir/.zshenv".to_owned(), "ZDOTDIR")),
+            veld_core::shell::Kind::Bash
+                if veld_core::shell::supports_posix_env_handoff(shell).await =>
+            {
+                Some(("bash/veldenv.bash".to_owned(), "$ENV"))
+            }
+            _ => None,
+        }
+    }
+
+    /// A shell's basename, for a message a human reads.
+    fn shell_name(shell: &str) -> String {
+        std::path::Path::new(shell)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(shell)
+            .to_owned()
     }
 
     /// Whether a terminal can route a URL into a Veld browser pane.
@@ -589,7 +619,7 @@ impl Diagnostics {
     ///
     /// A note rather than a failure: every other part of a terminal still works, and
     /// clicking a URL in the output still opens it in the system browser.
-    fn terminal_shims_check(&self) -> Check {
+    async fn terminal_shims_check(&self) -> Check {
         // **Skipped whole under sudo**, exactly as check 0 skips itself, and for both
         // of its reasons rather than one. `Db::open()` creates the file, so as root it
         // leaves root-owned `veld.db`/`-wal`/`-shm` that break every later non-sudo
@@ -612,12 +642,21 @@ impl Diagnostics {
         // their presence says nothing about whether the feature is *on*. Reporting
         // "Terminal URLs open in Veld" while the user has switched it off is a green
         // answer to the exact question someone runs this to ask.
-        let settings = veld_core::db::Db::open().ok().map(|db| {
+        let db = veld_core::db::Db::open().ok();
+        let settings = db.as_ref().map(|db| {
             (
                 db.terminal_open_urls_in_app(),
                 db.terminal_intercept_system_open(),
             )
         });
+        // Which shell the handoff has to be *for*. `terminal.shell` decides which
+        // mechanism applies, and each has its own file — so a row that only ever
+        // looked for the zsh one reported "not caught" to every bash user and
+        // "caught" to a zsh user who had switched to fish.
+        let shell = db
+            .as_ref()
+            .map(|db| db.terminal_shell())
+            .unwrap_or_else(veld_core::shell::auto_shell);
         if let Some((false, _)) = settings {
             return Check {
                 pass: true,
@@ -682,33 +721,56 @@ impl Diagnostics {
             .map(std::path::PathBuf::from);
         match cli {
             Some(cli) if cli.is_file() => {
-                // The `ZDOTDIR` handoff is the half that catches `open`/`xdg-open`, and
-                // it is worse than useless if its file has gone: `ZDOTDIR` redirects
-                // every zsh startup file, so a missing `.zshenv` there means none of
-                // the user's own zsh config runs. The daemon checks this per session
-                // too; this row makes the state visible before a terminal is opened.
-                let handoff = dir.join("zdotdir").join(".zshenv");
                 let intercept = settings.map(|(_, i)| i).unwrap_or(true);
-                if intercept && !handoff.is_file() {
+                if !intercept {
+                    // Names the shell even here. Someone debugging "my fish
+                    // aliases do not load" is asking about the shell, not about
+                    // URL routing, and this row is the only place `veld doctor`
+                    // reports which shell terminals actually open — so dropping
+                    // the name on this branch sends them to read the setting in
+                    // the UI to learn something the diagnostic already knew.
                     return Check {
-                        pass: false,
+                        pass: true,
                         label: format!(
-                            "Terminal URLs open in Veld, but {shown}/zdotdir/.zshenv is missing, so open/xdg-open are not caught. Restart the daemon to rewrite it: {}",
-                            restart_daemon_hint()
+                            "Terminal URLs open in Veld ({shown} → {}); terminals run {}, open/xdg-open not caught",
+                            cli.display(),
+                            Self::shell_name(&shell)
                         ),
                     };
                 }
-                Check {
-                    pass: true,
-                    label: format!(
-                        "Terminal URLs open in Veld ({shown} → {}{})",
-                        cli.display(),
-                        if intercept {
-                            ""
-                        } else {
-                            ", open/xdg-open not caught"
-                        }
-                    ),
+                match Self::handoff_for(&shell).await {
+                    // The file that performs the handoff is missing, and for zsh that
+                    // is worse than the feature being off: `ZDOTDIR` redirects every
+                    // zsh startup file, so a missing `.zshenv` there means none of the
+                    // user's own zsh config runs. The daemon checks this per session
+                    // too; this row makes the state visible before a terminal opens.
+                    Some((file, _)) if !dir.join(&file).is_file() => Check {
+                        pass: false,
+                        label: format!(
+                            "Terminal URLs open in Veld, but {shown}/{file} is missing, so open/xdg-open are not caught. Restart the daemon to rewrite it: {}",
+                            restart_daemon_hint()
+                        ),
+                    },
+                    Some((_, mechanism)) => Check {
+                        pass: true,
+                        label: format!(
+                            "Terminal URLs open in Veld ({shown} → {}, open/xdg-open caught in {} via {mechanism})",
+                            cli.display(),
+                            Self::shell_name(&shell)
+                        ),
+                    },
+                    // No mechanism for this shell — fish, nushell, or a bash too old
+                    // to honour `$ENV` (macOS ships 3.2 as /bin/bash). A note, not a
+                    // failure: `$BROWSER` still works, and the one line that closes
+                    // the gap is the point of saying anything at all.
+                    None => Check {
+                        pass: true,
+                        label: format!(
+                            "Terminal URLs open in Veld ({shown} → {}), but open/xdg-open are not caught in {}. Add to your shell's startup file: PATH=\"$VELD_SHIM_DIR:$PATH\"",
+                            cli.display(),
+                            Self::shell_name(&shell)
+                        ),
+                    },
                 }
             }
             Some(cli) => Check {
