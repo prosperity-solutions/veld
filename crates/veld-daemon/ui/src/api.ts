@@ -1175,9 +1175,16 @@ export const api = {
    * GUI session). Resolves to the chosen absolute path, or null on cancel.
    * Throws on: no picker backend (501), backend failure (500), another
    * picker already open (409), or the 10-minute timeout (408).
+   *
+   * `purpose` selects the dialog's prompt from a small server-known set
+   * (`pick_directory_prompt` in `desktop.rs`) — never free text, so a caller
+   * cannot inject anything into the native dialog's title.
    */
-  pickDirectory: async (): Promise<string | null> => {
-    const res = await fetch("/api/pick-directory", {
+  pickDirectory: async (
+    purpose?: "worktree-storage",
+  ): Promise<string | null> => {
+    const qs = purpose ? `?purpose=${encodeURIComponent(purpose)}` : "";
+    const res = await fetch(`/api/pick-directory${qs}`, {
       method: "POST",
       headers: { "X-Veld-Request": "1" },
     });
@@ -1219,6 +1226,17 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ path }),
     }),
+  /**
+   * Open the effective worktree-storage directory in the OS file manager.
+   * Takes no path — the daemon reads its own `worktree.storageMode`/
+   * `worktree.storageDir` settings, the same value `create_worktree` acts on.
+   * Throws on: the mode is `"sibling"` (409, no single directory to open
+   * there — only each repo's own sibling folder), the configured directory
+   * doesn't exist or isn't a directory (404), or the file manager itself
+   * failed to launch (500).
+   */
+  openWorktreeStorageDir: () =>
+    request<void>("/api/open-worktree-storage-dir", { method: "POST" }),
   /**
    * Mint a single-use ticket for an in-app terminal in a worktree.
    *

@@ -15,6 +15,8 @@ import {
   terminalShell,
   hideDisabledActions,
   gitCreateFrom,
+  worktreeStorageMode,
+  worktreeStorageDir,
   stalenessHue,
 } from "./settings";
 
@@ -227,6 +229,51 @@ describe("gitCreateFrom", () => {
       expect(
         gitCreateFrom({ "git.createFrom": bad as unknown as string }),
       ).toBe("origin");
+    }
+  });
+});
+
+describe("worktreeStorageMode", () => {
+  it("defaults to sibling (today's only behaviour)", () => {
+    expect(worktreeStorageMode({})).toBe("sibling");
+  });
+
+  it("reads the stored value", () => {
+    expect(worktreeStorageMode({ "worktree.storageMode": "custom" })).toBe(
+      "custom",
+    );
+    expect(worktreeStorageMode({ "worktree.storageMode": "sibling" })).toBe(
+      "sibling",
+    );
+  });
+
+  it("degrades to sibling for anything that is not a real value", () => {
+    for (const bad of ["Custom", "", 0, null]) {
+      expect(
+        worktreeStorageMode({
+          "worktree.storageMode": bad as unknown as string,
+        }),
+      ).toBe("sibling");
+    }
+  });
+});
+
+describe("worktreeStorageDir", () => {
+  it("defaults to empty (no folder chosen yet)", () => {
+    expect(worktreeStorageDir({})).toBe("");
+  });
+
+  it("reads and trims the stored value", () => {
+    expect(
+      worktreeStorageDir({ "worktree.storageDir": " /Users/me/worktrees " }),
+    ).toBe("/Users/me/worktrees");
+  });
+
+  it("degrades to empty — not the fallback of a non-string field — for anything that is not a string", () => {
+    for (const bad of [0, null, ["/tmp"]]) {
+      expect(
+        worktreeStorageDir({ "worktree.storageDir": bad as unknown as string }),
+      ).toBe("");
     }
   });
 });

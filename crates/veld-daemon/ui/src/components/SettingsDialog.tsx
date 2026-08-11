@@ -37,6 +37,7 @@
 
 import { type ReactNode, useEffect, useMemo, useState } from "react";
 import {
+  Button,
   Checkbox,
   Group,
   NativeSelect,
@@ -83,9 +84,12 @@ import {
   markerStyle,
   quickSwitchPrefs,
   terminalPrefs,
+  worktreeStorageDir,
+  worktreeStorageMode,
   type GitCreateFrom,
   type LogTimeZone,
   type MarkerStyle,
+  type WorktreeStorageMode,
 } from "../shared/settings";
 
 /** A labelled row with its explanation under it, used for every control. */
@@ -136,6 +140,34 @@ function SectionTitle(props: { children: ReactNode }) {
       {props.children}
     </Text>
   );
+}
+
+/** Mirrors `MAX_WORKTREE_STORAGE_DIR_LEN` in veld-core's settings.rs. */
+const MAX_WORKTREE_STORAGE_DIR_LEN = 1024;
+
+/**
+ * Every rule the daemon's `WorktreeStorageDir` validator enforces, mirrored
+ * so a value this box would reject never round-trips through a save attempt
+ * first — the daemon's 400 has no body a user would ever see. `null` means
+ * empty is a real value here too (the off switch, not an error).
+ */
+function worktreeStorageDirError(path: string): string | null {
+  const v = path.trim();
+  if (v === "") return null;
+  // Bytes, not JS's UTF-16 code units: the Rust validator this mirrors
+  // (`WorktreeStorageDir` in settings.rs) measures `s.len()`, which is a
+  // byte count — a path with any multi-byte character would otherwise pass
+  // this check under the limit and still get 400'd server-side.
+  if (new TextEncoder().encode(v).length > MAX_WORKTREE_STORAGE_DIR_LEN) {
+    return `Must be ${MAX_WORKTREE_STORAGE_DIR_LEN} bytes or fewer`;
+  }
+  // Also rejects the Unicode C1 controls (U+0080–U+009F) `char::is_control`
+  // catches on the Rust side, not only the ASCII C0 range + DEL.
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: rejecting them is the point.
+  if (/[\x00-\x1f\x7f-\x9f]/.test(v)) return "Must not contain control characters";
+  if (!v.startsWith("/")) return "Must be an absolute path";
+  if (v.split("/").includes("..")) return 'Must not contain ".."';
+  return null;
 }
 
 type GroupId = "general" | "git" | "terminal" | "links" | "browser";
@@ -306,11 +338,32 @@ export function SettingsDialog(props: {
   // shared `str()` helper.
   const searchValue = searchUrl(settings ?? {});
   const [search, setSearch] = useState(searchValue);
+  const storageMode = worktreeStorageMode(settings ?? {});
+  // Committed on blur like the other text fields (`search`, `exempt` above).
+  const storageDirValue = worktreeStorageDir(settings ?? {});
+  const [storageDir, setStorageDir] = useState(storageDirValue);
+  const [pickingStorageDir, setPickingStorageDir] = useState(false);
+  const [storageDirPickError, setStorageDirPickError] = useState<string | null>(
+    null,
+  );
+  const [openingStorageDir, setOpeningStorageDir] = useState(false);
+  const [openStorageDirError, setOpenStorageDirError] = useState<
+    string | null
+  >(null);
   // Shown under the field as it is typed, and the same predicate the blur handler
   // refuses on — so the reason the value did not save is on screen rather than inferred
   // from nothing having happened. Empty is not broken; it is the off switch.
   const searchBroken =
     search.trim() !== "" && searchTarget(search.trim(), "veld") === null;
+  // Mirrors the daemon's own validator (`worktree.storageDir` in
+  // veld-core's settings.rs) — see the blur handler below for why a
+  // client-side mirror exists at all. All three of the daemon's rules, not
+  // only the absolute-path one: a mirror that only caught the common case
+  // would still let a pasted over-long path or one carrying a tab pass here
+  // and 400 with no explanation, which is the exact failure this exists to
+  // prevent.
+  const storageDirError = worktreeStorageDirError(storageDir);
+  const storageDirBroken = storageDirError !== null;
   // Availability is probed against the DOM, so compute it once per open rather
   // than on every render — the list cannot change while the dialog is up.
   const fonts = useMemo(() => availableFonts(), []);
@@ -339,8 +392,20 @@ export function SettingsDialog(props: {
     setShellPath(shellValue);
     setExempt(exemptValue.join("\n"));
     setSearch(searchValue);
+    setStorageDir(storageDirValue);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [settings]);
+
+  // Both errors belong to controls that only render in `custom` mode (the
+  // field's Browse… button, the Open Folder button below it); leaving them
+  // set after switching back to `sibling` would strand red text with no
+  // control in view that it explains.
+  useEffect(() => {
+    if (storageMode !== "custom") {
+      setStorageDirPickError(null);
+      setOpenStorageDirError(null);
+    }
+  }, [storageMode]);
 
   const set = (patch: SettingsDoc) => {
     // Fire and forget: the hook holds the error, and awaiting here would freeze
@@ -604,6 +669,136 @@ export function SettingsDialog(props: {
                   }
                 />
               </Row>
+              <Row
+                label="Worktree storage location"
+                help="Next to repository (default): a new checkout lands in a _worktrees folder beside its repo — today's behaviour. Custom location: every new checkout, for every repository, lands under one folder you choose. Either way each repo gets its own subfolder there, so two repos can never collide on the same checkout path. Only affects worktrees created from now on; nothing already on disk moves."
+              >
+                <NativeSelect
+                  size="xs"
+                  w={220}
+                  value={storageMode}
+                  disabled={locked}
+                  data={[
+                    { value: "sibling", label: "Next to repository (default)" },
+                    { value: "custom", label: "Custom location" },
+                  ]}
+                  onChange={(e) =>
+                    set({
+                      "worktree.storageMode": e.currentTarget
+                        .value as WorktreeStorageMode,
+                    })
+                  }
+                />
+              </Row>
+              {storageMode === "custom" && (
+                <Row label="Custom worktree folder">
+                  <Stack gap={4} style={{ alignItems: "flex-end" }}>
+                    <Group gap="xs" wrap="nowrap">
+                      <TextInput
+                        size="xs"
+                        w={220}
+                        value={storageDir}
+                        disabled={locked}
+                        placeholder="/Users/you/veld-worktrees"
+                        styles={{
+                          input: {
+                            fontFamily: "var(--mantine-font-family-monospace)",
+                          },
+                        }}
+                        error={storageDirError ?? undefined}
+                        onChange={(e) => setStorageDir(e.currentTarget.value)}
+                        onBlur={() => {
+                          const v = storageDir.trim();
+                          if (v === storageDirValue) return;
+                          // Reuses `storageDirBroken` (computed above from this
+                          // same state) rather than a second inline copy of the
+                          // predicate — see the note on `searchUrl` above for
+                          // why the check exists here at all: the daemon's 400
+                          // has no body a user would ever see, so a rejected
+                          // value would otherwise just snap back with no
+                          // explanation.
+                          if (storageDirBroken) return;
+                          set({ "worktree.storageDir": v });
+                        }}
+                      />
+                      <Button
+                        size="xs"
+                        variant="default"
+                        loading={pickingStorageDir}
+                        disabled={locked}
+                        onClick={async () => {
+                          setPickingStorageDir(true);
+                          setStorageDirPickError(null);
+                          try {
+                            const picked =
+                              await api.pickDirectory("worktree-storage");
+                            if (picked) {
+                              setStorageDir(picked);
+                              set({ "worktree.storageDir": picked });
+                            }
+                          } catch (e) {
+                            setStorageDirPickError(
+                              e instanceof Error ? e.message : String(e),
+                            );
+                          } finally {
+                            setPickingStorageDir(false);
+                          }
+                        }}
+                      >
+                        Browse…
+                      </Button>
+                    </Group>
+                    {storageDirPickError && (
+                      <Text size="xs" c="red">
+                        {storageDirPickError}
+                      </Text>
+                    )}
+                    {!storageDirValue && !storageDirBroken && (
+                      <Text size="xs" c="dimmed">
+                        No folder chosen yet — new checkouts still land next to
+                        each repository until one is.
+                      </Text>
+                    )}
+                  </Stack>
+                </Row>
+              )}
+              <Row
+                label="Open worktree storage folder"
+                help={
+                  storageMode !== "custom"
+                    ? "Only available with Custom location: the default has no single folder — each repo's worktrees live beside it, so open one from its own context menu instead."
+                    : storageDirValue
+                      ? "Opens the folder above in Finder (or your file manager)."
+                      : "Choose a folder above first."
+                }
+              >
+                <Button
+                  size="xs"
+                  variant="default"
+                  loading={openingStorageDir}
+                  disabled={locked || storageMode !== "custom" || !storageDirValue}
+                  onClick={async () => {
+                    setOpeningStorageDir(true);
+                    setOpenStorageDirError(null);
+                    try {
+                      await api.openWorktreeStorageDir();
+                    } catch (e) {
+                      setOpenStorageDirError(
+                        e instanceof Error ? e.message : String(e),
+                      );
+                    } finally {
+                      setOpeningStorageDir(false);
+                    }
+                  }}
+                >
+                  Open Folder
+                </Button>
+              </Row>
+              {openStorageDirError && (
+                <Text size="xs" c="red">
+                  {openStorageDirError}
+                </Text>
+              )}
             </Stack>
           </Tabs.Panel>
 
