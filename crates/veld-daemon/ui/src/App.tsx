@@ -147,6 +147,7 @@ import {
   loadLayouts,
   newTabId,
   nextFreeProfile,
+  paneTabBaseLabel,
   paneTabLabel,
   parseSessionSets,
   parseTransferTabs,
@@ -2820,7 +2821,10 @@ function AppInner(props: {
           const tab = allTabs(l).find((t) => t.id === sessionId);
           if (!tab) continue;
           wtId = Number(key);
-          label = paneTabLabel(l, tab);
+          // The pane's own name, never the title the shell set for itself: a
+          // preexec hook writes the running command there, and a banner reading
+          // "· sleep 5 && printf '\033]9;…'" names the noise, not the pane.
+          label = paneTabBaseLabel(l, tab);
           break;
         }
         // A session this window does not hold is not ours to answer. The host

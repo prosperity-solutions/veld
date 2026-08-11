@@ -157,7 +157,13 @@ export function showSystemNotification(opts: SystemNotificationOptions): void {
   if (typeof Notification === "undefined") return;
   const show = () => {
     try {
-      const n = new Notification(opts.title, { body: opts.body });
+      // Silent for the same reason the desktop shell's banner is: the terminal
+      // rings its own bell for this, at the user's `terminal.bellVolume`, and
+      // the OS's default notification chime would be a second sound for one
+      // event — one that a bell volume of 0 could not turn off. A browser that
+      // ignores the flag falls back to its own sound, which is what it did
+      // before.
+      const n = new Notification(opts.title, { body: opts.body, silent: true });
       if (opts.onClick) {
         n.onclick = () => {
           // Focus the owning window/tab, then hand to the caller.

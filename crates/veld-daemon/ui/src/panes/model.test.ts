@@ -44,6 +44,7 @@ import {
   normalizeSessionSet,
   layoutSlotKey,
   parseLayouts,
+  paneTabBaseLabel,
   paneTabLabel,
   parseSessionSets,
   parseTransferTabs,
@@ -1128,6 +1129,40 @@ describe("paneTabLabel", () => {
     // Without a termTitle, both keep what they were born with.
     expect(paneTabLabel(l, cfg)).toBe("Claude");
     expect(paneTabLabel(l, plain)).toBe("Terminal");
+  });
+});
+
+describe("paneTabBaseLabel", () => {
+  it("ignores a shell's OSC title, so a notification never names the command", () => {
+    let l = twoDock();
+    const plain = term();
+    l = addTab(l, 0, plain);
+    // The exact shape that made a banner read "· sleep 5 && printf '…'": a
+    // preexec hook renames the tab to the running command line.
+    const running = { ...plain, termTitle: "sleep 5 && printf '\\033]9;done\\007'" };
+    expect(paneTabLabel(l, running)).toBe("sleep 5 && printf '\\033]9;done\\007'");
+    expect(paneTabBaseLabel(l, running)).toBe("Terminal");
+
+    // A config pane falls back to its configured label, not its spec id.
+    const cfg = configPaneTab({ id: "claude", label: "Claude" });
+    expect(paneTabBaseLabel(l, { ...cfg, termTitle: "fix login flow" })).toBe("Claude");
+  });
+
+  it("numbers plain terminals the way the strip does", () => {
+    let l = twoDock();
+    const first = term();
+    const second = term();
+    l = addTab(addTab(l, 0, first), 0, second);
+    expect(paneTabBaseLabel(l, second)).toBe("Terminal 2");
+    expect(paneTabBaseLabel(l, { ...second, termTitle: "vim x.rs" })).toBe("Terminal 2");
+  });
+
+  it("is `paneTabLabel` for every non-terminal kind", () => {
+    const l = twoDock();
+    const browser = browserTab({ url: "http://x.test/", title: "Veld" });
+    for (const tab of [newPaneTab(), diagTab("logs"), diagTab("nodes"), browser]) {
+      expect(paneTabBaseLabel(l, tab)).toBe(paneTabLabel(l, tab));
+    }
   });
 });
 
