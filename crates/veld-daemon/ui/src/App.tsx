@@ -2863,8 +2863,11 @@ function AppInner(props: {
    *  - **The event's own row must be ticked** (`activity.notify*`). Four rows rather
    *    than one switch, because "a command finished" and "an agent is waiting for you"
    *    are not the same event; `notifyKey` is the single place that maps one to the other.
-   *  - **Veld must not be the focused window.** Nothing interrupts you about a pane you
-   *    could be looking at. This is the rule the OSC 9 path already used, kept.
+   *  - **One channel, chosen by focus, never both.** A focused window gets the in-app
+   *    toast; an unfocused one gets the OS banner, which is the only thing that reaches
+   *    across windows and applications. An earlier version returned early when the window
+   *    was focused, which left the toast branch below unreachable — so a focused window got
+   *    nothing at all for an event in a pane it was not watching.
    *  - **The store fires once per event.** `onEvent`, not `subscribe`: a render may run
    *    any number of times for one event, and a banner may not. The store also never
    *    fires for the pane the user is watching, for a read, or for a retraction.

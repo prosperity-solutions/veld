@@ -1053,6 +1053,10 @@ export function reconnectTerminal(id: string): void {
 export function restartTerminal(id: string): void {
   const s = sessions.get(id);
   if (!s) return;
+  // A restart reuses the pane id, so the inbox's per-session state is about the *previous*
+  // process and none of it carries over — in particular the "this pane's exit is already
+  // filed" marker, which otherwise silenced every later exit in the pane.
+  inbox.restarted(id);
   // A config-declared pane has no login shell to fall back to, and "restart"
   // for one means the same thing "start fresh" does: run its launch command
   // again under a new identity.
@@ -1134,6 +1138,9 @@ export function mountTerminal(
 export function startTerminal(id: string, mode: PaneLaunchMode): void {
   const s = sessions.get(id);
   if (!s) return;
+  // Same reason as `restartTerminal`: the pane id is reused, so everything the inbox knows
+  // about this session belongs to the process that just ended.
+  inbox.restarted(id);
   cancelAutoReconnect(s);
   s.generation += 1;
   s.ws?.close();

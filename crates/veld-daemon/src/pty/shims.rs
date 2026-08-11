@@ -990,8 +990,11 @@ fn script(tool: Tool, cli: &Path, real: Option<&Path>) -> String {
 ///    **counter** (`VELD_AGENT_SHIM_DEPTH`), the shape `veld open-url` already uses for the
 ///    same reason: a counter rather than a flag, so a legitimate nested launch (an agent
 ///    invoking the agent through its own shell tool) still works while a loop stops at two.
-/// 5. **Fail open everywhere else.** No `VELD_AGENT_HOOKS`, no settings file, a `veld`
-///    that does not understand the subcommand, anything at all — and the invocation
+/// 5. **Fail open everywhere else** — with the depth counter above as the second and last
+///    exception, since it counts *every* invocation including the pass-throughs rule 1
+///    leaves alone. A genuine three-deep chain of nested launches is therefore refused,
+///    and the message says how to override it. No `VELD_AGENT_HOOKS`, no settings file, a
+///    `veld` that does not understand the subcommand, anything at all — and the invocation
 ///    `exec`s the real binary with the original argv, unexamined. A wrapper around
 ///    somebody's agent has no other acceptable failure mode.
 /// 6. **`exec`, always**, so fds, stdin, signals and the exit status all belong to the
@@ -1045,7 +1048,7 @@ case "$veld_depth" in
   '' | *[!0-9]*) veld_depth=0 ;;
 esac
 if [ "$veld_depth" -gt 1 ]; then
-  echo "veld: refusing to run {name} $veld_depth levels deep — two Veld shim directories are on PATH, or a copy of this wrapper is. Restart the terminal." >&2
+  echo "veld: refusing to run {name} $veld_depth levels deep. If this was a genuine nested launch, unset VELD_AGENT_SHIM_DEPTH; otherwise two Veld shim directories are on PATH (or a copy of this wrapper is) and restarting the terminal will fix it." >&2
   exit 127
 fi
 VELD_AGENT_SHIM_DEPTH=$((veld_depth + 1))

@@ -1455,10 +1455,23 @@ fn login_shell_script(shell: &str, shell_flags: &[String], script: String) -> Ve
     // *with all three terminal-integration settings off*, because the runtime guard is a
     // `$VELD_SHIM_DIR` test and the text is there regardless.
     //
-    // Gating on zsh is also all the prefix was ever for: bash's own handoff already
-    // prepends the directory with a plain assignment that a `-c` shell runs, measured
-    // both ways — see the table on the constant.
-    let script = if veld_core::shell::kind(shell) == veld_core::shell::Kind::Zsh {
+    // **zsh *and* bash**, not zsh alone. bash's own `$ENV` handoff does prepend the
+    // directory with a plain assignment a `-c` shell runs — but only when that handoff is
+    // active, and it is gated on a per-binary probe that is **false on bash 3.2**, which is
+    // what macOS ships as `/bin/bash`. So a zsh-only gate silently removed the prefix for
+    // exactly the bash users who have no other route to it, and their agent panes went back
+    // to resolving the real binary with no hooks. On a handoff-bash the line is an
+    // idempotent no-op (measured: one `PATH` entry, not two), so including bash costs
+    // nothing and closes that hole.
+    //
+    // `Kind::Other` is left out because it is where fish and nu live. It is also where
+    // ksh and dash live, and they would parse this fine — so they lose the prefix and an
+    // agent pane under them reports nothing. That is silence, which this feature treats as
+    // an acceptable outcome; a parse error that kills every pane is not.
+    let script = if matches!(
+        veld_core::shell::kind(shell),
+        veld_core::shell::Kind::Zsh | veld_core::shell::Kind::Bash
+    ) {
         format!("{SHIM_PATH_PREFIX}{script}")
     } else {
         script
@@ -3758,6 +3771,47 @@ mod tests {
                 "1",
                 "{name}: the shim directory must appear on PATH exactly once, saw {seen:?} / {:?}",
                 String::from_utf8_lossy(&counted.stderr)
+            );
+        }
+    }
+
+    /// The pane-command prefix reaches every shell that can parse it, and no others.
+    ///
+    /// A pure-text assertion, because the failure modes are opposite and both silent. Left
+    /// ungated it is spliced into a **fish** pane's `-c` script, where `${x-}`/`then`/`case`
+    /// are parse errors — every `ide.panes` entry in the project dies at launch having run
+    /// nothing, even with all three integration settings off. Gated too narrowly (zsh only,
+    /// which was the first fix) it disappears for **bash 3.2**, macOS's `/bin/bash`, whose
+    /// `$ENV` handoff is disabled by a per-binary probe and which therefore has no other
+    /// route to the shim directory — so its agent panes resolve the real binary and report
+    /// nothing.
+    ///
+    /// Neither shows up in `a_pane_command_finds_the_agent_shim_in_both_shells`: its bash arm
+    /// passes `--posix`, i.e. runs *with* the handoff, so it passes either way.
+    #[test]
+    fn the_pane_path_prefix_reaches_zsh_and_bash_and_no_other_shell() {
+        let probe = ["echo".to_owned(), "hi".to_owned()];
+        for shell in ["/bin/zsh", "/opt/homebrew/bin/bash", "/bin/bash"] {
+            let argv = login_shell_command(shell, &[], &probe);
+            assert!(
+                argv.last().unwrap().starts_with(SHIM_PATH_PREFIX),
+                "{shell} must get the prefix — it is the only route to the shim directory                  for a bash whose $ENV handoff the probe disabled"
+            );
+        }
+        // fish and nu cannot parse it. `Kind::Other` also covers ksh and dash, which could
+        // — they lose the prefix and an agent pane under them reports nothing, which is
+        // silence rather than a project whose every pane fails to launch.
+        for shell in [
+            "/opt/homebrew/bin/fish",
+            "/opt/homebrew/bin/nu",
+            "/usr/bin/xonsh",
+            "/bin/dash",
+        ] {
+            let argv = login_shell_command(shell, &[], &probe);
+            assert_eq!(
+                argv.last().unwrap(),
+                "'echo' 'hi'",
+                "{shell} must get the command and nothing else"
             );
         }
     }

@@ -856,6 +856,82 @@ describe("defects found in review", () => {
   });
 
   /**
+   * **The `done` path, which the first version of the fix above missed.**
+   *
+   * That fix widened the "a hook owns this pane" guard, and a separate fix released the
+   * claim when the agent reported `done` — which disarmed the guard for the `D` mark the
+   * shell emits moments later, when it redraws its prompt after `claude` exits. So "Agent
+   * session ended" was immediately overwritten by "Command finished", or by "Command failed
+   * (exit 130)" plus a second banner if the user had Ctrl-C'd out.
+   *
+   * The test that was supposed to cover this used `idle`, which never released the claim —
+   * so it passed while the `done` path stayed broken. Hence this one, and hence the claim
+   * now being released on the *read* instead.
+   */
+  it("keeps an ended agent's own account when the shell's prompt mark follows", () => {
+    const box = createInbox();
+    box.report("cc", WT, agent("ready"), NOW);
+    box.report("cc", WT, { type: "osc133", mark: "C", exit: null }, NOW + 1);
+    box.report("cc", WT, agent("done"), NOW + 2);
+    expect(box.unseen("cc")?.detail).toBe("Agent session ended");
+    // A departed agent is not "working", so the row must not spin while the mark is pending.
+    expect(box.isRunning("cc")).toBe(false);
+
+    let events = 0;
+    box.onEvent(() => {
+      events += 1;
+    });
+    // The shell's mark for the `claude` command that just ended — Ctrl-C's variant, which
+    // is the one that claimed a failure that never happened.
+    box.report("cc", WT, { type: "osc133", mark: "D", exit: 130 }, NOW + 3);
+    expect(box.unseen("cc")?.detail).toBe("Agent session ended");
+    expect(events, "and no second banner").toBe(0);
+
+    // Once read, the pane is the shell's again — which is the other half, and the reason
+    // the release is deferred rather than dropped.
+    box.read("cc");
+    box.report("cc", WT, { type: "notify", message: "back to normal" }, NOW + 4);
+    expect(box.unseen("cc")?.detail).toBe("back to normal");
+  });
+
+  /** Mark-all-read releases a departed agent's claim too, not only a focus read. */
+  it("releases the claim on mark-all-read as well", () => {
+    const box = createInbox();
+    box.report("cc", WT, agent("done"), NOW);
+    box.markWorktreeRead(WT);
+    box.report("cc", WT, { type: "notify", message: "heard" }, NOW + 1);
+    expect(box.unseen("cc")?.detail).toBe("heard");
+  });
+
+  /**
+   * A restart reuses the pane id, so the exit marker must not survive it.
+   *
+   * `restartTerminal`/`startTerminal` delete the daemon session and connect a new shell
+   * under the *same* id. With the marker left in place, every exit after the first was
+   * dropped silently — no badge, no notification, not even a re-render — which is the
+   * primary event path for a `oneshot` pane, the pane kind the exit producer exists for.
+   */
+  it("reports the exit of a pane that was restarted under the same id", () => {
+    const box = createInbox();
+    box.report("p", WT, { type: "exit", code: 1 }, NOW);
+    expect(box.unseen("p")?.kind).toBe("failed");
+    box.read("p");
+
+    // Restart: same id, new process.
+    box.restarted("p");
+    box.report("p", WT, { type: "exit", code: 1 }, NOW + 1);
+    expect(
+      box.unseen("p")?.kind,
+      "the second run's failure is news, not a replay of the first",
+    ).toBe("failed");
+
+    // …and the replay-suppression still works within that run.
+    box.read("p");
+    box.report("p", WT, { type: "exit", code: 1 }, NOW + 2);
+    expect(box.unseen("p")).toBeNull();
+  });
+
+  /**
    * An agent state this build does not understand is a no-op, not a claim.
    *
    * It used to pass the authority check and set `agentSource` before falling out of the

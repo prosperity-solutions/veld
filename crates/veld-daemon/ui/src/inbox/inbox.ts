@@ -172,6 +172,13 @@ interface SessionState {
   /** The authority of the last agent state accepted for this session. */
   agentSource: Source | null;
   /**
+   * The agent said it is gone, but its event has not been read yet.
+   *
+   * The authority claim is released on the read rather than on the report — see the `done`
+   * arm — so this is what remembers that a release is owed.
+   */
+  agentGone: boolean;
+  /**
    * Whether this pane's process exit has already been filed.
    *
    * The daemon replays the `exit` frame to **every** attach, so without this a read event
@@ -270,6 +277,7 @@ class WorktreeInbox {
       ranCommand: false,
       agentWorking: false,
       agentSource: null,
+      agentGone: false,
       reportedExit: false,
       unseen: null,
     });
@@ -379,6 +387,7 @@ class WorktreeInbox {
         // arm below refuses to speak where an agent has. Reusing a pane after an agent
         // session is the ordinary case, not an exotic one.
         session.agentSource = null;
+        session.agentGone = false;
         // The daemon **replays the exit frame to every new attach** — pinned by
         // `reattaching_after_exit_reports_the_exit`, which asserts a second attach reads
         // the same code again. So this arm sees an already-known death on every page
@@ -461,11 +470,17 @@ class WorktreeInbox {
               detail: "Waiting for you",
             };
           case "done":
-            // The agent is gone, so it stops speaking for this pane: without releasing the
-            // claim, reusing the pane for a plain command showed no activity ever again,
-            // and — worse, because it is not gated by a setting — every later OSC 9 in it
-            // was dropped by the `notify` arm's "an agent has spoken here" check.
-            session.agentSource = null;
+            // The agent is gone — but the claim is **not** dropped here, and that ordering
+            // is the whole point. Releasing it on `done` disarmed the guard above for the
+            // `D` mark that arrives moments later when the shell redraws its prompt: the
+            // "Agent session ended" event was immediately overwritten by "Command
+            // finished", or by "Command failed (exit 130)" plus a second banner if the user
+            // had Ctrl-C'd out. That is the exact defect the guard was widened to fix, and
+            // the first version of this fix reintroduced it one line up.
+            //
+            // So the claim outlives the agent until its event is **read** (see `release`),
+            // which is also when the pane genuinely stops being the agent's.
+            session.agentGone = true;
             session.agentWorking = false;
             return {
               kind: "finished",
@@ -493,13 +508,51 @@ class WorktreeInbox {
     }
   }
 
+  /**
+   * Hand a pane back to the shell once a departed agent's event has been read.
+   *
+   * The claim is released here and not when `done` arrives, because between those two
+   * moments the shell emits the `D` mark for the agent command that just ended — and
+   * without the claim, that mark overwrites the agent's own account of what happened.
+   */
+  private release(session: SessionState): void {
+    if (!session.agentGone) return;
+    session.agentGone = false;
+    session.agentSource = null;
+  }
+
   /** Read a session's unseen event. Whether there was one. */
   read(sessionId: string): boolean {
     const session = this.sessions.get(sessionId);
     if (!session?.unseen) return false;
     session.unseen = null;
+    this.release(session);
     this.notify();
     return true;
+  }
+
+  /**
+   * A pane is starting a fresh process under the same session id.
+   *
+   * `restartTerminal` and `startTerminal` deliberately reuse the pane id — they delete the
+   * daemon session and connect a new shell under the same name — so without this the
+   * `reportedExit` marker survived the restart and **every exit after the first was
+   * silently dropped**: no badge, no notification, not even a re-render. That is the
+   * primary event path for a `oneshot` pane, which is the pane kind the exit producer
+   * exists for.
+   *
+   * Explicit rather than inferred from a `ready` frame: a reattach to an already-dead
+   * session also reports ready, and clearing the marker there would re-file the very exit
+   * the marker exists to suppress.
+   */
+  restarted(sessionId: string): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+    session.reportedExit = false;
+    session.ranCommand = false;
+    session.agentWorking = false;
+    session.agentSource = null;
+    session.agentGone = false;
   }
 
   /**
@@ -520,6 +573,7 @@ class WorktreeInbox {
     for (const session of this.sessions.values()) {
       if (session.worktreeId === worktreeId && session.unseen) {
         session.unseen = null;
+        this.release(session);
         changed = true;
       }
     }
