@@ -232,14 +232,25 @@ export function SettingsDialog(props: {
   const [fontFamily, setFontFamily] = useState(term.fontFamily);
   const shellValue = terminalShell(settings ?? {});
   const [shellPath, setShellPath] = useState(shellValue);
-  // Sticky, exactly like `customFont`: choosing "Custom path…" has to keep the
-  // field open while it is still empty and therefore still matches nothing.
+  // Sticky *only* for the case the document cannot express: "Custom path…" was
+  // just chosen and the field is still empty, so the stored value is still one of
+  // the listed shells. Everything else is derived below — held as state alone, a
+  // shell changed in another window (or by a save from this one) left the select
+  // reading "Custom path…" for a value it no longer represented.
   const [customShell, setCustomShell] = useState(false);
   // What this machine has. Fetched once per open rather than read from the
   // settings document, because it is not a setting — see `api.shells`. A failure
   // leaves it null, which still renders a working picker: the stored value is
   // always an option, so the only thing lost is the list of alternatives.
   const [shells, setShells] = useState<ShellList | null>(null);
+  // Whether the stored shell is one the picker lists. `shells === null` means the
+  // list has not arrived, and "not on a list I do not have" is not a custom path —
+  // so the field stays shut rather than flashing open on every dialog open.
+  const shellIsListed =
+    shellValue === "auto" ||
+    shells === null ||
+    shells.shells.some((s) => s.path === shellValue);
+  const showCustomShell = customShell || !shellIsListed;
   useEffect(() => {
     let live = true;
     api
@@ -317,6 +328,9 @@ export function SettingsDialog(props: {
     setRetention(retentionValue);
     setHistory(historyValue);
     setShellPath(shellValue);
+    // The document is the authority again; the derived half below reopens the
+    // field on its own if the stored value really is a custom path.
+    setCustomShell(false);
     setExempt(exemptValue.join("\n"));
     setSearch(searchValue);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -721,7 +735,7 @@ export function SettingsDialog(props: {
                   size="xs"
                   w={220}
                   value={
-                    customShell
+                    customShell && shellIsListed
                       ? CUSTOM_SHELL
                       : // The stored value is always one of the options below, so a
                         // shell that is not on this machine's list — uninstalled, or
@@ -802,7 +816,7 @@ export function SettingsDialog(props: {
                   )}
                 </Stack>
               )}
-              {customShell && (
+              {showCustomShell && (
                 <Row
                   label="Custom shell path"
                   help="An absolute path — a bare name would be looked up on the daemon's own PATH, which is not your terminal's."

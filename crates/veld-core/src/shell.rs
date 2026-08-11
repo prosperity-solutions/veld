@@ -309,7 +309,20 @@ pub async fn supports_posix_env_handoff(shell: &str) -> bool {
     if let Some(known) = cache.lock().ok().and_then(|c| c.get(shell).copied()) {
         return known;
     }
-    let answer = probe_posix_env_handoff(shell).await;
+    let Some(answer) = probe_posix_env_handoff(shell).await else {
+        // The probe did not run — a spawn failure, or the timeout. That is not
+        // evidence of anything, and memoizing it as `false` would switch the
+        // handoff off for the daemon's whole lifetime on one transient hiccup,
+        // while `veld doctor` (a separate process, probing afresh) reported the
+        // opposite with no way to tell which was right. Same rule
+        // `user_path::publish_value` states: a resolution that learned nothing
+        // never displaces one that did.
+        debug!(
+            shell,
+            "the bash posix/ENV probe could not run — not caching"
+        );
+        return false;
+    };
     debug!(shell, answer, "probed the bash posix/ENV startup handoff");
     if let Ok(mut c) = cache.lock() {
         c.insert(shell.to_owned(), answer);
@@ -325,17 +338,20 @@ pub async fn supports_posix_env_handoff(shell: &str) -> bool {
 /// no terminal. Nothing of the user's is read on this path: in posix mode `$ENV`
 /// is the *only* startup file, and on a shell that ignores `$ENV` the `-c` form
 /// reads none either.
-async fn probe_posix_env_handoff(shell: &str) -> bool {
+/// `None` means the question could not be asked — distinct from `Some(false)`,
+/// "this shell does not honour it", which is the only answer worth caching.
+async fn probe_posix_env_handoff(shell: &str) -> Option<bool> {
     if kind(shell) != Kind::Bash || !is_executable(Path::new(shell)) {
-        return false;
+        // A definitive no: not a bash, so there is nothing to honour.
+        return Some(false);
     }
     const MARKER: &str = "VELD_POSIX_ENV_OK";
     let Ok(dir) = tempfile::TempDir::new() else {
-        return false;
+        return None;
     };
     let probe = dir.path().join("probe.sh");
     if std::fs::write(&probe, format!("printf {MARKER}\n")).is_err() {
-        return false;
+        return None;
     }
     let mut cmd = tokio::process::Command::new(shell);
     // **The long option must come first.** `bash -l -i --posix` is a usage error —
@@ -362,8 +378,10 @@ async fn probe_posix_env_handoff(shell: &str) -> bool {
         });
     }
     match tokio::time::timeout(PROBE_TIMEOUT, cmd.output()).await {
-        Ok(Ok(out)) => String::from_utf8_lossy(&out.stdout).contains(MARKER),
-        _ => false,
+        Ok(Ok(out)) => Some(String::from_utf8_lossy(&out.stdout).contains(MARKER)),
+        // A timeout or a spawn error: the shell never answered, so there is no
+        // answer to remember.
+        _ => None,
     }
 }
 

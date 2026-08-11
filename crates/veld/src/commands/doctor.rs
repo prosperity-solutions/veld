@@ -721,11 +721,6 @@ impl Diagnostics {
             .map(std::path::PathBuf::from);
         match cli {
             Some(cli) if cli.is_file() => {
-                // The `ZDOTDIR` handoff is the half that catches `open`/`xdg-open`, and
-                // it is worse than useless if its file has gone: `ZDOTDIR` redirects
-                // every zsh startup file, so a missing `.zshenv` there means none of
-                // the user's own zsh config runs. The daemon checks this per session
-                // too; this row makes the state visible before a terminal is opened.
                 let intercept = settings.map(|(_, i)| i).unwrap_or(true);
                 if !intercept {
                     // Names the shell even here. Someone debugging "my fish

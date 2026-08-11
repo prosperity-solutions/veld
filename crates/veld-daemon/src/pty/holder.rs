@@ -1112,7 +1112,7 @@ fn spawn_shell(
 /// outlive the daemon, and `Db::open()` on the session-spawn path is the thing
 /// AGENTS.md warns about. So the daemon resolves the shell once, at ticket-mint
 /// time, and sends it in [`HolderConfig::shell_argv`]. This is what a holder spawned by
-/// an older daemon — one whose config carries no `shell` — falls back to, which is
+/// an older daemon — one whose config carries no `shell_argv` — falls back to, which is
 /// exactly the behaviour that daemon had.
 pub fn login_shell() -> String {
     veld_core::shell::auto_shell()

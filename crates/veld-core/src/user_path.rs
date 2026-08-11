@@ -177,8 +177,8 @@ fn cell() -> &'static std::sync::Mutex<Option<String>> {
 /// **A resolution that learned nothing never displaces one that did.** This is
 /// the whole correctness argument. `login_shell_path` returns `None` on a stall,
 /// a spawn failure or a non-zero exit, and can also succeed while contributing
-/// nothing (an answer byte-identical to this process's `PATH`: `SHELL` unset so
-/// `sh` ran, or an rc file whose version-manager block is gated on a terminal
+/// nothing (an answer byte-identical to this process's `PATH`: no user shell
+/// config at all, or an rc file whose version-manager block is gated on a terminal
 /// that resolution deliberately does not provide). On a daemon that unhelpful
 /// value *is* the bug — the bare launchd `PATH` that cannot find `npx` — so it
 /// may seed an empty cell, but it must never overwrite a real answer, however

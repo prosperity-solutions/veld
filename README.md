@@ -441,7 +441,7 @@ In both cases Veld owns one file, in its own directory, and never writes to your
 
 The shims route a single http(s) URL and hand **anything else** to the real tool untouched, with the original arguments — `open .`, `open report.pdf`, `open -a Safari …` behave exactly as they always did.
 
-**bash support is probed, not assumed.** macOS still ships bash **3.2** as `/bin/bash`, and that version ignores `$ENV` in posix mode entirely — so Veld asks your bash (a ~10ms `bash -c ':'`, cached) and only uses the handoff on a bash that honours it. A Homebrew or Linux bash 4+ works; the system one on macOS does not.
+**bash support is probed, not assumed.** macOS still ships bash **3.2** as `/bin/bash`, and that version ignores `$ENV` in posix mode entirely — so Veld asks your bash — a ~10ms `bash --posix -i -c ':'` with `$ENV` pointed at a marker file, cached per binary — and only uses the handoff on a bash that honours it. A Homebrew or Linux bash 4+ works; the system one on macOS does not.
 
 Everything else — fish, nushell, and a bash too old for the handoff — keeps `$BROWSER` and can opt in by hand with one line, since every Veld terminal exports the directory:
 

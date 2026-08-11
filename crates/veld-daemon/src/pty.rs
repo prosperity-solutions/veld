@@ -2474,8 +2474,10 @@ async fn obtain_session(
         socket: socket_for(&ticket.session_id),
         // What lets a process inside the shell open a URL in Veld: `$BROWSER`
         // pointing at a generated shim, the session id it names when it does, and —
-        // for zsh, unless the setting is off — the `ZDOTDIR` handoff that gets the
-        // shim directory onto `PATH` after the user's own startup files have run.
+        // unless the setting is off — the startup handoff that gets the shim
+        // directory onto `PATH` after the user's own startup files have run
+        // (`ZDOTDIR` for zsh, posix-mode `$ENV` for a bash that was probed to
+        // honour it).
         // Computed here rather than in the holder because the holder is a dumb PTY
         // owner — it knows nothing about instances, ports or the CLI's location.
         //
