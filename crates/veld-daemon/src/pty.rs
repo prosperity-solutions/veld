@@ -3375,6 +3375,19 @@ fn clamp_dimension(v: Option<u16>, default: u16) -> u16 {
 
 #[cfg(test)]
 mod tests {
+    /// The shell these fixtures spawn.
+    ///
+    /// **Deliberately not the machine's.** These are plumbing tests — sockets,
+    /// adoption, replay, exit reporting — and the shell is only a process that
+    /// has to start cleanly and echo what it is told. A fixture that named
+    /// `/bin/zsh` passed on a developer's Mac and failed *every* e2e test on
+    /// Linux CI, because a zsh with no `~/.zshrc` runs `zsh-newuser-install`,
+    /// an interactive wizard that swallowed the bytes the test typed. `/bin/sh`
+    /// is present everywhere, reads no user startup files, and has no
+    /// first-run anything. A test that wants to exercise a *particular* shell
+    /// says so itself, as the bash and zsh handoff tests in `pty::shims` do.
+    const TEST_SHELL: &str = "/bin/sh";
+
     use super::*;
 
     /// An `argv` pane runs inside the user's login+interactive shell — the
@@ -3865,9 +3878,9 @@ mod tests {
                 cwd: std::env::temp_dir(),
                 label: "t".to_owned(),
                 pane: None,
-                shell: "/bin/zsh".to_owned(),
+                shell: TEST_SHELL.to_owned(),
                 shell_flags: Vec::new(),
-                shim_env: shims::session_env(id, "/bin/zsh", true, true, false),
+                shim_env: shims::session_env(id, TEST_SHELL, true, true, false),
                 expires_at: Instant::now() + ttl,
             },
         );
@@ -3891,9 +3904,9 @@ mod tests {
                 cwd: std::env::temp_dir(),
                 label: "t".to_owned(),
                 pane: None,
-                shell: "/bin/zsh".to_owned(),
+                shell: TEST_SHELL.to_owned(),
                 shell_flags: Vec::new(),
-                shim_env: shims::session_env("s2", "/bin/zsh", true, true, false),
+                shim_env: shims::session_env("s2", TEST_SHELL, true, true, false),
                 expires_at: Instant::now() - Duration::from_secs(1),
             },
         );
@@ -4130,9 +4143,9 @@ mod tests {
                     cwd: cwd.to_path_buf(),
                     label: "test".to_owned(),
                     pane: None,
-                    shell: "/bin/zsh".to_owned(),
+                    shell: TEST_SHELL.to_owned(),
                     shell_flags: Vec::new(),
-                    shim_env: shims::session_env(session, "/bin/zsh", true, true, false),
+                    shim_env: shims::session_env(session, TEST_SHELL, true, true, false),
                     expires_at: Instant::now() + TICKET_TTL,
                 },
             );
@@ -4237,9 +4250,9 @@ mod tests {
                     cwd: std::env::temp_dir(),
                     label: "test".to_owned(),
                     pane: None,
-                    shell: "/bin/zsh".to_owned(),
+                    shell: TEST_SHELL.to_owned(),
                     shell_flags: Vec::new(),
-                    shim_env: shims::session_env(&stale_session, "/bin/zsh", true, true, false),
+                    shim_env: shims::session_env(&stale_session, TEST_SHELL, true, true, false),
                     expires_at: Instant::now() - Duration::from_secs(1),
                 },
             );
