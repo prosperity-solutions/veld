@@ -3701,8 +3701,21 @@ mod tests {
                 Vec::new(),
             ),
             (
+                // `/bin/bash` is included, and the ordering is the whole point: on Linux it
+                // is bash 5 and the only bash there is, so leaving it out — which an earlier
+                // version did, on the grounds that macOS's `/bin/bash` is 3.2 — made this
+                // test's own "missing in CI" assertion fire on every Linux runner. The
+                // version does not matter here: since the pane prefix reaches bash, the shim
+                // directory is on `PATH` whether or not the `$ENV` handoff a 3.2 ignores ever
+                // ran. Never encode a machine's shell layout as a path exclusion.
                 "bash",
-                ["/opt/homebrew/bin/bash", "/usr/local/bin/bash"].as_slice(),
+                [
+                    "/opt/homebrew/bin/bash",
+                    "/usr/local/bin/bash",
+                    "/bin/bash",
+                    "/usr/bin/bash",
+                ]
+                .as_slice(),
                 vec!["--posix".to_owned()],
             ),
         ] {
