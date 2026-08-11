@@ -601,8 +601,17 @@ impl SettingKey {
             // the string is interpolated (a search URL, a stylesheet rule). This
             // one has no such trap: it becomes a `PathBuf` and is joined with an
             // alias, never parsed or rendered as markup. Only length and control
-            // characters are worth refusing; everything else a filesystem accepts
-            // is fine here too.
+            // characters are worth refusing on that basis alone; everything else
+            // a filesystem accepts is fine here too.
+            //
+            // `..` is refused for a different reason: the daemon's own
+            // `canonicalize_prefix` (`veld-daemon/src/desktop.rs`) already
+            // resolves one lexically before comparing a checkout path against
+            // every repo root, so a stored `..` cannot bypass that check —
+            // this is defence in depth, catching the shape at the point
+            // someone chose it rather than only at the point it is used, and
+            // there is no legitimate reason a *stored* directory needs one:
+            // every real one normalises to a cleaner absolute path anyway.
             //
             // Empty is a real value — "custom mode is chosen but no folder was
             // picked yet" — and the daemon's `worktree_storage_dir()` reads that
@@ -613,8 +622,14 @@ impl SettingKey {
                 if s.len() > MAX_WORKTREE_STORAGE_DIR_LEN || s.chars().any(char::is_control) {
                     return Err(bad());
                 }
-                if !s.is_empty() && !std::path::Path::new(s).is_absolute() {
-                    return Err(bad());
+                if !s.is_empty() {
+                    let p = std::path::Path::new(s);
+                    if !p.is_absolute()
+                        || p.components()
+                            .any(|c| matches!(c, std::path::Component::ParentDir))
+                    {
+                        return Err(bad());
+                    }
                 }
                 Value::from(s)
             }
@@ -1992,5 +2007,23 @@ mod tests {
             db.settings().unwrap()["worktree.storageDir"],
             Value::from("/tmp/veld-worktrees")
         );
+    }
+
+    #[test]
+    fn worktree_storage_dir_rejects_a_parent_dir_component() {
+        // Defence in depth: the daemon's own `canonicalize_prefix`
+        // (`veld-daemon/src/desktop.rs`) already resolves a `..` lexically
+        // before comparing a checkout path against every repo root, so this
+        // is not load-bearing for that check — but a *stored* directory has
+        // no legitimate reason to carry one, and refusing it here catches
+        // the shape at the point someone chose it.
+        let (_dir, db) = test_db();
+        let e = db
+            .patch_settings(&patch(&[(
+                "worktree.storageDir",
+                Value::from("/base/ghost/../Proj"),
+            )]))
+            .unwrap_err();
+        assert!(matches!(e, DbError::InvalidSetting { .. }), "{e}");
     }
 }
