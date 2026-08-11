@@ -95,19 +95,19 @@ import {
   IconPlayerPlayFilled,
   IconPlayerStopFilled,
   IconPlus,
-  IconRefresh,
+  IconAdjustments,
+  IconReload,
   IconRefreshDot,
   IconSearch,
-  IconBraces,
   IconSettings,
-  IconBroadcast,
-  IconShare2,
+  IconBuildingBroadcastTower,
+  IconShare,
   IconTrash,
   IconSun,
   IconDeviceDesktop,
   IconExternalLink,
   IconWorld,
-  IconListDetails,
+  IconTools,
   IconX,
   IconHelp,
 } from "@tabler/icons-react";
@@ -1444,8 +1444,8 @@ function AppInner(props: {
    * Whether any of the selected worktree's machine vars has a value answered on
    * this machine, plus a tick to force a re-read after the vars dialog closes.
    *
-   * Powers the small badge on the `{}` button: a project whose vars are already
-   * answered reads as settled, and one with a gap (or none at all) does not. A
+   * Powers the small badge on the variables button: a project whose vars are
+   * already answered reads as settled, and one with a gap (or none at all) does not. A
    * var counts as overridden when its scope is `project` or `worktree` — the two
    * values *this* machine supplied — never `default` (the config's own fallback)
    * or `unset`.
@@ -3764,9 +3764,9 @@ function AppInner(props: {
    * Deliberately **not** folded into the settings gear beside it. That dialog is
    * veld's own preferences — global, yours, the same whatever you have open.
    * These are values *this project declared* and this machine answers, so they
-   * change with the selected worktree and are meaningless without one. `{}`
-   * rather than another gear for the same reason: two gears would read as two
-   * ways into one thing.
+   * change with the selected worktree and are meaningless without one. The
+   * sliders icon rather than another gear for the same reason: two gears would
+   * read as two ways into one thing.
    *
    * **Disabled, not hidden, when the project asks for nothing.** A control that
    * vanishes teaches nobody it exists; one that is greyed out with a reason does.
@@ -3810,7 +3810,7 @@ function AppInner(props: {
               setDialog({ kind: "config-vars", project: worktree.path })
             }
           >
-            <IconBraces size={14} />
+            <IconAdjustments size={14} />
           </ActionIcon>
           {configVarsOverridden && (
             <span className="vars-badge" aria-hidden="true" />
@@ -3933,10 +3933,10 @@ function AppInner(props: {
         <span className="bar-hover-slot">
           <ActionIcon
             size="md"
-            /* One action, two readings: outline `IconShare2` when nothing is
-               shared, filled green `IconBroadcast` when it is — "on air" is what
-               the icon says, and colour plus fill carry it without a word widening
-               the bar. */
+            /* One action, two readings: outline `IconShare` when nothing is
+               shared, filled green `IconBuildingBroadcastTower` when it is —
+               "on air" is what the icon says, and colour plus fill carry it
+               without a word widening the bar. */
             variant={sharingActive ? "filled" : "default"}
             color={sharingActive ? "green" : undefined}
             disabled={shareDisabled}
@@ -3947,7 +3947,7 @@ function AppInner(props: {
             }
             onClick={() => setDialog({ kind: "sharing" })}
           >
-            {sharingActive ? <IconBroadcast size={14} /> : <IconShare2 size={14} />}
+            {sharingActive ? <IconBuildingBroadcastTower size={14} /> : <IconShare size={14} />}
           </ActionIcon>
         </span>
       </Tooltip>
@@ -4760,7 +4760,7 @@ function NodeActionsButton(props: {
       <Tooltip label="Start the run to act on its nodes">
         <span style={{ display: "inline-flex" }}>
           <ActionIcon size="md" variant="default" aria-label="Node actions" disabled>
-            <IconListDetails size={14} />
+            <IconTools size={14} />
           </ActionIcon>
         </span>
       </Tooltip>
@@ -4776,7 +4776,7 @@ function NodeActionsButton(props: {
       <Menu.Target>
         <Tooltip label="Node actions">
           <ActionIcon size="md" variant="default" aria-label="Node actions">
-            <IconListDetails size={14} />
+            <IconTools size={14} />
           </ActionIcon>
         </Tooltip>
       </Menu.Target>
@@ -5081,7 +5081,7 @@ function TopBar(props: {
                     disabled={!props.running || props.pending !== null}
                     onClick={props.onRestart}
                   >
-                    <IconRefresh size={13} />
+                    <IconReload size={13} />
                   </ActionIcon>
                 </Tooltip>
               )}
