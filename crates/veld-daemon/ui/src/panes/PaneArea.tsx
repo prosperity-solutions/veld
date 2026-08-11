@@ -46,7 +46,7 @@
  *
  * Only 1-3, 9, 10 and 11 are enforced. Note what is *not* a kind: the run's
  * URLs, which are a launcher shown inside a pane rather than a pane of their own
- * (`VeldLinks.tsx`).
+ * (`PlaceList.tsx`).
  */
 
 import { ActionIcon, Button, Menu, Modal, Text } from "@mantine/core";
@@ -66,7 +66,8 @@ import { useContextMenu } from "mantine-contextmenu";
 import { Fragment, useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { BrowserPane, browserTabDot } from "./BrowserPane";
 import { LogsPane, NodesPane, type RunPaneContext } from "./RunPanes";
-import { VeldLinks } from "./VeldLinks";
+import { PlaceList } from "./PlaceList";
+import { placesFor, suggestionsFor } from "./places";
 import { popBrowserSuspend, pushBrowserSuspend, reloadBrowser } from "./browserHost";
 import {
   type BrowserProfile,
@@ -283,10 +284,12 @@ export function PaneArea(props: {
   /** The selected worktree's run, for the `logs` and `nodes` panes. */
   runCtx: RunPaneContext;
   /**
-   * The running run's node actions, offered by the new-pane chooser — `null`
-   * when none can fire. See shared/NodeActions.tsx; the app builds the element.
+   * `browser.searchUrl` — where a pane's address bar sends words that are not an
+   * address, or `""` for nowhere. Read once by the app and passed down rather than
+   * re-read per pane: every pane in every dock resolves the same setting, and a
+   * component that fetches it is a component that renders before it arrives.
    */
-  nodeActions?: React.ReactNode | null;
+  searchUrl: string;
 }) {
   const { layout, onLayout } = props;
   const areaRef = useRef<HTMLDivElement>(null);
@@ -806,7 +809,7 @@ export function PaneArea(props: {
           quicklinks={props.quicklinks}
           panes={props.panes}
           urlsEmptyHint={props.urlsEmptyHint}
-          nodeActions={props.nodeActions}
+          searchUrl={props.searchUrl}
           onTerminal={() =>
             onLayout(addTab(layout, 0, { id: newTabId(), kind: "terminal", title: "Terminal" }))
           }
@@ -879,7 +882,7 @@ export function PaneArea(props: {
               onRemoveSession={props.onRemoveSession}
               quickSwitches={props.quickSwitches}
               runCtx={props.runCtx}
-              nodeActions={props.nodeActions}
+              searchUrl={props.searchUrl}
               onDetach={desktopWindow ? detachTabs : undefined}
               onDropOut={desktopWindow ? dropOutTabs : undefined}
               wasOutside={() => dragOutsideRef.current}
@@ -986,8 +989,8 @@ function DockView(props: {
   onRemoveSession: (profile: BrowserProfile) => void;
   quickSwitches: QuickSwitchPrefs;
   runCtx: RunPaneContext;
-  /** The running run's node actions, offered by the new-pane chooser. */
-  nodeActions?: React.ReactNode | null;
+  /** `browser.searchUrl`, for every pane in this dock's address bar. */
+  searchUrl: string;
   /** Pull tabs out into a window of their own. Absent outside Electron, which
    *  has no window manager to pull them into. */
   onDetach: ((tabs: PaneTab[]) => void | Promise<void>) | undefined;
@@ -1384,7 +1387,7 @@ function DockView(props: {
             quicklinks={props.quicklinks}
             panes={props.panes}
             urlsEmptyHint={props.urlsEmptyHint}
-            nodeActions={props.nodeActions}
+            searchUrl={props.searchUrl}
             // A `new` tab becomes the chosen kind in place; an empty dock has no
             // tab to convert, so it gets a fresh one.
             onTerminal={() =>
@@ -1410,6 +1413,7 @@ function DockView(props: {
             }
             onRemoveSession={props.onRemoveSession}
             quickSwitches={props.quickSwitches}
+            searchUrl={props.searchUrl}
             // Updater form on purpose: both docks can hold a browser pane, and
             // two navigations landing in the same commit would otherwise write
             // from the same stale `layout` and lose one.
@@ -1447,6 +1451,21 @@ function DockView(props: {
  * belongs here rather than in a menu off the `+` button — a menu is the size of a
  * cursor and disappears when you look away, while this is where the content will
  * actually be. The `+` keeps a hover menu for the one-click path.
+ *
+ * **Grouped by what you are trying to do, not by who wrote it.** The previous shape
+ * was a centred stack of same-weight buttons — veld's four first, the project's
+ * panes third under a caption, the run's URLs last — and a first user test found
+ * every failure that shape invites. People opened a Claude pane by pressing
+ * `Terminal`, because Claude was in a different section further down instead of
+ * beside the thing it is an alternative to. People pressed `Browser` and never
+ * connected it to their app's URL five rows below. The order was chosen so that
+ * Terminal would not move between checkouts, which optimises for veld's consistency
+ * over what the person is there to do; that trade is reversed here.
+ *
+ * Three groups, always in this order, so nothing a user hunts for changes position
+ * between projects: what to *work in*, where to *look*, and what to check when
+ * something is wrong. Membership inside a group varies with the project — that is the
+ * part a config is allowed to change.
  */
 function PaneChooser(props: {
   serviceUrls: Array<[string, string]>;
@@ -1455,8 +1474,8 @@ function PaneChooser(props: {
   /** Pane types the project declares in `ide.panes`. */
   panes: PaneSpec[];
   urlsEmptyHint: string;
-  /** The running run's node actions, offered when something can act. */
-  nodeActions?: React.ReactNode | null;
+  /** `browser.searchUrl`, only to say whether a blank pane can search. */
+  searchUrl: string;
   onTerminal: () => void;
   onPane: (spec: PaneSpec) => void;
   onBrowser: (tab: PaneTab) => void;
@@ -1464,87 +1483,114 @@ function PaneChooser(props: {
 }) {
   return (
     <div className="pane-chooser">
-      <div className="pane-chooser-row">
-        <button className="btn big" onClick={props.onTerminal}>
-          <IconTerminal2 size={15} /> Terminal
-        </button>
-        <button className="btn big" onClick={() => props.onBrowser(browserTab({}))}>
-          <IconWorld size={15} /> Browser
-        </button>
-      </div>
-      {/* Second row, not four buttons in one: the first two are what a pane
-          usually becomes, and the diagnostics are what you add when something is
-          wrong. Same size, so neither reads as disabled. */}
-      <div className="pane-chooser-row">
-        <button className="btn big" onClick={() => props.onDiag("logs")}>
-          <IconLogs size={15} /> Logs
-        </button>
-        <button className="btn big" onClick={() => props.onDiag("nodes")}>
-          <IconActivityHeartbeat size={15} /> Nodes
-        </button>
-      </div>
-      {/* The project's own panes, below veld's and under their own heading —
-          the same `section-label` treatment `ide.quicklinks` gets below, since
-          they are the same kind of thing: something this repo added rather than
-          something veld ships. Putting them first would move Terminal and
-          Browser around depending on which checkout you are in. An unavailable
-          pane is shown disabled with the reason rather than omitted — a repo
-          that declares a Claude pane should not look like it forgot to. */}
-      {props.panes.length > 0 && (
-        <>
-          <hr className="pane-chooser-rule" />
-          <span className="section-label">Project panes</span>
-        </>
-      )}
-      {props.panes.length > 0 && (
-        <div className="pane-chooser-row pane-chooser-custom">
+      {/* Cards of one size, in declaration order, with a plain shell as the last of
+          them. **Nothing is promoted.** The first cut of this gave the first declared
+          pane a full-width lead button, which read as a recommendation veld has no
+          business making: a repo that declares Claude, Pi, Codex and a git log has
+          four things a contributor might want, and picking one for them is a guess
+          dressed as a default. Equal cards let each one carry its own description
+          instead, which is the information that actually tells them apart. */}
+      <section className="chooser-group">
+        <h3 className="chooser-heading">
+          <IconTerminal2 size={16} /> Work in a terminal
+        </h3>
+        <div className="chooser-cards">
+          {/* An unavailable pane is shown disabled with the reason rather than
+              omitted — a repo that declares a Claude pane should not look like it
+              forgot to. */}
           {props.panes.map((spec) => (
-            <button
-              key={spec.id}
-              className="btn big"
-              // `aria-disabled`, not `disabled`. A disabled button dispatches no
-              // pointer events, so its native tooltip can never open — the trap
-              // #205 already paid for — and the reason a pane is unavailable
-              // lives *only* in that tooltip, since the `+` menu drops
-              // unavailable panes entirely. So the button stays interactive to
-              // the browser, refuses the click itself, and can explain why.
-              aria-disabled={!spec.available || undefined}
-              title={
-                spec.available
-                  ? (spec.description ?? `Open a ${spec.label} pane`)
-                  : `${spec.label} needs ${(spec.missing ?? []).join(", ")} — not found on your PATH`
-              }
-              onClick={() => {
-                if (spec.available) props.onPane(spec);
-              }}
-            >
-              {paneIcon(spec.icon, 15)} {spec.label}
-            </button>
+            <PaneButton key={spec.id} spec={spec} onPick={props.onPane} />
           ))}
+          <button className="pane-card" onClick={props.onTerminal}>
+            <span className="pane-card-main">
+              <IconTerminal2 size={15} /> Terminal
+            </span>
+            <span className="pane-card-sub">A shell in this worktree</span>
+          </button>
         </div>
-      )}
-      {/* The running run's node actions, when it has any — the same surface the
-          top bar exposes as a menu, embedded here so a freshly-opened pane
-          starts next to the things it might be there to act on. */}
-      {props.nodeActions && (
-        <>
-          <hr className="pane-chooser-rule" />
-          <span className="section-label">Actions on the running run</span>
-          {props.nodeActions}
-        </>
-      )}
-      {/* The run's URLs, one click from being the pane's content. Not a third
-          button opening a third kind — see VeldLinks.tsx. The rule separates
-          "what should this pane be" from "where should it go", which are two
-          questions that happen to share a screen. */}
-      <hr className="pane-chooser-rule" />
-      <VeldLinks
-        urls={props.serviceUrls}
-        quicklinks={props.quicklinks}
-        emptyHint={props.urlsEmptyHint}
-        onOpen={(name, url) => props.onBrowser(browserTab({ url, title: name }))}
-      />
+      </section>
+
+      {/* The run's URLs, the project's bookmarks and a blank pane, as one list.
+          Emphatically *not* a `Browser` button up in the first group with the URLs
+          somewhere below: that split is what made "open my app" undiscoverable. */}
+      <section className="chooser-group">
+        <h3 className="chooser-heading">
+          <IconWorld size={16} /> Open a page
+        </h3>
+        <PlaceList
+          suggestions={suggestionsFor(
+            placesFor(props.serviceUrls, props.quicklinks),
+            "",
+            props.searchUrl,
+          )}
+          emptyHint={props.urlsEmptyHint}
+          canSearch={props.searchUrl.trim() !== ""}
+          onOpen={(url, title) => props.onBrowser(browserTab({ url, title }))}
+          onBlank={() => props.onBrowser(browserTab({}))}
+          onOpenAll={() =>
+            props.serviceUrls.forEach(([, url]) => window.open(url, "_blank"))
+          }
+        />
+      </section>
+
+      {/* Last, but the same cards as the terminals above: these are panes you sit in
+          front of and arrange beside a shell, not toolbar actions, and rendering them
+          as small chips made them look like a lesser class of thing. The run's node
+          actions used to sit here as a fourth group; they are gone, because the top
+          bar carries them permanently and a screen this crowded cannot afford the
+          same surface twice. */}
+      <section className="chooser-group">
+        <h3 className="chooser-heading">
+          <IconActivityHeartbeat size={16} /> Check the run
+        </h3>
+        <div className="chooser-cards">
+          <button className="pane-card" onClick={() => props.onDiag("logs")}>
+            <span className="pane-card-main">
+              <IconLogs size={15} /> Logs
+            </span>
+            <span className="pane-card-sub">Every node's output, interleaved</span>
+          </button>
+          <button className="pane-card" onClick={() => props.onDiag("nodes")}>
+            <span className="pane-card-main">
+              <IconActivityHeartbeat size={15} /> Nodes
+            </span>
+            <span className="pane-card-sub">Health, CPU and memory per node</span>
+          </button>
+        </div>
+      </section>
     </div>
+  );
+}
+
+/** One config-declared pane, as a card of the same size as every other. */
+function PaneButton(props: { spec: PaneSpec; onPick: (spec: PaneSpec) => void }) {
+  const { spec } = props;
+  const missing = `${spec.label} needs ${(spec.missing ?? []).join(", ")} — not found on your PATH`;
+  return (
+    <button
+      className="pane-card"
+      // `aria-disabled`, not `disabled`. A disabled button dispatches no pointer
+      // events, so its native tooltip can never open — the trap #205 already paid
+      // for — and the reason a pane is unavailable lives *only* in that tooltip,
+      // since the `+` menu drops unavailable panes entirely. So the button stays
+      // interactive to the browser, refuses the click itself, and can explain why.
+      aria-disabled={!spec.available || undefined}
+      title={spec.available ? (spec.description ?? `Open a ${spec.label} pane`) : missing}
+      onClick={() => {
+        if (spec.available) props.onPick(spec);
+      }}
+    >
+      <span className="pane-card-main">
+        {paneIcon(spec.icon, 15)} {spec.label}
+      </span>
+      {/* Every card carries its second line, not only a chosen one: the description
+          is what tells four agent panes apart, and giving it to one of them is how
+          the previous cut ended up looking like a recommendation. An unavailable
+          pane spends the line on why instead. */}
+      <span className="pane-card-sub">
+        {spec.available ? (spec.description ?? "") : missing}
+      </span>
+    </button>
   );
 }
 

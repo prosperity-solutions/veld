@@ -216,6 +216,33 @@ pub const MAX_EXTERNAL_ORIGINS: usize = 64;
 /// scheme and port add a dozen; past that it is not an origin.
 const MAX_ORIGIN_LEN: usize = 280;
 
+/// Where a browser pane sends words that are not an address.
+///
+/// A pane's address bar takes http(s) URLs and nothing else
+/// ([`crate::url`]'s rules are not involved; the UI's `normalizeBrowserUrl` is).
+/// `react hooks docs` therefore used to be an error, which made the one thing a
+/// blank pane is *for* — reading something while you work — the one thing it
+/// refused. This template is where that text goes instead.
+///
+/// `%s` is the query, percent-encoded by the caller. Google because it is the
+/// engine a browser's own bar would have used, and the alternative to picking one
+/// is a blank pane that still dead-ends until a user finds a setting they have no
+/// reason to look for.
+///
+/// **Empty string means "no search"**, and that is a supported value rather than a
+/// broken one: the address bar goes back to refusing non-addresses, with an error
+/// that says what a full address looks like. It is the off switch for anyone who
+/// does not want a keystroke in a dev tool reaching an engine at all.
+pub const DEFAULT_SEARCH_URL: &str = "https://www.google.com/search?q=%s";
+
+/// The token a search template substitutes the query for — the convention every
+/// browser's custom-engine field uses, so a URL copied from one works here.
+pub const SEARCH_QUERY_TOKEN: &str = "%s";
+
+/// Longest accepted `browser.searchUrl`. Engine URLs carry parameters, so this is
+/// looser than an origin; past it, it is not a search template.
+const MAX_SEARCH_URL_LEN: usize = 400;
+
 /// Bounds on a key this binary does not recognise.
 ///
 /// Unknown keys are preserved rather than rejected (see the module docs), which
@@ -310,6 +337,7 @@ pub enum SettingKey {
     BrowserQuickSwitchResponsive,
     BrowserQuickSwitchColorScheme,
     BrowserExternalOrigins,
+    BrowserSearchUrl,
     UiHideDisabledActions,
     GitCreateFrom,
     Unknown(String),
@@ -347,6 +375,7 @@ impl SettingKey {
         Self::BrowserQuickSwitchResponsive,
         Self::BrowserQuickSwitchColorScheme,
         Self::BrowserExternalOrigins,
+        Self::BrowserSearchUrl,
         Self::UiHideDisabledActions,
         Self::GitCreateFrom,
     ];
@@ -373,6 +402,7 @@ impl SettingKey {
             Self::BrowserQuickSwitchResponsive => "browser.quickSwitch.responsive",
             Self::BrowserQuickSwitchColorScheme => "browser.quickSwitch.colorScheme",
             Self::BrowserExternalOrigins => "browser.externalOrigins",
+            Self::BrowserSearchUrl => "browser.searchUrl",
             Self::UiHideDisabledActions => "ui.hideDisabledActions",
             Self::GitCreateFrom => "git.createFrom",
             Self::Unknown(k) => k,
@@ -401,6 +431,7 @@ impl SettingKey {
             "browser.quickSwitch.responsive" => Self::BrowserQuickSwitchResponsive,
             "browser.quickSwitch.colorScheme" => Self::BrowserQuickSwitchColorScheme,
             "browser.externalOrigins" => Self::BrowserExternalOrigins,
+            "browser.searchUrl" => Self::BrowserSearchUrl,
             "ui.hideDisabledActions" => Self::UiHideDisabledActions,
             "git.createFrom" => Self::GitCreateFrom,
             other => Self::Unknown(other.to_string()),
@@ -511,6 +542,14 @@ impl SettingKey {
                 }
                 Value::Array(out)
             }
+            // Rejected rather than coerced: there is no nearest sensible engine, and a
+            // template that stored but never worked would send every query nowhere
+            // with nothing to say why. Stored trimmed, which is the one
+            // normalisation — the field round-trips its own value.
+            Self::BrowserSearchUrl => {
+                let s = value.as_str().ok_or_else(bad)?;
+                Value::from(parse_search_template(s).map_err(|_| bad())?)
+            }
             Self::TerminalCursorStyle => {
                 one_of(value, &["block", "underline", "bar"]).ok_or_else(bad)?
             }
@@ -561,6 +600,60 @@ impl SettingKey {
             }
         })
     }
+}
+
+/// Check a `browser.searchUrl` template, returning it trimmed.
+///
+/// Hand-rolled rather than parsed, for the reason [`crate::ide::parse_origin`] is:
+/// `veld-core` has no URL crate, and the two validators would disagree about
+/// oddities anyway. The rules are the small set that makes a template safe to
+/// navigate to.
+///
+/// The one that is not obvious: **`%s` may not appear in the host.**
+/// `https://%s.example.com/` would hand every word typed into an address bar the
+/// choice of which host to reach — a redirect gadget built out of a preference,
+/// and typing is how a user *avoids* thinking about hosts. The token belongs in
+/// the path or the query, which is where every real engine puts it.
+///
+/// An empty template is accepted and means search is off — see
+/// [`DEFAULT_SEARCH_URL`].
+pub fn parse_search_template(raw: &str) -> Result<String, String> {
+    let t = raw.trim();
+    if t.is_empty() {
+        return Ok(String::new());
+    }
+    if t.len() > MAX_SEARCH_URL_LEN {
+        return Err(format!("longer than {MAX_SEARCH_URL_LEN} characters"));
+    }
+    // Whitespace and controls, before anything else: a template carrying either is
+    // not a URL, and `char::is_control` also catches the newline that would let one
+    // stored value pose as two.
+    if t.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err("must not contain spaces or control characters".to_owned());
+    }
+    if !t.contains(SEARCH_QUERY_TOKEN) {
+        return Err(format!(
+            "must contain {SEARCH_QUERY_TOKEN} where the query goes"
+        ));
+    }
+    let rest = t
+        .strip_prefix("https://")
+        .or_else(|| t.strip_prefix("http://"))
+        .ok_or_else(|| "must start with http:// or https://".to_owned())?;
+    let host = rest
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default()
+        .to_owned();
+    if host.is_empty() {
+        return Err("has no host".to_owned());
+    }
+    if host.contains(SEARCH_QUERY_TOKEN) {
+        return Err(format!(
+            "must not put {SEARCH_QUERY_TOKEN} in the host — it belongs in the path or query"
+        ));
+    }
+    Ok(t.to_owned())
 }
 
 fn clamp_i64(value: &Value, lo: i64, hi: i64) -> Option<i64> {
@@ -659,6 +752,15 @@ pub fn defaults() -> BTreeMap<String, Value> {
         // Empty: veld ships no opinion about which hosts need the real browser.
         // A default entry would be a guess about someone else's SSO provider.
         (SettingKey::BrowserExternalOrigins, Value::Array(Vec::new())),
+        // An engine *is* shipped, unlike the exempt list above, and the difference is
+        // which way the empty default fails. An empty exempt list works — every host
+        // opens in a pane, which is the feature. An empty search template makes a
+        // blank pane refuse the first thing anyone types into it, and the fix is a
+        // setting nobody knows to look for. See the constant.
+        (
+            SettingKey::BrowserSearchUrl,
+            Value::from(DEFAULT_SEARCH_URL),
+        ),
         // Keep until emptied. The trash deleting things on its own is opt-in, and
         // the default has to be the one that cannot surprise anybody.
         (
@@ -1129,6 +1231,54 @@ mod tests {
         db.patch_settings(&patch(&[("terminal.openUrlsInApp", Value::from(false))]))
             .unwrap();
         assert!(!db.terminal_open_urls_in_app());
+    }
+
+    #[test]
+    fn the_search_template_ships_an_engine_and_refuses_an_unnavigable_one() {
+        let (_dir, db) = test_db();
+        // Shipped on, unlike the exempt list: a blank pane that refuses the first
+        // thing typed into it is the bug this key exists to fix.
+        assert_eq!(
+            db.settings().unwrap()["browser.searchUrl"],
+            Value::from(DEFAULT_SEARCH_URL)
+        );
+
+        // Trimmed on the way in, and an empty template is the off switch rather than
+        // a rejection.
+        db.patch_settings(&patch(&[(
+            "browser.searchUrl",
+            Value::from("  https://duckduckgo.com/?q=%s  "),
+        )]))
+        .unwrap();
+        assert_eq!(
+            db.settings().unwrap()["browser.searchUrl"],
+            Value::from("https://duckduckgo.com/?q=%s")
+        );
+        db.patch_settings(&patch(&[("browser.searchUrl", Value::from(""))]))
+            .unwrap();
+        assert_eq!(db.settings().unwrap()["browser.searchUrl"], Value::from(""));
+
+        for bad in [
+            Value::from("https://example.com/search"), // no %s: searches nothing
+            Value::from("example.com/?q=%s"),          // no scheme
+            Value::from("ftp://example.com/?q=%s"),    // not http(s)
+            Value::from("https:///?q=%s"),             // no host
+            Value::from("https://%s.example.com/"),    // the query picks the host
+            Value::from("https://e.com/?q=%s x"),      // whitespace
+            Value::from("https://e.com/?q=%s\nhttps://e2.com/?q=%s"), // two values in one
+            Value::from(7),                            // not a string
+            Value::from(format!(
+                "https://e.com/?q=%s&pad={}",
+                "a".repeat(MAX_SEARCH_URL_LEN)
+            )),
+        ] {
+            let e = db
+                .patch_settings(&patch(&[("browser.searchUrl", bad.clone())]))
+                .expect_err(&format!("{bad} must be refused"));
+            assert!(matches!(e, DbError::InvalidSetting { .. }), "{e}");
+        }
+        // …and the off switch set above survived every rejection.
+        assert_eq!(db.settings().unwrap()["browser.searchUrl"], Value::from(""));
     }
 
     #[test]

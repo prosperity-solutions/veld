@@ -1625,33 +1625,116 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
   flex: 1;
   display: flex;
   flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 10px;
-  padding: 24px;
+  /* Top-anchored and left-aligned, which is the layout half of the restructure.
+     Centred, the groups moved vertically as the project's pane count changed and
+     every heading sat over a different column — so nothing was in the same place
+     twice and there was no edge for the eye to run down. `margin: auto` on the inner
+     column keeps the whole block centred in a wide pane without centring the text
+     inside it. */
+  align-items: stretch;
+  gap: 30px;
+  padding: 28px 22px;
   overflow-y: auto;
-  /* The same surface as a Veld URLs pane: both are content, and a pane that
-     changes colour depending on what it holds reads as a different kind of
-     thing. */
+  /* The same surface as a start page: both are content, and a pane that changes
+     colour depending on what it holds reads as a different kind of thing. */
   background: var(--panel);
+}
+
+/* One question. The heading names it; nothing else in the group repeats it. */
+.chooser-group {
+  width: 100%;
+  max-width: 560px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* A real heading, at heading size and in sentence case. It was 11px uppercase with
+   wide tracking, which is the treatment this app uses for *captions* — so the three
+   things that structure the screen were set smaller than the buttons they were
+   introducing, and read as labels rather than as sections. */
+.chooser-heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--text);
+}
+
+.chooser-heading svg {
+  flex: none;
+  color: var(--muted);
+}
+
+/* Every terminal the project offers, at one size, plus a plain shell. Auto-fill
+   rather than a fixed column count: the group holds one card in a repo that declares
+   nothing and five in this one, and both should fill the width they have. */
+.chooser-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(168px, 1fr));
+  gap: 8px;
+}
+
+.pane-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--panel2);
+  text-align: left;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.pane-card:hover {
+  border-color: var(--border2);
+  background: var(--elev);
+}
+
+.pane-card[aria-disabled] {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.pane-card-main {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.pane-card-main svg {
+  flex: none;
+}
+
+/* The description, on every card. Clamped rather than truncated to one line: two
+   lines of "Claude Code in this worktree, in auto permission mode" is the sentence,
+   and an ellipsis after four words tells you nothing. */
+.pane-card-sub {
+  font-size: 10.5px;
+  font-weight: 400;
+  line-height: 1.35;
+  color: var(--muted);
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
 }
 
 .pane-chooser-row {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-  justify-content: center;
-}
-
-/* Separates "what should this pane be" from "where should it go" — two questions
-   that happen to share a screen. */
-.pane-chooser-rule {
-  width: 100%;
-  max-width: 520px;
-  height: 0;
-  margin: 6px 0;
-  border: 0;
-  border-top: 1px solid var(--border);
 }
 
 /* A pane-sized target rather than a toolbar-sized one: these are the primary
@@ -1662,6 +1745,7 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
   border-radius: 9px;
   font-size: 12.5px;
 }
+
 
 /* Session identity pip: on a browser tab, in the session menu, and on the
    pane's own session control. Colours come from the model (they must mean the
@@ -1850,14 +1934,10 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
 }
 
 /* The project's own panes, kept visually together and below veld's own. */
-.pane-chooser-custom {
-  flex-wrap: wrap;
-}
-
-/* The chooser already centres its children; the heading only needs its
-   left-aligned-list padding taken back off so it sits tight above its row. */
-.pane-chooser .section-label {
-  padding: 0;
+/* The chooser's groups carry their own headings (`.chooser-heading`); a
+   `.section-label` inside one belongs to the place list and keeps its own padding. */
+.pane-chooser .place-list {
+  max-width: none;
 }
 
 /* ---- embedded browser ----------------------------------------------------- */
@@ -2306,6 +2386,50 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
   max-width: 380px;
 }
 
+/* The blank pane's start page, which has to be tellable apart from the new-pane
+   chooser *at a glance* — the two used to differ by one empty toolbar. So this one
+   leads with a question and a hint about the bar above it, then the list; the chooser
+   leads with buttons. Top-anchored for the same reason the chooser is: the list grows
+   with the run, and a centred block moves every row when a service comes up. */
+.browser-screen.start {
+  justify-content: flex-start;
+  /* Left-aligned, overriding `.browser-screen`'s centring: the other screens are one
+     short sentence about a state, where centring reads as a notice, but this one is a
+     heading over a list of rows — and a centred heading over left-aligned rows has no
+     shared edge, so the eye starts in a different place for each. */
+  align-items: stretch;
+  text-align: left;
+  gap: 18px;
+  padding: 28px 22px;
+}
+
+.start-head {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  width: 100%;
+  max-width: 560px;
+  margin: 0 auto;
+}
+
+/* Matches `.chooser-heading`: the two screens are siblings and their titles should be
+   the same size, which is also what makes "Where to?" read as this pane's question
+   rather than as a caption over the list. */
+.start-head .pane-screen-title {
+  font-size: 17px;
+  letter-spacing: -0.01em;
+}
+
+.start-head p {
+  max-width: 560px;
+}
+
+.browser-screen.start .place-list {
+  width: 100%;
+  max-width: 560px;
+  margin: 0 auto;
+}
+
 .pane-screen-title {
   font-size: 13.5px;
   font-weight: 600;
@@ -2357,18 +2481,107 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
   font-size: 10.5px;
 }
 
-/* ---- Veld URLs (panes/VeldLinks.tsx) ------------------------------------- */
+/* ---- Places: where a pane can go (panes/PlaceList.tsx) -------------------- */
 
-.links-list {
+.place-list {
   width: 100%;
-  max-width: 520px;
+  max-width: 560px;
   display: flex;
   flex-direction: column;
-  gap: 7px;
+  gap: 6px;
   /* The list scrolls, not the screen around it. Centring a flex child inside a
      scrolling container clips its top once it overflows; scrolling the child
      instead keeps it centred while it fits and readable when it doesn't. */
   max-height: 100%;
+  overflow-y: auto;
+  /* Room for the active row's ring. `overflow-y: auto` makes the *other* axis
+     auto too (CSS overflow: one axis non-visible forces the other), so a
+     box-shadow drawn outside a full-width row was being clipped left and right by
+     the scrollport — the highlight appeared to stop at the row's corners. Padding is
+     inside the scrollable area, so 2px of it is 2px the ring can use. */
+  padding: 2px;
+}
+
+/* A bookmark is not a live URL, and the row says so with the glyph and the group it
+   sits in — **not** by dimming the text. Muting the name made a perfectly clickable
+   row read as disabled, which is the one thing a launcher must never do; the green
+   dot's absence already carries "nobody has probed this". */
+.place-glyph {
+  flex: none;
+  color: var(--faint);
+}
+
+/* The row Enter would open. A ring, not just a border colour: a row under the pointer
+   already lifts its background and thickens its border, so one signal for two states
+   would make "the key will open this" indistinguishable from "the mouse is over
+   this". The second inset shadow is what reads as a ring at 1px borders. */
+.link-row[data-active],
+.place-action[data-active] {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+  background: var(--elev);
+}
+
+/* The literal thing typed, as row zero. Same frame as a place — it is the same kind
+   of choice — but it carries no copy/open-externally siblings, so the whole row is
+   the button. */
+.place-action {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  /* Matches a place row's inner button (`.link-open` plus the frame's padding), so
+     the two rows' text starts on the same vertical line even though one has icon
+     controls on the right and the other does not. */
+  padding: 10px 11px;
+  margin-bottom: 4px;
+  text-align: left;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.place-action svg {
+  flex: none;
+  color: var(--accent);
+}
+
+/* The escape hatch: a pane with nothing in it, for a page that is neither the run's
+   nor the project's. Quieter than a place row — it is what you take when none of the
+   rows above is what you wanted — and dashed, which is the shape "nothing here yet"
+   already has elsewhere in this app. */
+.place-blank {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 9px 10px;
+  border: 1px dashed var(--border2);
+  border-radius: 9px;
+  background: none;
+  color: var(--faint);
+  text-align: left;
+  cursor: pointer;
+}
+
+.place-blank:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.place-blank svg {
+  flex: none;
+}
+
+/* The suggestions over a page that is already loaded. In flow between the chrome and
+   the slot — see BrowserPane; a native view paints over DOM, so this must never be
+   positioned over the page. `flex: none` keeps it from stretching, and the cap keeps
+   a long list from pushing the page out of a short pane. */
+.suggest-panel {
+  flex: none;
+  display: flex;
+  justify-content: center;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+  max-height: 60%;
   overflow-y: auto;
 }
 
@@ -2456,6 +2669,23 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
   color: var(--faint);
   font-weight: 600;
   padding: 6px 8px 2px;
+}
+
+/* A place group's heading carries the mark its rows carry — a live dot for the run's
+   URLs, a bookmark glyph for the project's — so the two kinds are legible as kinds
+   before you read a single row. Sentence case, not the global caption's uppercase:
+   this is a heading inside a pane, and three levels of shouted small caps on one
+   screen is what made the first cut hard to scan. */
+.place-list .section-label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 2px 2px;
+  font-size: 11.5px;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--muted);
+  text-align: left;
 }
 /* ---- loading spinner ------------------------------------------------------- */
 

@@ -26,6 +26,7 @@ import {
   markerStyle,
   quickSwitchPrefs,
   runHistoryDays,
+  searchUrl,
   terminalPrefs,
 } from "./shared/settings";
 import { pruneRunHistory } from "./shared/runHistory";
@@ -686,6 +687,12 @@ function AppInner(props: {
   // focus listener per pane for one document the app already holds.
   const quickSwitches = quickSwitchPrefs(settings ?? {});
 
+  // Where a pane's address bar sends words that are not an address, `""` for
+  // nowhere. Threaded for the same reason as the switches above — one document the
+  // app already holds — and read by both a pane's chrome and the new-pane chooser,
+  // which only needs to know whether searching is possible at all.
+  const searchTemplate = searchUrl(settings ?? {});
+
   // Which zone the logs views spell a line's timestamp in. Read here and threaded for
   // the same reason as the two above, and it is the same key `veld logs` reads — so the
   // two agree on the *policy*.
@@ -1294,8 +1301,11 @@ function AppInner(props: {
   // the fallback is legible rather than misleading.
   const diagRun: RunInfo | null = pick.run;
   const diagRef = worktree && diagRun ? runRef(worktree.path, diagRun) : null;
-  // The running run's nodes that declare actions, raised to the top bar and the
-  // new-pane chooser (shared/NodeActions.tsx). Only a *live running* run can act:
+  // The running run's nodes that declare actions, raised to the top bar
+  // (shared/NodeActions.tsx). The new-pane chooser used to embed the same buttons as
+  // a fourth group; it does not any more — the top bar carries them permanently, and
+  // a chooser nobody could read is not improved by putting the same surface on it
+  // twice. Only a *live running* run can act:
   // an ended one's actions would spawn against whatever is current. `nodeRows`
   // already nulls historical actions; gating on `running` closes the live-but-
   // not-running case (a run bound but stopped).
@@ -4004,9 +4014,7 @@ function AppInner(props: {
             onRemoveSession={removeSession}
             quickSwitches={quickSwitches}
             runCtx={runCtx}
-            nodeActions={
-              nodeActionProps ? <NodeActions {...nodeActionProps} /> : null
-            }
+            searchUrl={searchTemplate}
           />
         )}
       </div>
@@ -4287,9 +4295,7 @@ function AppInner(props: {
               onRemoveSession={removeSession}
               quickSwitches={quickSwitches}
               runCtx={runCtx}
-              nodeActions={
-                nodeActionProps ? <NodeActions {...nodeActionProps} /> : null
-              }
+              searchUrl={searchTemplate}
             />
           ) : null}
         </div>
@@ -4746,8 +4752,8 @@ function RunSelect(props: {
  *
  * A menu (the bar's one compact icon) rather than inline buttons: the bar is
  * the densest row in the app, and node actions belong to the run's nodes, which
- * may be several. The menu's content is `NodeActions`, the same buttons the
- * new-pane chooser embeds directly.
+ * may be several. The menu's content is `NodeActions`, and since the new-pane
+ * chooser stopped embedding those buttons this is the only place they live.
  */
 function NodeActionsButton(props: {
   run: RunRef | null;

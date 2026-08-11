@@ -214,7 +214,7 @@
         },
         "panes": {
           "type": "array",
-          "description": "Extra pane types this project offers in Veld Desktop's pane menu — the + menu, the pane chooser, and the command palette. Versioned with the repo, so a teammate who clones it gets the same panes. A terminal pane runs its own command instead of a login shell, and may declare a `resume` command so the pane can pick the tool's own session back up after a reboot; see ${veld.pane.token}.",
+          "description": "Extra pane types this project offers in Veld Desktop's pane menu — the + menu, the pane chooser, and the command palette. Versioned with the repo, so a teammate who clones it gets the same panes. A terminal pane runs its own command instead of a login shell, and may declare a `resume` command so the pane can pick the tool's own session back up after a reboot; see ${veld.pane.token}. The pane chooser shows every entry as an equal card in declaration order, beside veld's plain Terminal, each carrying its `description` under its label — so write one; nothing is promoted and there is no primary flag. An entry whose requires_bin is missing on the machine keeps its card, disabled, with the reason on that line.",
           "items": { "$ref": "#/$defs/pane" },
           "examples": [
             [

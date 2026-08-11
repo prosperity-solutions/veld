@@ -800,6 +800,112 @@ export function normalizeBrowserUrl(raw: string): string | null {
   return u.toString();
 }
 
+/**
+ * Whether typed text is meant as an address at all.
+ *
+ * The question `normalizeBrowserUrl` cannot answer: it completes `react` to
+ * `https://react/`, which parses, resolves nowhere, and is not what anybody meant.
+ * A word is an address when it *says* it is — a scheme, a port, a dotted host, an
+ * IPv6 literal — or when it is `localhost`, which has no dot and is the one host a
+ * dev tool must never send to a search engine.
+ *
+ * Dotted wins even when the TLD is nonsense (`react.js` navigates and fails), which
+ * is the deliberately dumb half of the rule. The alternative is a TLD list that
+ * decides for the user, gets it wrong on `.internal` and `.test`, and needs updating
+ * forever.
+ */
+function looksLikeAddress(text: string): boolean {
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(text)) return true;
+  // An IPv6 literal, bracketed. Checked before the port rule because the address'
+  // own colons defeat it.
+  if (text.startsWith("[")) return true;
+  const host = text.split(/[/?#]/, 1)[0] ?? "";
+  if (/:\d+$/.test(host)) return true;
+  // A scheme veld does not serve — `javascript:`, `data:`, `file:`. Address-shaped
+  // on purpose, so `normalizeBrowserUrl` below refuses it and the pane says why:
+  // searching the web for `javascript:alert(1)` would answer a question nobody
+  // asked and hide the refusal.
+  //
+  // Gated on there being no whitespace, which is what separates a scheme from an
+  // ordinary query that happens to contain a colon (`error: cannot find module`).
+  if (!/\s/.test(text) && /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(text)) return true;
+  if (host.includes(".")) return true;
+  return host.toLowerCase() === "localhost";
+}
+
+/** The token a search template substitutes the query for. Mirrors Rust's
+ *  `SEARCH_QUERY_TOKEN`; it is the convention every browser's engine field uses. */
+export const SEARCH_QUERY_TOKEN = "%s";
+
+/**
+ * Somewhere the address bar can actually go.
+ *
+ * Split out of {@link Address} rather than narrowed at each use: everything that
+ * *renders* an address — the suggestion row, the panel's action — needs a `url`, and
+ * a type that might not have one makes every one of those sites carry a check for a
+ * case its caller already excluded.
+ */
+export type Target =
+  | { kind: "url"; url: string }
+  | { kind: "search"; url: string; query: string };
+
+/** What the address bar's contents turn out to be. */
+export type Address = Target | { kind: "invalid" };
+
+/**
+ * Build a search URL from a template, or `null` if the template cannot make one.
+ *
+ * Re-checks the daemon's rules (`parse_search_template` in
+ * `veld-core/src/db/settings.rs`) rather than trusting them. The value arrives from
+ * a settings document, and a row written by another build, an older daemon or a hand
+ * edit reaches this same navigation — so the http(s) rule in particular is enforced
+ * where it is used, not only where it is written.
+ *
+ * `split`/`join`, not `replace`: `String.replace` gives `$&` and friends meaning in
+ * the replacement, so a query containing `$'` would splice part of the template back
+ * into itself.
+ */
+export function searchTarget(template: string, query: string): string | null {
+  const t = template.trim();
+  const q = query.trim();
+  if (t === "" || q === "") return null;
+  if (!t.includes(SEARCH_QUERY_TOKEN)) return null;
+  if (!/^https?:\/\//i.test(t)) return null;
+  // The token may not be in the host, and this has to be checked *before*
+  // substituting rather than after: `https://%s.evil.com/` becomes a perfectly
+  // parseable URL once a query is spliced in, so the normalise below would accept
+  // it. The daemon refuses such a template on write (`parse_search_template`) and
+  // this is the same rule at the point of use.
+  const host = t.replace(/^https?:\/\//i, "").split(/[/?#]/, 1)[0] ?? "";
+  if (host.includes(SEARCH_QUERY_TOKEN)) return null;
+  return normalizeBrowserUrl(t.split(SEARCH_QUERY_TOKEN).join(encodeURIComponent(q)));
+}
+
+/**
+ * Turn what the user typed into a navigation.
+ *
+ * The one place the address bar's two jobs are told apart. An address is normalised
+ * as before; anything else becomes a search, which is what makes a blank pane usable
+ * for reading documentation instead of only for previewing a dev server.
+ *
+ * `invalid` is still reachable, and deliberately: with search off (`browser.searchUrl`
+ * empty) or an address-shaped string that will not parse (`http://`), there is
+ * nothing honest to navigate to and the caller shows the error.
+ */
+export function resolveAddress(raw: string, searchUrl: string): Address {
+  const text = raw.trim();
+  if (text === "") return { kind: "invalid" };
+  if (looksLikeAddress(text)) {
+    const url = normalizeBrowserUrl(text);
+    // No search fallback for something that *claimed* to be an address: `http://`
+    // or `javascript:alert(1)` are typos and refusals, not queries, and searching
+    // for them would bury the reason the pane did not go there.
+    return url ? { kind: "url", url } : { kind: "invalid" };
+  }
+  const url = searchTarget(searchUrl, text);
+  return url ? { kind: "search", url, query: text } : { kind: "invalid" };
+}
+
 /** `/`, `/ide`, or anything under `/ide` — the two paths that serve this app. */
 const VELD_UI_PATH = /^\/(?:ide(?:\/.*)?)?$/;
 

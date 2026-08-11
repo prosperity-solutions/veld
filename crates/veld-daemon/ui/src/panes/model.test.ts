@@ -49,8 +49,10 @@ import {
   parseSessionSets,
   parseTransferTabs,
   replaceTab,
+  resolveAddress,
   revealDiagPane,
   readLayouts,
+  searchTarget,
   serializeLayouts,
   splitWithTab,
   serializeSessionSets,
@@ -637,6 +639,75 @@ describe("browser tabs", () => {
     expect(normalizeBrowserUrl("")).toBeNull();
     expect(normalizeBrowserUrl("   ")).toBeNull();
     expect(normalizeBrowserUrl("https://")).toBeNull();
+  });
+
+  describe("resolveAddress", () => {
+    const ENGINE = "https://www.google.com/search?q=%s";
+
+    it("navigates to anything that says it is an address", () => {
+      expect(resolveAddress("https://example.com/x", ENGINE)).toEqual({
+        kind: "url",
+        url: "https://example.com/x",
+      });
+      expect(resolveAddress("localhost:3000", ENGINE)).toEqual({
+        kind: "url",
+        url: "https://localhost:3000/",
+      });
+      // The two hosts a dev tool must never search for: no dot, but unmistakably a
+      // place. `localhost` alone was the regression risk in the dotted-host rule.
+      expect(resolveAddress("localhost", ENGINE)).toEqual({
+        kind: "url",
+        url: "https://localhost/",
+      });
+      expect(resolveAddress("[::1]:3000", ENGINE).kind).toBe("url");
+      expect(resolveAddress("web.dev.veld.localhost", ENGINE).kind).toBe("url");
+      // Dotted wins even when the TLD is nonsense — see `looksLikeAddress`.
+      expect(resolveAddress("react.js", ENGINE)).toEqual({
+        kind: "url",
+        url: "https://react.js/",
+      });
+    });
+
+    it("searches for everything else, encoding the query", () => {
+      expect(resolveAddress("react hooks docs", ENGINE)).toEqual({
+        kind: "search",
+        query: "react hooks docs",
+        url: "https://www.google.com/search?q=react%20hooks%20docs",
+      });
+      // A single word: the case that used to navigate to `https://react/` and fail.
+      expect(resolveAddress("react", ENGINE).kind).toBe("search");
+      // A query that would splice the template back into itself through
+      // `String.replace`'s `$&`.
+      expect(resolveAddress("$& $' cost", ENGINE).kind).toBe("search");
+      // Colons are ordinary in a query — a pasted error message is the reason the
+      // scheme test in `looksLikeAddress` also requires the absence of whitespace.
+      expect(resolveAddress("error: cannot find module", ENGINE).kind).toBe("search");
+    });
+
+    it("refuses rather than searching for a broken address, and honours search-off", () => {
+      // Claimed to be an address and is not one: searching for it would bury the
+      // reason the pane did not go there.
+      expect(resolveAddress("http://", ENGINE)).toEqual({ kind: "invalid" });
+      expect(resolveAddress("javascript:alert(1)", ENGINE)).toEqual({ kind: "invalid" });
+      // `browser.searchUrl` empty is the off switch, and then a query has nowhere
+      // to go.
+      expect(resolveAddress("react hooks", "")).toEqual({ kind: "invalid" });
+      expect(resolveAddress("", ENGINE)).toEqual({ kind: "invalid" });
+    });
+
+    it("refuses a template the query could aim, whatever the daemon stored", () => {
+      // The check has to happen before substitution: with a query spliced in, this
+      // template becomes a parseable URL pointing at someone else's host.
+      expect(searchTarget("https://%s.evil.example/", "victim")).toBeNull();
+      expect(resolveAddress("some words", "https://%s.evil.example/")).toEqual({
+        kind: "invalid",
+      });
+      // The daemon's other refusals, re-checked at the point of use because a row
+      // written by another build reaches this same navigation.
+      expect(searchTarget("https://e.example/?q=none", "x")).toBeNull();
+      expect(searchTarget("ftp://e.example/?q=%s", "x")).toBeNull();
+      expect(searchTarget("https://e.example/?q=%s", "  ")).toBeNull();
+    });
   });
 
   describe("isVeldOwnUi", () => {
