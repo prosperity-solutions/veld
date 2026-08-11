@@ -466,6 +466,40 @@ run, while a plain terminal in the same app works perfectly.
   the ones already running**, since a holder is only ever replaced by its shell
   ending. A change to this protocol's semantics protects sessions started after
   it, and the daemon-side half is what has to cover the rest.
+- **A coding agent's state is *told*, never inferred — and adding a second agent is an
+  installer, not a redesign.** Whether an agent in a terminal pane is working, waiting on
+  the user, or done is an **application-level fact that its output does not contain**.
+  Measured, not assumed: Claude Code's inline TUI emits OSC 0 (title), OSC 8 (hyperlinks),
+  OSC 9;4 (progress) and OSC 52 (clipboard), takes no alternate screen, and emits no
+  OSC 133 (`anthropics/claude-code#26235`, closed *not-planned*) and no OSC 9
+  notification. So the two signals that would otherwise generalise across tools — a
+  notification sequence and an alt-screen toggle — both miss the tool that matters most,
+  and any future "detect the agent from the stream" idea starts from that measurement
+  rather than from a hunch. Output quiescence in particular is **not** a substitute: it
+  cannot tell a thinking agent from a waiting one, and it false-positives on blinking
+  cursors and silent builds.
+
+  The mechanism is `veld_core::agent` plus a generated wrapper
+  (`pty/shims::agent_script`) that hands the real binary an **ephemeral `--settings`
+  file** installing lifecycle hooks which call `veld agent-state`. Everything downstream
+  of that is already generic — the daemon endpoint takes a `State` and not a vendor
+  payload, the wire carries a tool *name*, and the rail glyph, the pane dot and the
+  notification table key on the state — so **a new tool is five edits and no new
+  concepts**; `veld_core::agent`'s module docs carry the recipe and the four traps.
+  The ones worth repeating here because they are invariants rather than steps: **never
+  merge into a user's config file** (`~/.claude/settings.json` and a project's
+  `.claude/` are both off limits — the ephemeral flag exists precisely so nothing of
+  the user's is edited); **never install a hook the tool blocks on** (Claude's
+  `PreToolUse`/`Stop`/`UserPromptSubmit`/`PermissionRequest` wait, up to 600s, so a
+  wedged daemon would stall somebody's agent for a badge); **do not assume the payload
+  arrives on stdin** (Codex's `notify` appends the event JSON as the final `argv` entry
+  instead, which is why the parse lives in the CLI and not in the daemon); and **the
+  wrapper must be unreachable for anything but a plain interactive launch**, since a
+  wrapper injecting flags ahead of a subcommand's argv is a documented upstream breakage
+  (`anthropics/claude-code#42485`). **There is deliberately no config surface for
+  this** — a `veld.json` that could name a binary to wrap and a command to run on its
+  lifecycle events is repo-supplied remote code execution, which the hooks rule below
+  already forbids.
 - **Which client is showing a worktree is the daemon's answer, never a shell's.**
   The IDE's ownership registry lives in `crates/veld-daemon/src/ide.rs`, behind a
   control WebSocket (`/api/ide/channel`, ticket-authed like the PTY attach because

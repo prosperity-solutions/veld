@@ -185,6 +185,23 @@ pub fn real_opener(tool: Tool, exclude: Option<&Path>) -> Option<PathBuf> {
     resolve_in(names, exclude, &std::env::var_os("PATH")?)
 }
 
+/// Find the real executable named `name` on `PATH`, skipping `exclude`.
+///
+/// [`real_opener`] generalised for a shim that is not an opener — today the `claude`
+/// wrapper that installs a coding agent's lifecycle hooks
+/// (`crate::agent`). The exclusion carries the same weight it does there and for the
+/// same reason: a shim named `claude` that resolved `claude` on `PATH` would find
+/// itself, and the exec loop that follows is bounded only by an rlimit.
+///
+/// No hardcoded system fallback, unlike [`real_opener`]'s `/usr/bin/open`: there is
+/// no canonical location for a third-party CLI, and inventing one would put a shim in
+/// front of nothing. `None` means "not installed", and the caller's answer to that is
+/// to pass the invocation through untouched.
+#[must_use]
+pub fn real_on_path(name: &str, exclude: Option<&Path>) -> Option<PathBuf> {
+    resolve_in(&[name], exclude, &std::env::var_os("PATH")?)
+}
+
 /// [`real_opener`]'s search, with `PATH` passed in so a test does not have to
 /// mutate the process environment to exercise the exclusion.
 fn resolve_in(names: &[&str], exclude: Option<&Path>, path: &std::ffi::OsStr) -> Option<PathBuf> {

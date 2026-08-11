@@ -18,6 +18,7 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { api, type PaneLaunchMode } from "../api";
+import { inbox, isOsc9Notification, parseOsc133 } from "../inbox/inbox";
 import { ANSI_DARK, ANSI_LIGHT } from "../shared/ansi";
 import { notifyError, notifyRedirect } from "../shared/notify";
 import { terminalPrefs, type TerminalPrefs } from "../shared/settings";
@@ -492,6 +493,11 @@ function ensure(
     listeners: new Set(),
   };
   sessions.set(id, s);
+  // Tell the inbox which worktree this pane belongs to before any signal arrives. The
+  // daemon's relay carries a worktree id of its own, so this is not the only source —
+  // but an OSC 133 mark is filed from inside this session and has nowhere else to get
+  // one from.
+  inbox.register(id, worktreeId);
   // Adopt anything that subscribed before this session existed.
   const waiting = pending.get(id);
   if (waiting) {
@@ -509,7 +515,15 @@ function ensure(
   const send = (data: string) => {
     if (canSend()) s.ws!.send(encoder.encode(data));
   };
-  term.onData(send);
+  term.onData((data) => {
+    // Read-on-type. Typing into a pane is the strongest "I have seen this" there is,
+    // and it is the case a focus rule alone misses: answering a `sudo` prompt or a
+    // permission dialog *in place* must make the badge go away without the user also
+    // having to click it. Cheap — the store returns immediately when there is nothing
+    // unseen, which is every keystroke but the first.
+    inbox.read(s.id);
+    send(data);
+  });
   // Keys that must be answered before xterm sees them: the palette accelerator
   // and Shift+Enter. Sending goes through the same `canSend` gate as ordinary
   // typing, so a replay in progress cannot be interrupted by a keystroke.
@@ -578,14 +592,40 @@ function ensure(
   term.parser.registerOscHandler(9, (data) => {
     // During a reattach the scrollback is replayed through xterm; an OSC 9 in
     // it would otherwise re-notify for output that has already been seen.
-    if (!s.replaying) {
+    //
+    // **`OSC 9;4` is not a notification.** It is the ConEmu/Windows-Terminal progress
+    // sequence (`ESC ] 9 ; 4 ; <state> ; <percent> BEL`), and Claude Code emits it — so
+    // before this check every progress tick rang the bell and raised a banner whose
+    // body read `4;1;50`. Consumed either way (`return true`), because passing an
+    // unhandled OSC 9 through to xterm prints nothing useful.
+    if (!s.replaying && isOsc9Notification(data)) {
       // Sound as well as banner, at the same `terminal.bellVolume`: OSC 9 is
       // the *stronger* "notice me" of the two sequences, so it would be odd for
       // it to be the quieter one. It never doubles up with the handler above —
       // xterm consumes the terminating BEL as the OSC's string terminator and
       // never reports it as a bell.
       playBell();
-      for (const fn of notifyListeners) fn({ sessionId: id, message: data });
+      // Straight into the inbox and nowhere else. There used to be a listener seam here
+      // as well, whose subscriber raised a toast and a system banner of its own — so an
+      // OSC 9 was the one notification with no off switch, and away from the window it
+      // fired twice. The inbox classifies it as `attention` from a `command` producer,
+      // which puts it under `activity.notifyNoticed` with everything else.
+      inbox.report(id, s.worktreeId, { type: "notify", message: data });
+    }
+    return true;
+  });
+  // OSC 133 semantic prompt marks, from veld's own shell integration
+  // (`veld-daemon/src/pty/shims.rs`, `terminal.shellIntegration`). This is what tells
+  // the worktree's inbox that a command ran and how it ended — an exit code, not a
+  // guess. Nothing renders these, so the handler exists purely to file them.
+  //
+  // Gated on the replay like the two above: a reattach writes the scrollback back
+  // through xterm, and every mark still in it would re-report commands that finished
+  // before the page was reloaded.
+  term.parser.registerOscHandler(133, (data) => {
+    if (!s.replaying) {
+      const signal = parseOsc133(data);
+      if (signal) inbox.report(id, s.worktreeId, signal);
     }
     return true;
   });
@@ -775,11 +815,6 @@ const openUrlListeners = new Set<(event: { sessionId: string; url: string }) => 
 /** Subscribers to a shell's OSC 0/2 title — see `onTerminalTitleChange`. */
 const titleListeners = new Set<(event: { sessionId: string; title: string }) => void>();
 
-/** Subscribers to an OSC 9 notification — see `onTerminalNotify`. */
-const notifyListeners = new Set<
-  (event: { sessionId: string; message: string }) => void
->();
-
 /**
  * A URL the daemon routed to this page, and which terminal it came from.
  *
@@ -809,20 +844,6 @@ export function onTerminalTitleChange(
 ): () => void {
   titleListeners.add(fn);
   return () => titleListeners.delete(fn);
-}
-
-/**
- * A process asked to be noticed (OSC 9 — the "show a notification" sequence).
- *
- * `message` is the payload the process sent (often empty). The consumer adds
- * the worktree and pane context and decides how to surface it (toast, system
- * banner) — this host only reports that a notification was *requested*.
- */
-export function onTerminalNotify(
-  fn: (event: { sessionId: string; message: string }) => void,
-): () => void {
-  notifyListeners.add(fn);
-  return () => notifyListeners.delete(fn);
 }
 
 function handleControl(s: Session, raw: string): void {
@@ -863,6 +884,10 @@ function handleControl(s: Session, raw: string): void {
       // `ended`, not `error`: the shell finished, which is a normal way for a
       // terminal to stop and offers a Restart rather than reading as a fault.
       s.exitCode = msg.code ?? 0;
+      // The inbox's fallback producer, for a pane with no shell integration at all — a
+      // `oneshot` command pane, or a shell veld has no handoff for. The store discards it
+      // where OSC 133 already spoke, so this cannot double-report.
+      inbox.report(s.id, s.worktreeId, { type: "exit", code: s.exitCode });
       setState(s, "ended", `exit ${s.exitCode}`);
       if (
         shouldCloseOnExit({
@@ -1165,6 +1190,12 @@ function requestFit(s: Session): void {
  * one of the daemon's session slots) until the detach grace expires.
  */
 export function disposeTerminal(id: string): void {
+  // Forget the pane's unseen events, and only here. A *released* terminal is being
+  // handed to another window and its news is still the worktree's; a disposed one has
+  // no pane left to focus, so an event pointing at it could never be read except by
+  // mark-all-read — a badge the user cannot clear by looking is the poisoning the
+  // design set out to avoid.
+  inbox.forget(id);
   releaseTerminal(id);
   // Fire-and-forget: a failure here (daemon already gone) leaves the session
   // to the daemon's reaper, and there is no UI left to report it to.

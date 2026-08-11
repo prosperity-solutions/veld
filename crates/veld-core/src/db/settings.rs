@@ -337,6 +337,14 @@ pub enum SettingKey {
     TerminalReconnectFirstDelaySeconds,
     TerminalOpenUrlsInApp,
     TerminalInterceptSystemOpen,
+    TerminalShellIntegration,
+    TerminalAgentIntegration,
+    ActivityShowWorking,
+    ActivityNotifyCommandFinished,
+    ActivityNotifyCommandFailed,
+    ActivityNotifyAgentWaiting,
+    ActivityNotifyNoticed,
+    ActivityNotifyAgentFinished,
     WorktreeMarkerStyle,
     WorktreeTrashRetention,
     RunsHistoryDays,
@@ -378,6 +386,14 @@ impl SettingKey {
         Self::TerminalReconnectFirstDelaySeconds,
         Self::TerminalOpenUrlsInApp,
         Self::TerminalInterceptSystemOpen,
+        Self::TerminalShellIntegration,
+        Self::TerminalAgentIntegration,
+        Self::ActivityShowWorking,
+        Self::ActivityNotifyCommandFinished,
+        Self::ActivityNotifyCommandFailed,
+        Self::ActivityNotifyAgentWaiting,
+        Self::ActivityNotifyNoticed,
+        Self::ActivityNotifyAgentFinished,
         Self::WorktreeMarkerStyle,
         Self::WorktreeTrashRetention,
         Self::RunsHistoryDays,
@@ -408,6 +424,14 @@ impl SettingKey {
             Self::TerminalReconnectFirstDelaySeconds => "terminal.reconnectFirstDelaySeconds",
             Self::TerminalOpenUrlsInApp => "terminal.openUrlsInApp",
             Self::TerminalInterceptSystemOpen => "terminal.interceptSystemOpen",
+            Self::TerminalShellIntegration => "terminal.shellIntegration",
+            Self::TerminalAgentIntegration => "terminal.agentIntegration",
+            Self::ActivityShowWorking => "activity.showWorking",
+            Self::ActivityNotifyCommandFinished => "activity.notifyCommandFinished",
+            Self::ActivityNotifyCommandFailed => "activity.notifyCommandFailed",
+            Self::ActivityNotifyAgentWaiting => "activity.notifyAgentWaiting",
+            Self::ActivityNotifyNoticed => "activity.notifyNoticed",
+            Self::ActivityNotifyAgentFinished => "activity.notifyAgentFinished",
             Self::WorktreeMarkerStyle => "worktree.markerStyle",
             Self::WorktreeTrashRetention => "worktree.trashRetentionDays",
             Self::RunsHistoryDays => "runs.historyDays",
@@ -440,6 +464,14 @@ impl SettingKey {
             "terminal.reconnectFirstDelaySeconds" => Self::TerminalReconnectFirstDelaySeconds,
             "terminal.openUrlsInApp" => Self::TerminalOpenUrlsInApp,
             "terminal.interceptSystemOpen" => Self::TerminalInterceptSystemOpen,
+            "terminal.shellIntegration" => Self::TerminalShellIntegration,
+            "terminal.agentIntegration" => Self::TerminalAgentIntegration,
+            "activity.showWorking" => Self::ActivityShowWorking,
+            "activity.notifyCommandFinished" => Self::ActivityNotifyCommandFinished,
+            "activity.notifyCommandFailed" => Self::ActivityNotifyCommandFailed,
+            "activity.notifyAgentWaiting" => Self::ActivityNotifyAgentWaiting,
+            "activity.notifyNoticed" => Self::ActivityNotifyNoticed,
+            "activity.notifyAgentFinished" => Self::ActivityNotifyAgentFinished,
             "worktree.markerStyle" => Self::WorktreeMarkerStyle,
             "worktree.trashRetentionDays" => Self::WorktreeTrashRetention,
             "runs.historyDays" => Self::RunsHistoryDays,
@@ -526,6 +558,14 @@ impl SettingKey {
             | Self::TerminalShiftEnterNewline
             | Self::TerminalOpenUrlsInApp
             | Self::TerminalInterceptSystemOpen
+            | Self::TerminalShellIntegration
+            | Self::TerminalAgentIntegration
+            | Self::ActivityShowWorking
+            | Self::ActivityNotifyCommandFinished
+            | Self::ActivityNotifyCommandFailed
+            | Self::ActivityNotifyAgentWaiting
+            | Self::ActivityNotifyNoticed
+            | Self::ActivityNotifyAgentFinished
             | Self::BrowserQuickSwitchResponsive
             | Self::BrowserQuickSwitchColorScheme
             | Self::UiHideDisabledActions => Value::from(value.as_bool().ok_or_else(bad)?),
@@ -944,6 +984,80 @@ pub fn defaults() -> BTreeMap<String, Value> {
         // It is the only setting that puts veld in a shell's startup, which is why
         // it is a setting at all — see the key's own docs.
         (SettingKey::TerminalInterceptSystemOpen, Value::from(true)),
+        // On: the feature it feeds — the rail's unread badge — is worthless if the
+        // events that fill it are opt-in, because nobody switches on a signal they
+        // have never seen. What it costs is two `precmd`/`PROMPT_COMMAND` hooks that
+        // print an escape sequence, in a shell veld is already in for
+        // `terminal.interceptSystemOpen`. It is a separate key from that one because
+        // the two are independent decisions: "put the shim directory on my PATH" and
+        // "tell the window when a command ended" are not the same permission, and the
+        // first version made shell integration die whenever the *other* switch was
+        // off — a coupling nothing in either setting's documentation implied.
+        (SettingKey::TerminalShellIntegration, Value::from(true)),
+        // On, for the same reason, and with the same independence. This one is the
+        // more invasive of the two — it puts a `claude` shim on `PATH` and hands the
+        // agent an ephemeral `--settings` file — so it is worth being able to turn off
+        // on its own, without losing the OSC 133 half that has nothing to do with
+        // agents. Nothing of the user's is edited either way: no
+        // `~/.claude/settings.json` merge, ever.
+        (SettingKey::TerminalAgentIntegration, Value::from(true)),
+        // **Off**, reversing an earlier default-on decision on evidence from real use.
+        //
+        // The signal is only as good as its producers, and today they are uneven. A plain
+        // shell command is exact — a start mark with no end mark yet genuinely means
+        // "running here". A coding agent is not: no *installed* hook reports `Working`
+        // (the one that did, `SessionStart`, was blocking and set the state once, so an
+        // idle agent spun forever), and an agent veld has no installer for reports
+        // nothing at all. A spinner that is authoritative for builds, absent for
+        // supported agents and meaningless for unsupported ones is not something to put
+        // in front of everybody by default.
+        //
+        // Kept as a setting rather than removed, because for the build case it answers a
+        // real question ("is that still going?") and costs nothing to produce. Promoting
+        // it back to on wants `PostToolUse` first — see `veld_core::agent`.
+        (SettingKey::ActivityShowWorking, Value::from(false)),
+        // The notification table. Four rows and not one switch, because "a command
+        // finished" and "a coding agent is waiting for you" are not the same event and a
+        // single answer for both is wrong in one direction or the other.
+        //
+        // Every one of these fires **only while Veld is not the focused window** — the
+        // rule the OSC 9 notification path already used before this table existed.
+        //
+        // Off, and the only one that is: a finished command is news, and the rail already
+        // carries it. Interrupting a user in another application to say a build they
+        // walked away from succeeded is the definition of a notification people turn off
+        // wholesale — taking the two rows below with it.
+        (
+            SettingKey::ActivityNotifyCommandFinished,
+            Value::from(false),
+        ),
+        // On: a failed build is the one "it ended" event that is actionable, and finding
+        // out twenty minutes later is the cost this exists to remove.
+        (SettingKey::ActivityNotifyCommandFailed, Value::from(true)),
+        // On: an agent stopped at a permission prompt or a question is the single most
+        // actionable thing this whole feature detects.
+        (SettingKey::ActivityNotifyAgentWaiting, Value::from(true)),
+        // An OSC 9 notification — a program asking to be noticed. Its own row rather
+        // than riding the agent one, because the agent row's label has to be able to
+        // say what it covers and OSC 9 is emitted by anything, agent or not.
+        //
+        // On, and this is the row that keeps a shipped behaviour rather than adding one:
+        // an OSC 9 already raised a system banner before this table existed, with no
+        // setting to govern it at all. A default of `false` here would have made this
+        // change silently switch that off.
+        //
+        // This is also where "something is reading from stdin" would land if veld ever
+        // learns to see it. It cannot today: that is not observable from the browser at
+        // all, and not portably observable anywhere — there is no `/proc` on macOS, and
+        // `tcgetpgrp` names the foreground process without saying it is blocked on a
+        // read. It would be a holder-side, platform-specific producer.
+        (SettingKey::ActivityNotifyNoticed, Value::from(true)),
+        // On, at the maintainer's call, with the frequency stated: Claude Code's
+        // end-of-turn notification fires after **every response**, not once per session,
+        // so this is a banner each time an agent hands control back while you are
+        // elsewhere. That is the point (you walked away; you want to be called back), and
+        // it is also the row most likely to be turned off first.
+        (SettingKey::ActivityNotifyAgentFinished, Value::from(true)),
         // Empty: veld ships no opinion about which hosts need the real browser.
         // A default entry would be a guess about someone else's SSO provider.
         (SettingKey::BrowserExternalOrigins, Value::Array(Vec::new())),
@@ -1154,6 +1268,41 @@ impl Db {
     /// an off switch.
     pub fn terminal_intercept_system_open(&self) -> bool {
         self.setting(&SettingKey::TerminalInterceptSystemOpen)
+            .ok()
+            .flatten()
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true)
+    }
+
+    /// Whether a terminal session gets OSC 133 shell integration, so the window can
+    /// tell that a command started, ended, and with what status.
+    ///
+    /// Read by the daemon, which builds the session's environment. Independent of
+    /// [`SettingKey::TerminalInterceptSystemOpen`] even though both ride the same
+    /// startup handoff (`ZDOTDIR` for zsh, posix-mode `$ENV` for bash): the handoff
+    /// file is written once and each half of it is gated by its own variable, so one
+    /// switch cannot turn the other off. That coupling existed in the first version
+    /// and was wrong in a way neither setting's documentation admitted.
+    pub fn terminal_shell_integration(&self) -> bool {
+        self.setting(&SettingKey::TerminalShellIntegration)
+            .ok()
+            .flatten()
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true)
+    }
+
+    /// Whether a terminal session gets a coding-agent shim that injects lifecycle
+    /// hooks, so an agent waiting on the user reaches the worktree's inbox.
+    ///
+    /// Read by the daemon, which builds the session's environment. Off means the
+    /// `claude` shim on `PATH` is a bare `exec` passthrough — the file is still there
+    /// (the shim directory is written once per daemon start, not per session), and it
+    /// is the *absence of `VELD_AGENT_HOOKS`* in the environment that disables it. A
+    /// gate that depended on the file being absent would have to rewrite the
+    /// directory whenever the setting changed, and would still be wrong for every
+    /// shell already open.
+    pub fn terminal_agent_integration(&self) -> bool {
+        self.setting(&SettingKey::TerminalAgentIntegration)
             .ok()
             .flatten()
             .and_then(|v| v.as_bool())
@@ -1464,6 +1613,58 @@ mod tests {
             )]))
             .unwrap_err();
         assert!(matches!(err, DbError::InvalidSetting { .. }));
+    }
+
+    /// The two terminal-integration switches default on, take a bool, and are
+    /// **independent of each other and of `terminal.interceptSystemOpen`**.
+    ///
+    /// The independence is the assertion worth having. All three ride the same
+    /// startup handoff, and the first version of shell integration was gated on
+    /// `interceptSystemOpen` — so turning off "catch `open`/`xdg-open`" silently took
+    /// the unread badge with it. Nothing in the type system stops that coming back:
+    /// the coupling would live in `session_env`, and from here the only observable is
+    /// that each accessor answers for its own key.
+    #[test]
+    fn the_terminal_integration_switches_are_independent_bools_defaulting_on() {
+        let (_dir, db) = test_db();
+        assert!(db.terminal_shell_integration());
+        assert!(db.terminal_agent_integration());
+
+        // One off leaves the other two alone, in both directions.
+        db.patch_settings(&patch(&[("terminal.shellIntegration", Value::from(false))]))
+            .unwrap();
+        assert!(!db.terminal_shell_integration());
+        assert!(db.terminal_agent_integration());
+        assert!(db.terminal_intercept_system_open());
+
+        db.patch_settings(&patch(&[
+            ("terminal.shellIntegration", Value::from(true)),
+            ("terminal.agentIntegration", Value::from(false)),
+        ]))
+        .unwrap();
+        assert!(db.terminal_shell_integration());
+        assert!(!db.terminal_agent_integration());
+        assert!(db.terminal_intercept_system_open());
+
+        // And `interceptSystemOpen` off does not take either of them down with it —
+        // the exact coupling that shipped once.
+        db.patch_settings(&patch(&[(
+            "terminal.interceptSystemOpen",
+            Value::from(false),
+        )]))
+        .unwrap();
+        assert!(db.terminal_shell_integration());
+        assert!(!db.terminal_intercept_system_open());
+
+        for key in ["terminal.shellIntegration", "terminal.agentIntegration"] {
+            let err = db
+                .patch_settings(&patch(&[(key, Value::from("on"))]))
+                .unwrap_err();
+            assert!(
+                matches!(err, DbError::InvalidSetting { .. }),
+                "{key} accepted a string"
+            );
+        }
     }
 
     #[test]

@@ -426,6 +426,34 @@ requests at runtime — branding rule.
   runs inside a shell's startup gets a switch; it is read at **ticket** time, where
   the database is already open, so nothing puts a `Db::open()` on the
   session-spawn path.
+- **Three features ride that one file, and each gates its own half of it.**
+  `terminal.shellIntegration` adds the OSC 133 prompt marks that mark a worktree's
+  row in the rail, and `terminal.agentIntegration` puts a `claude` wrapper
+  in the shim directory (so it needs the directory on `PATH` even when the browser
+  feature is off). All three settings are read at ticket time into one
+  `shims::SessionOptions`, and the generated file decides what to run from the
+  **variables in the environment** (`VELD_SHIM_DIR`, `VELD_SHELL_INTEGRATION`,
+  `VELD_AGENT_HOOKS`) rather than from a file that exists or does not. That is what
+  keeps the switches independent without three files, and it is why a settings
+  change needs no directory rewrite: the shim directory is written once per daemon
+  start, so a gate keyed on a file's absence would be wrong for every shell
+  already open. The first version gated shell integration on
+  `terminal.interceptSystemOpen` and made the badge vanish when the *other* switch
+  was turned off.
+- **The coding-agent wrapper is the one shim that stands in front of a command the
+  user types deliberately**, so it is built to be unreachable for anything but a
+  plain interactive launch: no arguments, or a first argument beginning with `-`,
+  and no `-p`/`--print`/`--settings`. Every Claude Code subcommand is a bare first
+  word, which is what keeps `anthropics/claude-code#42485` — a wrapper injecting
+  flags ahead of a subcommand's argv — out of reach. It resolves the real binary at
+  run time (a user may install the agent after the daemon started) by walking `PATH`
+  and comparing **physical** directories, using shell builtins only: the first
+  version used `$(dirname "$0")`, and on a `PATH` without `/usr/bin` the missing
+  `dirname` left the self-exclusion empty and the wrapper `exec`ed itself until an
+  rlimit killed it. That one guard therefore **fails closed** — a wrapper that
+  cannot establish its own directory refuses — while every other failure path
+  `exec`s the real binary untouched. Adding a second agent is covered by
+  `veld_core::agent`'s module docs; the invariants are in the repo's AGENTS.md.
 - **A shim may shadow a real tool; it may never invent one.** `xdg-open` does not
   exist on macOS, and generating a shim for it put a command on `PATH` whose only
   answer is "no system opener" — so the portable idiom

@@ -1,4 +1,5 @@
 pub mod action;
+pub mod agent;
 pub mod config;
 pub mod desktop;
 pub mod doctor;

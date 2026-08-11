@@ -50,6 +50,7 @@ import {
   Textarea,
 } from "@mantine/core";
 import {
+  IconActivity,
   IconAdjustments,
   IconAppWindow,
   IconGitBranch,
@@ -76,7 +77,10 @@ import {
   hideDisabledActions,
   logsTimeZone,
   searchUrl,
+  activityPrefs,
+  terminalAgentIntegration,
   terminalInterceptSystemOpen,
+  terminalShellIntegration,
   runHistoryDays,
   terminalOpenUrlsInApp,
   terminalShell,
@@ -142,6 +146,41 @@ function SectionTitle(props: { children: ReactNode }) {
   );
 }
 
+/**
+ * The notification table, in the order it reads.
+ *
+ * Data rather than four hand-written rows, because the *only* thing that differs between
+ * them is a key and two strings — and because the keys have to match
+ * `inbox.notifyKey(unseen)` exactly. One list is one place for that to be true.
+ */
+const NOTIFY_ROWS: { key: string; label: string; help: string }[] = [
+  {
+    key: "activity.notifyCommandFinished",
+    label: "A command finished",
+    help: "Off by default: a build that succeeded is news, and the rail already carries it. This is the row most likely to make someone turn notifications off wholesale.",
+  },
+  {
+    key: "activity.notifyCommandFailed",
+    label: "A command failed",
+    help: "The one 'it ended' event that is actionable — and finding out twenty minutes later is the cost this exists to remove.",
+  },
+  {
+    key: "activity.notifyAgentWaiting",
+    label: "A coding agent is waiting for you",
+    help: "It stopped at a permission prompt, a question, or a plan to approve — and it will sit there until you answer. The single most actionable thing Veld can tell you about a pane you are not looking at.",
+  },
+  {
+    key: "activity.notifyAgentFinished",
+    label: "A coding agent finished",
+    help: "Note the frequency: an agent's end-of-turn signal fires after every response, not once per session — so this is a banner each time one hands control back while you are elsewhere. That is the point if you walked away, and the first row to turn off if it is not.",
+  },
+  {
+    key: "activity.notifyNoticed",
+    label: "A program asked to be noticed",
+    help: "Any program can ring the terminal's notification sequence (OSC 9) with a message — a test runner, a deploy script, a tool Veld knows nothing about. Its own row rather than the agent one above, because that label has to be able to say what it covers. Veld cannot yet tell that a plain program is merely *waiting* for input: that is not observable from the browser at all, so a program has to say so itself.",
+  },
+];
+
 /** Mirrors `MAX_WORKTREE_STORAGE_DIR_LEN` in veld-core's settings.rs. */
 const MAX_WORKTREE_STORAGE_DIR_LEN = 1024;
 
@@ -170,7 +209,7 @@ function worktreeStorageDirError(path: string): string | null {
   return null;
 }
 
-type GroupId = "general" | "git" | "terminal" | "links" | "browser";
+type GroupId = "general" | "git" | "terminal" | "activity" | "links" | "browser";
 
 /**
  * The groups, in sidebar order. `general` is first and is the one the dialog opens
@@ -183,11 +222,23 @@ type GroupId = "general" | "git" | "terminal" | "links" | "browser";
  * first, so they read as one decision with two refinements. Filed under Terminal
  * they were eight rows below the font size, with `browser.externalOrigins` sitting
  * under a Terminal heading.
+ *
+ * `activity` is the same story one step further on. Its seven settings — what Veld
+ * notices, what it shows in the rail, and what is allowed to interrupt you — are not
+ * *about* the terminal even though two of them reach it: Terminal already carries
+ * appearance, behaviour, shell and auto-reconnect, and burying a four-row notification
+ * table under it would put "does this send me a system banner" below the cursor style.
+ *
+ * **A group is not a key prefix**, here or anywhere in this dialog: `browser.externalOrigins`
+ * lives under *Links*, and `worktree.*`, `runs.*` and `logs.*` all live under *General*.
+ * So the two producer switches keep their `terminal.*` names — they configure what veld
+ * puts in your **shell** — while the presentation and notification keys are `activity.*`.
  */
 const GROUPS: { id: GroupId; label: string; icon: ReactNode }[] = [
   { id: "general", label: "General", icon: <IconAdjustments size={15} /> },
   { id: "git", label: "Git", icon: <IconGitBranch size={15} /> },
   { id: "terminal", label: "Terminal", icon: <IconTerminal2 size={15} /> },
+  { id: "activity", label: "Activity", icon: <IconActivity size={15} /> },
   { id: "links", label: "Links", icon: <IconLink size={15} /> },
   { id: "browser", label: "Browser panes", icon: <IconAppWindow size={15} /> },
 ];
@@ -230,6 +281,9 @@ export function SettingsDialog(props: {
   const quick = quickSwitchPrefs(settings ?? {});
   const openInApp = terminalOpenUrlsInApp(settings ?? {});
   const intercept = terminalInterceptSystemOpen(settings ?? {});
+  const shellIntegration = terminalShellIntegration(settings ?? {});
+  const agentIntegration = terminalAgentIntegration(settings ?? {});
+  const activity = activityPrefs(settings ?? {});
   const logsTz = logsTimeZone(settings ?? {});
   const hideDisabled = hideDisabledActions(settings ?? {});
 
@@ -1187,6 +1241,76 @@ export function SettingsDialog(props: {
                   }
                 />
               </Row>
+            </Stack>
+          </Tabs.Panel>
+
+          <Tabs.Panel
+            value="activity"
+            style={PANEL_STYLE}
+            pl={{ base: 0, sm: "lg" }}
+          >
+            <Stack gap="md">
+              <SectionTitle>Noticing</SectionTitle>
+              <Row
+                label="Notice when a command finishes"
+                help="Veld registers two hooks in the shell it opens, which print an invisible marker when a command starts and when it ends. A command that finishes in a terminal you are not looking at then marks its worktree in the rail — and its pane's tab, so you can tell which one. A shell sitting at a prompt never counts, and neither does a watcher that has not ended, so `pnpm dev` stays silent. Nothing of yours is edited: the hooks live in a file Veld owns and rewrites on every start. zsh, and bash 4.4 or newer — macOS's own /bin/bash is 3.2 and cannot carry it. Takes effect for new terminals; a running shell keeps the environment it started with."
+              >
+                <Checkbox
+                  size="xs"
+                  checked={shellIntegration}
+                  disabled={locked}
+                  onChange={(e) =>
+                    set({ "terminal.shellIntegration": e.currentTarget.checked })
+                  }
+                />
+              </Row>
+              <Row
+                label="Notice when a coding agent is waiting for you"
+                help="A coding agent's output does not say whether it is thinking or waiting — measured against Claude Code, which emits a title sequence, hyperlinks and a progress report, and nothing about its state. So Veld puts a `claude` wrapper on the terminal's PATH that hands the real binary an extra, throwaway settings file installing hooks that report it. Your own ~/.claude/settings.json is never touched and no .claude/ is written into your project; the flag merges, so your configuration still applies. Anything that is not a plain interactive launch — `claude mcp`, `claude update`, `claude -p …`, or a --settings of your own — is passed through untouched. Takes effect for new terminals."
+              >
+                <Checkbox
+                  size="xs"
+                  checked={agentIntegration}
+                  disabled={locked}
+                  onChange={(e) =>
+                    set({ "terminal.agentIntegration": e.currentTarget.checked })
+                  }
+                />
+              </Row>
+              <Row
+                label="Show what is working"
+                help="A spinner on any worktree with a command running in it. Off by default because the signal is uneven: for a shell command it is exact — a start marker with no end marker yet genuinely means 'running here' — but a coding agent does not report it (the hook that would is one Veld will not install, because it blocks the agent), and an agent Veld has no integration for reports nothing at all. Useful if you mainly want to know whether a build is still going. It is the quietest thing the rail shows either way: it loses to every unseen event, so a worktree with an agent waiting for you still reads as waiting."
+              >
+                <Checkbox
+                  size="xs"
+                  checked={activity.showWorking}
+                  disabled={locked}
+                  onChange={(e) =>
+                    set({ "activity.showWorking": e.currentTarget.checked })
+                  }
+                />
+              </Row>
+
+              <SectionTitle>Notifying</SectionTitle>
+              <Text size="xs" c="dimmed">
+                System notifications, and only while Veld is not the focused window —
+                nothing interrupts you about a pane you could be looking at. The rail
+                still marks everything either way.
+              </Text>
+              {/* A table and not one switch: "a command finished" and "a coding agent
+                  is waiting for you" are different enough events that a single answer
+                  for both is wrong in one direction or the other. Four rows, four keys —
+                  each validated by the same boolean path as every other switch here. */}
+              {NOTIFY_ROWS.map((row) => (
+                <Row key={row.key} label={row.label} help={row.help}>
+                  <Checkbox
+                    size="xs"
+                    checked={activity.notify[row.key] ?? false}
+                    disabled={locked}
+                    onChange={(e) => set({ [row.key]: e.currentTarget.checked })}
+                  />
+                </Row>
+              ))}
             </Stack>
           </Tabs.Panel>
 

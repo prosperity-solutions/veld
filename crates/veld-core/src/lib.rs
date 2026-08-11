@@ -1,3 +1,4 @@
+pub mod agent;
 pub mod config;
 pub use uuid;
 pub mod console;
