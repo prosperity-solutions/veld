@@ -192,6 +192,18 @@ export function SettingsDialog(props: {
   const [bellVolume, setBellVolume] = useState(term.bellVolume);
   const graceValue = detachGraceMinutes(settings ?? {});
   const [grace, setGrace] = useState<number | string>(graceValue);
+  const reconnectTriesValue = term.reconnectTries;
+  const [reconnectTries, setReconnectTries] = useState<number | string>(
+    reconnectTriesValue,
+  );
+  const reconnectBackoffValue = term.reconnectBackoffSeconds;
+  const [reconnectBackoff, setReconnectBackoff] = useState<number | string>(
+    reconnectBackoffValue,
+  );
+  const reconnectFirstValue = term.reconnectFirstDelaySeconds;
+  const [reconnectFirst, setReconnectFirst] = useState<number | string>(
+    reconnectFirstValue,
+  );
   const retentionValue = trashRetentionDays(settings ?? {});
   const [retention, setRetention] = useState<number | string>(retentionValue);
   const historyValue = runHistoryDays(settings ?? {});
@@ -222,6 +234,9 @@ export function SettingsDialog(props: {
     setBellVolume(term.bellVolume);
     setFontFamily(term.fontFamily);
     setGrace(graceValue);
+    setReconnectTries(reconnectTriesValue);
+    setReconnectBackoff(reconnectBackoffValue);
+    setReconnectFirst(reconnectFirstValue);
     setRetention(retentionValue);
     setHistory(historyValue);
     setExempt(exemptValue.join("\n"));
@@ -284,6 +299,10 @@ export function SettingsDialog(props: {
         <Tabs
           orientation="vertical"
           value={group}
+          /* `settings-tabs` scopes the selected-tab background to this sidebar so
+             the pane-strip tabs (custom classes) and any other Mantine Tabs are
+             untouched — see styles.css. */
+          className="settings-tabs"
           /* Mantine's onChange is nullable (a tab can be deselected); this surface
              always has exactly one group showing, so a null falls back to General
              rather than rendering an empty panel. */
@@ -682,6 +701,75 @@ export function SettingsDialog(props: {
                       grace,
                       graceValue,
                       setGrace,
+                    )
+                  }
+                />
+              </Row>
+              <SectionTitle>Auto-reconnect</SectionTitle>
+              <Row
+                label="Reconnect attempts on drop"
+                help="How many times a dropped connection reattaches to the running shell before it gives up and shows the Reconnect button (the machine slept, the daemon restarted mid-update, a proxy timed out — the shell keeps running, which is what the holder process is for). 0 turns it off: a dropped socket always waits for a click. Each attempt reattaches to the same shell, never starts a new one."
+              >
+                <NumberInput
+                  size="xs"
+                  w={100}
+                  min={0}
+                  max={20}
+                  value={reconnectTries}
+                  disabled={locked}
+                  onChange={setReconnectTries}
+                  onBlur={() =>
+                    commitNumber(
+                      "terminal.reconnectTries",
+                      reconnectTries,
+                      reconnectTriesValue,
+                      setReconnectTries,
+                    )
+                  }
+                />
+              </Row>
+              <Row
+                label="First attempt after"
+                help="Seconds before the first auto-reconnect fires. The first reconnect is the near-immediate one that fixes a sleep or a dropped proxy, so it defaults small — 1s — and this is the setting to raise if a flaky network is racing every blip."
+              >
+                <NumberInput
+                  size="xs"
+                  w={100}
+                  min={1}
+                  max={30}
+                  suffix=" s"
+                  value={reconnectFirst}
+                  disabled={locked}
+                  onChange={setReconnectFirst}
+                  onBlur={() =>
+                    commitNumber(
+                      "terminal.reconnectFirstDelaySeconds",
+                      reconnectFirst,
+                      reconnectFirstValue,
+                      setReconnectFirst,
+                    )
+                  }
+                />
+              </Row>
+              <Row
+                label="Wait between later attempts"
+                help="Seconds between attempts after the first. This is the backoff: a connection still failing is not hammering a daemon that is itself coming back, so later attempts space out to this interval."
+              >
+                <NumberInput
+                  size="xs"
+                  w={100}
+                  min={1}
+                  max={300}
+                  suffix=" s"
+                  value={reconnectBackoff}
+                  disabled={locked}
+                  onChange={setReconnectBackoff}
+                  onBlur={() =>
+                    commitNumber(
+                      "terminal.reconnectBackoffSeconds",
+                      reconnectBackoff,
+                      reconnectBackoffValue,
+                      setReconnectBackoff,
                     )
                   }
                 />

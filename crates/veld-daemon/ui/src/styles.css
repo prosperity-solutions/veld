@@ -3323,3 +3323,21 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
   font-weight: 600;
   color: var(--accent);
 }
+
+
+/* The Settings dialog's group sidebar (Mantine Tabs, vertical). The selected
+   group gets a subtle raised panel behind it in addition to the green left
+   edge, so the active tab is legible at a glance rather than five green edges
+   all reading as selected. Scoped to `.settings-tabs` so the pane-strip tabs
+   (custom classes) and any other Mantine Tabs are untouched. `--panel2` is a
+   step lighter than the dialog's `--panel` in both themes — a whisper, not a
+   filled chip. */
+.settings-tabs .mantine-Tabs-list {
+  gap: 2px;
+}
+.settings-tabs .mantine-Tabs-tab[data-active] {
+  background: var(--panel2);
+}
+.settings-tabs .mantine-Tabs-tab[data-active]:hover {
+  background: var(--panel2);
+}

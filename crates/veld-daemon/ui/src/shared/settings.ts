@@ -74,6 +74,9 @@ const FALLBACK = {
   scrollback: 10000,
   bellVolume: 50,
   shiftEnterNewline: true,
+  reconnectTries: 3,
+  reconnectBackoffSeconds: 5,
+  reconnectFirstDelaySeconds: 1,
   markerStyle: "color" as MarkerStyle,
   detachGraceMinutes: 30,
   quickSwitchResponsive: true,
@@ -155,6 +158,14 @@ export interface TerminalPrefs {
   scrollback: number;
   bellVolume: number;
   shiftEnterNewline: boolean;
+  /** How many times a dropped socket reconnects to the same shell by itself
+   *  before waiting for a click. `0` disables auto-reconnect. */
+  reconnectTries: number;
+  /** Seconds between auto-reconnect attempts after the first. */
+  reconnectBackoffSeconds: number;
+  /** Seconds before the first auto-reconnect attempt — the "nearly immediate"
+   *  one. */
+  reconnectFirstDelaySeconds: number;
 }
 
 export function terminalPrefs(doc: SettingsDoc): TerminalPrefs {
@@ -174,6 +185,17 @@ export function terminalPrefs(doc: SettingsDoc): TerminalPrefs {
       doc,
       "terminal.shiftEnterNewline",
       FALLBACK.shiftEnterNewline,
+    ),
+    reconnectTries: num(doc, "terminal.reconnectTries", FALLBACK.reconnectTries),
+    reconnectBackoffSeconds: num(
+      doc,
+      "terminal.reconnectBackoffSeconds",
+      FALLBACK.reconnectBackoffSeconds,
+    ),
+    reconnectFirstDelaySeconds: num(
+      doc,
+      "terminal.reconnectFirstDelaySeconds",
+      FALLBACK.reconnectFirstDelaySeconds,
     ),
   };
 }

@@ -146,6 +146,21 @@ interface Session {
    *  write into a terminal that has since been restarted. */
   generation: number;
   /**
+   * Auto-reconnect budget remaining in the current retry cycle, or `null` when
+   * not retrying (a healthy connection, or auto-reconnect disabled).
+   *
+   * `null` rather than `0` because the two need to be told apart: "not in a
+   * cycle" must re-arm from the setting, while "budget exhausted" must stay
+   * dead and wait for a click. See [`maybeAutoReconnect`].
+   */
+  reconnectLeft: number | null;
+  /** Whether the cycle's first attempt has fired, so the second and later wait
+   *  the backoff rather than the near-immediate first delay again. */
+  reconnectFiredFirst: boolean;
+  /** Handle for the pending reconnect timer, so a manual restart or reconnect
+   *  cancels it instead of racing the next attempt. */
+  reconnectTimer: number | null;
+  /**
    * True while replayed scrollback is being fed to the terminal.
    *
    * Nothing the terminal tries to *send* may leave while this is set. Recorded
@@ -470,6 +485,9 @@ function ensure(
     detail: "",
     observer: null,
     generation: 0,
+    reconnectLeft: null,
+    reconnectFiredFirst: false,
+    reconnectTimer: null,
     replaying: false,
     replayWrites: 0,
     replayEnded: false,
@@ -619,7 +637,13 @@ async function connect(s: Session, mode?: PaneLaunchMode): Promise<void> {
   ws.onmessage = (ev) => {
     if (s.generation !== generation) return;
     if (typeof ev.data === "string") {
-      if (ev.data.includes('"ready"')) everReady = true;
+      if (ev.data.includes('"ready"')) {
+        everReady = true;
+        // A live connection ends any auto-reconnect cycle: the next drop arms
+        // fresh with the full budget rather than continuing a spent one.
+        s.reconnectLeft = null;
+        s.reconnectFiredFirst = false;
+      }
       handleControl(s, ev.data);
       return;
     }
@@ -652,11 +676,21 @@ async function connect(s: Session, mode?: PaneLaunchMode): Promise<void> {
     // between a user retrying and a user checking the daemon log.
     if (everReady) {
       setState(s, "error", "connection lost");
-      writeNotice(s, "connection lost");
+      // Narrate only the first drop of a retry cycle: an auto-reconnect attempt
+      // failing again would otherwise write "connection lost" once per attempt
+      // into the scrollback. The state is already `error` — the pane and the
+      // overlay show it — so retry failures stay silent.
+      if (s.reconnectLeft === null) writeNotice(s, "connection lost");
     } else {
       setState(s, "error", "could not open a terminal — see the daemon log");
-      writeNotice(s, "could not open a terminal — see the daemon log");
+      if (s.reconnectLeft === null) {
+        writeNotice(s, "could not open a terminal — see the daemon log");
+      }
     }
+    // Whatever ended the socket, the shell is (or should be) still running —
+    // that is what the holder process and the detach grace are for — so try to
+    // get back to it on the user's behalf before offering the button.
+    maybeAutoReconnect(s);
   };
 }
 
@@ -866,6 +900,66 @@ function writeNotice(s: Session, text: string): void {
   s.term.write(`\r\n\x1b[2m[veld] ${text}\x1b[0m\r\n`);
 }
 
+/** Clear a pending auto-reconnect and reset the retry cycle.
+ *
+ *  Called whenever the user (or a dispose) supersedes the connection: a manual
+ *  reconnect, restart or start is a fresh attempt, so the next drop arms with
+ *  the full budget rather than continuing a spent cycle — and a pending timer
+ *  must not race the action it was superseded by. */
+function cancelAutoReconnect(s: Session): void {
+  if (s.reconnectTimer !== null) {
+    window.clearTimeout(s.reconnectTimer);
+    s.reconnectTimer = null;
+  }
+  s.reconnectLeft = null;
+  s.reconnectFiredFirst = false;
+}
+
+/**
+ * Arm the next auto-reconnect attempt after an abnormal socket close.
+ *
+ * A dropped socket with the shell still running (the daemon restarted, the
+ * machine slept, a proxy timed out) is the common transient, and reattaching is
+ * exactly what the manual Reconnect button does — so this does the same thing a
+ * few times on the user's behalf. The first attempt is near-immediate (the
+ * `reconnectFirstDelaySeconds` setting); the rest wait `reconnectBackoffSeconds`
+ * so a still-failing session is not hammering a daemon that is itself coming
+ * back. `reconnectTries` of `0` is the off switch and returns immediately.
+ *
+ * The budget counts per *cycle*: the first drop (from a healthy connection)
+ * arms it from the setting, and each failed attempt decrements until it is
+ * spent, where the terminal settles in `error` and the manual Reconnect button
+ * stays. A cycle resets the moment a connection reaches `ready` (see
+ * `ws.onmessage`), and a manual action resets it via [`cancelAutoReconnect`].
+ */
+function maybeAutoReconnect(s: Session): void {
+  const tries = prefs().reconnectTries;
+  if (tries <= 0) return;
+  if (s.reconnectLeft === null) {
+    // First drop in a cycle: arm with the full budget and a near-immediate
+    // first attempt.
+    s.reconnectLeft = tries;
+    s.reconnectFiredFirst = false;
+  }
+  if (s.reconnectLeft <= 0) return;
+  s.reconnectLeft -= 1;
+  const first = !s.reconnectFiredFirst;
+  s.reconnectFiredFirst = true;
+  const delayMs =
+    (first
+      ? prefs().reconnectFirstDelaySeconds
+      : prefs().reconnectBackoffSeconds) * 1000;
+  const gen = s.generation;
+  s.reconnectTimer = window.setTimeout(() => {
+    s.reconnectTimer = null;
+    // Superseded by a manual action (they bump the generation) or a dispose
+    // since this was armed. If so, this attempt is for a terminal nobody is
+    // looking at — leave it to whoever owns it now.
+    if (s.generation !== gen) return;
+    void connect(s);
+  }, delayMs);
+}
+
 /**
  * Reattach to the *same* shell after the socket dropped.
  *
@@ -878,6 +972,9 @@ function writeNotice(s: Session, text: string): void {
 export function reconnectTerminal(id: string): void {
   const s = sessions.get(id);
   if (!s) return;
+  // A manual reconnect is a fresh attempt: cancel any pending auto-reconnect so
+  // it cannot race, and re-arm the budget for the drop that follows if it fails.
+  cancelAutoReconnect(s);
   s.generation += 1;
   s.ws?.close();
   s.ws = null;
@@ -909,6 +1006,7 @@ export function restartTerminal(id: string): void {
     startTerminal(id, "fresh");
     return;
   }
+  cancelAutoReconnect(s);
   s.generation += 1;
   s.ws?.close();
   s.ws = null;
@@ -958,6 +1056,7 @@ export function mountTerminal(
 export function startTerminal(id: string, mode: PaneLaunchMode): void {
   const s = sessions.get(id);
   if (!s) return;
+  cancelAutoReconnect(s);
   s.generation += 1;
   s.ws?.close();
   s.ws = null;
@@ -1044,6 +1143,9 @@ export function releaseTerminal(id: string): void {
   // Bump first, so the close handler doesn't report "connection lost" for a
   // terminal the user deliberately closed.
   s.generation += 1;
+  // A released session must not reconnect on its own — the timer would call
+  // `connect` on a session that has been handed to another window.
+  cancelAutoReconnect(s);
   s.observer?.disconnect();
   s.ws?.close();
   s.container.remove();
