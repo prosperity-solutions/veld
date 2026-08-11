@@ -141,7 +141,7 @@
       "properties": {
         "quicklinks": {
           "type": "array",
-          "description": "Project links that are not veld's own — staging, a dashboard, an internal wiki — shown beside the run's URLs on a browser pane's start page. Versioned with the repo, so a teammate who clones it gets the same links.",
+          "description": "Project links that are not veld's own — staging, a dashboard, an internal wiki — offered behind a Bookmarks button on a browser pane's start page and on the new-pane chooser, where the list itself is the run's own URLs. Typing in the address bar still matches them inline. Versioned with the repo, so a teammate who clones it gets the same links.",
           "items": {
             "type": "object",
             "additionalProperties": false,

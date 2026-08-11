@@ -53,12 +53,14 @@ import { ActionIcon, Button, Menu, Modal, Text } from "@mantine/core";
 import {
   IconActivityHeartbeat,
   IconArrowsExchange,
+  IconBookmark,
   IconExternalLink,
   IconLayoutColumns,
   IconLogs,
   IconPlus,
   IconRefresh,
   IconTerminal2,
+  IconWindow,
   IconWorld,
   IconX,
 } from "@tabler/icons-react";
@@ -66,7 +68,7 @@ import { useContextMenu } from "mantine-contextmenu";
 import { Fragment, useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { BrowserPane, browserTabDot } from "./BrowserPane";
 import { LogsPane, NodesPane, type RunPaneContext } from "./RunPanes";
-import { PlaceList } from "./PlaceList";
+import { BookmarksModal, PlaceList } from "./PlaceList";
 import { placesFor, suggestionsFor } from "./places";
 import { popBrowserSuspend, pushBrowserSuspend, reloadBrowser } from "./browserHost";
 import {
@@ -1481,6 +1483,12 @@ function PaneChooser(props: {
   onBrowser: (tab: PaneTab) => void;
   onDiag: (kind: DiagKind) => void;
 }) {
+  const [bookmarksOpen, setBookmarksOpen] = useState(false);
+  const places = placesFor(props.serviceUrls, props.quicklinks);
+  // No query here — the chooser has no field of its own, so the list is always the
+  // run's URLs and the bookmarks are always the ones behind the button.
+  const suggestions = suggestionsFor(places, "", props.searchUrl);
+  const bookmarks = places.filter((p) => p.kind === "bookmark");
   return (
     <div className="pane-chooser">
       {/* Cards of one size, in declaration order, with a plain shell as the last of
@@ -1510,26 +1518,68 @@ function PaneChooser(props: {
         </div>
       </section>
 
-      {/* The run's URLs, the project's bookmarks and a blank pane, as one list.
+      {/* The run's URLs as the list, with the two escape hatches in the heading.
           Emphatically *not* a `Browser` button up in the first group with the URLs
-          somewhere below: that split is what made "open my app" undiscoverable. */}
+          somewhere below: that split is what made "open my app" undiscoverable, and
+          the reason these two controls are allowed to be buttons is that they sit
+          *on* the list they are alternatives to rather than in another section.
+
+          Blank was a dashed row at the bottom and the bookmarks were a second group
+          above it. In a project with four to eight services per run that put the
+          addresses veld is serving *now* — the answer, most of the time — in the
+          middle of a screen that scrolled, between a config's bookmarks and a row
+          nobody was looking for. */}
       <section className="chooser-group">
-        <h3 className="chooser-heading">
-          <IconWorld size={16} /> Open a page
-        </h3>
+        <div className="chooser-head">
+          <h3 className="chooser-heading">
+            <IconWorld size={16} /> Open a page
+          </h3>
+          <div className="chooser-head-actions">
+            <Button
+              size="compact-xs"
+              variant="default"
+              leftSection={<IconBookmark size={13} />}
+              // Never disabled, even with none declared. A disabled button dispatches
+              // no pointer events, so its tooltip can never open (#205) — and the
+              // modal's own empty state is where `ide.quicklinks` gets explained,
+              // which is the one thing a user who has no bookmarks needs to read.
+              title="Every address this project declares"
+              onClick={() => setBookmarksOpen(true)}
+            >
+              Bookmarks
+            </Button>
+            <Button
+              size="compact-xs"
+              variant="default"
+              leftSection={<IconWindow size={13} />}
+              title={
+                props.searchUrl.trim() === ""
+                  ? "A browser pane with nothing loaded — type any address"
+                  : "A browser pane with nothing loaded — type any address, or search"
+              }
+              onClick={() => props.onBrowser(browserTab({}))}
+            >
+              Blank browser
+            </Button>
+          </div>
+        </div>
         <PlaceList
-          suggestions={suggestionsFor(
-            placesFor(props.serviceUrls, props.quicklinks),
-            "",
-            props.searchUrl,
-          )}
+          suggestions={suggestions}
           emptyHint={props.urlsEmptyHint}
-          canSearch={props.searchUrl.trim() !== ""}
           onOpen={(url, title) => props.onBrowser(browserTab({ url, title }))}
-          onBlank={() => props.onBrowser(browserTab({}))}
-          onOpenAll={(urls) => urls.forEach((url) => window.open(url, "_blank"))}
         />
       </section>
+      <BookmarksModal
+        bookmarks={bookmarks}
+        opened={bookmarksOpen}
+        onClose={() => setBookmarksOpen(false)}
+        // The chooser's job is to become something, so a picked bookmark converts this
+        // pane exactly as a row does — and the modal has served its purpose either way.
+        onOpen={(url, title) => {
+          setBookmarksOpen(false);
+          props.onBrowser(browserTab({ url, title }));
+        }}
+      />
 
       {/* Last, but the same cards as the terminals above: these are panes you sit in
           front of and arrange beside a shell, not toolbar actions, and rendering them

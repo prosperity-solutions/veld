@@ -305,6 +305,16 @@ interface View {
    */
   visible: boolean;
   /**
+   * Whether *this pane's* own DOM overlay is open, which hides only this view.
+   *
+   * Separate from [`suspendDepth`], which is global because a portalled Mantine
+   * overlay can land anywhere on screen and nothing knows which pane it covers. An
+   * address bar's suggestion panel is the opposite: it covers exactly one pane, and
+   * freezing every *other* browser pane for as long as somebody is typing an address
+   * would stop a page they are watching in a second dock.
+   */
+  overlay: boolean;
+  /**
    * The device this view emulates, and its page zoom.
    *
    * The layout is the record (`PaneTab.emulation` / `PaneTab.zoom`); these are the
@@ -512,11 +522,23 @@ export function paneCovers(state: BrowserState, fallbackUrl?: string): boolean {
   return !state.loaded && state.loading;
 }
 
+/**
+ * Whether a DOM overlay is currently standing where this view paints.
+ *
+ * The two sources are deliberately different shapes — a global counter for
+ * portalled overlays nobody can attribute to a pane, a per-view flag for a pane's
+ * own — and every place that used to test `suspendDepth` directly reads this
+ * instead, so a still cannot be cleared out from under one of them.
+ */
+function obscured(v: View): boolean {
+  return suspendDepth > 0 || v.overlay;
+}
+
 /** Whether a mounted view should currently be on screen. A resize drag no longer
  *  hides it — the shell forwards the pointer instead, so the page can reflow under
  *  the cursor (see [`setBrowserResizing`]). */
 function shouldShow(v: View): boolean {
-  return v.mounted && suspendDepth === 0 && !covered(v);
+  return v.mounted && !obscured(v) && !covered(v);
 }
 
 /**
@@ -561,7 +583,10 @@ export function pushBrowserSuspend(): void {
   suspendDepth += 1;
   if (suspendDepth !== 1) return;
   for (const v of views.values()) {
-    if (desktop && v.mounted && !covered(v)) void freezeThenHide(v);
+    // `v.visible`, not `!covered(v)`: a view this pane already froze for its own
+    // overlay is hidden with a still already painted, and capturing a hidden view
+    // would replace that still with whatever the shell answers for one.
+    if (desktop && v.mounted && v.visible && !covered(v)) void freezeThenHide(v);
     else applyVisibility(v);
   }
 }
@@ -574,6 +599,32 @@ export function popBrowserSuspend(): void {
     applyVisibility(v);
     thaw(v);
   }
+}
+
+/**
+ * Hide **one** view behind a DOM overlay the pane itself renders.
+ *
+ * The address bar's suggestion panel. It used to sit in flow between the chrome and
+ * the slot, because a native view paints over DOM and a dropdown positioned over the
+ * page is invisible in the desktop app — so typing an address shoved the page down by
+ * up to 60% of the pane and reflowed it on every keystroke. Freezing this one view
+ * instead puts the panel over a still of the page, dimmed, which is what an address
+ * bar looks like everywhere else.
+ *
+ * A boolean rather than a counter: a pane has one such overlay, and the state that
+ * opens it is a single React value, so a count could only ever go wrong. Idempotent,
+ * because it is driven from an effect that re-runs on unrelated renders.
+ */
+export function setBrowserOverlay(id: string, open: boolean): void {
+  const v = views.get(id);
+  if (!v || v.overlay === open) return;
+  v.overlay = open;
+  if (open && desktop && v.mounted && v.visible && !covered(v)) {
+    void freezeThenHide(v);
+    return;
+  }
+  applyVisibility(v);
+  if (!open) thaw(v);
 }
 
 /**
@@ -600,9 +651,9 @@ async function freezeThenHide(v: View): Promise<void> {
   // The pane came back, or was superseded, while the capture was in flight:
   // painting a still over a live view would freeze a page that is running.
   if (v.freezeGeneration !== generation) return;
-  if (image && suspendDepth > 0) {
+  if (image && obscured(v)) {
     await Promise.race([decoded(image), deadline]);
-    if (v.freezeGeneration !== generation || suspendDepth === 0) return;
+    if (v.freezeGeneration !== generation || !obscured(v)) return;
     v.frame.style.backgroundImage = `url("${image}")`;
   }
   applyVisibility(v);
@@ -633,7 +684,7 @@ function thaw(v: View): void {
   if (!v.frame.style.backgroundImage) return;
   const generation = v.freezeGeneration;
   window.setTimeout(() => {
-    if (v.freezeGeneration !== generation || suspendDepth > 0) return;
+    if (v.freezeGeneration !== generation || obscured(v)) return;
     v.frame.style.backgroundImage = "";
   }, 250);
 }
@@ -747,6 +798,7 @@ function ensure(id: string, options: BrowserViewOptions): View {
     shellHasView: !desktop,
     freezeGeneration: 0,
     visible: true,
+    overlay: false,
     emulation: options.emulation ?? null,
     media: options.media ?? null,
     zoom: clampZoom(options.zoom ?? DEFAULT_ZOOM),
@@ -820,7 +872,19 @@ export function unmountBrowser(id: string): void {
   const v = views.get(id);
   if (!v) return;
   v.mounted = false;
+  // An overlay cannot outlive the pane that renders it. The pane's own effect clears
+  // this too; the belt matters because a flag left set on a detached view would keep
+  // it hidden for good the next time the tab is opened.
+  //
+  // `thaw` has to be here rather than left to that effect. React destroys effects in
+  // declaration order, so the mount effect's cleanup reaches this line first — and once
+  // it has cleared the flag, the pane's own `setBrowserOverlay(id, false)` sees no change
+  // and returns without dropping the still. That leaked a capture of the page the pane
+  // was showing, which the *next* freeze would expose if its own capture failed or timed
+  // out: a still of a page the pane had left, painted under a fresh overlay.
+  v.overlay = false;
   applyVisibility(v);
+  thaw(v);
   v.container.remove();
 }
 

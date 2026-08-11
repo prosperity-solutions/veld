@@ -17,18 +17,23 @@
  *
  * The same rows are the address bar's suggestions, which is what keeps typing and
  * picking from being two different lists of the same things.
+ *
+ * **The list is the run, and the bookmarks are one button.** A project with four to
+ * eight services per run had the addresses it was serving *now* pushed below however
+ * many bookmarks a config declared. `suggestionsFor` collapses them while nothing is
+ * typed, and every surface offers them through {@link BookmarksModal} — the panel
+ * here as a footer row, the two full-size screens as a control in their heading.
  */
 
-import { ActionIcon, Tooltip } from "@mantine/core";
+import { ActionIcon, Modal, Tooltip } from "@mantine/core";
 import {
   IconBookmark,
   IconCheck,
   IconCopy,
   IconExternalLink,
   IconSearch,
-  IconWindow,
+  IconWorld,
   IconWorldOff,
-  IconWorldWww,
 } from "@tabler/icons-react";
 import { useState } from "react";
 import type { Target } from "./model";
@@ -38,26 +43,25 @@ import type { Place, PlaceKind, Suggestions } from "./places";
  * What each kind of place looks like — its group heading and its row glyph.
  *
  * A `Record<PlaceKind, …>`, so **adding a kind is a compile error here** rather than a
- * kind that silently renders as a bookmark. The two facts live together because they
- * are one claim made twice: the heading says which group a row belongs to, and the
- * glyph repeats it at row level for anyone scrolling past the heading.
+ * kind that silently renders as a bookmark.
  *
  * A run URL gets the live dot because veld started that server and knows it is up. A
  * bookmark cannot have one: it is a string in a config that nobody has probed, and a
  * green dot beside it would be a claim veld is in no position to make.
+ *
+ * The **heading** carries no mark of its own. It used to repeat the row glyph — a live
+ * dot over "Running now", a bookmark glyph over "Project bookmarks" — on the theory
+ * that the kinds should be legible before you read a row. Every row directly under it
+ * already carries that same mark, so the heading's copy said nothing the next line did
+ * not, and a second green dot two rows from the first read as a status of its own.
  */
-const PLACE_KINDS: Record<
-  PlaceKind,
-  { heading: string; mark: React.ReactNode; glyph: React.ReactNode }
-> = {
+const PLACE_KINDS: Record<PlaceKind, { heading: string; glyph: React.ReactNode }> = {
   run: {
     heading: "Running now",
-    mark: <span className="dot running" style={{ animation: "none" }} />,
     glyph: <span className="dot running" style={{ animation: "none" }} />,
   },
   bookmark: {
     heading: "Project bookmarks",
-    mark: <IconBookmark size={11} />,
     glyph: <IconBookmark size={13} className="place-glyph" />,
   },
 };
@@ -83,30 +87,8 @@ export function PlaceList(props: {
    * options. `id` has to match the `aria-controls` the input names.
    */
   listboxId?: string;
-  /**
-   * Offer a blank pane as the last row. The chooser passes this — it is how a pane
-   * becomes a browser with nothing loaded, which is what you want for reading
-   * something that is not one of your own URLs. Omitted on a pane that is *already*
-   * blank, where the row would do nothing.
-   */
-  onBlank?: () => void;
-  /** Whether search is configured, which changes what the blank row promises. */
-  canSearch?: boolean;
-  /**
-   * Open these URLs in the system browser. Passed by the two start surfaces and
-   * deliberately not by the suggestion panel over a live page: there, the list is
-   * answering "where should this pane go", and a control that opens six other
-   * windows is not an answer to it.
-   *
-   * **The rows decide which URLs, not the caller.** Both callers used to close over
-   * the run's whole URL set while the button was gated on the *filtered* rows, so a
-   * query narrowing six services to two put "open all" under two rows and opened six
-   * windows.
-   */
-  onOpenAll?: (urls: string[]) => void;
 }) {
   const { suggestions: s, activeIndex = -1, listboxId } = props;
-  const runUrls = s.places.filter((p) => p.kind === "run").map((p) => p.url);
   const rowId = (index: number) =>
     listboxId ? `${listboxId}-row-${index}` : undefined;
   return (
@@ -154,7 +136,6 @@ export function PlaceList(props: {
                 className="section-label"
                 role={listboxId ? "presentation" : undefined}
               >
-                {PLACE_KINDS[heading].mark}
                 {PLACE_KINDS[heading].heading}
               </span>
             )}
@@ -184,35 +165,92 @@ export function PlaceList(props: {
           <p className="faint">{props.emptyHint}</p>
         </div>
       )}
-      {!listboxId && s.total > 0 && s.places.length === 0 && (
+      {/* `narrowed`, because "nothing matched" is only true of a query. Without it,
+          a project whose run has no URLs but which declares bookmarks — they are
+          collapsed, so `places` is empty while `total` is not — was told its
+          bookmarks did not match text nobody had typed. */}
+      {!listboxId && s.narrowed && s.total > 0 && s.places.length === 0 && (
         <p className="faint place-nomatch">
           None of this project's URLs or bookmarks match what you typed.
         </p>
       )}
-      {/* Two or more, as before: "open all" for one URL is the row above it. */}
-      {props.onOpenAll && runUrls.length > 1 && (
-        <button
-          type="button"
-          className="btn links-all"
-          onClick={() => props.onOpenAll?.(runUrls)}
-        >
-          <IconExternalLink size={13} /> Open all in system browser
-        </button>
-      )}
-      {props.onBlank && (
-        <button type="button" className="place-blank" onClick={props.onBlank}>
-          <IconWindow size={15} />
-          <span className="link-text">
-            <span className="name">Blank browser</span>
-            <span className="url">
-              {props.canSearch
-                ? "Type any address, or search"
-                : "Type any address"}
-            </span>
-          </span>
-        </button>
+      {!listboxId && !s.narrowed && s.total > 0 && s.places.length === 0 && (
+        <p className="faint place-nomatch">
+          Nothing is running yet — this project's bookmarks are under Bookmarks.
+        </p>
       )}
     </div>
+  );
+}
+
+/**
+ * The bookmarks control for the suggestion panel, which has no heading to put it in.
+ *
+ * A separate export rather than a footer row inside {@link PlaceList}, and the reason is
+ * ARIA rather than taste: in the panel that list *is* the `role="listbox"` the address
+ * bar names through `aria-controls`, and a listbox may own options and nothing else —
+ * which is why the group headings in there carry `role="presentation"`. A `<button>`
+ * dropped in as a bare child breaks that ownership and can turn up in the "3 of 7" a
+ * screen reader announces. Rendered as a sibling of the list, it is simply a button.
+ *
+ * The two full-size surfaces do not use this — they have a heading, and put the same
+ * control there beside a Blank browser button.
+ */
+export function BookmarksButton(props: { count: number; onOpen: () => void }) {
+  return (
+    <button type="button" className="btn place-bookmarks-row" onClick={props.onOpen}>
+      <IconBookmark size={13} /> Bookmarks ({props.count})
+    </button>
+  );
+}
+
+/**
+ * Every project bookmark, in a modal.
+ *
+ * One component for all three surfaces, because the modal *is* the bookmarks now:
+ * they are no longer inline anywhere that nothing has been typed, so a second
+ * rendering of them would be a second answer to "what did this config declare".
+ *
+ * A Mantine `Modal`, which is portalled — so `overlayGuard` hides every embedded
+ * browser pane while it is open, and the rows are not painted over by a native view.
+ * That is the whole reason this is allowed to be a modal when the suggestion panel is
+ * not: the guard watches portals, and it cannot see a panel rendered inside a pane.
+ */
+export function BookmarksModal(props: {
+  bookmarks: Place[];
+  opened: boolean;
+  onClose: () => void;
+  /** Open this bookmark. The caller closes — where a bookmark goes differs per surface. */
+  onOpen: (url: string, title?: string) => void;
+}) {
+  return (
+    <Modal
+      opened={props.opened}
+      onClose={props.onClose}
+      title="Project bookmarks"
+      size="lg"
+      centered
+    >
+      <div className="place-list bookmarks-modal-list">
+        {props.bookmarks.length === 0 ? (
+          <p className="faint place-nomatch">
+            This project declares no bookmarks. They come from{" "}
+            <code>ide.quicklinks</code> in veld.json.
+          </p>
+        ) : (
+          props.bookmarks.map((place) => (
+            <PlaceRow
+              // Name as well as URL — two bookmarks may legitimately share a URL
+              // under two labels; see the list's own key above.
+              key={`${place.url}:${place.name}`}
+              place={place}
+              active={false}
+              onOpen={() => props.onOpen(place.url, place.name)}
+            />
+          ))
+        )}
+      </div>
+    </Modal>
   );
 }
 
@@ -246,11 +284,16 @@ function ActionRow(props: {
       // do, and the two must not write to each other.
       onClick={props.onOpen}
     >
-      {action.kind === "search" ? (
-        <IconSearch size={14} />
-      ) : (
-        <IconWorldWww size={14} />
-      )}
+      {/* The same slot every place row's glyph sits in (`.place-mark`, which owns the
+          width), so all three row shapes start their text on one vertical line. Without
+          it the icon's own width set the offset, and a 7px live dot, a 13px bookmark and
+          a 14px action icon put three text columns on one list.
+          `IconWorld`, not `IconWorldWww`: the lettered globe reads as a graphic rather
+          than an icon at 14px — its three glyphs collapse into a smudge and it sat
+          visually lower than the search magnifier it alternates with. */}
+      <span className="place-mark">
+        {action.kind === "search" ? <IconSearch size={14} /> : <IconWorld size={14} />}
+      </span>
       <span className="link-text">
         <span className="name">
           {action.kind === "search" ? `Search for ${action.query}` : "Go to"}
@@ -294,8 +337,9 @@ function PlaceRow(props: {
       >
         {/* From the one table, not a `kind === "run"` boolean: a third kind used to
             silently inherit the bookmark's glyph and its "someone wrote this in a
-            config" framing. See `PLACE_KINDS`. */}
-        {PLACE_KINDS[place.kind].glyph}
+            config" framing. See `PLACE_KINDS`. The slot is fixed-width so a 7px dot
+            and a 13px bookmark glyph leave their names on the same line. */}
+        <span className="place-mark">{PLACE_KINDS[place.kind].glyph}</span>
         <span className="link-text">
           <span className="name">{place.name}</span>
           <span className="url">{place.url}</span>
