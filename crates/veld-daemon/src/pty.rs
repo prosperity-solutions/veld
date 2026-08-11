@@ -1445,7 +1445,7 @@ fn login_shell_script(shell: &str, shell_flags: &[String], script: String) -> Ve
     // Ahead of `-l`, which bash requires of a GNU long option and which is the
     // whole reason these travel as a list rather than being appended here.
     out.extend(shell_flags.iter().cloned());
-    // **zsh only**, and the gate is not a refinement — it is the difference between a
+    // **A POSIX-shell gate**, and it is not a refinement — it is the difference between a
     // working pane and none. [`SHIM_PATH_PREFIX`] is POSIX shell *text*, spliced in front
     // of the user's command, and `terminal.shell` reaches shells that cannot parse it:
     // `shell::PROBED_SHELLS` offers fish, nu and xonsh, and `auto_shell()` takes `$SHELL`,
@@ -1482,7 +1482,8 @@ fn login_shell_script(shell: &str, shell_flags: &[String], script: String) -> Ve
 
 /// Prepended to every config-declared pane's script. See [`login_shell_script`].
 ///
-/// **Needed for zsh, a no-op for bash** — measured, both shells, both directions:
+/// **Needed for zsh, and for a bash with no `$ENV` handoff; an idempotent no-op for a bash
+/// that has one** — measured, both shells, both directions:
 ///
 /// | shell, as a pane runs it | without this | with this |
 /// |---|---|---|
@@ -1495,8 +1496,9 @@ fn login_shell_script(shell: &str, shell_flags: &[String], script: String) -> Ve
 /// an assignment in `.zshenv` is undone by `/etc/zprofile`'s `path_helper` two steps
 /// later, and `precmd` only runs before a prompt.
 ///
-/// So this is not "belt and braces for both": it is the zsh fix, written in POSIX so it
-/// costs bash nothing. `a_pane_command_finds_the_agent_shim_in_both_shells` pins all four
+/// So it is not "belt and braces": for zsh it is the only route, for a **bash 3.2** (macOS's
+/// `/bin/bash`, whose handoff a per-binary probe disables) it is *also* the only route, and
+/// for a handoff bash it costs nothing because the `case` finds the directory already there. `a_pane_command_finds_the_agent_shim_in_both_shells` pins all four
 /// cells, because the one that matters is a *negative* — a change to either handoff that
 /// re-broke zsh would otherwise show up as an agent that silently reports nothing.
 const SHIM_PATH_PREFIX: &str = concat!(
@@ -3658,10 +3660,10 @@ mod tests {
     ///
     /// Run against real shells, because the thing being tested is which of a shell's
     /// startup seams fires for `-c` — a question no amount of reading answers. It is also
-    /// the only way to keep the *negative* honest: zsh needs
-    /// [`SHIM_PATH_PREFIX`] and bash does not, and a change to either handoff that
-    /// re-broke zsh would otherwise surface as "the coding-agent half reports nothing in
-    /// custom panes", with nothing failing.
+    /// the only way to keep the *negative* honest: a change to either handoff that re-broke
+    /// zsh would otherwise surface as "the coding-agent half reports nothing in custom
+    /// panes", with nothing failing. Which shells get [`SHIM_PATH_PREFIX`] is pinned
+    /// separately by `the_pane_path_prefix_reaches_zsh_and_bash_and_no_other_shell`.
     ///
     /// The generated startup files are the real ones ([`shims::prepare_in`]), so this
     /// exercises the same mechanism a terminal gets rather than a restatement of it.
@@ -3795,7 +3797,8 @@ mod tests {
             let argv = login_shell_command(shell, &[], &probe);
             assert!(
                 argv.last().unwrap().starts_with(SHIM_PATH_PREFIX),
-                "{shell} must get the prefix — it is the only route to the shim directory                  for a bash whose $ENV handoff the probe disabled"
+                "{shell} must get the prefix: it is the only route to the shim directory \
+                 for zsh, and for a bash whose $ENV handoff the probe disabled"
             );
         }
         // fish and nu cannot parse it. `Kind::Other` also covers ksh and dash, which could

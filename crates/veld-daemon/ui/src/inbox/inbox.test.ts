@@ -887,20 +887,94 @@ describe("defects found in review", () => {
     expect(box.unseen("cc")?.detail).toBe("Agent session ended");
     expect(events, "and no second banner").toBe(0);
 
-    // Once read, the pane is the shell's again — which is the other half, and the reason
-    // the release is deferred rather than dropped.
-    box.read("cc");
+    // …and that same mark is when the pane becomes the shell's again, so an OSC 9 after it
+    // is heard. No read required: the hand-off is a fact about which command ended.
     box.report("cc", WT, { type: "notify", message: "back to normal" }, NOW + 4);
     expect(box.unseen("cc")?.detail).toBe("back to normal");
   });
 
-  /** Mark-all-read releases a departed agent's claim too, not only a focus read. */
-  it("releases the claim on mark-all-read as well", () => {
+  /**
+   * **The hand-off must not depend on when the user reads.**
+   *
+   * Two earlier versions tied it to a read — one released the claim on `done` (which
+   * disarmed the guard for the `D` that follows a moment later), the other on the read
+   * itself, which only narrowed that to a race whose width is the agent's shutdown time.
+   * Marking the worktree read in that gap put the spurious "Command failed (exit 130)"
+   * straight back. This walks that exact interleaving.
+   */
+  it("survives a read landing between the agent's exit and the shell's prompt", () => {
     const box = createInbox();
-    box.report("cc", WT, agent("done"), NOW);
+    box.report("cc", WT, agent("ready"), NOW);
+    box.report("cc", WT, { type: "osc133", mark: "C", exit: null }, NOW + 1);
+    box.report("cc", WT, agent("done"), NOW + 2);
+    // The user reads it from the rail before the shell has redrawn its prompt.
     box.markWorktreeRead(WT);
-    box.report("cc", WT, { type: "notify", message: "heard" }, NOW + 1);
+    expect(box.hasUnread(WT)).toBe(false);
+    // Now the mark arrives.
+    box.report("cc", WT, { type: "osc133", mark: "D", exit: 130 }, NOW + 3);
+    expect(
+      box.unseen("cc"),
+      "the agent's command closing is not a new event, whenever the read happened",
+    ).toBeNull();
+  });
+
+  /**
+   * The claim must not get stuck when the `done` event is discarded as already-seen.
+   *
+   * `report` drops an event for the pane the user is watching, and the deferred-release
+   * version had no hook there — so ending an agent session *while looking at its pane*, the
+   * ordinary way to do it, left the pane claimed forever: no activity ever again, and every
+   * later OSC 9 in it silently dropped.
+   */
+  it("hands the pane back even when the agent's last event was never filed", () => {
+    const box = createInbox();
+    box.setWatching("cc");
+    box.report("cc", WT, agent("ready"), NOW);
+    box.report("cc", WT, { type: "osc133", mark: "C", exit: null }, NOW + 1);
+    box.report("cc", WT, agent("done"), NOW + 2);
+    expect(box.unseen("cc")).toBeNull();
+    // The shell's mark for the launch closes the hand-off.
+    box.report("cc", WT, { type: "osc133", mark: "D", exit: 0 }, NOW + 3);
+    box.setWatching(null);
+    box.report("cc", WT, { type: "notify", message: "heard" }, NOW + 4);
     expect(box.unseen("cc")?.detail).toBe("heard");
+  });
+
+  /** A relaunch in the same pane re-claims it, and a read must not hand it back. */
+  it("keeps a live agent's claim across a read", () => {
+    const box = createInbox();
+    box.report("cc", WT, agent("ready"), NOW);
+    box.report("cc", WT, { type: "osc133", mark: "C", exit: null }, NOW + 1);
+    box.report("cc", WT, agent("done"), NOW + 2);
+    box.report("cc", WT, { type: "osc133", mark: "D", exit: 0 }, NOW + 3);
+    box.read("cc");
+
+    // Relaunched in the same pane.
+    box.report("cc", WT, agent("ready"), NOW + 4);
+    box.report("cc", WT, agent("blocked"), NOW + 5);
+    expect(box.unseen("cc")?.producer).toBe("agent");
+    box.read("cc");
+    // The agent is still live, so its own OSC 9 must not be taken as a command's.
+    box.report("cc", WT, { type: "notify", message: "needs permission" }, NOW + 6);
+    expect(
+      box.unseen("cc"),
+      "a read must not hand a live agent's pane back to the shell",
+    ).toBeNull();
+  });
+
+  /** Restarting a pane drops the previous run's unread verdict. */
+  it("does not leave a restarted pane asserting the old run's failure", () => {
+    const box = createInbox();
+    box.report("p", WT, { type: "exit", code: 1 }, NOW);
+    expect(box.unseen("p")?.kind).toBe("failed");
+    // Restart from the tab strip, without reading — reachable for an inactive tab.
+    box.restarted("p");
+    expect(
+      box.unseen("p"),
+      "a badge from the previous run asserts a failure this run has not had",
+    ).toBeNull();
+    box.report("p", WT, { type: "exit", code: 0 }, NOW + 1);
+    expect(box.unseen("p")?.kind).toBe("finished");
   });
 
   /**

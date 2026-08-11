@@ -172,12 +172,21 @@ interface SessionState {
   /** The authority of the last agent state accepted for this session. */
   agentSource: Source | null;
   /**
-   * The agent said it is gone, but its event has not been read yet.
+   * The outstanding `C` mark belongs to an agent's own launch.
    *
-   * The authority claim is released on the read rather than on the report — see the `done`
-   * arm — so this is what remembers that a release is owed.
+   * This is the whole of the agent/shell hand-off, and it took three attempts to find. A
+   * pane running `claude` is one shell command: the `C` is the launch and the `D` that
+   * eventually closes it is the *same event* the agent already reported through a hook. So
+   * that one `D` must be dropped, and the pane handed back to the shell at the same moment.
+   *
+   * Keyed on the command rather than on when the user reads, which is what the two previous
+   * versions got wrong. Releasing the claim on `done` disarmed the guard for the `D` that
+   * follows a moment later; releasing it on the *read* only moved the race — marking the
+   * worktree read in the gap between the agent exiting and the shell redrawing its prompt
+   * put the spurious "Command failed (exit 130)" back. A fact about which command is
+   * outstanding has no such window.
    */
-  agentGone: boolean;
+  agentCommand: boolean;
   /**
    * Whether this pane's process exit has already been filed.
    *
@@ -277,7 +286,7 @@ class WorktreeInbox {
       ranCommand: false,
       agentWorking: false,
       agentSource: null,
-      agentGone: false,
+      agentCommand: false,
       reportedExit: false,
       unseen: null,
     });
@@ -349,14 +358,28 @@ class WorktreeInbox {
         // `D` — with whatever status was last set — and neither is a command that ran.
         if (!session.ranCommand) return undefined;
         session.ranCommand = false;
-        // A hook owns this pane, so a command mark must not speak over it — **whatever
-        // kind of event the hook filed.** Restricting this to `attention` broke the
-        // module's own authority rule: Ctrl-C out of a finished `claude` emits `D;130`
-        // with `ranCommand` still true from the launch `C`, which replaced "Agent
-        // finished" with "Command failed (exit 130)" and fired a *second* banner claiming
-        // a failure that never happened. A clean exit was quieter and just as wrong — the
-        // detail silently degraded from "Agent session ended" to "Command finished".
-        if (session.agentSource === "hook" && session.unseen !== null) {
+        // This `D` closes the command an agent was running, so it is not a second event —
+        // it is the shell's account of something the agent already reported through a
+        // hook, and the agent's is the better one. Dropping it is also the honest moment
+        // to hand the pane back: the agent's command has ended and the shell is at a
+        // prompt again, so from here the shell speaks for this pane.
+        //
+        // Ctrl-C out of a finished `claude` is the case that made this visible: it emits
+        // `D;130`, which used to replace "Agent finished" with "Command failed (exit 130)"
+        // and fire a second banner claiming a failure that never happened.
+        if (session.agentCommand) {
+          session.agentCommand = false;
+          session.agentSource = null;
+          session.agentWorking = false;
+          return undefined;
+        }
+        // And separately: an unread "needs you" from a hook is never buried by a command
+        // ending. Narrow on purpose — only `attention`, and only from a hook — because it
+        // is a claim about *relative value* rather than about the same event twice: an
+        // agent waiting on you is the highest-value thing this feature detects, and a
+        // command's verdict can wait behind it. Widening this to every kind is what made
+        // the release-ordering bug above hard to see.
+        if (session.agentSource === "hook" && session.unseen?.kind === "attention") {
           return undefined;
         }
         return signal.exit === 0
@@ -387,7 +410,7 @@ class WorktreeInbox {
         // arm below refuses to speak where an agent has. Reusing a pane after an agent
         // session is the ordinary case, not an exotic one.
         session.agentSource = null;
-        session.agentGone = false;
+        session.agentCommand = false;
         // The daemon **replays the exit frame to every new attach** — pinned by
         // `reattaching_after_exit_reports_the_exit`, which asserts a second attach reads
         // the same code again. So this arm sees an already-known death on every page
@@ -452,6 +475,9 @@ class WorktreeInbox {
         if (!KNOWN_AGENT_STATES.includes(signal.state)) return undefined;
         session.agentSource = signal.source;
         session.agentWorking = signal.state === "working";
+        // An outstanding `C` is this agent's own launch — remember it, so the `D` that
+        // eventually closes it is recognised as the agent's rather than as fresh news.
+        if (session.ranCommand) session.agentCommand = true;
         switch (signal.state) {
           case "ready":
             // Authority claimed, nothing reported. Setting `agentSource` above is the
@@ -470,18 +496,20 @@ class WorktreeInbox {
               detail: "Waiting for you",
             };
           case "done":
-            // The agent is gone — but the claim is **not** dropped here, and that ordering
-            // is the whole point. Releasing it on `done` disarmed the guard above for the
-            // `D` mark that arrives moments later when the shell redraws its prompt: the
-            // "Agent session ended" event was immediately overwritten by "Command
-            // finished", or by "Command failed (exit 130)" plus a second banner if the user
-            // had Ctrl-C'd out. That is the exact defect the guard was widened to fix, and
-            // the first version of this fix reintroduced it one line up.
-            //
-            // So the claim outlives the agent until its event is **read** (see `release`),
-            // which is also when the pane genuinely stops being the agent's.
-            session.agentGone = true;
             session.agentWorking = false;
+            // The claim goes with the agent's *command* where there is one — the `D` that
+            // closes it releases the pane, and dropping the claim here instead would
+            // disarm that guard for the mark arriving a moment later.
+            //
+            // Where there is **no** such command it has to be released now, because nothing
+            // else ever will: an agent launched with `terminal.shellIntegration` off, or in
+            // a config-declared pane (whose `-c` shell never prompts, so it emits no marks
+            // at all), produces no `C` and no `D`. Leaving those claimed muted the pane's
+            // activity for good and silently dropped every later OSC 9 in it.
+            //
+            // Safe precisely because it is conditional: with no agent-owned `C` outstanding,
+            // any `D` that turns up belongs to some other command and has earned its event.
+            if (!session.agentCommand) session.agentSource = null;
             return {
               kind: "finished",
               producer: "agent",
@@ -508,25 +536,11 @@ class WorktreeInbox {
     }
   }
 
-  /**
-   * Hand a pane back to the shell once a departed agent's event has been read.
-   *
-   * The claim is released here and not when `done` arrives, because between those two
-   * moments the shell emits the `D` mark for the agent command that just ended — and
-   * without the claim, that mark overwrites the agent's own account of what happened.
-   */
-  private release(session: SessionState): void {
-    if (!session.agentGone) return;
-    session.agentGone = false;
-    session.agentSource = null;
-  }
-
   /** Read a session's unseen event. Whether there was one. */
   read(sessionId: string): boolean {
     const session = this.sessions.get(sessionId);
     if (!session?.unseen) return false;
     session.unseen = null;
-    this.release(session);
     this.notify();
     return true;
   }
@@ -552,7 +566,13 @@ class WorktreeInbox {
     session.ranCommand = false;
     session.agentWorking = false;
     session.agentSource = null;
-    session.agentGone = false;
+    session.agentCommand = false;
+    // The event goes too. Restart is reachable from an *inactive* tab's strip, so
+    // restarting without having read is an ordinary gesture — and a badge left over from
+    // the previous run then asserts a failure the current run has not had, with no fresh
+    // event or timestamp when it succeeds or fails again.
+    session.unseen = null;
+    this.notify();
   }
 
   /**
@@ -573,7 +593,6 @@ class WorktreeInbox {
     for (const session of this.sessions.values()) {
       if (session.worktreeId === worktreeId && session.unseen) {
         session.unseen = null;
-        this.release(session);
         changed = true;
       }
     }

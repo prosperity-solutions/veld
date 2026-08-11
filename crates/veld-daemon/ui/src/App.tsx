@@ -2857,7 +2857,7 @@ function AppInner(props: {
   /**
    * Turn an unseen event into a system notification.
    *
-   * Three gates, and each of them is the difference between a useful banner and the
+   * Three rules, and each of them is the difference between a useful banner and the
    * reason someone turns notifications off:
    *
    *  - **The event's own row must be ticked** (`activity.notify*`). Four rows rather
