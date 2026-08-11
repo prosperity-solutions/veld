@@ -112,20 +112,20 @@ async fn shell_intercept_report() -> Result<Value, StatusCode> {
     let shell = db.terminal_shell();
     let open_in_app = db.terminal_open_urls_in_app();
     let intercept = db.terminal_intercept_system_open();
-    let bash_handoff = intercept
-        && open_in_app
+    let mut opts = super::pty::shims::SessionOptions {
+        open_in_app,
+        intercept,
+        shell_integration: db.terminal_shell_integration(),
+        agent_integration: db.terminal_agent_integration(),
+        bash_handoff: false,
+    };
+    opts.bash_handoff = opts.wants_handoff()
         && veld_core::shell::kind(&shell) == veld_core::shell::Kind::Bash
         && veld_core::shell::supports_posix_env_handoff(&shell).await;
     // The session id is synthetic: nothing in the probe reaches `veld open-url`,
     // which is the only consumer, and minting a real one would register a terminal
     // that does not exist.
-    let env = super::pty::shims::session_env(
-        "settings-probe",
-        &shell,
-        open_in_app,
-        intercept,
-        bash_handoff,
-    );
+    let env = super::pty::shims::session_env("settings-probe", &shell, opts);
     let shim_dir = env.get("VELD_SHIM_DIR").cloned();
     let resolved = if open_in_app && intercept && shim_dir.is_some() {
         veld_core::shell::resolved_open(&shell, &env).await

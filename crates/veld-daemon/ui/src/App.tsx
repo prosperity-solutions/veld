@@ -28,10 +28,14 @@ import {
   runHistoryDays,
   searchUrl,
   terminalPrefs,
+  activityPrefs,
 } from "./shared/settings";
 import { pruneRunHistory } from "./shared/runHistory";
 import { applyTerminalPrefs, setPaneCloseHandler } from "./panes/terminalHost";
 import { SettingsDialog } from "./components/SettingsDialog";
+import { InboxIcon, inboxDescription } from "./inbox/InboxIcon";
+import { inbox, notifyKey } from "./inbox/inbox";
+import { useInbox } from "./inbox/useInbox";
 import { useSettings } from "./shared/useSettings";
 import {
   activeRun,
@@ -137,6 +141,7 @@ import {
   addTabToFocused,
   adoptTabs,
   allTabs,
+  findTab,
   browserIds,
   browserTab,
   closeTab,
@@ -176,7 +181,6 @@ import {
 } from "./ide/layoutStore";
 import {
   applyTerminalTheme,
-  onTerminalNotify,
   onTerminalOpenUrl,
   onTerminalTitleChange,
   openExternally,
@@ -2062,6 +2066,26 @@ function AppInner(props: {
           },
         ],
       },
+      // The explicit mark-all-read. It lives here rather than on the rail's activity
+      // glyph deliberately: that glyph used to be a button that marked the worktree
+      // read, which made a click on the row mean two different things depending on
+      // which pixel it hit. Selecting the worktree is what a click on a row does, so
+      // the deliberate gesture belongs in the deliberate menu.
+      //
+      // Hidden rather than disabled when there is nothing to read: a greyed entry in a
+      // context menu is a row of noise on every worktree that is quiet, which is most
+      // of them most of the time.
+      ...(inbox.hasUnread(w.id)
+        ? [
+            {
+              key: "mark-read",
+              title: "Mark read",
+              // Reads the events, never touches what is *running*: `working` is a live
+              // state, not something there is to have seen.
+              onClick: () => inbox.markWorktreeRead(w.id),
+            },
+          ]
+        : []),
       {
         key: "copy-path",
         title: "Copy path",
@@ -2822,47 +2846,129 @@ function AppInner(props: {
     });
   };
 
+  // ---------------------------------------------------------------------------
+  // The worktree inbox: read-on-focus
+  // ---------------------------------------------------------------------------
+
+  // Re-render the rail when an unseen event lands or is read.
+  useInbox();
+  const activity = activityPrefs(settings ?? {});
+
+  /**
+   * Turn an unseen event into a system notification.
+   *
+   * Three rules, and each of them is the difference between a useful banner and the
+   * reason someone turns notifications off:
+   *
+   *  - **The event's own row must be ticked** (`activity.notify*`). Four rows rather
+   *    than one switch, because "a command finished" and "an agent is waiting for you"
+   *    are not the same event; `notifyKey` is the single place that maps one to the other.
+   *  - **One channel, chosen by focus, never both.** A focused window gets the in-app
+   *    toast; an unfocused one gets the OS banner, which is the only thing that reaches
+   *    across windows and applications. An earlier version returned early when the window
+   *    was focused, which left the toast branch below unreachable — so a focused window got
+   *    nothing at all for an event in a pane it was not watching.
+   *  - **The store fires once per event.** `onEvent`, not `subscribe`: a render may run
+   *    any number of times for one event, and a banner may not. The store also never
+   *    fires for the pane the user is watching, for a read, or for a retraction.
+   *
+   * Read through a ref so the effect does not re-subscribe on every settings change —
+   * re-subscribing is harmless but it would drop and re-add a listener on each keystroke
+   * elsewhere in the dialog.
+   */
+  const notifyPrefsRef = useRef(activity.notify);
+  notifyPrefsRef.current = activity.notify;
   useEffect(
     () =>
-      onTerminalNotify(({ sessionId, message }) => {
-        let wtId: number | null = null;
-        let label = "Terminal";
-        for (const [key, l] of Object.entries(layoutsRef.current)) {
-          const tab = allTabs(l).find((t) => t.id === sessionId);
-          if (!tab) continue;
-          wtId = Number(key);
-          // The pane's own name, never the title the shell set for itself: a
-          // preexec hook writes the running command there, and a banner reading
-          // "· sleep 5 && printf '\033]9;…'" names the noise, not the pane.
-          label = paneTabBaseLabel(l, tab);
-          break;
+      inbox.onEvent(({ sessionId, worktreeId, unseen }) => {
+        if (!notifyPrefsRef.current[notifyKey(unseen)]) return;
+        const wt = worktreesRef.current.find((w) => w.id === worktreeId);
+        const label = wt ? worktreeLabel(wt) : "Veld";
+        // The pane's name, when this window has that worktree's layout. It may not:
+        // an agent hook is relayed to every client, including ones showing something
+        // else, so the worktree alone has to be enough on its own.
+        const layout = layoutsRef.current[worktreeId];
+        const tab = layout ? findTab(layout, sessionId) : null;
+        // `paneTabBaseLabel`, never `paneTabLabel` — #272's fix, and shell integration
+        // makes it matter more rather than less. The pane's *displayed* label can be the
+        // title the process set for itself via OSC 0, and a shell's preexec hook writes
+        // the running command there: a banner reading "· sleep 5 && printf '\033]9;…'"
+        // names the noise instead of the pane. A notification is read out of the context
+        // that would have explained it, so it gets the pane's own name.
+        const heading =
+          tab && layout
+            ? `${label} · ${paneTabBaseLabel(layout, tab)}`
+            : label;
+        const click = () => focusPane(worktreeId, sessionId);
+        // **One channel, chosen by where the user is.** A focused window gets the toast
+        // — right weight for something you can already see — and an unfocused one gets
+        // the OS banner, which is the only thing that reaches across windows and apps.
+        // Never both: the OSC 9 path used to fire a toast unconditionally *and* a banner
+        // when away, so being elsewhere meant two notifications for one event.
+        if (document.hasFocus()) {
+          notifyTerminal({ title: heading, message: unseen.detail, onClick: click });
+          return;
         }
-        // A session this window does not hold is not ours to answer. The host
-        // only fires for a session mounted here, so this is defensive.
-        if (wtId === null) return;
-        const worktree = worktreesRef.current.find((w) => w.id === wtId);
-        const title = worktree ? worktreeLabel(worktree) : `Worktree ${wtId}`;
-        const heading = `${title} · ${label}`;
-        const body = message.trim() || "Terminal activity";
-        const click = () => focusPane(wtId as number, sessionId);
-
-        notifyTerminal({ title: heading, message: body, onClick: click });
-        // The OS banner is for the window you are NOT looking at — the half
-        // that reaches you across windows and tabs. A focused window already
-        // has the toast on screen, so a banner on top of it would be
-        // double-notifying.
-        if (!document.hasFocus()) {
-          showSystemNotification({
-            title: heading,
-            body,
-            worktreeId: wtId as number,
-            sessionId,
-            onClick: click,
-          });
-        }
+        showSystemNotification({
+          // The worktree first: with several open, "Command failed" alone does not say
+          // where, and the banner is read out of the context that would have told you.
+          title: heading,
+          body: unseen.detail,
+          // Echoed so Veld Desktop's main process can route the click back here — the
+          // native banner is owned there precisely so a click can raise a backgrounded
+          // window, which a page cannot do for itself.
+          worktreeId,
+          sessionId,
+          onClick: click,
+        });
       }),
     [],
   );
+
+  /**
+   * Which pane the user is actually looking at.
+   *
+   * "Looking at" is three conditions, and dropping any one of them makes the badge
+   * wrong in a way that is hard to notice:
+   *
+   *  - **This window is focused.** A pane visible behind another app is not being
+   *    watched, and an event there is exactly the news the inbox exists to keep.
+   *  - **This window is the one showing that worktree** (`shownId`, the granted claim —
+   *    not the selection, which a refused claim leaves pointing somewhere this window
+   *    does not render).
+   *  - **It is the active tab of the focused dock.** A split's other pane is on screen
+   *    but not where the user is.
+   *
+   * `document.hasFocus()` is not reactive, so the window's focus/blur events are what
+   * re-run this. Without them, blurring the window would leave the last watched pane
+   * marked as watched and silently swallow every event in it.
+   */
+  const [windowFocused, setWindowFocused] = useState(() => document.hasFocus());
+  useEffect(() => {
+    const focus = () => setWindowFocused(true);
+    const blur = () => setWindowFocused(false);
+    window.addEventListener("focus", focus);
+    window.addEventListener("blur", blur);
+    return () => {
+      window.removeEventListener("focus", focus);
+      window.removeEventListener("blur", blur);
+    };
+  }, []);
+  useEffect(() => {
+    const shownHere = worktree !== null && shownId === worktree.id;
+    const active = shownHere && layout ? activeTab(layout, layout.focused) : null;
+    inbox.setWatching(
+      windowFocused && active?.kind === "terminal" ? active.id : null,
+    );
+  }, [windowFocused, worktree, shownId, layout]);
+
+  /* The OSC 9 handler that used to live here is gone, and nothing replaced it.
+     An OSC 9 already flows into the inbox (`panes/terminalHost.ts` reports it as a
+     `notify` signal), which classifies it as `attention` from a `command` producer and
+     sends it through the one path above — so it is now governed by the notification
+     table (`activity.notifyNoticed`) like every other event, instead of being the one
+     notification with no off switch. Keeping both would have double-notified for the
+     same escape sequence. */
 
   // A native notification (Veld Desktop's main-process banner) was clicked. The
   // shell focused its window; focus the pane it names. Optional: an older shell
@@ -3042,10 +3148,23 @@ function AppInner(props: {
   // daemon's session slots. Disposal also tells the daemon to hang the shell
   // up, which closing the socket deliberately does not.
   useEffect(() => {
-    pruneTerminals(Object.values(layouts).flatMap(terminalIds));
+    const terminals = Object.values(layouts).flatMap(terminalIds);
+    pruneTerminals(terminals);
     // Same contract for browser panes: a `WebContentsView` left behind is a
     // renderer process with nothing to paint into.
     pruneBrowsers(Object.values(layouts).flatMap(browserIds));
+    // And the same for the inbox, which `pruneTerminals` cannot reach: it only walks
+    // *live sessions*, and after a reload the inbox is restored from storage and can name
+    // panes that were closed while the page was away. A restored event for a pane that no
+    // longer exists is one the user could never read by looking, which is the poisoned
+    // badge the design set out to avoid.
+    //
+    // **Scoped to the worktrees this window actually has a layout for.** A main window
+    // gets none from storage (`readLayouts` is explicit about it) and fetches them from
+    // the daemon one worktree at a time, so this effect's first run after a reload sees
+    // `layouts === {}`. Pruning against that emptied the whole restored inbox — the guard
+    // deleting the thing it guards.
+    inbox.retain(terminals, Object.keys(layouts).map(Number));
   }, [layouts]);
 
   // ---- browser sessions ---------------------------------------------------
@@ -4013,6 +4132,7 @@ function AppInner(props: {
             onAddSession={nextSession ? addSession : undefined}
             onRemoveSession={removeSession}
             quickSwitches={quickSwitches}
+            showWorking={activity.showWorking}
             runCtx={runCtx}
             searchUrl={searchTemplate}
           />
@@ -4235,6 +4355,7 @@ function AppInner(props: {
             onStart={onRailStart}
             onStop={stopWorktree}
             onDiagnose={diagnoseWorktree}
+            showWorking={activity.showWorking}
             onAddLane={() => setDialog({ kind: "new-lane" })}
             onLaneMenu={(e, lane) => laneMenu(lane)(e)}
             onMove={moveWorktreeTo}
@@ -4294,6 +4415,7 @@ function AppInner(props: {
               onAddSession={nextSession ? addSession : undefined}
               onRemoveSession={removeSession}
               quickSwitches={quickSwitches}
+              showWorking={activity.showWorking}
               runCtx={runCtx}
               searchUrl={searchTemplate}
             />
@@ -5335,6 +5457,9 @@ function Rail(props: {
    *  failed or recovering row. Selects first, so it can be refused like any other
    *  switch when another window holds the worktree. */
   onDiagnose: (w: Worktree) => Promise<void>;
+  /** `activity.showWorking` — whether a worktree with something merely *running* in
+   *  it gets a glyph, as opposed to only one with unseen news. */
+  showWorking: boolean;
   onAddLane: () => void;
   onLaneMenu: (e: React.MouseEvent, lane: string) => void;
   onMove: (path: string, toLane: string, toIndex: number) => void;
@@ -5904,6 +6029,10 @@ function Rail(props: {
               const showRunControl = props.wide && !trashed && props.canRun(w);
               const holder = props.elsewhere.get(w.id);
               const away = holder !== undefined;
+              // One pass over this worktree's sessions, here rather than inside the
+              // icon: the summary is needed twice (the glyph and the row's
+              // `aria-description`), and a rail holds every worktree of a monorepo.
+              const inboxSummary = inbox.rowState(w.id, props.showWorking);
               return (
                 /* A Fragment so the carets are the row's SIBLINGS. Drawn on the row
                    they were clipped by its `overflow: hidden` and rounded by its
@@ -5925,6 +6054,12 @@ function Rail(props: {
                   /* Selection is "which one am I looking at", not a toggle that
                      can be un-pressed — aria-current, not aria-pressed. */
                   aria-current={props.active?.id === w.id ? true : undefined}
+                  /* The activity state, for a screen reader. `aria-description` and
+                     not the glyph's own label: the row is a `role=button` whose
+                     accessible NAME is built from its content, so a status sentence
+                     inside it would be announced ahead of the alias it describes —
+                     the same reason the away icon is `aria-hidden`. */
+                  aria-description={inboxDescription(inboxSummary)}
                   className={`wt-row${props.active?.id === w.id ? " active" : ""}${props.wide ? "" : " slim"}${away ? " away" : ""}${trashed ? " trashed" : ""}${deletingRow ? " deleting" : ""}${w.trash_error ? " failed-remove" : ""}${dragPath === w.path ? " dragging" : ""}`}
                   title={
                     deletingRow
@@ -6063,6 +6198,17 @@ function Rail(props: {
                     >
                       <IconAlertTriangleFilled size={11} />
                     </button>
+                  )}
+                  {/* This worktree's terminal activity, immediately left of the run
+                      control — the far right of the row, where the eye lands last.
+                      AFTER the node-health alert: that one is about a *run* failing its
+                      probe and is clickable, this one is about *you* and is not.
+                      Rendered in the slim rail too, which the run control is not: it is
+                      the one indicator whose whole purpose is to be seen while you are
+                      looking somewhere else. Trashed rows are excluded — their panes are
+                      gone, so an event there could never be read by looking. */}
+                  {!trashed && (
+                    <InboxIcon summary={inboxSummary} label={worktreeLabel(w)} />
                   )}
                   {showRunControl && (
                     <Tooltip

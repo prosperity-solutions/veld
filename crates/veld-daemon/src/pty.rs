@@ -310,6 +310,7 @@ pub fn routes() -> Router {
         .route("/api/pty/sessions/{id}/busy", get(session_busy_status))
         .route("/api/pty/sessions/{id}", delete(close_session))
         .route("/api/pty/sessions/{id}/open-url", post(open_url))
+        .route("/api/pty/sessions/{id}/agent-state", post(agent_state))
 }
 
 /// Write the shim directory a terminal's `$BROWSER` points into.
@@ -1365,10 +1366,7 @@ async fn resolve_pane(
         // runs under the user's shell now, like a terminal command, instead of
         // a bare `sh` with no rc files.
         veld_core::config::CommandSpec::Shell(script) => {
-            let mut argv = vec![shell.to_owned()];
-            argv.extend(shell_flags.iter().cloned());
-            argv.extend(["-l".to_owned(), "-i".to_owned(), "-c".to_owned(), script]);
-            argv
+            login_shell_script(shell, shell_flags, script)
         }
     };
 
@@ -1419,13 +1417,98 @@ fn login_shell_command(shell: &str, shell_flags: &[String], argv: &[String]) -> 
         .map(|arg| veld_core::console::quote(arg))
         .collect::<Vec<_>>()
         .join(" ");
+    login_shell_script(shell, shell_flags, command)
+}
+
+/// A login+interactive shell running `script`, with veld's shim directory on `PATH`.
+///
+/// # Why the `PATH` line is here and not in the startup files
+///
+/// A config-declared pane is `<shell> -l -i -c '<script>'`, and **`-c` never prompts** —
+/// so zsh's `precmd` hook, which is how veld's `.zshenv` gets the shim directory onto
+/// `PATH` after `/etc/zprofile`'s `path_helper` has rebuilt it, never runs. The measured
+/// consequence: a pane declared as `{"argv": ["claude"]}` resolved the *real* `claude`,
+/// bypassed the wrapper, installed no lifecycle hooks, and reported nothing — the whole
+/// coding-agent half of the inbox was silently off for exactly the panes most likely to
+/// run an agent.
+///
+/// A plain assignment in `.zshenv` cannot fix it either: `path_helper` runs two steps
+/// later and puts the system directories back in front. Prepending here is the only
+/// point that is *after* every startup file the shell reads, which is the same reason the
+/// `precmd` hook exists for an interactive shell.
+///
+/// Guarded on `$VELD_SHIM_DIR`, which is therefore the setting: `shims::session_env` only
+/// exports it when something actually wants the directory on `PATH`. Idempotent, so it
+/// cannot stack duplicates, and POSIX-only syntax so it is the same line for zsh and bash.
+fn login_shell_script(shell: &str, shell_flags: &[String], script: String) -> Vec<String> {
     let mut out = vec![shell.to_owned()];
     // Ahead of `-l`, which bash requires of a GNU long option and which is the
     // whole reason these travel as a list rather than being appended here.
     out.extend(shell_flags.iter().cloned());
-    out.extend(["-l".to_owned(), "-i".to_owned(), "-c".to_owned(), command]);
+    // **A POSIX-shell gate**, and it is not a refinement — it is the difference between a
+    // working pane and none. [`SHIM_PATH_PREFIX`] is POSIX shell *text*, spliced in front
+    // of the user's command, and `terminal.shell` reaches shells that cannot parse it:
+    // `shell::PROBED_SHELLS` offers fish, nu and xonsh, and `auto_shell()` takes `$SHELL`,
+    // so a fish user gets fish with no setting changed at all. fish has no `${x-}`, no
+    // `then` and no `case`/`esac` — it would be a parse error, and every `ide.panes` entry
+    // in the project would die at launch having run nothing. Note it would fail that way
+    // *with all three terminal-integration settings off*, because the runtime guard is a
+    // `$VELD_SHIM_DIR` test and the text is there regardless.
+    //
+    // **zsh *and* bash**, not zsh alone. bash's own `$ENV` handoff does prepend the
+    // directory with a plain assignment a `-c` shell runs — but only when that handoff is
+    // active, and it is gated on a per-binary probe that is **false on bash 3.2**, which is
+    // what macOS ships as `/bin/bash`. So a zsh-only gate silently removed the prefix for
+    // exactly the bash users who have no other route to it, and their agent panes went back
+    // to resolving the real binary with no hooks. On a handoff-bash the line is an
+    // idempotent no-op (measured: one `PATH` entry, not two), so including bash costs
+    // nothing and closes that hole.
+    //
+    // `Kind::Other` is left out because it is where fish and nu live. It is also where
+    // ksh and dash live, and they would parse this fine — so they lose the prefix and an
+    // agent pane under them reports nothing. That is silence, which this feature treats as
+    // an acceptable outcome; a parse error that kills every pane is not.
+    let script = if matches!(
+        veld_core::shell::kind(shell),
+        veld_core::shell::Kind::Zsh | veld_core::shell::Kind::Bash
+    ) {
+        format!("{SHIM_PATH_PREFIX}{script}")
+    } else {
+        script
+    };
+    out.extend(["-l".to_owned(), "-i".to_owned(), "-c".to_owned(), script]);
     out
 }
+
+/// Prepended to every config-declared pane's script. See [`login_shell_script`].
+///
+/// **Needed for zsh, and for a bash with no `$ENV` handoff; an idempotent no-op for a bash
+/// that has one.** The table below is the measured part, and note what it does *not* cover:
+/// its bash row is a `--posix` bash, i.e. one *with* the handoff. The no-handoff case
+/// (bash 3.2, macOS's `/bin/bash`, whose probe disables it) is reasoned from that probe
+/// rather than measured here, and it is the case the gate was widened for.
+///
+/// | shell, as a pane runs it | without this | with this |
+/// |---|---|---|
+/// | `zsh -l -i -c` | resolves the **real** binary | resolves the shim |
+/// | `bash --posix -l -i -c` | resolves the shim already | unchanged, no duplicate `PATH` entry |
+///
+/// The asymmetry is in *how* each handoff puts the directory on `PATH`. bash's `$ENV`
+/// file uses a plain assignment, and `$ENV` is read by a `-c` shell as long as `-i`
+/// makes it interactive — so bash was never broken. zsh's uses a `precmd` hook, because
+/// an assignment in `.zshenv` is undone by `/etc/zprofile`'s `path_helper` two steps
+/// later, and `precmd` only runs before a prompt.
+///
+/// So it is not "belt and braces": for zsh it is the only route, for a **bash 3.2** (macOS's
+/// `/bin/bash`, whose handoff a per-binary probe disables) it is *also* the only route, and
+/// for a handoff bash it costs nothing because the `case` finds the directory already there.
+/// `a_pane_command_finds_the_agent_shim_in_both_shells` pins all four
+/// cells, because the one that matters is a *negative* — a change to either handoff that
+/// re-broke zsh would otherwise show up as an agent that silently reports nothing.
+const SHIM_PATH_PREFIX: &str = concat!(
+    r#"if [ -n "${VELD_SHIM_DIR-}" ]; then case ":$PATH:" in *":$VELD_SHIM_DIR:"*) ;; "#,
+    r#"*) PATH="$VELD_SHIM_DIR:$PATH"; export PATH ;; esac; fi; "#,
+);
 
 /// The variables a pane command may interpolate.
 ///
@@ -1653,9 +1736,15 @@ async fn mint_ticket(
     // database open. A `Db::open()` on the session-spawn path is the thing AGENTS.md
     // warns about — one reached that path before and twelve unrelated tests migrated
     // a real user database as a side effect.
-    let open_urls_in_app = db.terminal_open_urls_in_app();
-    let intercept_system_open = db.terminal_intercept_system_open();
     let shell = db.terminal_shell();
+    let mut opts = shims::SessionOptions {
+        open_in_app: db.terminal_open_urls_in_app(),
+        intercept: db.terminal_intercept_system_open(),
+        shell_integration: db.terminal_shell_integration(),
+        agent_integration: db.terminal_agent_integration(),
+        // Filled in below: it is the one field that is not a setting.
+        bash_handoff: false,
+    };
     // The session's environment is built here, not at spawn time, because the bash
     // half of it needs a **probe** — does this bash honour `$ENV` in posix mode? —
     // and that is an async spawn. A definitive answer is cached per shell path, so
@@ -1663,17 +1752,14 @@ async fn mint_ticket(
     // used and nothing after that; a probe that could not *run* is remembered only
     // briefly, so a wedged shell costs at most one slow open a minute rather than
     // one per terminal. Skipped entirely unless the answer could matter.
-    let bash_handoff = intercept_system_open
-        && open_urls_in_app
+    //
+    // `wants_handoff` and not one setting: three features ride that one file now, and
+    // gating the probe on the browser pair alone is how shell integration silently
+    // stopped working for bash users who had turned `interceptSystemOpen` off.
+    opts.bash_handoff = opts.wants_handoff()
         && veld_core::shell::kind(&shell) == veld_core::shell::Kind::Bash
         && veld_core::shell::supports_posix_env_handoff(&shell).await;
-    let shim_env = shims::session_env(
-        &body.session_id,
-        &shell,
-        open_urls_in_app,
-        intercept_system_open,
-        bash_handoff,
-    );
+    let shim_env = shims::session_env(&body.session_id, &shell, opts);
     // Derived from the environment rather than from `bash_handoff` directly, so the
     // flag and the variable it depends on can never disagree: `--posix` without an
     // `ENV` is a bash session in posix mode reading none of the user's startup.
@@ -1946,6 +2032,77 @@ async fn open_url(
             }))
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// A coding agent's state
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AgentStateRequest {
+    /// Which agent reported. A name, not a schema: the vendor's payload is parsed on
+    /// the CLI side (`veld agent-state`) so that a second tool is a new mapping
+    /// function and a hook installer, with nothing to change here.
+    tool: String,
+    /// One of `veld_core::agent::State`'s spellings, minus `unknown` — the CLI does not
+    /// send that one, because "we were told something we do not understand" is not a
+    /// state worth storing at hook authority.
+    state: String,
+}
+
+/// Report that a coding agent in this terminal is working, waiting on the user, or
+/// done.
+///
+/// The daemon is a **relay**, not a store. It resolves the session to a worktree —
+/// which is the one thing only it can do, since a hook knows a terminal and the rail
+/// is keyed on worktrees — and fans the event out to every connected client. Nothing is
+/// persisted and nothing is queued for a client that is not there: an inbox event is
+/// only meaningful to a window that can render it, and one that arrives half an hour
+/// late is worse than one that never arrives.
+///
+/// CSRF-gated, like `open_url` and for the same reason: without the gate any page in a
+/// browser could push a "needs your attention" badge into a Veld window on the
+/// developer's machine. The generated hooks send the header (they go through the
+/// `veld` CLI, which sets it).
+async fn agent_state(
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<AgentStateRequest>,
+) -> Result<StatusCode, ApiError> {
+    check_csrf(&headers)
+        .map_err(|_| err(StatusCode::FORBIDDEN, "missing X-Veld-Request header"))?;
+    if !valid_session_id(&id) {
+        return Err(err(StatusCode::BAD_REQUEST, "invalid session id"));
+    }
+    let Some(tool) = veld_core::agent::AgentTool::parse(&body.tool) else {
+        return Err(err(StatusCode::BAD_REQUEST, "unknown agent tool"));
+    };
+    let Some(state) = veld_core::agent::State::parse(&body.state) else {
+        return Err(err(StatusCode::BAD_REQUEST, "unknown agent state"));
+    };
+
+    // The registry first, then the released set. A *released* session is one this
+    // daemon handed back to its holder — the shell is still running and an agent inside
+    // it is still worth reporting on, so resolving only through `SESSIONS` would go
+    // quiet for exactly the sessions that outlived a daemon restart.
+    // The registry lookup gets its own scope: a `MutexGuard` in a `match` scrutinee lives
+    // to the end of the `match`, which would run `released_worktree` — a `std` mutex plus a
+    // filesystem `stat` — while holding the async lock every attach contends for.
+    // `mint_ticket` deliberately lets the guard drop first; this now does too.
+    let registered = SESSIONS.lock().await.get(&id).map(|s| s.worktree_id);
+    let worktree_id = match registered {
+        Some(worktree_id) => worktree_id,
+        None => released_worktree(&id)
+            .ok_or_else(|| err(StatusCode::NOT_FOUND, "no such terminal session"))?,
+    };
+
+    debug!(session = %id, worktree = worktree_id, tool = tool.as_str(), state = state.as_str(), "agent state");
+    super::ide::broadcast_agent_state(worktree_id, &id, tool, state);
+    // 202: the event has been handed to the clients that are connected, which is not
+    // the same as a badge appearing. Nothing the caller could do with a richer answer —
+    // it is a hook, and its own contract is to exit and get out of the way.
+    Ok(StatusCode::ACCEPTED)
 }
 
 /// The project half of the exempt list, for the worktree a session belongs to.
@@ -3460,14 +3617,29 @@ mod tests {
             ],
         );
         assert_eq!(
-            argv,
-            vec![
+            argv[..4],
+            [
                 "/bin/zsh".to_owned(),
                 "-l".to_owned(),
                 "-i".to_owned(),
                 "-c".to_owned(),
-                "'pi' '--session-id' 'a1b2c3'".to_owned(),
             ]
+        );
+        // The command is preceded by the shim-directory `PATH` prepend and nothing else.
+        // `-c` never prompts, so zsh's `precmd` hook — how an interactive shell gets that
+        // directory past `path_helper` — never runs, and without this line a pane
+        // declared as `{"argv": ["claude"]}` resolved the *real* binary, bypassed the
+        // wrapper and reported no agent state at all.
+        assert_eq!(
+            argv[4],
+            format!("{SHIM_PATH_PREFIX}'pi' '--session-id' 'a1b2c3'")
+        );
+        // The pane's own command is last and unaltered, which is the half that must not
+        // regress: everything veld adds goes in front of it.
+        assert!(
+            argv[4].ends_with("'pi' '--session-id' 'a1b2c3'"),
+            "{}",
+            argv[4]
         );
 
         // A space or a single quote in a value stays one argument when the
@@ -3481,10 +3653,187 @@ mod tests {
                 "it's a 'quote'".to_owned(),
             ],
         );
-        assert_eq!(
-            tricky[4],
-            "'pi' 'My Projects/veld' 'it'\\''s a '\\''quote'\\'''"
+        assert!(
+            tricky[4].ends_with("'pi' 'My Projects/veld' 'it'\\''s a '\\''quote'\\'''"),
+            "{}",
+            tricky[4]
         );
+    }
+
+    /// A config-declared pane resolves veld's agent wrapper, in **both** shells.
+    ///
+    /// Run against real shells, because the thing being tested is which of a shell's
+    /// startup seams fires for `-c` — a question no amount of reading answers. It is also
+    /// the only way to keep the *negative* honest: a change to either handoff that re-broke
+    /// zsh would otherwise surface as "the coding-agent half reports nothing in custom
+    /// panes", with nothing failing. Which shells get [`SHIM_PATH_PREFIX`] is pinned
+    /// separately by `the_pane_path_prefix_reaches_zsh_and_bash_and_no_other_shell`.
+    ///
+    /// The generated startup files are the real ones ([`shims::prepare_in`]), so this
+    /// exercises the same mechanism a terminal gets rather than a restatement of it.
+    #[test]
+    fn a_pane_command_finds_the_agent_shim_in_both_shells() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let home = tmp.path().join("home");
+        let shims = tmp.path().join("shims");
+        let real = tmp.path().join("real");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&real).unwrap();
+        // The real generator writes the handoffs *and* the `claude` wrapper.
+        shims::prepare_in(&shims, std::path::Path::new("/nonexistent/veld")).unwrap();
+        // A decoy earlier on `PATH`, so "found the shim" cannot be an accident of order.
+        std::fs::write(real.join("claude"), "#!/bin/sh\necho REAL\n").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(real.join("claude"), std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+        }
+
+        let path = format!("{}:/usr/bin:/bin", real.display());
+        // `command -v` and not running it: the wrapper would exec the decoy, and what is
+        // being asserted is *which file the shell resolves*.
+        let probe = ["command".to_owned(), "-v".to_owned(), "claude".to_owned()];
+
+        for (name, candidates, extra) in [
+            (
+                "zsh",
+                ["/bin/zsh", "/usr/bin/zsh", "/opt/homebrew/bin/zsh"].as_slice(),
+                Vec::new(),
+            ),
+            (
+                // `/bin/bash` is included, and the ordering is the whole point: on Linux it
+                // is bash 5 and the only bash there is, so leaving it out — which an earlier
+                // version did, on the grounds that macOS's `/bin/bash` is 3.2 — made this
+                // test's own "missing in CI" assertion fire on every Linux runner. The
+                // version does not matter here: since the pane prefix reaches bash, the shim
+                // directory is on `PATH` whether or not the `$ENV` handoff a 3.2 ignores ever
+                // ran. Never encode a machine's shell layout as a path exclusion.
+                "bash",
+                [
+                    "/opt/homebrew/bin/bash",
+                    "/usr/local/bin/bash",
+                    "/bin/bash",
+                    "/usr/bin/bash",
+                ]
+                .as_slice(),
+                vec!["--posix".to_owned()],
+            ),
+        ] {
+            let Some(shell) = candidates
+                .iter()
+                .map(std::path::PathBuf::from)
+                .find(|p| p.is_file())
+            else {
+                // Skipping is fine on a contributor's machine and not in CI, where this
+                // is the only thing pinning which startup seam a `-c` pane reaches.
+                assert!(
+                    std::env::var_os("CI").is_none(),
+                    "{name} is missing in CI — install it in the workflow"
+                );
+                eprintln!("no {name} on this machine — skipping");
+                continue;
+            };
+            let argv = login_shell_command(shell.to_str().unwrap(), &extra, &probe);
+            let mut cmd = std::process::Command::new(&argv[0]);
+            cmd.args(&argv[1..])
+                .env_clear()
+                .env("HOME", &home)
+                .env("PATH", &path)
+                .env("TERM", "dumb")
+                .env("VELD_SHIM_DIR", &shims);
+            if name == "zsh" {
+                cmd.env("ZDOTDIR", shims.join("zdotdir"));
+            } else {
+                cmd.env("ENV", shims.join("bash").join("veldenv.bash"));
+            }
+            let out = cmd.output().expect("run the pane's shell");
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            assert!(
+                stdout.contains(shims.join("claude").to_str().unwrap()),
+                "{name}: a pane command must resolve veld's wrapper, not the real \
+                 binary — without it an `ide.panes` entry running an agent installs no \
+                 hooks and reports nothing. saw {stdout:?} / {:?}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            // Idempotent **at run time**, which is the claim that matters and the one
+            // bash exercises: its `$ENV` handoff has already prepended the directory by
+            // the time veld's prefix runs, so a prefix that assigned unconditionally
+            // would leave two copies on `PATH` and grow it once per nested shell.
+            let count_argv = login_shell_command(
+                shell.to_str().unwrap(),
+                &extra,
+                &[
+                    "sh".to_owned(),
+                    "-c".to_owned(),
+                    // Counts exact-match entries, so a directory that merely *contains*
+                    // the shim path as a prefix is not miscounted.
+                    r#"printf %s "$PATH" | tr : '\n' | grep -c -x -F "$VELD_SHIM_DIR""#.to_owned(),
+                ],
+            );
+            let mut count_cmd = std::process::Command::new(&count_argv[0]);
+            count_cmd
+                .args(&count_argv[1..])
+                .env_clear()
+                .env("HOME", &home)
+                .env("PATH", &path)
+                .env("TERM", "dumb")
+                .env("VELD_SHIM_DIR", &shims);
+            if name == "zsh" {
+                count_cmd.env("ZDOTDIR", shims.join("zdotdir"));
+            } else {
+                count_cmd.env("ENV", shims.join("bash").join("veldenv.bash"));
+            }
+            let counted = count_cmd.output().expect("count PATH entries");
+            let seen = String::from_utf8_lossy(&counted.stdout).trim().to_owned();
+            assert_eq!(
+                seen,
+                "1",
+                "{name}: the shim directory must appear on PATH exactly once, saw {seen:?} / {:?}",
+                String::from_utf8_lossy(&counted.stderr)
+            );
+        }
+    }
+
+    /// The pane-command prefix reaches every shell that can parse it, and no others.
+    ///
+    /// A pure-text assertion, because the failure modes are opposite and both silent. Left
+    /// ungated it is spliced into a **fish** pane's `-c` script, where `${x-}`/`then`/`case`
+    /// are parse errors — every `ide.panes` entry in the project dies at launch having run
+    /// nothing, even with all three integration settings off. Gated too narrowly (zsh only,
+    /// which was the first fix) it disappears for **bash 3.2**, macOS's `/bin/bash`, whose
+    /// `$ENV` handoff is disabled by a per-binary probe and which therefore has no other
+    /// route to the shim directory — so its agent panes resolve the real binary and report
+    /// nothing.
+    ///
+    /// Neither shows up in `a_pane_command_finds_the_agent_shim_in_both_shells`: its bash arm
+    /// passes `--posix`, i.e. runs *with* the handoff, so it passes either way.
+    #[test]
+    fn the_pane_path_prefix_reaches_zsh_and_bash_and_no_other_shell() {
+        let probe = ["echo".to_owned(), "hi".to_owned()];
+        for shell in ["/bin/zsh", "/opt/homebrew/bin/bash", "/bin/bash"] {
+            let argv = login_shell_command(shell, &[], &probe);
+            assert!(
+                argv.last().unwrap().starts_with(SHIM_PATH_PREFIX),
+                "{shell} must get the prefix: it is the only route to the shim directory \
+                 for zsh, and for a bash whose $ENV handoff the probe disabled"
+            );
+        }
+        // fish and nu cannot parse it. `Kind::Other` also covers ksh and dash, which could
+        // — they lose the prefix and an agent pane under them reports nothing, which is
+        // silence rather than a project whose every pane fails to launch.
+        for shell in [
+            "/opt/homebrew/bin/fish",
+            "/opt/homebrew/bin/nu",
+            "/usr/bin/xonsh",
+            "/bin/dash",
+        ] {
+            let argv = login_shell_command(shell, &[], &probe);
+            assert_eq!(
+                argv.last().unwrap(),
+                "'echo' 'hi'",
+                "{shell} must get the command and nothing else"
+            );
+        }
     }
 
     /// `veld lint` and the spawn path must agree on the pane variable scope,
@@ -3889,7 +4238,14 @@ mod tests {
                 pane: None,
                 shell: TEST_SHELL.to_owned(),
                 shell_flags: Vec::new(),
-                shim_env: shims::session_env(id, TEST_SHELL, true, true, false),
+                shim_env: shims::session_env(
+                    id,
+                    TEST_SHELL,
+                    shims::SessionOptions {
+                        bash_handoff: false,
+                        ..shims::SessionOptions::all_on()
+                    },
+                ),
                 expires_at: Instant::now() + ttl,
             },
         );
@@ -3915,7 +4271,14 @@ mod tests {
                 pane: None,
                 shell: TEST_SHELL.to_owned(),
                 shell_flags: Vec::new(),
-                shim_env: shims::session_env("s2", TEST_SHELL, true, true, false),
+                shim_env: shims::session_env(
+                    "s2",
+                    TEST_SHELL,
+                    shims::SessionOptions {
+                        bash_handoff: false,
+                        ..shims::SessionOptions::all_on()
+                    },
+                ),
                 expires_at: Instant::now() - Duration::from_secs(1),
             },
         );
@@ -4029,6 +4392,13 @@ mod tests {
                 "/api/pty/sessions/a/open-url",
                 r#"{"url":"https://example.com"}"#,
             ),
+            // Ungated, any page in a browser could push a "needs your attention" badge
+            // into a Veld window on this machine.
+            (
+                "POST",
+                "/api/pty/sessions/a/agent-state",
+                r#"{"tool":"claude","state":"blocked"}"#,
+            ),
         ] {
             let res = routes()
                 .oneshot(
@@ -4049,6 +4419,115 @@ mod tests {
                 "{method} {uri} must require the CSRF header"
             );
         }
+    }
+
+    /// The agent-state endpoint validates before it resolves, and reports a live
+    /// session's worktree.
+    ///
+    /// The validation half matters because this is the one endpoint a *third party's*
+    /// hook posts to: everything about the payload is somebody else's schema, and the
+    /// answer to a spelling veld does not know has to be a 400 rather than a broadcast
+    /// carrying a state the UI will not understand.
+    #[tokio::test]
+    async fn agent_state_validates_its_payload_and_needs_a_real_session() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let post = |uri: &'static str, body: &'static str| async move {
+            routes()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri(uri)
+                        .header("content-type", "application/json")
+                        .header("x-veld-request", "1")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+                .status()
+        };
+
+        // Checked before the session is looked up, so none of these need one.
+        for body in [
+            // A tool veld has no mapping for.
+            r#"{"tool":"codex","state":"blocked"}"#,
+            // A state that is not one of ours.
+            r#"{"tool":"claude","state":"busy"}"#,
+        ] {
+            assert_eq!(
+                post("/api/pty/sessions/abc/agent-state", body).await,
+                StatusCode::BAD_REQUEST,
+                "{body}"
+            );
+        }
+        // An unknown field is a client typo, not something to ignore — `deny_unknown_fields`
+        // makes it a 422 from the extractor rather than a 400 from the handler, which is
+        // axum's shape for "this body is not the type I asked for". The assertion is on
+        // it being refused at all; the status is not something this handler chooses.
+        for body in [
+            r#"{"tool":"claude","state":"blocked","surface":"pane-1"}"#,
+            r#"{"tool":"claude"}"#,
+            r#"not json"#,
+        ] {
+            assert!(
+                post("/api/pty/sessions/abc/agent-state", body)
+                    .await
+                    .is_client_error(),
+                "{body}"
+            );
+        }
+        // An invalid session id never reaches the registry.
+        assert_eq!(
+            post(
+                "/api/pty/sessions/../etc/agent-state",
+                r#"{"tool":"claude","state":"idle"}"#
+            )
+            .await,
+            StatusCode::NOT_FOUND,
+            "a traversal attempt must not route to this handler at all"
+        );
+        // A well-formed report for a session nobody has: 404, not a silent accept. A
+        // hook cannot act on it, but a 202 here would make a broken wiring look healthy.
+        assert_eq!(
+            post(
+                "/api/pty/sessions/nosuchsession/agent-state",
+                r#"{"tool":"claude","state":"blocked"}"#
+            )
+            .await,
+            StatusCode::NOT_FOUND
+        );
+
+        // A session this daemon *released* is still resolvable — the shell is running
+        // and an agent inside it is still worth reporting on — but only while a holder
+        // could actually be serving it. With no holder socket the entry is stale, and
+        // reporting for it would badge a worktree for a shell that is gone.
+        //
+        // Read-only: `released_worktree` stats the socket path and never creates it, so
+        // this needs no `VELD_PTY_DIR` and writes nothing into the developer's home.
+        let orphaned = "agent-state-released";
+        RELEASED
+            .lock()
+            .expect("released set poisoned")
+            .insert(orphaned.to_owned(), 42);
+        assert_eq!(
+            post(
+                "/api/pty/sessions/agent-state-released/agent-state",
+                r#"{"tool":"claude","state":"blocked"}"#
+            )
+            .await,
+            StatusCode::NOT_FOUND,
+            "a released session whose holder is gone must not produce an inbox event"
+        );
+        // …and the stale entry is dropped on the way out, so this does not leak into
+        // another test.
+        assert!(
+            !RELEASED
+                .lock()
+                .expect("released set poisoned")
+                .contains_key(orphaned)
+        );
     }
 
     #[tokio::test]
@@ -4154,7 +4633,14 @@ mod tests {
                     pane: None,
                     shell: TEST_SHELL.to_owned(),
                     shell_flags: Vec::new(),
-                    shim_env: shims::session_env(session, TEST_SHELL, true, true, false),
+                    shim_env: shims::session_env(
+                        session,
+                        TEST_SHELL,
+                        shims::SessionOptions {
+                            bash_handoff: false,
+                            ..shims::SessionOptions::all_on()
+                        },
+                    ),
                     expires_at: Instant::now() + TICKET_TTL,
                 },
             );
@@ -4186,7 +4672,14 @@ mod tests {
                     }),
                     shell: TEST_SHELL.to_owned(),
                     shell_flags: Vec::new(),
-                    shim_env: shims::session_env(session, TEST_SHELL, true, true, false),
+                    shim_env: shims::session_env(
+                        session,
+                        TEST_SHELL,
+                        shims::SessionOptions {
+                            bash_handoff: false,
+                            ..shims::SessionOptions::all_on()
+                        },
+                    ),
                     expires_at: Instant::now() + TICKET_TTL,
                 },
             );
@@ -4293,7 +4786,14 @@ mod tests {
                     pane: None,
                     shell: TEST_SHELL.to_owned(),
                     shell_flags: Vec::new(),
-                    shim_env: shims::session_env(&stale_session, TEST_SHELL, true, true, false),
+                    shim_env: shims::session_env(
+                        &stale_session,
+                        TEST_SHELL,
+                        shims::SessionOptions {
+                            bash_handoff: false,
+                            ..shims::SessionOptions::all_on()
+                        },
+                    ),
                     expires_at: Instant::now() - Duration::from_secs(1),
                 },
             );

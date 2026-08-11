@@ -729,6 +729,15 @@ internationalised host must be written punycoded.
 replacing it. A project cannot remove a user's entry, and cannot switch the
 feature off — that is the user's `terminal.openUrlsInApp`.
 
+Not to be confused with the two user settings that ride the same shell handoff
+and that a project cannot influence either: `terminal.shellIntegration` (a
+terminal reports when a command started and how it ended, which marks a
+worktree in the rail) and `terminal.agentIntegration` (a `claude` wrapper
+installs lifecycle hooks so an agent waiting on the user reaches the same
+glyph). Both sit under *Settings → Activity* with `activity.showWorking` and the
+four `activity.notify*` rows. All of these switches are independent of one
+another.
+
 ### `ide.quicklinks`
 
 Project links that are **not** veld's — staging, a dashboard, a wiki — offered

@@ -26,6 +26,7 @@
  */
 
 import { api } from "../api";
+import { inbox, type AgentState } from "../inbox/inbox";
 
 /** What kind of client this is, which decides whether it can be raised. */
 export type ClientKind = "electron" | "browser";
@@ -329,6 +330,33 @@ class Channel {
       case "layout_changed": {
         if (typeof msg.worktree_id !== "number" || typeof msg.version !== "number") return;
         h.onLayoutChanged(msg.worktree_id, msg.version);
+        return;
+      }
+      case "agent_state": {
+        // Filed straight into the inbox rather than routed through `Handlers`, for the
+        // same reason `panes/terminalHost.ts` files its own signals there: the inbox is
+        // a store, not a policy the app has to arbitrate. The policy — read-on-focus,
+        // read-on-type, mark-all-read — lives with the thing that knows where the user
+        // is looking, and none of it is needed to *record* an event.
+        //
+        // Every field is checked because this arrives over a socket from a daemon that
+        // may be a different version. An unrecognised `state` is dropped by the store,
+        // so a newer daemon inventing one is silence rather than a wrong badge.
+        if (
+          typeof msg.worktree_id !== "number" ||
+          typeof msg.session_id !== "string" ||
+          typeof msg.state !== "string"
+        ) {
+          return;
+        }
+        inbox.report(msg.session_id, msg.worktree_id, {
+          type: "agent",
+          state: msg.state as AgentState,
+          // A hook is the only producer of this message today, and the authority is the
+          // daemon's claim about *how it learned*, not a field the wire carries — there
+          // is nothing on the other end that could report at a lower one.
+          source: "hook",
+        });
         return;
       }
       default:

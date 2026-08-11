@@ -2108,6 +2108,19 @@ only ever sends a URL to the real browser, which is where it would have gone
 before any of this existed. Turning the whole behaviour off is also the user's
 call (`terminal.openUrlsInApp`), not a project's.
 
+Two further user settings ride the same shell-startup handoff and are worth not
+confusing with this one, because a project cannot influence either:
+`terminal.shellIntegration` (*Settings → Activity → Notice when a command
+finishes*) makes a terminal report when a command started and how it ended, which
+is what marks a worktree in the rail; `terminal.agentIntegration`
+(*…Notice when a coding agent is waiting for you*) wraps `claude` so its
+lifecycle hooks report the same way. Both live under *Activity* alongside
+`activity.showWorking` and the four `activity.notify*` rows that decide which of
+those events raise a system notification. **All of these switches are independent** —
+they share one generated file and gate their halves of it on separate
+environment variables, so turning off `terminal.interceptSystemOpen` does not
+turn off the unread badge. Nothing of the user's is edited by any of them.
+
 The grammar is exactly [`ide.permissions[].origin`](#idepermissions)'s, checked by
 the same parser: `scheme://host[:port]`, `http` or `https`, no path, a leading
 `*.` for any depth of subdomain (label-wise, so `evilokta.com` does not match

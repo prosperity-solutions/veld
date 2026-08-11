@@ -782,6 +782,23 @@ enum ServerMsg {
     /// A worktree's stored layout changed. Sent to every client *except* the one
     /// that wrote it, which already has the answer in its own response.
     LayoutChanged { worktree_id: i64, version: i64 },
+    /// A coding agent in a terminal reported what it is doing.
+    ///
+    /// Sent to **every** client, including the one showing the worktree: the inbox is
+    /// per worktree and the rail renders every worktree in every window, so a client
+    /// that is not currently displaying this one still has a row to badge. The client
+    /// decides what to do with it — read-on-focus is a client-side rule, because
+    /// "is the user looking at this pane" is a question only the window can answer.
+    ///
+    /// Carries the session so the client can attribute it to a pane (and clear it when
+    /// that pane is focused), and the tool so a future second agent is distinguishable
+    /// without a second message type.
+    AgentState {
+        worktree_id: i64,
+        session_id: String,
+        tool: &'static str,
+        state: &'static str,
+    },
 }
 
 /// A yield in flight: who was asked, under which id, and the channel their
@@ -1162,6 +1179,36 @@ fn broadcast_layout(worktree_id: i64, version: i64, author: Option<&str>) {
             let _ = client.tx.send(ServerMsg::LayoutChanged {
                 worktree_id,
                 version,
+            });
+        }
+    });
+}
+
+/// Tell every client that a coding agent in a terminal changed state.
+///
+/// Fire-and-forget from an HTTP handler, exactly like [`broadcast_layout`]: it takes
+/// the registry lock in a spawned task rather than blocking the response on it. The
+/// caller is a lifecycle hook with an agent waiting behind it, so the request must
+/// return without waiting on a mutex a claim might be holding.
+///
+/// To **every** client and not "except the author": the author is a hook running in a
+/// shell, which is not a client and has nothing to be spared. And a client that is not
+/// showing this worktree still renders its rail row.
+pub fn broadcast_agent_state(
+    worktree_id: i64,
+    session_id: &str,
+    tool: veld_core::agent::AgentTool,
+    state: veld_core::agent::State,
+) {
+    let session_id = session_id.to_owned();
+    tokio::spawn(async move {
+        let reg = REGISTRY.lock().await;
+        for client in reg.clients.values() {
+            let _ = client.tx.send(ServerMsg::AgentState {
+                worktree_id,
+                session_id: session_id.clone(),
+                tool: tool.as_str(),
+                state: state.as_str(),
             });
         }
     });

@@ -106,6 +106,9 @@ import {
   splitWithTab,
   updateTab,
 } from "./model";
+import { inbox, type RowState } from "../inbox/inbox";
+import { HEADLINE, PaneActivityIcon } from "../inbox/InboxIcon";
+import { useInbox } from "../inbox/useInbox";
 import { notifyError } from "../shared/notify";
 import type { QuickSwitchPrefs } from "../shared/settings";
 import type { PaneSpec, Quicklink } from "../api";
@@ -283,6 +286,8 @@ export function PaneArea(props: {
   onRemoveSession: (profile: BrowserProfile) => void;
   /** Which one-click toggles a browser pane's chrome shows. */
   quickSwitches: QuickSwitchPrefs;
+  /** `activity.showWorking` — whether a tab shows a spinner while its pane is busy. */
+  showWorking: boolean;
   /** The selected worktree's run, for the `logs` and `nodes` panes. */
   runCtx: RunPaneContext;
   /**
@@ -883,6 +888,7 @@ export function PaneArea(props: {
               onAddSession={props.onAddSession}
               onRemoveSession={props.onRemoveSession}
               quickSwitches={props.quickSwitches}
+              showWorking={props.showWorking}
               runCtx={props.runCtx}
               searchUrl={props.searchUrl}
               onDetach={desktopWindow ? detachTabs : undefined}
@@ -990,6 +996,7 @@ function DockView(props: {
   onAddSession: ((tabId: string) => void) | undefined;
   onRemoveSession: (profile: BrowserProfile) => void;
   quickSwitches: QuickSwitchPrefs;
+  showWorking: boolean;
   runCtx: RunPaneContext;
   /** `browser.searchUrl`, for every pane in this dock's address bar. */
   searchUrl: string;
@@ -1010,6 +1017,10 @@ function DockView(props: {
   const { index, layout, onLayout } = props;
   const dock = layout.docks[index];
   const active = activeTab(layout, index);
+  // The tabs carry an unseen dot, so this strip has to re-render when the inbox does.
+  // Without it a pane's dot appears only when something else happens to re-render the
+  // dock — which for a pane nobody is touching is "never".
+  useInbox();
   // Only counts for the worktree it was fetched for — see `paneAnswerFor`,
   // which is where the reasoning and the tests live.
   const paneAnswer = paneAnswerFor(props.paneSessions, props.worktreeId);
@@ -1224,6 +1235,8 @@ function DockView(props: {
             onMenu={(e) => tabMenu(tab)(e)}
             canMove={dock.tabs.length > 1}
             canDetach={props.onDetach !== undefined}
+            activity={paneActivity(tab.id, props.showWorking)}
+            activityDetail={inbox.unseen(tab.id)?.detail ?? null}
             onDragStartTab={beginTabDragEverywhere}
             onDragOverTab={(after) => {
               props.onClearZone();
@@ -1791,6 +1804,18 @@ function onTabKeyDown(onClose: () => void) {
  * hides the inner controls from assistive tech — a known debt from #169. New
  * surfaces shouldn't add to it.
  */
+/**
+ * One pane's glyph: its unseen event if it has one, else whether it is running.
+ *
+ * Same precedence the rail uses, one pane wide — an unread event outranks activity,
+ * because "this finished" is news and "this is running" is not.
+ */
+function paneActivity(id: string, showWorking: boolean): RowState | null {
+  const unseen = inbox.unseen(id);
+  if (unseen) return unseen.kind;
+  return showWorking && inbox.isRunning(id) ? "working" : null;
+}
+
 function TabButton(props: {
   tab: PaneTab;
   label: string;
@@ -1808,6 +1833,16 @@ function TabButton(props: {
   canMove: boolean;
   /** Whether dragging this tab out of the window does anything — Electron only. */
   canDetach: boolean;
+  /**
+   * What this pane has to say — the tab's half of the rail's glyph: the rail says
+   * *that* something happened in the worktree, this says *which pane*.
+   *
+   * A `RowState` rather than a boolean so it carries the same four-way vocabulary the
+   * rail does, `working` included; `null` when the pane has nothing to report.
+   */
+  activity: RowState | null;
+  /** What happened, for the glyph's tooltip. Absent for `working`, which has no event. */
+  activityDetail: string | null;
   onDragStartTab: () => void;
   onDragOverTab: (after: boolean) => void;
   onDropTab: (e: React.DragEvent, after: boolean) => void;
@@ -1883,6 +1918,9 @@ function TabButton(props: {
         // both docks before reaching the pane content.
         tabIndex={props.selected ? 0 : -1}
         className="pane-tab-label"
+        aria-description={
+          props.activity === null ? undefined : HEADLINE[props.activity]
+        }
         onClick={props.onSelect}
         onKeyDown={onTabKeyDown(props.onClose)}
         onAuxClick={(e) => {
@@ -1908,6 +1946,16 @@ function TabButton(props: {
         </span>
         <span className="pane-tab-text">{props.label}</span>
       </button>
+      {/* Which pane the worktree's rail glyph was talking about — the SAME glyph, so
+          the two surfaces share one vocabulary instead of having to be learned
+          separately. Outside the label button and immediately left of the close
+          button: inside it, the icon was part of the button's accessible name and sat
+          under the label's `text-overflow: ellipsis`, so a long tab title could clip
+          the one thing that says this pane needs you. `aria-hidden`, with the state on
+          the label button's `aria-description`. */}
+      {props.activity !== null && (
+        <PaneActivityIcon state={props.activity} detail={props.activityDetail} />
+      )}
       <button
         type="button"
         className="pane-tab-close"

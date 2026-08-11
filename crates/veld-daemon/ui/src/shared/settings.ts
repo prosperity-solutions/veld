@@ -98,6 +98,26 @@ const FALLBACK = {
   // before it because the daemon has not heard of the key.
   terminalOpenUrlsInApp: true,
   terminalInterceptSystemOpen: true,
+  // Both take the shipped default rather than the previous release's behaviour, which
+  // is the exception this file's rule above allows for: each one decides whether a
+  // control *exists* (the rail's unread badge), and a build whose rail has the badge
+  // must not behave as though the feature were off because the daemon predates the key.
+  terminalShellIntegration: true,
+  terminalAgentIntegration: true,
+  // **Off**, matching the Rust default — and here the file's "shipped default" exception
+  // and the "previous release's behaviour" rule agree, because the honest reason is the
+  // signal's own unevenness: exact for a shell command, absent for a supported agent, and
+  // meaningless for an unsupported one. See `defaults()` in veld-core's settings.rs.
+  activityShowWorking: false,
+  // The notification table. Only `commandFinished` is off — see the Rust `defaults()`
+  // for why each one is where it is. `notifyWaiting` in particular defaults on because
+  // an OSC 9 banner already fired before this table existed, and a `false` here would
+  // silently switch off shipped behaviour.
+  activityNotifyCommandFinished: false,
+  activityNotifyCommandFailed: true,
+  activityNotifyAgentWaiting: true,
+  activityNotifyNoticed: true,
+  activityNotifyAgentFinished: true,
   // The one place this file's "previous release's behaviour" rule and the Rust default
   // happen to *agree*: this view already rendered browser-local time before the key
   // existed (its `fmtTs` read `Date` getters), so `local` is both.
@@ -388,6 +408,95 @@ export function terminalInterceptSystemOpen(doc: SettingsDoc): boolean {
     "terminal.interceptSystemOpen",
     FALLBACK.terminalInterceptSystemOpen,
   );
+}
+
+/**
+ * Whether a terminal reports when a command started and how it ended (OSC 133 shell
+ * integration), which is what fills the rail's unread badge for plain commands.
+ * **Defaults on.**
+ *
+ * Display only. Independent of `terminal.interceptSystemOpen` even though both ride the
+ * same shell-startup handoff — see `veld-daemon/src/pty/shims.rs`, where the first
+ * version coupled them and made this feature disappear when the *other* switch was off.
+ */
+export function terminalShellIntegration(doc: SettingsDoc): boolean {
+  return bool(
+    doc,
+    "terminal.shellIntegration",
+    FALLBACK.terminalShellIntegration,
+  );
+}
+
+/**
+ * Whether Veld wraps a coding agent's CLI to install lifecycle hooks, so an agent
+ * waiting on you reaches the rail's badge. **Defaults on.**
+ *
+ * Display only. Nothing of the user's is edited either way — the hooks ride an
+ * ephemeral `--settings` file, never a merge into `~/.claude/settings.json`.
+ */
+export function terminalAgentIntegration(doc: SettingsDoc): boolean {
+  return bool(
+    doc,
+    "terminal.agentIntegration",
+    FALLBACK.terminalAgentIntegration,
+  );
+}
+
+/** What the rail shows about unseen activity, and what is allowed to interrupt you. */
+export interface ActivityPrefs {
+  /** Show a spinner on a worktree with something running in it. */
+  showWorking: boolean;
+  /**
+   * Which events raise a system notification, keyed by the **setting name** rather than
+   * by a shape of its own.
+   *
+   * A `Record` and not four named fields, because the consumer looks the key up: the
+   * inbox's `notifyKey(unseen)` decides which row an event belongs to, and a mapping
+   * from an event to a *field name* would be a second vocabulary to keep in step with
+   * the first.
+   */
+  notify: Record<string, boolean>;
+}
+
+/**
+ * The activity group's preferences. **Everything defaults on except
+ * `notifyCommandFinished`.**
+ *
+ * Read here for display and for the notification decision, both of which are the
+ * client's: the daemon has no idea which window is focused, and these five keys are the
+ * only ones in the settings document it never reads.
+ */
+export function activityPrefs(doc: SettingsDoc): ActivityPrefs {
+  return {
+    showWorking: bool(doc, "activity.showWorking", FALLBACK.activityShowWorking),
+    notify: {
+      "activity.notifyCommandFinished": bool(
+        doc,
+        "activity.notifyCommandFinished",
+        FALLBACK.activityNotifyCommandFinished,
+      ),
+      "activity.notifyCommandFailed": bool(
+        doc,
+        "activity.notifyCommandFailed",
+        FALLBACK.activityNotifyCommandFailed,
+      ),
+      "activity.notifyAgentWaiting": bool(
+        doc,
+        "activity.notifyAgentWaiting",
+        FALLBACK.activityNotifyAgentWaiting,
+      ),
+      "activity.notifyNoticed": bool(
+        doc,
+        "activity.notifyNoticed",
+        FALLBACK.activityNotifyNoticed,
+      ),
+      "activity.notifyAgentFinished": bool(
+        doc,
+        "activity.notifyAgentFinished",
+        FALLBACK.activityNotifyAgentFinished,
+      ),
+    },
+  };
 }
 
 /**

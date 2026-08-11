@@ -1185,6 +1185,14 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
 .wt-row.trashed .wt-edit {
   margin-left: auto;
 }
+/* …and take it back off the run control when the activity glyph is there to carry it.
+   A sibling combinator rather than a second rule on `.wt-inbox`, because the glyph is
+   conditional: with no activity to report, `.wt-run` is the first trailing control again
+   and must keep its own auto margin. */
+.wt-inbox ~ .wt-run,
+.wt-inbox ~ .wt-edit {
+  margin-left: 0;
+}
 .wt-run.on {
   color: var(--danger);
 }
@@ -1230,11 +1238,72 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
   height: auto;
 }
 
+/* Unseen terminal activity in this worktree: ONE glyph, worst-state-wins. Not a
+   count — nobody acts differently on three unseen events than on five, so the
+   row's scarce space goes on which KIND of news. Not a button either: the click
+   falls through and selects the worktree like any other part of the row, and
+   mark-all-read lives in the ⋯ menu where a deliberate gesture belongs. */
+.wt-inbox {
+  flex: none;
+  display: flex;
+  align-items: center;
+  color: var(--muted);
+  /* The row's documented convention: `margin-left: auto` on the FIRST trailing control
+     pushes it and everything after it to the right edge. This glyph is now that first
+     control, so the auto moves here from `.wt-run` — with it left there, the free space
+     landed before the run button and this icon packed against the alias mid-row.
+     Two autos are not an option: CSS divides the free space between them, which is the
+     half-right position the first attempt actually produced. */
+  margin-left: auto;
+  /* Deliberately NOT `pointer-events: none`, which would have suppressed the
+     `title` tooltip — the one thing this glyph has to offer on hover. A click on it
+     bubbles to the row and selects the worktree, and `:hover` propagates to the row
+     too, so nothing needed suppressing in the first place. */
+}
+/* Listening for you. Amber, pulsing — the same treatment `.wt-alert.recovering`
+   gets, because it is the same claim: something has stopped and wants you. */
+.wt-inbox.attention {
+  color: var(--warn);
+  animation: pulse 1.6s infinite;
+}
+/* A command failed. Kept apart from `.wt-alert` (a NODE failing its probe) by
+   weight — this one is the outline triangle, that one is filled — and by being
+   the only one of the two that is not clickable. If the pair reads ambiguously on
+   screen, drop the animation here first: the shared pulse is most of what makes
+   two triangles look like one thing. */
+.wt-inbox.failed {
+  color: var(--danger);
+  animation: pulse 1.6s infinite;
+}
+/* Something ended, and it ended well — the brand green, which is the one place this
+   vocabulary says "good" rather than "look at me". No animation: it is news, not a
+   problem, and the whole point of the inbox is that it does not nag. */
+.wt-inbox.finished {
+  color: var(--accent);
+}
+/* Something is running. Dimmer than every state above it, because activity is the
+   one entry here that is not news — a row where a build is merely running must not
+   out-shout one where an agent is waiting. */
+.wt-inbox.working {
+  color: var(--muted);
+  opacity: 0.65;
+}
+.wt-inbox.working svg {
+  animation: spin 1.4s linear infinite;
+}
+/* Collapsed, the same treatment `.wt-alert` gets: a 64px centred row has no room
+   for margin beside the marker. The glyph still renders — this is the indicator
+   most worth seeing from a narrow rail, which is the whole reason it exists. */
+.wt-row.slim .wt-inbox {
+  margin-left: 2px;
+}
+
 /* The row is a role=button div, so its nested controls can be real buttons
    without invalid nesting — but they need their own visible focus ring. */
 .wt-row:focus-visible,
 .wt-run:focus-visible,
 .wt-alert:focus-visible,
+.wt-inbox:focus-visible,
 .wt-edit:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: -1px;
@@ -1488,6 +1557,37 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* This pane's half of the rail glyph: the rail says a worktree has news, this says
+   which pane. The SAME icon, so the two surfaces are one vocabulary rather than two.
+
+   Outside the label button and left of the close button, because inside it the icon
+   sat under the label's `text-overflow: ellipsis` — a long tab title would clip the
+   one thing saying this pane needs you. `flex: none` for the same reason. */
+.pane-tab-activity {
+  flex: none;
+  display: flex;
+  align-items: center;
+  padding-left: 4px;
+  color: var(--muted);
+}
+.pane-tab-activity.finished {
+  color: var(--accent);
+}
+.pane-tab-activity.attention {
+  color: var(--warn);
+  animation: pulse 1.6s infinite;
+}
+.pane-tab-activity.failed {
+  color: var(--danger);
+  animation: pulse 1.6s infinite;
+}
+.pane-tab-activity.working {
+  opacity: 0.65;
+}
+.pane-tab-activity.working svg {
+  animation: spin 1.4s linear infinite;
 }
 
 .pane-tab-close {

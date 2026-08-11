@@ -333,7 +333,12 @@ PR is ready, so waiting on a draft's checks is an infinite wait, not patience.
    If *no* checks appear at all a minute or two after marking ready, the PR is
    probably `CONFLICTING` — that stops `pull_request` events firing entirely.
 4. When a check fails, read the failing job's log and fix the real cause; don't
-   retry blind (a rerun re-runs the same commit). Pushing the fix fires
+   retry blind (a rerun re-runs the same commit). **A failure you did not cause is
+   still yours to fix** — check the same job on `main` to find out which it is, and
+   either way the answer is a fix, not a hand-back (see *Shipping means fixing what
+   you hit on the way*). A pre-existing bug masked by flakiness is the common case:
+   it looks like your regression and is not, and it will keep costing whoever wins
+   the coin flip next. Pushing the fix fires
    `synchronize`, and since the PR is now ready, that re-runs CI normally.
 5. Then apply the Step 0 merge policy:
    - *Bypass-merge on green* → `gh pr merge --squash --admin`, confirm merged,
@@ -341,6 +346,42 @@ PR is ready, so waiting on a draft's checks is an infinite wait, not patience.
    - *Open PR, stop* → report the PR link and the CI result, then stop. Leave it
      ready, not draft.
    - *Human PR review* → request review, wait for approval, then merge.
+
+## Shipping means fixing what you hit on the way
+
+**"Ship it" is not "ship the happy path".** If something blocks the merge, the
+default is that you fix it — including things you did not write and did not break.
+A red CI job caused by a pre-existing bug is still between this change and `main`,
+so it is still yours to deal with.
+
+This is the failure to avoid: diagnose the obstacle perfectly, write it up
+beautifully, and hand it back with the work unmerged. That is the *appearance* of
+diligence with none of the value — the maintainer now has a report to read and a
+job to do, which is exactly what they delegated. **A correct diagnosis is the
+beginning of the fix, not a substitute for it.**
+
+So, on hitting an obstacle:
+
+1. **Find the real cause.** Not the symptom, and not a guess — for CI, compare the
+   same job on `main` before concluding it is yours. A pre-existing failure masked
+   by flakiness looks exactly like a regression you introduced.
+2. **Fix it, in this PR, and say so.** Adjacent-but-necessary work belongs here;
+   it is the price of the change landing. Name it in the PR body under its own
+   heading so a reviewer sees it was deliberate rather than smuggled in.
+3. **Prefer the proper fix to the one that makes the symptom go away.** If two
+   users are fighting over one file, give them a file each; do not `chown` after
+   the fact. If the honest fix is genuinely too large for this PR, do the small
+   correct thing *and* record the real one as a named follow-up — never leave a
+   workaround unlabelled.
+
+**The narrow exception — a genuine blocker with no right answer.** Stop and ask
+only when fixing it properly would mean a *product decision* you cannot make, an
+irreversible or destructive act, credentials you cannot obtain, or a change so
+large it is its own PR. Then bring: the root cause, the options with their costs,
+and your recommendation — not just the problem.
+
+And say which of those it is. "I could not merge because X" is only acceptable
+when X is on that list; otherwise it reads as a fix you decided not to do.
 
 ## When to involve the human
 
@@ -356,7 +397,10 @@ Stay autonomous. Only stop to ask when one of these holds:
 - **A test checkpoint is due** — Step 0 chose checkpointed autonomy. These are
   planned stops, not failures; hand over and wait.
 - **Blocked** — a genuinely irreversible or destructive action with no safe
-  default, or missing access/credentials you can't obtain.
+  default, or missing access/credentials you can't obtain. Note what does *not*
+  count: an obstacle that is merely unwelcome, unrelated, or somebody else's fault.
+  See **Shipping means fixing what you hit on the way** above.
 
 Everything else — naming, refactors, test choices, fixing your own review
-findings — you decide.
+findings, **and repairing whatever else stands between this change and `main`** —
+you decide.

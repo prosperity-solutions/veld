@@ -9,9 +9,11 @@ import {
   markerStyle,
   quickSwitchPrefs,
   searchUrl,
+  terminalAgentIntegration,
   terminalInterceptSystemOpen,
   terminalOpenUrlsInApp,
   terminalPrefs,
+  terminalShellIntegration,
   terminalShell,
   hideDisabledActions,
   gitCreateFrom,
@@ -343,6 +345,29 @@ describe("terminalShell", () => {
     expect(
       terminalShell({ "terminal.shell": 7 as unknown as string }),
     ).toBe("auto");
+  });
+});
+
+describe("terminal integration switches", () => {
+  it("default on, and each reads only its own key", () => {
+    expect(terminalShellIntegration({})).toBe(true);
+    expect(terminalAgentIntegration({})).toBe(true);
+    // Independent: one off leaves the other alone. All three integration switches ride
+    // one generated shell file, and the coupling that shipped once made turning off
+    // `interceptSystemOpen` silently remove the rail's unread badge.
+    const doc = {
+      "terminal.shellIntegration": false,
+      "terminal.interceptSystemOpen": false,
+    };
+    expect(terminalShellIntegration(doc)).toBe(false);
+    expect(terminalAgentIntegration(doc)).toBe(true);
+  });
+
+  it("ignores a non-boolean rather than reading it as off", () => {
+    // `bool` is a typeof check, so a stored `0` or `""` from a hand-edited row falls
+    // back to the shipped default instead of quietly disabling a feature.
+    expect(terminalShellIntegration({ "terminal.shellIntegration": 0 })).toBe(true);
+    expect(terminalAgentIntegration({ "terminal.agentIntegration": "off" })).toBe(true);
   });
 });
 

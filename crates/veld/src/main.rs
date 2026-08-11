@@ -214,6 +214,49 @@ enum Command {
         args: Vec<String>,
     },
 
+    /// Write this terminal's ephemeral coding-agent settings and print its path.
+    ///
+    /// Called by the generated `claude` wrapper, not by hand. The file installs
+    /// lifecycle hooks that report whether the agent is working, waiting on you, or
+    /// done, so the worktree's rail badge can say so. It is per terminal session, lives
+    /// in this daemon's own shim directory, and **nothing of yours is edited** — no
+    /// `~/.claude/settings.json`, no `.claude/` in your project. `--settings` merges,
+    /// so your own configuration still applies.
+    ///
+    /// Turned off by `terminal.agentIntegration` (Settings → Terminal).
+    #[command(name = "agent-settings", hide = true)]
+    AgentSettings {
+        /// Which agent. Only `claude` today.
+        #[arg(long)]
+        tool: Option<String>,
+
+        /// Terminal session the file is for. Defaults to `$VELD_PTY_SESSION`.
+        #[arg(long)]
+        session: Option<String>,
+    },
+
+    /// Report a coding agent's state, from a lifecycle hook. Reads the payload on stdin.
+    ///
+    /// Called by the hooks `veld agent-settings` installs, not by hand.
+    #[command(name = "agent-state", hide = true)]
+    AgentState {
+        /// Which agent's payload this is. Only `claude` today.
+        #[arg(long)]
+        tool: Option<String>,
+
+        /// Terminal session to attribute the state to. Defaults to
+        /// `$VELD_PTY_SESSION`.
+        #[arg(long)]
+        session: Option<String>,
+
+        /// Report "an agent just launched here and is idle", reading no stdin.
+        ///
+        /// Sent by the generated wrapper before it execs the agent. It is what stops a
+        /// pane running an agent looking like a pane running a long shell command.
+        #[arg(long)]
+        launched: bool,
+    },
+
     /// Show URLs of a running environment.
     Urls {
         /// Name of the run to inspect.
@@ -894,6 +937,14 @@ async fn main() {
             args,
         } => commands::open_url::run(tool, session, args).await,
 
+        Command::AgentSettings { tool, session } => commands::agent::settings(tool, session),
+
+        Command::AgentState {
+            tool,
+            session,
+            launched,
+        } => commands::agent::state(tool, session, launched).await,
+
         Command::Action {
             action,
             name,
@@ -1248,6 +1299,15 @@ fn command_survives_an_update(command: &Command) -> bool {
             | Command::Init
             | Command::InternalLog { .. }
             | Command::InternalTimestamp { .. }
+            // Neither touches the daemon, the helper or the installed binaries: one
+            // writes a small file in this instance's own shim directory, the other
+            // POSTs to localhost and ignores the answer. Both already fail silently,
+            // so gating them would buy nothing — and would cost something real,
+            // because the gate's message goes to stderr and `agent-state`'s stderr is
+            // read by a coding agent. Veld's update banner appearing inside somebody's
+            // Claude Code transcript is worse than a badge that does not arrive.
+            | Command::AgentSettings { .. }
+            | Command::AgentState { .. }
             | Command::Desktop {
                 command: None | Some(DesktopCommand::Status { .. })
             }
