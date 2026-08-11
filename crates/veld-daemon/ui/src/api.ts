@@ -1175,9 +1175,16 @@ export const api = {
    * GUI session). Resolves to the chosen absolute path, or null on cancel.
    * Throws on: no picker backend (501), backend failure (500), another
    * picker already open (409), or the 10-minute timeout (408).
+   *
+   * `purpose` selects the dialog's prompt from a small server-known set
+   * (`pick_directory_prompt` in `desktop.rs`) — never free text, so a caller
+   * cannot inject anything into the native dialog's title.
    */
-  pickDirectory: async (): Promise<string | null> => {
-    const res = await fetch("/api/pick-directory", {
+  pickDirectory: async (
+    purpose?: "worktree-storage",
+  ): Promise<string | null> => {
+    const qs = purpose ? `?purpose=${encodeURIComponent(purpose)}` : "";
+    const res = await fetch(`/api/pick-directory${qs}`, {
       method: "POST",
       headers: { "X-Veld-Request": "1" },
     });

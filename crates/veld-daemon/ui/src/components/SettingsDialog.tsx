@@ -142,6 +142,28 @@ function SectionTitle(props: { children: ReactNode }) {
   );
 }
 
+/** Mirrors `MAX_WORKTREE_STORAGE_DIR_LEN` in veld-core's settings.rs. */
+const MAX_WORKTREE_STORAGE_DIR_LEN = 1024;
+
+/**
+ * Every rule the daemon's `WorktreeStorageDir` validator enforces, mirrored
+ * so a value this box would reject never round-trips through a save attempt
+ * first — the daemon's 400 has no body a user would ever see. `null` means
+ * empty is a real value here too (the off switch, not an error).
+ */
+function worktreeStorageDirError(path: string): string | null {
+  const v = path.trim();
+  if (v === "") return null;
+  if (v.length > MAX_WORKTREE_STORAGE_DIR_LEN) {
+    return `Must be ${MAX_WORKTREE_STORAGE_DIR_LEN} characters or fewer`;
+  }
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: rejecting them is the point.
+  if (/[\x00-\x1f\x7f]/.test(v)) return "Must not contain control characters";
+  if (!v.startsWith("/")) return "Must be an absolute path";
+  if (v.split("/").includes("..")) return 'Must not contain ".."';
+  return null;
+}
+
 type GroupId = "general" | "git" | "terminal" | "links" | "browser";
 
 /**
@@ -327,10 +349,15 @@ export function SettingsDialog(props: {
   // from nothing having happened. Empty is not broken; it is the off switch.
   const searchBroken =
     search.trim() !== "" && searchTarget(search.trim(), "veld") === null;
-  // Mirrors the daemon's own validator (absolute or empty) — see the blur
-  // handler below for why a client-side mirror exists at all.
-  const storageDirBroken =
-    storageDir.trim() !== "" && !storageDir.trim().startsWith("/");
+  // Mirrors the daemon's own validator (`worktree.storageDir` in
+  // veld-core's settings.rs) — see the blur handler below for why a
+  // client-side mirror exists at all. All three of the daemon's rules, not
+  // only the absolute-path one: a mirror that only caught the common case
+  // would still let a pasted over-long path or one carrying a tab pass here
+  // and 400 with no explanation, which is the exact failure this exists to
+  // prevent.
+  const storageDirError = worktreeStorageDirError(storageDir);
+  const storageDirBroken = storageDirError !== null;
   // Availability is probed against the DOM, so compute it once per open rather
   // than on every render — the list cannot change while the dialog is up.
   const fonts = useMemo(() => availableFonts(), []);
@@ -672,19 +699,19 @@ export function SettingsDialog(props: {
                             fontFamily: "var(--mantine-font-family-monospace)",
                           },
                         }}
-                        error={
-                          storageDirBroken ? "Must be an absolute path" : undefined
-                        }
+                        error={storageDirError ?? undefined}
                         onChange={(e) => setStorageDir(e.currentTarget.value)}
                         onBlur={() => {
                           const v = storageDir.trim();
                           if (v === storageDirValue) return;
-                          // Mirrors the daemon's own rule (absolute or empty) —
-                          // see the note on `searchUrl` above for why: the
-                          // daemon's 400 has no body a user would ever see, so a
-                          // rejected value would otherwise just snap back with
-                          // no explanation.
-                          if (v !== "" && !v.startsWith("/")) return;
+                          // Reuses `storageDirBroken` (computed above from this
+                          // same state) rather than a second inline copy of the
+                          // predicate — see the note on `searchUrl` above for
+                          // why the check exists here at all: the daemon's 400
+                          // has no body a user would ever see, so a rejected
+                          // value would otherwise just snap back with no
+                          // explanation.
+                          if (storageDirBroken) return;
                           set({ "worktree.storageDir": v });
                         }}
                       />
@@ -697,7 +724,8 @@ export function SettingsDialog(props: {
                           setPickingStorageDir(true);
                           setStorageDirPickError(null);
                           try {
-                            const picked = await api.pickDirectory();
+                            const picked =
+                              await api.pickDirectory("worktree-storage");
                             if (picked) {
                               setStorageDir(picked);
                               set({ "worktree.storageDir": picked });
