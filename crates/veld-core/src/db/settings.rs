@@ -1964,4 +1964,33 @@ mod tests {
             .unwrap();
         assert_eq!(db.worktree_storage_dir(), None);
     }
+
+    #[test]
+    fn worktree_storage_dir_rejects_too_long_and_control_char_values() {
+        // The two bounds this key's validator carries and neither had a test —
+        // the sibling free-text key (`BrowserSearchUrl`) pins both of these at
+        // its own length constant, above.
+        let (_dir, db) = test_db();
+        for bad in [
+            Value::from(format!("/{}", "a".repeat(MAX_WORKTREE_STORAGE_DIR_LEN))),
+            Value::from("/tmp/has\ta-tab"),
+            Value::from("/tmp/has\na-newline"),
+        ] {
+            let e = db
+                .patch_settings(&patch(&[("worktree.storageDir", bad.clone())]))
+                .expect_err(&format!("{bad} must be refused"));
+            assert!(matches!(e, DbError::InvalidSetting { .. }), "{e}");
+        }
+        // Empty and a real absolute path both still work — the bound is on
+        // length and control characters, not on content.
+        db.patch_settings(&patch(&[(
+            "worktree.storageDir",
+            Value::from("/tmp/veld-worktrees"),
+        )]))
+        .unwrap();
+        assert_eq!(
+            db.settings().unwrap()["worktree.storageDir"],
+            Value::from("/tmp/veld-worktrees")
+        );
+    }
 }
