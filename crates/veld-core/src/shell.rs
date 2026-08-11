@@ -33,7 +33,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tracing::{debug, warn};
 
@@ -286,6 +286,12 @@ pub fn kind(shell: &str) -> Kind {
 /// practice; this bound exists for a wedged binary, not for a slow `.bashrc`.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// How long a probe that *could not run* is remembered before it is tried again.
+///
+/// Not a cache of an answer — a bound on how often a broken probe may cost
+/// [`PROBE_TIMEOUT`] on the ticket-mint path. See [`supports_posix_env_handoff`].
+const PROBE_RETRY_AFTER: Duration = Duration::from_secs(60);
+
 /// Whether this bash honours the `--posix` + `$ENV` startup handoff.
 ///
 /// **Probed, never inferred from a version number.** bash's manual says an
@@ -304,30 +310,45 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 /// daemon lifetime, in the direction of doing nothing rather than doing something
 /// broken.
 pub async fn supports_posix_env_handoff(shell: &str) -> bool {
-    static CACHE: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
+    // `None` is "the probe could not run", remembered with the time it failed —
+    // neither cached forever nor retried on every call. See below.
+    static CACHE: OnceLock<Mutex<HashMap<String, (Option<bool>, Instant)>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Some(known) = cache.lock().ok().and_then(|c| c.get(shell).copied()) {
-        return known;
+    if let Some((known, at)) = cache.lock().ok().and_then(|c| c.get(shell).copied()) {
+        match known {
+            Some(answer) => return answer,
+            // A remembered failure, still fresh: answer "no handoff" without
+            // paying for the probe again.
+            None if at.elapsed() < PROBE_RETRY_AFTER => return false,
+            None => {}
+        }
     }
-    let Some(answer) = probe_posix_env_handoff(shell).await else {
+    let answer = probe_posix_env_handoff(shell).await;
+    match answer {
+        Some(answer) => debug!(shell, answer, "probed the bash posix/ENV startup handoff"),
         // The probe did not run — a spawn failure, or the timeout. That is not
-        // evidence of anything, and memoizing it as `false` would switch the
-        // handoff off for the daemon's whole lifetime on one transient hiccup,
-        // while `veld doctor` (a separate process, probing afresh) reported the
-        // opposite with no way to tell which was right. Same rule
-        // `user_path::publish_value` states: a resolution that learned nothing
-        // never displaces one that did.
-        debug!(
+        // evidence about the shell, and memoizing it as a definitive `false` would
+        // switch the handoff off for the daemon's whole lifetime on one transient
+        // hiccup, while `veld doctor` (a separate process, probing afresh) reported
+        // the opposite with no way to tell which was right. Same rule
+        // `user_path::publish_value` states: a resolution that learned nothing never
+        // displaces one that did.
+        //
+        // **But not retried on every call either.** This is awaited inline on the
+        // ticket-mint path, once per new terminal, so a persistently wedged bash (a
+        // full disk failing the tempdir, a spawn that never returns) would otherwise
+        // add up to `PROBE_TIMEOUT` to *every* terminal open, for ever. Remembering
+        // the failure for `PROBE_RETRY_AFTER` bounds that at one slow open a minute
+        // while still letting a transient failure heal.
+        None => debug!(
             shell,
-            "the bash posix/ENV probe could not run — not caching"
-        );
-        return false;
-    };
-    debug!(shell, answer, "probed the bash posix/ENV startup handoff");
-    if let Ok(mut c) = cache.lock() {
-        c.insert(shell.to_owned(), answer);
+            "the bash posix/ENV probe could not run — retrying later"
+        ),
     }
-    answer
+    if let Ok(mut c) = cache.lock() {
+        c.insert(shell.to_owned(), (answer, Instant::now()));
+    }
+    answer.unwrap_or(false)
 }
 
 /// The uncached probe: write a marker file, point `$ENV` at it, and see whether

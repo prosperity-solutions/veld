@@ -1662,9 +1662,11 @@ async fn mint_ticket(
     let shell = db.terminal_shell();
     // The session's environment is built here, not at spawn time, because the bash
     // half of it needs a **probe** — does this bash honour `$ENV` in posix mode? —
-    // and that is an async spawn. It is cached per shell path, so the cost is one
-    // ~10ms non-interactive `bash -c ':'` the first time a given shell is used, and
-    // nothing after that. Skipped entirely unless the answer could matter.
+    // and that is an async spawn. A definitive answer is cached per shell path, so
+    // the cost is one ~10ms non-interactive probe the first time a given shell is
+    // used and nothing after that; a probe that could not *run* is remembered only
+    // briefly, so a wedged shell costs at most one slow open a minute rather than
+    // one per terminal. Skipped entirely unless the answer could matter.
     let bash_handoff = intercept_system_open
         && open_urls_in_app
         && veld_core::shell::kind(&shell) == veld_core::shell::Kind::Bash

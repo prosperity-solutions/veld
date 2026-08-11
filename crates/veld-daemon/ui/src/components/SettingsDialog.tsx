@@ -243,13 +243,20 @@ export function SettingsDialog(props: {
   // leaves it null, which still renders a working picker: the stored value is
   // always an option, so the only thing lost is the list of alternatives.
   const [shells, setShells] = useState<ShellList | null>(null);
+  // Settled, not loaded: set on failure too. Without the distinction, a failed
+  // `api.shells()` leaves `shells` null for ever, and treating null as "the value
+  // is listed" would then hide the custom-path field permanently for someone whose
+  // shell *is* a custom path. Treating null as "unlisted" instead would flash the
+  // field open on every dialog open before the list arrives, which is the reason
+  // the null case is not simply folded in.
+  const [shellsSettled, setShellsSettled] = useState(false);
   // Whether the stored shell is one the picker lists. `shells === null` means the
   // list has not arrived, and "not on a list I do not have" is not a custom path —
   // so the field stays shut rather than flashing open on every dialog open.
   const shellIsListed =
     shellValue === "auto" ||
-    shells === null ||
-    shells.shells.some((s) => s.path === shellValue);
+    !shellsSettled ||
+    (shells?.shells ?? []).some((s) => s.path === shellValue);
   const showCustomShell = customShell || !shellIsListed;
   useEffect(() => {
     let live = true;
@@ -258,7 +265,10 @@ export function SettingsDialog(props: {
       .then((list) => {
         if (live) setShells(list);
       })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => {
+        if (live) setShellsSettled(true);
+      });
     return () => {
       live = false;
     };
