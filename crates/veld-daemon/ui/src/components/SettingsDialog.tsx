@@ -327,6 +327,10 @@ export function SettingsDialog(props: {
   // from nothing having happened. Empty is not broken; it is the off switch.
   const searchBroken =
     search.trim() !== "" && searchTarget(search.trim(), "veld") === null;
+  // Mirrors the daemon's own validator (absolute or empty) — see the blur
+  // handler below for why a client-side mirror exists at all.
+  const storageDirBroken =
+    storageDir.trim() !== "" && !storageDir.trim().startsWith("/");
   // Availability is probed against the DOM, so compute it once per open rather
   // than on every render — the list cannot change while the dialog is up.
   const fonts = useMemo(() => availableFonts(), []);
@@ -358,6 +362,17 @@ export function SettingsDialog(props: {
     setStorageDir(storageDirValue);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [settings]);
+
+  // Both errors belong to controls that only render in `custom` mode (the
+  // field's Browse… button, the Open Folder button below it); leaving them
+  // set after switching back to `sibling` would strand red text with no
+  // control in view that it explains.
+  useEffect(() => {
+    if (storageMode !== "custom") {
+      setStorageDirPickError(null);
+      setOpenStorageDirError(null);
+    }
+  }, [storageMode]);
 
   const set = (patch: SettingsDoc) => {
     // Fire and forget: the hook holds the error, and awaiting here would freeze
@@ -623,7 +638,7 @@ export function SettingsDialog(props: {
               </Row>
               <Row
                 label="Worktree storage location"
-                help="Next to repository (default): a new checkout lands in a `_worktrees` folder beside its repo — today's behaviour. Custom location: every new checkout, for every repository, lands under one folder you choose. Either way each repo gets its own subfolder there, so two repos can never collide on the same checkout path. Only affects worktrees created from now on; nothing already on disk moves."
+                help="Next to repository (default): a new checkout lands in a _worktrees folder beside its repo — today's behaviour. Custom location: every new checkout, for every repository, lands under one folder you choose. Either way each repo gets its own subfolder there, so two repos can never collide on the same checkout path. Only affects worktrees created from now on; nothing already on disk moves."
               >
                 <NativeSelect
                   size="xs"
@@ -644,65 +659,83 @@ export function SettingsDialog(props: {
               </Row>
               {storageMode === "custom" && (
                 <Row label="Custom worktree folder">
-                  <Group gap="xs" wrap="nowrap">
-                    <TextInput
-                      size="xs"
-                      w={220}
-                      value={storageDir}
-                      disabled={locked}
-                      placeholder="/Users/you/veld-worktrees"
-                      styles={{
-                        input: {
-                          fontFamily: "var(--mantine-font-family-monospace)",
-                        },
-                      }}
-                      onChange={(e) => setStorageDir(e.currentTarget.value)}
-                      onBlur={() => {
-                        const v = storageDir.trim();
-                        if (v !== storageDirValue) {
+                  <Stack gap={4} style={{ alignItems: "flex-end" }}>
+                    <Group gap="xs" wrap="nowrap">
+                      <TextInput
+                        size="xs"
+                        w={220}
+                        value={storageDir}
+                        disabled={locked}
+                        placeholder="/Users/you/veld-worktrees"
+                        styles={{
+                          input: {
+                            fontFamily: "var(--mantine-font-family-monospace)",
+                          },
+                        }}
+                        error={
+                          storageDirBroken ? "Must be an absolute path" : undefined
+                        }
+                        onChange={(e) => setStorageDir(e.currentTarget.value)}
+                        onBlur={() => {
+                          const v = storageDir.trim();
+                          if (v === storageDirValue) return;
+                          // Mirrors the daemon's own rule (absolute or empty) —
+                          // see the note on `searchUrl` above for why: the
+                          // daemon's 400 has no body a user would ever see, so a
+                          // rejected value would otherwise just snap back with
+                          // no explanation.
+                          if (v !== "" && !v.startsWith("/")) return;
                           set({ "worktree.storageDir": v });
-                        }
-                      }}
-                    />
-                    <Button
-                      size="xs"
-                      variant="default"
-                      loading={pickingStorageDir}
-                      disabled={locked}
-                      onClick={async () => {
-                        setPickingStorageDir(true);
-                        setStorageDirPickError(null);
-                        try {
-                          const picked = await api.pickDirectory();
-                          if (picked) {
-                            setStorageDir(picked);
-                            set({ "worktree.storageDir": picked });
+                        }}
+                      />
+                      <Button
+                        size="xs"
+                        variant="default"
+                        loading={pickingStorageDir}
+                        disabled={locked}
+                        onClick={async () => {
+                          setPickingStorageDir(true);
+                          setStorageDirPickError(null);
+                          try {
+                            const picked = await api.pickDirectory();
+                            if (picked) {
+                              setStorageDir(picked);
+                              set({ "worktree.storageDir": picked });
+                            }
+                          } catch (e) {
+                            setStorageDirPickError(
+                              e instanceof Error ? e.message : String(e),
+                            );
+                          } finally {
+                            setPickingStorageDir(false);
                           }
-                        } catch (e) {
-                          setStorageDirPickError(
-                            e instanceof Error ? e.message : String(e),
-                          );
-                        } finally {
-                          setPickingStorageDir(false);
-                        }
-                      }}
-                    >
-                      Browse…
-                    </Button>
-                  </Group>
+                        }}
+                      >
+                        Browse…
+                      </Button>
+                    </Group>
+                    {storageDirPickError && (
+                      <Text size="xs" c="red">
+                        {storageDirPickError}
+                      </Text>
+                    )}
+                    {!storageDirValue && !storageDirBroken && (
+                      <Text size="xs" c="dimmed">
+                        No folder chosen yet — new checkouts still land next to
+                        each repository until one is.
+                      </Text>
+                    )}
+                  </Stack>
                 </Row>
-              )}
-              {storageDirPickError && (
-                <Text size="xs" c="red">
-                  {storageDirPickError}
-                </Text>
               )}
               <Row
                 label="Open worktree storage folder"
                 help={
-                  storageMode === "custom"
-                    ? "Opens the folder above in Finder (or your file manager)."
-                    : "Only available with Custom location: the default has no single folder — each repo's worktrees live beside it, so open one from its own context menu instead."
+                  storageMode !== "custom"
+                    ? "Only available with Custom location: the default has no single folder — each repo's worktrees live beside it, so open one from its own context menu instead."
+                    : storageDirValue
+                      ? "Opens the folder above in Finder (or your file manager)."
+                      : "Choose a folder above first."
                 }
               >
                 <Button
