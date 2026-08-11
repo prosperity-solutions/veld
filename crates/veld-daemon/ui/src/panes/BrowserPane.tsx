@@ -56,7 +56,7 @@ import {
   urlForProfile,
   urlLabel,
 } from "./model";
-import { BookmarksModal, PlaceList } from "./PlaceList";
+import { BookmarksButton, BookmarksModal, PlaceList } from "./PlaceList";
 import { pickSuggestion, placesFor, stepIndex, suggestionsFor } from "./places";
 import {
   DEFAULT_ZOOM,
@@ -436,6 +436,9 @@ export function BrowserPane(props: {
     !chooser &&
     (suggestions.count > 0 || suggestions.bookmarks.length > 0);
 
+  /** Every project bookmark, which is no longer inline on any surface. */
+  const [bookmarksOpen, setBookmarksOpen] = useState(false);
+
   /**
    * The panel is an overlay over a *frozen* page, so the native view has to go.
    *
@@ -446,14 +449,25 @@ export function BrowserPane(props: {
    * freezes and hides **this pane's view only** (not the global suspend, which would
    * stop a page somebody is watching in the other dock), leaving a still of the page
    * for the panel to dim.
+   *
+   * **`bookmarksOpen` is in here, and it is not decoration.** Opening the modal from the
+   * panel closes the panel in the same commit, so gating on `panelOpen` alone released
+   * the view — and `overlayGuard`, which is what hides views for a portalled Mantine
+   * dialog, only re-takes it on the next animation frame and then spends up to
+   * `FREEZE_TIMEOUT_MS` capturing. The live page popped back over the just-mounted modal
+   * for that window. Holding this pane's own flag across the hand-off makes the hidden
+   * period continuous instead of two overlapping ones with a gap between them.
+   *
+   * `profile` is a dependency because a profile change *replaces the view* — the mount
+   * effect above disposes it and `ensure` builds a fresh one with `overlay: false`. That
+   * effect is declared first, so it runs first, and this one then re-asserts the flag on
+   * the new view rather than leaving a visible page painted over an open panel.
    */
   useEffect(() => {
-    setBrowserOverlay(id, panelOpen);
+    const hidden = panelOpen || bookmarksOpen;
+    setBrowserOverlay(id, hidden);
     return () => setBrowserOverlay(id, false);
-  }, [id, panelOpen]);
-
-  /** Every project bookmark, which is no longer inline on any surface. */
-  const [bookmarksOpen, setBookmarksOpen] = useState(false);
+  }, [id, profile, panelOpen, bookmarksOpen]);
 
   // Anything but the default is removable, including the one this pane is on:
   // removing it moves every pane using it back to Default. Refusing instead meant
@@ -1923,6 +1937,76 @@ export function BrowserPane(props: {
       )}
 
       <div className="browser-slot" ref={slot}>
+        {/* The suggestions, over a page that is already loaded.
+
+            **A dimmed overlay inside the slot, and the native view is hidden while it
+            is up.** It used to sit in flow between the chrome and the slot, because a
+            `WebContentsView` paints over DOM whatever the z-index says — so a panel
+            positioned over a live view is invisible in the desktop app and perfectly
+            visible in a browser tab, the worst of both. The cost was that typing an
+            address shoved the page down by up to 60% of the pane and reflowed it on
+            every keystroke. `setBrowserOverlay` (the effect beside `panelOpen`) takes
+            the view down and leaves a still of the page in its place, so there is
+            something real to dim rather than an empty pane.
+
+            **First among the slot's children, and above every `.browser-screen` by
+            z-index rather than by DOM order.** Those two facts are not in tension: the
+            screens are `z-index: 1` and this is `2`, so painting is decided by the
+            numbers, which leaves DOM order free to be the *tab* order. Rendering it
+            last put the error and spinner screens' buttons — dimmed under the scrim —
+            ahead of the suggestion rows when tabbing out of the address bar. It has to
+            be above them either way: the address bar is how you leave a page that
+            failed to load, so the panel must be readable over the error screen.
+
+            Not rendered while the pane is blank: there the start page below *is* this
+            list, at pane size, and two copies of it would be the duplication that made
+            the blank pane and the new-pane chooser indistinguishable in the first
+            place. */}
+        {panelOpen && (
+          <div
+            className="suggest-overlay"
+            // Swallow `mousedown` **inside the panel** so the address bar never loses
+            // focus to a row. That is what lets `onBlur` close the panel — the two
+            // together are one mechanism: blur means "the user went somewhere else",
+            // and a click on a row is not going somewhere else. `preventDefault` on
+            // mousedown is the only event that stops focus moving; a blur handler that
+            // tried to guess would race the click.
+            //
+            // **The scrim is exempt, and that is the point.** Preventing it there too
+            // made clicking the dimmed page cost two clicks: the first closed the panel
+            // through a handler of its own while focus stayed pinned in the field, so
+            // the bar was still focused with no list under it, and only a second click
+            // blurred it. Letting mousedown's default action run on the scrim blurs the
+            // field, and `onBlur` closes the panel — one click, one mechanism, and no
+            // second path that can disagree with it.
+            onMouseDown={(e) => {
+              if (e.target !== e.currentTarget) e.preventDefault();
+            }}
+          >
+            <div className="suggest-panel">
+              <PlaceList
+                suggestions={suggestions}
+                activeIndex={active}
+                listboxId={suggestId(id)}
+                emptyHint={props.urlsEmptyHint}
+                onOpen={(url, title) => go(url, { title })}
+              />
+              {/* A sibling of the list, never a child of it: that list is the listbox
+                  the address bar names through `aria-controls`, and a listbox may own
+                  options and nothing else. */}
+              {suggestions.bookmarks.length > 0 && (
+                <BookmarksButton
+                  count={suggestions.bookmarks.length}
+                  onOpen={() => {
+                    closeSuggestions();
+                    setBookmarksOpen(true);
+                  }}
+                />
+              )}
+            </div>
+          </div>
+        )}
+
         {/* Drag any edge to resize the emulated screen — the answer to "which
             width does this break at", which no list of devices can give you. The
             handles are only reachable because an emulated screen is inset from the
@@ -2122,65 +2206,6 @@ export function BrowserPane(props: {
             {state.error?.url && (
               <p className="pane-screen-url">{state.error.url}</p>
             )}
-          </div>
-        )}
-
-        {/* The suggestions, over a page that is already loaded.
-
-            **A dimmed overlay inside the slot, and the native view is hidden while it
-            is up.** It used to sit in flow between the chrome and the slot, because a
-            `WebContentsView` paints over DOM whatever the z-index says — so a panel
-            positioned over a live view is invisible in the desktop app and perfectly
-            visible in a browser tab, the worst of both. The cost was that typing an
-            address shoved the page down by up to 60% of the pane and reflowed it on
-            every keystroke. `setBrowserOverlay` (the effect beside `panelOpen`) takes
-            the view down and leaves a still of the page in its place, so there is
-            something real to dim rather than an empty pane.
-
-            Last among the slot's children and above every `.browser-screen`: the
-            address bar is how you leave a page that failed to load, so the panel has
-            to be readable over the error screen too.
-
-            Not rendered while the pane is blank: there the start page below *is* this
-            list, at pane size, and two copies of it would be the duplication that made
-            the blank pane and the new-pane chooser indistinguishable in the first
-            place. */}
-        {panelOpen && (
-          <div
-            className="suggest-overlay"
-            // Swallow `mousedown` **inside the panel** so the address bar never loses
-            // focus to a row. That is what lets `onBlur` close the panel — the two
-            // together are one mechanism: blur means "the user went somewhere else",
-            // and a click on a row is not going somewhere else. `preventDefault` on
-            // mousedown is the only event that stops focus moving; a blur handler that
-            // tried to guess would race the click.
-            //
-            // **The scrim is exempt, and that is the point.** Preventing it there too
-            // made clicking the dimmed page cost two clicks: the first closed the panel
-            // through a handler of its own while focus stayed pinned in the field, so
-            // the bar was still focused with no list under it, and only a second click
-            // blurred it. Letting mousedown's default action run on the scrim blurs the
-            // field, and `onBlur` closes the panel — one click, one mechanism, and no
-            // second path that can disagree with it.
-            onMouseDown={(e) => {
-              if (e.target !== e.currentTarget) e.preventDefault();
-            }}
-          >
-            <div className="suggest-panel">
-              <PlaceList
-                suggestions={suggestions}
-                activeIndex={active}
-                listboxId={suggestId(id)}
-                emptyHint={props.urlsEmptyHint}
-                onOpen={(url, title) => go(url, { title })}
-                // The panel has no heading to hang a control off, so the bookmarks sit
-                // under the rows here rather than beside a title.
-                onBookmarks={() => {
-                  closeSuggestions();
-                  setBookmarksOpen(true);
-                }}
-              />
-            </div>
           </div>
         )}
       </div>

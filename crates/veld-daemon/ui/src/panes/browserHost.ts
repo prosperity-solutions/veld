@@ -875,8 +875,16 @@ export function unmountBrowser(id: string): void {
   // An overlay cannot outlive the pane that renders it. The pane's own effect clears
   // this too; the belt matters because a flag left set on a detached view would keep
   // it hidden for good the next time the tab is opened.
+  //
+  // `thaw` has to be here rather than left to that effect. React destroys effects in
+  // declaration order, so the mount effect's cleanup reaches this line first — and once
+  // it has cleared the flag, the pane's own `setBrowserOverlay(id, false)` sees no change
+  // and returns without dropping the still. That leaked a capture of the page the pane
+  // was showing, which the *next* freeze would expose if its own capture failed or timed
+  // out: a still of a page the pane had left, painted under a fresh overlay.
   v.overlay = false;
   applyVisibility(v);
+  thaw(v);
   v.container.remove();
 }
 

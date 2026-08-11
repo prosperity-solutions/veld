@@ -87,18 +87,6 @@ export function PlaceList(props: {
    * options. `id` has to match the `aria-controls` the input names.
    */
   listboxId?: string;
-  /**
-   * Open the bookmarks modal, as a footer row under the rows.
-   *
-   * Only the suggestion panel passes this: the two full-size surfaces have a heading
-   * to put the control in, and this one does not. Rendered only when there are
-   * collapsed bookmarks to show — a button that opens an empty modal is worse than
-   * no button.
-   *
-   * Deliberately **not** a `role="option"`: it is not somewhere the pane can go, so
-   * the arrow keys must not stop on it and `pickSuggestion` knows nothing about it.
-   */
-  onBookmarks?: () => void;
 }) {
   const { suggestions: s, activeIndex = -1, listboxId } = props;
   const rowId = (index: number) =>
@@ -191,16 +179,28 @@ export function PlaceList(props: {
           Nothing is running yet — this project's bookmarks are under Bookmarks.
         </p>
       )}
-      {props.onBookmarks && s.bookmarks.length > 0 && (
-        <button
-          type="button"
-          className="btn place-bookmarks-row"
-          onClick={props.onBookmarks}
-        >
-          <IconBookmark size={13} /> Bookmarks ({s.bookmarks.length})
-        </button>
-      )}
     </div>
+  );
+}
+
+/**
+ * The bookmarks control for the suggestion panel, which has no heading to put it in.
+ *
+ * A separate export rather than a footer row inside {@link PlaceList}, and the reason is
+ * ARIA rather than taste: in the panel that list *is* the `role="listbox"` the address
+ * bar names through `aria-controls`, and a listbox may own options and nothing else —
+ * which is why the group headings in there carry `role="presentation"`. A `<button>`
+ * dropped in as a bare child breaks that ownership and can turn up in the "3 of 7" a
+ * screen reader announces. Rendered as a sibling of the list, it is simply a button.
+ *
+ * The two full-size surfaces do not use this — they have a heading, and put the same
+ * control there beside a Blank browser button.
+ */
+export function BookmarksButton(props: { count: number; onOpen: () => void }) {
+  return (
+    <button type="button" className="btn place-bookmarks-row" onClick={props.onOpen}>
+      <IconBookmark size={13} /> Bookmarks ({props.count})
+    </button>
   );
 }
 
@@ -284,10 +284,10 @@ function ActionRow(props: {
       // do, and the two must not write to each other.
       onClick={props.onOpen}
     >
-      {/* The same 14px slot every place row's glyph sits in (`.place-mark`), so all
-          three row shapes start their text on one vertical line. Without it the icon's
-          own width set the offset, and a 7px live dot, a 13px bookmark and a 14px
-          action icon put three text columns on one list.
+      {/* The same slot every place row's glyph sits in (`.place-mark`, which owns the
+          width), so all three row shapes start their text on one vertical line. Without
+          it the icon's own width set the offset, and a 7px live dot, a 13px bookmark and
+          a 14px action icon put three text columns on one list.
           `IconWorld`, not `IconWorldWww`: the lettered globe reads as a graphic rather
           than an icon at 14px — its three glyphs collapse into a smudge and it sat
           visually lower than the search magnifier it alternates with. */}

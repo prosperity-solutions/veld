@@ -1655,10 +1655,16 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
   flex-wrap: wrap;
 }
 
+/* Wraps too. A Button's own `overflow: hidden` zeroes *its* minimum size but not this
+   container's min-content, so at `MIN_RATIO` (a 15% dock) the pair overflowed the line
+   the parent's wrap had just given it — and `.pane-chooser`'s `overflow-y: auto` forces
+   `overflow-x: auto`, so that became a horizontal scrollbar across the whole chooser. */
 .chooser-head-actions {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
+  min-width: 0;
 }
 
 /* One question. The heading names it; nothing else in the group repeats it. */
@@ -2425,6 +2431,13 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
+  /* Wraps, exactly as `.chooser-head` does and for the same reason. A Mantine Button's
+     root is `overflow: hidden`, so its automatic minimum size as a flex item is 0 and it
+     shrinks freely — and its label is `nowrap` with no ellipsis, so it does not shorten,
+     it gets *sliced*. The hint paragraph beside it is ~420px unwrapped against this
+     block's own 560px cap, so "Bookmarks" was rendering as "Bookmar" in any dock under
+     roughly half a 1280px window. */
+  flex-wrap: wrap;
   width: 100%;
   max-width: 560px;
   margin: 0 auto;
@@ -2531,7 +2544,7 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
    A run row's live dot is 7px, a bookmark's glyph is 13px and the action row's icon is
    14px, so letting each set its own offset put three text columns in one list — most
    visibly on the action row, whose "Go to" sat 7px right of the service name under it.
-   One box, and the 9px gap after it is then the same gap everywhere.
+   One box, and one gap after it, everywhere.
 
    **Left-aligned, not centred.** Centring in a box the widest glyph fills left the
    action row's icon with more space on its left than its right, and a centred 7px dot
@@ -2618,8 +2631,11 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
    kind of lie a launcher cannot afford. The two full-size surfaces put the same control
    in their heading, which they have and the panel does not. */
 .place-bookmarks-row {
-  align-self: flex-start;
-  margin-top: 2px;
+  /* Centred under the list, not pinned to the panel's left edge: the list is capped at
+     560px and centred, so `flex-start` would put the button somewhere the rows above it
+     do not start whenever the pane is wider than that. A small centred pill under a
+     centred list reads as deliberate; a left-flushed one reads as a bug. */
+  align-self: center;
 }
 
 /* The suggestions over a page that is already loaded.
@@ -2647,8 +2663,12 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
 
 .suggest-panel {
   flex: none;
+  /* A column: the list, then the bookmarks button as its sibling rather than a row
+     inside it (see `BookmarksButton` — the list is a listbox and may own only options). */
   display: flex;
-  justify-content: center;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
   padding: 8px 10px;
   border-bottom: 1px solid var(--border);
   background: var(--panel);
