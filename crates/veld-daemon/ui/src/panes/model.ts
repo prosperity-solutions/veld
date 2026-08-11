@@ -54,7 +54,7 @@ import {
  * There is deliberately no `services` kind. The run's URLs are a *launcher*, not
  * a peer of a terminal and a page, and a launcher belongs wherever you are about
  * to need it: a `new` pane and a browser pane with no URL both show them
- * (`panes/VeldLinks.tsx`). Having a kind for it meant a singleton tab id, a
+ * (`panes/PlaceList.tsx`). Having a kind for it meant a singleton tab id, a
  * "does it already exist" check at every call site that could open one, and a
  * second place to render the same rows.
  */
@@ -801,34 +801,68 @@ export function normalizeBrowserUrl(raw: string): string | null {
 }
 
 /**
+ * A bracketed IPv6 literal, optionally with a port and a path.
+ *
+ * Tight rather than "starts with `[`": a pasted `[ERROR] cannot find module` starts
+ * with a bracket too, and treating it as an address got it refused with "not an
+ * http(s) address" instead of searched — which is the opposite of useful for a log
+ * line somebody is trying to look up.
+ */
+const IPV6_ADDRESS = /^\[[0-9a-fA-F:.]+\](?::\d+)?(?:[/?#].*)?$/;
+
+/**
+ * The schemes a browser pane refuses rather than searches for.
+ *
+ * A **closed set**, not "anything shaped like `scheme:`". The open rule made every
+ * colon-bearing token without whitespace an address, so `std::vec::Vec`, `Vec::push`
+ * and `TypeError:x` were refused with "not an http(s) address" — exactly the strings
+ * a developer types in order to look them up. These are the ones worth refusing
+ * loudly, because searching the web for `javascript:alert(1)` answers a question
+ * nobody asked and hides the refusal.
+ *
+ * A scheme with an authority (`slack://…`, `chrome://settings`) never reaches this:
+ * the `://` test above catches it, and `normalizeBrowserUrl` refuses it by protocol.
+ */
+const REFUSED_SCHEME = /^(?:javascript|data|file|about|mailto|blob|vbscript|tel|sms|view-source):/i;
+
+/**
  * Whether typed text is meant as an address at all.
  *
  * The question `normalizeBrowserUrl` cannot answer: it completes `react` to
  * `https://react/`, which parses, resolves nowhere, and is not what anybody meant.
  * A word is an address when it *says* it is — a scheme, a port, a dotted host, an
- * IPv6 literal — or when it is `localhost`, which has no dot and is the one host a
- * dev tool must never send to a search engine.
+ * IPv6 literal — or when it is `localhost`.
  *
  * Dotted wins even when the TLD is nonsense (`react.js` navigates and fails), which
  * is the deliberately dumb half of the rule. The alternative is a TLD list that
  * decides for the user, gets it wrong on `.internal` and `.test`, and needs updating
  * forever.
+ *
+ * **A bare single label is a search, and that is a real behaviour change.** Before
+ * this, `grafana` navigated to `https://grafana/`, which matters on a machine with
+ * `/etc/hosts` short names or a corporate intranet. It is what every mainstream
+ * browser does with a single label, veld cannot do better without the DNS and
+ * history signals an omnibox uses, and the alternative — offering a
+ * `Go to https://<label>/` row for every word typed — puts a bogus row under nine
+ * queries out of ten. The escape hatch is one prefix (`http://grafana`), and it is
+ * documented in `docs/configuration.md` § Searching From a Browser Pane's Address Bar.
+ * `localhost` is special-cased because it is the one bare label a dev tool can be
+ * certain about.
  */
 function looksLikeAddress(text: string): boolean {
   if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(text)) return true;
-  // An IPv6 literal, bracketed. Checked before the port rule because the address'
-  // own colons defeat it.
-  if (text.startsWith("[")) return true;
+  if (IPV6_ADDRESS.test(text)) return true;
+  // **Whitespace means it is a sentence, not an address**, and this one line covers
+  // three separate over-captures the earlier version had: `error: cannot find module`
+  // and `aspect ratio 16:9` were matched by the port rule, and
+  // `vite.config.ts not found` by the dotted-host rule — all three refused with "not
+  // an http(s) address" instead of being searched for. An address that genuinely
+  // contains a space has to say its scheme, which is checked above; that is also what
+  // every browser's address bar does.
+  if (/\s/.test(text)) return false;
   const host = text.split(/[/?#]/, 1)[0] ?? "";
   if (/:\d+$/.test(host)) return true;
-  // A scheme veld does not serve — `javascript:`, `data:`, `file:`. Address-shaped
-  // on purpose, so `normalizeBrowserUrl` below refuses it and the pane says why:
-  // searching the web for `javascript:alert(1)` would answer a question nobody
-  // asked and hide the refusal.
-  //
-  // Gated on there being no whitespace, which is what separates a scheme from an
-  // ordinary query that happens to contain a colon (`error: cannot find module`).
-  if (!/\s/.test(text) && /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(text)) return true;
+  if (REFUSED_SCHEME.test(text)) return true;
   if (host.includes(".")) return true;
   return host.toLowerCase() === "localhost";
 }

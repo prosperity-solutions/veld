@@ -8,6 +8,7 @@ import {
   logsTimeZone,
   markerStyle,
   quickSwitchPrefs,
+  searchUrl,
   terminalInterceptSystemOpen,
   terminalOpenUrlsInApp,
   terminalPrefs,
@@ -316,5 +317,34 @@ describe("terminal URL routing", () => {
         "browser.externalOrigins": ["https://a.example", 7 as unknown as string],
       }),
     ).toEqual(["https://a.example"]);
+  });
+});
+
+describe("searchUrl", () => {
+  it("keeps an empty template, because empty is the off switch", () => {
+    // The one thing this reader exists for. `str()` — which every other string
+    // setting goes through — treats `""` as absent and substitutes the fallback, so
+    // routing this key through it would make "no search" the single preference a user
+    // cannot save. A future simplification to `str(doc, "browser.searchUrl")` has to
+    // fail here rather than silently delete the off switch.
+    expect(searchUrl({ "browser.searchUrl": "" })).toBe("");
+    expect(searchUrl({ "browser.searchUrl": "   " })).toBe("");
+  });
+
+  it("falls back to the shipped engine only when the daemon said nothing", () => {
+    // Mirrors `DEFAULT_SEARCH_URL` in `veld-core/src/db/settings.rs`. Nothing ties the
+    // two strings together, so this assertion is the drift alarm: an older daemon that
+    // has never heard of the key must still leave a client able to search, because the
+    // address bar's placeholder has already promised it can.
+    expect(searchUrl({})).toBe("https://www.google.com/search?q=%s");
+    expect(searchUrl({ "browser.searchUrl": 7 as unknown as string })).toBe(
+      "https://www.google.com/search?q=%s",
+    );
+  });
+
+  it("trims, so a template is compared and used in one spelling", () => {
+    expect(searchUrl({ "browser.searchUrl": "  https://d.example/?q=%s " })).toBe(
+      "https://d.example/?q=%s",
+    );
   });
 });

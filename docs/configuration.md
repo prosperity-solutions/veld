@@ -3413,14 +3413,30 @@ previewing the app you are building.
   IPv6 literal, a host with a dot in it, or `localhost`. A dotted host wins even when
   its TLD is nonsense (`react.js` navigates and fails), because the alternative is a
   TLD list that decides for you and gets `.internal` and `.test` wrong.
-- **A non-http(s) scheme is refused, never searched for.** `javascript:alert(1)` and
-  `file:///etc/passwd` are typos or refusals, and searching the web for one would bury
-  the reason the pane did not go there. A colon alone does not make a scheme, so a
-  pasted `error: cannot find module` is still a query.
+- **Whitespace makes it a query.** `vite.config.ts not found`, `error at line 12:5`
+  and `aspect ratio 16:9` are searched for, not refused — an address that genuinely
+  contains a space has to say its scheme, which is what every browser's address bar
+  requires too.
+- **A bare single label is a search, not a host.** `grafana` searches; it does *not*
+  go to `https://grafana/` the way an earlier version did. That is what every
+  mainstream browser does with a single label, and veld has neither the DNS nor the
+  history signals an omnibox uses to know better. If you do want the host — an
+  `/etc/hosts` entry, an intranet short name — say the scheme: `http://grafana`.
+  `localhost` is special-cased, being the one bare label a dev tool can be sure about.
+- **A non-http(s) scheme is refused, never searched for.** The refused set is closed
+  (`javascript:`, `data:`, `file:`, `about:`, `mailto:`, `blob:`, `vbscript:`, `tel:`,
+  `sms:`, `view-source:`, plus anything with a `scheme://` veld does not serve):
+  searching the web for `javascript:alert(1)` would bury the reason the pane did not
+  go there. Outside that set a colon is just a colon, so `std::vec::Vec` and
+  `TypeError:x` are queries.
 - The daemon validates the template on write: it must contain `%s`, start with
-  `http://` or `https://`, have a host, and carry no whitespace — and **`%s` may not
+  `http://` or `https://` (case-insensitively), have a host that is not just a port,
+  and carry no whitespace or control characters, within 400 bytes — and **`%s` may not
   be in the host**, since `https://%s.example.com/` would let anything typed into an
   address bar choose which host to reach.
+- A search is a navigation like any other, so the pane records it: the resulting URL
+  is written into the pane's layout and restored with the pane, exactly as a visited
+  page is. Turn search off if you would rather a mistyped query left no trace.
 
 ---
 

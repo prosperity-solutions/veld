@@ -1731,12 +1731,6 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
   overflow: hidden;
 }
 
-.pane-chooser-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
 /* A pane-sized target rather than a toolbar-sized one: these are the primary
    action of a whole pane, not a chip in a dense row. */
 .btn.big {
@@ -1933,7 +1927,6 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
   cursor: not-allowed;
 }
 
-/* The project's own panes, kept visually together and below veld's own. */
 /* The chooser's groups carry their own headings (`.chooser-heading`); a
    `.section-label` inside one belongs to the place list and keeps its own padding. */
 .pane-chooser .place-list {
@@ -2509,6 +2502,13 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
 .place-glyph {
   flex: none;
   color: var(--faint);
+}
+
+/* The filter matched nothing — distinct from there being nothing to match, which gets
+   the icon-and-hint screen above. */
+.place-nomatch {
+  margin: 0;
+  padding: 6px 4px;
 }
 
 /* The row Enter would open. A ring, not just a border colour: a row under the pointer

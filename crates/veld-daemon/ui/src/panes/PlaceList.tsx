@@ -44,9 +44,17 @@ export function PlaceList(props: {
   activeIndex?: number;
   /** Open this place, in the pane the list is being shown in. */
   onOpen: (url: string, title?: string) => void;
-  onHover?: (index: number) => void;
   /** Why there are no places, which only the app knows (no run, or no veld.json). */
   emptyHint: string;
+  /**
+   * Rows are a popup listbox for the address bar above them, not a page of links.
+   *
+   * Only the suggestion panel sets this. It is what makes `role="option"` and
+   * `aria-selected` honest: a screen reader needs them when a field's arrow keys move
+   * through the rows, and must not be told a start page's links are a widget's
+   * options. `id` has to match the `aria-controls` the input names.
+   */
+  listboxId?: string;
   /**
    * Offer a blank pane as the last row. The chooser passes this — it is how a pane
    * becomes a browser with nothing loaded, which is what you want for reading
@@ -57,23 +65,35 @@ export function PlaceList(props: {
   /** Whether search is configured, which changes what the blank row promises. */
   canSearch?: boolean;
   /**
-   * Open every run URL in the system browser. Passed by the two start surfaces and
+   * Open these URLs in the system browser. Passed by the two start surfaces and
    * deliberately not by the suggestion panel over a live page: there, the list is
    * answering "where should this pane go", and a control that opens six other
    * windows is not an answer to it.
+   *
+   * **The rows decide which URLs, not the caller.** Both callers used to close over
+   * the run's whole URL set while the button was gated on the *filtered* rows, so a
+   * query narrowing six services to two put "open all" under two rows and opened six
+   * windows.
    */
-  onOpenAll?: () => void;
+  onOpenAll?: (urls: string[]) => void;
 }) {
-  const { suggestions: s, activeIndex = -1 } = props;
-  const nothing = s.count === 0;
+  const { suggestions: s, activeIndex = -1, listboxId } = props;
+  const runUrls = s.places.filter((p) => p.kind === "run").map((p) => p.url);
+  const rowId = (index: number) =>
+    listboxId ? `${listboxId}-row-${index}` : undefined;
   return (
-    <div className="place-list">
+    <div
+      className="place-list"
+      id={listboxId}
+      role={listboxId ? "listbox" : undefined}
+    >
       {s.action && (
         <ActionRow
           action={s.action}
           active={activeIndex === 0}
+          id={rowId(0)}
+          asOption={listboxId !== undefined}
           onOpen={() => props.onOpen(s.action?.url ?? "")}
-          onHover={() => props.onHover?.(0)}
         />
       )}
       {s.places.map((place, i) => {
@@ -100,22 +120,35 @@ export function PlaceList(props: {
             <PlaceRow
               place={place}
               active={activeIndex === index}
+              id={rowId(index)}
+              asOption={listboxId !== undefined}
               onOpen={() => props.onOpen(place.url, place.name)}
-              onHover={() => props.onHover?.(index)}
             />
           </div>
         );
       })}
-      {nothing && (
+      {/* Two empty states, not one. `total === 0` is a fact about the *run* and only
+          the app can explain it; a filter that matched nothing is a fact about what
+          was typed. Conflating them printed "start the run and its services appear
+          here" over a live run with five URLs, because the query was narrower than
+          the list. */}
+      {s.total === 0 && (
         <div className="links-empty">
           <IconWorldOff size={26} />
           <p className="pane-screen-title">No URLs yet</p>
           <p className="faint">{props.emptyHint}</p>
         </div>
       )}
+      {s.total > 0 && s.places.length === 0 && (
+        <p className="faint place-nomatch">Nothing here matches what you typed.</p>
+      )}
       {/* Two or more, as before: "open all" for one URL is the row above it. */}
-      {props.onOpenAll && s.places.filter((p) => p.kind === "run").length > 1 && (
-        <button type="button" className="btn links-all" onClick={props.onOpenAll}>
+      {props.onOpenAll && runUrls.length > 1 && (
+        <button
+          type="button"
+          className="btn links-all"
+          onClick={() => props.onOpenAll?.(runUrls)}
+        >
           <IconExternalLink size={13} /> Open all in system browser
         </button>
       )}
@@ -146,17 +179,25 @@ export function PlaceList(props: {
 function ActionRow(props: {
   action: Target;
   active: boolean;
+  id?: string;
+  asOption?: boolean;
   onOpen: () => void;
-  onHover: () => void;
 }) {
   const { action } = props;
   return (
     <button
       type="button"
       className="link-row place-action"
+      id={props.id}
+      role={props.asOption ? "option" : undefined}
+      aria-selected={props.asOption ? props.active : undefined}
       data-active={props.active || undefined}
+      // No hover handler. Hover used to write the keyboard's index, which meant that
+      // after the pointer had crossed the list once, Enter opened the last row it
+      // passed over instead of what was typed — and nothing cleared it, since only a
+      // keystroke reset the index. Hover is a CSS state; the ring is what Enter will
+      // do, and the two must not write to each other.
       onClick={props.onOpen}
-      onMouseMove={props.onHover}
     >
       {action.kind === "search" ? (
         <IconSearch size={14} />
@@ -176,8 +217,9 @@ function ActionRow(props: {
 function PlaceRow(props: {
   place: Place;
   active: boolean;
+  id?: string;
+  asOption?: boolean;
   onOpen: () => void;
-  onHover: () => void;
 }) {
   const [copied, setCopied] = useState(false);
   const { place } = props;
@@ -185,9 +227,15 @@ function PlaceRow(props: {
   return (
     <div
       className="link-row"
+      id={props.id}
+      // The frame carries the option role, not the inner button: it is what the ring
+      // is drawn on and what `aria-activedescendant` points at. The copy and
+      // open-externally controls are siblings inside it, which is why the row cannot
+      // be a `<button>` itself.
+      role={props.asOption ? "option" : undefined}
+      aria-selected={props.asOption ? props.active : undefined}
       data-kind={place.kind}
       data-active={props.active || undefined}
-      onMouseMove={props.onHover}
     >
       {/* Siblings, not nested: a `<button>` inside a `<button>` is invalid HTML and
           browsers resolve it by dropping the inner one — the same rule the pane tabs

@@ -390,6 +390,17 @@ export function BrowserPane(props: {
   const opening = covered && !failure && !nested && !chooser;
   const color = BROWSER_PROFILE_COLORS[profile];
 
+  /**
+   * Whether the suggestion **panel** is on screen, which is not the same as the
+   * address bar having focus.
+   *
+   * On a blank pane the start page already *is* the list, so no panel renders — and
+   * three things read this rather than `suggesting`: the ARIA combobox state (it must
+   * not name a listbox that does not exist), Escape's first step (which otherwise
+   * fired invisibly and swallowed the keypress), and the panel itself.
+   */
+  const panelOpen = suggesting && !chooser && suggestions.count > 0;
+
   // Anything but the default is removable, including the one this pane is on:
   // removing it moves every pane using it back to Default. Refusing instead meant
   // the session you were looking at was the one you could never get rid of.
@@ -960,9 +971,16 @@ export function BrowserPane(props: {
               : "Search, or go to an address"
           }
           // The list of places is what this field is *for* — see `suggesting`.
+          //
+          // `panelOpen`, not `suggesting`: on a blank pane the start page *is* the
+          // list, so no panel with this id is rendered, and claiming an expanded
+          // listbox that does not exist points a screen reader at nothing.
           role="combobox"
-          aria-expanded={suggesting}
-          aria-controls={suggestId(id)}
+          aria-expanded={panelOpen}
+          aria-controls={panelOpen ? suggestId(id) : undefined}
+          aria-activedescendant={
+            panelOpen && active >= 0 ? `${suggestId(id)}-row-${active}` : undefined
+          }
           aria-autocomplete="list"
           onChange={(e) => {
             setDraft(e.currentTarget.value);
@@ -979,11 +997,18 @@ export function BrowserPane(props: {
             setTyped(false);
             e.currentTarget.select();
           }}
-          // Not on blur: a click on a suggestion blurs the field first, so closing
-          // here would unmount the row mid-click and the click would land on
-          // nothing. `go` and Escape are what close the panel, and both are the
-          // user having decided.
-          onBlur={() => setEditing(false)}
+          // **Closing on blur is what makes the panel dismissible at all.** It was
+          // left out because a click on a suggestion blurs the field first, which
+          // would unmount the row mid-click — but the panel is in flow above the
+          // page, so without this, clicking into the page left up to 60% of the pane
+          // occupied by a list of one row reading "Go to <the URL you are already
+          // on>", with no way back but the address bar. The mid-click problem is
+          // solved where it happens instead: the panel swallows `mousedown` so the
+          // field never loses focus to a row (see `.suggest-panel` below).
+          onBlur={() => {
+            setEditing(false);
+            closeSuggestions();
+          }}
           onKeyDown={(e) => {
             if (e.key === "Enter") {
               e.preventDefault();
@@ -993,7 +1018,12 @@ export function BrowserPane(props: {
               // One Escape at a time: with the panel up it closes the panel and
               // leaves the text alone, so a mis-arrowed highlight costs nothing.
               // A second one restores the address and gives the keyboard back.
-              if (suggesting) {
+              //
+              // Gated on the panel actually being *rendered*: on a blank pane
+              // `suggesting` is true from the focus alone, so this branch used to
+              // swallow the first Escape invisibly — widening the still-visible start
+              // page back to unfiltered and not giving the keyboard back.
+              if (panelOpen) {
                 closeSuggestions();
                 return;
               }
@@ -1819,14 +1849,23 @@ export function BrowserPane(props: {
           list, at pane size, and two copies of it would be the duplication that made
           the blank pane and the new-pane chooser indistinguishable in the first
           place. */}
-      {suggesting && !chooser && suggestions.count > 0 && (
-        <div className="suggest-panel" id={suggestId(id)} role="listbox">
+      {panelOpen && (
+        <div
+          className="suggest-panel"
+          // Swallow `mousedown` so the address bar never loses focus to a row. That
+          // is what lets `onBlur` close the panel — the two together are one
+          // mechanism: blur means "the user went somewhere else", and a click inside
+          // the panel is not going somewhere else. `preventDefault` on mousedown is
+          // the only event that stops focus moving; a blur handler that tried to
+          // guess would race the click.
+          onMouseDown={(e) => e.preventDefault()}
+        >
           <PlaceList
             suggestions={suggestions}
             activeIndex={active}
+            listboxId={suggestId(id)}
             emptyHint={props.urlsEmptyHint}
             onOpen={(url, title) => go(url, { title })}
-            onHover={setActiveRow}
           />
         </div>
       )}
@@ -1901,9 +1940,11 @@ export function BrowserPane(props: {
           // the chooser plus an empty bar, and the user's question was "there is no
           // URL in here, how do I use it?". Two things answer it. The heading names
           // *this* pane's one question — where should it go — where the chooser asks
-          // what a pane should be. And the address bar above is focused with a caret
-          // in it, so the field is visibly the thing to type into rather than a
-          // display of nothing.
+          // what a pane should be. And typing into the bar above puts what it will do
+          // at the top of this list, ringed, so the field's effect is visible before
+          // Enter is pressed. **Not** a focused caret: autofocus was tried and taken
+          // back out (see the note beside `chooser` above), so do not reintroduce it
+          // on the strength of this comment.
           <div className="browser-screen start">
             <div className="start-head">
               <p className="pane-screen-title">Where to?</p>
@@ -1918,10 +1959,9 @@ export function BrowserPane(props: {
               activeIndex={active}
               emptyHint={props.urlsEmptyHint}
               onOpen={(url, title) => go(url, { title })}
-              onHover={setActiveRow}
-              onOpenAll={() =>
-                props.serviceUrls.forEach(([, url]) => window.open(url, "_blank"))
-              }
+              // The rows decide which URLs "open all" means — with the list filtered
+              // by what is in the address bar, the run's whole set is the wrong answer.
+              onOpenAll={(urls) => urls.forEach((url) => window.open(url, "_blank"))}
             />
           </div>
         )}

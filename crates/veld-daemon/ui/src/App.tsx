@@ -3116,11 +3116,11 @@ function AppInner(props: {
   };
 
   // The top bar's globe: a browser pane with nothing in it, which is where the
-  // run's URLs live now (`panes/VeldLinks.tsx`). An existing blank pane is already
+  // run's URLs live now (`panes/PlaceList.tsx`). An existing blank pane is already
   // showing exactly that, so it gets focused instead of stacking up another one —
   // and the *last* of them, so asking twice lands in the same place rather than
   // cycling.
-  const showVeldLinks = () => {
+  const showBlankBrowser = () => {
     if (!layout) return;
     // Updater form, like every other layout mutation here: a browser pane writes
     // the layout on its own schedule (`did-navigate` → `updateTab`), and that URL
@@ -3729,7 +3729,7 @@ function AppInner(props: {
         group: "Panes",
         label: "Open the run's URLs in a pane",
         alt: ["urls", "services", "links"],
-        run: showVeldLinks,
+        run: showBlankBrowser,
       });
     }
 
@@ -4123,7 +4123,7 @@ function AppInner(props: {
         }
         urls={urls}
         sharing={sharingSurface}
-        onShowVeldLinks={layout && showVeldLinks}
+        onShowBlankBrowser={layout && showBlankBrowser}
         onSelectRepo={(root) => {
           setActiveRepoRoot(root);
           setActiveWtKey("");
@@ -4836,7 +4836,7 @@ function TopBar(props: {
   /** The Sharing surface, built by the app (it owns the shares poll). */
   sharing: React.ReactNode;
   /** Open a pane on the run's URLs. Absent when there is no layout to open into. */
-  onShowVeldLinks: (() => void) | undefined;
+  onShowBlankBrowser: (() => void) | undefined;
   onSelectRepo: (root: string) => void;
   onImport: () => void;
   onRemoveRepo: () => void;
@@ -5123,8 +5123,8 @@ function TopBar(props: {
                     size="md"
                     variant="default"
                     aria-label="Open the run's URLs in a pane"
-                    disabled={!props.onShowVeldLinks || props.urls.length === 0}
-                    onClick={props.onShowVeldLinks}
+                    disabled={!props.onShowBlankBrowser || props.urls.length === 0}
+                    onClick={props.onShowBlankBrowser}
                   >
                     <IconWorld size={14} />
                   </ActionIcon>

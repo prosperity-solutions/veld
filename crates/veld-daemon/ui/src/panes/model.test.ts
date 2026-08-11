@@ -684,6 +684,56 @@ describe("browser tabs", () => {
       expect(resolveAddress("error: cannot find module", ENGINE).kind).toBe("search");
     });
 
+    it("searches for the shapes that only *look* like addresses", () => {
+      // Every one of these was refused with "not an http(s) address" before the rules
+      // were tightened, which is the worst possible answer for a string somebody typed
+      // *in order to look it up*.
+      //
+      // `std::vec::Vec` — an open `scheme:` test made every colon-bearing token an
+      // address; the set of refused schemes is closed now.
+      expect(resolveAddress("std::vec::Vec", ENGINE).kind).toBe("search");
+      expect(resolveAddress("Vec::push", ENGINE).kind).toBe("search");
+      // A port rule that did not care about whitespace claimed these.
+      expect(resolveAddress("aspect ratio 16:9", ENGINE).kind).toBe("search");
+      expect(resolveAddress("error at line 12:5", ENGINE).kind).toBe("search");
+      // A dotted-host rule that did not care about whitespace claimed this one.
+      expect(resolveAddress("vite.config.ts not found", ENGINE).kind).toBe("search");
+      // `startsWith("[")` claimed any bracketed text, not the IPv6 literal it meant.
+      expect(resolveAddress("[ERROR] cannot find module", ENGINE).kind).toBe("search");
+    });
+
+    it("still refuses the schemes a pane must not open", () => {
+      // The closed set has to keep doing the job the open rule did: these are typos
+      // and refusals, and searching the web for one hides the refusal.
+      for (const raw of [
+        "javascript:alert(1)",
+        "data:text/html,<b>x",
+        "file:///etc/passwd",
+        "about:blank",
+        "mailto:someone@example.com",
+        "view-source:https://example.com",
+        // A scheme with an authority never reaches the set — the `://` test catches it
+        // and `normalizeBrowserUrl` refuses it by protocol.
+        "chrome://settings",
+      ]) {
+        expect(resolveAddress(raw, ENGINE), raw).toEqual({ kind: "invalid" });
+      }
+    });
+
+    it("sends a bare single label to search, which is a deliberate change", () => {
+      // `grafana` used to navigate to `https://grafana/`. It searches now: it is what
+      // every mainstream browser does with a single label, and veld has neither the DNS
+      // nor the history signals an omnibox uses to know better. The escape hatch is one
+      // prefix, and this pins both halves so the trade cannot be reversed by accident.
+      expect(resolveAddress("grafana", ENGINE).kind).toBe("search");
+      expect(resolveAddress("http://grafana", ENGINE)).toEqual({
+        kind: "url",
+        url: "http://grafana/",
+      });
+      // `localhost` is the one bare label a dev tool can be certain about.
+      expect(resolveAddress("localhost", ENGINE).kind).toBe("url");
+    });
+
     it("refuses rather than searching for a broken address, and honours search-off", () => {
       // Claimed to be an address and is not one: searching for it would bury the
       // reason the pane did not go there.

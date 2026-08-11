@@ -82,6 +82,15 @@ export interface Suggestions {
   places: Place[];
   /** Rows in total, action included. What the arrow keys move within. */
   count: number;
+  /**
+   * Places before filtering.
+   *
+   * Carried so a renderer can tell "this run has no URLs" from "your query matched
+   * none of them" — two states that were one, which put the app's *there is no run*
+   * hint on screen while a run was up with five URLs, simply because the filter was
+   * narrower than the list.
+   */
+  total: number;
 }
 
 export function suggestionsFor(
@@ -92,7 +101,12 @@ export function suggestionsFor(
   const matched = filterPlaces(places, query);
   const resolved = query.trim() === "" ? null : resolveAddress(query, searchUrl);
   const action = resolved && resolved.kind !== "invalid" ? resolved : null;
-  return { action, places: matched, count: (action ? 1 : 0) + matched.length };
+  return {
+    action,
+    places: matched,
+    count: (action ? 1 : 0) + matched.length,
+    total: places.length,
+  };
 }
 
 /**

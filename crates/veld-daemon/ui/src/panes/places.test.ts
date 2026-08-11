@@ -81,6 +81,18 @@ describe("suggestionsFor", () => {
     expect(query.action?.kind).toBe("search");
   });
 
+  it("reports the unfiltered size, so a renderer can tell no-places from no-matches", () => {
+    // Without `total`, a filter that matched nothing was indistinguishable from a run
+    // with no URLs — and the renderer put the app's "start the run and its services
+    // appear here" hint on screen while a run was up with four places.
+    const matched = suggestionsFor(places, "zzz nothing", ENGINE);
+    expect(matched.places).toEqual([]);
+    expect(matched.total).toBe(4);
+
+    const none = suggestionsFor([], "zzz nothing", ENGINE);
+    expect(none.total).toBe(0);
+  });
+
   it("offers no action row for text that resolves nowhere", () => {
     // A broken address is not a search — see `resolveAddress`.
     expect(suggestionsFor(places, "http://", ENGINE).action).toBeNull();

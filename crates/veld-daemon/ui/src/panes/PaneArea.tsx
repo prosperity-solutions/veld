@@ -1527,9 +1527,7 @@ function PaneChooser(props: {
           canSearch={props.searchUrl.trim() !== ""}
           onOpen={(url, title) => props.onBrowser(browserTab({ url, title }))}
           onBlank={() => props.onBrowser(browserTab({}))}
-          onOpenAll={() =>
-            props.serviceUrls.forEach(([, url]) => window.open(url, "_blank"))
-          }
+          onOpenAll={(urls) => urls.forEach((url) => window.open(url, "_blank"))}
         />
       </section>
 

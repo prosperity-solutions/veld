@@ -622,8 +622,12 @@ pub fn parse_search_template(raw: &str) -> Result<String, String> {
     if t.is_empty() {
         return Ok(String::new());
     }
+    // Bytes, and the message says bytes: `t.len()` is a byte count, so an engine on an
+    // IDN host (`https://поиск.рф/?q=%s`) gets half the budget a character count would
+    // give it. Saying "characters" made the refusal read as a lie about a template the
+    // author can see is shorter than that.
     if t.len() > MAX_SEARCH_URL_LEN {
-        return Err(format!("longer than {MAX_SEARCH_URL_LEN} characters"));
+        return Err(format!("longer than {MAX_SEARCH_URL_LEN} bytes"));
     }
     // Whitespace and controls, before anything else: a template carrying either is
     // not a URL, and `char::is_control` also catches the newline that would let one
@@ -636,17 +640,33 @@ pub fn parse_search_template(raw: &str) -> Result<String, String> {
             "must contain {SEARCH_QUERY_TOKEN} where the query goes"
         ));
     }
-    let rest = t
-        .strip_prefix("https://")
-        .or_else(|| t.strip_prefix("http://"))
-        .ok_or_else(|| "must start with http:// or https://".to_owned())?;
-    let host = rest
+    // Case-insensitively, because a scheme is: `HTTPS://duckduckgo.com/?q=%s` is a
+    // valid URL that the *client* accepts (`/^https?:\/\//i` in `panes/model.ts`), so a
+    // case-sensitive `strip_prefix` here refused it with "must start with http:// or
+    // https://" — a message the author can see is false.
+    let lower = t.to_ascii_lowercase();
+    let scheme_len = if lower.starts_with("https://") {
+        "https://".len()
+    } else if lower.starts_with("http://") {
+        "http://".len()
+    } else {
+        return Err("must start with http:// or https://".to_owned());
+    };
+    let host = t[scheme_len..]
         .split(['/', '?', '#'])
         .next()
         .unwrap_or_default()
         .to_owned();
     if host.is_empty() {
         return Err("has no host".to_owned());
+    }
+    // A port with nothing in front of it. `https://:8080/?q=%s` passed every rule above
+    // — the host span is non-empty — and then failed at the point of *use*, where the
+    // client's URL parser rejects it and the pane blames the query: "Not an http(s)
+    // address: <what the user typed>". A setting that cannot work must fail on the
+    // screen where it is written.
+    if host.starts_with(':') {
+        return Err("has a port but no host".to_owned());
     }
     if host.contains(SEARCH_QUERY_TOKEN) {
         return Err(format!(
@@ -1254,6 +1274,13 @@ mod tests {
             db.settings().unwrap()["browser.searchUrl"],
             Value::from("https://duckduckgo.com/?q=%s")
         );
+        // A scheme is case-insensitive, and the client's reader accepts this spelling —
+        // so refusing it here would make one stored value legal in one half of the app.
+        db.patch_settings(&patch(&[(
+            "browser.searchUrl",
+            Value::from("HTTPS://duckduckgo.com/?q=%s"),
+        )]))
+        .unwrap();
         db.patch_settings(&patch(&[("browser.searchUrl", Value::from(""))]))
             .unwrap();
         assert_eq!(db.settings().unwrap()["browser.searchUrl"], Value::from(""));
@@ -1263,10 +1290,14 @@ mod tests {
             Value::from("example.com/?q=%s"),          // no scheme
             Value::from("ftp://example.com/?q=%s"),    // not http(s)
             Value::from("https:///?q=%s"),             // no host
-            Value::from("https://%s.example.com/"),    // the query picks the host
-            Value::from("https://e.com/?q=%s x"),      // whitespace
+            // Passes every other rule and then cannot navigate: the client's URL parser
+            // rejects it, and the refusal surfaced as "not an http(s) address: <the
+            // user's own query>". A setting that cannot work fails where it is typed.
+            Value::from("https://:8080/?q=%s"),
+            Value::from("https://%s.example.com/"), // the query picks the host
+            Value::from("https://e.com/?q=%s x"),   // whitespace
             Value::from("https://e.com/?q=%s\nhttps://e2.com/?q=%s"), // two values in one
-            Value::from(7),                            // not a string
+            Value::from(7),                         // not a string
             Value::from(format!(
                 "https://e.com/?q=%s&pad={}",
                 "a".repeat(MAX_SEARCH_URL_LEN)
