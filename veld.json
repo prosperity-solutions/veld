@@ -98,6 +98,13 @@
         // also accepts a caller-chosen session id (`--session-id`, which the
         // CLI creates if missing), so it gets a real token and a real resume
         // rather than codex's `--last` guess.
+        //
+        // Any pane runs inside your **login+interactive shell** (`$SHELL -l -i
+        // -c '<command>'`), the same shell a normal terminal opens — so an `argv`
+        // here inherits whatever `.zprofile`/`.zshrc` export (model tokens,
+        // tool paths), exactly as if you had typed the command in a terminal.
+        // The shell still exits with the command's status, so `close_on_exit`
+        // and resume behave as before.
         "id": "pi",
         "type": "terminal",
         "label": "Pi - auto",
@@ -171,11 +178,11 @@
         // The third shape: one-shot. No resume, no token, an emoji instead of
         // an icon name — a pane needs none of the machinery to be worth having.
         //
-        // Deliberately does *not* `exec $SHELL -l` afterwards. Git pages its
-        // log, so `q` quits the pager, git exits, the shell exits 0, and
-        // `close_on_exit` tidies the pane away — which is what pressing `q`
-        // ought to mean. Dropping into a shell instead left the pane sitting at
-        // a prompt nobody asked for.
+        // Deliberately does *not* drop into an interactive prompt afterwards.
+        // Git pages its log, so `q` quits the pager, git exits, and the login
+        // shell wrapping the pane exits with its status — which is what
+        // `close_on_exit` then tidies away. `q` means "this pane is done", not
+        // "and now give me a shell".
         "id": "git-log",
         "type": "terminal",
         "label": "Git log",

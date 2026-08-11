@@ -497,7 +497,7 @@ One permission is answered without asking anyone: a pane may **capture its own c
 
 `ide.quicklinks` is the other half of the same block, and the other half of a pane's start page: veld lists the URLs it made, and these are the ones it didn't — staging, a dashboard, an internal wiki — versioned with the repo so a teammate who clones it gets the same links.
 
-**A project can add its own panes** (`ide.panes`), which is how the dock stops being a fixed set of four kinds. A declared pane is a terminal that runs *your* command instead of a login shell, and it appears in the `+` menu, the pane chooser and ⌘K alongside veld's own:
+**A project can add its own panes** (`ide.panes`), which is how the dock stops being a fixed set of four kinds. A declared pane is a terminal that runs *your* command inside your **login shell** — the same shell a plain terminal opens, so it inherits everything `.zprofile`/`.zshrc` export (model tokens, tool paths) — and it appears in the `+` menu, the pane chooser and ⌘K alongside veld's own:
 
 ```jsonc
 "ide": {

@@ -332,7 +332,11 @@ fn launch_linux(script: &Path) -> Result<String, ConsoleError> {
 /// Single quotes disable every expansion there is, which is the point: a path or
 /// a version string reaching a generated script must never be able to become a
 /// second command. The `'\''` dance is the only escape single quoting needs.
-fn quote(s: &str) -> String {
+///
+/// `pub` for the daemon's pane path, which re-quotes an `argv` pane command so it
+/// can run inside the user's login shell without an argument becoming a second
+/// command. Same contract, same `'\''` escape.
+pub fn quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 

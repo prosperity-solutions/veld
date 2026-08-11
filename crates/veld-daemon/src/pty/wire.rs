@@ -214,11 +214,11 @@ pub struct HolderConfig {
     /// that knows about instances, ports and where the `veld` CLI lives; the holder
     /// only applies it.
     ///
-    /// It is also how a **pane command** gets a usable `PATH`. The holder's shell
-    /// path deliberately skips `resolve_user_path()` because a login shell computes
-    /// `PATH` itself — but [`Self::argv`] is spawned *directly*, with no login shell
-    /// in front of it, so it would otherwise inherit launchd's bare service `PATH`
-    /// and fail to find every user-installed CLI it exists to run.
+    /// It is also how a **pane command** gets a usable `PATH`. `resolve_pane`
+    /// wraps the pane's command in the user's login+interactive shell, which
+    /// computes `PATH` itself, so this entry is a *floor* for a shell with no rc
+    /// files — without it that shell would inherit the daemon's bare service
+    /// `PATH` and fail to find every user-installed CLI a pane exists to run.
     ///
     /// `#[serde(default)]`, which is what keeps this off [`PROTOCOL`]: a holder
     /// spawned by an older daemon simply has no entry, and its shell has no
