@@ -988,9 +988,12 @@ struct Spawned {
 /// Two shapes, and the difference decides who computes `PATH`:
 ///
 /// - **No `argv`** — the user's login shell, which is the ordinary terminal.
-/// - **An `argv`** — a config-declared pane's command, spawned directly. There is
-///   no login shell in front of it to work `PATH` out, so the daemon resolves one
-///   and passes it in `env`; see [`wire::HolderConfig::env`].
+/// - **An `argv`** — a config-declared pane's command. `resolve_pane` has
+///   already wrapped it in the user's **login+interactive** shell (`$SHELL -l -i
+///   -c '<command>'`), so this is what actually runs here; the pane command
+///   inherits the same environment a real terminal gives, and `PATH` is the
+///   login shell's own to compute. The daemon still injects a resolved `PATH`
+///   as a floor for a shell with no rc files. See [`wire::HolderConfig::env`].
 fn spawn_shell(
     cwd: &std::path::Path,
     size: PtySize,
@@ -1296,14 +1299,17 @@ mod tests {
     /// A config-declared pane runs its own command, with the `PATH` the daemon
     /// resolved rather than the one this process happens to have.
     ///
-    /// The `PATH` half is the point. Every other terminal in this module gets
+    /// The `PATH` half is the point. Every ordinary terminal in this module gets
     /// its `PATH` from the login shell it spawns, which is why `spawn_shell`
-    /// documents itself as an exception to the AGENTS.md rule — but a pane's
-    /// `argv` is spawned **directly**, with no shell in front of it, so it would
-    /// otherwise inherit launchd's bare service `PATH` and fail to find the
-    /// user-installed CLI the pane exists to run. The command here prints what it
-    /// actually got, so a regression shows up as the wrong string rather than as
-    /// a pane that works on the developer's machine and not from the app.
+    /// documents itself as an exception to the AGENTS.md rule — and a pane now
+    /// does too, because `resolve_pane` wraps the pane command in a login+interactive
+    /// shell before it ever reaches the holder. But the **holder's** contract is
+    /// unchanged: whatever `argv` it is handed it spawns directly and layers the
+    /// injected `env` on top. This test pins that contract so the injected `PATH`
+    /// (a floor for a shell with no rc files) and `VELD_PANE_*` actually reach
+    /// the command. The command prints what it got, so a regression shows up as
+    /// the wrong string rather than as a pane that works on the developer's
+    /// machine and not from the app.
     #[tokio::test]
     async fn a_pane_command_runs_instead_of_a_shell_and_gets_the_injected_path() {
         let dir = tempfile::tempdir().unwrap();

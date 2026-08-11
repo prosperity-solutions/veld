@@ -805,7 +805,7 @@ labelled *set by veld.json*, where it can be revoked.
 
 Pane types the project adds to Veld Desktop's dock — the `+` menu, the pane
 chooser and the ⌘K palette. Only `type: "terminal"` exists today: a pane that
-runs the project's command instead of a login shell. A browser tab has no panes,
+runs the project's command inside your login shell. A browser tab has no panes,
 so none of this applies there.
 
 | Field | Notes |
@@ -873,8 +873,14 @@ element after the array is fixed and cannot change the argument count.
 is a lint problem: `${veld.pane.id}`, `${veld.pane.label}`, `${veld.pane.token}`,
 `${veld.worktree}`, `${veld.root}`, `${veld.branch}`, `${veld.project}`,
 `${veld.username}`. `VELD_PANE_ID` and `VELD_PANE_TOKEN` are in the environment
-too, for a `shell` pane. The command runs with your **login shell's `PATH`**, not
-the daemon's.
+too, for a `shell` pane.
+
+**A pane command runs inside your login+interactive shell** (`$SHELL -l -i -c
+'<command>'`) — the same shell a plain terminal opens — so it inherits
+**everything** your `.zprofile`/`.zshrc` export (model tokens, `JAVA_HOME`, tool
+paths), not just `PATH`. That is why an agent pane picks up your environment.
+The wrapper shell exits with the command's status, so `close_on_exit` and exit
+reporting are unaffected.
 
 **There are no pane variants.** Two modes of a tool are two entries. Node
 `variants` exist because a node is a graph vertex a preset selects across; a pane

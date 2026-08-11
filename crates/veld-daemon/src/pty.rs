@@ -1312,31 +1312,49 @@ async fn resolve_pane(
             ),
         )
     })?;
+    // A pane runs inside the user's **login+interactive** shell — the exact
+    // shell a real terminal opens — rather than being spawned directly. That is
+    // what makes a pane inherit the whole environment a terminal gives: the
+    // `.zprofile`/`.zshrc` exports (model tokens, tool paths, `JAVA_HOME`) that
+    // a directly-spawned `argv` on the daemon's bare service environment never
+    // saw. The shell runs the command and exits with its status, so
+    // `close_on_exit` and exit reporting are unchanged.
+    let shell = holder::login_shell();
     let argv = match resolved {
-        veld_core::config::CommandSpec::Argv(argv) => argv,
-        // Wrapped here rather than in the holder so the holder only ever knows
-        // about an argv, and `shell` keeps meaning exactly what it means for
-        // every other command position in the config.
+        veld_core::config::CommandSpec::Argv(argv) => {
+            if argv.is_empty() || argv[0].is_empty() {
+                return Err(err(
+                    StatusCode::CONFLICT,
+                    format!("the {} pane's command is empty", pane.label),
+                ));
+            }
+            login_shell_command(&shell, &argv)
+        }
+        // A `shell` spec is already a command string, so it is handed to the
+        // login shell as-is — no re-quoting, and `shell` keeps meaning exactly
+        // what it means for every other command position in the config. It just
+        // runs under the user's shell now, like a terminal command, instead of
+        // a bare `sh` with no rc files.
         veld_core::config::CommandSpec::Shell(script) => {
-            vec!["sh".to_owned(), "-c".to_owned(), script]
+            vec![
+                shell,
+                "-l".to_owned(),
+                "-i".to_owned(),
+                "-c".to_owned(),
+                script,
+            ]
         }
     };
-    if argv.is_empty() || argv[0].is_empty() {
-        return Err(err(
-            StatusCode::CONFLICT,
-            format!("the {} pane's command is empty", pane.label),
-        ));
-    }
 
     Ok(PaneLaunch {
         spec_id: spec_id.to_owned(),
         label: pane.label.clone(),
         argv,
         env: vec![
-            // The load-bearing one. The holder's shell path skips this because a
-            // login shell computes PATH itself, but a pane command is spawned
-            // directly — without it, every user-installed CLI a pane exists to
-            // run is missing from the daemon's bare service PATH.
+            // A floor, not the answer: the login shell computes the user's own
+            // PATH (and the rc files typically refine it), but a shell with no
+            // rc files would otherwise inherit the daemon's bare service PATH.
+            // `VELD_PANE_*` are this pane's own and must win over the shim env.
             ("PATH".to_owned(), path),
             ("VELD_PANE_ID".to_owned(), pane.id.clone()),
             ("VELD_PANE_TOKEN".to_owned(), token.clone()),
@@ -1344,6 +1362,29 @@ async fn resolve_pane(
         token,
         fresh,
     })
+}
+
+/// Wrap an `argv` pane command for the user's login shell:
+/// `$SHELL -l -i -c '<each argv element single-quoted>'`.
+///
+/// `-l -i` are the flags a terminal's shell runs with, so `.zprofile` *and*
+/// `.zshrc` both load — the `-l -i -c 'command env'` shape `resolve_user_path`
+/// relies on for the same reason. Each argument is re-quoted with
+/// [`veld_core::console::quote`] so spaces, `$`, backticks or a single quote in
+/// a value can never become a second command.
+fn login_shell_command(shell: &str, argv: &[String]) -> Vec<String> {
+    let command = argv
+        .iter()
+        .map(|arg| veld_core::console::quote(arg))
+        .collect::<Vec<_>>()
+        .join(" ");
+    vec![
+        shell.to_owned(),
+        "-l".to_owned(),
+        "-i".to_owned(),
+        "-c".to_owned(),
+        command,
+    ]
 }
 
 /// The variables a pane command may interpolate.
@@ -2369,8 +2410,9 @@ async fn obtain_session(
         // owner — it knows nothing about instances, ports or the CLI's location.
         //
         // A config-declared pane's own entries are layered on top: its resolved
-        // `PATH` is load-bearing (no login shell computes one for a directly
-        // spawned `argv`), so it must win over anything the shim env carries.
+        // `PATH` is a floor (a login shell computes the user's own PATH, and the
+        // rc files typically refine it) and `VELD_PANE_*` are this pane's alone,
+        // so they must win over anything the shim env carries.
         env: {
             let mut env = shims::session_env(
                 &ticket.session_id,
@@ -3266,6 +3308,49 @@ fn clamp_dimension(v: Option<u16>, default: u16) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An `argv` pane runs inside the user's login+interactive shell — the
+    /// whole point being that a pane inherits the same environment a real
+    /// terminal gives, not just the injected `PATH`. The shape must be exactly
+    /// `$SHELL -l -i -c '<quoted argv>'`, and every argv element must be
+    /// single-quoted so spaces, `$`, backticks or a quote in a value can never
+    /// become a second command.
+    #[test]
+    fn a_pane_argv_is_wrapped_in_the_login_shell() {
+        let argv = login_shell_command(
+            "/bin/zsh",
+            &[
+                "pi".to_owned(),
+                "--session-id".to_owned(),
+                "a1b2c3".to_owned(),
+            ],
+        );
+        assert_eq!(
+            argv,
+            vec![
+                "/bin/zsh".to_owned(),
+                "-l".to_owned(),
+                "-i".to_owned(),
+                "-c".to_owned(),
+                "'pi' '--session-id' 'a1b2c3'".to_owned(),
+            ]
+        );
+
+        // A space or a single quote in a value stays one argument when the
+        // shell parses the re-quoted line.
+        let tricky = login_shell_command(
+            "/bin/zsh",
+            &[
+                "pi".to_owned(),
+                "My Projects/veld".to_owned(),
+                "it's a 'quote'".to_owned(),
+            ],
+        );
+        assert_eq!(
+            tricky[4],
+            "'pi' 'My Projects/veld' 'it'\\''s a '\\''quote'\\'''"
+        );
+    }
 
     /// `veld lint` and the spawn path must agree on the pane variable scope,
     /// exactly.

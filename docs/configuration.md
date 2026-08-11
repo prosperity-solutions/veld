@@ -2317,7 +2317,15 @@ because veld does not interpret it and has no idea how to combine two of them.
 A pane is a tab in Veld Desktop's dock. Veld ships four kinds (terminal,
 browser, run logs, node health); `ide.panes` lets a project add its own to the
 `+` menu, the pane chooser and the ⌘K palette. Today a declared pane is always a
-**terminal** that runs the project's command instead of a login shell.
+**terminal** that runs the project's command inside your login+interactive shell.
+
+A pane command runs as `$SHELL -l -i -c '<command>'` — the same shell a plain
+terminal opens — so it inherits everything your `.zprofile`/`.zshrc` export
+(model tokens, `JAVA_HOME`, tool paths) exactly as if you had typed it in a
+terminal. That is why an agent pane picks up your environment while a command
+the daemon spawns without the wrapper would not (see [`env`](#env) for the
+contrast). The wrapper shell exits with the command's status, so
+`close_on_exit` and exit reporting are unaffected.
 
 ```jsonc
 {
