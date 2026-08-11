@@ -1145,6 +1145,22 @@ export function paneTabLabel(layout: PaneLayout, tab: PaneTab): string {
   }
 }
 
+/**
+ * A tab's label ignoring any title the *process* gave itself (OSC 0/2).
+ *
+ * The tab strip wants `paneTabLabel`: you are looking at the strip, so a shell
+ * renaming itself to the command it is running is useful. A notification is
+ * read out of context — often on another desktop, hours later — and there the
+ * live command is noise, because a shell's preexec hook sets the title to the
+ * raw command line ("sleep 5 && printf '\033]9;done\007'" is a title an
+ * OS banner should never carry). What makes a banner navigable is the pane's
+ * own name, the one still on screen when you go back to it.
+ */
+export function paneTabBaseLabel(layout: PaneLayout, tab: PaneTab): string {
+  if (tab.kind !== "terminal") return paneTabLabel(layout, tab);
+  return tab.spec ? tab.title : terminalLabel(layout, tab.id);
+}
+
 // ---------------------------------------------------------------------------
 // Persistence
 // ---------------------------------------------------------------------------

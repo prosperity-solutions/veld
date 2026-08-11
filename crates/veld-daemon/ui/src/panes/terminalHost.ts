@@ -530,7 +530,13 @@ function ensure(
   // and the user should hear it. xterm 5 exposed the bell only as `onBell` (its
   // `bellStyle`/`bellSound` options are gone), so the sound is played here.
   // Sound only: the richer notification half is OSC 9 below.
-  term.onBell(playBell);
+  //
+  // Gated on the replay for the same reason OSC 9 is: a reattach writes the
+  // scrollback back through xterm, and every BEL still in it would ring again —
+  // a burst of beeps for output that was heard the first time.
+  term.onBell(() => {
+    if (!s.replaying) playBell();
+  });
   // OSC 9 (`ESC ] 9;message BEL`) is the "show a notification" sequence — the
   // one macOS Terminal and iTerm2 turn into a system banner, and the thing
   // Claude Code's "task finished" notification rides on. xterm does not act on
@@ -540,6 +546,12 @@ function ensure(
     // During a reattach the scrollback is replayed through xterm; an OSC 9 in
     // it would otherwise re-notify for output that has already been seen.
     if (!s.replaying) {
+      // Sound as well as banner, at the same `terminal.bellVolume`: OSC 9 is
+      // the *stronger* "notice me" of the two sequences, so it would be odd for
+      // it to be the quieter one. It never doubles up with the handler above —
+      // xterm consumes the terminating BEL as the OSC's string terminator and
+      // never reports it as a bell.
+      playBell();
       for (const fn of notifyListeners) fn({ sessionId: id, message: data });
     }
     return true;
