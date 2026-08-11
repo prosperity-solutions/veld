@@ -1445,12 +1445,25 @@ fn login_shell_script(shell: &str, shell_flags: &[String], script: String) -> Ve
     // Ahead of `-l`, which bash requires of a GNU long option and which is the
     // whole reason these travel as a list rather than being appended here.
     out.extend(shell_flags.iter().cloned());
-    out.extend([
-        "-l".to_owned(),
-        "-i".to_owned(),
-        "-c".to_owned(),
-        format!("{SHIM_PATH_PREFIX}{script}"),
-    ]);
+    // **zsh only**, and the gate is not a refinement — it is the difference between a
+    // working pane and none. [`SHIM_PATH_PREFIX`] is POSIX shell *text*, spliced in front
+    // of the user's command, and `terminal.shell` reaches shells that cannot parse it:
+    // `shell::PROBED_SHELLS` offers fish, nu and xonsh, and `auto_shell()` takes `$SHELL`,
+    // so a fish user gets fish with no setting changed at all. fish has no `${x-}`, no
+    // `then` and no `case`/`esac` — it would be a parse error, and every `ide.panes` entry
+    // in the project would die at launch having run nothing. Note it would fail that way
+    // *with all three terminal-integration settings off*, because the runtime guard is a
+    // `$VELD_SHIM_DIR` test and the text is there regardless.
+    //
+    // Gating on zsh is also all the prefix was ever for: bash's own handoff already
+    // prepends the directory with a plain assignment that a `-c` shell runs, measured
+    // both ways — see the table on the constant.
+    let script = if veld_core::shell::kind(shell) == veld_core::shell::Kind::Zsh {
+        format!("{SHIM_PATH_PREFIX}{script}")
+    } else {
+        script
+    };
+    out.extend(["-l".to_owned(), "-i".to_owned(), "-c".to_owned(), script]);
     out
 }
 
@@ -2054,8 +2067,13 @@ async fn agent_state(
     // daemon handed back to its holder — the shell is still running and an agent inside
     // it is still worth reporting on, so resolving only through `SESSIONS` would go
     // quiet for exactly the sessions that outlived a daemon restart.
-    let worktree_id = match SESSIONS.lock().await.get(&id) {
-        Some(session) => session.worktree_id,
+    // The registry lookup gets its own scope: a `MutexGuard` in a `match` scrutinee lives
+    // to the end of the `match`, which would run `released_worktree` — a `std` mutex plus a
+    // filesystem `stat` — while holding the async lock every attach contends for.
+    // `mint_ticket` deliberately lets the guard drop first; this now does too.
+    let registered = SESSIONS.lock().await.get(&id).map(|s| s.worktree_id);
+    let worktree_id = match registered {
+        Some(worktree_id) => worktree_id,
         None => released_worktree(&id)
             .ok_or_else(|| err(StatusCode::NOT_FOUND, "no such terminal session"))?,
     };

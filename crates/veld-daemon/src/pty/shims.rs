@@ -953,8 +953,15 @@ fn script(tool: Tool, cli: &Path, real: Option<&Path>) -> String {
 ///    arguments, or a first argument that begins with `-`. Every Claude Code
 ///    subcommand (`mcp`, `install`, `update`, `doctor`, `setup-token`,
 ///    `remote-control`) is a bare first word, so the rule cannot reach one, and #42485
-///    cannot be reproduced through it. `-p`/`--print` is excluded too: it is
+///    cannot be reproduced through it. `-p*`/`--print` is excluded too: it is
 ///    non-interactive, so there is no user for it to wait on and nothing to badge.
+///
+///    **The known cost, accepted:** `claude "fix the failing test"` — a bare positional
+///    prompt — also starts with a word, so it gets no hooks and reports nothing. Widening
+///    the rule to cover it means distinguishing a prompt from a subcommand by *content*,
+///    which is a list of somebody else's subcommands that goes stale on their release
+///    schedule and lands straight in #42485 when it does. Silence is the right failure
+///    here; a mangled argv is not.
 /// 2. **A `--settings` of the user's wins outright.** Two `--settings` flags means one
 ///    of them loses silently, and it must not be theirs.
 /// 3. **The real binary is resolved at run time**, not baked at generation: a user may
@@ -973,6 +980,16 @@ fn script(tool: Tool, cli: &Path, real: Option<&Path>) -> String {
 ///    directory **refuses** rather than proceeding unprotected. That is the one place
 ///    the script does not fail open, because the failure it would otherwise permit is
 ///    a fork bomb rather than a missing badge.
+///
+///    **The directory comparison is not sufficient on its own**, which an earlier version
+///    of this comment wrongly claimed. It excludes only *this* script's directory, so it
+///    cannot see a second copy of the wrapper: two shim directories on one `PATH` — an
+///    installed daemon and a dev one, since `pty_dir()` is keyed on the daemon port — each
+///    skip their own and `exec` the other's, forever. Reproduced. A hand-copied or
+///    symlinked wrapper is the same bug by another route. So there is also an exported
+///    **counter** (`VELD_AGENT_SHIM_DEPTH`), the shape `veld open-url` already uses for the
+///    same reason: a counter rather than a flag, so a legitimate nested launch (an agent
+///    invoking the agent through its own shell tool) still works while a loop stops at two.
 /// 5. **Fail open everywhere else.** No `VELD_AGENT_HOOKS`, no settings file, a `veld`
 ///    that does not understand the subcommand, anything at all — and the invocation
 ///    `exec`s the real binary with the original argv, unexamined. A wrapper around
@@ -1010,17 +1027,56 @@ if [ -z "$veld_self_dir" ]; then
 fi
 
 # The real one, by walking PATH and comparing PHYSICAL directories.
+# A COUNTER, not a flag, and not optional. The directory comparison below excludes only
+# THIS script's own directory, so it cannot see a *second copy* of this wrapper: two Veld
+# shim directories on one PATH (an installed daemon and a dev one — `pty_dir()` is keyed on
+# the daemon port) each skip their own and resolve the other's, and exec each other
+# forever. Reproduced. A hand-copied or symlinked wrapper is the same bug by another route.
+# `veld open-url` learned this the expensive way — see VELD_OPEN_URL_DEPTH, measured at
+# ~3,800 execs in five seconds — and its conclusion applies verbatim: a guard whose failure
+# mode is a fork bomb has to count.
+#
+# Incremented and exported rather than set, so a LEGITIMATE nested launch (an agent
+# invoking the agent through its own shell tool) still works at depth 1 while a loop stops
+# at 2. A flag would refuse the legitimate case. An unparseable value reads as 0, never as
+# "infinitely deep", so a hostile or stale value cannot block a real launch.
+veld_depth=${{VELD_AGENT_SHIM_DEPTH:-0}}
+case "$veld_depth" in
+  '' | *[!0-9]*) veld_depth=0 ;;
+esac
+if [ "$veld_depth" -gt 1 ]; then
+  echo "veld: refusing to run {name} $veld_depth levels deep — two Veld shim directories are on PATH, or a copy of this wrapper is. Restart the terminal." >&2
+  exit 127
+fi
+VELD_AGENT_SHIM_DEPTH=$((veld_depth + 1))
+export VELD_AGENT_SHIM_DEPTH
+
 veld_real=
 veld_saved_ifs=${{IFS-}}
+veld_had_ifs=${{IFS+set}}
 IFS=:
+# `set -f` because $PATH is unquoted: IFS=: gives the field splitting this needs, but
+# pathname expansion is still on, so a PATH entry containing `*`, `?` or `[` would be
+# replaced by whatever it matches — searching directories the shell itself would never
+# resolve a command from. Measured: `IFS=:; for d in $P` on P="/usr/b*:/bin" yields
+# /usr/bin.
+set -f
 for veld_dir in $PATH; do
   [ -n "$veld_dir" ] || continue
   veld_phys=$(cd "$veld_dir" 2>/dev/null && pwd -P) || continue
   [ "$veld_phys" = "$veld_self_dir" ] && continue
-  if [ -x "$veld_phys/{name}" ]; then veld_real="$veld_phys/{name}"; break; fi
+  # `-f` as well as `-x`: `-x` alone accepts an executable *directory* named {name}, which
+  # would exec and fail instead of falling through to the entry holding the real binary.
+  if [ -f "$veld_phys/{name}" ] && [ -x "$veld_phys/{name}" ]; then
+    veld_real="$veld_phys/{name}"
+    break
+  fi
 done
-IFS=$veld_saved_ifs
-unset veld_saved_ifs veld_dir veld_phys
+set +f
+# Restore IFS precisely: assigning the saved value leaves it set-but-empty where it was
+# originally unset, which is not the same thing.
+if [ -n "$veld_had_ifs" ]; then IFS=$veld_saved_ifs; else unset IFS; fi
+unset veld_saved_ifs veld_had_ifs veld_dir veld_phys veld_depth
 
 if [ -z "$veld_real" ]; then
   echo "veld: {name} is not installed (not on PATH outside Veld's shim directory)" >&2
@@ -1041,7 +1097,10 @@ if [ -n "${{VELD_AGENT_HOOKS-}}" ] && [ -n "${{VELD_PTY_SESSION-}}" ]; then
   esac
   for veld_arg in "$@"; do
     case "$veld_arg" in
-      -p | --print | --settings | --settings=*) veld_inject= ; break ;;
+      # `-p*` and not `-p`: a glued short option (`-pfoo`) is the same non-interactive
+      # request, and matching only the exact spelling injected `--settings` ahead of the
+      # very path the docs promise is left untouched.
+      -p* | --print | --settings | --settings=*) veld_inject= ; break ;;
     esac
   done
   unset veld_arg
@@ -1694,6 +1753,100 @@ mod tests {
             String::from_utf8_lossy(&out.stderr).contains("not installed"),
             "{:?}",
             String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// **Two shim directories on one `PATH` do not exec each other forever.**
+    ///
+    /// The directory comparison in the wrapper excludes only its *own* directory, so it is
+    /// blind to a second copy of itself — and `pty_dir()` is keyed on the daemon port, so
+    /// two shim directories is the ordinary state of a machine running an installed daemon
+    /// and a dev one. Each skips its own, resolves the other's, and `exec`s it. Reproduced
+    /// as an unbounded loop before the counter existed.
+    ///
+    /// Run for real, with a hard bound on the child, because the failure mode of getting
+    /// this wrong is a fork bomb rather than a wrong answer: a test that only inspected the
+    /// script text could not tell a terminating guard from a non-terminating one.
+    #[test]
+    fn two_shim_directories_on_one_path_do_not_exec_each_other_forever() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let a = tmp.path().join("a");
+        let b = tmp.path().join("b");
+        // Two independent instances, each baking its own directory — exactly what two
+        // daemons on different ports produce.
+        prepare_in(&a, Path::new("/nonexistent/veld")).unwrap();
+        prepare_in(&b, Path::new("/nonexistent/veld")).unwrap();
+
+        let out = std::process::Command::new(a.join("claude"))
+            .env_clear()
+            // No real `claude` anywhere: the only candidates are the two wrappers.
+            .env("PATH", format!("{}:{}", a.display(), b.display()))
+            .env("VELD_AGENT_HOOKS", "1")
+            .env("VELD_PTY_SESSION", "pane-1")
+            .output()
+            .expect("run the claude shim");
+        // It must terminate, and say why. Either message is a correct refusal: the depth
+        // counter's, or "not installed" if the walk simply found nothing.
+        assert_eq!(
+            out.status.code(),
+            Some(127),
+            "the wrappers exec'd each other instead of refusing: {:?}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("levels deep") || stderr.contains("not installed"),
+            "{stderr:?}"
+        );
+    }
+
+    /// A legitimate nested launch still works — the guard counts rather than latching.
+    ///
+    /// An agent invoking the agent through its own shell tool is depth 1 and must be
+    /// allowed; a flag instead of a counter would have refused it, which is why
+    /// `veld open-url` uses a counter too.
+    #[test]
+    fn a_nested_launch_is_allowed_but_a_third_level_is_not() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let shims = tmp.path().join("shims");
+        let real_dir = tmp.path().join("bin");
+        std::fs::create_dir_all(&real_dir).unwrap();
+        prepare_in(&shims, Path::new("/nonexistent/veld")).unwrap();
+        std::fs::write(real_dir.join("claude"), "#!/bin/sh\necho REAL\n").unwrap();
+        set_mode(&real_dir.join("claude"), 0o755).unwrap();
+
+        let run = |depth: Option<&str>| {
+            let mut cmd = std::process::Command::new(shims.join("claude"));
+            cmd.env_clear()
+                .env(
+                    "PATH",
+                    format!("{}:{}", shims.display(), real_dir.display()),
+                )
+                .env("VELD_AGENT_HOOKS", "1")
+                .env("VELD_PTY_SESSION", "pane-1");
+            if let Some(d) = depth {
+                cmd.env("VELD_AGENT_SHIM_DEPTH", d);
+            }
+            cmd.output().expect("run the claude shim")
+        };
+
+        // Depth 0 and 1 reach the real binary.
+        for depth in [None, Some("0"), Some("1")] {
+            let out = run(depth);
+            assert!(
+                String::from_utf8_lossy(&out.stdout).contains("REAL"),
+                "depth {depth:?} must still launch: {:?}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        // Deeper than that is a loop.
+        let out = run(Some("2"));
+        assert_eq!(out.status.code(), Some(127));
+        // A garbled value reads as zero rather than as "infinitely deep", so it can never
+        // refuse a legitimate launch — the same rule `veld open-url`'s guard follows.
+        assert!(
+            String::from_utf8_lossy(&run(Some("banana")).stdout).contains("REAL"),
+            "an unparseable depth must not block a launch"
         );
     }
 

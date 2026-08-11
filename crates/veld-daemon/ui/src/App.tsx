@@ -2879,7 +2879,6 @@ function AppInner(props: {
     () =>
       inbox.onEvent(({ sessionId, worktreeId, unseen }) => {
         if (!notifyPrefsRef.current[notifyKey(unseen)]) return;
-        if (document.hasFocus()) return;
         const wt = worktreesRef.current.find((w) => w.id === worktreeId);
         const label = wt ? worktreeLabel(wt) : "Veld";
         // The pane's name, when this window has that worktree's layout. It may not:

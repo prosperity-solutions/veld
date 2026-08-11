@@ -18,11 +18,18 @@
 //!
 //! # Told, not inferred — and the authority that makes that stick
 //!
-//! [`Source`] ranks how a state was learned, and a lower-authority signal never
-//! overwrites a higher one ([`Source::supersedes`]). Without that rule the passive
-//! fallbacks are worse than useless: an OSC 9 notification arriving after a real
-//! `Stop` hook would flip a finished session back to "needs you", and the feature
-//! would train the user to ignore the badge.
+//! A state is only as good as what told us, so the inbox ranks its sources
+//! (`hook > socket > detected`) and never lets a lower one overwrite a higher. Without
+//! that rule the passive fallbacks are worse than useless: an OSC 9 notification arriving
+//! after a real `Stop` hook would flip a finished session back to "needs you", and the
+//! feature would train the user to ignore the badge.
+//!
+//! **That rule lives in `ui/src/inbox/inbox.ts`, not here**, because the store it guards
+//! is the browser's. This module had a `Source` enum and a `supersedes` method mirroring
+//! it, with a test pinning the ordering — and none of it was reachable: the wire carries
+//! only `tool` and `state`, and the client attributes the authority itself. A second copy
+//! of a rule, with a passing test and no caller, is worse than no copy: changing it
+//! changes nothing while looking like it changed something.
 //!
 //! # What veld does *not* do
 //!
@@ -185,46 +192,6 @@ impl State {
         ]
         .into_iter()
         .find(|st| st.as_str() == s)
-    }
-}
-
-/// How a [`State`] was learned. Strictly ordered: `Hook > Socket > Detected`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Source {
-    /// Inferred from the byte stream — an OSC 9 / 777 / kitty 99 notification. The
-    /// hook-less fallback for a tool veld has no installer for. Lowest authority
-    /// because it cannot distinguish "finished" from "wants you": a notification is
-    /// only ever "notice me".
-    Detected,
-    /// A tool that speaks to veld over a socket of its own. No producer today; the
-    /// rung exists because a tool that reports continuously is a different kind of
-    /// claim from a tool that fires one hook, and collapsing the two would mean
-    /// re-deciding the authority question when the first one shows up.
-    Socket,
-    /// The tool told us, through a lifecycle hook veld installed. Authoritative.
-    Hook,
-}
-
-impl Source {
-    /// Whether a state learned from `self` may replace one already known from
-    /// `current`.
-    ///
-    /// Equal authority supersedes — a second hook is newer news from the same mouth.
-    /// Lower authority does not, which is the whole point: a stray OSC 9 must not
-    /// undo a `Stop`.
-    #[must_use]
-    pub fn supersedes(self, current: Source) -> bool {
-        self >= current
-    }
-
-    #[must_use]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Detected => "detected",
-            Self::Socket => "socket",
-            Self::Hook => "hook",
-        }
     }
 }
 
@@ -577,20 +544,6 @@ mod tests {
         let grown: HookPayload =
             serde_json::from_str(r#"{"hook_event_name":"Stop","brand_new_field":42}"#).unwrap();
         assert_eq!(claude_state(&grown), State::Idle);
-    }
-
-    #[test]
-    fn a_lower_authority_signal_never_overrides_a_hook() {
-        assert!(Source::Hook.supersedes(Source::Detected));
-        assert!(Source::Hook.supersedes(Source::Socket));
-        assert!(Source::Socket.supersedes(Source::Detected));
-        // The rule that matters: a stray OSC 9 arriving after a real `Stop` must
-        // not flip a finished session back to "needs you".
-        assert!(!Source::Detected.supersedes(Source::Hook));
-        assert!(!Source::Socket.supersedes(Source::Hook));
-        // Equal authority is newer news from the same mouth, so it lands.
-        assert!(Source::Hook.supersedes(Source::Hook));
-        assert!(Source::Detected.supersedes(Source::Detected));
     }
 
     /// The generated document installs only events veld intends, carries the session

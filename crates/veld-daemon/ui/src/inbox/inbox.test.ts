@@ -787,6 +787,136 @@ describe("surviving a page reload", () => {
   });
 });
 
+describe("defects found in review", () => {
+  /**
+   * An agent must hand the pane back when it goes.
+   *
+   * `agentSource` was set by the first hook and never cleared, so the authority claim
+   * outlived the agent for the life of the pane. Two things stayed broken afterwards, and
+   * the second is not gated by any setting: the shell's `working` was permanently muted,
+   * and **every later OSC 9 in that pane was dropped**, because the notify arm refuses to
+   * speak where an agent has. Reusing a pane after an agent session is the ordinary case.
+   */
+  it("gives the pane back to the shell when the agent session ends", () => {
+    const box = createInbox();
+    box.report("p", WT, agent("ready"), NOW);
+    box.report("p", WT, agent("done"), NOW + 1);
+    expect(box.unseen("p")?.detail).toBe("Agent session ended");
+    box.read("p");
+
+    // The shell speaks for this pane again.
+    box.report("p", WT, { type: "osc133", mark: "C", exit: null }, NOW + 2);
+    expect(box.isRunning("p")).toBe(true);
+    expect(rowState(box, WT)).toBe("working");
+    box.report("p", WT, { type: "osc133", mark: "D", exit: 1 }, NOW + 3);
+    expect(box.unseen("p")?.kind).toBe("failed");
+    box.read("p");
+
+    // …and so does an OSC 9, which is the half no setting could have restored.
+    box.report("p", WT, { type: "notify", message: "tests failed" }, NOW + 4);
+    expect(box.unseen("p")?.detail).toBe("tests failed");
+  });
+
+  /** A pane's process exit clears the claim too — the agent died with the shell. */
+  it("gives the pane back when the whole process exits", () => {
+    const box = createInbox();
+    box.report("p", WT, agent("blocked"), NOW);
+    box.report("p", WT, { type: "exit", code: 0 }, NOW + 1);
+    box.read("p");
+    box.report("p", WT, { type: "notify", message: "later" }, NOW + 2);
+    expect(box.unseen("p")?.detail).toBe("later");
+  });
+
+  /**
+   * A command mark must not speak over a hook's event, whatever kind it is.
+   *
+   * The guard covered only `attention`, so: `claude` finishes a turn (`Stop` → "Agent
+   * finished" + a banner), the user Ctrl-Cs out of it, zsh emits `D;130` with `ranCommand`
+   * still true from the launch `C` — and that replaced the agent's event with "Command
+   * failed (exit 130)" plus a **second** banner, claiming a failure that never happened.
+   */
+  it("does not let a command mark overwrite a hook's finished event", () => {
+    const box = createInbox();
+    box.report("cc", WT, agent("ready"), NOW);
+    box.report("cc", WT, { type: "osc133", mark: "C", exit: null }, NOW + 1);
+    box.report("cc", WT, agent("idle"), NOW + 2);
+    expect(box.unseen("cc")?.detail).toBe("Agent finished");
+
+    let events = 0;
+    box.onEvent(() => {
+      events += 1;
+    });
+    // Ctrl-C: the shell's own mark for the `claude` command it has been running.
+    box.report("cc", WT, { type: "osc133", mark: "D", exit: 130 }, NOW + 3);
+    expect(
+      box.unseen("cc")?.detail,
+      "the agent's own account of what happened must survive",
+    ).toBe("Agent finished");
+    expect(events, "and it must not fire a second notification").toBe(0);
+  });
+
+  /**
+   * An agent state this build does not understand is a no-op, not a claim.
+   *
+   * It used to pass the authority check and set `agentSource` before falling out of the
+   * switch — so a newer daemon sending `compacting` permanently muted the shell's
+   * `working` and every OSC 9 in that pane, which is the opposite of the wire contract's
+   * "an unrecognised state is dropped by the store".
+   */
+  it("claims nothing for a state it does not understand", () => {
+    const box = createInbox();
+    box.report("p", WT, { type: "osc133", mark: "C", exit: null }, NOW);
+    box.report(
+      "p",
+      WT,
+      { type: "agent", state: "compacting" as never, source: "hook" },
+      NOW + 1,
+    );
+    expect(box.isRunning("p"), "the shell must still speak for this pane").toBe(true);
+    box.report("p", WT, { type: "notify", message: "still heard" }, NOW + 2);
+    expect(box.unseen("p")?.detail).toBe("still heard");
+  });
+
+  /**
+   * The daemon replays the `exit` frame to **every** attach — pinned on the Rust side by
+   * `reattaching_after_exit_reports_the_exit`. So a read event came back on every page
+   * reload, with a notification, for a command that died before it.
+   */
+  it("does not re-file an exit it has already reported", () => {
+    const box = createInbox();
+    box.report("p", WT, { type: "exit", code: 1 }, NOW);
+    expect(box.unseen("p")?.kind).toBe("failed");
+    box.read("p");
+
+    // The same frame again, as a fresh attach receives it.
+    box.report("p", WT, { type: "exit", code: 1 }, NOW + 1);
+    expect(box.unseen("p")).toBeNull();
+
+    // And across a reload, which is the case that actually bit: the marker rides the
+    // snapshot even though there is no event left to restore.
+    const after = createInbox();
+    after.restore(JSON.parse(JSON.stringify(box.snapshot())));
+    after.report("p", WT, { type: "exit", code: 1 }, NOW + 2);
+    expect(
+      after.unseen("p"),
+      "a reload must not resurrect an exit the user already read",
+    ).toBeNull();
+  });
+
+  /** An OSC 9 payload is arbitrary terminal output, and it is now persisted. */
+  it("bounds a program's own notification text", () => {
+    const box = createInbox();
+    box.report("p", WT, { type: "notify", message: "x".repeat(50_000) }, NOW);
+    const detail = box.unseen("p")?.detail ?? "";
+    expect(detail.length).toBeLessThanOrEqual(201);
+    expect(detail.endsWith("…")).toBe(true);
+    // A short message is untouched.
+    box.read("p");
+    box.report("p", WT, { type: "notify", message: "  done  " }, NOW + 1);
+    expect(box.unseen("p")?.detail).toBe("done");
+  });
+});
+
 describe("bookkeeping", () => {
   it("orders a worktree's events newest first", () => {
     const box = createInbox();

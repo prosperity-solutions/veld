@@ -34,7 +34,10 @@
  * VT scanner in the PTY holder, which is the named follow-up — so a daemon-side store
  * would buy durability for the agent half only, at the price of a persistence question
  * and a round trip per command. The honest shape is that **both producers are as
- * durable as the window**: a closed tab, and the gap across a reload, lose events.
+ * durable as the window**: a closed tab loses them, and so does a command that *spans* a
+ * reload — its start mark is gone with the page, and the scrollback replay that would carry
+ * it is deliberately suppressed, so the end mark arrives unpaired and is discarded. Unread
+ * events themselves do survive a reload (see `persist.ts`).
  *
  * # Source authority
  *
@@ -135,6 +138,22 @@ export interface RowSummary {
 
 const NOTHING: RowSummary = { state: null, entries: [], running: 0 };
 
+/** Agent states this build acts on. Anything else claims nothing — see `classify`. */
+const KNOWN_AGENT_STATES: AgentState[] = ["ready", "working", "blocked", "idle", "done"];
+
+/**
+ * How much of a program's own message to keep.
+ *
+ * Generous for a banner, bounded for storage: the text reaches a system notification and a
+ * `sessionStorage` write, and neither wants an unbounded string from terminal output.
+ */
+const MAX_DETAIL = 200;
+
+function bannerText(message: string): string {
+  const trimmed = message.trim();
+  return trimmed.length > MAX_DETAIL ? `${trimmed.slice(0, MAX_DETAIL)}…` : trimmed;
+}
+
 /**
  * What the classifier remembers per session.
  *
@@ -152,6 +171,14 @@ interface SessionState {
   agentWorking: boolean;
   /** The authority of the last agent state accepted for this session. */
   agentSource: Source | null;
+  /**
+   * Whether this pane's process exit has already been filed.
+   *
+   * The daemon replays the `exit` frame to **every** attach, so without this a read event
+   * came back on every page reload — with a notification. Persisted, because the reload is
+   * exactly when it has to be remembered.
+   */
+  reportedExit: boolean;
   unseen: Unseen | null;
 }
 
@@ -243,6 +270,7 @@ class WorktreeInbox {
       ranCommand: false,
       agentWorking: false,
       agentSource: null,
+      reportedExit: false,
       unseen: null,
     });
   }
@@ -313,11 +341,14 @@ class WorktreeInbox {
         // `D` — with whatever status was last set — and neither is a command that ran.
         if (!session.ranCommand) return undefined;
         session.ranCommand = false;
-        // A hook has authority over a command mark, but they are not talking about the
-        // same thing: the shell says a *command* ended, the hook says the *agent* is
-        // waiting. Suppressing the command event while an agent holds the session is
-        // what stops `claude`'s own exit mark overwriting its "needs you".
-        if (session.agentSource === "hook" && session.unseen?.kind === "attention") {
+        // A hook owns this pane, so a command mark must not speak over it — **whatever
+        // kind of event the hook filed.** Restricting this to `attention` broke the
+        // module's own authority rule: Ctrl-C out of a finished `claude` emits `D;130`
+        // with `ranCommand` still true from the launch `C`, which replaced "Agent
+        // finished" with "Command failed (exit 130)" and fired a *second* banner claiming
+        // a failure that never happened. A clean exit was quieter and just as wrong — the
+        // detail silently degraded from "Agent session ended" to "Command finished".
+        if (session.agentSource === "hook" && session.unseen !== null) {
           return undefined;
         }
         return signal.exit === 0
@@ -342,6 +373,20 @@ class WorktreeInbox {
         const midCommand = session.ranCommand;
         session.ranCommand = false;
         session.agentWorking = false;
+        // And no agent owns this pane any more. Leaving `agentSource` set outlived the
+        // agent for the life of the pane and muted two things permanently: the shell's
+        // `working` (see `running`) and **every OSC 9 in that pane**, because the `notify`
+        // arm below refuses to speak where an agent has. Reusing a pane after an agent
+        // session is the ordinary case, not an exotic one.
+        session.agentSource = null;
+        // The daemon **replays the exit frame to every new attach** — pinned by
+        // `reattaching_after_exit_reports_the_exit`, which asserts a second attach reads
+        // the same code again. So this arm sees an already-known death on every page
+        // reload, and without a marker it filed a fresh `failed` and fired a banner for a
+        // command that ended before the reload, every time, forever. The marker is
+        // persisted with the events and pruned by `retain`.
+        if (session.reportedExit) return undefined;
+        session.reportedExit = true;
         // Keyed on `unseen` alone, and **not** on `ranCommand`. That was the bug: a
         // shell dying mid-command (a crash, `exit 3`, an OOM kill) has `ranCommand`
         // true and will never send its `D`, so the exit frame *is* the report — and
@@ -378,7 +423,11 @@ class WorktreeInbox {
           producer: "command",
           at: now,
           source: "detected",
-          detail: signal.message.trim() || "Terminal activity",
+          // Bounded: this is raw terminal output, and it now ends up in a system banner
+          // *and* in `sessionStorage`. A program printing a few hundred KB into OSC 9
+          // otherwise blew the storage quota, and that failure is swallowed — silently
+          // disabling reload survival for the whole window.
+          detail: bannerText(signal.message) || "Terminal activity",
         };
 
       case "agent": {
@@ -386,6 +435,12 @@ class WorktreeInbox {
         if (session.agentSource && !supersedes(signal.source, session.agentSource)) {
           return undefined;
         }
+        // Authority is claimed only for a state this build understands. A newer daemon
+        // sending one it does not (`compacting`, `paused`) used to reach here, set
+        // `agentSource` and clear `agentWorking` before falling out of the switch — so an
+        // unrecognised state *permanently muted* the shell's `working` and every OSC 9 in
+        // that pane, rather than being the no-op the wire contract promises.
+        if (!KNOWN_AGENT_STATES.includes(signal.state)) return undefined;
         session.agentSource = signal.source;
         session.agentWorking = signal.state === "working";
         switch (signal.state) {
@@ -405,14 +460,27 @@ class WorktreeInbox {
               source: signal.source,
               detail: "Waiting for you",
             };
-          case "idle":
           case "done":
+            // The agent is gone, so it stops speaking for this pane: without releasing the
+            // claim, reusing the pane for a plain command showed no activity ever again,
+            // and — worse, because it is not gated by a setting — every later OSC 9 in it
+            // was dropped by the `notify` arm's "an agent has spoken here" check.
+            session.agentSource = null;
+            session.agentWorking = false;
             return {
               kind: "finished",
               producer: "agent",
               at: now,
               source: signal.source,
-              detail: signal.state === "done" ? "Agent session ended" : "Agent finished",
+              detail: "Agent session ended",
+            };
+          case "idle":
+            return {
+              kind: "finished",
+              producer: "agent",
+              at: now,
+              source: signal.source,
+              detail: "Agent finished",
             };
           case "working":
             // A retraction, not an event. The agent has moved on from whatever it was
@@ -535,8 +603,15 @@ class WorktreeInbox {
   snapshot(): PersistedInbox {
     const sessions: PersistedInbox["sessions"] = {};
     for (const [id, session] of this.sessions) {
-      if (session.unseen) {
-        sessions[id] = { worktreeId: session.worktreeId, unseen: session.unseen };
+      if (session.unseen || session.reportedExit) {
+        sessions[id] = {
+          worktreeId: session.worktreeId,
+          unseen: session.unseen,
+          // Carried even for a session with nothing unread: it is the *read* case that
+          // needed it, since the daemon replays the exit frame to the next attach and the
+          // event would otherwise come back — with a notification — on every reload.
+          reportedExit: session.reportedExit,
+        };
       }
     }
     return { v: 1, sessions };
@@ -559,8 +634,13 @@ class WorktreeInbox {
       this.register(id, entry.worktreeId);
       const session = this.sessions.get(id);
       if (!session) continue;
-      session.unseen = entry.unseen;
-      changed = true;
+      // Adopted even when there is no event to restore: it is what stops the daemon's
+      // replayed exit frame filing the same death again after the reload.
+      session.reportedExit = session.reportedExit || entry.reportedExit;
+      if (entry.unseen !== null) {
+        session.unseen = entry.unseen;
+        changed = true;
+      }
     }
     if (changed) this.notify();
   }
@@ -600,7 +680,15 @@ class WorktreeInbox {
 /** The shape written to storage. Versioned, so a future change can migrate or discard. */
 export interface PersistedInbox {
   v: 1;
-  sessions: Record<string, { worktreeId: number; unseen: Unseen }>;
+  sessions: Record<
+    string,
+    {
+      worktreeId: number;
+      /** `null` for a session kept only to remember that its exit was already filed. */
+      unseen: Unseen | null;
+      reportedExit: boolean;
+    }
+  >;
 }
 
 const KINDS: UnseenKind[] = ["finished", "failed", "attention"];
@@ -623,7 +711,16 @@ function parsePersisted(doc: unknown): PersistedInbox["sessions"] {
     const entry = raw as Record<string, unknown>;
     const unseen = entry.unseen;
     if (typeof entry.worktreeId !== "number") continue;
-    if (typeof unseen !== "object" || unseen === null) continue;
+    const reportedExit = entry.reportedExit === true;
+    // A row with no event but a filed exit is meaningful on its own — it is the whole
+    // point of persisting the marker — so it is kept rather than skipped.
+    if (unseen === null || unseen === undefined) {
+      if (reportedExit) {
+        out[id] = { worktreeId: entry.worktreeId, unseen: null, reportedExit };
+      }
+      continue;
+    }
+    if (typeof unseen !== "object") continue;
     const u = unseen as Record<string, unknown>;
     if (!KINDS.includes(u.kind as UnseenKind)) continue;
     if (!PRODUCERS.includes(u.producer as Producer)) continue;
@@ -631,6 +728,7 @@ function parsePersisted(doc: unknown): PersistedInbox["sessions"] {
     if (typeof u.at !== "number" || typeof u.detail !== "string") continue;
     out[id] = {
       worktreeId: entry.worktreeId,
+      reportedExit,
       unseen: {
         kind: u.kind as UnseenKind,
         producer: u.producer as Producer,

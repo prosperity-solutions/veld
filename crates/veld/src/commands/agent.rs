@@ -29,7 +29,7 @@ use veld_core::agent::{self, AgentTool};
 /// filename (AGENTS.md: machine-readable output on stdout, chrome on stderr).
 pub fn settings(tool: Option<String>, session: Option<String>) -> i32 {
     let Some(tool) = parse_tool(tool.as_deref()) else {
-        return 2;
+        return 1;
     };
     let Some(session) = session_id(session) else {
         // Outside a Veld terminal there is nothing to attribute a state to. Silent:
@@ -90,7 +90,7 @@ pub fn settings(tool: Option<String>, session: Option<String>) -> i32 {
 /// third-party schema out of a long-lived process.
 pub async fn state(tool: Option<String>, session: Option<String>, launched: bool) -> i32 {
     let Some(tool) = parse_tool(tool.as_deref()) else {
-        return 2;
+        return 1;
     };
     let Some(session) = session_id(session) else {
         return 1;
@@ -150,6 +150,15 @@ async fn report(session: &str, tool: AgentTool, reported: agent::State) -> i32 {
     }
 }
 
+/// Parse `--tool`, or `None`.
+///
+/// The caller exits **1** on `None`, never 2: on `UserPromptSubmit` and `Stop` — both of
+/// which the generated settings file installs — exit 2 is Claude Code's *blocking* status,
+/// which feeds stderr back into the session and, on `UserPromptSubmit`, discards the user's
+/// prompt. Unreachable through the generated file today (it always passes `--tool claude`),
+/// but adding a second tool is documented as a five-edit change and a session's settings
+/// file persists on disk between launches. The failure mode of getting this wrong is
+/// "veld erased your prompt", not "no badge" — the one outcome this module exists to avoid.
 fn parse_tool(tool: Option<&str>) -> Option<AgentTool> {
     match tool {
         None => Some(AgentTool::Claude),
