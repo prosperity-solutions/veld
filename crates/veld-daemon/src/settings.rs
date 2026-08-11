@@ -13,11 +13,13 @@
 //! visible in the handler being reviewed.
 
 use std::collections::BTreeMap;
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 use axum::{
     Json, Router,
     http::{HeaderMap, StatusCode},
-    routing::get,
+    routing::{get, post},
 };
 use serde_json::Value;
 use tracing::warn;
@@ -28,8 +30,15 @@ pub fn routes() -> Router {
     Router::new()
         .route("/api/settings", get(get_settings).patch(patch_settings))
         .route("/api/shells", get(get_shells))
-        .route("/api/shells/intercept", get(get_shell_intercept))
+        .route("/api/shells/intercept", post(post_shell_intercept))
 }
+
+/// How long a probe result is reused.
+///
+/// Short enough that pasting the suggested line and reopening the dialog shows the
+/// change — which is the whole point of measuring rather than assuming — and long
+/// enough that a caller in a loop cannot turn one request into one login shell.
+const INTERCEPT_TTL: Duration = Duration::from_secs(10);
 
 /// Whether `open`/`xdg-open` are **actually** caught in the user's chosen shell.
 ///
@@ -47,9 +56,43 @@ pub fn routes() -> Router {
 ///
 /// Its own endpoint rather than a field on `/api/shells`, because it costs a login
 /// shell (sub-second normally, up to 10s on a stalled rc file) and the picker's list
-/// must stay instant. Uncached on purpose: the whole point is that someone who
-/// pastes the suggested line can reopen the dialog and see it go green.
-async fn get_shell_intercept() -> Result<Json<Value>, StatusCode> {
+/// must stay instant.
+///
+/// # Why this is a `POST`, and gated, when it reads nothing
+///
+/// It spawns the user's **full login shell**, rc files and all. A `GET` is a *safe*
+/// method: a bare `<img src="http://127.0.0.1:<port>/api/shells/intercept">` on any
+/// page the developer visits is a simple request that needs no preflight and is sent
+/// regardless of whether the reply can be read — so as an ungated `GET` this was one
+/// `for` loop away from unbounded process creation, and `pty.rs` already writes the
+/// rule down: *a safe route must stay genuinely safe — if it ever grows a side
+/// effect, it needs the header and the client needs to send it.* `POST` plus
+/// [`check_csrf`] means a cross-origin caller cannot reach it at all, since the
+/// custom header forces a preflight it cannot pass.
+///
+/// The header alone does not bound a **same-origin** caller, and same-origin is not
+/// a small set: a developer's own app reaches this daemon through the helper's
+/// `/__veld__` proxy. So the result is also single-flighted and cached for
+/// [`INTERCEPT_TTL`] — the lock is held across the probe, so a hundred concurrent
+/// requests produce one shell and ninety-nine clones of its answer.
+async fn post_shell_intercept(headers: HeaderMap) -> Result<Json<Value>, StatusCode> {
+    check_csrf(&headers)?;
+    static CACHE: OnceLock<tokio::sync::Mutex<Option<(Instant, Value)>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| tokio::sync::Mutex::new(None));
+    // Held across the await deliberately: that is what makes this single-flight.
+    let mut cached = cache.lock().await;
+    if let Some((measured_at, doc)) = cached.as_ref()
+        && measured_at.elapsed() < INTERCEPT_TTL
+    {
+        return Ok(Json(doc.clone()));
+    }
+    let doc = shell_intercept_report().await?;
+    *cached = Some((Instant::now(), doc.clone()));
+    Ok(Json(doc))
+}
+
+/// The probe itself, without the gate or the cache.
+async fn shell_intercept_report() -> Result<Value, StatusCode> {
     let db = open_db()?;
     let shell = db.terminal_shell();
     let open_in_app = db.terminal_open_urls_in_app();
@@ -81,7 +124,7 @@ async fn get_shell_intercept() -> Result<Json<Value>, StatusCode> {
         (Some(path), Some(dir)) => Some(path.starts_with(dir.as_str())),
         _ => None,
     };
-    Ok(Json(serde_json::json!({
+    Ok(serde_json::json!({
         "shell": shell,
         "name": std::path::Path::new(&shell)
             .file_name()
@@ -96,7 +139,7 @@ async fn get_shell_intercept() -> Result<Json<Value>, StatusCode> {
             let (file, line) = veld_core::shell::path_hint(&shell);
             serde_json::json!({ "file": file, "line": line })
         }),
-    })))
+    }))
 }
 
 /// The shells this machine has, for the `terminal.shell` picker.
@@ -114,7 +157,11 @@ async fn get_shell_intercept() -> Result<Json<Value>, StatusCode> {
 async fn get_shells() -> Json<Value> {
     Json(serde_json::json!({
         "auto": veld_core::shell::auto_shell(),
-        "shells": veld_core::shell::discover(),
+        // The **user's** PATH, not the daemon's: under launchd ours is bare, and
+        // /etc/shells lists only what the OS shipped — so reading the process
+        // environment here offered every bash except the Homebrew one this
+        // feature's whole point is to reach. Cached, so this costs no login shell.
+        "shells": veld_core::shell::discover(&veld_core::user_path::cached_user_path().await),
     }))
 }
 
@@ -245,6 +292,37 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn the_shell_probe_is_gated_and_is_not_a_safe_method() {
+        // It spawns the user's full login shell. As an ungated GET, a bare
+        // `<img src=…>` on any page the developer visits was one loop away from
+        // unbounded process creation — a simple request needs no preflight and is
+        // sent whether or not the reply can be read. So: not a GET, and gated.
+        let res = routes()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/shells/intercept")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
+        // …and the safe method is gone rather than left as a second way in.
+        let res = routes()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/shells/intercept")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::METHOD_NOT_ALLOWED);
     }
 
     #[tokio::test]

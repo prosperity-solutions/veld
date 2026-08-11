@@ -111,17 +111,27 @@ pub fn resolve(preference: Option<&str>) -> String {
 /// systemd has a service environment, not a login session's, so `$SHELL` may be
 /// absent — and `/bin/sh` alone would hand that user a shell that reads none of
 /// their startup files.
+/// Each candidate is checked for executability, so `/bin/sh` is a real last resort
+/// rather than a nominal one. Without that, the guarantee [`resolve`] documents —
+/// a shell that was uninstalled can never leave a user unable to open the terminal
+/// they would fix the setting from — held only for an explicitly configured path
+/// and not for `auto`, which is what almost everyone is on: someone who `chsh`'d to
+/// a Homebrew shell and later removed it has a stale `$SHELL` and a stale `passwd`
+/// entry, and every terminal would name a program that is not there.
 #[must_use]
 pub fn auto_shell() -> String {
-    if let Some(shell) = std::env::var("SHELL")
+    let from_env = std::env::var("SHELL")
         .ok()
         .map(|s| s.trim().to_owned())
-        .filter(|s| !s.is_empty())
-    {
-        return shell;
-    }
-    if let Some(shell) = passwd_shell() {
-        return shell;
+        .filter(|s| !s.is_empty());
+    for candidate in [from_env, passwd_shell()].into_iter().flatten() {
+        if is_executable(Path::new(&candidate)) {
+            return candidate;
+        }
+        warn!(
+            shell = %candidate,
+            "the login shell on record is not an executable file — trying the next source"
+        );
     }
     "/bin/sh".to_owned()
 }
@@ -164,10 +174,20 @@ pub fn is_valid_preference(value: &str) -> bool {
 
 /// Every shell this machine appears to have, for the picker.
 ///
-/// Two sources, unioned: `/etc/shells` and a `PATH` probe of [`PROBED_SHELLS`].
-/// Entries that are not executable files are dropped — a stale `/etc/shells` line
-/// for a shell that was uninstalled is common, and offering it would let someone
-/// pick a shell whose only outcome is the fallback.
+/// Two sources, unioned: `/etc/shells` and a probe of [`PROBED_SHELLS`] across
+/// `path`. Entries that are not executable files are dropped — a stale
+/// `/etc/shells` line for a shell that was uninstalled is common, and offering it
+/// would let someone pick a shell whose only outcome is the fallback.
+///
+/// **`path` is the *user's* `PATH`, passed in, never `std::env::var("PATH")`.** A
+/// daemon under launchd has a bare service `PATH` (measured: `launchctl getenv
+/// PATH` is empty on macOS), and `/etc/shells` lists only what the OS shipped —
+/// Homebrew's install notes tell you to append to it and nobody does. Read from the
+/// process environment, this offered `/bin/bash` (3.2, which cannot take the `$ENV`
+/// handoff) and never `/opt/homebrew/bin/bash` (5.x, which can): a picker whose
+/// whole purpose is "use my bash" listing every bash except the working one. This
+/// is the AGENTS.md daemon-`PATH` convention, and it applies to a directory scan as
+/// much as to a spawn.
 ///
 /// Deduplicated by **(canonical path, basename)** rather than by canonical path
 /// alone. On Linux `/bin/bash` and `/usr/bin/bash` are one file through the
@@ -175,7 +195,7 @@ pub fn is_valid_preference(value: &str) -> bool {
 /// `/bin/bash` may also be one file, and collapsing *those* would be wrong,
 /// because a shell's `argv[0]` decides which startup files it reads.
 #[must_use]
-pub fn discover() -> Vec<Discovered> {
+pub fn discover(path: &str) -> Vec<Discovered> {
     let mut out: Vec<Discovered> = Vec::new();
     let mut seen: Vec<(PathBuf, String)> = Vec::new();
 
@@ -217,8 +237,8 @@ pub fn discover() -> Vec<Discovered> {
             consider(PathBuf::from(line));
         }
     }
-    if let Some(path) = std::env::var_os("PATH") {
-        for dir in std::env::split_paths(&path) {
+    {
+        for dir in std::env::split_paths(path) {
             if dir.as_os_str().is_empty() {
                 continue;
             }
@@ -393,8 +413,14 @@ pub async fn resolved_open(
     for (key, value) in env {
         cmd.env(key, value);
     }
-    // No terminal escape noise around the answer, and no colour codes inside it.
-    cmd.env("TERM", "dumb");
+    // **The same `TERM` a real session gets** (`holder.rs`'s `spawn_shell`), not
+    // the `dumb` that would keep the output tidy. `[[ $TERM == dumb ]] && return`
+    // at the top of an rc file is a near-universal guard (it is what Emacs TRAMP
+    // and `scp` mode rely on), so probing with `dumb` skips the very lines this is
+    // here to judge — and answers "the shim wins" for a machine whose terminals it
+    // loses on. A probe that does not reproduce the session is not a probe.
+    // The escape noise that buys is handled by [`strip_controls`].
+    cmd.env("TERM", "xterm-256color");
     cmd.stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
@@ -430,13 +456,56 @@ pub async fn resolved_open(
             // markers appears on stdout first.
             let answer = text
                 .rsplit_once(OPEN)
-                .and_then(|(before, _)| before.rsplit_once(OPEN).map(|(_, found)| found.trim()))?;
+                .and_then(|(before, _)| before.rsplit_once(OPEN).map(|(_, found)| found))?;
+            let answer = strip_controls(answer);
             // Empty means `command -v` found nothing at all, which is a real
             // answer ("no `open` on this machine") and not a resolution.
-            (!answer.is_empty()).then(|| answer.to_owned())
+            (!answer.is_empty()).then_some(answer)
         }
         _ => None,
     }
+}
+
+/// Drop terminal escape sequences and control characters, then trim.
+///
+/// The probe runs with a real `TERM` (see [`resolved_open`]), so a prompt theme can
+/// emit CSI colour runs and OSC title/cwd sequences on the same stream as the
+/// answer. The sentinels bound where the answer is; this decides what inside those
+/// bounds is part of it. A path never legitimately contains one of these bytes.
+fn strip_controls(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut chars = raw.chars();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            if !c.is_control() {
+                out.push(c);
+            }
+            continue;
+        }
+        // ESC. Skip to the sequence's terminator: a final byte in `@`..=`~` for
+        // CSI/SS3, or BEL / ESC-\ for the string sequences (OSC, DCS, APC).
+        match chars.next() {
+            Some(']') | Some('P') | Some('X') | Some('^') | Some('_') => {
+                let mut prev = '\0';
+                for c in chars.by_ref() {
+                    if c == '\u{7}' || (prev == '\u{1b}' && c == '\\') {
+                        break;
+                    }
+                    prev = c;
+                }
+            }
+            Some('[') => {
+                for c in chars.by_ref() {
+                    if ('\u{40}'..='\u{7e}').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            // A two-character escape; its second character was already consumed.
+            _ => {}
+        }
+    }
+    out.trim().to_owned()
 }
 
 /// The line that puts veld's shim directory on `PATH` by hand, and the file to put
@@ -644,7 +713,9 @@ mod tests {
 
     #[test]
     fn discovery_returns_executables_only_and_no_duplicates() {
-        let found = discover();
+        // The test process's own PATH stands in for the user's here; the point of
+        // the argument is that a *daemon* must not use its own.
+        let found = discover(&std::env::var("PATH").unwrap_or_default());
         assert!(
             !found.is_empty(),
             "no shell discovered at all — /etc/shells and PATH both empty?"

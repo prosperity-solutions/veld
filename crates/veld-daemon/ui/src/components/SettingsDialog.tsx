@@ -270,7 +270,11 @@ export function SettingsDialog(props: {
     return () => {
       live = false;
     };
-  }, [shellValue]);
+    // Not just the shell: the endpoint's answer is gated on both Links switches,
+    // and both are editable in this same mounted dialog. Without them, turning
+    // interception off leaves a warning on screen telling the user to edit
+    // ~/.bashrc for a feature they just disabled.
+  }, [shellValue, openInApp, intercept]);
   // One origin per line, which is what an exempt list reads as. Held locally and
   // committed on blur like every other text field here — the daemon refuses the
   // whole list if one entry is not an origin, and its error lands in `props.error`.
@@ -992,7 +996,7 @@ export function SettingsDialog(props: {
               </Row>
               <Row
                 label="Also catch programs that call open / xdg-open"
-                help="Most tools read $BROWSER, but some call the system opener directly — including an agent's shell tool (Bash(open “https://…”)). For those, Veld puts a small shim directory on the PATH of each terminal. It needs the last word after your shell's startup files, so Veld points ZDOTDIR at a directory of its own holding one .zshenv: that file hands ZDOTDIR straight back, sources your real .zshenv, and registers a hook. Your .zprofile, .zshrc and .zlogin are read normally, in order, and nothing of yours is edited. zsh only; other shells keep $BROWSER and can add $VELD_SHIM_DIR to PATH by hand. Takes effect for new terminals."
+                help="Most tools read $BROWSER, but some call the system opener directly — including an agent's shell tool (Bash(open “https://…”)). For those, Veld puts a small shim directory on the PATH of each terminal. It needs the last word after your shell's startup files, so Veld points ZDOTDIR at a directory of its own holding one .zshenv: that file hands ZDOTDIR straight back, sources your real .zshenv, and registers a hook. Your .zprofile, .zshrc and .zlogin are read normally, in order, and nothing of yours is edited. In bash it uses the equivalent seam — posix mode’s $ENV, the only startup file an interactive --posix bash reads — replaying your own startup itself; that is probed per binary, because macOS ships bash 3.2 as /bin/bash and 3.2 ignores $ENV. Other shells keep $BROWSER and can add $VELD_SHIM_DIR to PATH by hand. The Shell row above reports whether it actually worked. Takes effect for new terminals."
               >
                 <Checkbox
                   size="xs"

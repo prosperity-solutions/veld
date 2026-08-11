@@ -1159,10 +1159,17 @@ export const api = {
   /**
    * Ask whether the shim actually wins in the chosen shell. Costs a login shell,
    * so it is a separate call from the list and is made only when the settings
-   * surface is open — and it is uncached, so pasting the suggested line and
-   * reopening the dialog shows the change.
+   * surface is open.
+   *
+   * A `POST` even though it reads: it spawns the user's shell, and a safe method
+   * with that side effect is reachable from any page the user visits via a bare
+   * `<img src=…>`. The method is what makes `request` send `X-Veld-Request`, which
+   * is the header the daemon requires. The daemon single-flights it and caches the
+   * answer for ten seconds, so pasting the suggested line and reopening the dialog
+   * still shows the change.
    */
-  shellIntercept: () => request<ShellIntercept>("/api/shells/intercept"),
+  shellIntercept: () =>
+    request<ShellIntercept>("/api/shells/intercept", { method: "POST" }),
   /**
    * Open the OS folder picker (hosted by the daemon — it runs in the user's
    * GUI session). Resolves to the chosen absolute path, or null on cancel.

@@ -1402,6 +1402,21 @@ async fn resolve_pane(
 /// relies on for the same reason. Each argument is re-quoted with
 /// [`veld_core::console::quote`] so spaces, `$`, backticks or a single quote in
 /// a value can never become a second command.
+/// The argv of an ordinary terminal's login shell: `<shell> <flags…> -l`.
+///
+/// A function rather than three lines at the one call site, so the flag ordering
+/// that bash enforces is reachable from a test. Getting it backwards is not a
+/// degradation — `bash -l --posix` exits printing its usage, so every terminal on a
+/// bash with the handoff would fail to open — and nothing else in the codebase
+/// would have caught it, because both existing call-site tests pass no flags.
+fn login_shell_argv(shell: &str, shell_flags: &[String]) -> Vec<String> {
+    let mut argv = vec![shell.to_owned()];
+    // Ahead of `-l`: bash parses GNU long options **only** before the short ones.
+    argv.extend(shell_flags.iter().cloned());
+    argv.push("-l".to_owned());
+    argv
+}
+
 fn login_shell_command(shell: &str, shell_flags: &[String], argv: &[String]) -> Vec<String> {
     let command = argv
         .iter()
@@ -2486,12 +2501,7 @@ async fn obtain_session(
         // like every other value here: changing `terminal.shell` applies to
         // terminals opened afterwards, and cannot reach into a shell that is
         // already running.
-        shell_argv: Some({
-            let mut argv = vec![ticket.shell.clone()];
-            argv.extend(ticket.shell_flags.iter().cloned());
-            argv.push("-l".to_owned());
-            argv
-        }),
+        shell_argv: Some(login_shell_argv(&ticket.shell, &ticket.shell_flags)),
         argv: ticket.pane.as_ref().map(|p| p.argv.clone()),
         pane_label: ticket.pane.as_ref().map(|p| p.label.clone()),
     };
@@ -3375,6 +3385,49 @@ mod tests {
     /// `$SHELL -l -i -c '<quoted argv>'`, and every argv element must be
     /// single-quoted so spaces, `$`, backticks or a quote in a value can never
     /// become a second command.
+    /// A GNU long option comes **before** the short ones, in both places that
+    /// compose a shell argv.
+    ///
+    /// `bash -l --posix` is not a shell with a flag in an odd order — it is a
+    /// usage error, so bash exits and the terminal never opens. The order is
+    /// therefore load-bearing and, until this test, invisible: every other test of
+    /// these two functions passes no flags at all, so swapping the two `extend`
+    /// calls would leave the whole suite green and break every bash terminal that
+    /// takes the `$ENV` handoff.
+    #[test]
+    fn a_long_option_precedes_the_short_ones_in_every_composed_argv() {
+        let flags = vec!["--posix".to_owned()];
+
+        // The ordinary terminal.
+        assert_eq!(
+            login_shell_argv("/opt/homebrew/bin/bash", &flags),
+            vec![
+                "/opt/homebrew/bin/bash".to_owned(),
+                "--posix".to_owned(),
+                "-l".to_owned(),
+            ]
+        );
+
+        // A config-declared pane's command.
+        let pane = login_shell_command("/opt/homebrew/bin/bash", &flags, &["claude".to_owned()]);
+        assert_eq!(
+            &pane[..4],
+            &[
+                "/opt/homebrew/bin/bash".to_owned(),
+                "--posix".to_owned(),
+                "-l".to_owned(),
+                "-i".to_owned(),
+            ],
+            "the long option must precede -l -i, or bash prints its usage and exits"
+        );
+
+        // And with no flags — the zsh and bash-3.2 path — nothing is inserted.
+        assert_eq!(
+            login_shell_argv("/bin/zsh", &[]),
+            vec!["/bin/zsh".to_owned(), "-l".to_owned()]
+        );
+    }
+
     #[test]
     fn a_pane_argv_is_wrapped_in_the_login_shell() {
         let argv = login_shell_command(

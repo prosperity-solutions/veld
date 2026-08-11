@@ -1111,7 +1111,7 @@ fn spawn_shell(
 /// process deliberately does not open: a holder is a dumb PTY owner that must
 /// outlive the daemon, and `Db::open()` on the session-spawn path is the thing
 /// AGENTS.md warns about. So the daemon resolves the shell once, at ticket-mint
-/// time, and sends it in [`HolderConfig::shell`]. This is what a holder spawned by
+/// time, and sends it in [`HolderConfig::shell_argv`]. This is what a holder spawned by
 /// an older daemon — one whose config carries no `shell` — falls back to, which is
 /// exactly the behaviour that daemon had.
 pub fn login_shell() -> String {
@@ -1410,7 +1410,7 @@ mod tests {
     ///
     /// The whole `terminal.shell` preference rests on this hop: the setting lives
     /// in the database, the holder has none, so the value travels in
-    /// [`HolderConfig::shell`] and a holder that ignored it would leave the picker
+    /// [`HolderConfig::shell_argv`] and a holder that ignored it would leave the picker
     /// changing nothing while every unit test still passed. Asserted with a stub
     /// shell that prints its own `argv`, which also pins the `-l` — a bash spawned
     /// without it reads no `~/.bash_profile`, i.e. none of the startup files the

@@ -303,17 +303,23 @@ if shopt -q login_shell; then
   # macOS ships no ~/.bash_profile at all, so a user with ~/.profile and ~/.bashrc
   # gets a bash with none of their aliases, functions or integrations.
   #
-  # Only when the profile did not already do it, tested by looking for the word in
-  # the file veld actually sourced. That is exact for the conventional idiom
-  # (`. ~/.bashrc` / `source ~/.bashrc` both contain it) and errs toward NOT
-  # sourcing twice: a false positive leaves today's behaviour, while a double
-  # source would duplicate PATH entries and re-run prompt setup. A profile that
-  # reaches ~/.bashrc through a second file veld cannot see is the residual case,
-  # and it costs one extra source rather than a broken shell.
+  # Only when the profile did not already do it, tested per line and only on a
+  # line that actually sources something. Comments are skipped, because the bare
+  # word is not evidence: a profile whose only mention is
+  # `# deliberately not sourcing ~/.bashrc` would otherwise suppress the source and
+  # hand the user exactly the bug this feature exists to fix. The two error
+  # directions are not symmetric — a missed source means none of your config
+  # loaded, a double source means a duplicated PATH entry — so the test is
+  # deliberately biased toward sourcing.
   if [ -r "$HOME/.bashrc" ]; then
     veld_seen=
     if [ -n "$veld_profile" ]; then
-      case "$(< "$veld_profile")" in *bashrc*) veld_seen=1 ;; esac
+      while IFS= read -r veld_line || [ -n "$veld_line" ]; do
+        [[ "$veld_line" =~ ^[[:space:]]*# ]] && continue
+        case "$veld_line" in
+          *". "*bashrc*|*"source "*bashrc*) veld_seen=1; break ;;
+        esac
+      done < "$veld_profile"
     fi
     [ -z "$veld_seen" ] && . "$HOME/.bashrc"
   fi
@@ -323,7 +329,7 @@ else
   done
   [ -r "$HOME/.bashrc" ] && . "$HOME/.bashrc"
 fi
-builtin unset veld_rc veld_profile veld_seen
+builtin unset veld_rc veld_profile veld_seen veld_line
 
 # veld's shim directory, prepended last — after /etc/profile's path_helper and
 # after your own rc files, which is the only point at which it can win. Idempotent,
@@ -1210,6 +1216,12 @@ exit
             .env("PATH", "/usr/bin:/bin")
             .env("TERM", "dumb")
             .env("ENV", &handoff)
+            // Drives the restore arm rather than the unset one: `$ENV` is read by
+            // every posix shell started from here, so a user who had one must get
+            // it back. Only reachable when the daemon itself was started from a
+            // shell that exported `ENV`, which is rare and is exactly why it would
+            // otherwise never be exercised.
+            .env("VELD_USER_ENV", "/tmp/their-env")
             .env("VELD_SHIM_DIR", &shim)
             .env("VELD_SHIM_BROWSER", shim.join("veld-open"))
             .env("BROWSER", shim.join("veld-open"))
@@ -1252,10 +1264,11 @@ exit
             stdout.contains("startup=ran/ran1"),
             "the user's startup files must each run exactly once: {stdout:?} {stderr:?}"
         );
-        // `$ENV` handed back, so a nested posix shell is not wrapped.
+        // `$ENV` handed back to the user's own, so a nested posix shell reads what
+        // they configured rather than veld's file a second time.
         assert!(
-            stdout.contains("env=unset"),
-            "ENV must be handed back: {stdout:?}"
+            stdout.contains("env=/tmp/their-env"),
+            "the user's own ENV must be restored: {stdout:?}"
         );
         // The rc file's own `export BROWSER=firefox` ran after veld's environment was
         // handed over; the file takes it back and keeps theirs for the fall-through.
@@ -1345,6 +1358,7 @@ exit
                 .write_all(
                     b"echo startup=$VELD_TEST_PROFILE/ran$VELD_TEST_BASHRC\n\
                       echo fn=$(type -t veld_test_fn)\n\
+                      echo env=${ENV-unset}\n\
                       exit\n",
                 )
                 .unwrap();
@@ -1359,6 +1373,13 @@ exit
         assert!(
             stdout.contains("fn=function"),
             "a function defined in .bashrc must be available: {stdout:?}"
+        );
+        // The other arm of the `$ENV` handback — no `VELD_USER_ENV`, so it is
+        // unset rather than left pointing at veld's file, which a nested posix
+        // shell would otherwise source a second time.
+        assert!(
+            stdout.contains("env=unset"),
+            "ENV must be unset when the user had none: {stdout:?}"
         );
     }
 
