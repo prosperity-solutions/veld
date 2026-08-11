@@ -137,6 +137,14 @@ export function PlaceList(props: {
           // the heading walk needs somewhere to put a label. Without it the option
           // ownership — and the "3 of 7" a screen reader announces — is broken by the
           // very elements added to make the list legible.
+          // The key carries the name as well as the URL, which **changes what two
+          // bookmarks sharing one URL do**: `VeldLinks` keyed quicklinks by url alone
+          // and said a repeated url "is the same link twice … and loses nothing by
+          // collapsing". It did not really collapse — two children with one key is a
+          // React warning and unspecified reconciliation, not a merge — and a config
+          // that declares `Docs → /docs` twice under two labels is declaring two links.
+          // So both render, each with a key of its own, and the pair is visible to the
+          // author instead of silently half-dropped.
           <div
             key={`${place.kind}:${place.url}:${place.name}`}
             role={listboxId ? "presentation" : undefined}
