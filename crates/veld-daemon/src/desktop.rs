@@ -223,7 +223,7 @@ async fn run_picker(cmd: &str, args: &[&str]) -> Pick {
     }
 }
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize)]
 struct PickDirectoryQuery {
     #[serde(default)]
     purpose: Option<String>,

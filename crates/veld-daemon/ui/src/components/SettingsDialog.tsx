@@ -154,11 +154,17 @@ const MAX_WORKTREE_STORAGE_DIR_LEN = 1024;
 function worktreeStorageDirError(path: string): string | null {
   const v = path.trim();
   if (v === "") return null;
-  if (v.length > MAX_WORKTREE_STORAGE_DIR_LEN) {
-    return `Must be ${MAX_WORKTREE_STORAGE_DIR_LEN} characters or fewer`;
+  // Bytes, not JS's UTF-16 code units: the Rust validator this mirrors
+  // (`WorktreeStorageDir` in settings.rs) measures `s.len()`, which is a
+  // byte count — a path with any multi-byte character would otherwise pass
+  // this check under the limit and still get 400'd server-side.
+  if (new TextEncoder().encode(v).length > MAX_WORKTREE_STORAGE_DIR_LEN) {
+    return `Must be ${MAX_WORKTREE_STORAGE_DIR_LEN} bytes or fewer`;
   }
+  // Also rejects the Unicode C1 controls (U+0080–U+009F) `char::is_control`
+  // catches on the Rust side, not only the ASCII C0 range + DEL.
   // biome-ignore lint/suspicious/noControlCharactersInRegex: rejecting them is the point.
-  if (/[\x00-\x1f\x7f]/.test(v)) return "Must not contain control characters";
+  if (/[\x00-\x1f\x7f-\x9f]/.test(v)) return "Must not contain control characters";
   if (!v.startsWith("/")) return "Must be an absolute path";
   if (v.split("/").includes("..")) return 'Must not contain ".."';
   return null;

@@ -1230,8 +1230,10 @@ export const api = {
    * Open the effective worktree-storage directory in the OS file manager.
    * Takes no path — the daemon reads its own `worktree.storageMode`/
    * `worktree.storageDir` settings, the same value `create_worktree` acts on.
-   * Throws (409) when the mode is `"sibling"`: there is no single directory to
-   * open in that mode, only each repo's own sibling folder.
+   * Throws on: the mode is `"sibling"` (409, no single directory to open
+   * there — only each repo's own sibling folder), the configured directory
+   * doesn't exist or isn't a directory (404), or the file manager itself
+   * failed to launch (500).
    */
   openWorktreeStorageDir: () =>
     request<void>("/api/open-worktree-storage-dir", { method: "POST" }),
