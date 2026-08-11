@@ -59,12 +59,42 @@ const PATH_RESOLVE_TIMEOUT: Duration = Duration::from_secs(10);
 /// rather than one per call. Note that a caller shared between the two, like
 /// `endpoint::resolve_secret`, counts as daemon-side and uses the cache.
 pub async fn resolve_user_path() -> String {
-    let shell = resolution_shell();
-    if let Some(path) = login_shell_path(&shell).await {
+    if let Some(path) = resolve_with_fallback().await {
         info!(path = %path, "resolved user PATH from login shell");
         return path;
     }
     process_path_fallback()
+}
+
+/// Ask the preferred shell, and — only if it answered nothing — the login shell.
+///
+/// **A shell someone picked for their *terminals* need not be able to answer this
+/// question.** `terminal.shell` can be any executable, and the picker offers what
+/// `/etc/shells` lists: on stock macOS that includes `/bin/csh` and `/bin/tcsh`,
+/// neither of which prints a `PATH=` line for `-l -i -c 'command env'` (measured:
+/// zsh/bash/ksh/dash print one, csh/tcsh print none). Without the second attempt,
+/// choosing tcsh for terminals would silently take the user's `PATH` away from
+/// every *node command*, `SecretSource::Command` and health probe — and only after
+/// the next daemon restart, since [`publish_value`] keeps a good value alive until
+/// then, which is about the least diagnosable shape a bug can have.
+///
+/// The extra spawn happens only on the failing path, so the common case still
+/// costs exactly one shell.
+async fn resolve_with_fallback() -> Option<String> {
+    let preferred = resolution_shell();
+    if let Some(path) = login_shell_path(&preferred).await {
+        return Some(path);
+    }
+    let login = crate::shell::auto_shell();
+    if login == preferred {
+        return None;
+    }
+    debug!(
+        preferred = %preferred,
+        falling_back_to = %login,
+        "the preferred shell answered no PATH — asking the login shell"
+    );
+    login_shell_path(&login).await
 }
 
 /// The user's chosen shell, published by whoever knows about it.
@@ -208,8 +238,7 @@ pub async fn cached_user_path() -> String {
 
 /// Re-resolve and publish per [`publish_value`].
 async fn refresh_user_path_cache() {
-    let shell = resolution_shell();
-    let resolved = login_shell_path(&shell).await;
+    let resolved = resolve_with_fallback().await;
     if let Some(path) = &resolved {
         info!(path = %path, "resolved user PATH from login shell");
     }

@@ -111,6 +111,7 @@ pub fn resolve(preference: Option<&str>) -> String {
 /// systemd has a service environment, not a login session's, so `$SHELL` may be
 /// absent — and `/bin/sh` alone would hand that user a shell that reads none of
 /// their startup files.
+///
 /// Each candidate is checked for executability, so `/bin/sh` is a real last resort
 /// rather than a nominal one. Without that, the guarantee [`resolve`] documents —
 /// a shell that was uninstalled can never leave a user unable to open the terminal
@@ -688,7 +689,14 @@ mod tests {
         // rebuilds `PATH` after the assignment would have happened.
         std::fs::write(
             zdir.join(".zshenv"),
-            "unset ZDOTDIR\n\
+            // The first line is the point of the fixture as much as the hook is:
+            // `[[ $TERM == dumb ]] && return` at the top of an rc file is a
+            // near-universal guard, so a probe that spawns with `TERM=dumb` — for
+            // tidier output, say — skips everything below it and reports that the
+            // shim wins on a machine where it loses. Reverting `resolved_open`'s
+            // TERM must fail here rather than in a user's terminal.
+            "[[ $TERM == dumb ]] && return\n\
+             unset ZDOTDIR\n\
              PATH=/usr/bin:/bin\n\
              veld_shim_path() { case \":$PATH:\" in *\":$VELD_SHIM_DIR:\"*) ;; \
              *) PATH=\"$VELD_SHIM_DIR:$PATH\" ;; esac }\n\

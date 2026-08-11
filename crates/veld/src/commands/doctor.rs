@@ -728,11 +728,18 @@ impl Diagnostics {
                 // too; this row makes the state visible before a terminal is opened.
                 let intercept = settings.map(|(_, i)| i).unwrap_or(true);
                 if !intercept {
+                    // Names the shell even here. Someone debugging "my fish
+                    // aliases do not load" is asking about the shell, not about
+                    // URL routing, and this row is the only place `veld doctor`
+                    // reports which shell terminals actually open — so dropping
+                    // the name on this branch sends them to read the setting in
+                    // the UI to learn something the diagnostic already knew.
                     return Check {
                         pass: true,
                         label: format!(
-                            "Terminal URLs open in Veld ({shown} → {}, open/xdg-open not caught)",
-                            cli.display()
+                            "Terminal URLs open in Veld ({shown} → {}); terminals run {}, open/xdg-open not caught",
+                            cli.display(),
+                            Self::shell_name(&shell)
                         ),
                     };
                 }

@@ -77,17 +77,32 @@ const INTERCEPT_TTL: Duration = Duration::from_secs(10);
 /// requests produce one shell and ninety-nine clones of its answer.
 async fn post_shell_intercept(headers: HeaderMap) -> Result<Json<Value>, StatusCode> {
     check_csrf(&headers)?;
-    static CACHE: OnceLock<tokio::sync::Mutex<Option<(Instant, Value)>>> = OnceLock::new();
+    // **Keyed on everything the answer depends on**, which is not optional: the
+    // flow this feature exists for is "open the dialog, pick a different shell,
+    // read the verdict", and the client refetches immediately — well inside the
+    // TTL. An unkeyed cache would hand back the *previous* shell's report, with
+    // the wrong name, the wrong verdict and a hint naming the wrong rc file, and
+    // nothing would refetch again to correct it.
+    let db = open_db()?;
+    let key = (
+        db.terminal_shell(),
+        db.terminal_open_urls_in_app(),
+        db.terminal_intercept_system_open(),
+    );
+    drop(db);
+    type Cached = Option<((String, bool, bool), Instant, Value)>;
+    static CACHE: OnceLock<tokio::sync::Mutex<Cached>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| tokio::sync::Mutex::new(None));
     // Held across the await deliberately: that is what makes this single-flight.
     let mut cached = cache.lock().await;
-    if let Some((measured_at, doc)) = cached.as_ref()
+    if let Some((cached_key, measured_at, doc)) = cached.as_ref()
+        && *cached_key == key
         && measured_at.elapsed() < INTERCEPT_TTL
     {
         return Ok(Json(doc.clone()));
     }
     let doc = shell_intercept_report().await?;
-    *cached = Some((Instant::now(), doc.clone()));
+    *cached = Some((key, Instant::now(), doc.clone()));
     Ok(Json(doc))
 }
 
@@ -160,8 +175,19 @@ async fn get_shells() -> Json<Value> {
         // The **user's** PATH, not the daemon's: under launchd ours is bare, and
         // /etc/shells lists only what the OS shipped — so reading the process
         // environment here offered every bash except the Homebrew one this
-        // feature's whole point is to reach. Cached, so this costs no login shell.
-        "shells": veld_core::shell::discover(&veld_core::user_path::cached_user_path().await),
+        // feature's whole point is to reach.
+        //
+        // `published_user_path`, never `cached_user_path`: this route is an
+        // ungated GET, and the cached accessor *resolves inline* when nothing has
+        // been published yet (deliberately without single-flighting), so during
+        // the seconds between daemon start and the warm task's first answer, N
+        // concurrent requests would spawn N login shells — reintroducing exactly
+        // the amplification `post_shell_intercept` was just hardened against. Cold
+        // means this one listing may miss a Homebrew shell for a few seconds;
+        // `/etc/shells` still contributes, and the warm task fixes it shortly.
+        "shells": veld_core::shell::discover(
+            &veld_core::user_path::published_user_path().unwrap_or_default(),
+        ),
     }))
 }
 
