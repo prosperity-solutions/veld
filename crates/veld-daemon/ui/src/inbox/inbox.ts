@@ -172,7 +172,13 @@ interface SessionState {
   /** The authority of the last agent state accepted for this session. */
   agentSource: Source | null;
   /**
-   * The outstanding `C` mark belongs to an agent's own launch.
+   * The outstanding `C` mark is an agent's own launch.
+   *
+   * Established from exactly two places, which are the two orders the signals can be
+   * *observed* in: a `ready` arriving while a `C` is outstanding, and a `C` arriving while a
+   * claim is held. Latching on "any agent signal while any `C` is outstanding" was neither
+   * necessary nor sufficient — it missed the launch when the claim was seen first, and it
+   * stole a plain command's `C` when a fire-and-forget `Stop` arrived late.
    *
    * This is the whole of the agent/shell hand-off, and it took three attempts to find. A
    * pane running `claude` is one shell command: the `C` is the launch and the `D` that
@@ -351,6 +357,15 @@ class WorktreeInbox {
       case "osc133":
         if (signal.mark === "C") {
           session.ranCommand = true;
+          if (session.agentSource !== null) session.agentCommand = true;
+          // The mirror of the `ready` rule below, and it is not redundant: the inbox sees
+          // signals in the order **xterm delivers** them, not the order the bytes arrived.
+          // An agent's state comes in on the IDE channel and is filed synchronously, while a
+          // mark comes in on the pty socket and is parsed by xterm's write buffer, which
+          // defers to a macrotask — so the wrapper's launch report can be observed *before*
+          // the `preexec` mark that actually preceded it. Attributing on only one of the two
+          // orders left the launch unattributed, which filed a spurious "Command failed" for
+          // the agent's own exit **and** wedged the claim for the life of the pane.
           return undefined;
         }
         if (signal.mark !== "D") return undefined; // `A`/`B` are prompt boundaries.
@@ -475,9 +490,13 @@ class WorktreeInbox {
         if (!KNOWN_AGENT_STATES.includes(signal.state)) return undefined;
         session.agentSource = signal.source;
         session.agentWorking = signal.state === "working";
-        // An outstanding `C` is this agent's own launch — remember it, so the `D` that
-        // eventually closes it is recognised as the agent's rather than as fresh news.
-        if (session.ranCommand) session.agentCommand = true;
+        // Only `ready` may claim an outstanding `C`, because only `ready` means "an agent
+        // just launched here" — it is the wrapper's own report, fired before the exec. Any
+        // agent state would have been wrong in the other direction: `Stop` and `SessionEnd`
+        // are fire-and-forget, so a late one can arrive after the shell has already started
+        // the *next* command, and it then claimed that command's `C` — swallowing its
+        // result, its spinner and every OSC 9 until it ended.
+        if (session.ranCommand && signal.state === "ready") session.agentCommand = true;
         switch (signal.state) {
           case "ready":
             // Authority claimed, nothing reported. Setting `agentSource` above is the
@@ -507,8 +526,9 @@ class WorktreeInbox {
             // at all), produces no `C` and no `D`. Leaving those claimed muted the pane's
             // activity for good and silently dropped every later OSC 9 in it.
             //
-            // Safe precisely because it is conditional: with no agent-owned `C` outstanding,
-            // any `D` that turns up belongs to some other command and has earned its event.
+            // Safe because `agentCommand` is now established from both observation orders
+            // (see the field): with it false there really is no agent launch outstanding, so
+            // any `D` that turns up belongs to another command and has earned its event.
             if (!session.agentCommand) session.agentSource = null;
             return {
               kind: "finished",

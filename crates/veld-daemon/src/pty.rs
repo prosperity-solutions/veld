@@ -1483,7 +1483,10 @@ fn login_shell_script(shell: &str, shell_flags: &[String], script: String) -> Ve
 /// Prepended to every config-declared pane's script. See [`login_shell_script`].
 ///
 /// **Needed for zsh, and for a bash with no `$ENV` handoff; an idempotent no-op for a bash
-/// that has one** — measured, both shells, both directions:
+/// that has one.** The table below is the measured part, and note what it does *not* cover:
+/// its bash row is a `--posix` bash, i.e. one *with* the handoff. The no-handoff case
+/// (bash 3.2, macOS's `/bin/bash`, whose probe disables it) is reasoned from that probe
+/// rather than measured here, and it is the case the gate was widened for.
 ///
 /// | shell, as a pane runs it | without this | with this |
 /// |---|---|---|
@@ -1498,7 +1501,8 @@ fn login_shell_script(shell: &str, shell_flags: &[String], script: String) -> Ve
 ///
 /// So it is not "belt and braces": for zsh it is the only route, for a **bash 3.2** (macOS's
 /// `/bin/bash`, whose handoff a per-binary probe disables) it is *also* the only route, and
-/// for a handoff bash it costs nothing because the `case` finds the directory already there. `a_pane_command_finds_the_agent_shim_in_both_shells` pins all four
+/// for a handoff bash it costs nothing because the `case` finds the directory already there.
+/// `a_pane_command_finds_the_agent_shim_in_both_shells` pins all four
 /// cells, because the one that matters is a *negative* — a change to either handoff that
 /// re-broke zsh would otherwise show up as an agent that silently reports nothing.
 const SHIM_PATH_PREFIX: &str = concat!(

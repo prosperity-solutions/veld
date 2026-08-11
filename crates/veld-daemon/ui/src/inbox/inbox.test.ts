@@ -866,7 +866,7 @@ describe("defects found in review", () => {
    *
    * The test that was supposed to cover this used `idle`, which never released the claim —
    * so it passed while the `done` path stayed broken. Hence this one, and hence the claim
-   * now being released on the *read* instead.
+   * now being handed back by the `D` that closes the agent's own launch.
    */
   it("keeps an ended agent's own account when the shell's prompt mark follows", () => {
     const box = createInbox();
@@ -960,6 +960,74 @@ describe("defects found in review", () => {
       box.unseen("cc"),
       "a read must not hand a live agent's pane back to the shell",
     ).toBeNull();
+  });
+
+  /**
+   * **The claim can be observed before the mark that preceded it.**
+   *
+   * The inbox sees signals in the order xterm delivers them, not the order the bytes
+   * arrived: an agent's state arrives on the IDE channel and is filed synchronously, while a
+   * mark arrives on the pty socket and is parsed by xterm's write buffer, which defers to a
+   * macrotask. So the wrapper's launch report can be seen *before* the `preexec` mark that
+   * actually came first — and attributing the launch on only one of the two orders filed a
+   * spurious "Command failed" for the agent's own exit and wedged the claim permanently.
+   */
+  it("attributes an agent's launch whichever order the two signals are seen in", () => {
+    for (const claimFirst of [false, true]) {
+      const box = createInbox();
+      const claim = () => box.report("cc", WT, agent("ready"), NOW);
+      const mark = () =>
+        box.report("cc", WT, { type: "osc133", mark: "C", exit: null }, NOW);
+      if (claimFirst) {
+        claim();
+        mark();
+      } else {
+        mark();
+        claim();
+      }
+      // Ctrl-C out of the agent: its own launch closing, not a command that failed.
+      box.report("cc", WT, { type: "osc133", mark: "D", exit: 130 }, NOW + 1);
+      expect(
+        box.unseen("cc"),
+        `claimFirst=${claimFirst}: the agent's own exit is not a command failure`,
+      ).toBeNull();
+      // …and the pane is the shell's again, which is the half that used to wedge.
+      box.report("cc", WT, { type: "notify", message: "heard" }, NOW + 2);
+      expect(
+        box.unseen("cc")?.detail,
+        `claimFirst=${claimFirst}: the claim must not outlive the agent`,
+      ).toBe("heard");
+    }
+  });
+
+  /**
+   * A late fire-and-forget hook must not claim the *next* command's mark.
+   *
+   * `Stop` and `SessionEnd` do not block, so one can land after the shell has already
+   * started the command the user typed ahead. Latching on "any agent signal while any `C` is
+   * outstanding" stole that command's mark — swallowing its result, its spinner and every
+   * OSC 9 in the pane until it ended.
+   */
+  it("does not let a late agent hook claim the next command", () => {
+    const box = createInbox();
+    // An agent runs and exits; its launch mark is correctly swallowed.
+    box.report("cc", WT, { type: "osc133", mark: "C", exit: null }, NOW);
+    box.report("cc", WT, agent("ready"), NOW + 1);
+    box.report("cc", WT, agent("working"), NOW + 2);
+    box.report("cc", WT, { type: "osc133", mark: "D", exit: 130 }, NOW + 3);
+
+    // The typed-ahead command starts…
+    box.report("cc", WT, { type: "osc133", mark: "C", exit: null }, NOW + 4);
+    // …and the agent's `SessionEnd` only now arrives.
+    box.report("cc", WT, agent("done"), NOW + 5);
+    box.read("cc");
+
+    expect(box.isRunning("cc"), "the new command is still running").toBe(true);
+    box.report("cc", WT, { type: "notify", message: "3 failing" }, NOW + 6);
+    expect(box.unseen("cc")?.detail, "its notifications must be heard").toBe("3 failing");
+    box.read("cc");
+    box.report("cc", WT, { type: "osc133", mark: "D", exit: 1 }, NOW + 7);
+    expect(box.unseen("cc")?.kind, "and its own result must be filed").toBe("failed");
   });
 
   /** Restarting a pane drops the previous run's unread verdict. */
