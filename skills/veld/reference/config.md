@@ -731,11 +731,13 @@ feature off — that is the user's `terminal.openUrlsInApp`.
 
 ### `ide.quicklinks`
 
-Project links that are **not** veld's — staging, a dashboard, a wiki — listed
-beside the run's own URLs on a browser pane's start page. `label` and `url` are
-both required; `url` must be `http://` or `https://` (other schemes are refused,
-because a click hands the string to the OS). **Literal only** — `${...}` is not
-interpolated here, since the start page renders with no run to resolve against.
+Project links that are **not** veld's — staging, a dashboard, a wiki — offered
+behind a **Bookmarks** button on a browser pane's start page and on the new-pane
+chooser, where the list itself is the run's own URLs. Typing in the address bar
+still matches them inline. `label` and `url` are both required; `url` must be
+`http://` or `https://` (other schemes are refused, because a click hands the
+string to the OS). **Literal only** — `${...}` is not interpolated here, since
+the start page renders with no run to resolve against.
 
 ### `ide.permissions`
 

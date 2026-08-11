@@ -19,6 +19,7 @@ import {
   IconArrowLeft,
   IconArrowRight,
   IconArrowsHorizontal,
+  IconBookmark,
   IconBug,
   IconCheck,
   IconClockExclamation,
@@ -55,7 +56,7 @@ import {
   urlForProfile,
   urlLabel,
 } from "./model";
-import { PlaceList } from "./PlaceList";
+import { BookmarksModal, PlaceList } from "./PlaceList";
 import { pickSuggestion, placesFor, stepIndex, suggestionsFor } from "./places";
 import {
   DEFAULT_ZOOM,
@@ -116,6 +117,7 @@ import {
   requestPermissionSettings,
   setBrowserEmulation,
   setBrowserMedia,
+  setBrowserOverlay,
   setBrowserResizing,
   setBrowserZoom,
   setPermission,
@@ -347,6 +349,15 @@ export function BrowserPane(props: {
   // different ways of naming the same places.
   const places = placesFor(props.serviceUrls, props.quicklinks);
   /**
+   * What the bookmarks modal shows: **every** bookmark, never the filtered set.
+   *
+   * `suggestions.bookmarks` is the ones currently collapsed *out of the list*, which
+   * is the right thing to count on a button and the wrong thing to put in the modal —
+   * with text typed it is empty, and the modal is "every address this project
+   * declares" rather than a second view of the same filter.
+   */
+  const allBookmarks = places.filter((p) => p.kind === "bookmark");
+  /**
    * Whether the draft is something the user typed.
    *
    * Not `editing`: focusing the bar selects the address already in it, so filtering
@@ -415,8 +426,34 @@ export function BrowserPane(props: {
    * three things read this rather than `suggesting`: the ARIA combobox state (it must
    * not name a listbox that does not exist), Escape's first step (which otherwise
    * fired invisibly and swallowed the keypress), and the panel itself.
+   *
+   * The bookmarks disjunct matters for a project that declares bookmarks and has no
+   * run URLs: with nothing typed those places are all collapsed, `count` is 0, and
+   * gating on it alone left the address bar with no way to reach them at all.
    */
-  const panelOpen = suggesting && !chooser && suggestions.count > 0;
+  const panelOpen =
+    suggesting &&
+    !chooser &&
+    (suggestions.count > 0 || suggestions.bookmarks.length > 0);
+
+  /**
+   * The panel is an overlay over a *frozen* page, so the native view has to go.
+   *
+   * It used to sit in flow between the chrome and the slot — the only place a DOM
+   * element is visible in the desktop app, since a `WebContentsView` paints over DOM
+   * whatever the z-index says. The cost was that typing an address pushed the page
+   * down by up to 60% of the pane and reflowed it on every keystroke. `setBrowserOverlay`
+   * freezes and hides **this pane's view only** (not the global suspend, which would
+   * stop a page somebody is watching in the other dock), leaving a still of the page
+   * for the panel to dim.
+   */
+  useEffect(() => {
+    setBrowserOverlay(id, panelOpen);
+    return () => setBrowserOverlay(id, false);
+  }, [id, panelOpen]);
+
+  /** Every project bookmark, which is no longer inline on any surface. */
+  const [bookmarksOpen, setBookmarksOpen] = useState(false);
 
   // Anything but the default is removable, including the one this pane is on:
   // removing it moves every pane using it back to Default. Refusing instead meant
@@ -1007,6 +1044,22 @@ export function BrowserPane(props: {
             // likely been filtered out, and a stale index would open a row the user
             // can no longer see.
             setActiveRow(-1);
+          }}
+          // **Clicking an unfocused bar selects all of it**, which `onFocus`'s `select()`
+          // alone does not achieve: the pointer sequence is mousedown → focus → mouseup,
+          // and mouseup's default action collapses the selection to a caret where the
+          // click landed. So the whole address was selected for one frame and then
+          // wasn't, and replacing it took a second ⌘A — while arriving by Tab or by the
+          // keyboard shortcut worked perfectly, which is what made it look intermittent.
+          //
+          // Taking the mousedown and focusing by hand skips the caret placement
+          // entirely. Gated on the field not already having focus, so once you are in
+          // it a click still positions the caret and a drag still selects a range —
+          // the same trade every browser's address bar makes.
+          onMouseDown={(e) => {
+            if (document.activeElement === e.currentTarget) return;
+            e.preventDefault();
+            e.currentTarget.focus();
           }}
           onFocus={(e) => {
             setEditing(true);
@@ -1869,40 +1922,6 @@ export function BrowserPane(props: {
         </div>
       )}
 
-      {/* The suggestions, over a page that is already loaded.
-
-          **In flow, between the chrome and the slot — never floating over the page.**
-          A native `WebContentsView` paints over DOM whatever the z-index says, so a
-          dropdown positioned over the view is invisible in the desktop app and
-          perfectly visible in a browser tab: the worst of both. The permission prompt
-          above solved this the same way, and shrinking the slot is safe because its
-          ResizeObserver republishes the view's box.
-
-          Not rendered while the pane is blank: there the start page below *is* this
-          list, at pane size, and two copies of it would be the duplication that made
-          the blank pane and the new-pane chooser indistinguishable in the first
-          place. */}
-      {panelOpen && (
-        <div
-          className="suggest-panel"
-          // Swallow `mousedown` so the address bar never loses focus to a row. That
-          // is what lets `onBlur` close the panel — the two together are one
-          // mechanism: blur means "the user went somewhere else", and a click inside
-          // the panel is not going somewhere else. `preventDefault` on mousedown is
-          // the only event that stops focus moving; a blur handler that tried to
-          // guess would race the click.
-          onMouseDown={(e) => e.preventDefault()}
-        >
-          <PlaceList
-            suggestions={suggestions}
-            activeIndex={active}
-            listboxId={suggestId(id)}
-            emptyHint={props.urlsEmptyHint}
-            onOpen={(url, title) => go(url, { title })}
-          />
-        </div>
-      )}
-
       <div className="browser-slot" ref={slot}>
         {/* Drag any edge to resize the emulated screen — the answer to "which
             width does this break at", which no list of devices can give you. The
@@ -1980,12 +1999,26 @@ export function BrowserPane(props: {
           // on the strength of this comment.
           <div className="browser-screen start">
             <div className="start-head">
-              <p className="pane-screen-title">Where to?</p>
-              <p className="faint">
-                {props.searchUrl.trim() === ""
-                  ? "Type an address in the bar above, or pick one below."
-                  : "Type an address in the bar above, search the web from it, or pick one below."}
-              </p>
+              <div className="start-head-text">
+                <p className="pane-screen-title">Where to?</p>
+                <p className="faint">
+                  {props.searchUrl.trim() === ""
+                    ? "Type an address in the bar above, or pick one below."
+                    : "Type an address in the bar above, search the web from it, or pick one below."}
+                </p>
+              </div>
+              {/* The same control the chooser's heading carries, in the same corner —
+                  this screen's heading is where it belongs here. No blank-pane button
+                  beside it: this pane already *is* one. */}
+              <Button
+                size="compact-xs"
+                variant="default"
+                leftSection={<IconBookmark size={13} />}
+                title="Every address this project declares"
+                onClick={() => setBookmarksOpen(true)}
+              >
+                Bookmarks
+              </Button>
             </div>
             {/* Swallows `mousedown`, exactly as the suggestion panel does, and for the
                 same reason: a click on a row must not blur the address bar first. This
@@ -2009,9 +2042,6 @@ export function BrowserPane(props: {
                 activeIndex={active}
                 emptyHint={props.urlsEmptyHint}
                 onOpen={(url, title) => go(url, { title })}
-                // The rows decide which URLs "open all" means — with the list filtered
-                // by what is in the address bar, the run's whole set is the wrong answer.
-                onOpenAll={(urls) => urls.forEach((url) => window.open(url, "_blank"))}
               />
             </div>
           </div>
@@ -2094,7 +2124,76 @@ export function BrowserPane(props: {
             )}
           </div>
         )}
+
+        {/* The suggestions, over a page that is already loaded.
+
+            **A dimmed overlay inside the slot, and the native view is hidden while it
+            is up.** It used to sit in flow between the chrome and the slot, because a
+            `WebContentsView` paints over DOM whatever the z-index says — so a panel
+            positioned over a live view is invisible in the desktop app and perfectly
+            visible in a browser tab, the worst of both. The cost was that typing an
+            address shoved the page down by up to 60% of the pane and reflowed it on
+            every keystroke. `setBrowserOverlay` (the effect beside `panelOpen`) takes
+            the view down and leaves a still of the page in its place, so there is
+            something real to dim rather than an empty pane.
+
+            Last among the slot's children and above every `.browser-screen`: the
+            address bar is how you leave a page that failed to load, so the panel has
+            to be readable over the error screen too.
+
+            Not rendered while the pane is blank: there the start page below *is* this
+            list, at pane size, and two copies of it would be the duplication that made
+            the blank pane and the new-pane chooser indistinguishable in the first
+            place. */}
+        {panelOpen && (
+          <div
+            className="suggest-overlay"
+            // Swallow `mousedown` **inside the panel** so the address bar never loses
+            // focus to a row. That is what lets `onBlur` close the panel — the two
+            // together are one mechanism: blur means "the user went somewhere else",
+            // and a click on a row is not going somewhere else. `preventDefault` on
+            // mousedown is the only event that stops focus moving; a blur handler that
+            // tried to guess would race the click.
+            //
+            // **The scrim is exempt, and that is the point.** Preventing it there too
+            // made clicking the dimmed page cost two clicks: the first closed the panel
+            // through a handler of its own while focus stayed pinned in the field, so
+            // the bar was still focused with no list under it, and only a second click
+            // blurred it. Letting mousedown's default action run on the scrim blurs the
+            // field, and `onBlur` closes the panel — one click, one mechanism, and no
+            // second path that can disagree with it.
+            onMouseDown={(e) => {
+              if (e.target !== e.currentTarget) e.preventDefault();
+            }}
+          >
+            <div className="suggest-panel">
+              <PlaceList
+                suggestions={suggestions}
+                activeIndex={active}
+                listboxId={suggestId(id)}
+                emptyHint={props.urlsEmptyHint}
+                onOpen={(url, title) => go(url, { title })}
+                // The panel has no heading to hang a control off, so the bookmarks sit
+                // under the rows here rather than beside a title.
+                onBookmarks={() => {
+                  closeSuggestions();
+                  setBookmarksOpen(true);
+                }}
+              />
+            </div>
+          </div>
+        )}
       </div>
+
+      <BookmarksModal
+        bookmarks={allBookmarks}
+        opened={bookmarksOpen}
+        onClose={() => setBookmarksOpen(false)}
+        onOpen={(url, title) => {
+          setBookmarksOpen(false);
+          go(url, { title });
+        }}
+      />
 
       {!state.error && iframeBackend && (state.url || tab.url) && (
         <div className="browser-note" role="status">

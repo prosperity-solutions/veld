@@ -67,7 +67,41 @@ describe("suggestionsFor", () => {
   it("offers no action row while the field is empty", () => {
     const s = suggestionsFor(places, "", ENGINE);
     expect(s.action).toBeNull();
-    expect(s.count).toBe(4);
+    // Two, not four: with nothing typed the bookmarks are behind a button.
+    expect(s.count).toBe(2);
+  });
+
+  it("collapses the bookmarks while nothing is typed", () => {
+    const s = suggestionsFor(places, "", ENGINE);
+    expect(s.narrowed).toBe(false);
+    expect(s.places.map((p) => p.name)).toEqual(["api", "web"]);
+    expect(s.bookmarks.map((p) => p.name)).toEqual(["GitHub", "Staging"]);
+    // `count` indexes `places` alone, so the arrow keys can never land on a
+    // collapsed bookmark.
+    expect(s.count).toBe(s.places.length);
+    // The unfiltered size still counts every place: it answers "does this project
+    // have anywhere to go", which a collapsed bookmark does.
+    expect(s.total).toBe(4);
+  });
+
+  it("brings the bookmarks back inline the moment something is typed", () => {
+    // A filter that could not see a bookmark would be a filter lying about its
+    // scope — typing `github` has to find the bookmark that is only reachable
+    // through the button otherwise.
+    const s = suggestionsFor(places, "github", ENGINE);
+    expect(s.narrowed).toBe(true);
+    expect(s.places.map((p) => p.name)).toEqual(["GitHub"]);
+    expect(s.bookmarks).toEqual([]);
+  });
+
+  it("collapses bookmarks even when the run has no URLs of its own", () => {
+    // The surface with no run URLs is the one that must not read as empty: `places`
+    // is empty, `total` is not, and the button is the only way in.
+    const s = suggestionsFor(placesFor([], LINKS), "", ENGINE);
+    expect(s.places).toEqual([]);
+    expect(s.count).toBe(0);
+    expect(s.total).toBe(2);
+    expect(s.bookmarks).toHaveLength(2);
   });
 
   it("heads the list with the literal thing typed", () => {
@@ -140,7 +174,10 @@ describe("pickSuggestion", () => {
       url: "https://api.dev.veld.localhost/",
       title: "api",
     });
-    expect(pickSuggestion(s, 3)?.title).toBe("Staging");
+    expect(pickSuggestion(s, 1)?.title).toBe("web");
+    // Row 2 does not exist with the bookmarks collapsed. A picker that still reached
+    // into them would open a place the list is not showing.
+    expect(pickSuggestion(s, 2)).toBeNull();
   });
 
   it("returns null for an index that selects nothing", () => {

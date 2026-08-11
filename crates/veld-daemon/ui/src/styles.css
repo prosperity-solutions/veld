@@ -1640,6 +1640,27 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
   background: var(--panel);
 }
 
+/* A heading with its own controls at the far right. Only "Open a page" has any: the
+   list under it is the run's URLs, and the two things that are *not* a URL — every
+   bookmark, and a pane with nothing in it — sit here rather than as extra rows. In a
+   project with four to eight services per run those two rows had pushed the answer
+   into the middle of a scrolling list. */
+.chooser-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  /* Wraps rather than crushing the buttons in a narrow pane — a dock at 30% is
+     narrower than the heading plus two labels. */
+  flex-wrap: wrap;
+}
+
+.chooser-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
 /* One question. The heading names it; nothing else in the group repeats it. */
 .chooser-group {
   width: 100%;
@@ -2396,13 +2417,24 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
   padding: 28px 22px;
 }
 
+/* The question on the left, the bookmarks control pinned right — the same shape as
+   `.chooser-head`, because these two screens are siblings and a control that moves
+   corner between them is a control the user has to find twice. */
 .start-head {
   display: flex;
-  flex-direction: column;
-  gap: 5px;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
   width: 100%;
   max-width: 560px;
   margin: 0 auto;
+}
+
+.start-head-text {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
 }
 
 /* Matches `.chooser-heading`: the two screens are siblings and their titles should be
@@ -2481,7 +2513,7 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
   max-width: 560px;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
   /* The list scrolls, not the screen around it. Centring a flex child inside a
      scrolling container clips its top once it overflows; scrolling the child
      instead keeps it centred while it fits and readable when it doesn't. */
@@ -2493,6 +2525,32 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
      the scrollport — the highlight appeared to stop at the row's corners. Padding is
      inside the scrollable area, so 2px of it is 2px the ring can use. */
   padding: 2px;
+}
+
+/* The glyph column, one width for every row shape.
+   A run row's live dot is 7px, a bookmark's glyph is 13px and the action row's icon is
+   14px, so letting each set its own offset put three text columns in one list — most
+   visibly on the action row, whose "Go to" sat 7px right of the service name under it.
+   One box, and the 9px gap after it is then the same gap everywhere.
+
+   **Left-aligned, not centred.** Centring in a box the widest glyph fills left the
+   action row's icon with more space on its left than its right, and a centred 7px dot
+   no longer shared a left edge with the icons above it. Left-aligned, every glyph
+   starts on one line and the gap absorbs the size difference instead.
+
+   The three numbers are tied together and have to be read as one set, because two
+   things must come out even: where the text starts on every row shape, and how much air
+   sits either side of a glyph that fills the box. Slot 18px, gap 11px (both row
+   shapes), left inset 15px (`.place-action` directly, `.link-row` + `.link-open`
+   together). That puts 15px to the left of the 14px icon and 4 + 11 = 15px to its
+   right, and text 44px in from every row's border: 15 + 18 + 11 on the action row,
+   5 + 10 + 18 + 11 on a place row. Change one of them and the other two move. */
+.place-mark {
+  flex: none;
+  width: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
 }
 
 /* A bookmark is not a live URL, and the row says so with the glyph and the group it
@@ -2524,15 +2582,25 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
 
 /* The literal thing typed, as row zero. Same frame as a place — it is the same kind
    of choice — but it carries no copy/open-externally siblings, so the whole row is
-   the button. */
-.place-action {
+   the button.
+
+   **`.link-row.place-action`, and the compound selector is load-bearing.** The element
+   carries both classes, and `.link-row` is declared *below* this block — so at one
+   class each, source order handed `.link-row` every property both of them set. This row
+   was silently running on `gap: 4px` and a 5px left padding while the rule that appears
+   to style it declared otherwise, and three rounds of raising the numbers here changed
+   nothing on screen. Two classes outrank one wherever the rules sit, so this cannot
+   regress by someone moving a block. Anything below that `.link-row` also sets belongs
+   in this selector, not in a bare `.place-action` one. */
+.link-row.place-action {
   display: flex;
   align-items: center;
-  gap: 9px;
-  /* Matches a place row's inner button (`.link-open` plus the frame's padding), so
-     the two rows' text starts on the same vertical line even though one has icon
-     controls on the right and the other does not. */
-  padding: 10px 11px;
+  gap: 11px;
+  /* The left inset matches a place row's inner button (`.link-open` plus the frame's
+     padding), so the two rows' text starts on the same vertical line even though one
+     has icon controls on the right and the other does not. See `.place-mark` — this
+     number is one of a set of three. */
+  padding: 10px 15px;
   margin-bottom: 4px;
   text-align: left;
   color: var(--text);
@@ -2544,36 +2612,39 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
   color: var(--accent);
 }
 
-/* The escape hatch: a pane with nothing in it, for a page that is neither the run's
-   nor the project's. Quieter than a place row — it is what you take when none of the
-   rows above is what you wanted — and dashed, which is the shape "nothing here yet"
-   already has elsewhere in this app. */
-.place-blank {
+/* The bookmarks, as the list's last row in the suggestion panel. A button rather than
+   a place row because it does not go anywhere: it is where the *rest* of the project's
+   addresses are, and a row shaped like a destination that opens a dialog instead is the
+   kind of lie a launcher cannot afford. The two full-size surfaces put the same control
+   in their heading, which they have and the panel does not. */
+.place-bookmarks-row {
+  align-self: flex-start;
+  margin-top: 2px;
+}
+
+/* The suggestions over a page that is already loaded.
+
+   **Inside the slot, over a frozen still of the page.** A native `WebContentsView`
+   paints over DOM whatever the z-index says, so this used to sit *in flow* above the
+   slot and shove the page down by up to 60% of the pane on every keystroke.
+   `setBrowserOverlay` hides that one view and leaves a capture of it painted on the
+   frame, so there is a page to dim rather than an empty box. The z-index is above
+   `.browser-screen` (1) because the address bar is how you leave a page that failed
+   to load. */
+.suggest-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
   display: flex;
-  align-items: center;
-  gap: 9px;
-  padding: 9px 10px;
-  border: 1px dashed var(--border2);
-  border-radius: 9px;
-  background: none;
-  color: var(--faint);
-  text-align: left;
-  cursor: pointer;
+  flex-direction: column;
+  align-items: stretch;
+  min-height: 0;
+  /* Dark rather than a blur: `backdrop-filter` over a native view's *capture* is
+     honest, but over the live iframe in the browser build it costs a compositor pass
+     per keystroke on a full-pane element. Both backends get the same flat scrim. */
+  background: rgb(0 0 0 / 55%);
 }
 
-.place-blank:hover {
-  border-color: var(--accent);
-  color: var(--text);
-}
-
-.place-blank svg {
-  flex: none;
-}
-
-/* The suggestions over a page that is already loaded. In flow between the chrome and
-   the slot — see BrowserPane; a native view paints over DOM, so this must never be
-   positioned over the page. `flex: none` keeps it from stretching, and the cap keeps
-   a long list from pushing the page out of a short pane. */
 .suggest-panel {
   flex: none;
   display: flex;
@@ -2581,7 +2652,11 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
   padding: 8px 10px;
   border-bottom: 1px solid var(--border);
   background: var(--panel);
-  max-height: 60%;
+  /* The list is the top of the pane, not a centred dialog: it belongs to the field
+     directly above it, and a panel that floated mid-pane read as unrelated to the
+     bar. The cap leaves the dimmed page visible underneath, which is what says the
+     page is still there. */
+  max-height: 70%;
   overflow-y: auto;
 }
 
@@ -2599,9 +2674,12 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
   max-width: 320px;
 }
 
-.links-all {
-  align-self: center;
-  margin-top: 4px;
+/* The bookmarks modal's rows. Same list, no cap on its height — the dialog scrolls
+   itself, and a project may declare a dozen. */
+.bookmarks-modal-list {
+  max-width: none;
+  max-height: none;
+  overflow: visible;
 }
 
 /* One URL. The card is the frame; the button inside is the click target and takes
@@ -2611,7 +2689,9 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
   display: flex;
   align-items: center;
   gap: 4px;
-  padding: 3px 6px 3px 3px;
+  /* The 5px left is half of the glyph's inset; `.link-open` carries the other 10.
+     See `.place-mark` — one of a set of three numbers. */
+  padding: 3px 6px 3px 5px;
   border-radius: 9px;
   border: 1px solid var(--border);
   background: var(--panel2);
@@ -2627,8 +2707,8 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
   min-width: 0;
   display: flex;
   align-items: center;
-  gap: 9px;
-  padding: 7px 8px;
+  gap: 11px;
+  padding: 7px 10px;
   border: none;
   border-radius: 7px;
   background: none;
@@ -2671,21 +2751,33 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
   padding: 6px 8px 2px;
 }
 
-/* A place group's heading carries the mark its rows carry — a live dot for the run's
-   URLs, a bookmark glyph for the project's — so the two kinds are legible as kinds
-   before you read a single row. Sentence case, not the global caption's uppercase:
-   this is a heading inside a pane, and three levels of shouted small caps on one
-   screen is what made the first cut hard to scan. */
+/* A place group's heading. Sentence case, not the global caption's uppercase: this is a
+   heading inside a pane, and three levels of shouted small caps on one screen is what
+   made the first cut hard to scan. No mark of its own — every row beneath it carries
+   the one that says which kind this is (see `PLACE_KINDS`).
+   The bottom padding is the whole gap between a heading and its first row: the list's
+   own `gap` separates *groups*, and the heading lives inside the first row's wrapper.
+   At 2px it sat on top of the row it introduces. */
 .place-list .section-label {
   display: flex;
   align-items: center;
-  gap: 5px;
-  padding: 4px 2px 2px;
+  padding: 4px 2px 8px;
   font-size: 11.5px;
   text-transform: none;
   letter-spacing: 0;
   color: var(--muted);
   text-align: left;
+}
+
+/* Air above every group but the first. Two kinds separated by the list's own 8px gap
+   read as one run of rows with a caption dropped into it — the heading sat closer to
+   the row above it than to the rows it introduces. The rule is positional rather than
+   a class on the heading because a filtered list can drop a whole kind, so which group
+   comes first is not knowable where the heading is emitted.
+   `> *`: each group is a wrapper div holding the heading and its row (see
+   `PlaceList`), so the selector has to reach one level in. */
+.place-list > *:not(:first-child) > .section-label {
+  margin-top: 12px;
 }
 /* ---- loading spinner ------------------------------------------------------- */
 

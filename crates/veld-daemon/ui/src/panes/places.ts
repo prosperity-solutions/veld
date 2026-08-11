@@ -91,21 +91,52 @@ export interface Suggestions {
    * narrower than the list.
    */
   total: number;
+  /**
+   * The bookmarks that are *not* in `places`, for the surface that offers them
+   * behind a button.
+   *
+   * Always empty while {@link Suggestions.narrowed} — see `suggestionsFor`.
+   */
+  bookmarks: Place[];
+  /** Whether a query is narrowing the list, i.e. the user has typed something. */
+  narrowed: boolean;
 }
 
+/**
+ * What to offer, and — with nothing typed — what to keep behind a button.
+ *
+ * **Bookmarks collapse out of the list while the query is empty.** A project with
+ * four to eight services per run puts the thing you came for (a run URL veld is
+ * serving *now*) below however many addresses somebody wrote in a config, on every
+ * one of the three surfaces this feeds. So the default list is the run, and the
+ * bookmarks go behind one button that opens all of them.
+ *
+ * The moment something *is* typed, they come back inline. A query is a search over
+ * every place the project knows, and a bookmark you can find by typing `github` but
+ * not by typing at all would be a filter that lies about its scope. One rule, three
+ * surfaces: not typing shows the run, typing searches everything.
+ *
+ * `count` therefore indexes `places` alone — the collapsed bookmarks are not rows,
+ * so the arrow keys cannot land on them.
+ */
 export function suggestionsFor(
   places: Place[],
   query: string,
   searchUrl: string,
 ): Suggestions {
+  const narrowed = query.trim() !== "";
   const matched = filterPlaces(places, query);
-  const resolved = query.trim() === "" ? null : resolveAddress(query, searchUrl);
+  const shown = narrowed ? matched : matched.filter((p) => p.kind === "run");
+  const bookmarks = narrowed ? [] : matched.filter((p) => p.kind === "bookmark");
+  const resolved = narrowed ? resolveAddress(query, searchUrl) : null;
   const action = resolved && resolved.kind !== "invalid" ? resolved : null;
   return {
     action,
-    places: matched,
-    count: (action ? 1 : 0) + matched.length,
+    places: shown,
+    count: (action ? 1 : 0) + shown.length,
     total: places.length,
+    bookmarks,
+    narrowed,
   };
 }
 

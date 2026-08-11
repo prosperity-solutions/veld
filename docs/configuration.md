@@ -2052,9 +2052,15 @@ Nothing here is required, and nothing here affects a run. A project without an
 
 The links that are *not* veld's. A browser pane with no page yet is the run's
 start page and lists the URLs veld made; these are the ones it didn't — staging,
-a dashboard, an internal wiki — shown beside them. Shipping a hardcoded set of
-those would be an opinion no tool should have, so they come from the project and
-are versioned and shared with the repo.
+a dashboard, an internal wiki. Shipping a hardcoded set of those would be an
+opinion no tool should have, so they come from the project and are versioned and
+shared with the repo.
+
+They live behind a **Bookmarks** button rather than inline in that list — a
+project with four to eight services per run had the addresses veld is serving
+*now* pushed below however many bookmarks a config declared. Typing in the
+address bar still searches them: a filter that could not see a bookmark would be
+a filter lying about its scope.
 
 ```jsonc
 "ide": {
