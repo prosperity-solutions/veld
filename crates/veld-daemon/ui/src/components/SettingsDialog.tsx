@@ -37,6 +37,7 @@
 
 import { type ReactNode, useEffect, useMemo, useState } from "react";
 import {
+  Button,
   Checkbox,
   Group,
   NativeSelect,
@@ -83,9 +84,12 @@ import {
   markerStyle,
   quickSwitchPrefs,
   terminalPrefs,
+  worktreeStorageDir,
+  worktreeStorageMode,
   type GitCreateFrom,
   type LogTimeZone,
   type MarkerStyle,
+  type WorktreeStorageMode,
 } from "../shared/settings";
 
 /** A labelled row with its explanation under it, used for every control. */
@@ -306,6 +310,18 @@ export function SettingsDialog(props: {
   // shared `str()` helper.
   const searchValue = searchUrl(settings ?? {});
   const [search, setSearch] = useState(searchValue);
+  const storageMode = worktreeStorageMode(settings ?? {});
+  // Committed on blur like the other text fields (`search`, `exempt` above).
+  const storageDirValue = worktreeStorageDir(settings ?? {});
+  const [storageDir, setStorageDir] = useState(storageDirValue);
+  const [pickingStorageDir, setPickingStorageDir] = useState(false);
+  const [storageDirPickError, setStorageDirPickError] = useState<string | null>(
+    null,
+  );
+  const [openingStorageDir, setOpeningStorageDir] = useState(false);
+  const [openStorageDirError, setOpenStorageDirError] = useState<
+    string | null
+  >(null);
   // Shown under the field as it is typed, and the same predicate the blur handler
   // refuses on — so the reason the value did not save is on screen rather than inferred
   // from nothing having happened. Empty is not broken; it is the off switch.
@@ -339,6 +355,7 @@ export function SettingsDialog(props: {
     setShellPath(shellValue);
     setExempt(exemptValue.join("\n"));
     setSearch(searchValue);
+    setStorageDir(storageDirValue);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [settings]);
 
@@ -604,6 +621,117 @@ export function SettingsDialog(props: {
                   }
                 />
               </Row>
+              <Row
+                label="Worktree storage location"
+                help="Next to repository (default): a new checkout lands in a `_worktrees` folder beside its repo — today's behaviour. Custom location: every new checkout, for every repository, lands under one folder you choose. Either way each repo gets its own subfolder there, so two repos can never collide on the same checkout path. Only affects worktrees created from now on; nothing already on disk moves."
+              >
+                <NativeSelect
+                  size="xs"
+                  w={220}
+                  value={storageMode}
+                  disabled={locked}
+                  data={[
+                    { value: "sibling", label: "Next to repository (default)" },
+                    { value: "custom", label: "Custom location" },
+                  ]}
+                  onChange={(e) =>
+                    set({
+                      "worktree.storageMode": e.currentTarget
+                        .value as WorktreeStorageMode,
+                    })
+                  }
+                />
+              </Row>
+              {storageMode === "custom" && (
+                <Row label="Custom worktree folder">
+                  <Group gap="xs" wrap="nowrap">
+                    <TextInput
+                      size="xs"
+                      w={220}
+                      value={storageDir}
+                      disabled={locked}
+                      placeholder="/Users/you/veld-worktrees"
+                      styles={{
+                        input: {
+                          fontFamily: "var(--mantine-font-family-monospace)",
+                        },
+                      }}
+                      onChange={(e) => setStorageDir(e.currentTarget.value)}
+                      onBlur={() => {
+                        const v = storageDir.trim();
+                        if (v !== storageDirValue) {
+                          set({ "worktree.storageDir": v });
+                        }
+                      }}
+                    />
+                    <Button
+                      size="xs"
+                      variant="default"
+                      loading={pickingStorageDir}
+                      disabled={locked}
+                      onClick={async () => {
+                        setPickingStorageDir(true);
+                        setStorageDirPickError(null);
+                        try {
+                          const picked = await api.pickDirectory();
+                          if (picked) {
+                            setStorageDir(picked);
+                            set({ "worktree.storageDir": picked });
+                          }
+                        } catch (e) {
+                          setStorageDirPickError(
+                            e instanceof Error ? e.message : String(e),
+                          );
+                        } finally {
+                          setPickingStorageDir(false);
+                        }
+                      }}
+                    >
+                      Browse…
+                    </Button>
+                  </Group>
+                </Row>
+              )}
+              {storageDirPickError && (
+                <Text size="xs" c="red">
+                  {storageDirPickError}
+                </Text>
+              )}
+              <Row
+                label="Open worktree storage folder"
+                help={
+                  storageMode === "custom"
+                    ? "Opens the folder above in Finder (or your file manager)."
+                    : "Only available with Custom location: the default has no single folder — each repo's worktrees live beside it, so open one from its own context menu instead."
+                }
+              >
+                <Button
+                  size="xs"
+                  variant="default"
+                  loading={openingStorageDir}
+                  disabled={locked || storageMode !== "custom" || !storageDirValue}
+                  onClick={async () => {
+                    setOpeningStorageDir(true);
+                    setOpenStorageDirError(null);
+                    try {
+                      await api.openWorktreeStorageDir();
+                    } catch (e) {
+                      setOpenStorageDirError(
+                        e instanceof Error ? e.message : String(e),
+                      );
+                    } finally {
+                      setOpeningStorageDir(false);
+                    }
+                  }}
+                >
+                  Open Folder
+                </Button>
+              </Row>
+              {openStorageDirError && (
+                <Text size="xs" c="red">
+                  {openStorageDirError}
+                </Text>
+              )}
             </Stack>
           </Tabs.Panel>
 

@@ -253,6 +253,12 @@ const MAX_SEARCH_URL_LEN: usize = 400;
 const MAX_UNKNOWN_KEY_LEN: usize = 128;
 const MAX_UNKNOWN_VALUE_LEN: usize = 4096;
 
+/// Longest accepted `worktree.storageDir`. Generous — it is a filesystem path,
+/// not a hostname — but still bounded, for the same reason every stored string
+/// in this file is: the whole document round-trips through every client on
+/// every window focus.
+const MAX_WORKTREE_STORAGE_DIR_LEN: usize = 1024;
+
 /// Which zone a log timestamp is *shown* in.
 ///
 /// Storage is not affected and cannot be: every `log_lines.ts` is UTC because
@@ -341,6 +347,8 @@ pub enum SettingKey {
     BrowserSearchUrl,
     UiHideDisabledActions,
     GitCreateFrom,
+    WorktreeStorageMode,
+    WorktreeStorageDir,
     Unknown(String),
 }
 
@@ -380,6 +388,8 @@ impl SettingKey {
         Self::BrowserSearchUrl,
         Self::UiHideDisabledActions,
         Self::GitCreateFrom,
+        Self::WorktreeStorageMode,
+        Self::WorktreeStorageDir,
     ];
 
     pub fn as_str(&self) -> &str {
@@ -408,6 +418,8 @@ impl SettingKey {
             Self::BrowserSearchUrl => "browser.searchUrl",
             Self::UiHideDisabledActions => "ui.hideDisabledActions",
             Self::GitCreateFrom => "git.createFrom",
+            Self::WorktreeStorageMode => "worktree.storageMode",
+            Self::WorktreeStorageDir => "worktree.storageDir",
             Self::Unknown(k) => k,
         }
     }
@@ -438,6 +450,8 @@ impl SettingKey {
             "browser.searchUrl" => Self::BrowserSearchUrl,
             "ui.hideDisabledActions" => Self::UiHideDisabledActions,
             "git.createFrom" => Self::GitCreateFrom,
+            "worktree.storageMode" => Self::WorktreeStorageMode,
+            "worktree.storageDir" => Self::WorktreeStorageDir,
             other => Self::Unknown(other.to_string()),
         }
     }
@@ -578,6 +592,32 @@ impl SettingKey {
             // directly in `create_worktree`, so a stored value neither surface
             // honours would silently change where branches come from.
             Self::GitCreateFrom => one_of(value, &["origin", "local"]).ok_or_else(bad)?,
+            // Where a *new* worktree's checkout lands. Rejected rather than
+            // coerced, same reason as `GitCreateFrom` just above: the daemon acts
+            // on this directly in `create_worktree`.
+            Self::WorktreeStorageMode => one_of(value, &["sibling", "custom"]).ok_or_else(bad)?,
+            // A filesystem path, not a hostname or a CSS value — the two other
+            // free-text keys in this file bound their characters because of where
+            // the string is interpolated (a search URL, a stylesheet rule). This
+            // one has no such trap: it becomes a `PathBuf` and is joined with an
+            // alias, never parsed or rendered as markup. Only length and control
+            // characters are worth refusing; everything else a filesystem accepts
+            // is fine here too.
+            //
+            // Empty is a real value — "custom mode is chosen but no folder was
+            // picked yet" — and the daemon's `worktree_storage_dir()` reads that
+            // as "fall back to the sibling default", so it must not be forced to
+            // look absolute like a real choice would.
+            Self::WorktreeStorageDir => {
+                let s = value.as_str().ok_or_else(bad)?.trim();
+                if s.len() > MAX_WORKTREE_STORAGE_DIR_LEN || s.chars().any(char::is_control) {
+                    return Err(bad());
+                }
+                if !s.is_empty() && !std::path::Path::new(s).is_absolute() {
+                    return Err(bad());
+                }
+                Value::from(s)
+            }
             // Rejected rather than coerced, like every other enum here: the CLI reads
             // this key too, and a stored `"UTC"` that the reader then treats as the
             // default would mean the daemon reporting a saved preference neither
@@ -938,6 +978,13 @@ pub fn defaults() -> BTreeMap<String, Value> {
         // daemon acts on this in `create_worktree`, so it is validated above like
         // `TerminalDetachGrace`, not trusted from the wire.
         (SettingKey::GitCreateFrom, Value::from("origin")),
+        // Sibling of the repo — today's only behaviour, and the one that needs no
+        // setup: a fresh install has never chosen a folder, so the default must
+        // be the thing that already works.
+        (SettingKey::WorktreeStorageMode, Value::from("sibling")),
+        // Empty: meaningless in `sibling` mode, and in `custom` mode it is "chosen
+        // custom but no folder yet" — see `WorktreeStorageDir`'s validator.
+        (SettingKey::WorktreeStorageDir, Value::from("")),
     ]
     .into_iter()
     .map(|(k, v)| (k.as_str().to_string(), v))
@@ -1118,6 +1165,39 @@ impl Db {
         } else {
             GitCreateSource::Origin
         }
+    }
+
+    /// The configured base directory for a *new* worktree's checkout
+    /// (`worktree.storageMode` / `worktree.storageDir`), or `None` for the
+    /// sibling-of-repo `_worktrees` default.
+    ///
+    /// Read by the daemon's `create_worktree`, so — like [`Self::git_create_from`]
+    /// — it goes through the same "anything not a real value is the default" path
+    /// rather than trusting the stored bytes. Both conditions have to hold: the
+    /// mode has to say `"custom"` **and** the stored directory has to be a
+    /// non-empty absolute path. A user who switches to "Custom location" before
+    /// picking a folder gets today's behaviour, not new worktrees silently
+    /// landing at the repo root's parent.
+    ///
+    /// Existing checkouts are never moved — this only decides where the *next*
+    /// one is created.
+    pub fn worktree_storage_dir(&self) -> Option<std::path::PathBuf> {
+        let mode = self
+            .setting(&SettingKey::WorktreeStorageMode)
+            .ok()
+            .flatten()
+            .and_then(|v| v.as_str().map(str::to_owned));
+        if mode.as_deref() != Some("custom") {
+            return None;
+        }
+        let dir = self
+            .setting(&SettingKey::WorktreeStorageDir)
+            .ok()
+            .flatten()
+            .and_then(|v| v.as_str().map(str::to_owned))
+            .unwrap_or_default();
+        let path = std::path::PathBuf::from(dir.trim());
+        path.is_absolute().then_some(path)
     }
 
     /// The global half of the exempt list: origins that must open in the system
@@ -1840,5 +1920,48 @@ mod tests {
                  DEFAULT_RUN_HISTORY_DAYS / MAX_RUN_HISTORY_DAYS"
             );
         }
+    }
+
+    #[test]
+    fn worktree_storage_dir_is_none_until_custom_mode_has_an_absolute_folder() {
+        let (_dir, db) = test_db();
+        // Sibling mode (the default): no configured directory at all.
+        assert_eq!(db.worktree_storage_dir(), None);
+
+        // Custom mode chosen, but no folder picked yet — still None, not the
+        // empty string turned into a path. This is the case that must not
+        // silently redirect new worktrees to nowhere useful.
+        db.patch_settings(&patch(&[("worktree.storageMode", Value::from("custom"))]))
+            .unwrap();
+        assert_eq!(db.worktree_storage_dir(), None);
+
+        // A relative path is rejected by the validator before it ever reaches
+        // storage, so the effective document keeps the previous (empty) value.
+        let e = db
+            .patch_settings(&patch(&[(
+                "worktree.storageDir",
+                Value::from("relative/dir"),
+            )]))
+            .unwrap_err();
+        assert!(matches!(e, DbError::InvalidSetting { .. }), "{e}");
+        assert_eq!(db.worktree_storage_dir(), None);
+
+        // Both conditions hold: mode is custom and the folder is a real absolute path.
+        db.patch_settings(&patch(&[(
+            "worktree.storageDir",
+            Value::from("/tmp/veld-worktrees"),
+        )]))
+        .unwrap();
+        assert_eq!(
+            db.worktree_storage_dir(),
+            Some(std::path::PathBuf::from("/tmp/veld-worktrees"))
+        );
+
+        // Switching back to sibling mode stops using the folder, even though it
+        // is still stored — flipping the mode is how a user "clears" this
+        // without losing the folder if they flip back.
+        db.patch_settings(&patch(&[("worktree.storageMode", Value::from("sibling"))]))
+            .unwrap();
+        assert_eq!(db.worktree_storage_dir(), None);
     }
 }

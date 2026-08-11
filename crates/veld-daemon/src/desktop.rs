@@ -71,6 +71,10 @@ pub fn routes() -> Router {
         .route("/api/lane-order", post(reorder_lanes))
         .route("/api/lanes/{name}", patch(rename_lane).delete(delete_lane))
         .route("/api/pick-directory", post(pick_directory))
+        .route(
+            "/api/open-worktree-storage-dir",
+            post(open_worktree_storage_dir),
+        )
         .layer(axum::middleware::from_fn(csrf_layer))
 }
 
@@ -296,6 +300,102 @@ async fn pick_directory() -> Result<axum::response::Response, ApiError> {
             "no directory picker available on this system",
         )),
     }
+}
+
+/// FNV-1a. Deterministic across every future `rustup update stable`, unlike
+/// `std::hash::Hasher`'s default algorithm, whose own docs disclaim that
+/// stability "over releases" — and this hash has to be stable forever, since
+/// it decides which folder a repository's worktrees keep landing in.
+fn stable_hash(bytes: &[u8]) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x100000001b3;
+    bytes.iter().fold(FNV_OFFSET, |hash, &b| {
+        (hash ^ b as u64).wrapping_mul(FNV_PRIME)
+    })
+}
+
+/// A short, on-disk grouping folder for one repository's worktrees:
+/// `<slugified basename>-<8 hex chars of a hash of the canonicalized root>`.
+///
+/// Plumbing, not a display name — the alias/`display_name` already own that
+/// job in the rail — so a hash suffix is fine here. It exists because the
+/// basename alone cannot promise uniqueness: `repos.name` (also a basename,
+/// set at import) carries no `UNIQUE` constraint, only `repos.root` does, so
+/// two different repositories both called `backend` — cloned into two
+/// different parent directories — would otherwise be handed the *same*
+/// bucket. That is precisely what a shared custom storage directory does:
+/// funnel every imported repository into one folder, where a bare basename
+/// collision becomes a real, silent alias collision between two unrelated
+/// projects. The hash is over the *canonicalized* path so a symlink or a
+/// trailing component cannot change which bucket a repository lands in.
+fn project_slug(repo_root: &FsPath) -> String {
+    let canon = repo_root
+        .canonicalize()
+        .unwrap_or_else(|_| repo_root.to_path_buf());
+    let base = canon
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "repo".to_string());
+    // Same cap `default_alias`/`unique_alias` apply to a branch-derived alias
+    // — a repository cloned into a giant-named directory must not produce an
+    // unwieldy path component.
+    let mut slug = veld_core::url::slugify(&base);
+    slug.truncate(48);
+    let hash = stable_hash(canon.to_string_lossy().as_bytes()) as u32;
+    format!("{slug}-{hash:08x}")
+}
+
+/// Open a directory in the OS file manager — mac's `open`, Linux's `xdg-open`
+/// (the same two-way split [`open_terminal`](crate::management) uses; Windows
+/// is not one of this daemon's supported targets today, so `explorer.exe` has
+/// no branch here).
+///
+/// Unlike a terminal spawn, a file manager window is not something that has to
+/// be reaped: `open`/`xdg-open` both hand the path to an already-running
+/// desktop-environment process and exit immediately, so `.status()` rather
+/// than `.spawn()` is enough.
+async fn open_in_file_manager(dir: &FsPath) -> Result<(), String> {
+    let path_env = cached_user_path().await;
+    let cmd = if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    let status = tokio::process::Command::new(cmd)
+        .arg(dir)
+        .env("PATH", path_env)
+        .status()
+        .await
+        .map_err(|e| format!("failed to run {cmd}: {e}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("{cmd} exited with {status}"))
+    }
+}
+
+/// Open the *effective* worktree storage directory in the OS file manager —
+/// the settings dialog's Open Folder button.
+///
+/// Takes no path from the caller: it reads [`Db::worktree_storage_dir`]
+/// itself, the same value `create_worktree` acts on, rather than trusting a
+/// client-supplied path. That value is `None` in the default "next to each
+/// repository" mode — there is no single directory to open in that mode, a
+/// worktree's own folder is what "reveal in file manager" on its context menu
+/// is for — so this 409s there instead of guessing which repo's sibling
+/// folder was meant.
+async fn open_worktree_storage_dir() -> Result<StatusCode, ApiError> {
+    let db = open_desktop_db()?;
+    let dir = db.worktree_storage_dir().ok_or_else(|| {
+        err(
+            StatusCode::CONFLICT,
+            "no custom worktree storage directory is configured",
+        )
+    })?;
+    open_in_file_manager(&dir)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 // ---------------------------------------------------------------------------
@@ -1600,7 +1700,11 @@ struct CreateWorktreeBody {
     /// between the two leaves it there for good.
     #[serde(default)]
     lane: Option<String>,
-    /// Custom checkout path; defaults to `<repo parent>/_worktrees/<alias>`.
+    /// Custom checkout path, overriding both this request and the
+    /// `worktree.storageMode`/`worktree.storageDir` settings. Defaults to
+    /// `<storage root>/<project slug>/<alias>`, where the storage root is the
+    /// configured storage directory, or `<repo parent>/_worktrees` when none
+    /// is configured — see `project_slug`.
     #[serde(default)]
     path: Option<String>,
     /// Marker glyph chosen in the create dialog; the daemon assigns one when absent.
@@ -1699,11 +1803,27 @@ async fn create_worktree(
             }
             p
         }
+        // No per-call override: use the configured storage directory
+        // (`worktree.storageMode` = `"custom"`), falling back to the sibling
+        // `_worktrees` folder when none is configured — today's only behaviour.
+        // Existing checkouts already on disk are unaffected either way; this
+        // only decides where the *next* one is created. Either root gets a
+        // per-project subfolder — see `project_slug` — so two repositories
+        // that happen to share both a storage root (always true in `sibling`
+        // mode when they share a parent directory; guaranteed in `custom`
+        // mode, which funnels every repo into one folder) and an alias can
+        // never collide on the same checkout path.
         None => {
-            let parent = repo_root
-                .parent()
-                .ok_or_else(|| err(StatusCode::BAD_REQUEST, "repo root has no parent"))?;
-            parent.join("_worktrees").join(&alias_hint)
+            let storage_root = match db.worktree_storage_dir() {
+                Some(base) => base,
+                None => repo_root
+                    .parent()
+                    .ok_or_else(|| err(StatusCode::BAD_REQUEST, "repo root has no parent"))?
+                    .join("_worktrees"),
+            };
+            storage_root
+                .join(project_slug(&repo_root))
+                .join(&alias_hint)
         }
     };
     if checkout_path.exists() {
@@ -2678,6 +2798,32 @@ mod tests {
         }
     }
 
+    #[test]
+    fn project_slug_disambiguates_same_named_repos_in_different_places() {
+        // The exact scenario a bare basename cannot handle: two different
+        // directories that happen to share a name — the failure mode a
+        // shared custom storage directory turns from theoretical into common.
+        let a = tempfile::TempDir::new().unwrap();
+        let b = tempfile::TempDir::new().unwrap();
+        let repo_a = a.path().join("backend");
+        let repo_b = b.path().join("backend");
+        std::fs::create_dir_all(&repo_a).unwrap();
+        std::fs::create_dir_all(&repo_b).unwrap();
+
+        let slug_a = project_slug(&repo_a);
+        let slug_b = project_slug(&repo_b);
+        assert_ne!(slug_a, slug_b, "different repos must not share a bucket");
+        // Both still start with the human-readable basename — only the
+        // machine-plumbing suffix differs.
+        assert!(slug_a.starts_with("backend-"));
+        assert!(slug_b.starts_with("backend-"));
+
+        // Deterministic: the same repo must land in the same bucket every
+        // time, across process restarts and daemon upgrades — new worktrees
+        // for a project already in use must keep joining it.
+        assert_eq!(slug_a, project_slug(&repo_a));
+    }
+
     /// The generated-status path, run against **real git**, not a hand-built
     /// fixture: ``git_status`` is what the endpoint serves, and this pins that a
     /// plain unstaged edit is reported just as reliably as a staged one (a
@@ -2967,6 +3113,7 @@ mod tests {
                 ),
                 ("DELETE", "/api/lanes/x?repo_root=/tmp", ""),
                 ("POST", "/api/pick-directory", ""),
+                ("POST", "/api/open-worktree-storage-dir", ""),
             ] {
                 let res = super::super::routes()
                     .oneshot(req(method, uri, false, body))

@@ -1220,6 +1220,15 @@ export const api = {
       body: JSON.stringify({ path }),
     }),
   /**
+   * Open the effective worktree-storage directory in the OS file manager.
+   * Takes no path — the daemon reads its own `worktree.storageMode`/
+   * `worktree.storageDir` settings, the same value `create_worktree` acts on.
+   * Throws (409) when the mode is `"sibling"`: there is no single directory to
+   * open in that mode, only each repo's own sibling folder.
+   */
+  openWorktreeStorageDir: () =>
+    request<void>("/api/open-worktree-storage-dir", { method: "POST" }),
+  /**
    * Mint a single-use ticket for an in-app terminal in a worktree.
    *
    * The WebSocket that follows cannot carry the `X-Veld-Request` CSRF header

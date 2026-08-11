@@ -24,6 +24,9 @@ export type MarkerStyle = "color" | "emoji";
 /** Where a new worktree's branch is cut from. Mirrors the Rust `one_of` for
  *  `git.createFrom`; a value the daemon acts on. */
 export type GitCreateFrom = "origin" | "local";
+/** Where a *new* worktree's checkout lands. Mirrors the Rust `one_of` for
+ *  `worktree.storageMode`; a value the daemon acts on in `create_worktree`. */
+export type WorktreeStorageMode = "sibling" | "custom";
 /**
  * Which zone a log timestamp is *shown* in — never which zone it is stored in.
  *
@@ -107,6 +110,12 @@ const FALLBACK = {
   // exception: the create dialog renders "based on the latest origin" unless an
   // older daemon says otherwise, which is the behaviour this setting ships with.
   gitCreateFrom: "origin" as GitCreateFrom,
+  // Sibling of the repo, matching the Rust default: today's only behaviour, and
+  // what a fresh install already does before anyone has chosen a folder.
+  worktreeStorageMode: "sibling" as WorktreeStorageMode,
+  // Empty, matching the Rust default — meaningless in `sibling` mode, and in
+  // `custom` mode read as "no folder chosen yet" by `worktreeStorageDir` below.
+  worktreeStorageDir: "",
   // Mirrors `DEFAULT_SEARCH_URL` in `veld-core/src/db/settings.rs`. The
   // `quickSwitch*` exception again, and here the previous-release rule would be
   // actively misleading: the address bar's own placeholder tells the user they can
@@ -425,6 +434,37 @@ export function hideDisabledActions(doc: SettingsDoc): boolean {
 export function gitCreateFrom(doc: SettingsDoc): GitCreateFrom {
   const v = doc["git.createFrom"];
   return v === "local" ? "local" : "origin";
+}
+
+/**
+ * Where a *new* worktree's checkout lands: `sibling` (the `_worktrees` folder
+ * next to the repo — today's only behaviour) or `custom` (a configured
+ * directory, see [`worktreeStorageDir`]).
+ *
+ * The daemon enforces this in `create_worktree`; existing checkouts already on
+ * disk are never moved by changing it.
+ */
+export function worktreeStorageMode(doc: SettingsDoc): WorktreeStorageMode {
+  return oneOf(
+    doc,
+    "worktree.storageMode",
+    ["sibling", "custom"] as const,
+    FALLBACK.worktreeStorageMode,
+  );
+}
+
+/**
+ * The configured base directory for new worktree checkouts, or `""` if none
+ * has been chosen yet.
+ *
+ * Read with its own function rather than through `str()`, for the same reason
+ * as [`searchUrl`]: **`""` is a value here**, not an absent one — `str()`
+ * would substitute the fallback (also `""`) either way, but a caller should
+ * not have to know that to get the right answer.
+ */
+export function worktreeStorageDir(doc: SettingsDoc): string {
+  const v = doc["worktree.storageDir"];
+  return typeof v === "string" ? v.trim() : FALLBACK.worktreeStorageDir;
 }
 
 /**
