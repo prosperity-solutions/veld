@@ -679,9 +679,19 @@ pub fn parse_search_template(raw: &str) -> Result<String, String> {
 
 /// The host span of a search template: `host[:port]`, or a bracketed IPv6 literal.
 ///
-/// Deliberately stricter than a URL parser rather than a reimplementation of one. Every
-/// spelling this rejects is one `new URL()` also rejects, so the two cannot disagree in
-/// the direction that matters — a template the daemon stores is one the client can use.
+/// **Not a reimplementation of a URL parser, and not equivalent to one.** An earlier
+/// version of this comment claimed every spelling rejected here is one `new URL()`
+/// rejects too. That was false in three places and the third one cost a feature:
+/// `new URL()` accepts a port of `0`, accepts `https://../`, and **punycodes a
+/// non-ASCII hostname** — so an ASCII-only charset check refused
+/// `https://поиск.рф/?q=%s` outright, which is the very example the length rule above
+/// discusses as a case worth getting right.
+///
+/// So the charset test is a deny-list of the punctuation a hostname cannot hold, not an
+/// allow-list of ASCII: a browser resolves an IDN engine perfectly well, and this is not
+/// the place to have an opinion about scripts. What remains deliberately stricter than
+/// the parser is a port of `0` — it parses and cannot be connected to, and refusing it
+/// on the settings screen beats a template that silently never works.
 fn check_search_host(host: &str) -> Result<(), String> {
     let (name, port) = match host.strip_prefix('[') {
         // IPv6 literal: the brackets are what separate the address' own colons from the
@@ -715,11 +725,14 @@ fn check_search_host(host: &str) -> Result<(), String> {
     if host.starts_with(':') {
         return Err("has a port but no host".to_owned());
     }
-    // Empty only for the IPv6 branch, which validated its own address above.
-    if !name.is_empty()
-        && !name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+    // Empty only for the IPv6 branch, which validated its own address above. A
+    // deny-list, for the reason in this function's docs: these are the characters that
+    // make `new URL()` throw or that would silently mean something other than a host
+    // (an escape, an authority delimiter, a second path). Everything else — including
+    // every non-ASCII script — is a hostname a browser can resolve.
+    if name
+        .chars()
+        .any(|c| matches!(c, '%' | '[' | ']' | '\\' | '/' | '?' | '#' | '@' | ':'))
     {
         return Err("has characters in the host that a hostname cannot hold".to_owned());
     }
@@ -1340,6 +1353,10 @@ mod tests {
             "https://my_engine.internal/?q=%s",
             "http://127.0.0.1:1234/?q=%s",
             "http://[::1]:8080/?q=%s",
+            // An IDN engine. A browser punycodes this and resolves it; an ASCII-only
+            // charset check refused it, which removed a working engine for no reason —
+            // and contradicted the length rule's own worked example.
+            "https://поиск.рф/?q=%s",
         ] {
             db.patch_settings(&patch(&[("browser.searchUrl", Value::from(good))]))
                 .unwrap_or_else(|e| panic!("{good} must be accepted: {e}"));

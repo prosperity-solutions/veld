@@ -3429,11 +3429,17 @@ previewing the app you are building.
   searching the web for `javascript:alert(1)` would bury the reason the pane did not
   go there. Outside that set a colon is just a colon, so `std::vec::Vec` and
   `TypeError:x` are queries.
-- The daemon validates the template on write: it must contain `%s`, start with
-  `http://` or `https://` (case-insensitively), have a host that is not just a port,
-  and carry no whitespace or control characters, within 400 bytes — and **`%s` may not
-  be in the host**, since `https://%s.example.com/` would let anything typed into an
-  address bar choose which host to reach.
+- The daemon validates the template on write, so a template that cannot work is
+  refused on the settings screen rather than failing later against whatever you typed
+  into an address bar. It must contain `%s`, start with `http://` or `https://`
+  (case-insensitively), carry no whitespace or control characters, and fit in 400
+  bytes. **`%s` may not be in the host**, since `https://%s.example.com/` would let
+  anything typed into an address bar choose which host to reach. And the host must be
+  a host: a name (any script — an IDN engine such as `https://поиск.рф/?q=%s` is fine)
+  with no `%`, brackets, slashes, `@` or `#` in it; a port, if present, numeric and
+  between 1 and 65535; a bracketed IPv6 literal closed and made of hex, colons and
+  dots. So `https://:8080/?q=%s`, `https://e.com:99999/?q=%s` and
+  `https://e.com]/?q=%s` are all refused where you can see them.
 - A search is a navigation like any other, so the pane records it: the resulting URL
   is written into the pane's layout and restored with the pane, exactly as a visited
   page is. Turn search off if you would rather a mistyped query left no trace.
