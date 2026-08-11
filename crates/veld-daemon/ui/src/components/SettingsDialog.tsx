@@ -243,21 +243,21 @@ export function SettingsDialog(props: {
   // leaves it null, which still renders a working picker: the stored value is
   // always an option, so the only thing lost is the list of alternatives.
   const [shells, setShells] = useState<ShellList | null>(null);
-  // Settled, not loaded: set on failure too. Without the distinction, a failed
-  // `api.shells()` leaves `shells` null for ever, and treating null as "the value
-  // is listed" would then hide the custom-path field permanently for someone whose
-  // shell *is* a custom path. Treating null as "unlisted" instead would flash the
-  // field open on every dialog open before the list arrives, which is the reason
-  // the null case is not simply folded in.
-  const [shellsSettled, setShellsSettled] = useState(false);
-  // Whether the stored shell is one the picker lists. `shells === null` means the
-  // list has not arrived, and "not on a list I do not have" is not a custom path —
-  // so the field stays shut rather than flashing open on every dialog open.
-  const shellIsListed =
-    shellValue === "auto" ||
-    !shellsSettled ||
-    (shells?.shells ?? []).some((s) => s.path === shellValue);
-  const showCustomShell = customShell || !shellIsListed;
+  // **A positive fact, never a negation.** This asks only "do we *know* the stored
+  // shell is not one of the listed ones", which is answerable exactly when a list
+  // actually arrived. Every previous shape of this was some flavour of "not
+  // listed", which had to decide what an absent list meant and got it wrong three
+  // times running: sticky-only went stale when another window changed the shell;
+  // treating a missing list as listed hid the field for ever when the fetch
+  // failed; treating it as unlisted flashed the field open on every dialog open
+  // and, on a failed fetch, opened it for ordinary listed shells. With the
+  // question posed positively there is no third state to get wrong — no list means
+  // no claim, and the user can still open the field from the select.
+  const knownUnlisted =
+    shells !== null &&
+    shellValue !== "auto" &&
+    !shells.shells.some((s) => s.path === shellValue);
+  const showCustomShell = customShell || knownUnlisted;
   useEffect(() => {
     let live = true;
     api
@@ -265,10 +265,7 @@ export function SettingsDialog(props: {
       .then((list) => {
         if (live) setShells(list);
       })
-      .catch(() => {})
-      .finally(() => {
-        if (live) setShellsSettled(true);
-      });
+      .catch(() => {});
     return () => {
       live = false;
     };
@@ -745,7 +742,7 @@ export function SettingsDialog(props: {
                   size="xs"
                   w={220}
                   value={
-                    customShell && shellIsListed
+                    customShell
                       ? CUSTOM_SHELL
                       : // The stored value is always one of the options below, so a
                         // shell that is not on this machine's list — uninstalled, or
