@@ -69,7 +69,6 @@ import {
 } from "./model";
 import { startOriginLabel } from "./shared/startOrigin";
 import { worktreeLabel } from "./shared/worktreeName";
-import { LogoMark } from "./components/LogoMark";
 import { nodeRows, type NodeRow } from "./shared/NodeList";
 import { NodeActions } from "./shared/NodeActions";
 import {
@@ -551,68 +550,33 @@ function useUrlSelection(): {
  * from this bar entirely rather than moved: the bar is dense, and the brand is
  * carried by the favicon, the window/app icon and the daemon's own pages.
  *
- * At rest it is just the mark. Under the pointer the mark is replaced by the
- * swap glyph, and the tooltip names both halves the glyphs cannot — which mode
- * you are in, and which one a click reaches. The word labels are gone: in a bar
- * this dense they read as the loudest text in it, and "IDE"/"Runs" as words
- * carry no information the tooltip and the destination glyph do not. A screen
- * reader still gets the full state + destination from the `aria-label`.
- *
- * The two states are layered in one grid cell, so the wider of them fixes the
- * button's width and nothing in the bar moves as the pointer crosses it.
+ * The swap glyph is shown statically — the discoverability win of showing it
+ * on hover is worth more when it is always visible, and there is no brand mark
+ * left to trade against it. The tooltip names both halves the glyph cannot:
+ * which mode you are in, and which one a click reaches. The word labels are
+ * gone: in a bar this dense they read as the loudest text in it, and
+ * "IDE"/"Runs" as words carry no information the tooltip and the destination
+ * glyph do not. A screen reader still gets the full state + destination from
+ * the `aria-label`.
  */
 function ModeSwitch(props: {
   mode: string;
   onMode: (m: string) => void;
-  /**
-   * Hover state, owned by the parent.
-   *
-   * Not a `:hover` rule and not local state, both of which replay the crossfade
-   * after a click: switching mode moves this control from one bar to the other,
-   * React unmounts it and mounts a new one, and the fresh node starts at the
-   * resting state and animates back to hover under a pointer that never moved.
-   * Held above the two bars, the new node mounts already hovered — and an
-   * element whose first computed style *is* the end state does not transition.
-   */
-  hover: boolean;
-  onHover: (h: boolean) => void;
 }) {
   const other = props.mode === "ide" ? "runs" : "ide";
   const modeLabel = (m: string) => (m === "runs" ? "Runs" : "IDE");
   return (
-    // The pointer listeners sit outside the Tooltip rather than on the Button:
-    // Mantine clones its child and passes the child's own handlers through
-    // floating-ui's prop merger, which is one indirection too many to rely on
-    // for the control that has to keep working to leave a mode.
-    <div
-      className="mode-switch-slot"
-      onMouseEnter={() => props.onHover(true)}
-      onMouseLeave={() => props.onHover(false)}
-    >
-      <Tooltip label={`Switch to ${modeLabel(other)}`}>
-        <Button
-          size="compact-sm"
-          variant="default"
-          className={`mode-switch${props.hover ? " hovered" : ""}`}
-          // The bar is dense and the brand is carried by the mark itself; the
-          // resting state is the mark alone. The label is gone, so the tooltip
-          // and the accessible name carry both halves that the visible glyph
-          // cannot — which mode you are in and which one a click reaches.
-          aria-label={`${modeLabel(props.mode)}, switch to ${modeLabel(other)}`}
-          onClick={() => props.onMode(other)}
-        >
-          <span className="ms-layer ms-rest">
-            <LogoMark />
-          </span>
-          {/* Hidden from the accessibility tree: the `aria-label` above is the
-              button's whole name, and a glyph in here would append a decoration
-              to it as if it were content. */}
-          <span className="ms-layer ms-hover" aria-hidden="true">
-            <IconArrowsExchange size={14} />
-          </span>
-        </Button>
-      </Tooltip>
-    </div>
+    <Tooltip label={`Switch to ${modeLabel(other)}`}>
+      <Button
+        size="compact-sm"
+        variant="default"
+        className="mode-switch"
+        aria-label={`${modeLabel(props.mode)}, switch to ${modeLabel(other)}`}
+        onClick={() => props.onMode(other)}
+      >
+        <IconArrowsExchange size={14} />
+      </Button>
+    </Tooltip>
   );
 }
 
@@ -2061,7 +2025,7 @@ function AppInner(props: {
       // case-insensitive uniqueness exists to prevent.
       {
         key: "lane",
-        title: "Move to lane",
+        title: "Move to group",
         items: [
           ...lanes.map((l) => ({
             key: `lane:${l.name}`,
@@ -2074,7 +2038,7 @@ function AppInner(props: {
             ? [
                 {
                   key: "lane-none",
-                  title: "Remove from lane",
+                  title: "Remove from group",
                   onClick: () => void assignLane(w, ""),
                 },
               ]
@@ -2082,7 +2046,7 @@ function AppInner(props: {
           ...(lanes.length > 0 ? [{ key: "lane-new-divider" }] : []),
           {
             key: "lane-new",
-            title: "New lane…",
+            title: "New group…",
             onClick: () => setDialog({ kind: "new-lane", worktree: w }),
           },
         ],
@@ -2151,7 +2115,7 @@ function AppInner(props: {
     try {
       await api.reorderLanes(repo.root, order);
     } catch (e) {
-      notifyError("Could not reorder the lanes", e);
+      notifyError("Could not reorder the groups", e);
     }
     await refresh();
   };
@@ -2167,25 +2131,25 @@ function AppInner(props: {
     return showContextMenu([
       {
         key: "lane-rename",
-        title: "Rename lane…",
+        title: "Rename group…",
         onClick: () => setDialog({ kind: "rename-lane", lane }),
       },
       {
         key: "lane-up",
-        title: "Move lane up",
+        title: "Move group up",
         disabled: index <= 0,
         onClick: () => move(lanes[index - 1]),
       },
       {
         key: "lane-down",
-        title: "Move lane down",
+        title: "Move group down",
         disabled: index < 0 || index >= lanes.length - 1,
         onClick: () => move(lanes[index + 1]),
       },
       { key: "lane-divider" },
       {
         key: "lane-delete",
-        title: "Delete lane",
+        title: "Delete group",
         color: "red",
         // No confirm: deleting a lane ungroups its worktrees and removes
         // nothing, so there is nothing to lose and a dialog would only train
@@ -2200,7 +2164,7 @@ function AppInner(props: {
     try {
       await api.deleteLane(repo.root, lane);
     } catch (e) {
-      notifyError(`Could not delete the lane "${lane}"`, e);
+      notifyError(`Could not delete the group "${lane}"`, e);
     }
     await refresh();
   };
@@ -3405,14 +3369,8 @@ function AppInner(props: {
   // visible; it predates this change and is tracked as a follow-up rather than
   // fixed here, because restoring it means new state on the app's busiest render
   // path and this diff's review budget is spent.
-  const [switchHover, setSwitchHover] = useState(false);
   const modeSwitch = (
-    <ModeSwitch
-      mode={mode}
-      onMode={setMode}
-      hover={switchHover}
-      onHover={setSwitchHover}
-    />
+    <ModeSwitch mode={mode} onMode={setMode} />
   );
 
   /**
@@ -4504,8 +4462,8 @@ function AppInner(props: {
       )}
       {dialog.kind === "new-lane" && (
         <LaneNameDialog
-          title="New lane"
-          confirmLabel="Create lane"
+          title="New group"
+          confirmLabel="Create group"
           initial=""
           taken={lanes.map((l) => l.name)}
           onClose={closeDialog}
@@ -4524,7 +4482,7 @@ function AppInner(props: {
       )}
       {dialog.kind === "rename-lane" && (
         <LaneNameDialog
-          title="Rename lane"
+          title="Rename group"
           confirmLabel="Rename"
           initial={dialog.lane}
           taken={lanes
@@ -5734,7 +5692,7 @@ function Rail(props: {
                   <Tooltip
                     label={
                       group.lane === ""
-                        ? "New worktree, not in a lane"
+                        ? "New worktree, not in a group"
                         : `New worktree in ${group.lane}`
                     }
                   >
@@ -5748,8 +5706,8 @@ function Rail(props: {
                          cannot tell apart at all. */
                       aria-label={
                         group.lane === ""
-                          ? "New worktree, not in a lane"
-                          : `New worktree in lane ${group.lane}`
+                          ? "New worktree, not in a group"
+                          : `New worktree in group ${group.lane}`
                       }
                       onClick={(e) => {
                         e.stopPropagation();
@@ -5816,11 +5774,11 @@ function Rail(props: {
                     as the same gesture. Only on a real lane: the trash and the
                     ungrouped section have nothing to rename or delete. */}
                 {group.editable && (
-                  <Tooltip label={`Menu for lane ${group.label}`}>
+                  <Tooltip label={`Menu for group ${group.label}`}>
                     <button
                       type="button"
                       className="lane-edit"
-                      aria-label={`Menu for lane ${group.label}`}
+                      aria-label={`Menu for group ${group.label}`}
                       onClick={(e) => {
                         e.stopPropagation();
                         props.onLaneMenu(e, group.lane);
@@ -5839,16 +5797,36 @@ function Rail(props: {
                 trash needs the same affordance, saying plainly that worktrees can
                 be dropped here. */}
             {props.wide && canDropOn(group) && group.worktrees.length === 0 && (
-              <div className="lane-empty">
-                {dragPath
-                  ? "Drop here"
-                  : group.addable
-                    ? // Both ways in, named. An empty lane is exactly where
+              group.addable ? (
+                /* The addable empty lane is the lane's own "＋": clicking the
+                   whole placeholder files into the same lane a header "＋" would,
+                   so the two ways in are one target. The trash's empty state
+                   (below) is a drop target only — there is no "＋" in the trash. */
+                <button
+                  type="button"
+                  className="lane-empty"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    props.onAdd(group.lane);
+                  }}
+                  aria-label={
+                    group.lane === ""
+                      ? "New worktree, not in a group"
+                      : `New worktree in group ${group.lane}`
+                  }
+                >
+                  {dragPath
+                    ? "Drop here"
+                    : // Both ways in, named. An empty lane is exactly where
                       // someone reaches for "＋", and the placeholder used to
-                      // offer only the drag.
-                      "Empty — drag one in, or ＋"
-                    : "Empty — drag a worktree in"}
-              </div>
+                      // offer only the drag — now the whole thing is the button.
+                      "Empty — drag one in or click to add one"}
+                </button>
+              ) : (
+                <div className="lane-empty">
+                  {dragPath ? "Drop here" : "Empty — drag a worktree in"}
+                </div>
+              )
             )}
             {group.worktrees.map((w, index) => {
               const caretHere =
@@ -6014,20 +5992,15 @@ function Rail(props: {
                   {props.wide && (
                     <span className="wt-alias">{worktreeLabel(w)}</span>
                   )}
-                  {props.wide && (
-                    <span className="wt-branch">
-                      {/* The branch column carries the removal failure, because
-                          that is the one thing about this row that is not the
-                          branch any more. Trashed rows say what is happening to
-                          them; the branch is not the news. */}
-                      {deletingRow
-                        ? "deleting…"
-                        : trashed
-                          ? "in trash"
-                          : w.trash_error
-                            ? w.trash_error
-                            : w.branch}
-                    </span>
+                  {/* The branch column carries the removal failure — the one thing
+                      about a row that is not the branch any more. Branch names and
+                      the trash/deleting states are deliberately not shown: the rail
+                      is narrow, the alias the user typed is the row's name, and a
+                      row in the Trash (or Deleting) lane is already visibly there,
+                      so restating it per row is noise. Only a *failure* gets a
+                      column, because that is the one thing the lane does not say. */}
+                  {props.wide && w.trash_error && (
+                    <span className="wt-branch">{w.trash_error}</span>
                   )}
                   {/* Beside the run control, and not on the marker. The marker is
                       the row's identity — #204 made its *colour* the identifier —
@@ -6082,50 +6055,53 @@ function Rail(props: {
                     </button>
                   )}
                   {showRunControl && (
-                    <button
-                      type="button"
-                      className={`wt-run${running ? " on" : ""}`}
-                      title={
+                    <Tooltip
+                      label={
                         pending
                           ? `${pending}…`
                           : running
                             ? `Stop ${worktreeLabel(w)}`
                             : `Start ${worktreeLabel(w)}`
                       }
-                      aria-label={running ? `Stop ${worktreeLabel(w)}` : `Start ${worktreeLabel(w)}`}
-                      // Mirrors the context menu and the palette. Without the
-                      // start guard the button looked live but its click hit a
-                      // no-op for a worktree with no presets and no nodes.
-                      //
-                      // Deliberately keyed on `pending`, not on `spinner`: a
-                      // spinner is a state *display*, and a run that some other
-                      // surface started is still legitimately stoppable while it
-                      // comes up. Only an action this window fired and has not
-                      // seen land disables the control, which is what stops a
-                      // double fire.
-                      disabled={
-                        pending !== null || (!running && !props.canStart(w))
-                      }
-                      onClick={(e) => {
-                        // The row is clickable too; without this, starting a run
-                        // would also switch the selection out from under the user.
-                        e.stopPropagation();
-                        if (running) props.onStop(w);
-                        else props.onStart(w);
-                      }}
                     >
-                      {spinner ? (
-                        // The spinner carries the action's colour, so a row that
-                        // is stopping reads as stopping and not as starting. That
-                        // held only for locally-fired actions before `spinner`
-                        // took the observed transition into account too.
-                        <Loader size={10} color={actionColor(spinner)} />
-                      ) : running ? (
-                        <IconPlayerStopFilled size={10} />
-                      ) : (
-                        <IconPlayerPlayFilled size={10} />
-                      )}
-                    </button>
+                      <button
+                        type="button"
+                        className={`wt-run${running ? " on" : ""}`}
+                        aria-label={running ? `Stop ${worktreeLabel(w)}` : `Start ${worktreeLabel(w)}`}
+                        // Mirrors the context menu and the palette. Without the
+                        // start guard the button looked live but its click hit a
+                        // no-op for a worktree with no presets and no nodes.
+                        //
+                        // Deliberately keyed on `pending`, not on `spinner`: a
+                        // spinner is a state *display*, and a run that some other
+                        // surface started is still legitimately stoppable while it
+                        // comes up. Only an action this window fired and has not
+                        // seen land disables the control, which is what stops a
+                        // double fire.
+                        disabled={
+                          pending !== null || (!running && !props.canStart(w))
+                        }
+                        onClick={(e) => {
+                          // The row is clickable too; without this, starting a run
+                          // would also switch the selection out from under the user.
+                          e.stopPropagation();
+                          if (running) props.onStop(w);
+                          else props.onStart(w);
+                        }}
+                      >
+                        {spinner ? (
+                          // The spinner carries the action's colour, so a row that
+                          // is stopping reads as stopping and not as starting. That
+                          // held only for locally-fired actions before `spinner`
+                          // took the observed transition into account too.
+                          <Loader size={10} color={actionColor(spinner)} />
+                        ) : running ? (
+                          <IconPlayerStopFilled size={10} />
+                        ) : (
+                          <IconPlayerPlayFilled size={10} />
+                        )}
+                      </button>
+                    </Tooltip>
                   )}
                   {props.wide && !trashed && (
                     <button
@@ -6142,24 +6118,29 @@ function Rail(props: {
                     </button>
                   )}
                   {props.wide && trashed && !deletingRow && (
-                    <button
-                      type="button"
-                      className="wt-edit"
-                      title={`Restore ${worktreeLabel(w)}`}
-                      aria-label={`Restore ${worktreeLabel(w)}`}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        props.onRestore(w);
-                      }}
-                    >
-                      <IconArrowBackUp size={12} />
-                    </button>
+                    <Tooltip label={`Restore ${worktreeLabel(w)}`}>
+                      <button
+                        type="button"
+                        className="wt-edit"
+                        aria-label={`Restore ${worktreeLabel(w)}`}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          props.onRestore(w);
+                        }}
+                      >
+                        <IconArrowBackUp size={12} />
+                      </button>
+                    </Tooltip>
                   )}
                   {/* A terminal removal has no restore — it is committed — so the
                       trailing slot that would hold Restore carries a spinner
                       instead, making the in-progress state audible as motion. */}
                   {props.wide && deletingRow && (
-                    <Loader size={12} className="wt-deleting-spinner" />
+                    <Loader
+                      size={12}
+                      className="wt-deleting-spinner"
+                      color="var(--danger)"
+                    />
                   )}
                   </div>
                   {caretAfter && <RailCaret />}
@@ -6191,12 +6172,12 @@ function Rail(props: {
         <div style={{ flex: 1 }} />
         {props.wide && (
           <>
-            <Tooltip label="New lane">
+            <Tooltip label="New group">
               <ActionIcon
                 size="sm"
                 variant="subtle"
                 color="gray"
-                aria-label="New lane"
+                aria-label="New group"
                 onClick={props.onAddLane}
               >
                 <IconFolderPlus size={14} />
