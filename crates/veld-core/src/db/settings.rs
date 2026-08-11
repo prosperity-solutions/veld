@@ -692,6 +692,15 @@ pub fn parse_search_template(raw: &str) -> Result<String, String> {
 /// the place to have an opinion about scripts. What remains deliberately stricter than
 /// the parser is a port of `0` — it parses and cannot be connected to, and refusing it
 /// on the settings screen beats a template that silently never works.
+///
+/// **This function is the second line of defence, not the first.** Review found a defect
+/// in it in three consecutive rounds (`https://:8080/`, an ASCII-only host, then trailing
+/// junk after an IPv6 `]` plus an overflowing port), which is what hand-rolling a URL
+/// grammar earns. The first line is the settings dialog, which runs the *real* parser the
+/// pane will use (`searchTarget` in `panes/model.ts`) before it saves — see
+/// `SettingsDialog.tsx`. What is left here matters only for a write that does not come
+/// from our own UI, and its job is to reject the shapes it can state exactly rather than
+/// to be a URL parser.
 fn check_search_host(host: &str) -> Result<(), String> {
     let (name, port) = match host.strip_prefix('[') {
         // IPv6 literal: the brackets are what separate the address' own colons from the
@@ -705,7 +714,23 @@ fn check_search_host(host: &str) -> Result<(), String> {
                 {
                     return Err("is not a valid IPv6 address".to_owned());
                 }
-                (String::new(), after.strip_prefix(':').map(str::to_owned))
+                // **Whatever follows the `]` has to be nothing or a port.** Mapping it
+                // through `strip_prefix(':')` alone turned trailing junk into "no port"
+                // and accepted `https://[::1]xyz/`, which the client's parser throws on.
+                // **Whatever follows the `]` has to be nothing or a port.** Mapping it
+                // through `strip_prefix(':')` alone turned trailing junk into "no port"
+                // and accepted `https://[::1]xyz/`, which the client's parser throws on.
+                let port = match after {
+                    "" => None,
+                    rest => Some(
+                        rest.strip_prefix(':')
+                            .ok_or_else(|| {
+                                format!("has {rest:?} after the ] where a port should be")
+                            })?
+                            .to_owned(),
+                    ),
+                };
+                (String::new(), port)
             }
             None => return Err("has an unclosed [ in the host".to_owned()),
         },
@@ -715,9 +740,14 @@ fn check_search_host(host: &str) -> Result<(), String> {
         },
     };
     if let Some(port) = port {
+        // `matches!` over the parse, not `is_ok_and`: an all-digit port too big for a
+        // `u32` (`4294967296`) parses to `Err`, and `is_ok_and` reads `Err` as "not out
+        // of range" — so the one value most obviously out of range was the one accepted.
+        // The digit test stays, because `"+5".parse::<u32>()` is `Ok(5)` while the URL
+        // parser throws on it.
         if port.is_empty()
             || !port.chars().all(|c| c.is_ascii_digit())
-            || port.parse::<u32>().is_ok_and(|p| p == 0 || p > 65535)
+            || !matches!(port.parse::<u32>(), Ok(p) if (1..=65535).contains(&p))
         {
             return Err(format!("has {port:?} where a port number should be"));
         }
@@ -1383,10 +1413,20 @@ mod tests {
             Value::from("https://%/?q=%s"),     // not a hostname
             Value::from("https://[:1/?q=%s"),   // unclosed IPv6 bracket
             Value::from("https://[zz::1]/?q=%s"), // not hex in an IPv6 literal
+            // The two this check accepted for three rounds. Trailing junk after the `]`
+            // was mapped to "no port" instead of refused, and an all-digit port too big
+            // for a `u32` parsed to `Err`, which the range test read as "in range".
+            Value::from("https://[::1]xyz/?q=%s"),
+            Value::from("https://[::1]a:8080/?q=%s"),
+            Value::from("https://e.com:4294967296/?q=%s"),
+            Value::from("https://e.com:99999999999/?q=%s"),
+            // `"+5".parse::<u32>()` is `Ok(5)`, so the digit test is what refuses this —
+            // the URL parser throws on it.
+            Value::from("https://e.com:+5/?q=%s"),
             Value::from("https://%s.example.com/"), // the query picks the host
-            Value::from("https://e.com/?q=%s x"), // whitespace
+            Value::from("https://e.com/?q=%s x"),   // whitespace
             Value::from("https://e.com/?q=%s\nhttps://e2.com/?q=%s"), // two values in one
-            Value::from(7),                     // not a string
+            Value::from(7),                         // not a string
             Value::from(format!(
                 "https://e.com/?q=%s&pad={}",
                 "a".repeat(MAX_SEARCH_URL_LEN)

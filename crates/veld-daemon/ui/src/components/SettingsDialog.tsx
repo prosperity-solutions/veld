@@ -57,6 +57,7 @@ import {
 } from "@tabler/icons-react";
 
 import type { SettingsDoc } from "../api";
+import { searchTarget } from "../panes/model";
 import { Modal } from "./dialogs";
 import {
   availableFonts,
@@ -221,6 +222,11 @@ export function SettingsDialog(props: {
   // shared `str()` helper.
   const searchValue = searchUrl(settings ?? {});
   const [search, setSearch] = useState(searchValue);
+  // Shown under the field as it is typed, and the same predicate the blur handler
+  // refuses on — so the reason the value did not save is on screen rather than inferred
+  // from nothing having happened. Empty is not broken; it is the off switch.
+  const searchBroken =
+    search.trim() !== "" && searchTarget(search.trim(), "veld") === null;
   // Availability is probed against the DOM, so compute it once per open rather
   // than on every render — the list cannot change while the dialog is up.
   const fonts = useMemo(() => availableFonts(), []);
@@ -919,11 +925,21 @@ export function SettingsDialog(props: {
                 value={search}
                 disabled={locked}
                 onChange={(e) => setSearch(e.currentTarget.value)}
+                error={searchBroken ? "Veld cannot build a search URL from this" : undefined}
                 onBlur={() => {
                   const next = search.trim();
                   // Nothing to say if it is unchanged — including opening the dialog,
                   // clicking through the field and leaving.
                   if (next === searchValue) return;
+                  // **Validated here with the parser that will actually use it.** The
+                  // daemon has its own rules, but they are hand-written and review found
+                  // a hole in them three rounds running; this runs `searchTarget` — the
+                  // same function a pane calls, so the same `new URL()` — against a probe
+                  // query, which makes "would this template ever work" a question answered
+                  // by the thing that has to answer it. Without it, a template that parses
+                  // nowhere is stored happily and then fails on the user's next query,
+                  // blaming the query.
+                  if (next !== "" && searchTarget(next, "veld") === null) return;
                   set({ "browser.searchUrl": next });
                 }}
               />
