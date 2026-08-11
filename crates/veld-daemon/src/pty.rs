@@ -4161,6 +4161,38 @@ mod tests {
             key
         }
 
+        /// Plant a ticket that runs a config-declared pane — the shape the
+        /// daemon's own `mint_ticket` produces for a `ide.panes[].type ==
+        /// "terminal"` launch. The pane's `argv` is what the holder spawns (the
+        /// login-shell wrapping happens upstream in `resolve_pane`), so `sh -c
+        /// 'sleep …'` stands in for the real `$SHELL -l -i -c '<command>'` the
+        /// pane path produces.
+        fn plant_pane_ticket(session: &str, cwd: &std::path::Path, argv: Vec<String>) -> String {
+            let key = uuid::Uuid::new_v4().simple().to_string();
+            TICKETS.lock().unwrap().insert(
+                key.clone(),
+                Ticket {
+                    session_id: session.to_owned(),
+                    worktree_id: 1,
+                    cwd: cwd.to_path_buf(),
+                    label: "test".to_owned(),
+                    pane: Some(PaneLaunch {
+                        spec_id: "probe".to_owned(),
+                        label: "Probe".to_owned(),
+                        argv,
+                        env: vec![("VELD_PANE_TOKEN".to_owned(), "tok-123".to_owned())],
+                        token: "tok-123".to_owned(),
+                        fresh: true,
+                    }),
+                    shell: TEST_SHELL.to_owned(),
+                    shell_flags: Vec::new(),
+                    shim_env: shims::session_env(session, TEST_SHELL, true, true, false),
+                    expires_at: Instant::now() + TICKET_TTL,
+                },
+            );
+            key
+        }
+
         /// The origin the daemon under test actually trusts. Derived from the
         /// allowlist rather than hardcoded, so this can't drift away from it.
         fn good_origin() -> String {
@@ -4415,6 +4447,25 @@ mod tests {
             let (ws, _) = tokio_tungstenite::connect_async(attach_request(
                 addr,
                 &format!("ticket={t}{extra}"),
+                Some(&good_origin()),
+            ))
+            .await
+            .expect("handshake");
+            ws
+        }
+
+        /// Open a session that runs a config-declared pane (a ticket with a
+        /// `pane`), the way the UI launches one.
+        async fn open_pane(
+            addr: SocketAddr,
+            sid: &str,
+            cwd: &std::path::Path,
+            argv: Vec<String>,
+        ) -> Client {
+            let t = plant_pane_ticket(sid, cwd, argv);
+            let (ws, _) = tokio_tungstenite::connect_async(attach_request(
+                addr,
+                &format!("ticket={t}"),
                 Some(&good_origin()),
             ))
             .await
@@ -5321,6 +5372,80 @@ mod tests {
                 !busy(&format!("/api/pty/sessions/{sid}/busy")).await,
                 "an idle prompt must not read as busy"
             );
+            end_session(&sid, "test cleanup").await;
+        }
+
+        /// A config-declared pane reads as **busy while its command runs**, even
+        /// though it never spawns a foreground job of its own. A pane's command
+        /// runs `$SHELL -l -i -c '<command>'`, and an interactive shell execs a
+        /// simple command into its own process group — so the `tcgetpgrp`-vs-pid
+        /// signal a shell uses would read a running pane as idle, and closing the
+        /// tab would hang the agent/pager without asking. "Busy" for a pane is
+        /// simply "its command has not exited", and that is what this pins end to
+        /// end through the same `/api/pty/sessions/{id}/busy` route.
+        #[tokio::test]
+        async fn a_config_pane_reads_busy_while_running_and_idle_after_it_exits() {
+            use axum::body::Body;
+            use tower::ServiceExt;
+
+            let addr = serve().await;
+            let dir = tempfile::tempdir().unwrap();
+            let sid = session_id();
+            // A stand-in for `$SHELL -l -i -c 'git …'`: the holder treats any
+            // `argv` it is handed as a pane. `sleep` leaves the shell alive but
+            // doing nothing a `tcgetpgrp` probe would see — the exact case that
+            // used to read as idle.
+            let mut ws = open_pane(
+                addr,
+                &sid,
+                dir.path(),
+                vec!["sh".to_owned(), "-c".to_owned(), "sleep 5".to_owned()],
+            )
+            .await;
+            read_control(&mut ws, "ready").await;
+
+            async fn busy(uri: &str) -> bool {
+                let res = routes()
+                    .oneshot(
+                        axum::http::Request::builder()
+                            .method("GET")
+                            .uri(uri)
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    res.status(),
+                    StatusCode::OK,
+                    "busy check must be a safe GET"
+                );
+                let bytes = axum::body::to_bytes(res.into_body(), 64).await.unwrap();
+                serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["busy"]
+                    .as_bool()
+                    .expect("busy is a bool")
+            }
+
+            // A freshly-started pane whose command is still running must be busy
+            // from the very first query — no poll-until-it-sticks needed, because
+            // it never relies on the pgrp switching.
+            assert!(
+                busy(&format!("/api/pty/sessions/{sid}/busy")).await,
+                "a running pane must read as busy"
+            );
+
+            // Once the command exits the pane is idle: closing no longer needs to
+            // ask, and `close_on_exit` can tidy it away.
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let mut saw_idle = false;
+            while Instant::now() < deadline {
+                if !busy(&format!("/api/pty/sessions/{sid}/busy")).await {
+                    saw_idle = true;
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            assert!(saw_idle, "an exited pane must read as idle");
             end_session(&sid, "test cleanup").await;
         }
     }
