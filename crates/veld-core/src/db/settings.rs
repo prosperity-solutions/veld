@@ -757,8 +757,9 @@ fn check_search_host(host: &str) -> Result<(), String> {
     // make `new URL()` throw or that would silently mean something other than a host
     // (an escape, an authority delimiter, a second path). Everything else — including
     // every non-ASCII script — is a hostname a browser can resolve.
-    // `/ ? #` are already gone (the host span was split on them); they stay for the
-    // reader, since this list is meant to be read as "what a host may not hold".
+    // `/ ? #` and `:` are already gone (the host span was split on the first three, and
+    // on the colon just above); they stay for the reader, since this list is meant to be
+    // read as "what a host may not hold".
     if name.chars().any(|c| {
         matches!(
             c,

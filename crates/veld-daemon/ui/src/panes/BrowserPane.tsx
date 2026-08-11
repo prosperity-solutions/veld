@@ -1022,29 +1022,25 @@ export function BrowserPane(props: {
           // on>", with no way back but the address bar. The mid-click problem is
           // solved where it happens instead: the panel swallows `mousedown` so the
           // field never loses focus to a row (see `.suggest-panel` below).
-          // **Each flag is reset by whoever reads it**, which took three attempts to get
-          // right — so the reasoning, not just the rule:
+          // **Blur means the user left, so everything resets** — and the reason that is
+          // safe belongs here, because getting it wrong took four attempts.
           //
-          // `suggesting` is read only by `panelOpen`, and always dropping it is what
-          // dismisses the panel. It must be unconditional: gating it on `panelOpen`
-          // meant that blurring while the list happened to be empty left it `true`, and
-          // then the draft-sync effect above (which fires *because* `editing` went
-          // false) rewrote `draft` to the page's own URL, which always resolves to an
-          // action row — so the panel mounted with the field unfocused, showing "Go to
-          // <the URL you are already on>". That is the very symptom blur-close exists to
-          // prevent, arriving after the click instead of before it.
+          // A click on a row is *not* leaving, and that is enforced where it happens:
+          // both surfaces that render rows swallow `mousedown` (the panel below, and the
+          // start page's list), so the field never blurs while a click is in flight and
+          // this handler cannot reflow anything under the pointer.
           //
-          // `typed` is read only by the suggestions filter, and dropping it *reflows the
-          // list*. On a blank pane the start page is that list and has no `mousedown`
-          // swallow, so an unconditional reset re-rendered the rows out from under the
-          // pointer between mousedown and mouseup and the click never landed. So it is
-          // dropped only when the panel — which does swallow mousedown — is what the
-          // user is leaving.
+          // Two dead ends, recorded so they are not retried. Leaving blur alone entirely
+          // wedged the panel in flow above the page until the user came back and clicked
+          // the bar. Gating the reset on `panelOpen` fixed that and broke the blank
+          // pane — and gating only `typed` did not fix the blank pane either, because the
+          // reflow there is not caused by any flag: `setEditing(false)` re-runs the
+          // draft-sync effect above, which on a blank pane writes `draft = ""` (there is
+          // no page URL to restore), and the empty query widens the list all by itself.
+          // One mechanism for both surfaces is what actually closes it.
           onBlur={() => {
             setEditing(false);
-            setSuggesting(false);
-            setActiveRow(-1);
-            if (panelOpen) setTyped(false);
+            closeSuggestions();
           }}
           onKeyDown={(e) => {
             if (e.key === "Enter") {
@@ -1991,15 +1987,26 @@ export function BrowserPane(props: {
                   : "Type an address in the bar above, search the web from it, or pick one below."}
               </p>
             </div>
-            <PlaceList
-              suggestions={suggestions}
-              activeIndex={active}
-              emptyHint={props.urlsEmptyHint}
-              onOpen={(url, title) => go(url, { title })}
-              // The rows decide which URLs "open all" means — with the list filtered
-              // by what is in the address bar, the run's whole set is the wrong answer.
-              onOpenAll={(urls) => urls.forEach((url) => window.open(url, "_blank"))}
-            />
+            {/* Swallows `mousedown`, exactly as the suggestion panel does, and for the
+                same reason: a click on a row must not blur the address bar first. This
+                list is filtered by what is in that bar, and blurring it re-runs the
+                draft-sync effect above — which on a blank pane writes `draft = ""`,
+                since `chooser` means there is no page URL to restore. The list then
+                widens between mousedown and mouseup, the row moves out from under the
+                pointer, and the click lands on the container instead of the row.
+                Gating a *flag* could never fix that; the draft wipe does it on its own,
+                which is why both surfaces need the same one mechanism. */}
+            <div onMouseDown={(e) => e.preventDefault()}>
+              <PlaceList
+                suggestions={suggestions}
+                activeIndex={active}
+                emptyHint={props.urlsEmptyHint}
+                onOpen={(url, title) => go(url, { title })}
+                // The rows decide which URLs "open all" means — with the list filtered
+                // by what is in the address bar, the run's whole set is the wrong answer.
+                onOpenAll={(urls) => urls.forEach((url) => window.open(url, "_blank"))}
+              />
+            </div>
           </div>
         )}
         {opening && (
