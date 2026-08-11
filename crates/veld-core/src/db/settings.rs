@@ -717,9 +717,6 @@ fn check_search_host(host: &str) -> Result<(), String> {
                 // **Whatever follows the `]` has to be nothing or a port.** Mapping it
                 // through `strip_prefix(':')` alone turned trailing junk into "no port"
                 // and accepted `https://[::1]xyz/`, which the client's parser throws on.
-                // **Whatever follows the `]` has to be nothing or a port.** Mapping it
-                // through `strip_prefix(':')` alone turned trailing junk into "no port"
-                // and accepted `https://[::1]xyz/`, which the client's parser throws on.
                 let port = match after {
                     "" => None,
                     rest => Some(
@@ -760,10 +757,14 @@ fn check_search_host(host: &str) -> Result<(), String> {
     // make `new URL()` throw or that would silently mean something other than a host
     // (an escape, an authority delimiter, a second path). Everything else — including
     // every non-ASCII script — is a hostname a browser can resolve.
-    if name
-        .chars()
-        .any(|c| matches!(c, '%' | '[' | ']' | '\\' | '/' | '?' | '#' | '@' | ':'))
-    {
+    // `/ ? #` are already gone (the host span was split on them); they stay for the
+    // reader, since this list is meant to be read as "what a host may not hold".
+    if name.chars().any(|c| {
+        matches!(
+            c,
+            '%' | '[' | ']' | '\\' | '/' | '?' | '#' | '@' | ':' | '<' | '>' | '^' | '|'
+        )
+    }) {
         return Err("has characters in the host that a hostname cannot hold".to_owned());
     }
     Ok(())

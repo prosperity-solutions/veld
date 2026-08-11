@@ -356,9 +356,26 @@ export function BrowserPane(props: {
    */
   const [typed, setTyped] = useState(false);
   const suggestions = suggestionsFor(places, typed ? draft : "", props.searchUrl);
-  // Which row the arrows are on. `-1` is "none", which is also the state Enter reads
-  // as "go to whatever is typed" rather than "open the highlighted row".
-  const [activeRow, setActiveRow] = useState(-1);
+  /**
+   * Which row the arrows are on — **carrying the list it was chosen from**.
+   *
+   * A highlighted row is a position, and the list it indexes comes from a poll: a
+   * service coming up or going down mid-run reorders `places`, so a bare index would
+   * have Enter open a place the user never arrowed to, ring and all, with nothing
+   * looking wrong. The first attempt reset the index from an effect, which is the
+   * mistake this repo has made three times: an effect runs *after* the commit, so the
+   * frame between the new list and the reset is a real frame, and a keypress already
+   * queued is dispatched against it.
+   *
+   * So the staleness is a value the data carries. `key` is the list the row was picked
+   * from; a render whose list no longer matches reads the row as "none" without any
+   * ordering having to be won. `-1` is also what Enter reads as "go to whatever is
+   * typed" rather than "open the highlighted row".
+   */
+  const placeKey = places.map((p) => p.url).join(" ");
+  const [highlight, setHighlight] = useState({ key: placeKey, row: -1 });
+  const activeRow = highlight.key === placeKey ? highlight.row : -1;
+  const setActiveRow = (row: number) => setHighlight({ key: placeKey, row });
   /**
    * The row Enter would open, which is not the same as the row the arrows have moved
    * to.
@@ -369,15 +386,6 @@ export function BrowserPane(props: {
    * has to show what the key will do, not what the pointer has touched.
    */
   const active = activeRow < 0 && suggestions.action ? 0 : activeRow;
-  // A highlighted row is a *position*, and the list it indexes comes from a poll: a
-  // service coming up or going down mid-run reorders `places`, so Enter would open a
-  // place the user never arrowed to — with the ring moving too, so nothing looks
-  // wrong, it just goes somewhere else. Dropping the highlight when the set changes
-  // identity costs one keypress and cannot open the wrong thing.
-  const placeKey = places.map((p) => p.url).join(" ");
-  useEffect(() => {
-    setActiveRow(-1);
-  }, [placeKey]);
   // Whether the panel is up. Opens on focus *before* anything is typed — the list is
   // the answer to "what can I do here", and a panel that appears only after a
   // keystroke is a panel a first-time user never sees.
@@ -1014,16 +1022,29 @@ export function BrowserPane(props: {
           // on>", with no way back but the address bar. The mid-click problem is
           // solved where it happens instead: the panel swallows `mousedown` so the
           // field never loses focus to a row (see `.suggest-panel` below).
-          // **Only when a panel is actually up.** Unconditionally, this broke clicking a
-          // row on a *blank* pane: there the start page is the list and has no
-          // `mousedown` swallow, so blur fired between mousedown and mouseup, React
-          // flushed `setTyped(false)` synchronously, the list re-rendered unfiltered,
-          // the row under the pointer moved, and mouseup landed on a different node —
-          // no click at all. A blank pane has no panel to dismiss, so it needs no
-          // blur-close.
+          // **Each flag is reset by whoever reads it**, which took three attempts to get
+          // right — so the reasoning, not just the rule:
+          //
+          // `suggesting` is read only by `panelOpen`, and always dropping it is what
+          // dismisses the panel. It must be unconditional: gating it on `panelOpen`
+          // meant that blurring while the list happened to be empty left it `true`, and
+          // then the draft-sync effect above (which fires *because* `editing` went
+          // false) rewrote `draft` to the page's own URL, which always resolves to an
+          // action row — so the panel mounted with the field unfocused, showing "Go to
+          // <the URL you are already on>". That is the very symptom blur-close exists to
+          // prevent, arriving after the click instead of before it.
+          //
+          // `typed` is read only by the suggestions filter, and dropping it *reflows the
+          // list*. On a blank pane the start page is that list and has no `mousedown`
+          // swallow, so an unconditional reset re-rendered the rows out from under the
+          // pointer between mousedown and mouseup and the click never landed. So it is
+          // dropped only when the panel — which does swallow mousedown — is what the
+          // user is leaving.
           onBlur={() => {
             setEditing(false);
-            if (panelOpen) closeSuggestions();
+            setSuggesting(false);
+            setActiveRow(-1);
+            if (panelOpen) setTyped(false);
           }}
           onKeyDown={(e) => {
             if (e.key === "Enter") {
