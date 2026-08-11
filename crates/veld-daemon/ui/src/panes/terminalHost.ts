@@ -24,7 +24,6 @@ import { terminalPrefs, type TerminalPrefs } from "../shared/settings";
 import { chromeless, layoutSlot, windowSeed } from "../shell";
 import {
   type PaneMount,
-  type StartPlan,
   parseLayouts,
   shouldCloseOnExit,
   startPlanFor,
@@ -416,8 +415,7 @@ function ensure(
   id: string,
   worktreeId: number,
   pane: PaneMount | undefined,
-  start: StartPlan,
-): Session {
+): { session: Session; created: boolean } {
   const existing = sessions.get(id);
   if (existing) {
     // The daemon refuses a cross-worktree resume with a 409; mirror that here,
@@ -429,7 +427,7 @@ function ensure(
         `terminal ${id} belongs to worktree ${existing.worktreeId}, not ${worktreeId}`,
       );
     }
-    return existing;
+    return { session: existing, created: false };
   }
 
   const p = prefs();
@@ -533,6 +531,23 @@ function ensure(
       s.ws.send(JSON.stringify({ type: "resize", cols, rows }));
     }
   });
+  // A wheel over a full-screen program (the alternate buffer: a pager like
+  // `git log`'s, a TUI) scrolls it, the way a native terminal does — xterm.js
+  // leaves the alternate buffer alone, so without this the wheel does nothing
+  // over `git log`/`less` while it scrolls fine in a plain terminal. Guarded on
+  // the two cases that must not also get cursor keys: the normal buffer (where
+  // the wheel scrolls xterm's own scrollback) and a program that has taken the
+  // mouse over itself (`term.modes.mouseTrackingMode` — vim/htop/`less --mouse`
+  // report their own wheel events and must not receive a second copy).
+  container.addEventListener("wheel", (e) => {
+    if (term.buffer.active.type !== "alternate") return;
+    if (term.modes.mouseTrackingMode !== "none") return;
+    e.preventDefault();
+    // One screen-scroll step per notch is the native feel; send the same
+    // sequences the wheel in a real terminal sends, so any full-screen program
+    // that scrolls with arrows behaves.
+    send(e.deltaY > 0 ? "\x1b[B" : "\x1b[A");
+  });
 
   // A process sets its own tab title with OSC 0/2 (`ESC ] 0;title BEL`). xterm
   // parses the sequence and reports the result here — the only parser worth
@@ -576,9 +591,11 @@ function ensure(
   });
 
   // `shell` and `reattach` both mean "no command to choose" — a login shell has
-  // none, and a reattach runs whatever is already there.
-  connect(s, start === "shell" || start === "reattach" ? undefined : start);
-  return s;
+  // none, and a reattach runs whatever is already there. The connection itself
+  // is established by the caller (`mountTerminal`) *after* the terminal has
+  // been opened and fitted, so the pty is minted at the real size rather than
+  // xterm's 80x24 default.
+  return { session: s, created: true };
 }
 
 function attachUrl(ticket: string, cols: number, rows: number): string {
@@ -1042,13 +1059,37 @@ export function mountTerminal(
   parent: HTMLElement,
   pane?: PaneMount,
 ): void {
-  const s = ensure(id, worktreeId, pane, startPlanFor(id, pane));
+  const start = startPlanFor(id, pane);
+  const { session: s, created } = ensure(id, worktreeId, pane);
   if (s.container.parentElement !== parent) parent.appendChild(s.container);
 
   if (!s.opened) {
     // Now that the container is in the document, xterm can measure the font.
     s.term.open(s.container);
     s.opened = true;
+  }
+
+  if (created) {
+    // Fit **synchronously** before the first connection, so the pty is created
+    // at the pane's real size rather than xterm's 80x24 default. A full-screen
+    // program — a pager like `git log`, a TUI — that starts before the resize
+    // enters its alternate screen at the wrong size and renders with a blank
+    // offset (and a pager whose scrolling looks dead). `requestFit` below is
+    // rAF-deferred, so it would run *after* the connection has already minted
+    // the pty at 80x24. `fit()` forces layout, so the real size is measurable
+    // right here for a container that is in the document; the same `< 2` guard
+    // `requestFit` uses keeps a not-yet-laid-out container from collapsing the
+    // grid (and the rAF fit and post-`ready` re-fit correct it once it is).
+    const rect = s.container.getBoundingClientRect();
+    if (rect.width >= 2 && rect.height >= 2) {
+      try {
+        s.fit.fit();
+      } catch {
+        // Container not laid out yet (a pane in a hidden dock); the rAF fit
+        // below and the post-`ready` re-fit correct the size as soon as it is.
+      }
+    }
+    connect(s, start === "shell" || start === "reattach" ? undefined : start);
   }
   requestFit(s);
 

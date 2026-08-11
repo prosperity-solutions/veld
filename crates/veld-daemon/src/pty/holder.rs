@@ -522,11 +522,22 @@ async fn serve(cfg: &HolderConfig, listener: UnixListener) -> anyhow::Result<()>
                                 // data; dropping it is fine, because the daemon's own
                                 // query times out and reports idle.
                                 if let Some(c) = conn.as_ref() {
-                                    let reply = (
-                                        wire::BUSY,
-                                        wire::encode_busy(session_busy(master.as_ref(), pid))
-                                            .to_vec(),
-                                    );
+                                    // A config-declared pane runs `$SHELL -l -i -c
+                                    // '<command>'`, and an interactive shell **execs** a
+                                    // simple command into its own process group rather
+                                    // than giving it one of its own — so `tcgetpgrp`
+                                    // equals `pid` for the whole life of a running pane
+                                    // (the git-log pane, a coding agent), and the pgrp
+                                    // heuristic below would read it as *idle* while it
+                                    // is busy. For a pane, "busy" simply means its
+                                    // command has not exited yet.
+                                    let busy = if cfg.argv.is_some() {
+                                        exit_code.is_none()
+                                    } else {
+                                        session_busy(master.as_ref(), pid)
+                                    };
+                                    let reply =
+                                        (wire::BUSY, wire::encode_busy(busy).to_vec());
                                     if c.out.try_send(reply).is_err() {
                                         debug!("dropping a busy reply: the daemon is behind");
                                     }
