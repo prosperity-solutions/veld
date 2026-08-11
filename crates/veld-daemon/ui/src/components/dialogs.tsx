@@ -1172,7 +1172,7 @@ export function LaneNameDialog(props: {
       <form onSubmit={submit}>
         <Stack gap="sm">
           <TextInput
-            label="Lane name"
+            label="Group name"
             placeholder="review"
             value={name}
             maxLength={MAX_LANE_NAME_LEN}
@@ -1181,9 +1181,9 @@ export function LaneNameDialog(props: {
             data-autofocus
           />
           <Text size="sm" c="dimmed">
-            Lanes group the worktrees in the rail. They are yours, not the
+            Groups organise the worktrees in the rail. They are yours, not the
             repository&apos;s — nothing is written to the project&apos;s config, so
-            your lanes never show up in someone else&apos;s checkout.
+            your groups never show up in someone else&apos;s checkout.
           </Text>
           <ErrorText error={error} />
           <Button type="submit" loading={busy} disabled={!trimmed || collides}>

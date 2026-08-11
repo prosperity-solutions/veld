@@ -642,12 +642,32 @@ body[data-fullscreen="true"] .topbar.electron {
   justify-content: center;
   min-height: 34px;
   margin: 1px 3px 2px;
+  padding: 0;
   border: 1px dashed var(--border2);
-  border-radius: 8px;
+  background: none;
   color: var(--faint);
+  font: inherit;
   font-size: 10px;
   letter-spacing: 0.04em;
   user-select: none;
+  width: 100%;
+}
+/* The addable (real lane / ungrouped) empty state is the lane's "＋": a button
+   that adds a worktree, so it reads as an affordance. The trash's empty state is
+   a passive drop target only. */
+button.lane-empty {
+  cursor: pointer;
+}
+.lane-empty:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+/* The trash's empty drop zone is a destination, not a create: hovering it says
+   "drop here" in the trash's own colour rather than the create affordance's
+   green, so the two hover states read differently. */
+.rail-group.trash .lane-empty:hover {
+  border-color: var(--danger);
+  color: var(--danger);
 }
 .rail-group.drop-in .lane-empty {
   border-color: var(--accent);
@@ -658,13 +678,12 @@ body[data-fullscreen="true"] .topbar.electron {
 .lane-head {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 7px;
   padding: 2px 7px 3px;
   color: var(--muted);
   font-size: 9.5px;
   font-weight: 700;
-  letter-spacing: 0.09em;
-  text-transform: uppercase;
+  letter-spacing: 0.03em;
   user-select: none;
 }
 /* The whole header is the drag handle for reordering lanes, so it says so on
@@ -713,7 +732,6 @@ body[data-fullscreen="true"] .topbar.electron {
   justify-content: center;
   width: 17px;
   height: 17px;
-  margin-left: 4px;
   padding: 0;
   border: none;
   border-radius: 5px;
@@ -740,13 +758,9 @@ body[data-fullscreen="true"] .topbar.electron {
   color: var(--danger);
 }
 
-/* The terminal deletion lane is still destructive but *in progress* — green like
-   the accent on a run control rather than the trash's "waiting to be emptied"
-   red, so the two lanes never read as the same state. The rows carry the motion
-   (spinner) and the red left edge; the header says which lane you are in. */
-.rail-group.deleting .lane-head {
-  color: var(--accent);
-}
+/* The terminal deletion lane is destructive but *in progress* — the rows carry
+   the motion (spinner) and the red left edge, so the header keeps the default
+   muted tone. A green header here read as "success", which a deletion is not. */
 
 /* The pinned bottom of the rail: the trash lane (always present) and the
    terminal Deleting lane sit here and never scroll away with the rows above
@@ -773,9 +787,9 @@ body[data-fullscreen="true"] .topbar.electron {
  *
  * **Its own element, a sibling of the rows.** The first version drew it as a
  * pseudo-element on `.wt-row`, which does not work here: the row carries
- * `overflow: hidden` and an 8px `border-radius`, and overflow clips pseudo-elements
- * too — so the caret was clipped to the row's rounded rect and read as a
- * highlighted row border rather than as a gap opening between two rows. A sibling
+ * `overflow: hidden`, and overflow clips pseudo-elements too — so the caret was
+ * clipped to the row and read as a highlighted row border rather than as a gap
+ * opening between two rows. A sibling
  * sits outside every row's clipping context, and it makes "after the last row" the
  * same code path as any other position rather than a second special case.
  *
@@ -791,7 +805,7 @@ body[data-fullscreen="true"] .topbar.electron {
 .rail-caret::before {
   content: "";
   position: absolute;
-  /* Inset to the rows' own rounded corners, so the bar spans the row it points at
+  /* Inset to the rows' own padding, so the bar spans the row it points at
      rather than the full width of the rail. */
   left: 3px;
   right: 3px;
@@ -831,11 +845,9 @@ body[data-fullscreen="true"] .topbar.electron {
   cursor: default;
   border-left-color: var(--danger);
 }
-.wt-row.deleting .wt-branch {
-  color: var(--danger);
-}
 .wt-deleting-spinner {
   flex: none;
+  margin-left: auto;
   color: var(--danger);
 }
 /* Came *back* out of trash because the removal failed. Full opacity — it is a
@@ -862,6 +874,7 @@ body[data-fullscreen="true"] .topbar.electron {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 7px;
   padding: 0 8px;
   border-bottom: 1px solid var(--border);
 }
@@ -881,7 +894,6 @@ body[data-fullscreen="true"] .topbar.electron {
   align-items: center;
   gap: 7px;
   padding: 5px 7px;
-  border-radius: 8px;
   border: none;
   border-left: 2px solid transparent;
   background: transparent;
@@ -1161,6 +1173,17 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
   color: var(--accent);
   padding: 0;
   cursor: pointer;
+  /* The row's trailing controls (run + three-dot, or restore in the trash, or
+     the deleting spinner) sit against the right edge of the row, not after the
+     alias: the row's width is whatever the user dragged it to, and the controls
+     must not drift mid-row when it is wide. `margin-left: auto` on the first
+     trailing control pushes it and everything after it right. Scoped rather than
+     on `.wt-edit`, which is shared by the three-dot (already pushed by the run
+     control's auto margin) and the trash's restore. */
+  margin-left: auto;
+}
+.wt-row.trashed .wt-edit {
+  margin-left: auto;
 }
 .wt-run.on {
   color: var(--danger);
@@ -3099,77 +3122,8 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
 /* The bar's first control, in both modes. `flex: none` because the bar is a
    flex row and this must not be what gives when it gets crowded — it is the
    only way out of the mode you are in. */
-.topbar .mode-switch-slot {
-  display: flex;
+.topbar .mode-switch {
   flex: none;
-}
-
-/* A shade smaller than the rest of the bar on purpose: the mark is the bar's
-   one non-control glyph (the tooltip names the mode and the destination, which
-   the resting mark cannot), not one of the bar's verbs. `.mantine-Button-root`
-   is in the selector only to outrank the bar-wide 12px rule on specificity
-   rather than on source order — two `!important` declarations of equal weight
-   are settled by whichever comes last in the file, which is not a thing to leave
-   a reader to work out. */
-.topbar .mode-switch.mantine-Button-root {
-  --button-fz: 11px !important;
-}
-
-/* Both states share one grid cell, so the wider of them (mark + label) sets the
-   button's width once and the swap glyph crossfades inside it. Nothing in the
-   bar moves as the pointer crosses — which is the whole reason for the grid
-   rather than swapping the contents out. */
-.topbar .mode-switch .mantine-Button-label {
-  display: grid;
-  align-items: center;
-  justify-items: center;
-}
-.topbar .mode-switch .ms-layer {
-  grid-area: 1 / 1;
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  transition: opacity 0.15s ease;
-}
-.topbar .mode-switch .ms-hover {
-  opacity: 0;
-}
-/* Same reasoning as `.qr-shield` above: the *state* is information and is kept,
-   only the fade goes. This is the app's most-hovered animation, so it is the one
-   most worth honouring the setting on. */
-@media (prefers-reduced-motion: reduce) {
-  .topbar .mode-switch .ms-layer {
-    transition: none;
-  }
-}
-/* `.hovered` is a React class, not `:hover` — see ModeSwitch. `:focus-visible`
-   stays a real pseudo-class: a keyboard user gets no pointer and would
-   otherwise never see that the control does anything. */
-.topbar .mode-switch.hovered .ms-rest,
-.topbar .mode-switch:focus-visible .ms-rest {
-  opacity: 0;
-}
-.topbar .mode-switch.hovered .ms-hover,
-.topbar .mode-switch:focus-visible .ms-hover {
-  opacity: 1;
-}
-
-/* The mark takes the theme tokens rather than logo.svg's baked-in white and
-   #C4F56A — see components/LogoMark.tsx and docs/branding.md. The dot hangs one
-   unit below the V's foot in the source geometry, so the box is square and the
-   glyph is not re-cropped here — which is also why it sits a shade lower than
-   the cap height of the label beside it. */
-.logo-mark {
-  height: 12px;
-  width: 12px;
-  flex: none;
-  display: block;
-}
-.logo-mark path:first-child {
-  fill: var(--text);
-}
-.logo-mark path:last-child {
-  fill: var(--accent);
 }
 
 /* ---- centered / empty states ------------------------------------------------ */
