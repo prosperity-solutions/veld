@@ -11,6 +11,7 @@
 //! | `VELD_PTY_SESSION` | Which terminal asked, which is how the daemon knows *which window* the pane belongs in. |
 //! | `VELD_SHIM_DIR` | The directory holding the `open`/`xdg-open` wrappers. Exported for every shell, so a non-zsh user can put it on `PATH` themselves. |
 //! | `ZDOTDIR` / `VELD_USER_ZDOTDIR` | zsh only, and only while `terminal.interceptSystemOpen` is on: the handoff that gets that directory onto `PATH` after the user's own startup files. See [`zshenv`]. |
+//! | `ENV` / `VELD_USER_ENV` | The bash equivalent, on a bash that was **probed** to honour it. See [`bashenv`]. |
 //! | `VELD_SHIM_BROWSER` | The same path as `BROWSER`, kept under its own name so the `veld_browser` hook can re-assert it after an rc file exports a `$BROWSER` of its own. |
 //! | `VELD_BROWSER_ORIGINAL` | Whatever `$BROWSER` was before veld took it over, so the fall-through path can restore it instead of handing a child the shim again. |
 //!
@@ -35,9 +36,21 @@
 //! design — that is how a terminal gets the user's real environment — so it is
 //! entitled to do this.
 //!
-//! The answer is [`zshenv`]: one file veld owns, in its own directory, which hands
-//! `ZDOTDIR` back immediately and installs a hook that runs *after* every rc file.
-//! Nothing of the user's is edited, wrapped, or read twice.
+//! The answer is one file veld owns, per shell family, reached through the one seam
+//! that shell offers for running code around its own startup:
+//!
+//! - **zsh** — [`zshenv`], via `ZDOTDIR`. veld's file is read first, hands `ZDOTDIR`
+//!   straight back, and registers a `precmd` hook that runs after every rc file.
+//! - **bash** — [`bashenv`], via posix mode's `$ENV`, which is the *only* startup
+//!   file an interactive `--posix` bash reads. veld's file leaves posix mode, replays
+//!   the user's own startup in bash's documented order, and adds its line last.
+//!   Used only on a bash **probed** to honour it: macOS ships bash 3.2 as
+//!   `/bin/bash`, which ignores `$ENV` entirely.
+//!
+//! Nothing of the user's is edited, wrapped, or read twice. Everything else — fish,
+//! nushell, and a bash that failed the probe — keeps `$BROWSER` and the documented
+//! `$VELD_SHIM_DIR` one-liner, and `veld doctor` says so rather than leaving it
+//! silent.
 //!
 //! # Rewritten every daemon start, never trusted from disk
 //!
@@ -81,6 +94,11 @@ pub fn session_env(
     shell: &str,
     open_in_app: bool,
     intercept: bool,
+    // Whether this bash was **probed** to honour the `--posix`/`$ENV` handoff.
+    // Passed in rather than probed here because probing spawns a process and this
+    // function is pure and synchronous; the daemon probes once, at ticket-mint
+    // time, and caches. Meaningless for a non-bash shell, and ignored there.
+    bash_handoff: bool,
 ) -> BTreeMap<String, String> {
     let mut env = BTreeMap::new();
     env.insert("VELD_PTY_SESSION".to_owned(), session_id.to_owned());
@@ -136,6 +154,26 @@ pub fn session_env(
             env.insert("VELD_USER_ZDOTDIR".to_owned(), theirs);
         }
     }
+    // The bash equivalent. Same three conditions as the zsh branch — the setting is
+    // on, the shell is the right family, and the file that performs the handoff is
+    // still on disk — plus one this one needs and zsh's does not: the shell must
+    // have been probed to honour `$ENV` in posix mode. On bash 3.2 (macOS's
+    // `/bin/bash`) it does not, and setting `ENV` there is at best inert; it is
+    // `interactive_flags` reading this same `ENV` key that would otherwise add a
+    // `--posix` with nothing to show for it.
+    let bash_handoff_file = bashenv_path(dir);
+    if intercept && is_bash(shell) && bash_handoff && bash_handoff_file.is_file() {
+        // Stashed before it is replaced, exactly like `VELD_USER_ZDOTDIR`: `$ENV`
+        // is read by every posix shell the user starts, so silently dropping
+        // theirs would change more than this feature is about.
+        if let Some(theirs) = std::env::var_os("ENV")
+            .and_then(|v| v.into_string().ok())
+            .filter(|v| !v.is_empty())
+        {
+            env.insert("VELD_USER_ENV".to_owned(), theirs);
+        }
+        env.insert("ENV".to_owned(), bash_handoff_file.display().to_string());
+    }
     // Saved before it is replaced, so the fall-through in `veld open-url` can give a
     // child the browser the user actually configured, rather than handing it the shim
     // again — which is a loop, not a fallback.
@@ -162,17 +200,153 @@ pub fn session_env(
 
 /// Whether a login shell is zsh.
 ///
-/// The `ZDOTDIR` handoff is zsh-only, and deliberately so: zsh is the one shell
-/// with a startup file that runs *before* `$ZDOTDIR` matters and a hook array that
-/// runs *after* every rc file, which is what makes an override possible without
-/// touching a single file of the user's. bash has no equivalent env-only hook
-/// (`BASH_ENV` is non-interactive shells only) and replicating login semantics
-/// through `--rcfile` means veld reimplementing the user's startup order. So bash,
-/// fish and the rest get `$BROWSER` plus the documented `$VELD_SHIM_DIR` line.
+/// Delegates to [`veld_core::shell::kind`] so "is this bash / is this zsh" has one
+/// answer in the codebase. By basename, which is not a shortcut: a shell's
+/// `argv[0]` decides which startup files it reads, so `/bin/sh` is not bash even
+/// when it is the same binary.
 fn is_zsh(shell: &str) -> bool {
-    std::path::Path::new(shell)
-        .file_name()
-        .is_some_and(|n| n == "zsh")
+    veld_core::shell::kind(shell) == veld_core::shell::Kind::Zsh
+}
+
+/// Whether a login shell is bash.
+fn is_bash(shell: &str) -> bool {
+    veld_core::shell::kind(shell) == veld_core::shell::Kind::Bash
+}
+
+/// Where the `$ENV` file veld owns lives — beside the shims, like the zsh one.
+fn bashenv_path(shim_dir: &Path) -> PathBuf {
+    shim_dir.join("bash").join("veldenv.bash")
+}
+
+/// The one file veld runs inside a **bash** startup.
+///
+/// # The seam, and why it is this one
+///
+/// bash has no hook that runs after its rc files: `BASH_ENV` is non-interactive
+/// shells only, and `--rcfile` is consulted only when the shell is interactive and
+/// **not** a login shell — so it is ignored outright for the `-l` shell a terminal
+/// opens, and reaching it would mean dropping `-l` and losing `shopt login_shell`
+/// along with `/etc/profile`.
+///
+/// What does exist is posix mode: started with `--posix`, an interactive bash reads
+/// `$ENV` **and no other startup file at all**. So veld takes that one file, leaves
+/// posix mode on the first line, replays the user's real startup itself, and adds
+/// its line at the end — where nothing can rebuild `PATH` after it. This is the
+/// mechanism kitty's shell integration uses; VS Code took the `--rcfile` route and
+/// carries a standing bug for the login-shell semantics it loses.
+///
+/// # What makes this riskier than the zsh handoff, and what pays for it
+///
+/// [`zshenv`] *adds* a file to a sequence bash-style posix mode *replaces*. If this
+/// replay is wrong, the user's whole environment is wrong — not merely the shim. So:
+///
+/// - It is only ever used when the shell has been **probed** to honour the handoff
+///   (`veld_core::shell::supports_posix_env_handoff`). macOS's `/bin/bash` is 3.2,
+///   where `--posix` is accepted and `$ENV` is *ignored* — passing it there would
+///   leave a session in posix mode for no benefit, so veld passes nothing.
+/// - It replays exactly what bash documents, keyed on `shopt -q login_shell`, which
+///   is still true because `-l` survives (posix mode changes which files are read,
+///   not what kind of shell this is).
+/// - `terminal.interceptSystemOpen` turns the whole thing off, as it does for zsh.
+/// - `a_bash_session_runs_the_users_startup_and_still_wins_the_path` asserts it
+///   against a real bash, the same way the zsh file is asserted.
+///
+/// One thing this file does *better* than the zsh one: it runs **after** the user's
+/// rc files rather than before, so `$BROWSER` is re-asserted with a plain
+/// assignment instead of a `precmd` hook. There is nothing left to run after it.
+///
+/// # The one place this deliberately departs from bash
+///
+/// A login bash does not read `~/.bashrc` — it reads `/etc/profile` and the first of
+/// `~/.bash_profile`, `~/.bash_login`, `~/.profile`, and the convention is that one
+/// of those sources `~/.bashrc`. Where that line is missing, following bash exactly
+/// would mean the shell picker loading none of the config it exists for: macOS ships
+/// no `~/.bash_profile`, so a user with `~/.profile` and `~/.bashrc` gets a bash with
+/// none of their aliases or functions — the very complaint `terminal.shell` was built
+/// for, reproduced one level down. So this file sources `~/.bashrc` as well, unless
+/// the profile it sourced already mentions it. Every other terminal emulator runs a
+/// plain login bash and does not do this; veld does, because picking bash *here* is a
+/// statement about where your config lives.
+fn bashenv() -> String {
+    // `${x-}` throughout, for the same reason the zsh file uses it: these lines run
+    // after the user's startup, so they inherit their `set -u`.
+    String::from(GENERATED_HEADER)
+        + r#"
+#
+# veld owns this file and nothing else. bash read it INSTEAD OF your startup files
+# (posix mode + $ENV), so its first job is to run them, in bash's own documented
+# order, and then get out of the way.
+
+# Leave posix mode immediately: it is how veld got here, not a mode you asked for.
+builtin set +o posix
+
+# Hand $ENV back. Yours if you had one — it is read by every posix shell you start
+# from here — and unset otherwise, so a nested bash is not wrapped.
+if [ -n "${VELD_USER_ENV-}" ]; then
+  ENV="$VELD_USER_ENV"
+  builtin export ENV
+else
+  builtin unset ENV
+fi
+
+# Your startup files, in bash's own order. `-l` survived into posix mode, so this
+# answers the same question bash itself would have asked.
+if shopt -q login_shell; then
+  [ -r /etc/profile ] && . /etc/profile
+  veld_profile=
+  for veld_rc in "$HOME/.bash_profile" "$HOME/.bash_login" "$HOME/.profile"; do
+    if [ -r "$veld_rc" ]; then veld_profile="$veld_rc"; . "$veld_rc"; break; fi
+  done
+  # …and then ~/.bashrc, which a login bash does NOT read on its own. The usual
+  # setup has the profile source it, and where that line is missing, choosing bash
+  # in veld's shell picker would load none of the config the picker exists for:
+  # macOS ships no ~/.bash_profile at all, so a user with ~/.profile and ~/.bashrc
+  # gets a bash with none of their aliases, functions or integrations.
+  #
+  # Only when the profile did not already do it, tested by looking for the word in
+  # the file veld actually sourced. That is exact for the conventional idiom
+  # (`. ~/.bashrc` / `source ~/.bashrc` both contain it) and errs toward NOT
+  # sourcing twice: a false positive leaves today's behaviour, while a double
+  # source would duplicate PATH entries and re-run prompt setup. A profile that
+  # reaches ~/.bashrc through a second file veld cannot see is the residual case,
+  # and it costs one extra source rather than a broken shell.
+  if [ -r "$HOME/.bashrc" ]; then
+    veld_seen=
+    if [ -n "$veld_profile" ]; then
+      case "$(< "$veld_profile")" in *bashrc*) veld_seen=1 ;; esac
+    fi
+    [ -z "$veld_seen" ] && . "$HOME/.bashrc"
+  fi
+else
+  for veld_rc in /etc/bash.bashrc /etc/bash/bashrc /etc/bashrc; do
+    if [ -r "$veld_rc" ]; then . "$veld_rc"; break; fi
+  done
+  [ -r "$HOME/.bashrc" ] && . "$HOME/.bashrc"
+fi
+builtin unset veld_rc veld_profile veld_seen
+
+# veld's shim directory, prepended last — after /etc/profile's path_helper and
+# after your own rc files, which is the only point at which it can win. Idempotent,
+# so a re-source cannot stack duplicates.
+if [ -n "${VELD_SHIM_DIR-}" ]; then
+  case ":$PATH:" in
+    *":$VELD_SHIM_DIR:"*) ;;
+    *) PATH="$VELD_SHIM_DIR:$PATH"; builtin export PATH ;;
+  esac
+fi
+
+# An rc file that exported its own BROWSER has already run, so take it back and
+# keep theirs for the fall-through. A plain assignment, not a hook: nothing runs
+# after this file.
+if [ -n "${VELD_SHIM_BROWSER-}" ] && [ "${BROWSER-}" != "$VELD_SHIM_BROWSER" ]; then
+  if [ -n "${BROWSER-}" ]; then
+    VELD_BROWSER_ORIGINAL="$BROWSER"
+    builtin export VELD_BROWSER_ORIGINAL
+  fi
+  BROWSER="$VELD_SHIM_BROWSER"
+  builtin export BROWSER
+fi
+"#
 }
 
 /// Where the `.zshenv` veld owns lives — beside the shims, inside the instance's
@@ -345,6 +519,11 @@ pub fn clear_unbacked() {
         removed += usize::from(remove_if_generated(&dir.join(tool.shim_name())));
     }
     removed += usize::from(remove_if_generated(&zdotdir_path(&dir).join(".zshenv")));
+    // The bash handoff goes with them, and for a sharper reason than the zsh one:
+    // it is the *only* file bash reads, so a stale copy naming a `veld` binary that
+    // no longer exists still replays the user's startup correctly but points
+    // `$BROWSER` at a script that cannot run.
+    removed += usize::from(remove_if_generated(&bashenv_path(&dir)));
     if removed > 0 {
         warn!(
             dir = %dir.display(),
@@ -418,6 +597,18 @@ fn prepare_in(dir: &Path, cli: &Path) -> std::io::Result<()> {
     std::fs::write(&tmp, zshenv())?;
     set_mode(&tmp, 0o600)?;
     std::fs::rename(&tmp, zdir.join(".zshenv"))?;
+    // The bash `$ENV` handoff, by the same rules: written unconditionally (whether
+    // a session *uses* it is `session_env`'s call, per shell, per setting and per
+    // probe) and through write-then-rename, since a shell may be starting while
+    // the daemon restarts.
+    let handoff = bashenv_path(dir);
+    let bash_dir = handoff.parent().expect("bashenv path has a parent");
+    std::fs::create_dir_all(bash_dir)?;
+    set_mode(bash_dir, 0o700)?;
+    let tmp = bash_dir.join("veldenv.bash.new");
+    std::fs::write(&tmp, bashenv())?;
+    set_mode(&tmp, 0o600)?;
+    std::fs::rename(&tmp, &handoff)?;
     Ok(())
 }
 
@@ -687,17 +878,17 @@ mod tests {
         // this on, and reimplementing bash's startup order is not something to do to
         // somebody's shell.
         for shell in ["/bin/bash", "/usr/bin/fish", "/opt/homebrew/bin/nu", ""] {
-            let env = session_env("s", shell, true, true);
+            let env = session_env("s", shell, true, true, false);
             assert!(!env.contains_key("ZDOTDIR"), "{shell} must not be wrapped");
         }
         // And the setting is a real off switch, not a preference the daemon ignores.
-        assert!(!session_env("s", "/bin/zsh", true, false).contains_key("ZDOTDIR"));
+        assert!(!session_env("s", "/bin/zsh", true, false, false).contains_key("ZDOTDIR"));
 
         // The master switch gates the WHOLE environment. Off means veld is not in the
         // shell at all — no `$BROWSER` round trip, nothing in the startup — which is
         // what its own documentation promises. Only the session id survives, and that
         // is for `veld open-url` invoked deliberately.
-        let off = session_env("s", "/bin/zsh", false, true);
+        let off = session_env("s", "/bin/zsh", false, true, false);
         assert_eq!(off.keys().collect::<Vec<_>>(), vec!["VELD_PTY_SESSION"]);
         assert!(is_zsh("/bin/zsh") && is_zsh("/opt/homebrew/bin/zsh"));
         assert!(!is_zsh("/bin/zsh-beta") && !is_zsh("/bin/bash"));
@@ -926,11 +1117,286 @@ exit
         assert!(!zdotdir_path(&shims).join(".zshenv").is_file());
     }
 
+    /// A bash that honours the `--posix`/`$ENV` handoff, or `None`.
+    ///
+    /// Probed rather than version-tested, for the reason
+    /// `veld_core::shell::supports_posix_env_handoff` gives: macOS ships bash 3.2 as
+    /// `/bin/bash`, which accepts `--posix` and ignores `$ENV` outright.
+    fn capable_bash() -> Option<PathBuf> {
+        let dir = tempfile::TempDir::new().ok()?;
+        let probe = dir.path().join("p.sh");
+        std::fs::write(&probe, "printf VELD_OK\n").ok()?;
+        [
+            "/bin/bash",
+            "/usr/bin/bash",
+            "/opt/homebrew/bin/bash",
+            "/usr/local/bin/bash",
+        ]
+        .into_iter()
+        .map(PathBuf::from)
+        .filter(|p| p.is_file())
+        .find(|bash| {
+            std::process::Command::new(bash)
+                .args(["--posix", "-i", "-c", ":"])
+                .env("ENV", &probe)
+                .stdin(std::process::Stdio::null())
+                .output()
+                .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("VELD_OK"))
+        })
+    }
+
+    /// The generated bash file replays the user's startup **and** still wins `PATH`.
+    ///
+    /// This is the bash counterpart of
+    /// `the_generated_zshenv_wins_against_an_rc_that_rebuilds_path`, and it carries
+    /// more weight than that one does: posix mode means veld's file is the *only*
+    /// startup file bash reads, so a replay that misses a file does not degrade the
+    /// shim — it silently deletes the user's environment. Every clause below is a
+    /// thing that has to be true before this may ship, asserted by running bash
+    /// rather than by reading it.
+    #[test]
+    fn a_bash_session_runs_the_users_startup_and_still_wins_the_path() {
+        let Some(bash) = capable_bash() else {
+            // Not `assert!(CI.is_none())` like the zsh test: GitHub's macOS runners
+            // ship only bash 3.2, which cannot do this at all, so requiring it there
+            // would fail the suite for a platform where the feature is correctly
+            // switched off. Linux CI does have bash 5, and that is where this runs.
+            assert!(
+                std::env::var_os("CI").is_none() || !cfg!(target_os = "linux"),
+                "no bash with the posix/ENV handoff in Linux CI — this test is the \
+                 only thing pinning the bash mechanism"
+            );
+            eprintln!("no bash with the posix/ENV handoff on this machine — skipping");
+            return;
+        };
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let home = tmp.path().join("home");
+        let shim = tmp.path().join("shim");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&shim).unwrap();
+        std::fs::write(shim.join("open"), "#!/bin/sh\necho shim\n").unwrap();
+        set_mode(&shim.join("open"), 0o755).unwrap();
+
+        // A startup as unhelpful as a real one: the profile sources the rc file (the
+        // near-universal convention) and the rc file *rebuilds* `PATH` from scratch
+        // and exports a `$BROWSER` of its own — the two things that defeat every
+        // simpler approach. `VELD_TEST_BASHRC` counts rather than flags, so a
+        // double source is a failure and not a pass.
+        std::fs::write(
+            home.join(".bash_profile"),
+            "export VELD_TEST_PROFILE=ran\n[ -r ~/.bashrc ] && . ~/.bashrc\n",
+        )
+        .unwrap();
+        std::fs::write(
+            home.join(".bashrc"),
+            "export VELD_TEST_BASHRC=$((VELD_TEST_BASHRC+1))\nPATH=/usr/bin:/bin\nexport BROWSER=firefox\n",
+        )
+        .unwrap();
+
+        let handoff = tmp.path().join("veldenv.bash");
+        std::fs::write(&handoff, bashenv()).unwrap();
+
+        let mut child = std::process::Command::new(&bash)
+            // The long option **first** — `bash -l -i --posix` is a usage error, and
+            // getting this backwards produces a shell that never starts.
+            .args(["--posix", "-l", "-i"])
+            // In the fake home, not the crate directory: bash's default `PS1`
+            // carries the working directory, and this test runs inside a checkout
+            // whose path contains "veld".
+            .current_dir(&home)
+            .env_clear()
+            .env("HOME", &home)
+            .env("PATH", "/usr/bin:/bin")
+            .env("TERM", "dumb")
+            .env("ENV", &handoff)
+            .env("VELD_SHIM_DIR", &shim)
+            .env("VELD_SHIM_BROWSER", shim.join("veld-open"))
+            .env("BROWSER", shim.join("veld-open"))
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("run bash");
+        {
+            use std::io::Write;
+            child
+                .stdin
+                .as_mut()
+                .unwrap()
+                .write_all(
+                    b"command -v open\n\
+                      echo startup=$VELD_TEST_PROFILE/ran$VELD_TEST_BASHRC\n\
+                      echo env=${ENV-unset}\n\
+                      echo browser=$BROWSER original=$VELD_BROWSER_ORIGINAL\n\
+                      echo posix=$(set -o | awk '/^posix/{print $2}')\n\
+                      echo login=$(shopt -q login_shell && echo yes || echo no)\n\
+                      exit\n",
+                )
+                .unwrap();
+        }
+        let out = child.wait_with_output().expect("bash exit");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+
+        // The shim wins even though `.bashrc` rebuilt PATH after the profile — the
+        // whole point of running last.
+        assert!(
+            stdout.contains(&shim.join("open").display().to_string()),
+            "the shim must resolve first even though .bashrc rebuilt PATH; saw:\n{stdout}\n{stderr}"
+        );
+        // **Both** of the user's files ran, and `.bashrc` ran exactly **once** —
+        // this profile sources it, so veld must not source it a second time and
+        // duplicate whatever it does.
+        assert!(
+            stdout.contains("startup=ran/ran1"),
+            "the user's startup files must each run exactly once: {stdout:?} {stderr:?}"
+        );
+        // `$ENV` handed back, so a nested posix shell is not wrapped.
+        assert!(
+            stdout.contains("env=unset"),
+            "ENV must be handed back: {stdout:?}"
+        );
+        // The rc file's own `export BROWSER=firefox` ran after veld's environment was
+        // handed over; the file takes it back and keeps theirs for the fall-through.
+        assert!(
+            stdout.contains(&format!("browser={}", shim.join("veld-open").display())),
+            "the rc file's BROWSER must be re-pointed at the shim: {stdout:?}"
+        );
+        assert!(
+            stdout.contains("original=firefox"),
+            "the user's own browser must be kept for the passthrough: {stdout:?}"
+        );
+        // posix mode is how veld got in, not a mode the user asked for.
+        assert!(
+            stdout.contains("posix=off"),
+            "posix mode must be left behind: {stdout:?}"
+        );
+        // …and `-l` survived, which is what makes the replay pick the profile branch.
+        assert!(
+            stdout.contains("login=yes"),
+            "the shell must still be a login shell: {stdout:?}"
+        );
+        // Nothing of veld's may complain at the top of every terminal. Keyed on the
+        // generated file's *name*, which is what bash puts in front of an error it
+        // raises while sourcing it — a bare "veld" match hits the prompt, since the
+        // echoed `PS1` carries a path.
+        let veld_errors: Vec<&str> = stderr
+            .lines()
+            .filter(|l| l.contains("veldenv.bash"))
+            .collect();
+        assert!(
+            veld_errors.is_empty(),
+            "veld's own file errored: {veld_errors:?}"
+        );
+    }
+
+    /// A bash user whose `~/.bashrc` is not reached by any profile still gets it.
+    ///
+    /// The shape this feature exists for, and the one it shipped broken for: no
+    /// `~/.bash_profile` (macOS ships none), a `~/.profile` that does not source
+    /// `~/.bashrc`, and every alias and function in `~/.bashrc`. A login bash reads
+    /// the profile and stops, so following bash exactly gives the user a shell with
+    /// none of the config they picked bash *for*. Verified against a real bash
+    /// because the whole question is what the shell actually reads.
+    #[test]
+    fn a_bashrc_no_profile_reaches_is_still_loaded_and_only_once() {
+        let Some(bash) = capable_bash() else {
+            assert!(
+                std::env::var_os("CI").is_none() || !cfg!(target_os = "linux"),
+                "no bash with the posix/ENV handoff in Linux CI"
+            );
+            eprintln!("no bash with the posix/ENV handoff on this machine — skipping");
+            return;
+        };
+        let tmp = tempfile::TempDir::new().unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        // Exactly the reported machine: `.profile` exists and never mentions the
+        // rc file, so bash's own order reaches `.bashrc` on no path at all.
+        std::fs::write(home.join(".profile"), "export VELD_TEST_PROFILE=ran\n").unwrap();
+        std::fs::write(
+            home.join(".bashrc"),
+            "export VELD_TEST_BASHRC=$((VELD_TEST_BASHRC+1))\nveld_test_fn() { :; }\n",
+        )
+        .unwrap();
+        let handoff = tmp.path().join("veldenv.bash");
+        std::fs::write(&handoff, bashenv()).unwrap();
+
+        let mut child = std::process::Command::new(&bash)
+            .args(["--posix", "-l", "-i"])
+            .current_dir(&home)
+            .env_clear()
+            .env("HOME", &home)
+            .env("PATH", "/usr/bin:/bin")
+            .env("TERM", "dumb")
+            .env("ENV", &handoff)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("run bash");
+        {
+            use std::io::Write;
+            child
+                .stdin
+                .as_mut()
+                .unwrap()
+                .write_all(
+                    b"echo startup=$VELD_TEST_PROFILE/ran$VELD_TEST_BASHRC\n\
+                      echo fn=$(type -t veld_test_fn)\n\
+                      exit\n",
+                )
+                .unwrap();
+        }
+        let out = child.wait_with_output().expect("bash exit");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            stdout.contains("startup=ran/ran1"),
+            "the profile AND the unreferenced .bashrc must each run exactly once: {stdout:?}"
+        );
+        // The thing the user actually notices: their function is there.
+        assert!(
+            stdout.contains("fn=function"),
+            "a function defined in .bashrc must be available: {stdout:?}"
+        );
+    }
+
+    #[test]
+    fn the_bash_handoff_needs_the_probe_the_setting_and_the_file() {
+        // Every gate, because the failure mode of getting one wrong is a bash session
+        // in posix mode reading none of the user's startup.
+        let with_handoff = session_env("s", "/bin/bash", true, true, true);
+        let no_probe = session_env("s", "/bin/bash", true, true, false);
+        let no_setting = session_env("s", "/bin/bash", true, false, true);
+        assert!(
+            !no_probe.contains_key("ENV"),
+            "a bash that ignores $ENV must be handed none — it would only get posix mode"
+        );
+        assert!(
+            !no_setting.contains_key("ENV"),
+            "the off switch must be real"
+        );
+        // A zsh never gets `ENV`, and a bash never gets `ZDOTDIR`: two mechanisms,
+        // one shell each, so a change to either cannot leak into the other.
+        assert!(!with_handoff.contains_key("ZDOTDIR"));
+        assert!(!session_env("s", "/bin/zsh", true, true, true).contains_key("ENV"));
+
+        // The flag and the variable are decided together: `--posix` without an `$ENV`
+        // is a bash reading nothing at all.
+        assert!(
+            veld_core::shell::interactive_flags("/bin/bash", &with_handoff).is_empty()
+                || with_handoff.contains_key("ENV")
+        );
+        assert!(veld_core::shell::interactive_flags("/bin/bash", &no_probe).is_empty());
+        assert!(veld_core::shell::interactive_flags("/bin/zsh", &with_handoff).is_empty());
+    }
+
     #[test]
     fn the_session_id_is_always_exported() {
         // Even when no shim directory could be prepared: `veld open-url` run by
         // hand still needs to know which terminal it is in.
-        let env = session_env("abc-123", "/bin/zsh", true, true);
+        let env = session_env("abc-123", "/bin/zsh", true, true, false);
         assert_eq!(
             env.get("VELD_PTY_SESSION").map(String::as_str),
             Some("abc-123")

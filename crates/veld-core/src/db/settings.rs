@@ -317,6 +317,7 @@ impl LogTimeZone {
 /// written by a newer client survives being read and rewritten by an older one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SettingKey {
+    TerminalShell,
     TerminalFontSize,
     TerminalFontFamily,
     TerminalCursorStyle,
@@ -355,6 +356,7 @@ impl SettingKey {
     /// claim is impossible. `as_str` and `validate` are exhaustive matches and need
     /// no help; these two do.
     pub const ALL: &'static [SettingKey] = &[
+        Self::TerminalShell,
         Self::TerminalFontSize,
         Self::TerminalFontFamily,
         Self::TerminalCursorStyle,
@@ -382,6 +384,7 @@ impl SettingKey {
 
     pub fn as_str(&self) -> &str {
         match self {
+            Self::TerminalShell => "terminal.shell",
             Self::TerminalFontSize => "terminal.fontSize",
             Self::TerminalFontFamily => "terminal.fontFamily",
             Self::TerminalCursorStyle => "terminal.cursorStyle",
@@ -411,6 +414,7 @@ impl SettingKey {
 
     pub fn parse(key: &str) -> Self {
         match key {
+            "terminal.shell" => Self::TerminalShell,
             "terminal.fontSize" => Self::TerminalFontSize,
             "terminal.fontFamily" => Self::TerminalFontFamily,
             "terminal.cursorStyle" => Self::TerminalCursorStyle,
@@ -552,6 +556,21 @@ impl SettingKey {
             }
             Self::TerminalCursorStyle => {
                 one_of(value, &["block", "underline", "bar"]).ok_or_else(bad)?
+            }
+            // Which shell a terminal opens. Validated by **shape** — `"auto"` or an
+            // absolute path — and never by existence, which is
+            // `veld_core::shell::resolve`'s job at spawn time: a value must be
+            // storable while its shell is mid-install, and a shell that is later
+            // uninstalled must not leave a user unable to open the terminal they
+            // would fix the setting from. Rejected rather than coerced, like every
+            // enum here: the daemon acts on this directly, so a stored value it
+            // would silently ignore is worse than a refused write.
+            Self::TerminalShell => {
+                let s = value.as_str().ok_or_else(bad)?.trim();
+                if !crate::shell::is_valid_preference(s) {
+                    return Err(bad());
+                }
+                Value::from(s)
             }
             Self::WorktreeMarkerStyle => one_of(value, &["color", "emoji"]).ok_or_else(bad)?,
             // Where a *new* worktree's branch is cut from. Rejected rather than
@@ -792,6 +811,12 @@ fn one_of(value: &Value, allowed: &[&str]) -> Option<Value> {
 /// receives a complete document and never needs a default of its own.
 pub fn defaults() -> BTreeMap<String, Value> {
     [
+        // `auto` — the user's login shell, which is the right answer for almost
+        // everyone and is exactly the previous behaviour. The setting exists for
+        // the minority whose login shell is not the shell they work in: macOS has
+        // shipped zsh since Catalina, so a bash user's `~/.bashrc` aliases,
+        // completions and tool integrations were loading in no veld terminal.
+        (SettingKey::TerminalShell, Value::from(crate::shell::AUTO)),
         (SettingKey::TerminalFontSize, Value::from(12)),
         (
             SettingKey::TerminalFontFamily,
@@ -1020,6 +1045,26 @@ impl Db {
         std::time::Duration::from_secs(minutes as u64 * 60)
     }
 
+    /// The shell a terminal session should spawn — already resolved, so every
+    /// caller gets the same answer and none of them has to know what `"auto"`
+    /// means.
+    ///
+    /// Read by the daemon (it is the daemon that spawns the shell), so it takes
+    /// the same "anything that is not a value we accept is the default" path the
+    /// other daemon-read keys take rather than trusting the stored bytes: a
+    /// preference written by a newer build, or one whose shell has since been
+    /// uninstalled, falls back to [`crate::shell::auto_shell`] instead of failing
+    /// the spawn.
+    pub fn terminal_shell(&self) -> String {
+        crate::shell::resolve(
+            self.setting(&SettingKey::TerminalShell)
+                .ok()
+                .flatten()
+                .as_ref()
+                .and_then(|v| v.as_str()),
+        )
+    }
+
     /// Whether a URL a terminal produces opens in a Veld browser pane.
     ///
     /// Read by the daemon (it is the daemon that routes the URL — see
@@ -1217,6 +1262,44 @@ mod tests {
             .patch_settings(&patch(&[("terminal.cursorStyle", Value::from("wobble"))]))
             .unwrap_err();
         assert!(matches!(err, DbError::InvalidSetting { .. }));
+    }
+
+    #[test]
+    fn the_terminal_shell_stores_a_path_and_resolves_a_missing_one() {
+        let (_dir, db) = test_db();
+        // Nothing stored is `auto`, and `auto` resolves to the login shell — the
+        // behaviour every existing user had before this key existed.
+        assert_eq!(
+            db.settings().unwrap()["terminal.shell"],
+            Value::from(crate::shell::AUTO)
+        );
+        assert_eq!(db.terminal_shell(), crate::shell::auto_shell());
+
+        // A path is stored verbatim, because it is what gets spawned.
+        db.patch_settings(&patch(&[(
+            "terminal.shell",
+            Value::from("/nonexistent/sh"),
+        )]))
+        .unwrap();
+        assert_eq!(
+            db.settings().unwrap()["terminal.shell"],
+            Value::from("/nonexistent/sh")
+        );
+        // …but a shell that is not there resolves to the login shell rather than
+        // being spawned. The preference is kept: the machine may get it back, and
+        // deleting a user's choice because a binary is momentarily absent is not
+        // ours to do.
+        assert_eq!(db.terminal_shell(), crate::shell::auto_shell());
+
+        // A bare name is refused — it would resolve against the daemon's bare
+        // service PATH, which is a different binary from the one that name finds
+        // in the user's terminal. So is anything that is not a string.
+        for bad in [Value::from("bash"), Value::from(""), Value::from(7)] {
+            let e = db
+                .patch_settings(&patch(&[("terminal.shell", bad.clone())]))
+                .expect_err(&format!("{bad} must be refused"));
+            assert!(matches!(e, DbError::InvalidSetting { .. }), "{e}");
+        }
     }
 
     #[test]

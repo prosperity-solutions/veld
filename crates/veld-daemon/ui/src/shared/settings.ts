@@ -113,6 +113,11 @@ const FALLBACK = {
   // search, so falling back to "search is off" would print a promise this client
   // then refuses to keep.
   searchUrl: "https://www.google.com/search?q=%s",
+  // "Work it out from the login shell" — both the shipped default and the
+  // previous release's behaviour, so the file's two rules agree here. Nothing on
+  // this side interprets the value: it names a shell the *daemon* spawns, and the
+  // picker is the only reader.
+  terminalShell: "auto",
 } as const;
 
 function strings(doc: SettingsDoc, key: string): string[] {
@@ -303,6 +308,24 @@ export function quickSwitchPrefs(doc: SettingsDoc): QuickSwitchPrefs {
  */
 export function detachGraceMinutes(doc: SettingsDoc): number {
   return num(doc, "terminal.detachGraceMinutes", FALLBACK.detachGraceMinutes);
+}
+
+/**
+ * Which shell a terminal opens: `"auto"` (the user's login shell) or an absolute
+ * path.
+ *
+ * Deliberately **not** part of [`TerminalPrefs`]: that bundle is the set of xterm
+ * options `applyTerminalPrefs` pushes into every live terminal, and this is not one
+ * — it is chosen by the daemon at spawn time and cannot change a running shell.
+ * Putting it there would invite a re-render that looked like it did something.
+ *
+ * Returned raw rather than validated against the discovered list. The list comes
+ * from `GET /api/shells` and is what this machine *has*; a stored path that is not
+ * on it is a shell that was uninstalled or lives somewhere unusual, and the picker
+ * shows it as a custom path rather than silently resetting a choice the user made.
+ */
+export function terminalShell(doc: SettingsDoc): string {
+  return str(doc, "terminal.shell", FALLBACK.terminalShell);
 }
 
 /**

@@ -2319,8 +2319,10 @@ browser, run logs, node health); `ide.panes` lets a project add its own to the
 `+` menu, the pane chooser and the ⌘K palette. Today a declared pane is always a
 **terminal** that runs the project's command inside your login+interactive shell.
 
-A pane command runs as `$SHELL -l -i -c '<command>'` — the same shell a plain
-terminal opens — so it inherits everything your `.zprofile`/`.zshrc` export
+A pane command runs as `<shell> -l -i -c '<command>'` — the same shell a plain
+terminal opens, which since the `terminal.shell` setting (*Settings → Terminal →
+Shell*) means the shell **you chose**, defaulting to the login shell `$SHELL`
+names — so it inherits everything your `.zprofile`/`.zshrc`/`.bashrc` export
 (model tokens, `JAVA_HOME`, tool paths) exactly as if you had typed it in a
 terminal. That is why an agent pane picks up your environment while a command
 the daemon spawns without the wrapper would not (see [`env`](#env) for the

@@ -25,7 +25,97 @@ use tracing::warn;
 use super::management::{check_csrf, open_db};
 
 pub fn routes() -> Router {
-    Router::new().route("/api/settings", get(get_settings).patch(patch_settings))
+    Router::new()
+        .route("/api/settings", get(get_settings).patch(patch_settings))
+        .route("/api/shells", get(get_shells))
+        .route("/api/shells/intercept", get(get_shell_intercept))
+}
+
+/// Whether `open`/`xdg-open` are **actually** caught in the user's chosen shell.
+///
+/// Asks the shell, rather than reasoning about it. veld has a startup handoff for
+/// zsh (`ZDOTDIR`) and for a bash that honours `$ENV` in posix mode, and none for
+/// fish, nushell or macOS's bash 3.2 — but even where there is one it can lose: a
+/// `.zshrc` that clears `precmd_functions`, a `.bashrc` that rebuilds `PATH` in a
+/// way veld's line cannot survive. Every one of those failures is silent, and the
+/// user finds out when an agent's `open <url>` goes to Safari instead of a pane.
+///
+/// So this spawns the real shell, with the environment a real session would get,
+/// and reports what `open` resolves to. `works: null` means the shell could not be
+/// asked — deliberately distinct from `false`, because "we do not know" must not be
+/// shown to a user as "this is broken".
+///
+/// Its own endpoint rather than a field on `/api/shells`, because it costs a login
+/// shell (sub-second normally, up to 10s on a stalled rc file) and the picker's list
+/// must stay instant. Uncached on purpose: the whole point is that someone who
+/// pastes the suggested line can reopen the dialog and see it go green.
+async fn get_shell_intercept() -> Result<Json<Value>, StatusCode> {
+    let db = open_db()?;
+    let shell = db.terminal_shell();
+    let open_in_app = db.terminal_open_urls_in_app();
+    let intercept = db.terminal_intercept_system_open();
+    let bash_handoff = intercept
+        && open_in_app
+        && veld_core::shell::kind(&shell) == veld_core::shell::Kind::Bash
+        && veld_core::shell::supports_posix_env_handoff(&shell).await;
+    // The session id is synthetic: nothing in the probe reaches `veld open-url`,
+    // which is the only consumer, and minting a real one would register a terminal
+    // that does not exist.
+    let env = super::pty::shims::session_env(
+        "settings-probe",
+        &shell,
+        open_in_app,
+        intercept,
+        bash_handoff,
+    );
+    let shim_dir = env.get("VELD_SHIM_DIR").cloned();
+    let resolved = if open_in_app && intercept && shim_dir.is_some() {
+        veld_core::shell::resolved_open(&shell, &env).await
+    } else {
+        None
+    };
+    // `starts_with` on the directory, not equality with the file: the shim is
+    // `<dir>/open`, and a resolution that landed anywhere else in that directory is
+    // still veld's.
+    let works = match (&resolved, &shim_dir) {
+        (Some(path), Some(dir)) => Some(path.starts_with(dir.as_str())),
+        _ => None,
+    };
+    Ok(Json(serde_json::json!({
+        "shell": shell,
+        "name": std::path::Path::new(&shell)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(&shell),
+        "enabled": open_in_app && intercept,
+        "works": works,
+        "resolved": resolved,
+        // What to paste, and where. Only sent when it would help — a hint beside a
+        // working feature is noise that teaches people to ignore hints.
+        "hint": (works == Some(false)).then(|| {
+            let (file, line) = veld_core::shell::path_hint(&shell);
+            serde_json::json!({ "file": file, "line": line })
+        }),
+    })))
+}
+
+/// The shells this machine has, for the `terminal.shell` picker.
+///
+/// A separate endpoint rather than a field in the settings document, because it is
+/// not a setting: it is what the *machine* can offer, it changes when someone
+/// installs a shell rather than when someone saves a preference, and probing the
+/// filesystem on every settings read (which every client does on every window
+/// focus) would be a directory scan per focus.
+///
+/// Reports `auto` alongside the list so the picker can label its default with the
+/// shell it actually resolves to — "Automatic (zsh)" is the answer to the question
+/// this feature exists for, and the client must not compute it from `$SHELL`,
+/// which in a browser it does not have and in Veld Desktop is Electron's.
+async fn get_shells() -> Json<Value> {
+    Json(serde_json::json!({
+        "auto": veld_core::shell::auto_shell(),
+        "shells": veld_core::shell::discover(),
+    }))
 }
 
 /// Every setting's **effective** value — the Rust defaults with any stored rows
@@ -76,6 +166,17 @@ async fn patch_settings(
             StatusCode::INTERNAL_SERVER_ERROR
         }
     })?;
+    // `terminal.shell` is read by one thing that cannot re-read it per call: the
+    // login shell `veld_core::user_path` spawns to learn the user's `PATH`, which
+    // lives in a crate the gateway and the CLI link too and therefore holds no
+    // database handle. Re-published here so a change takes effect at the next
+    // resolution rather than at the next daemon restart. Terminals need nothing —
+    // `mint_ticket` reads the setting per session.
+    //
+    // Unconditional rather than gated on the key being present in the patch: the
+    // effective value is what matters and this is one database read, where a
+    // `patch.contains_key` gate is a second place that has to know the key's name.
+    veld_core::user_path::set_preferred_shell(Some(db.terminal_shell()));
     // Echo the full effective document back, so the caller applies exactly what
     // was stored rather than what it asked for — the clamp is invisible otherwise
     // and a slider would sit at a value the daemon never accepted.
@@ -144,6 +245,38 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn the_shell_list_names_what_auto_resolves_to() {
+        // The picker's default row reads "Automatic (<name>)", and the client
+        // cannot work that name out itself: a browser has no `$SHELL`, and Veld
+        // Desktop's is Electron's. So `auto` has to be in the payload, and it has
+        // to be a value that could actually be spawned.
+        let res = routes()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/shells")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(res.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let doc: Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            doc["auto"].as_str().is_some_and(|s| s.starts_with('/')),
+            "{doc}"
+        );
+        let shells = doc["shells"].as_array().expect("a list of shells");
+        assert!(!shells.is_empty(), "no shell found on this machine: {doc}");
+        for shell in shells {
+            assert!(shell["path"].as_str().is_some_and(|p| p.starts_with('/')));
+            assert!(shell["name"].as_str().is_some_and(|n| !n.is_empty()));
+        }
     }
 
     #[tokio::test]
