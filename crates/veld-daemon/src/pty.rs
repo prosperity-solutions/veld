@@ -3386,7 +3386,16 @@ mod tests {
     /// is present everywhere, reads no user startup files, and has no
     /// first-run anything. A test that wants to exercise a *particular* shell
     /// says so itself, as the bash and zsh handoff tests in `pty::shims` do.
-    const TEST_SHELL: &str = "/bin/sh";
+    ///
+    /// `/bin/bash` rather than `/bin/sh`, because several of these tests assert on
+    /// **job control and hangup** — a background job survives a detach, the shell
+    /// dies on close — and `/bin/sh` is dash on Debian and Ubuntu, which does not
+    /// answer those the way an interactive shell does. bash is on every platform
+    /// this repo supports (3.2 on macOS, 5.x on Linux) and needs no rc file to
+    /// behave. The daemon's own bash `$ENV` handoff cannot reach these tests: it
+    /// requires a shim directory, and a test binary resolves no `veld` CLI to
+    /// build one.
+    const TEST_SHELL: &str = "/bin/bash";
 
     use super::*;
 
