@@ -653,13 +653,23 @@ jobs:
       - name: Run full integration tests
         run: |
           chmod +x tests/integration.sh
-          sudo ./tests/integration.sh \
+          # `VELD_DB_PATH` because this runs the **cargo-built** binary under `sudo`, and
+          # a cargo-built binary resolves its database through `Db::cargo_target_db` — the
+          # worktree's own `.veld-dev/veld-cargo.db`. Run as root, that creates the file
+          # root-owned, and every later step in this job runs as the runner: SQLite then
+          # answers `unable to open database file` for the rest of the job. It cost a red
+          # `Integration Tests (macOS)` on #279, and it is latent on `main` — the
+          # unprivileged block that trips over it is skipped whenever Caddy fails to start,
+          # which in CI is most of the time, so the bug only surfaces on the runs that get
+          # far enough. Giving root its own database is the fix rather than chowning the
+          # shared one afterwards: two users sharing one SQLite file is the problem.
+          sudo env VELD_DB_PATH="${RUNNER_TEMP:-/tmp}/veld-ci-root.db" ./tests/integration.sh \
             --veld-bin "$(pwd)/target/debug/veld" \
             --project-dir "$(pwd)/testproject"
 
       - name: "Cleanup after integration tests"
         run: |
-          sudo "$(pwd)/target/debug/veld" uninstall 2>/dev/null || true
+          sudo env VELD_DB_PATH="${RUNNER_TEMP:-/tmp}/veld-ci-root.db" "$(pwd)/target/debug/veld" uninstall 2>/dev/null || true
           curl -s -X POST http://localhost:2019/stop 2>/dev/null || true
           sudo rm -rf "$HOME/.veld" "$HOME/.local/lib/veld" /usr/local/lib/veld 2>/dev/null || true
           sudo chown -R "$(whoami)" "$HOME/.local" 2>/dev/null || true
@@ -772,7 +782,8 @@ jobs:
           set -e
           VELD="$(pwd)/target/debug/veld"
           echo "=== Privileged setup ==="
-          sudo $VELD setup privileged
+          # Root gets its own database — see the integration step above.
+          sudo env VELD_DB_PATH="${RUNNER_TEMP:-/tmp}/veld-ci-root.db" $VELD setup privileged
           echo ""
 
           echo "=== Run doctor (diagnostics) ==="
@@ -812,7 +823,8 @@ jobs:
           mkdir -p "$HOME/.local/lib/veld"
           cp /tmp/caddy-preserve "$HOME/.local/lib/veld/caddy" 2>/dev/null || true
           chmod +x "$HOME/.local/lib/veld/caddy" 2>/dev/null || true
-          sudo $VELD setup privileged
+          # Root gets its own database — see the integration step above.
+          sudo env VELD_DB_PATH="${RUNNER_TEMP:-/tmp}/veld-ci-root.db" $VELD setup privileged
           sleep 2
           if sudo launchctl print system/dev.veld.helper | grep -qE '^[[:space:]]*pid = [1-9]'; then
             echo "Helper job still registered and running after re-setup"
