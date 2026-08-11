@@ -57,6 +57,7 @@ import {
 } from "@tabler/icons-react";
 
 import type { SettingsDoc } from "../api";
+import { searchTarget } from "../panes/model";
 import { Modal } from "./dialogs";
 import {
   availableFonts,
@@ -68,6 +69,7 @@ import {
   gitCreateFrom,
   hideDisabledActions,
   logsTimeZone,
+  searchUrl,
   terminalInterceptSystemOpen,
   runHistoryDays,
   terminalOpenUrlsInApp,
@@ -214,6 +216,17 @@ export function SettingsDialog(props: {
   // whole list if one entry is not an origin, and its error lands in `props.error`.
   const exemptValue = externalOrigins(settings ?? {});
   const [exempt, setExempt] = useState(exemptValue.join("\n"));
+  // Committed on blur like the other text fields. Empty is a real value here — it
+  // turns search off — so this one is never coerced back to the default on the way
+  // out; that is why `searchUrl` reads the key itself rather than going through the
+  // shared `str()` helper.
+  const searchValue = searchUrl(settings ?? {});
+  const [search, setSearch] = useState(searchValue);
+  // Shown under the field as it is typed, and the same predicate the blur handler
+  // refuses on — so the reason the value did not save is on screen rather than inferred
+  // from nothing having happened. Empty is not broken; it is the off switch.
+  const searchBroken =
+    search.trim() !== "" && searchTarget(search.trim(), "veld") === null;
   // Availability is probed against the DOM, so compute it once per open rather
   // than on every render — the list cannot change while the dialog is up.
   const fonts = useMemo(() => availableFonts(), []);
@@ -240,6 +253,7 @@ export function SettingsDialog(props: {
     setRetention(retentionValue);
     setHistory(historyValue);
     setExempt(exemptValue.join("\n"));
+    setSearch(searchValue);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [settings]);
 
@@ -890,6 +904,45 @@ export function SettingsDialog(props: {
                   }
                 />
               </Row>
+              {/* Full width rather than a `Row`: a URL needs the room, and the
+                  explanation carries two things a trailing help line cannot — what
+                  %s means, and that empty is a supported answer. */}
+              <Stack gap={2}>
+                <Text size="sm">Search from the address bar</Text>
+                <Text size="xs" c="dimmed">
+                  Where a browser pane sends words that are not an address, so you
+                  can look something up in the pane you are working in.{" "}
+                  <code>%s</code> is where the words go — the same spelling a
+                  browser's own custom-engine field uses, so a URL copied from one
+                  works here. Leave it empty to turn search off; the address bar then
+                  only accepts addresses.
+                </Text>
+              </Stack>
+              <TextInput
+                size="xs"
+                spellCheck={false}
+                placeholder="https://www.google.com/search?q=%s"
+                value={search}
+                disabled={locked}
+                onChange={(e) => setSearch(e.currentTarget.value)}
+                error={searchBroken ? "Veld cannot build a search URL from this" : undefined}
+                onBlur={() => {
+                  const next = search.trim();
+                  // Nothing to say if it is unchanged — including opening the dialog,
+                  // clicking through the field and leaving.
+                  if (next === searchValue) return;
+                  // **Validated here with the parser that will actually use it.** The
+                  // daemon has its own rules, but they are hand-written and review found
+                  // a hole in them three rounds running; this runs `searchTarget` — the
+                  // same function a pane calls, so the same `new URL()` — against a probe
+                  // query, which makes "would this template ever work" a question answered
+                  // by the thing that has to answer it. Without it, a template that parses
+                  // nowhere is stored happily and then fails on the user's next query,
+                  // blaming the query.
+                  if (next !== "" && searchTarget(next, "veld") === null) return;
+                  set({ "browser.searchUrl": next });
+                }}
+              />
             </Stack>
           </Tabs.Panel>
         </Tabs>

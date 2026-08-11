@@ -216,6 +216,33 @@ pub const MAX_EXTERNAL_ORIGINS: usize = 64;
 /// scheme and port add a dozen; past that it is not an origin.
 const MAX_ORIGIN_LEN: usize = 280;
 
+/// Where a browser pane sends words that are not an address.
+///
+/// A pane's address bar takes http(s) URLs and nothing else
+/// ([`crate::url`]'s rules are not involved; the UI's `normalizeBrowserUrl` is).
+/// `react hooks docs` therefore used to be an error, which made the one thing a
+/// blank pane is *for* — reading something while you work — the one thing it
+/// refused. This template is where that text goes instead.
+///
+/// `%s` is the query, percent-encoded by the caller. Google because it is the
+/// engine a browser's own bar would have used, and the alternative to picking one
+/// is a blank pane that still dead-ends until a user finds a setting they have no
+/// reason to look for.
+///
+/// **Empty string means "no search"**, and that is a supported value rather than a
+/// broken one: the address bar goes back to refusing non-addresses, with an error
+/// that says what a full address looks like. It is the off switch for anyone who
+/// does not want a keystroke in a dev tool reaching an engine at all.
+pub const DEFAULT_SEARCH_URL: &str = "https://www.google.com/search?q=%s";
+
+/// The token a search template substitutes the query for — the convention every
+/// browser's custom-engine field uses, so a URL copied from one works here.
+pub const SEARCH_QUERY_TOKEN: &str = "%s";
+
+/// Longest accepted `browser.searchUrl`. Engine URLs carry parameters, so this is
+/// looser than an origin; past it, it is not a search template.
+const MAX_SEARCH_URL_LEN: usize = 400;
+
 /// Bounds on a key this binary does not recognise.
 ///
 /// Unknown keys are preserved rather than rejected (see the module docs), which
@@ -310,6 +337,7 @@ pub enum SettingKey {
     BrowserQuickSwitchResponsive,
     BrowserQuickSwitchColorScheme,
     BrowserExternalOrigins,
+    BrowserSearchUrl,
     UiHideDisabledActions,
     GitCreateFrom,
     Unknown(String),
@@ -347,6 +375,7 @@ impl SettingKey {
         Self::BrowserQuickSwitchResponsive,
         Self::BrowserQuickSwitchColorScheme,
         Self::BrowserExternalOrigins,
+        Self::BrowserSearchUrl,
         Self::UiHideDisabledActions,
         Self::GitCreateFrom,
     ];
@@ -373,6 +402,7 @@ impl SettingKey {
             Self::BrowserQuickSwitchResponsive => "browser.quickSwitch.responsive",
             Self::BrowserQuickSwitchColorScheme => "browser.quickSwitch.colorScheme",
             Self::BrowserExternalOrigins => "browser.externalOrigins",
+            Self::BrowserSearchUrl => "browser.searchUrl",
             Self::UiHideDisabledActions => "ui.hideDisabledActions",
             Self::GitCreateFrom => "git.createFrom",
             Self::Unknown(k) => k,
@@ -401,6 +431,7 @@ impl SettingKey {
             "browser.quickSwitch.responsive" => Self::BrowserQuickSwitchResponsive,
             "browser.quickSwitch.colorScheme" => Self::BrowserQuickSwitchColorScheme,
             "browser.externalOrigins" => Self::BrowserExternalOrigins,
+            "browser.searchUrl" => Self::BrowserSearchUrl,
             "ui.hideDisabledActions" => Self::UiHideDisabledActions,
             "git.createFrom" => Self::GitCreateFrom,
             other => Self::Unknown(other.to_string()),
@@ -511,6 +542,14 @@ impl SettingKey {
                 }
                 Value::Array(out)
             }
+            // Rejected rather than coerced: there is no nearest sensible engine, and a
+            // template that stored but never worked would send every query nowhere
+            // with nothing to say why. Stored trimmed, which is the one
+            // normalisation — the field round-trips its own value.
+            Self::BrowserSearchUrl => {
+                let s = value.as_str().ok_or_else(bad)?;
+                Value::from(parse_search_template(s).map_err(|_| bad())?)
+            }
             Self::TerminalCursorStyle => {
                 one_of(value, &["block", "underline", "bar"]).ok_or_else(bad)?
             }
@@ -561,6 +600,175 @@ impl SettingKey {
             }
         })
     }
+}
+
+/// Check a `browser.searchUrl` template, returning it trimmed.
+///
+/// Hand-rolled rather than parsed, for the reason [`crate::ide::parse_origin`] is:
+/// `veld-core` has no URL crate, and the two validators would disagree about
+/// oddities anyway. The rules are the small set that makes a template safe to
+/// navigate to.
+///
+/// The one that is not obvious: **`%s` may not appear in the host.**
+/// `https://%s.example.com/` would hand every word typed into an address bar the
+/// choice of which host to reach — a redirect gadget built out of a preference,
+/// and typing is how a user *avoids* thinking about hosts. The token belongs in
+/// the path or the query, which is where every real engine puts it.
+///
+/// An empty template is accepted and means search is off — see
+/// [`DEFAULT_SEARCH_URL`].
+pub fn parse_search_template(raw: &str) -> Result<String, String> {
+    let t = raw.trim();
+    if t.is_empty() {
+        return Ok(String::new());
+    }
+    // Bytes, and the message says bytes: `t.len()` is a byte count, so an engine on an
+    // IDN host (`https://поиск.рф/?q=%s`) gets half the budget a character count would
+    // give it. Saying "characters" made the refusal read as a lie about a template the
+    // author can see is shorter than that.
+    if t.len() > MAX_SEARCH_URL_LEN {
+        return Err(format!("longer than {MAX_SEARCH_URL_LEN} bytes"));
+    }
+    // Whitespace and controls, before anything else: a template carrying either is
+    // not a URL, and `char::is_control` also catches the newline that would let one
+    // stored value pose as two.
+    if t.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err("must not contain spaces or control characters".to_owned());
+    }
+    if !t.contains(SEARCH_QUERY_TOKEN) {
+        return Err(format!(
+            "must contain {SEARCH_QUERY_TOKEN} where the query goes"
+        ));
+    }
+    // Case-insensitively, because a scheme is: `HTTPS://duckduckgo.com/?q=%s` is a
+    // valid URL that the *client* accepts (`/^https?:\/\//i` in `panes/model.ts`), so a
+    // case-sensitive `strip_prefix` here refused it with "must start with http:// or
+    // https://" — a message the author can see is false.
+    let lower = t.to_ascii_lowercase();
+    let scheme_len = if lower.starts_with("https://") {
+        "https://".len()
+    } else if lower.starts_with("http://") {
+        "http://".len()
+    } else {
+        return Err("must start with http:// or https://".to_owned());
+    };
+    let host = t[scheme_len..]
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default()
+        .to_owned();
+    if host.is_empty() {
+        return Err("has no host".to_owned());
+    }
+    if host.contains(SEARCH_QUERY_TOKEN) {
+        return Err(format!(
+            "must not put {SEARCH_QUERY_TOKEN} in the host — it belongs in the path or query"
+        ));
+    }
+    // **The host has to be a host, not merely a non-empty span.** A template that
+    // passes here and then cannot be parsed by the client fails at the point of *use*,
+    // where the only thing the pane can say is "not an http(s) address: <what the user
+    // typed>" — it blames the query for a broken setting, and there is no path from
+    // that message back to this field. So the whole class is refused here: an empty
+    // authority (`https://:8080/`), a non-numeric or out-of-range port
+    // (`https://e.com:abc/`, `https://e.com:99999/`), and anything outside the
+    // characters a host may hold (`https://e.com]/`, `https://%/`).
+    check_search_host(&host)?;
+    Ok(t.to_owned())
+}
+
+/// The host span of a search template: `host[:port]`, or a bracketed IPv6 literal.
+///
+/// **Not a reimplementation of a URL parser, and not equivalent to one.** An earlier
+/// version of this comment claimed every spelling rejected here is one `new URL()`
+/// rejects too. That was false in three places and the third one cost a feature:
+/// `new URL()` accepts a port of `0`, accepts `https://../`, and **punycodes a
+/// non-ASCII hostname** — so an ASCII-only charset check refused
+/// `https://поиск.рф/?q=%s` outright, which is the very example the length rule above
+/// discusses as a case worth getting right.
+///
+/// So the charset test is a deny-list of the punctuation a hostname cannot hold, not an
+/// allow-list of ASCII: a browser resolves an IDN engine perfectly well, and this is not
+/// the place to have an opinion about scripts. What remains deliberately stricter than
+/// the parser is a port of `0` — it parses and cannot be connected to, and refusing it
+/// on the settings screen beats a template that silently never works.
+///
+/// **This function is the second line of defence, not the first.** Review found a defect
+/// in it in three consecutive rounds (`https://:8080/`, an ASCII-only host, then trailing
+/// junk after an IPv6 `]` plus an overflowing port), which is what hand-rolling a URL
+/// grammar earns. The first line is the settings dialog, which runs the *real* parser the
+/// pane will use (`searchTarget` in `panes/model.ts`) before it saves — see
+/// `SettingsDialog.tsx`. What is left here matters only for a write that does not come
+/// from our own UI, and its job is to reject the shapes it can state exactly rather than
+/// to be a URL parser.
+fn check_search_host(host: &str) -> Result<(), String> {
+    let (name, port) = match host.strip_prefix('[') {
+        // IPv6 literal: the brackets are what separate the address' own colons from the
+        // port separator, so the split has to happen after them.
+        Some(rest) => match rest.split_once(']') {
+            Some((inner, after)) => {
+                if inner.is_empty()
+                    || !inner
+                        .chars()
+                        .all(|c| c.is_ascii_hexdigit() || c == ':' || c == '.')
+                {
+                    return Err("is not a valid IPv6 address".to_owned());
+                }
+                // **Whatever follows the `]` has to be nothing or a port.** Mapping it
+                // through `strip_prefix(':')` alone turned trailing junk into "no port"
+                // and accepted `https://[::1]xyz/`, which the client's parser throws on.
+                let port = match after {
+                    "" => None,
+                    rest => Some(
+                        rest.strip_prefix(':')
+                            .ok_or_else(|| {
+                                format!("has {rest:?} after the ] where a port should be")
+                            })?
+                            .to_owned(),
+                    ),
+                };
+                (String::new(), port)
+            }
+            None => return Err("has an unclosed [ in the host".to_owned()),
+        },
+        None => match host.split_once(':') {
+            Some((name, port)) => (name.to_owned(), Some(port.to_owned())),
+            None => (host.to_owned(), None),
+        },
+    };
+    if let Some(port) = port {
+        // `matches!` over the parse, not `is_ok_and`: an all-digit port too big for a
+        // `u32` (`4294967296`) parses to `Err`, and `is_ok_and` reads `Err` as "not out
+        // of range" — so the one value most obviously out of range was the one accepted.
+        // The digit test stays, because `"+5".parse::<u32>()` is `Ok(5)` while the URL
+        // parser throws on it.
+        if port.is_empty()
+            || !port.chars().all(|c| c.is_ascii_digit())
+            || !matches!(port.parse::<u32>(), Ok(p) if (1..=65535).contains(&p))
+        {
+            return Err(format!("has {port:?} where a port number should be"));
+        }
+    }
+    if host.starts_with(':') {
+        return Err("has a port but no host".to_owned());
+    }
+    // Empty only for the IPv6 branch, which validated its own address above. A
+    // deny-list, for the reason in this function's docs: these are the characters that
+    // make `new URL()` throw or that would silently mean something other than a host
+    // (an escape, an authority delimiter, a second path). Everything else — including
+    // every non-ASCII script — is a hostname a browser can resolve.
+    // `/ ? #` and `:` are already gone (the host span was split on the first three, and
+    // on the colon just above); they stay for the reader, since this list is meant to be
+    // read as "what a host may not hold".
+    if name.chars().any(|c| {
+        matches!(
+            c,
+            '%' | '[' | ']' | '\\' | '/' | '?' | '#' | '@' | ':' | '<' | '>' | '^' | '|'
+        )
+    }) {
+        return Err("has characters in the host that a hostname cannot hold".to_owned());
+    }
+    Ok(())
 }
 
 fn clamp_i64(value: &Value, lo: i64, hi: i64) -> Option<i64> {
@@ -659,6 +867,15 @@ pub fn defaults() -> BTreeMap<String, Value> {
         // Empty: veld ships no opinion about which hosts need the real browser.
         // A default entry would be a guess about someone else's SSO provider.
         (SettingKey::BrowserExternalOrigins, Value::Array(Vec::new())),
+        // An engine *is* shipped, unlike the exempt list above, and the difference is
+        // which way the empty default fails. An empty exempt list works — every host
+        // opens in a pane, which is the feature. An empty search template makes a
+        // blank pane refuse the first thing anyone types into it, and the fix is a
+        // setting nobody knows to look for. See the constant.
+        (
+            SettingKey::BrowserSearchUrl,
+            Value::from(DEFAULT_SEARCH_URL),
+        ),
         // Keep until emptied. The trash deleting things on its own is opt-in, and
         // the default has to be the one that cannot surprise anybody.
         (
@@ -1129,6 +1346,101 @@ mod tests {
         db.patch_settings(&patch(&[("terminal.openUrlsInApp", Value::from(false))]))
             .unwrap();
         assert!(!db.terminal_open_urls_in_app());
+    }
+
+    #[test]
+    fn the_search_template_ships_an_engine_and_refuses_an_unnavigable_one() {
+        let (_dir, db) = test_db();
+        // Shipped on, unlike the exempt list: a blank pane that refuses the first
+        // thing typed into it is the bug this key exists to fix.
+        assert_eq!(
+            db.settings().unwrap()["browser.searchUrl"],
+            Value::from(DEFAULT_SEARCH_URL)
+        );
+
+        // Trimmed on the way in, and an empty template is the off switch rather than
+        // a rejection.
+        db.patch_settings(&patch(&[(
+            "browser.searchUrl",
+            Value::from("  https://duckduckgo.com/?q=%s  "),
+        )]))
+        .unwrap();
+        assert_eq!(
+            db.settings().unwrap()["browser.searchUrl"],
+            Value::from("https://duckduckgo.com/?q=%s")
+        );
+        // A scheme is case-insensitive, and the client's reader accepts this spelling —
+        // so refusing it here would make one stored value legal in one half of the app.
+        db.patch_settings(&patch(&[(
+            "browser.searchUrl",
+            Value::from("HTTPS://duckduckgo.com/?q=%s"),
+        )]))
+        .unwrap();
+        // The host shapes that *are* navigable stay accepted — the host check is a gate
+        // on the class of broken template above, not a narrowing of what an engine may
+        // be hosted on.
+        for good in [
+            "http://localhost:8080/search?q=%s",
+            "https://search.example.co.uk/?q=%s&hl=en",
+            "https://my_engine.internal/?q=%s",
+            "http://127.0.0.1:1234/?q=%s",
+            "http://[::1]:8080/?q=%s",
+            // An IDN engine. A browser punycodes this and resolves it; an ASCII-only
+            // charset check refused it, which removed a working engine for no reason —
+            // and contradicted the length rule's own worked example.
+            "https://поиск.рф/?q=%s",
+        ] {
+            db.patch_settings(&patch(&[("browser.searchUrl", Value::from(good))]))
+                .unwrap_or_else(|e| panic!("{good} must be accepted: {e}"));
+        }
+        db.patch_settings(&patch(&[("browser.searchUrl", Value::from(""))]))
+            .unwrap();
+        assert_eq!(db.settings().unwrap()["browser.searchUrl"], Value::from(""));
+
+        for bad in [
+            Value::from("https://example.com/search"), // no %s: searches nothing
+            Value::from("example.com/?q=%s"),          // no scheme
+            Value::from("ftp://example.com/?q=%s"),    // not http(s)
+            Value::from("https:///?q=%s"),             // no host
+            // Every one of these passes the %s/scheme/whitespace rules and is then
+            // refused by the *client's* URL parser, so it used to fail at the point of
+            // use with "not an http(s) address: <the user's own query>" — blaming the
+            // query for a broken setting, with no path back to the field. A setting
+            // that cannot work has to fail where it is typed.
+            Value::from("https://:8080/?q=%s"), // port, no host
+            Value::from("https://e.com:abc/?q=%s"), // port that is not a number
+            Value::from("https://e.com:99999/?q=%s"), // port out of range
+            Value::from("https://e.com:0/?q=%s"), // port zero
+            Value::from("https://e.com]/?q=%s"), // stray bracket
+            Value::from("https://%/?q=%s"),     // not a hostname
+            Value::from("https://[:1/?q=%s"),   // unclosed IPv6 bracket
+            Value::from("https://[zz::1]/?q=%s"), // not hex in an IPv6 literal
+            // The two this check accepted for three rounds. Trailing junk after the `]`
+            // was mapped to "no port" instead of refused, and an all-digit port too big
+            // for a `u32` parsed to `Err`, which the range test read as "in range".
+            Value::from("https://[::1]xyz/?q=%s"),
+            Value::from("https://[::1]a:8080/?q=%s"),
+            Value::from("https://e.com:4294967296/?q=%s"),
+            Value::from("https://e.com:99999999999/?q=%s"),
+            // `"+5".parse::<u32>()` is `Ok(5)`, so the digit test is what refuses this —
+            // the URL parser throws on it.
+            Value::from("https://e.com:+5/?q=%s"),
+            Value::from("https://%s.example.com/"), // the query picks the host
+            Value::from("https://e.com/?q=%s x"),   // whitespace
+            Value::from("https://e.com/?q=%s\nhttps://e2.com/?q=%s"), // two values in one
+            Value::from(7),                         // not a string
+            Value::from(format!(
+                "https://e.com/?q=%s&pad={}",
+                "a".repeat(MAX_SEARCH_URL_LEN)
+            )),
+        ] {
+            let e = db
+                .patch_settings(&patch(&[("browser.searchUrl", bad.clone())]))
+                .expect_err(&format!("{bad} must be refused"));
+            assert!(matches!(e, DbError::InvalidSetting { .. }), "{e}");
+        }
+        // …and the off switch set above survived every rejection.
+        assert_eq!(db.settings().unwrap()["browser.searchUrl"], Value::from(""));
     }
 
     #[test]

@@ -51,10 +51,12 @@ import {
   MAX_EXTRA_SESSIONS,
   type PaneTab,
   browserProfileLabel,
+  resolveAddress,
   urlForProfile,
   urlLabel,
 } from "./model";
-import { VeldLinks } from "./VeldLinks";
+import { PlaceList } from "./PlaceList";
+import { pickSuggestion, placesFor, stepIndex, suggestionsFor } from "./places";
 import {
   DEFAULT_ZOOM,
   DEVICE_GROUPS,
@@ -206,6 +208,11 @@ function schemeName(value: string | undefined): string {
   return MEDIA_LABELS["prefers-color-scheme"].values[value] ?? value;
 }
 
+/** The suggestion panel's DOM id, which the address bar's `aria-controls` names. */
+function suggestId(paneId: string): string {
+  return `suggest-${paneId}`;
+}
+
 /** One coloured session pip. */
 function SessionDot(props: { color: string | null; size?: number }) {
   const size = props.size ?? 8;
@@ -237,6 +244,8 @@ export function BrowserPane(props: {
   urlsEmptyHint: string;
   /** Which one-click toggles the chrome shows, from the settings store. */
   quickSwitches: QuickSwitchPrefs;
+  /** `browser.searchUrl` — where words that are not an address go, or `""`. */
+  searchUrl: string;
   /** The sessions that exist for this worktree, in slot order. */
   sessions: BrowserProfile[];
   /** Create a session and move this pane onto it. Absent at the slot cap. */
@@ -333,6 +342,55 @@ export function BrowserPane(props: {
     if (!editing) setDraft(state.url || tab.url || "");
   }, [state.url, editing]);
 
+  // Suggestions: the run's URLs, the project's bookmarks, and what has been typed.
+  // The same list the new-pane chooser shows, so picking and typing are not two
+  // different ways of naming the same places.
+  const places = placesFor(props.serviceUrls, props.quicklinks);
+  /**
+   * Whether the draft is something the user typed.
+   *
+   * Not `editing`: focusing the bar selects the address already in it, so filtering
+   * by the draft would open the panel filtered by the page you are on — which
+   * matches nothing and offers "Go to <the URL you are already on>". Until a
+   * keystroke, the panel is the unfiltered list of places.
+   */
+  const [typed, setTyped] = useState(false);
+  const suggestions = suggestionsFor(places, typed ? draft : "", props.searchUrl);
+  /**
+   * Which row the arrows are on — **carrying the list it was chosen from**.
+   *
+   * A highlighted row is a position, and the list it indexes comes from a poll: a
+   * service coming up or going down mid-run reorders `places`, so a bare index would
+   * have Enter open a place the user never arrowed to, ring and all, with nothing
+   * looking wrong. The first attempt reset the index from an effect, which is the
+   * mistake this repo has made three times: an effect runs *after* the commit, so the
+   * frame between the new list and the reset is a real frame, and a keypress already
+   * queued is dispatched against it.
+   *
+   * So the staleness is a value the data carries. `key` is the list the row was picked
+   * from; a render whose list no longer matches reads the row as "none" without any
+   * ordering having to be won. `-1` is also what Enter reads as "go to whatever is
+   * typed" rather than "open the highlighted row".
+   */
+  const placeKey = places.map((p) => p.url).join(" ");
+  const [highlight, setHighlight] = useState({ key: placeKey, row: -1 });
+  const activeRow = highlight.key === placeKey ? highlight.row : -1;
+  const setActiveRow = (row: number) => setHighlight({ key: placeKey, row });
+  /**
+   * The row Enter would open, which is not the same as the row the arrows have moved
+   * to.
+   *
+   * With text typed and nothing arrowed to, the action row is what Enter does — so it
+   * is what carries the ring. Leaving it unringed meant the highlight appeared only
+   * *after* pressing Down, on a screen where Enter already had an effect: the ring
+   * has to show what the key will do, not what the pointer has touched.
+   */
+  const active = activeRow < 0 && suggestions.action ? 0 : activeRow;
+  // Whether the panel is up. Opens on focus *before* anything is typed — the list is
+  // the answer to "what can I do here", and a panel that appears only after a
+  // keystroke is a panel a first-time user never sees.
+  const [suggesting, setSuggesting] = useState(false);
+
   const external = state.url || tab.url || "";
   const canStop = state.loading && !iframeBackend;
 
@@ -349,10 +407,28 @@ export function BrowserPane(props: {
   const opening = covered && !failure && !nested && !chooser;
   const color = BROWSER_PROFILE_COLORS[profile];
 
+  /**
+   * Whether the suggestion **panel** is on screen, which is not the same as the
+   * address bar having focus.
+   *
+   * On a blank pane the start page already *is* the list, so no panel renders — and
+   * three things read this rather than `suggesting`: the ARIA combobox state (it must
+   * not name a listbox that does not exist), Escape's first step (which otherwise
+   * fired invisibly and swallowed the keypress), and the panel itself.
+   */
+  const panelOpen = suggesting && !chooser && suggestions.count > 0;
+
   // Anything but the default is removable, including the one this pane is on:
   // removing it moves every pane using it back to Default. Refusing instead meant
   // the session you were looking at was the one you could never get rid of.
   const removable = props.sessions.filter((p) => p !== "default");
+
+  // A blank pane deliberately does **not** focus its own address bar. It did, on the
+  // theory that a caret is what says "type here"; driving it, the pane taking the
+  // keyboard on open reads as the app grabbing something rather than offering it —
+  // and the pane is often opened to click a URL in it, not to type. What answers the
+  // "there is no URL in here" confusion is the start page's own heading and the
+  // ringed first suggestion, neither of which costs the user their keyboard.
 
   // A first load that never finishes used to leave the pane blank with no way
   // out but the reload button — which is exactly what the user found by accident.
@@ -464,15 +540,47 @@ export function BrowserPane(props: {
   };
 
   /** Navigate, and record where the pane ended up. */
-  const go = (raw: string, opts: { force?: boolean } = {}) => {
+  const go = (raw: string, opts: { force?: boolean; title?: string } = {}) => {
     const target = navigateBrowser(id, raw, opts);
     if (target) {
       setDraft(target);
-      onTab({ url: target });
+      // The title only when the caller has one — a picked place knows its service
+      // name, which beats the hostname the page will report.
+      onTab(opts.title ? { url: target, title: opts.title } : { url: target });
     }
+    // Whatever happened, the panel's work is done: on success the page is loading,
+    // and on a refusal the error screen is what has to be readable.
+    closeSuggestions();
   };
-  /** Go to whatever is in the address bar. */
-  const submit = () => go(draft);
+
+  const closeSuggestions = () => {
+    setSuggesting(false);
+    setActiveRow(-1);
+    setTyped(false);
+  };
+
+  /**
+   * Go where the address bar says, which is two questions.
+   *
+   * A highlighted row wins over the text, because arrowing to a row and pressing
+   * Enter is picking that row — even though the text under the cursor still says
+   * something else. With no row highlighted, the text is resolved: an address is
+   * navigated to and anything else is searched for (`resolveAddress`), which is what
+   * makes a blank pane usable for reading documentation and not only for previewing
+   * a dev server.
+   */
+  const submit = () => {
+    const picked = pickSuggestion(suggestions, active);
+    if (picked) {
+      go(picked.url, { title: picked.title });
+      return;
+    }
+    const resolved = resolveAddress(draft, props.searchUrl);
+    // `invalid` goes through `go` with the raw text on purpose: `navigateBrowser`
+    // owns the "not an http(s) address" error, and one refusal path means the pane
+    // cannot end up silently doing nothing.
+    go(resolved.kind === "invalid" ? draft : resolved.url);
+  };
 
   // ---- Device emulation and zoom -----------------------------------------
   //
@@ -870,21 +978,100 @@ export function BrowserPane(props: {
           autoCapitalize="off"
           autoCorrect="off"
           aria-label="Address"
-          placeholder="Enter a URL"
-          onChange={(e) => setDraft(e.currentTarget.value)}
+          // Names the capability rather than the field. "Enter a URL" was already
+          // there and a first-time user still asked "there is no URL in here, how do
+          // I use it?" — a noun tells you what goes in the box, not what the box can
+          // do for you. The `%s` template being unset takes the promise back out.
+          placeholder={
+            props.searchUrl.trim() === ""
+              ? "Go to an address"
+              : "Search, or go to an address"
+          }
+          // The list of places is what this field is *for* — see `suggesting`.
+          //
+          // `panelOpen`, not `suggesting`: on a blank pane the start page *is* the
+          // list, so no panel with this id is rendered, and claiming an expanded
+          // listbox that does not exist points a screen reader at nothing.
+          role="combobox"
+          aria-expanded={panelOpen}
+          aria-controls={panelOpen ? suggestId(id) : undefined}
+          aria-activedescendant={
+            panelOpen && active >= 0 ? `${suggestId(id)}-row-${active}` : undefined
+          }
+          aria-autocomplete="list"
+          onChange={(e) => {
+            setDraft(e.currentTarget.value);
+            setTyped(true);
+            setSuggesting(true);
+            // Typing invalidates the highlight: the row that was under it has very
+            // likely been filtered out, and a stale index would open a row the user
+            // can no longer see.
+            setActiveRow(-1);
+          }}
           onFocus={(e) => {
             setEditing(true);
+            setSuggesting(true);
+            setTyped(false);
             e.currentTarget.select();
           }}
-          onBlur={() => setEditing(false)}
+          // **Closing on blur is what makes the panel dismissible at all.** It was
+          // left out because a click on a suggestion blurs the field first, which
+          // would unmount the row mid-click — but the panel is in flow above the
+          // page, so without this, clicking into the page left up to 60% of the pane
+          // occupied by a list of one row reading "Go to <the URL you are already
+          // on>", with no way back but the address bar. The mid-click problem is
+          // solved where it happens instead: the panel swallows `mousedown` so the
+          // field never loses focus to a row (see `.suggest-panel` below).
+          // **Blur means the user left, so everything resets** — and the reason that is
+          // safe belongs here, because getting it wrong took four attempts.
+          //
+          // A click on a row is *not* leaving, and that is enforced where it happens:
+          // both surfaces that render rows swallow `mousedown` (the panel below, and the
+          // start page's list), so the field never blurs while a click is in flight and
+          // this handler cannot reflow anything under the pointer.
+          //
+          // Two dead ends, recorded so they are not retried. Leaving blur alone entirely
+          // wedged the panel in flow above the page until the user came back and clicked
+          // the bar. Gating the reset on `panelOpen` fixed that and broke the blank
+          // pane — and gating only `typed` did not fix the blank pane either, because the
+          // reflow there is not caused by any flag: `setEditing(false)` re-runs the
+          // draft-sync effect above, which on a blank pane writes `draft = ""` (there is
+          // no page URL to restore), and the empty query widens the list all by itself.
+          // One mechanism for both surfaces is what actually closes it.
+          onBlur={() => {
+            setEditing(false);
+            closeSuggestions();
+          }}
           onKeyDown={(e) => {
             if (e.key === "Enter") {
               e.preventDefault();
               submit();
               e.currentTarget.blur();
             } else if (e.key === "Escape") {
+              // One Escape at a time: with the panel up it closes the panel and
+              // leaves the text alone, so a mis-arrowed highlight costs nothing.
+              // A second one restores the address and gives the keyboard back.
+              //
+              // Gated on the panel actually being *rendered*: on a blank pane
+              // `suggesting` is true from the focus alone, so this branch used to
+              // swallow the first Escape invisibly — widening the still-visible start
+              // page back to unfiltered and not giving the keyboard back.
+              if (panelOpen) {
+                closeSuggestions();
+                return;
+              }
               setDraft(state.url || tab.url || "");
               e.currentTarget.blur();
+            } else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+              if (suggestions.count === 0) return;
+              e.preventDefault();
+              setSuggesting(true);
+              // Stepped from `active`, not from the raw state: with the action row
+              // ringed by default, Down has to move to row 1, and an updater reading
+              // `-1` would move to row 0 and look like the key did nothing.
+              setActiveRow(
+                stepIndex(suggestions.count, active, e.key === "ArrowDown" ? 1 : -1),
+              );
             }
           }}
         />
@@ -1682,6 +1869,40 @@ export function BrowserPane(props: {
         </div>
       )}
 
+      {/* The suggestions, over a page that is already loaded.
+
+          **In flow, between the chrome and the slot — never floating over the page.**
+          A native `WebContentsView` paints over DOM whatever the z-index says, so a
+          dropdown positioned over the view is invisible in the desktop app and
+          perfectly visible in a browser tab: the worst of both. The permission prompt
+          above solved this the same way, and shrinking the slot is safe because its
+          ResizeObserver republishes the view's box.
+
+          Not rendered while the pane is blank: there the start page below *is* this
+          list, at pane size, and two copies of it would be the duplication that made
+          the blank pane and the new-pane chooser indistinguishable in the first
+          place. */}
+      {panelOpen && (
+        <div
+          className="suggest-panel"
+          // Swallow `mousedown` so the address bar never loses focus to a row. That
+          // is what lets `onBlur` close the panel — the two together are one
+          // mechanism: blur means "the user went somewhere else", and a click inside
+          // the panel is not going somewhere else. `preventDefault` on mousedown is
+          // the only event that stops focus moving; a blur handler that tried to
+          // guess would race the click.
+          onMouseDown={(e) => e.preventDefault()}
+        >
+          <PlaceList
+            suggestions={suggestions}
+            activeIndex={active}
+            listboxId={suggestId(id)}
+            emptyHint={props.urlsEmptyHint}
+            onOpen={(url, title) => go(url, { title })}
+          />
+        </div>
+      )}
+
       <div className="browser-slot" ref={slot}>
         {/* Drag any edge to resize the emulated screen — the answer to "which
             width does this break at", which no list of devices can give you. The
@@ -1746,16 +1967,53 @@ export function BrowserPane(props: {
           // Nothing loaded yet, so the pane is the run's own start page. This is
           // the whole reason there is no separate URLs pane: the list belongs in
           // the thing that is about to become the page.
+          //
+          // It has to be tellable apart from the new-pane chooser at a glance, which
+          // it was not: the chooser also showed this list, so a blank browser read as
+          // the chooser plus an empty bar, and the user's question was "there is no
+          // URL in here, how do I use it?". Two things answer it. The heading names
+          // *this* pane's one question — where should it go — where the chooser asks
+          // what a pane should be. And typing into the bar above puts what it will do
+          // at the top of this list, ringed, so the field's effect is visible before
+          // Enter is pressed. **Not** a focused caret: autofocus was tried and taken
+          // back out (see the note beside `chooser` above), so do not reintroduce it
+          // on the strength of this comment.
           <div className="browser-screen start">
-            <VeldLinks
-              urls={props.serviceUrls}
-              quicklinks={props.quicklinks}
-              emptyHint={props.urlsEmptyHint}
-              onOpen={(name, url) => {
-                const target = navigateBrowser(id, url);
-                if (target) onTab({ url: target, title: name });
-              }}
-            />
+            <div className="start-head">
+              <p className="pane-screen-title">Where to?</p>
+              <p className="faint">
+                {props.searchUrl.trim() === ""
+                  ? "Type an address in the bar above, or pick one below."
+                  : "Type an address in the bar above, search the web from it, or pick one below."}
+              </p>
+            </div>
+            {/* Swallows `mousedown`, exactly as the suggestion panel does, and for the
+                same reason: a click on a row must not blur the address bar first. This
+                list is filtered by what is in that bar, and blurring it re-runs the
+                draft-sync effect above — which on a blank pane writes `draft = ""`,
+                since `chooser` means there is no page URL to restore. The list then
+                widens between mousedown and mouseup, the row moves out from under the
+                pointer, and the click lands on the container instead of the row.
+                Gating a *flag* could never fix that; the draft wipe does it on its own,
+                which is why both surfaces need the same one mechanism.
+
+                What this gives up, since `mousedown` is also where a native selection
+                begins: you can no longer drag-select the URL text in a row. Each row
+                carries an explicit copy button, which is the better affordance for the
+                thing that text is for. `click` is untouched — `preventDefault` cancels
+                mousedown's own default action, not the click that follows it — so every
+                button and the open-externally anchor still work, as does the keyboard. */}
+            <div onMouseDown={(e) => e.preventDefault()}>
+              <PlaceList
+                suggestions={suggestions}
+                activeIndex={active}
+                emptyHint={props.urlsEmptyHint}
+                onOpen={(url, title) => go(url, { title })}
+                // The rows decide which URLs "open all" means — with the list filtered
+                // by what is in the address bar, the run's whole set is the wrong answer.
+                onOpenAll={(urls) => urls.forEach((url) => window.open(url, "_blank"))}
+              />
+            </div>
           </div>
         )}
         {opening && (

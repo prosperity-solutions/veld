@@ -808,6 +808,12 @@ chooser and the ⌘K palette. Only `type: "terminal"` exists today: a pane that
 runs the project's command inside your login shell. A browser tab has no panes,
 so none of this applies there.
 
+The chooser renders them as **equal cards in declaration order**, beside veld's plain
+Terminal, each showing its `description` under its label — so write descriptions;
+they are what tells four agent panes apart. Nothing is promoted and there is no
+`primary` flag. An entry whose `requires_bin` is missing keeps its card, disabled,
+with the reason on that second line.
+
 | Field | Notes |
 |---|---|
 | `id` | **Required.** `[A-Za-z0-9_-]`, ≤64 chars, unique in the project. |

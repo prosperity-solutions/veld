@@ -2327,6 +2327,17 @@ the daemon spawns without the wrapper would not (see [`env`](#env) for the
 contrast). The wrapper shell exits with the command's status, so
 `close_on_exit` and exit reporting are unaffected.
 
+**All panes are shown equally**, as same-sized cards in declaration order beside
+veld's plain Terminal — they are alternatives to each other, so the choice belongs in
+one group. Order is display order and nothing more: no entry is promoted, and there
+is deliberately no `primary` flag. A repo that declares Claude, Pi, Codex and a git
+log has four things a contributor might legitimately want, and singling one out is a
+recommendation veld is not in a position to make.
+
+What tells them apart is the `description`, which every card carries under its label —
+so write one. An entry whose `requires_bin` is missing on this machine keeps its card,
+shown disabled, and spends that line on the reason instead.
+
 ```jsonc
 {
   "ide": {
@@ -3383,6 +3394,55 @@ web:local [2026-03-12T08:30:01.456789Z] Connected to database
 - **The first-generation dashboard at `https://veld.localhost/` always shows local time** and does not read this setting — it fetches no settings at all. So with `logs.timeZone` set to `utc`, that one page still shows local. It is a frozen surface; `/ide` is where the setting applies.
 - **"Local" means each reader's own clock, not one shared clock.** The setting fixes the policy; the zone is resolved where the timestamp is rendered — from the process environment for the CLI, from the browser for `/ide`. So a `veld logs` run with an empty `TZ` prints `+00:00` (an empty `TZ` resolves to UTC) while the same daemon's `/ide` shows your machine's zone, and a browser on another machine shows that machine's. Use `--utc` when two readers must agree exactly.
 - **One hour a year, the displayed time is not monotonic.** At the DST fall-back the local clock repeats an hour, so correctly-ordered lines can render `02:59:00` then `02:01:00`. The lines are not misordered and nothing is wrong with the data — the stored UTC values are strictly increasing, which is what Veld sorts by. `veld logs` shows the offset inline (`+02:00` then `+01:00`), and in `/ide` the tooltip's offset is the tiebreak. `--utc` avoids the ambiguity entirely.
+
+### Searching From a Browser Pane's Address Bar
+
+A browser pane's address bar takes http(s) addresses. Anything else — `react hooks
+docs`, or a single word — goes to a search engine instead of being refused, which is
+what makes a pane usable for reading something while you work rather than only for
+previewing the app you are building.
+
+- The template is the **`browser.searchUrl`** setting (**Settings → Browser panes**),
+  with `%s` where the query goes — the same spelling a browser's own custom-engine
+  field uses, so a URL copied from one works here. It defaults to
+  `https://www.google.com/search?q=%s`.
+- **Empty turns search off**, and that is a supported value rather than a broken one:
+  the address bar goes back to accepting only addresses. It is the switch for anyone
+  who does not want a keystroke in a dev tool reaching an engine.
+- What counts as an address: an explicit `http(s)://`, a `host:port`, a bracketed
+  IPv6 literal, a host with a dot in it, or `localhost`. A dotted host wins even when
+  its TLD is nonsense (`react.js` navigates and fails), because the alternative is a
+  TLD list that decides for you and gets `.internal` and `.test` wrong.
+- **Whitespace makes it a query.** `vite.config.ts not found`, `error at line 12:5`
+  and `aspect ratio 16:9` are searched for, not refused — an address that genuinely
+  contains a space has to say its scheme, which is what every browser's address bar
+  requires too.
+- **A bare single label is a search, not a host.** `grafana` searches; it does *not*
+  go to `https://grafana/` the way an earlier version did. That is what every
+  mainstream browser does with a single label, and veld has neither the DNS nor the
+  history signals an omnibox uses to know better. If you do want the host — an
+  `/etc/hosts` entry, an intranet short name — say the scheme: `http://grafana`.
+  `localhost` is special-cased, being the one bare label a dev tool can be sure about.
+- **A non-http(s) scheme is refused, never searched for.** The refused set is closed
+  (`javascript:`, `data:`, `file:`, `about:`, `mailto:`, `blob:`, `vbscript:`, `tel:`,
+  `sms:`, `view-source:`, plus anything with a `scheme://` veld does not serve):
+  searching the web for `javascript:alert(1)` would bury the reason the pane did not
+  go there. Outside that set a colon is just a colon, so `std::vec::Vec` and
+  `TypeError:x` are queries.
+- The daemon validates the template on write, so a template that cannot work is
+  refused on the settings screen rather than failing later against whatever you typed
+  into an address bar. It must contain `%s`, start with `http://` or `https://`
+  (case-insensitively), carry no whitespace or control characters, and fit in 400
+  bytes. **`%s` may not be in the host**, since `https://%s.example.com/` would let
+  anything typed into an address bar choose which host to reach. And the host must be
+  a host: a name (any script — an IDN engine such as `https://поиск.рф/?q=%s` is fine)
+  with no `%`, brackets, slashes, `@` or `#` in it; a port, if present, numeric and
+  between 1 and 65535; a bracketed IPv6 literal closed and made of hex, colons and
+  dots. So `https://:8080/?q=%s`, `https://e.com:99999/?q=%s` and
+  `https://e.com]/?q=%s` are all refused where you can see them.
+- A search is a navigation like any other, so the pane records it: the resulting URL
+  is written into the pane's layout and restored with the pane, exactly as a visited
+  page is. Turn search off if you would rather a mistyped query left no trace.
 
 ---
 

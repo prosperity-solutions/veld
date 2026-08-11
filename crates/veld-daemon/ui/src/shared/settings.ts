@@ -107,6 +107,12 @@ const FALLBACK = {
   // exception: the create dialog renders "based on the latest origin" unless an
   // older daemon says otherwise, which is the behaviour this setting ships with.
   gitCreateFrom: "origin" as GitCreateFrom,
+  // Mirrors `DEFAULT_SEARCH_URL` in `veld-core/src/db/settings.rs`. The
+  // `quickSwitch*` exception again, and here the previous-release rule would be
+  // actively misleading: the address bar's own placeholder tells the user they can
+  // search, so falling back to "search is off" would print a promise this client
+  // then refuses to keep.
+  searchUrl: "https://www.google.com/search?q=%s",
 } as const;
 
 function strings(doc: SettingsDoc, key: string): string[] {
@@ -442,4 +448,22 @@ export function stalenessHue(
  */
 export function externalOrigins(doc: SettingsDoc): string[] {
   return strings(doc, "browser.externalOrigins");
+}
+
+/**
+ * The search template a browser pane sends non-addresses to, or `""` for none.
+ *
+ * Read with its own function rather than through `str()`, because **`""` is a value
+ * here** — the off switch — and `str()` treats an empty string as absent and
+ * substitutes the fallback. Passing this key through it would make "no search" the
+ * one setting a user cannot save.
+ *
+ * The `%s` and http(s) rules are the daemon's (`parse_search_template`), enforced on
+ * write; `searchTarget` in `panes/model.ts` re-checks them at use rather than
+ * trusting them, since a row written by another build or by hand reaches the same
+ * navigation.
+ */
+export function searchUrl(doc: SettingsDoc): string {
+  const v = doc["browser.searchUrl"];
+  return typeof v === "string" ? v.trim() : FALLBACK.searchUrl;
 }
