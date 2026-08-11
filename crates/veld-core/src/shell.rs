@@ -312,7 +312,8 @@ const PROBE_RETRY_AFTER: Duration = Duration::from_secs(60);
 pub async fn supports_posix_env_handoff(shell: &str) -> bool {
     // `None` is "the probe could not run", remembered with the time it failed —
     // neither cached forever nor retried on every call. See below.
-    static CACHE: OnceLock<Mutex<HashMap<String, (Option<bool>, Instant)>>> = OnceLock::new();
+    type Probed = HashMap<String, (Option<bool>, Instant)>;
+    static CACHE: OnceLock<Mutex<Probed>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     if let Some((known, at)) = cache.lock().ok().and_then(|c| c.get(shell).copied()) {
         match known {

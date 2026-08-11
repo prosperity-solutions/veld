@@ -1139,17 +1139,9 @@ struct Ticket {
     /// Resolved here, from the project's own config, so the client never gets
     /// to say what the daemon executes.
     pane: Option<PaneLaunch>,
-    /// `terminal.openUrlsInApp`, read at the same moment and for the same reason as
-    /// the field below. It gates the session's whole environment: with the feature
-    /// off, veld puts nothing in the shell.
-    open_urls_in_app: bool,
-    /// `terminal.interceptSystemOpen`, read while [`mint_ticket`] already had the
-    /// database open. It rides the ticket rather than being read at spawn time so
-    /// that nothing puts a `Db::open()` on the session-spawn path — see the comment
-    /// where it is read, and the AGENTS.md note it points at.
-    intercept_system_open: bool,
-    /// `terminal.shell`, already resolved (`Db::terminal_shell`), read at the same
-    /// moment and for the same reason as the two above.
+    /// `terminal.shell`, already resolved (`Db::terminal_shell`), read while
+    /// [`mint_ticket`] already had the database open — nothing may put a
+    /// `Db::open()` on the session-spawn path (AGENTS.md).
     ///
     /// One value, decided once: it is what the holder spawns, what a pane command
     /// is wrapped in, and what decides whether the session environment carries a
@@ -1247,6 +1239,10 @@ struct TicketResponse {
 /// project's own `veld.json`, read here from the worktree the ticket already
 /// resolved. That is the same boundary the actions API keeps — the daemon never
 /// executes a command a request body contained.
+// Nine, and each one is a distinct fact the caller already knows: bundling them
+// would build a struct whose only purpose is to be destructured one line later.
+// The repo's idiom for that is this allow (see `commands/logs.rs`, `core::url`).
+#[allow(clippy::too_many_arguments)]
 async fn resolve_pane(
     db: &veld_core::db::Db,
     spec_id: &str,
@@ -1739,8 +1735,6 @@ async fn mint_ticket(
                 cwd,
                 label: wt.alias.clone(),
                 pane,
-                open_urls_in_app,
-                intercept_system_open,
                 shell,
                 shell_flags,
                 shim_env,
@@ -3871,8 +3865,6 @@ mod tests {
                 cwd: std::env::temp_dir(),
                 label: "t".to_owned(),
                 pane: None,
-                open_urls_in_app: true,
-                intercept_system_open: true,
                 shell: "/bin/zsh".to_owned(),
                 shell_flags: Vec::new(),
                 shim_env: shims::session_env(id, "/bin/zsh", true, true, false),
@@ -3899,8 +3891,6 @@ mod tests {
                 cwd: std::env::temp_dir(),
                 label: "t".to_owned(),
                 pane: None,
-                open_urls_in_app: true,
-                intercept_system_open: true,
                 shell: "/bin/zsh".to_owned(),
                 shell_flags: Vec::new(),
                 shim_env: shims::session_env("s2", "/bin/zsh", true, true, false),
@@ -4140,8 +4130,6 @@ mod tests {
                     cwd: cwd.to_path_buf(),
                     label: "test".to_owned(),
                     pane: None,
-                    open_urls_in_app: true,
-                    intercept_system_open: true,
                     shell: "/bin/zsh".to_owned(),
                     shell_flags: Vec::new(),
                     shim_env: shims::session_env(session, "/bin/zsh", true, true, false),
@@ -4249,8 +4237,6 @@ mod tests {
                     cwd: std::env::temp_dir(),
                     label: "test".to_owned(),
                     pane: None,
-                    open_urls_in_app: true,
-                    intercept_system_open: true,
                     shell: "/bin/zsh".to_owned(),
                     shell_flags: Vec::new(),
                     shim_env: shims::session_env(&stale_session, "/bin/zsh", true, true, false),
