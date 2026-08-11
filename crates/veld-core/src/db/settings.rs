@@ -660,20 +660,70 @@ pub fn parse_search_template(raw: &str) -> Result<String, String> {
     if host.is_empty() {
         return Err("has no host".to_owned());
     }
-    // A port with nothing in front of it. `https://:8080/?q=%s` passed every rule above
-    // — the host span is non-empty — and then failed at the point of *use*, where the
-    // client's URL parser rejects it and the pane blames the query: "Not an http(s)
-    // address: <what the user typed>". A setting that cannot work must fail on the
-    // screen where it is written.
-    if host.starts_with(':') {
-        return Err("has a port but no host".to_owned());
-    }
     if host.contains(SEARCH_QUERY_TOKEN) {
         return Err(format!(
             "must not put {SEARCH_QUERY_TOKEN} in the host — it belongs in the path or query"
         ));
     }
+    // **The host has to be a host, not merely a non-empty span.** A template that
+    // passes here and then cannot be parsed by the client fails at the point of *use*,
+    // where the only thing the pane can say is "not an http(s) address: <what the user
+    // typed>" — it blames the query for a broken setting, and there is no path from
+    // that message back to this field. So the whole class is refused here: an empty
+    // authority (`https://:8080/`), a non-numeric or out-of-range port
+    // (`https://e.com:abc/`, `https://e.com:99999/`), and anything outside the
+    // characters a host may hold (`https://e.com]/`, `https://%/`).
+    check_search_host(&host)?;
     Ok(t.to_owned())
+}
+
+/// The host span of a search template: `host[:port]`, or a bracketed IPv6 literal.
+///
+/// Deliberately stricter than a URL parser rather than a reimplementation of one. Every
+/// spelling this rejects is one `new URL()` also rejects, so the two cannot disagree in
+/// the direction that matters — a template the daemon stores is one the client can use.
+fn check_search_host(host: &str) -> Result<(), String> {
+    let (name, port) = match host.strip_prefix('[') {
+        // IPv6 literal: the brackets are what separate the address' own colons from the
+        // port separator, so the split has to happen after them.
+        Some(rest) => match rest.split_once(']') {
+            Some((inner, after)) => {
+                if inner.is_empty()
+                    || !inner
+                        .chars()
+                        .all(|c| c.is_ascii_hexdigit() || c == ':' || c == '.')
+                {
+                    return Err("is not a valid IPv6 address".to_owned());
+                }
+                (String::new(), after.strip_prefix(':').map(str::to_owned))
+            }
+            None => return Err("has an unclosed [ in the host".to_owned()),
+        },
+        None => match host.split_once(':') {
+            Some((name, port)) => (name.to_owned(), Some(port.to_owned())),
+            None => (host.to_owned(), None),
+        },
+    };
+    if let Some(port) = port {
+        if port.is_empty()
+            || !port.chars().all(|c| c.is_ascii_digit())
+            || port.parse::<u32>().is_ok_and(|p| p == 0 || p > 65535)
+        {
+            return Err(format!("has {port:?} where a port number should be"));
+        }
+    }
+    if host.starts_with(':') {
+        return Err("has a port but no host".to_owned());
+    }
+    // Empty only for the IPv6 branch, which validated its own address above.
+    if !name.is_empty()
+        && !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+    {
+        return Err("has characters in the host that a hostname cannot hold".to_owned());
+    }
+    Ok(())
 }
 
 fn clamp_i64(value: &Value, lo: i64, hi: i64) -> Option<i64> {
@@ -1281,6 +1331,19 @@ mod tests {
             Value::from("HTTPS://duckduckgo.com/?q=%s"),
         )]))
         .unwrap();
+        // The host shapes that *are* navigable stay accepted — the host check is a gate
+        // on the class of broken template above, not a narrowing of what an engine may
+        // be hosted on.
+        for good in [
+            "http://localhost:8080/search?q=%s",
+            "https://search.example.co.uk/?q=%s&hl=en",
+            "https://my_engine.internal/?q=%s",
+            "http://127.0.0.1:1234/?q=%s",
+            "http://[::1]:8080/?q=%s",
+        ] {
+            db.patch_settings(&patch(&[("browser.searchUrl", Value::from(good))]))
+                .unwrap_or_else(|e| panic!("{good} must be accepted: {e}"));
+        }
         db.patch_settings(&patch(&[("browser.searchUrl", Value::from(""))]))
             .unwrap();
         assert_eq!(db.settings().unwrap()["browser.searchUrl"], Value::from(""));
@@ -1290,14 +1353,23 @@ mod tests {
             Value::from("example.com/?q=%s"),          // no scheme
             Value::from("ftp://example.com/?q=%s"),    // not http(s)
             Value::from("https:///?q=%s"),             // no host
-            // Passes every other rule and then cannot navigate: the client's URL parser
-            // rejects it, and the refusal surfaced as "not an http(s) address: <the
-            // user's own query>". A setting that cannot work fails where it is typed.
-            Value::from("https://:8080/?q=%s"),
+            // Every one of these passes the %s/scheme/whitespace rules and is then
+            // refused by the *client's* URL parser, so it used to fail at the point of
+            // use with "not an http(s) address: <the user's own query>" — blaming the
+            // query for a broken setting, with no path back to the field. A setting
+            // that cannot work has to fail where it is typed.
+            Value::from("https://:8080/?q=%s"), // port, no host
+            Value::from("https://e.com:abc/?q=%s"), // port that is not a number
+            Value::from("https://e.com:99999/?q=%s"), // port out of range
+            Value::from("https://e.com:0/?q=%s"), // port zero
+            Value::from("https://e.com]/?q=%s"), // stray bracket
+            Value::from("https://%/?q=%s"),     // not a hostname
+            Value::from("https://[:1/?q=%s"),   // unclosed IPv6 bracket
+            Value::from("https://[zz::1]/?q=%s"), // not hex in an IPv6 literal
             Value::from("https://%s.example.com/"), // the query picks the host
-            Value::from("https://e.com/?q=%s x"),   // whitespace
+            Value::from("https://e.com/?q=%s x"), // whitespace
             Value::from("https://e.com/?q=%s\nhttps://e2.com/?q=%s"), // two values in one
-            Value::from(7),                         // not a string
+            Value::from(7),                     // not a string
             Value::from(format!(
                 "https://e.com/?q=%s&pad={}",
                 "a".repeat(MAX_SEARCH_URL_LEN)

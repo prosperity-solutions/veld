@@ -32,7 +32,35 @@ import {
 } from "@tabler/icons-react";
 import { useState } from "react";
 import type { Target } from "./model";
-import type { Place, Suggestions } from "./places";
+import type { Place, PlaceKind, Suggestions } from "./places";
+
+/**
+ * What each kind of place looks like — its group heading and its row glyph.
+ *
+ * A `Record<PlaceKind, …>`, so **adding a kind is a compile error here** rather than a
+ * kind that silently renders as a bookmark. The two facts live together because they
+ * are one claim made twice: the heading says which group a row belongs to, and the
+ * glyph repeats it at row level for anyone scrolling past the heading.
+ *
+ * A run URL gets the live dot because veld started that server and knows it is up. A
+ * bookmark cannot have one: it is a string in a config that nobody has probed, and a
+ * green dot beside it would be a claim veld is in no position to make.
+ */
+const PLACE_KINDS: Record<
+  PlaceKind,
+  { heading: string; mark: React.ReactNode; glyph: React.ReactNode }
+> = {
+  run: {
+    heading: "Running now",
+    mark: <span className="dot running" style={{ animation: "none" }} />,
+    glyph: <span className="dot running" style={{ animation: "none" }} />,
+  },
+  bookmark: {
+    heading: "Project bookmarks",
+    mark: <IconBookmark size={11} />,
+    glyph: <IconBookmark size={13} className="place-glyph" />,
+  },
+};
 
 export function PlaceList(props: {
   /** Rows and the optional action row, from `suggestionsFor`. */
@@ -104,17 +132,22 @@ export function PlaceList(props: {
         const heading =
           i === 0 || s.places[i - 1]?.kind !== place.kind ? place.kind : null;
         return (
-          <div key={`${place.kind}:${place.url}:${place.name}`}>
-            {heading === "run" && (
-              <span className="section-label">
-                <span className="dot running" style={{ animation: "none" }} />
-                Running now
-              </span>
-            )}
-            {heading === "bookmark" && (
-              <span className="section-label">
-                <IconBookmark size={11} />
-                Project bookmarks
+          // `presentation` on the wrapper and the heading, in listbox mode: ARIA lets a
+          // listbox own options and nothing else, and this wrapper exists only because
+          // the heading walk needs somewhere to put a label. Without it the option
+          // ownership — and the "3 of 7" a screen reader announces — is broken by the
+          // very elements added to make the list legible.
+          <div
+            key={`${place.kind}:${place.url}:${place.name}`}
+            role={listboxId ? "presentation" : undefined}
+          >
+            {heading && (
+              <span
+                className="section-label"
+                role={listboxId ? "presentation" : undefined}
+              >
+                {PLACE_KINDS[heading].mark}
+                {PLACE_KINDS[heading].heading}
               </span>
             )}
             <PlaceRow
@@ -127,20 +160,26 @@ export function PlaceList(props: {
           </div>
         );
       })}
-      {/* Two empty states, not one. `total === 0` is a fact about the *run* and only
-          the app can explain it; a filter that matched nothing is a fact about what
-          was typed. Conflating them printed "start the run and its services appear
-          here" over a live run with five URLs, because the query was narrower than
-          the list. */}
-      {s.total === 0 && (
+      {/* Two empty states, not one — and **neither belongs in the suggestion panel**,
+          which is why both are gated on not being a listbox. `total === 0` is a fact
+          about the *run* and only a start surface can helpfully explain it: rendered
+          in the panel it put "start the run and its services appear here" in flow
+          above somebody's documentation page, on every keystroke, which is a run-status
+          lecture over unrelated content. And a "nothing matched" line makes no sense
+          under an action row that plainly did match.
+          Conflating the two in the first place printed the run hint over a *live* run
+          with five URLs, because the query was narrower than the list. */}
+      {!listboxId && s.total === 0 && (
         <div className="links-empty">
           <IconWorldOff size={26} />
           <p className="pane-screen-title">No URLs yet</p>
           <p className="faint">{props.emptyHint}</p>
         </div>
       )}
-      {s.total > 0 && s.places.length === 0 && (
-        <p className="faint place-nomatch">Nothing here matches what you typed.</p>
+      {!listboxId && s.total > 0 && s.places.length === 0 && (
+        <p className="faint place-nomatch">
+          None of this project's URLs or bookmarks match what you typed.
+        </p>
       )}
       {/* Two or more, as before: "open all" for one URL is the row above it. */}
       {props.onOpenAll && runUrls.length > 1 && (
@@ -223,7 +262,6 @@ function PlaceRow(props: {
 }) {
   const [copied, setCopied] = useState(false);
   const { place } = props;
-  const live = place.kind === "run";
   return (
     <div
       className="link-row"
@@ -246,13 +284,10 @@ function PlaceRow(props: {
         onClick={props.onOpen}
         title={`Open ${place.name} here`}
       >
-        {/* A green dot beside an address nobody has probed would be a claim veld
-            cannot make, so a bookmark gets a glyph saying what it is instead. */}
-        {live ? (
-          <span className="dot running" style={{ animation: "none" }} />
-        ) : (
-          <IconBookmark size={13} className="place-glyph" />
-        )}
+        {/* From the one table, not a `kind === "run"` boolean: a third kind used to
+            silently inherit the bookmark's glyph and its "someone wrote this in a
+            config" framing. See `PLACE_KINDS`. */}
+        {PLACE_KINDS[place.kind].glyph}
         <span className="link-text">
           <span className="name">{place.name}</span>
           <span className="url">{place.url}</span>

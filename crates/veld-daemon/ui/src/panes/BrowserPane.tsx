@@ -369,6 +369,15 @@ export function BrowserPane(props: {
    * has to show what the key will do, not what the pointer has touched.
    */
   const active = activeRow < 0 && suggestions.action ? 0 : activeRow;
+  // A highlighted row is a *position*, and the list it indexes comes from a poll: a
+  // service coming up or going down mid-run reorders `places`, so Enter would open a
+  // place the user never arrowed to — with the ring moving too, so nothing looks
+  // wrong, it just goes somewhere else. Dropping the highlight when the set changes
+  // identity costs one keypress and cannot open the wrong thing.
+  const placeKey = places.map((p) => p.url).join(" ");
+  useEffect(() => {
+    setActiveRow(-1);
+  }, [placeKey]);
   // Whether the panel is up. Opens on focus *before* anything is typed — the list is
   // the answer to "what can I do here", and a panel that appears only after a
   // keystroke is a panel a first-time user never sees.
@@ -1005,9 +1014,16 @@ export function BrowserPane(props: {
           // on>", with no way back but the address bar. The mid-click problem is
           // solved where it happens instead: the panel swallows `mousedown` so the
           // field never loses focus to a row (see `.suggest-panel` below).
+          // **Only when a panel is actually up.** Unconditionally, this broke clicking a
+          // row on a *blank* pane: there the start page is the list and has no
+          // `mousedown` swallow, so blur fired between mousedown and mouseup, React
+          // flushed `setTyped(false)` synchronously, the list re-rendered unfiltered,
+          // the row under the pointer moved, and mouseup landed on a different node —
+          // no click at all. A blank pane has no panel to dismiss, so it needs no
+          // blur-close.
           onBlur={() => {
             setEditing(false);
-            closeSuggestions();
+            if (panelOpen) closeSuggestions();
           }}
           onKeyDown={(e) => {
             if (e.key === "Enter") {
