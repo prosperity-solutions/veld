@@ -1954,6 +1954,9 @@ function TerminalPane(props: {
   // likely survives on the daemon (that is what the detach grace is for), so
   // offer to reattach before offering to replace it.
   const canReconnect = state === "error";
+  // A plain terminal (no spec) has no configured label; the full-size card that
+  // a dead terminal now gets needs a name to sit under the icon.
+  const cardTitle = label || "Terminal";
 
   return (
     <div className="term-pane">
@@ -1963,20 +1966,26 @@ function TerminalPane(props: {
           It goes here rather than into the terminal, which would corrupt a
           full-screen program's display — see writeNotice in terminalHost. */}
       {state === "live" && detail && <div className="term-status">{detail}</div>}
-      {/* A config pane that is not running gets the pane, not a chip in the
-          corner. It is the only thing the pane is for at that moment, and after
-          a full-screen program exits there is usually nothing else on screen.
+      {/* A terminal that is not running gets the pane, not a chip in the
+          corner. That is true for a config pane that has not started (the only
+          thing the pane is for at that moment) and — since a dropped socket
+          with the shell still alive is exactly what the Reconnect button is
+          for — for any terminal that has ended, plain or configured: after a
+          full-screen program exits or the pipe breaks there is usually nothing
+          else on screen. Previously a plain terminal reported the loss as a
+          chip in the corner, which read as minor for the case the whole
+          reconnect feature exists for.
           
           **Dismissible, and that is not decoration.** `close_on_exit` closes a
           pane that ended cleanly, so a pane still sitting here has almost
           always *failed* — and whatever is on the screen underneath is the
           reason. Covering that permanently would repeat the mistake the
           non-zero-exit guard exists to prevent. */}
-      {specId && (state === "idle" || dead) && !showOutput && (
+      {((specId && state === "idle") || dead) && !showOutput && (
         <div className="term-overlay">
           <div className="term-card">
             <div className="term-card-icon">{paneIcon(spec?.icon, 26)}</div>
-            <div className="term-card-title">{label}</div>
+            <div className="term-card-title">{cardTitle}</div>
             <div className="term-card-detail">
               {state === "idle"
                 ? canResume
@@ -2005,12 +2014,16 @@ function TerminalPane(props: {
               )}
               <button
                 className="btn big"
-                onClick={startFresh}
+                onClick={label ? startFresh : restart}
                 title={
-                  canResume ? "Start over, discarding the previous session" : undefined
+                  label
+                    ? canResume
+                      ? "Start over, discarding the previous session"
+                      : undefined
+                    : "End this shell and start a new one"
                 }
               >
-                {canResume ? "Start fresh" : `Start ${label}`}
+                {canResume ? "Start fresh" : label ? `Start ${label}` : "Restart"}
               </button>
             </div>
             {dead && (
@@ -2021,7 +2034,10 @@ function TerminalPane(props: {
           </div>
         </div>
       )}
-      {dead && (!specId || showOutput) && (
+      {/* The full-card "Show output" view: the user asked to see what was under
+          the overlay, so the terminal scrollback is back on screen and the
+          dead-state actions become a corner chip rather than covering it. */}
+      {dead && showOutput && (
         <div className="term-status">
           <span>{detail || "session ended"}</span>
           {canReconnect && (

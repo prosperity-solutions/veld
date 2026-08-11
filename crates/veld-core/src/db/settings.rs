@@ -68,6 +68,69 @@ pub const MIN_DETACH_GRACE_MINUTES: i64 = 1;
 /// already generous; unbounded means a leak with a preference in front of it.
 pub const MAX_DETACH_GRACE_MINUTES: i64 = 10_080;
 
+/// How many times a terminal whose socket dropped reconnects to the same shell
+/// by itself before giving up and waiting for a click.
+///
+/// The shell survives the pipe (that is what the holder process and the detach
+/// grace exist for), so a dropped socket is usually a transient network blip —
+/// the machine slept, a proxy timed out, the daemon restarted mid-`veld update`
+/// — and a few automatic attempts reconnect without the user noticing. After the
+/// budget is spent the terminal settles in its `error` state and offers the
+/// manual Reconnect button, so this is a courtesy that can never wedge a shell
+/// behind an unreachable daemon.
+///
+/// **Zero disables auto-reconnect** — the previous release's behaviour, where a
+/// dropped socket always waited for a click. The off switch must not be clamped
+/// to a retry: the whole point of the setting is that some people would rather
+/// decide themselves.
+pub const DEFAULT_RECONNECT_TRIES: i64 = 3;
+
+/// Lower bound on the reconnect budget. Zero is the off switch (see
+/// [`DEFAULT_RECONNECT_TRIES`]); one is "try once, then stop".
+pub const MIN_RECONNECT_TRIES: i64 = 0;
+/// Upper bound on the reconnect budget.
+///
+/// Each attempt is a WebSocket handshake and, on the first one, a reattach; past
+/// a couple of dozen the session is effectively unreachable and every further
+/// attempt is just a heartbeat at the daemon it cannot reach. A cap keeps a
+/// mis-set preference from turning a dead pipe into a permanent reconnect storm.
+pub const MAX_RECONNECT_TRIES: i64 = 20;
+
+/// Seconds between auto-reconnect attempts **after the first**.
+///
+/// The first attempt is the one that fixes the common cases (a sleep, a dropped
+/// proxy) and is deliberately near-immediate (see
+/// [`DEFAULT_RECONNECT_FIRST_DELAY_SECONDS`]); the backoff is what a still-failing
+/// session waits between attempts so it is not hammering a daemon that is itself
+/// restarting.
+pub const DEFAULT_RECONNECT_BACKOFF_SECONDS: i64 = 5;
+
+/// Lower bound on the reconnect backoff. Sub-second spacing between reconnect
+/// attempts is a reconnect storm even at the default budget.
+pub const MIN_RECONNECT_BACKOFF_SECONDS: i64 = 1;
+/// Upper bound on the reconnect backoff. Past a few minutes the session is not
+/// coming back on a timescale the backoff can span usefully; the manual Reconnect
+/// button is the honest answer there.
+pub const MAX_RECONNECT_BACKOFF_SECONDS: i64 = 300;
+
+/// Seconds before the **first** auto-reconnect attempt fires after a socket drops.
+///
+/// This is the "nearly immediately" of the feature: the first reconnect should
+/// feel automatic, not like the session is gone. It is a setting rather than a
+/// constant because "nearly" is a preference — a flaky network might want the
+/// first attempt a little later rather than racing every blip.
+pub const DEFAULT_RECONNECT_FIRST_DELAY_SECONDS: i64 = 1;
+
+/// Lower bound on the first reconnect delay.
+pub const MIN_RECONNECT_FIRST_DELAY_SECONDS: i64 = 1;
+/// Upper bound on the first reconnect delay.
+///
+/// The first reconnect is the "is it really gone?" probe, and past half a minute
+/// it stops feeling automatic and starts feeling like the session is unreachable
+/// — which is what the manual button is for. The backoff setting below covers
+/// longer waits between the attempts that follow.
+pub const MAX_RECONNECT_FIRST_DELAY_SECONDS: i64 = 30;
+
 /// Lines of scrollback each terminal keeps.
 ///
 /// xterm stores a cell as **3 × u32 = 12 bytes** (`new Uint32Array(3 * cols)` per
@@ -235,6 +298,9 @@ pub enum SettingKey {
     TerminalShiftEnterNewline,
     TerminalBellVolume,
     TerminalDetachGrace,
+    TerminalReconnectTries,
+    TerminalReconnectBackoffSeconds,
+    TerminalReconnectFirstDelaySeconds,
     TerminalOpenUrlsInApp,
     TerminalInterceptSystemOpen,
     WorktreeMarkerStyle,
@@ -269,6 +335,9 @@ impl SettingKey {
         Self::TerminalShiftEnterNewline,
         Self::TerminalBellVolume,
         Self::TerminalDetachGrace,
+        Self::TerminalReconnectTries,
+        Self::TerminalReconnectBackoffSeconds,
+        Self::TerminalReconnectFirstDelaySeconds,
         Self::TerminalOpenUrlsInApp,
         Self::TerminalInterceptSystemOpen,
         Self::WorktreeMarkerStyle,
@@ -292,6 +361,9 @@ impl SettingKey {
             Self::TerminalShiftEnterNewline => "terminal.shiftEnterNewline",
             Self::TerminalBellVolume => "terminal.bellVolume",
             Self::TerminalDetachGrace => "terminal.detachGraceMinutes",
+            Self::TerminalReconnectTries => "terminal.reconnectTries",
+            Self::TerminalReconnectBackoffSeconds => "terminal.reconnectBackoffSeconds",
+            Self::TerminalReconnectFirstDelaySeconds => "terminal.reconnectFirstDelaySeconds",
             Self::TerminalOpenUrlsInApp => "terminal.openUrlsInApp",
             Self::TerminalInterceptSystemOpen => "terminal.interceptSystemOpen",
             Self::WorktreeMarkerStyle => "worktree.markerStyle",
@@ -317,6 +389,9 @@ impl SettingKey {
             "terminal.shiftEnterNewline" => Self::TerminalShiftEnterNewline,
             "terminal.bellVolume" => Self::TerminalBellVolume,
             "terminal.detachGraceMinutes" => Self::TerminalDetachGrace,
+            "terminal.reconnectTries" => Self::TerminalReconnectTries,
+            "terminal.reconnectBackoffSeconds" => Self::TerminalReconnectBackoffSeconds,
+            "terminal.reconnectFirstDelaySeconds" => Self::TerminalReconnectFirstDelaySeconds,
             "terminal.openUrlsInApp" => Self::TerminalOpenUrlsInApp,
             "terminal.interceptSystemOpen" => Self::TerminalInterceptSystemOpen,
             "worktree.markerStyle" => Self::WorktreeMarkerStyle,
@@ -356,6 +431,29 @@ impl SettingKey {
             Self::TerminalDetachGrace => Value::from(
                 clamp_i64(value, MIN_DETACH_GRACE_MINUTES, MAX_DETACH_GRACE_MINUTES)
                     .ok_or_else(bad)?,
+            ),
+            // Zero is the off switch and is deliberately inside the range (it is
+            // the minimum) — see DEFAULT_RECONNECT_TRIES. The one numeric setting
+            // whose lowest value is the answer to "I want none", not a lower
+            // bound to clamp up from.
+            Self::TerminalReconnectTries => Value::from(
+                clamp_i64(value, MIN_RECONNECT_TRIES, MAX_RECONNECT_TRIES).ok_or_else(bad)?,
+            ),
+            Self::TerminalReconnectBackoffSeconds => Value::from(
+                clamp_i64(
+                    value,
+                    MIN_RECONNECT_BACKOFF_SECONDS,
+                    MAX_RECONNECT_BACKOFF_SECONDS,
+                )
+                .ok_or_else(bad)?,
+            ),
+            Self::TerminalReconnectFirstDelaySeconds => Value::from(
+                clamp_i64(
+                    value,
+                    MIN_RECONNECT_FIRST_DELAY_SECONDS,
+                    MAX_RECONNECT_FIRST_DELAY_SECONDS,
+                )
+                .ok_or_else(bad)?,
             ),
             // Zero is "keep until emptied" and is deliberately outside the clamped
             // range, because this is the one numeric setting whose off state is not a
@@ -508,6 +606,23 @@ pub fn defaults() -> BTreeMap<String, Value> {
         (
             SettingKey::TerminalDetachGrace,
             Value::from(DEFAULT_DETACH_GRACE_MINUTES),
+        ),
+        // Auto-reconnect ships on at three tries: a dropped socket is the common
+        // transient (a sleep, a proxy timeout, a daemon restart the holder
+        // outlives) and a shell still running is exactly what the holder process
+        // exists to preserve. A manual Reconnect is one click away if three tries
+        // are not enough. Zero turns the whole thing off.
+        (
+            SettingKey::TerminalReconnectTries,
+            Value::from(DEFAULT_RECONNECT_TRIES),
+        ),
+        (
+            SettingKey::TerminalReconnectBackoffSeconds,
+            Value::from(DEFAULT_RECONNECT_BACKOFF_SECONDS),
+        ),
+        (
+            SettingKey::TerminalReconnectFirstDelaySeconds,
+            Value::from(DEFAULT_RECONNECT_FIRST_DELAY_SECONDS),
         ),
         // Colour is the new default marker; the emoji face stays stored, so this
         // is a rendering choice and switching back is lossless.
@@ -1068,6 +1183,56 @@ mod tests {
         assert_eq!(
             db.detach_grace(),
             std::time::Duration::from_secs(MAX_DETACH_GRACE_MINUTES as u64 * 60)
+        );
+    }
+
+    #[test]
+    fn reconnect_prefs_default_and_clamp() {
+        let (_dir, db) = test_db();
+        let s = db.settings().unwrap();
+        assert_eq!(
+            s["terminal.reconnectTries"],
+            Value::from(DEFAULT_RECONNECT_TRIES),
+            "auto-reconnect ships on at three tries"
+        );
+        assert_eq!(
+            s["terminal.reconnectBackoffSeconds"],
+            Value::from(DEFAULT_RECONNECT_BACKOFF_SECONDS)
+        );
+        assert_eq!(
+            s["terminal.reconnectFirstDelaySeconds"],
+            Value::from(DEFAULT_RECONNECT_FIRST_DELAY_SECONDS)
+        );
+
+        // Zero is the off switch and must survive the clamp, not be raised to
+        // one — the same shape as the trash retention's zero.
+        db.patch_settings(&patch(&[("terminal.reconnectTries", Value::from(0))]))
+            .unwrap();
+        assert_eq!(
+            db.settings().unwrap()["terminal.reconnectTries"],
+            Value::from(0)
+        );
+
+        // Above the ceilings clamps down.
+        db.patch_settings(&patch(&[(
+            "terminal.reconnectTries",
+            Value::from(MAX_RECONNECT_TRIES + 50),
+        )]))
+        .unwrap();
+        assert_eq!(
+            db.settings().unwrap()["terminal.reconnectTries"],
+            Value::from(MAX_RECONNECT_TRIES)
+        );
+
+        // A negative (or wrong-typed) value degrades to the default on read.
+        db.patch_settings(&patch(&[(
+            "terminal.reconnectBackoffSeconds",
+            Value::from("soon"),
+        )]))
+        .unwrap_err();
+        assert_eq!(
+            db.settings().unwrap()["terminal.reconnectBackoffSeconds"],
+            Value::from(DEFAULT_RECONNECT_BACKOFF_SECONDS)
         );
     }
 

@@ -26,6 +26,9 @@ describe("terminalPrefs", () => {
       "terminal.scrollback": 1000,
       "terminal.bellVolume": 60,
       "terminal.shiftEnterNewline": false,
+      "terminal.reconnectTries": 5,
+      "terminal.reconnectBackoffSeconds": 12,
+      "terminal.reconnectFirstDelaySeconds": 2,
     });
     expect(p).toEqual({
       fontSize: 15,
@@ -35,7 +38,21 @@ describe("terminalPrefs", () => {
       scrollback: 1000,
       bellVolume: 60,
       shiftEnterNewline: false,
+      reconnectTries: 5,
+      reconnectBackoffSeconds: 12,
+      reconnectFirstDelaySeconds: 2,
     });
+  });
+
+  it("defaults auto-reconnect on at three near-immediate tries", () => {
+    // The shipped default: a dropped socket reconnects on its own a few times,
+    // starting nearly immediately — the case the feature exists for — and 0 is
+    // the off switch.
+    const p = terminalPrefs({});
+    expect(p.reconnectTries).toBe(3);
+    expect(p.reconnectBackoffSeconds).toBe(5);
+    expect(p.reconnectFirstDelaySeconds).toBe(1);
+    expect(terminalPrefs({ "terminal.reconnectTries": 0 }).reconnectTries).toBe(0);
   });
 
   it("falls back for a key an older daemon never sent", () => {
