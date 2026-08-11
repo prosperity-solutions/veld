@@ -232,11 +232,13 @@ export function SettingsDialog(props: {
   const [fontFamily, setFontFamily] = useState(term.fontFamily);
   const shellValue = terminalShell(settings ?? {});
   const [shellPath, setShellPath] = useState(shellValue);
-  // Sticky *only* for the case the document cannot express: "Custom path…" was
-  // just chosen and the field is still empty, so the stored value is still one of
-  // the listed shells. Everything else is derived below — held as state alone, a
-  // shell changed in another window (or by a save from this one) left the select
-  // reading "Custom path…" for a value it no longer represented.
+  // This dialog's own intent — "I clicked Custom path…" — and nothing else. It is
+  // deliberately **not** reset from the settings document, which is the last piece
+  // of machinery this row had and the source of its fourth consecutive review
+  // finding: `save` updates the document optimistically, so resetting on every
+  // document change closed the field the moment a custom path was saved, whenever
+  // the shells list happened to be absent. Intent belongs to the window that
+  // expressed it and dies with the dialog, which is remounted on every open.
   const [customShell, setCustomShell] = useState(false);
   // What this machine has. Fetched once per open rather than read from the
   // settings document, because it is not a setting — see `api.shells`. A failure
@@ -335,9 +337,6 @@ export function SettingsDialog(props: {
     setRetention(retentionValue);
     setHistory(historyValue);
     setShellPath(shellValue);
-    // The document is the authority again; the derived half below reopens the
-    // field on its own if the stored value really is a custom path.
-    setCustomShell(false);
     setExempt(exemptValue.join("\n"));
     setSearch(searchValue);
     // eslint-disable-next-line react-hooks/exhaustive-deps
