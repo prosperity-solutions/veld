@@ -1995,7 +1995,14 @@ export function BrowserPane(props: {
                 widens between mousedown and mouseup, the row moves out from under the
                 pointer, and the click lands on the container instead of the row.
                 Gating a *flag* could never fix that; the draft wipe does it on its own,
-                which is why both surfaces need the same one mechanism. */}
+                which is why both surfaces need the same one mechanism.
+
+                What this gives up, since `mousedown` is also where a native selection
+                begins: you can no longer drag-select the URL text in a row. Each row
+                carries an explicit copy button, which is the better affordance for the
+                thing that text is for. `click` is untouched — `preventDefault` cancels
+                mousedown's own default action, not the click that follows it — so every
+                button and the open-externally anchor still work, as does the keyboard. */}
             <div onMouseDown={(e) => e.preventDefault()}>
               <PlaceList
                 suggestions={suggestions}
