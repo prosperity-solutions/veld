@@ -428,8 +428,8 @@ requests at runtime — branding rule.
   session-spawn path.
 - **Three features ride that one file, and each gates its own half of it.**
   `terminal.shellIntegration` adds the OSC 133 prompt marks that mark a worktree's
-  row in the rail, and `terminal.agentIntegration` puts a `claude` wrapper
-  in the shim directory (so it needs the directory on `PATH` even when the browser
+  row in the rail, and `terminal.agentIntegration` puts an agent wrapper (`claude`,
+  `codex`) in the shim directory (so it needs the directory on `PATH` even when the browser
   feature is off). All three settings are read at ticket time into one
   `shims::SessionOptions`, and the generated file decides what to run from the
   **variables in the environment** (`VELD_SHIM_DIR`, `VELD_SHELL_INTEGRATION`,

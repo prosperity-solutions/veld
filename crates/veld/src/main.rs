@@ -214,33 +214,35 @@ enum Command {
         args: Vec<String>,
     },
 
-    /// Write this terminal's ephemeral coding-agent settings and print its path.
+    /// Write this terminal's ephemeral coding-agent hook configuration and print it.
     ///
-    /// Called by the generated `claude` wrapper, not by hand. The file installs
-    /// lifecycle hooks that report whether the agent is working, waiting on you, or
-    /// done, so the worktree's rail badge can say so. It is per terminal session, lives
-    /// in this daemon's own shim directory, and **nothing of yours is edited** — no
-    /// `~/.claude/settings.json`, no `.claude/` in your project. `--settings` merges,
-    /// so your own configuration still applies.
+    /// Called by the generated `claude`/`codex` wrapper, not by hand. **Nothing of
+    /// yours is edited** — no `~/.claude/settings.json`, no `.claude/` in your project,
+    /// no `~/.codex/config.toml`. For Claude this writes a per-session settings file
+    /// and prints its path; `--settings` merges, so your own configuration still
+    /// applies. For Codex there is no file: this prints a literal `-c notify=[...]`
+    /// value, which overrides that one key for one invocation.
     ///
     /// Turned off by `terminal.agentIntegration` (Settings → Terminal).
     #[command(name = "agent-settings", hide = true)]
     AgentSettings {
-        /// Which agent. Only `claude` today.
+        /// Which agent: `claude` or `codex`.
         #[arg(long)]
         tool: Option<String>,
 
-        /// Terminal session the file is for. Defaults to `$VELD_PTY_SESSION`.
+        /// Terminal session this is for. Defaults to `$VELD_PTY_SESSION`.
         #[arg(long)]
         session: Option<String>,
     },
 
-    /// Report a coding agent's state, from a lifecycle hook. Reads the payload on stdin.
+    /// Report a coding agent's state, from a lifecycle hook.
     ///
-    /// Called by the hooks `veld agent-settings` installs, not by hand.
+    /// Reads the payload on stdin for a tool that pipes it there (Claude); a tool that
+    /// appends it as the final argument instead (Codex's `notify`) passes it as
+    /// `PAYLOAD` here. Called by the hooks `veld agent-settings` installs, not by hand.
     #[command(name = "agent-state", hide = true)]
     AgentState {
-        /// Which agent's payload this is. Only `claude` today.
+        /// Which agent's payload this is: `claude` or `codex`.
         #[arg(long)]
         tool: Option<String>,
 
@@ -249,12 +251,17 @@ enum Command {
         #[arg(long)]
         session: Option<String>,
 
-        /// Report "an agent just launched here and is idle", reading no stdin.
+        /// Report "an agent just launched here and is idle", reading no payload.
         ///
         /// Sent by the generated wrapper before it execs the agent. It is what stops a
         /// pane running an agent looking like a pane running a long shell command.
         #[arg(long)]
         launched: bool,
+
+        /// The event JSON, when the tool appends it as the final argv entry rather
+        /// than piping it on stdin. Absent for Claude and for `--launched`.
+        #[arg(value_name = "PAYLOAD")]
+        payload: Option<String>,
     },
 
     /// Show URLs of a running environment.
@@ -943,7 +950,8 @@ async fn main() {
             tool,
             session,
             launched,
-        } => commands::agent::state(tool, session, launched).await,
+            payload,
+        } => commands::agent::state(tool, session, launched, payload).await,
 
         Command::Action {
             action,

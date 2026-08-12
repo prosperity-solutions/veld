@@ -2113,8 +2113,8 @@ confusing with this one, because a project cannot influence either:
 `terminal.shellIntegration` (*Settings → Activity → Notice when a command
 finishes*) makes a terminal report when a command started and how it ended, which
 is what marks a worktree in the rail; `terminal.agentIntegration`
-(*…Notice when a coding agent is waiting for you*) wraps `claude` so its
-lifecycle hooks report the same way. Both live under *Activity* alongside
+(*…Notice when a coding agent is waiting for you*) wraps `claude`/`codex` so
+their lifecycle hooks report the same way. Both live under *Activity* alongside
 `activity.showWorking` and the four `activity.notify*` rows that decide which of
 those events raise a system notification. **All of these switches are independent** —
 they share one generated file and gate their halves of it on separate
