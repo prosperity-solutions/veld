@@ -27,6 +27,7 @@ mod stats;
 mod var_overrides;
 mod worktrees;
 
+pub use kv::PromotionState;
 pub use layouts::{LayoutRejected, LayoutWrite, MAX_LAYOUT_BYTES, PaneLayout};
 pub use logs::{LogFilter, LogRow, LogStream, stream_is_per_node};
 pub use panes::{PaneSession, mint_pane_token};

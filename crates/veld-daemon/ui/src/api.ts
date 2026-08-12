@@ -879,7 +879,7 @@ export async function errorMessage(res: Response): Promise<string> {
   // a surrogate pair — the daemon quotes paths and worktree aliases, and those can
   // hold an emoji, which would otherwise render as U+FFFD.
   if (raw.length <= 600) return raw;
-  const cut = /[\uD800-\uDBFF]$/.test(raw.slice(0, 600)) ? 599 : 600;
+  const cut = /[\uD800-\uDBFF]$/u.test(raw.slice(0, 600)) ? 599 : 600;
   return `${raw.slice(0, cut)}…`;
 }
 
@@ -1088,9 +1088,9 @@ export const api = {
   deleteTrashedWorktree: (id: number) =>
     request<void>(`/api/worktrees/${id}/delete`, { method: "POST" }),
   /** Delete every trashed worktree of a repo now. */
-  emptyTrash: (repo_root: string) =>
+  emptyTrash: (repoRoot: string) =>
     request<{ queued: number }>(
-      `/api/trash?repo_root=${encodeURIComponent(repo_root)}`,
+      `/api/trash?repo_root=${encodeURIComponent(repoRoot)}`,
       { method: "DELETE" },
     ),
   /** Clear a recorded deletion failure — the user has read it. */
@@ -1103,31 +1103,31 @@ export const api = {
    * `worktrees.id` is a reused rowid, and the full list because that makes the
    * write idempotent — omitted paths go back to unplaced.
    */
-  reorderWorktrees: (repo_root: string, order: string[]) =>
+  reorderWorktrees: (repoRoot: string, order: string[]) =>
     request<void>("/api/worktree-order", {
       method: "POST",
-      body: JSON.stringify({ repo_root, order }),
+      body: JSON.stringify({ repo_root: repoRoot, order }),
     }),
-  createLane: (repo_root: string, name: string) =>
+  createLane: (repoRoot: string, name: string) =>
     request<{ lane: Lane }>("/api/lanes", {
       method: "POST",
-      body: JSON.stringify({ repo_root, name }),
+      body: JSON.stringify({ repo_root: repoRoot, name }),
     }),
-  renameLane: (repo_root: string, from: string, name: string) =>
+  renameLane: (repoRoot: string, from: string, name: string) =>
     request<void>(`/api/lanes/${encodeURIComponent(from)}`, {
       method: "PATCH",
-      body: JSON.stringify({ repo_root, name }),
+      body: JSON.stringify({ repo_root: repoRoot, name }),
     }),
   /** Delete a lane. Its members are ungrouped, never removed. */
-  deleteLane: (repo_root: string, name: string) =>
+  deleteLane: (repoRoot: string, name: string) =>
     request<void>(
-      `/api/lanes/${encodeURIComponent(name)}?repo_root=${encodeURIComponent(repo_root)}`,
+      `/api/lanes/${encodeURIComponent(name)}?repo_root=${encodeURIComponent(repoRoot)}`,
       { method: "DELETE" },
     ),
-  reorderLanes: (repo_root: string, order: string[]) =>
+  reorderLanes: (repoRoot: string, order: string[]) =>
     request<void>("/api/lane-order", {
       method: "POST",
-      body: JSON.stringify({ repo_root, order }),
+      body: JSON.stringify({ repo_root: repoRoot, order }),
     }),
   /**
    * Every setting's **effective** value — the daemon merges its own defaults
@@ -1148,6 +1148,34 @@ export const api = {
     request<{ settings: SettingsDoc }>("/api/settings", {
       method: "PATCH",
       body: JSON.stringify(patch),
+    }),
+  /**
+   * What this user has done about each promotion, plus when they first opened
+   * the IDE.
+   *
+   * The daemon has no idea what a promotion is — it stores opaque ids against
+   * `dismissed`/`read` and hands back the arrival stamp, and every decision made
+   * from that (which are unread, which predate the user, which may prompt) is
+   * `model.ts`'s. Same split as `pane_layouts`: adding a promotion is a UI-only
+   * change, and an older daemon serving a newer bundle still works.
+   *
+   * A `POST` because it *stamps* `first_use` on first contact, and a safe method
+   * with that side effect is reachable from any page via a bare `<img src=…>`.
+   */
+  promotionState: () =>
+    request<{ states: Record<string, "dismissed" | "read">; first_use: string }>(
+      "/api/promotions/state",
+      { method: "POST" },
+    ),
+  /**
+   * Record a state for promotions. A monotone merge server-side — `read` wins
+   * over `dismissed` and neither is undone — so two windows acting on the same
+   * card converge instead of one overwriting the other.
+   */
+  markPromotions: (ids: string[], state: "dismissed" | "read") =>
+    request<{ states: Record<string, "dismissed" | "read"> }>("/api/promotions/mark", {
+      method: "POST",
+      body: JSON.stringify({ ids, state }),
     }),
   /**
    * The shells this machine offers for `terminal.shell`, plus what `"auto"`

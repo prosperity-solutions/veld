@@ -3783,3 +3783,198 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
 .settings-tabs .mantine-Tabs-tab[data-active]:hover {
   background: var(--panel2);
 }
+
+/* ---- first-run screen + feature promotions ---------------------------------- */
+
+/* The wordmark, coloured from the theme in both. Letters take `--text`, the
+   trailing dot takes `--accent` — the brand's signature detail, and the reason
+   the paths are reordered in `Brand.tsx` so the dot is `:last-child`. */
+.wordmark {
+  display: block;
+}
+
+.wordmark path {
+  fill: var(--text);
+}
+
+.wordmark path:last-child {
+  fill: var(--accent);
+}
+
+.start-screen {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: auto;
+  padding: 32px 24px;
+}
+
+.start-screen-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 34px;
+  /* Wide enough for three columns at a comfortable measure; the grid below
+     collapses rather than letting this stretch on an ultrawide window. */
+  max-width: 880px;
+  width: 100%;
+}
+
+.start-screen-head {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  text-align: center;
+}
+
+.start-screen-tagline {
+  margin: 0;
+  max-width: 46ch;
+  color: var(--muted);
+  font-size: 14.5px;
+  line-height: 1.55;
+}
+
+.promo-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+  width: 100%;
+}
+
+/* One column below the point where three would each be narrower than their own
+   headline. A media query rather than a container query: the grid's container
+   is the page, so there is nothing to measure that the viewport does not
+   already say. */
+@media (max-width: 760px) {
+  .promo-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.promo-section {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--panel);
+  text-align: left;
+}
+
+/* Row one: the glyph and the eyebrow read as one line, so rows two and three
+   both start at the card's edge and share a full-width measure. */
+.promo-section-lede {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+}
+
+.promo-section-glyph {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  color: var(--accent);
+  background: var(--live-bg);
+}
+
+/* Pushed to the row's end, so the eyebrow and the date read as one line rather
+   than as a wrapping pair. `margin-left: auto` and not a `space-between` on the
+   row, because the glyph and eyebrow must stay adjacent. */
+.promo-section-day {
+  margin-left: auto;
+  padding-left: 8px;
+  flex: none;
+  color: var(--faint);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.promo-section-eyebrow {
+  color: var(--accent);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  /* A long eyebrow shortens rather than pushing the glyph off its row. */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.promo-section-headline {
+  margin: 0;
+  color: var(--text);
+  font-size: 14.5px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.promo-section-body {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+
+.start-screen-cta {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+
+.start-screen-hint {
+  margin: 0;
+  max-width: 44ch;
+  color: var(--faint);
+  font-size: 12px;
+  line-height: 1.5;
+  text-align: center;
+}
+
+/* The second layout over the same atom: a stack instead of a grid. This is the
+   whole of the difference between the two surfaces — no prop, no variant. */
+.promo-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.promo-dialog-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+/* Unread-news dot on the project-actions button. `overflow: visible` because a
+   Mantine ActionIcon clips its content by default, which would slice the dot in
+   half at the corner. The ring is the bar's own background, so the dot reads as
+   sitting on top of the button rather than inside it. */
+.project-actions {
+  position: relative;
+  overflow: visible;
+}
+
+.project-actions-dot {
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  /* Matched to `.vars-btn .vars-badge` above, deliberately: both are "this
+     control has something for you" on the same 26px bar, and two corner dots of
+     different sizes read as two different kinds of signal. */
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 2px solid var(--panel2);
+}

@@ -233,6 +233,46 @@ call either way. When the change is website-facing, prefer serving it locally
 (`veld start website:local`) and collaborating through `veld feedback` before
 shipping.
 
+### Should this be promoted?
+
+Ask it explicitly, once, here — and **state the answer either way**, the same as
+the website question. This is the point where the answer is actually known: the
+change is finished, and you are the one who built it.
+
+Veld's IDE has a **feature-promotion channel** ([docs/promotions.md](../../../docs/promotions.md)):
+short cards shown once, after the release that adds them, to every existing user.
+Adding one is a decision with a cost, not a checklist step — it spends everyone's
+attention exactly once whether or not the thing was worth it.
+
+**"No" is the expected answer and needs no justification.** Promote only a change
+that *alters how somebody works* and that they would not otherwise find: a new
+pane kind, a new way to move between worktrees, a default that flipped, or
+something small with outsized daily reach. Never promote a bug fix, a perf win, a
+refactor, a new flag or config field, or anything only the person who shipped it
+would go looking for.
+
+If the answer is yes: append one entry to `PROMOTIONS` in
+`crates/veld-daemon/ui/src/promotions/content.ts` in **this** PR, within the caps
+that `model.test.ts` enforces, and read that doc's two id rules first — an id is
+never renamed and never reused, and both failures are silent.
+
+**Write the outcome, not the mechanism** — and treat this as the part you are
+most likely to get wrong, because you have just spent an hour inside the
+implementation and the implementation is the most available thing in your head.
+The headline is what the reader can now *do, or stop doing*. The body says what
+changes about their day, and only then where to look.
+
+> ✗ "Each worktree now shows one glyph for what its terminals have to say — needs
+> you, failed, finished, working — and marks the tab it came from."
+>
+> ✓ "Walk away from a running agent or a long build. When one needs you, fails,
+> or finishes, its worktree says so — and points at the tab it happened in."
+
+The check: if the sentence would still read as true to somebody who will never
+use the feature, it is describing the product instead of their day. Rewrite it
+starting from *you*. Never open with "Veld now…", a feature name, or a list of
+the states and options — that is documentation, and the docs already have it.
+
 If Step 1 classified the change as **customization** (or it includes a
 customization-shaped request), add a row to the extension backlog in
 `docs/extensions-vision.md` in this same PR — feature, data contract, UI
