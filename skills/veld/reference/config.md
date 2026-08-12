@@ -671,11 +671,11 @@ Reverse-proxy header rules applied by the **local Caddy proxy** (local dev) and 
 - `remove`: header names to strip. `set`: name → value map (replaces any existing value). Header names matched case-insensitively.
 - **Default change:** Veld no longer strips `Origin` by default (it used to, so dev-server WS HMR worked). `Origin` now passes through the local proxy; the gateway rewrites it *coherently* to the origin host on all requests (incl. WS upgrades) rather than dropping it. If a Next.js dev server rejects WS HMR on `Origin`, set `allowedDevOrigins` in `next.config.js` (recommended — https://nextjs.org/docs/app/api-reference/config/next-config-js/allowedDevOrigins). Escape hatch for frameworks with no allow-list: `"proxy": { "request": { "remove": ["Origin"] } }`.
 
-## `ide` — quicklinks, permissions, external origins and panes
+## `ide` — quicklinks, permissions, external origins, panes and news
 
 Per-project settings for Veld's own IDE surfaces (Veld Desktop, and `/ide` in a
 browser). Absent from most configs, and never affects a run. Every key under `ide`
-other than the three below is **reserved**: parsed, stored, not rendered, and
+other than the ones below is **reserved**: parsed, stored, not rendered, and
 `veld lint` emits a notice naming it.
 
 > Spelled `ui` before it was interpreted. A config still using `ui` fails
@@ -812,6 +812,57 @@ Loopback and veld's own URLs are a different matter — a config that can alread
 run `argv` on the machine is not meaningfully constrained by withholding a camera
 from its own dev server. Every config grant is shown in the pane's per-site panel
 labelled *set by veld.json*, where it can be revoked.
+
+### `ide.news`
+
+Cards the project shows its own team, through the channel Veld uses for its own
+announcements. Merge one with the change it describes; a teammate pulls, and the
+next time they open the IDE they are told once. Reading clears it; dismissing stops
+the prompt but keeps it counted; everything is revisitable from *What's new…* in the
+project ⋯ menu.
+
+```jsonc
+"ide": {
+  "news": [
+    {
+      "id": "one-command-tests",
+      "since": "2026-08-12",
+      "eyebrow": "Heads up",
+      "headline": "Stop guessing which test script works",
+      "body": "The wrappers are gone — `just test` runs everything, and your old local alias is the one thing that will still fail today.",
+      "glyph": "terminal"
+    }
+  ]
+}
+```
+
+| Field | Notes |
+|---|---|
+| `id` | **Required.** Kebab-case (`^[a-z0-9]+(-[a-z0-9]+)*$`), ≤64 chars, unique in the project. **Never renamed, never reused** — it is what each teammate's read state is stored against; both failures are silent. Namespaced per project before storage, so another repo's identical slug is not a collision. |
+| `since` | **Required**, `YYYY-MM-DD`, no default. Shown on the card, and it decides who is too new to need it: a teammate who imported the project after that day never sees it. |
+| `eyebrow` | **Required**, 1–24 chars. |
+| `headline` | **Required**, 1–44 chars. What a teammate can now *do*, or stop doing. |
+| `body` | **Required**, 1–160 chars. One sentence. |
+| `glyph` | `terminal` \| `panes` \| `device` \| `inbox`. Default `inbox`. Not the `ide.panes` icon set. |
+
+Rules that are enforced rather than advised:
+
+- **At most 5 live items.** Extras are dropped with a `veld lint` warning.
+  **Retiring an item is deleting it.**
+- **Only the repo's main checkout is read**, so a card on a feature branch prompts
+  nobody until it lands — and stays silent until somebody pulls on main.
+- **Every item is a change and its date gates it.** There is no evergreen kind:
+  standing practice belongs in the repo's docs (point at them with
+  `ide.quicklinks`), so a card can never outlive the change it describes.
+- Malformed entries are `veld lint` warnings, never load errors.
+- The reader can turn the whole channel off (*Settings → General → Show news from
+  your projects*), which hides cards without marking them read.
+
+**Write the outcome, not the mechanism** — ✗ "Test wrappers removed", ✓ "Stop
+guessing which test script works". If the sentence would read as true to somebody
+who will never touch that part of the repo, it describes the change instead of
+their day. Ask the user before adding one unless they asked: it is a message
+published to their colleagues in their name.
 
 ### `ide.panes`
 

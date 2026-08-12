@@ -118,6 +118,55 @@ pub const PANE_ICON_NAMES: &[&str] = &[
     "wand",
 ];
 
+/// Every illustration a news item may name, in sorted order.
+///
+/// The same closed set the IDE's own promotion cards draw from (`GlyphName` in
+/// `crates/veld-daemon/ui/src/promotions/model.ts`) — line art in `currentColor`,
+/// never a raster. Four names against `ide.panes`'s thirty is deliberate: a news
+/// card is one sentence with a mark beside it, and the set staying small is what
+/// keeps a project's card looking like it belongs beside Veld's rather than
+/// pasted in. It is not the pane icon vocabulary and must not grow into it.
+///
+/// Two gates keep this list, the schema's `enum`, and the bundle's `GLYPH_NAMES`
+/// from drifting: [`tests::the_glyph_set_matches_the_published_schema`] here, and
+/// `a_project_glyph_set_matches_the_schema` in `model.test.ts`.
+pub const NEWS_GLYPHS: &[&str] = &["device", "inbox", "panes", "terminal"];
+
+/// Every key one `ide.news` entry may declare, in sorted order.
+///
+/// Mirrors the schema's `$defs.newsItem`, which sets `additionalProperties:
+/// false` — so without this an editor red-squiggles `"headlines": "…"` while
+/// `veld lint` accepts it and the entry is dropped for a missing `headline` that
+/// the author can see right there in the file.
+pub const NEWS_ITEM_KEYS: &[&str] = &["body", "eyebrow", "glyph", "headline", "id", "since"];
+
+/// Caps on one news item's copy, in characters.
+///
+/// The same numbers the IDE bundle enforces on Veld's own cards, and they are
+/// **the mechanism, not style advice**: a card is a headline and one sentence, so
+/// a project cannot turn the interrupting surface into a wall of prose. An entry
+/// that breaches one is dropped with a problem rather than truncated — a
+/// half-sentence is worse than an author being told to shorten it.
+pub const MAX_NEWS_EYEBROW: usize = 24;
+/// See [`MAX_NEWS_EYEBROW`].
+pub const MAX_NEWS_HEADLINE: usize = 44;
+/// See [`MAX_NEWS_EYEBROW`].
+pub const MAX_NEWS_BODY: usize = 160;
+
+/// How many news items one config may have **live at once**.
+///
+/// The scarcity discipline in `docs/promotions.md`, made a gate. A news channel
+/// in a shared config file is a channel every teammate can push a modal through
+/// to every other teammate, and the technical mitigations that work are the ones
+/// that also improve authoring: the copy caps above stop a wall, and this stops a
+/// stack. Retiring a news item is *deleting* it, exactly as for Veld's own cards,
+/// so a project that has more than this many things to say at once has a
+/// changelog to say them in.
+///
+/// Items past the cap are dropped **from the end**, so the ones an author wrote
+/// first keep working rather than the list silently reordering what is seen.
+pub const MAX_NEWS_ITEMS: usize = 5;
+
 /// Every key a `terminal` pane may declare, in sorted order.
 ///
 /// Mirrors the schema's `$defs.pane` terminal branch, which sets
@@ -172,6 +221,19 @@ pub struct IdeSection {
     /// Extra pane types this project offers in the desktop app's pane menu.
     #[serde(default)]
     pub panes: Vec<PaneDef>,
+    /// News this project tells its own team, in author order, capped at
+    /// [`MAX_NEWS_ITEMS`].
+    ///
+    /// The repo's half of the IDE's promotion channel: a maintainer merges a card
+    /// with the change it describes, a teammate pulls, and the teammate is told.
+    /// Everything about *delivery* — whether a card has been read, whether its
+    /// date predates this user, what the unread count is — lives in the bundle
+    /// against opaque ids, exactly as for Veld's own cards. What lives here is
+    /// only the parse and the caps, because this is the process that reads
+    /// `veld.json` and therefore the only one that can tell an author their
+    /// headline ran long.
+    #[serde(default)]
+    pub news: Vec<NewsItem>,
     /// Origins that must open in the **system** browser rather than in a Veld
     /// browser pane — the project's half of the exempt list (the other half is the
     /// `browser.externalOrigins` setting, and the two are unioned).
@@ -213,6 +275,7 @@ impl IdeSection {
             && self.permissions.is_empty()
             && self.external_origins.is_empty()
             && self.panes.is_empty()
+            && self.news.is_empty()
     }
 
     /// The staleness-sensitivity multiplier, floored at `0.1`. Always at least
@@ -325,6 +388,46 @@ pub enum PaneIcon {
     Name(String),
     /// Any non-ASCII string — in practice an emoji, rendered as text.
     Emoji(String),
+}
+
+/// One card a project shows its own team.
+///
+/// Deliberately the *same* closed field set as a Veld promotion, not a superset:
+/// no `layout`, no `variant`, no CTA, no link, no Markdown. The cap is the
+/// mechanism — four short strings and a mark cannot become a wall of headings,
+/// which is the only thing that keeps an interrupting surface worth interrupting
+/// for. A `details` pointer to a repo-relative Markdown file is the designed
+/// extension point if somebody genuinely hits the limit; it is not this version,
+/// and if it is ever built it wants a strict subset renderer rather than a
+/// Markdown library, no HTML passthrough, no images, and `https:` links shown as
+/// their literal URL.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NewsItem {
+    /// The author's own slug, kebab-case, stable forever.
+    ///
+    /// **Not** what is persisted: the bundle namespaces this per project before
+    /// it reaches storage, so two unrelated repos both shipping `new-build` stay
+    /// separate. It still must never be renamed or reused within one project, for
+    /// the same two silent failures Veld's own ids have — a rename re-shows the
+    /// card to the whole team, and reusing a retired slug suppresses the new card
+    /// for everyone who saw the old one.
+    pub id: String,
+    /// The day this item was written, `YYYY-MM-DD`.
+    ///
+    /// **Required, with no default, and it gates.** A teammate who imported the
+    /// project after this day never sees the card — which is what stops cloning a
+    /// repo with a year of history from being a stack of modals about changes that
+    /// predate you, and what makes an item that nobody deleted stop reaching
+    /// people anyway. There is deliberately no fallback: a defaulted date would
+    /// gate wrongly and silently, and "today" is wrong the moment the config is
+    /// read on a different day than it was written.
+    pub since: String,
+    pub eyebrow: String,
+    pub headline: String,
+    /// One sentence. Not two.
+    pub body: String,
+    /// One of [`NEWS_GLYPHS`]. Defaults to `inbox`.
+    pub glyph: String,
 }
 
 /// A link on the browser pane's start page.
@@ -482,6 +585,7 @@ pub fn parse(value: Option<&serde_json::Value>) -> IdeSection {
 
     for (key, child) in map {
         match key.as_str() {
+            "news" => parse_news(child, &mut section),
             "quicklinks" => parse_quicklinks(child, &mut section),
             "permissions" => parse_permissions(child, &mut section),
             "panes" => parse_panes(child, &mut section),
@@ -936,6 +1040,216 @@ fn valid_pane_id(id: &str) -> bool {
         && id
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// Whether a slug can be a news id.
+///
+/// Kebab-case, the same grammar Veld's own promotion ids use, and the length
+/// bound is not cosmetic: the bundle namespaces this slug per project before it
+/// reaches storage, and the whole namespaced string has to fit the promotions
+/// endpoint's 128-character ceiling. 64 leaves room for the prefix and the
+/// project hash with plenty to spare.
+///
+/// The rule that matters most is what kebab-case *excludes*: a `:` cannot appear
+/// here, which is what makes `proj:<hash>:<slug>` unambiguous and keeps a project
+/// from writing an id that collides with one of Veld's. Do not loosen this to
+/// admit `:` — see `NAMESPACE_SEPARATOR` in the bundle's `model.ts`.
+fn valid_news_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id.split('-').all(|part| {
+            !part.is_empty()
+                && part
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        })
+}
+
+/// Whether a string is a plausible `YYYY-MM-DD` day.
+///
+/// Shape and range only — no calendar. The gate this date feeds compares
+/// day-granularity strings lexicographically, so `2026-02-31` would work
+/// perfectly well and mean nothing; the check exists to catch the typo
+/// (`2026-13-04`, `26-08-12`, `2026/08/12`) before it silently changes who sees a
+/// card, not to validate a calendar veld has no reason to know about.
+fn plausible_day(day: &str) -> bool {
+    let bytes = day.as_bytes();
+    if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
+        return false;
+    }
+    if !bytes
+        .iter()
+        .enumerate()
+        .all(|(i, b)| i == 4 || i == 7 || b.is_ascii_digit())
+    {
+        return false;
+    }
+    let num = |from: usize, to: usize| day[from..to].parse::<u32>().unwrap_or(0);
+    (1..=12).contains(&num(5, 7)) && (1..=31).contains(&num(8, 10))
+}
+
+/// Parse `ide.news` — the cards this project shows its own team.
+///
+/// Lenient like every other `ide` key: a malformed entry is dropped with a
+/// problem that `veld lint` reports, never a load error. Note where this parser
+/// deliberately does **not** follow the module's fail-closed rule: an unknown key
+/// on an otherwise-valid entry reports a problem and *keeps* the card, exactly as
+/// `ide.panes` does. Fail-closed exists because guessing at a permission hands
+/// web content a capability nobody granted; a news card grants nothing, and
+/// dropping one over a stray key is a change the team never hears about.
+fn parse_news(value: &serde_json::Value, out: &mut IdeSection) {
+    let Some(items) = value.as_array() else {
+        out.problems.push(IdeProblem {
+            location: "ide.news".to_owned(),
+            message: "must be an array of news items; it was ignored".to_owned(),
+        });
+        return;
+    };
+    for (index, item) in items.iter().enumerate() {
+        let at = format!("ide.news[{index}]");
+        // Checked before the item is parsed, so the finding names the entry the
+        // author would have to delete rather than a validation detail of a card
+        // that was never going to be shown anyway.
+        if out.news.len() >= MAX_NEWS_ITEMS {
+            out.problems.push(IdeProblem {
+                location: at,
+                message: format!(
+                    "a project may have at most {MAX_NEWS_ITEMS} news items live at once; \
+                     this one was dropped. Retiring a news item is deleting it — remove the \
+                     ones that have stopped being news"
+                ),
+            });
+            continue;
+        }
+        let Some(entry) = item.as_object() else {
+            out.problems.push(IdeProblem {
+                location: at,
+                message: "must be an object with `id`, `since`, `eyebrow`, `headline` and `body`"
+                    .to_owned(),
+            });
+            continue;
+        };
+
+        let id = entry.get("id").and_then(serde_json::Value::as_str);
+        let Some(id) = id.filter(|id| valid_news_id(id)) else {
+            out.problems.push(IdeProblem {
+                location: format!("{at}.id"),
+                message: format!(
+                    "required, and must be a kebab-case slug of at most 64 characters \
+                     such as \"build-moved-to-just\" (got {:?})",
+                    id.unwrap_or_default()
+                ),
+            });
+            continue;
+        };
+        // One id is one slot in the user's stored state, so two entries sharing one
+        // would mean reading either marks both. First wins, matching `ide.panes`.
+        if out.news.iter().any(|existing| existing.id == id) {
+            out.problems.push(IdeProblem {
+                location: format!("{at}.id"),
+                message: format!("duplicate news id {id:?}; the first entry was kept"),
+            });
+            continue;
+        }
+
+        let since = entry.get("since").and_then(serde_json::Value::as_str);
+        let Some(since) = since.filter(|s| plausible_day(s)) else {
+            out.problems.push(IdeProblem {
+                location: format!("{at}.since"),
+                message: format!(
+                    "required for every news item, as a YYYY-MM-DD day such as \
+                     \"2026-08-12\" (got {:?}). It is shown on the card and it decides who \
+                     is new enough not to need it — so there is no default",
+                    since.unwrap_or_default()
+                ),
+            });
+            continue;
+        };
+
+        // The three copy fields, each dropped rather than truncated on a breach:
+        // half a sentence reads as a bug in veld, where a lint finding reads as
+        // what it is.
+        let mut copy: Vec<&str> = Vec::with_capacity(3);
+        let mut bad = false;
+        for (key, max) in [
+            ("eyebrow", MAX_NEWS_EYEBROW),
+            ("headline", MAX_NEWS_HEADLINE),
+            ("body", MAX_NEWS_BODY),
+        ] {
+            let text = entry.get(key).and_then(serde_json::Value::as_str);
+            match text {
+                Some(text) if !text.trim().is_empty() && text.chars().count() <= max => {
+                    copy.push(text);
+                }
+                _ => {
+                    bad = true;
+                    out.problems.push(IdeProblem {
+                        location: format!("{at}.{key}"),
+                        message: format!(
+                            "required, and must be 1-{max} characters (got {}). The cap is \
+                             the point: a card is a headline and one sentence, so it is \
+                             worth being interrupted by",
+                            text.map_or_else(
+                                || "nothing".to_owned(),
+                                |t| format!("{}", t.chars().count())
+                            )
+                        ),
+                    });
+                }
+            }
+        }
+        if bad {
+            continue;
+        }
+
+        let glyph = match entry.get("glyph").map(serde_json::Value::as_str) {
+            None => "inbox",
+            Some(Some(name)) if NEWS_GLYPHS.contains(&name) => name,
+            other => {
+                out.problems.push(IdeProblem {
+                    location: format!("{at}.glyph"),
+                    message: format!(
+                        "must be one of {} (got {:?})",
+                        NEWS_GLYPHS.join(", "),
+                        other.flatten().unwrap_or_default()
+                    ),
+                });
+                continue;
+            }
+        };
+
+        // After the item is known to be good, so a card being dropped for a real
+        // reason does not also collect a pile of key complaints.
+        let mut unknown: Vec<&str> = entry
+            .keys()
+            .map(String::as_str)
+            .filter(|k| !NEWS_ITEM_KEYS.contains(k))
+            .collect();
+        if !unknown.is_empty() {
+            unknown.sort_unstable();
+            out.problems.push(IdeProblem {
+                location: at,
+                message: format!(
+                    "unknown news key(s) {}. A news item may declare: {}",
+                    unknown
+                        .iter()
+                        .map(|k| format!("{k:?}"))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    NEWS_ITEM_KEYS.join(", ")
+                ),
+            });
+        }
+
+        out.news.push(NewsItem {
+            id: id.to_owned(),
+            since: since.to_owned(),
+            eyebrow: copy[0].to_owned(),
+            headline: copy[1].to_owned(),
+            body: copy[2].to_owned(),
+            glyph: glyph.to_owned(),
+        });
+    }
 }
 
 fn parse_quicklinks(value: &serde_json::Value, out: &mut IdeSection) {
@@ -2484,5 +2798,242 @@ mod tests {
         sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(sorted, PERMISSION_IDS.to_vec());
+    }
+
+    // -- ide.news --------------------------------------------------------------
+
+    fn news_item(extra: serde_json::Value) -> serde_json::Value {
+        let mut item = json!({
+            "id": "build-moved",
+            "since": "2026-08-12",
+            "eyebrow": "Heads up",
+            "headline": "Run the suite with one command",
+            "body": "The test script moved behind `just test`, so a stale local wrapper is the one thing that will still fail today.",
+        });
+        let (Some(base), Some(extra)) = (item.as_object_mut(), extra.as_object()) else {
+            panic!("both must be objects");
+        };
+        for (key, value) in extra {
+            base.insert(key.clone(), value.clone());
+        }
+        item
+    }
+
+    fn one_news(item: serde_json::Value) -> IdeSection {
+        section(json!({ "news": [item] }))
+    }
+
+    #[test]
+    fn a_news_item_takes_the_safe_defaults_for_what_it_omits() {
+        let parsed = one_news(news_item(json!({})));
+        assert!(parsed.problems.is_empty(), "{:?}", parsed.problems);
+        assert_eq!(parsed.news.len(), 1);
+        // The glyph is the only optional field. Everything an item says about
+        // *who sees it* — the date — is required, so there is no default that can
+        // silently change its audience.
+        assert_eq!(parsed.news[0].glyph, "inbox");
+        assert!(!parsed.is_empty(), "news alone is worth sending to a UI");
+    }
+
+    /// The caps are the whole mitigation for an interrupting surface a teammate
+    /// can push through, so a breach must not be quietly truncated into a
+    /// half-sentence that reads as a veld bug.
+    #[test]
+    fn a_news_item_over_a_copy_cap_is_dropped_and_named() {
+        for (key, max) in [
+            ("eyebrow", MAX_NEWS_EYEBROW),
+            ("headline", MAX_NEWS_HEADLINE),
+            ("body", MAX_NEWS_BODY),
+        ] {
+            let parsed = one_news(news_item(json!({ key: "x".repeat(max + 1) })));
+            assert!(parsed.news.is_empty(), "{key} over cap must not ship");
+            assert_eq!(parsed.problems[0].location, format!("ide.news[0].{key}"));
+        }
+        // Exactly at the cap is fine — the bound is inclusive, and it is measured
+        // in characters rather than bytes so an em dash does not cost three.
+        let ok = one_news(news_item(
+            json!({ "headline": "—".repeat(MAX_NEWS_HEADLINE) }),
+        ));
+        assert_eq!(ok.news.len(), 1, "{:?}", ok.problems);
+
+        // Present-but-blank is a missing field, not a valid empty card.
+        let blank = one_news(news_item(json!({ "eyebrow": "   " })));
+        assert!(blank.news.is_empty());
+    }
+
+    #[test]
+    fn a_news_item_needs_a_plausible_day_and_gets_no_default() {
+        for bad in [
+            json!("2026-13-04"),
+            json!("2026-08-32"),
+            json!("26-08-12"),
+            json!("2026/08/12"),
+            json!("2026-8-1"),
+            json!(20260812),
+            serde_json::Value::Null,
+        ] {
+            let mut item = news_item(json!({}));
+            item.as_object_mut()
+                .unwrap()
+                .insert("since".into(), bad.clone());
+            let parsed = one_news(item);
+            assert!(parsed.news.is_empty(), "{bad} must not ship");
+            assert_eq!(parsed.problems[0].location, "ide.news[0].since");
+        }
+        // A missing key is the same answer as a malformed one: "today" would be
+        // wrong the moment the config is read on a different day.
+        let mut without = news_item(json!({}));
+        without.as_object_mut().unwrap().remove("since");
+        assert!(one_news(without).news.is_empty());
+    }
+
+    #[test]
+    fn the_live_item_cap_drops_from_the_end_and_says_why() {
+        let items: Vec<serde_json::Value> = (0..MAX_NEWS_ITEMS + 2)
+            .map(|i| news_item(json!({ "id": format!("item-{i}") })))
+            .collect();
+        let parsed = section(json!({ "news": items }));
+        assert_eq!(parsed.news.len(), MAX_NEWS_ITEMS);
+        // The author's first entries survive; the list does not silently reorder
+        // which of them is seen.
+        assert_eq!(parsed.news[0].id, "item-0");
+        assert_eq!(parsed.problems.len(), 2);
+        assert_eq!(
+            parsed.problems[0].location,
+            format!("ide.news[{MAX_NEWS_ITEMS}]")
+        );
+        assert!(parsed.problems[0].message.contains("Retiring"));
+    }
+
+    /// The reason `proj:<hash>:<slug>` is unambiguous, asserted rather than
+    /// commented. `NAMESPACE_SEPARATOR` in the bundle's `model.ts` reserves `:`,
+    /// and a project id that could contain one would let a repo write an id
+    /// indistinguishable from one of Veld's.
+    #[test]
+    fn a_news_id_can_never_contain_the_namespace_separator() {
+        for id in ["a:b", ":", "proj:x:y", "veld:news"] {
+            assert!(!valid_news_id(id), "{id} must not be a valid news id");
+        }
+        for id in ["a", "build-moved", "a1-b2-c3"] {
+            assert!(valid_news_id(id), "{id} must be a valid news id");
+        }
+        // Not kebab-case: capitals, underscores, spaces, doubled or edge dashes.
+        for id in [
+            "Build-Moved",
+            "build_moved",
+            "build moved",
+            "build--moved",
+            "-build",
+            "build-",
+            "",
+        ] {
+            assert!(!valid_news_id(id), "{id:?} must not be a valid news id");
+        }
+        // Bounded so the namespaced form fits the promotions endpoint's ceiling.
+        assert!(valid_news_id(&"a".repeat(64)));
+        assert!(!valid_news_id(&"a".repeat(65)));
+    }
+
+    #[test]
+    fn a_duplicate_news_id_keeps_the_first_and_reports_the_second() {
+        let parsed = section(json!({
+            "news": [
+                news_item(json!({ "eyebrow": "First" })),
+                news_item(json!({ "eyebrow": "Second" })),
+            ]
+        }));
+        assert_eq!(parsed.news.len(), 1);
+        assert_eq!(parsed.news[0].eyebrow, "First");
+        assert_eq!(parsed.problems[0].location, "ide.news[1].id");
+    }
+
+    #[test]
+    fn a_bad_glyph_is_named_rather_than_guessed() {
+        let glyph = one_news(news_item(json!({ "glyph": "rocket" })));
+        assert!(glyph.news.is_empty());
+        assert_eq!(glyph.problems[0].location, "ide.news[0].glyph");
+        // The pane icon vocabulary is a different, much larger set, and naming one
+        // of its members here must not quietly work.
+        assert!(PANE_ICON_NAMES.contains(&"rocket"));
+    }
+
+    /// An unknown key reports but **keeps** the card, unlike `ide.permissions`.
+    /// Fail-closed exists because guessing at a permission hands out a
+    /// capability; a card grants nothing, and dropping one over a stray key is a
+    /// change the team never hears about.
+    #[test]
+    fn an_unknown_news_key_is_reported_but_the_card_still_ships() {
+        let parsed = one_news(news_item(json!({ "kind": "onboarding" })));
+        assert_eq!(parsed.news.len(), 1);
+        assert_eq!(parsed.problems.len(), 1);
+        assert_eq!(parsed.problems[0].location, "ide.news[0]");
+        // `kind` was a real field until the onboarding kind was removed. A config
+        // still carrying one keeps working and is told what to delete, rather than
+        // losing its card to a key that used to be valid.
+        assert!(parsed.problems[0].message.contains("\"kind\""));
+    }
+
+    #[test]
+    fn a_wrong_typed_news_key_is_ignored_whole_and_reported() {
+        let parsed = section(json!({ "news": { "id": "a" } }));
+        assert!(parsed.news.is_empty());
+        assert_eq!(parsed.problems.len(), 1);
+        assert_eq!(parsed.problems[0].location, "ide.news");
+    }
+
+    /// `news` moved out of `uninterpreted` when it gained a meaning; F8 must stop
+    /// naming it or `veld lint` tells authors their news is not rendered.
+    #[test]
+    fn news_is_no_longer_reported_as_uninterpreted() {
+        let parsed = one_news(news_item(json!({})));
+        assert!(parsed.uninterpreted.is_empty());
+    }
+
+    /// Same drift gate as the pane icons and the permission ids. The bundle's half
+    /// of it is `a_project_glyph_set_matches_the_schema` in `model.test.ts`, so
+    /// all three — parser, schema, renderer — are pinned to one list.
+    #[test]
+    fn the_glyph_set_matches_the_published_schema() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .expect("workspace root")
+            .join("schema/v3/veld.schema.json");
+        let schema: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("schema is readable"))
+                .expect("schema is valid JSON");
+        let item = &schema["$defs"]["newsItem"];
+        assert_eq!(
+            item["additionalProperties"],
+            serde_json::json!(false),
+            "the key check below only means anything while the schema is closed"
+        );
+        let mut names: Vec<&str> = item["properties"]["glyph"]["enum"]
+            .as_array()
+            .expect("$defs.newsItem.properties.glyph.enum must exist")
+            .iter()
+            .map(|v| v.as_str().expect("names are strings"))
+            .collect();
+        names.sort_unstable();
+        assert_eq!(names, NEWS_GLYPHS.to_vec());
+
+        let mut keys: Vec<&str> = item["properties"]
+            .as_object()
+            .expect("$defs.newsItem must list properties")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(keys, NEWS_ITEM_KEYS.to_vec());
+    }
+
+    #[test]
+    fn news_glyphs_and_keys_are_sorted_and_unique() {
+        for list in [NEWS_GLYPHS, NEWS_ITEM_KEYS] {
+            let mut sorted = list.to_vec();
+            sorted.sort_unstable();
+            sorted.dedup();
+            assert_eq!(sorted, list.to_vec());
+        }
     }
 }

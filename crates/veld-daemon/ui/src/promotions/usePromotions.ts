@@ -1,33 +1,64 @@
 /**
- * The client half of the promotion channel.
+ * The client half of the promotion channel — Veld's cards and the selected
+ * project's, as one list.
  *
  * Reads the state map and the arrival stamp once per page load, and owns the
  * open/close state of the panel. Deliberately thin: every decision — what counts
- * as unread, what may prompt, whether a dated item predates the user — lives in
- * `model.ts`, where the node-environment test suite can reach it.
+ * as unread, what may prompt, whether a dated item predates the reader, how an
+ * id is namespaced — lives in `model.ts`, where the node-environment test suite
+ * can reach it.
+ *
+ * **The two channels differ in exactly two places, and both are handled by
+ * `model.ts` before anything here sees them.** A project's ids are namespaced,
+ * so a repo shipping `new-build` can never collide with a Veld card or with
+ * another repo's; and a project's cards gate on when this user imported *that
+ * project* rather than on when they arrived at Veld. Past that point a card is a
+ * card, which is what keeps one unread count, one panel and one merge.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import { api } from "../api";
 import { PROMOTIONS } from "./content";
 import {
+  type Card,
   mergeStates,
-  type Promotion,
+  type ProjectNewsItem,
   type PromotionState,
+  projectCards,
   toPrompt,
   unreadCount,
   unreadOf,
+  veldCards,
 } from "./model";
+
+/** The selected project and the news its main checkout declares. */
+export interface NewsProject {
+  root: string;
+  name: string;
+  created_at: string;
+  news: ProjectNewsItem[];
+}
 
 export interface PromotionsState {
   /** The panel's contents, or `null` when it is closed. */
-  open: { promotions: Promotion[]; automatic: boolean } | null;
+  open: { cards: Card[]; automatic: boolean } | null;
+  /** Everything this build and this project ship, for the history view. */
+  all: Card[];
+  /**
+   * The selected project's name, or `null` when there is none.
+   *
+   * Passed through so the history view can offer a **disabled** tab for a project
+   * with no news, rather than omitting it — "this project has told you nothing"
+   * is an answer, and a missing tab reads as a missing feature. It is not derived
+   * from `all` for exactly that reason: a project with no cards contributes none.
+   */
+  projectName: string | null;
   /** Whether there is anything to reopen at all. */
   any: boolean;
   /** What the indicator shows: unread *and* dismissed, never auto-read. */
   unread: number;
-  /** Open everything this build ships, on demand. */
+  /** Open everything, on demand. */
   browse: () => void;
   /** "Got it" — actually read. Clears the indicator. */
   markRead: () => void;
@@ -42,10 +73,27 @@ export function usePromotions(options: {
    *
    * Suppresses the *automatic* prompt only — the ⋯ menu still works. A panel
    * thrown over the screen that is trying to get somebody started is the wrong
-   * moment, and it is a real collision now that onboarding-kind promotions are
-   * shown to brand-new users by design.
+   * moment. Rarer than it looks, since every card is date-gated and a genuinely
+   * new user therefore has none — but an existing user who removed their last
+   * project lands on that screen with a real backlog, and that is the collision.
    */
   suppressAuto: boolean;
+  /**
+   * The selected project, or `null` when there is none.
+   *
+   * One project at a time, not every imported repo: the stored state row grows
+   * monotonically and the daemon cannot prune an id it does not understand, so
+   * "mark everything the user has ever had a repo for" is a row that only ever
+   * gets bigger. The selected project is also the only one whose news the reader
+   * has any context for.
+   *
+   * Its `news` comes from the repo's **main** checkout — the daemon takes it from
+   * there and discards every other worktree's copy, so a card being drafted on a
+   * feature branch cannot prompt anybody until it lands.
+   */
+  project: NewsProject | null;
+  /** `ui.showProjectNews`. When off, a project's cards are not built at all. */
+  showProject: boolean;
 }): PromotionsState {
   const [states, setStates] = useState<Record<string, PromotionState> | null>(null);
   const [firstUse, setFirstUse] = useState<string | null>(null);
@@ -59,8 +107,12 @@ export function usePromotions(options: {
    * Discarding the fetch outright instead was worse: a browse-and-close landing
    * mid-flight left `states`/`firstUse` null for the rest of the session, which
    * pins the badge at zero and makes every later settle a no-op.
+   *
+   * A `useState` rather than a `useRef` because it is read by the effect below
+   * and an effect must not depend on a value React does not track — but it is
+   * only ever set to `true`, so the extra render it costs happens once.
    */
-  const settled = useRef(false);
+  const [settled, setSettled] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -86,20 +138,38 @@ export function usePromotions(options: {
     };
   }, []);
 
-  const unread = useMemo(
-    () => (states && firstUse ? unreadCount(PROMOTIONS, states, firstUse) : 0),
-    [states, firstUse],
-  );
+  /**
+   * Every card, from both sources.
+   *
+   * Recomputed each render rather than memoised, deliberately. `project` arrives
+   * from the `/api/repos` poll, so it is a fresh object every few seconds — a
+   * `useMemo` keyed on it would rebuild anyway, and a `useMemo` keyed on a
+   * hand-rolled signature string would be a second, subtler source of truth
+   * about when news changed. The work is a hash of one path and a map over at
+   * most a handful of items.
+   *
+   * Nothing is built while `firstUse` is null: with no arrival there is no date
+   * gate, and guessing one is how a fresh install gets a modal about last spring.
+   * That deliberately gates the project's cards on Veld's own stamp being loaded
+   * too — the request that carries it is the same one that carries `states`, so
+   * without it there is nothing to compare a read against either.
+   */
+  const all: Card[] = firstUse
+    ? [
+        ...veldCards(PROMOTIONS, firstUse),
+        ...(options.showProject && options.project
+          ? projectCards(options.project, options.project.news)
+          : []),
+      ]
+    : [];
 
-  const promptable = useMemo(
-    () => (states && firstUse ? toPrompt(PROMOTIONS, states, firstUse) : []),
-    [states, firstUse],
-  );
+  const unread = states ? unreadCount(all, states) : 0;
+  const promptable = states ? toPrompt(all, states) : [];
 
   useEffect(() => {
-    if (settled.current || options.suppressAuto || promptable.length === 0 || open) return;
-    setOpen({ promotions: promptable, automatic: true });
-  }, [options.suppressAuto, promptable, open]);
+    if (settled || options.suppressAuto || promptable.length === 0 || open) return;
+    setOpen({ cards: promptable, automatic: true });
+  }, [settled, options.suppressAuto, promptable, open]);
 
   /**
    * Record a state for whatever the panel is showing, and close it.
@@ -113,17 +183,17 @@ export function usePromotions(options: {
   const settle = useCallback(
     (state: PromotionState) => {
       if (!open) return;
-      // Close first, unconditionally. The marking below needs `firstUse` to know
-      // what is outstanding, but a dialog that will not shut because a fetch
-      // failed is far worse than a card shown again — and `browse()` can open
-      // this panel while that fetch is still in flight or has already failed.
-      settled.current = true;
+      // Close first, unconditionally. The marking below needs the cards' stored
+      // state to know what is outstanding, but a dialog that will not shut
+      // because a fetch failed is far worse than a card shown again — and
+      // `browse()` can open this panel while that fetch is still in flight or has
+      // already failed.
+      setSettled(true);
       setOpen(null);
-      if (!firstUse) return;
       // Only what this user actually has outstanding. Browsing shows every card
-      // the build ships, and marking the auto-read ones would write a row per
-      // promotion the user never had.
-      const ids = unreadOf(open.promotions, states ?? {}, firstUse);
+      // there is, and marking the auto-read ones would write a row per card the
+      // user never had.
+      const ids = unreadOf(open.cards, states ?? {});
       if (ids.length === 0) return;
       setStates((current) => mergeStates(current ?? {}, ids, state));
       // Never block the close on the write. The merge is idempotent, so a failed
@@ -134,18 +204,30 @@ export function usePromotions(options: {
         .then((res) => setStates(res.states))
         .catch(() => {});
     },
-    [open, states, firstUse],
+    [open, states],
   );
 
   const markRead = useCallback(() => settle("read"), [settle]);
   const dismiss = useCallback(() => settle("dismissed"), [settle]);
 
   const browse = useCallback(() => {
-    // Everything this build ships, whatever its state — including auto-read
-    // items, which is how somebody catches up on what changed before they
-    // arrived. Closing this marks read: they came here on purpose.
-    setOpen({ promotions: PROMOTIONS, automatic: false });
-  }, []);
+    // Everything there is, whatever its state — including auto-read items, which
+    // is how somebody catches up on what changed before they arrived. Closing
+    // this marks read: they came here on purpose.
+    setOpen({ cards: all, automatic: false });
+  }, [all]);
 
-  return { open, any: PROMOTIONS.length > 0, unread, browse, markRead, dismiss };
+  return {
+    open,
+    all,
+    // Only when its news is actually being shown: with `ui.showProjectNews` off,
+    // a tab named after the project would offer to filter to cards this session
+    // has deliberately not built.
+    projectName: options.showProject ? (options.project?.name ?? null) : null,
+    any: all.length > 0,
+    unread,
+    browse,
+    markRead,
+    dismiss,
+  };
 }

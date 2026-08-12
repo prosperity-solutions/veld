@@ -1,5 +1,5 @@
 /**
- * The `veld.` wordmark and the promotion glyph set.
+ * The `veld.` wordmark, the `V.` icon mark, and the promotion glyph set.
  *
  * The wordmark is the brand mark for this surface. `docs/branding.md` keeps it
  * out of the `/ide` top bar — 40–42px of pure controls, which is the documented
@@ -35,6 +35,37 @@ export function Wordmark(props: { height?: number; className?: string }) {
       <path d="M2137 1463V20H2311V1463H2137Z" />
       <path d="M2937 1463C2848.33 1463 2770.83 1440.83 2704.5 1396.5C2638.17 1352.17 2586.67 1289.5 2550 1208.5C2513.33 1127.5 2495 1032.33 2495 923V922C2495 812.667 2513.5 717.667 2550.5 637C2587.5 556.333 2639 493.833 2705 449.5C2771 405.167 2847.33 383 2934 383C2983.33 383 3029.17 390.833 3071.5 406.5C3113.83 422.167 3151.67 444.5 3185 473.5C3218.33 502.5 3245.67 537 3267 577H3271V0H3445V1443H3271V1267H3267C3245.67 1307.67 3218.67 1342.5 3186 1371.5C3153.33 1400.5 3116.17 1423 3074.5 1439C3032.83 1455 2987 1463 2937 1463ZM2971 1309C3029.67 1309 3081.67 1293 3127 1261C3172.33 1229 3207.83 1184 3233.5 1126C3259.17 1068 3272 1000.33 3272 923V922C3272 844.667 3259 777.167 3233 719.5C3207 661.833 3171.5 617 3126.5 585C3081.5 553 3029.67 537 2971 537C2909.67 537 2856.67 552.667 2812 584C2767.33 615.333 2733 659.667 2709 717C2685 774.333 2673 842.667 2673 922V923C2673 1002.33 2685 1071 2709 1129C2733 1187 2767.33 1231.5 2812 1262.5C2856.67 1293.5 2909.67 1309 2971 1309Z" />
       <path d="M3757 1463C3801.18 1463 3837 1427.18 3837 1383C3837 1338.82 3801.18 1303 3757 1303C3712.82 1303 3677 1338.82 3677 1383C3677 1427.18 3712.82 1463 3757 1463Z" />
+    </svg>
+  );
+}
+
+/**
+ * The `V.` icon mark, coloured from the theme.
+ *
+ * The wordmark's sibling from `crates/veld-daemon/assets/logo.svg` — same two
+ * paths, dot already last, and the hard-coded `fill="white"` / `fill="#C4F56A"`
+ * dropped so CSS owns both colours (the asset is drawn for a dark tile; a white
+ * `V` on a light dialog would be an invisible byline).
+ *
+ * Used where the wordmark is too wide to sit inside a line of text: a byline is
+ * one line at 10.5px, and `veld.` at that height is four glyphs of letterform
+ * fighting the sentence it is attached to. The mark is one glyph, and it is still
+ * the thing a repo cannot produce, which is the whole job.
+ */
+export function Logomark(props: { size?: number; className?: string }) {
+  const size = props.size ?? 14;
+  return (
+    <svg
+      className={`logomark${props.className ? ` ${props.className}` : ""}`}
+      width={size}
+      height={size}
+      viewBox="0 0 32 32"
+      role="img"
+      aria-label="veld"
+      focusable="false"
+    >
+      <path d="M13.2 28L4 4H8.4L15.7 23.8H15.8L23.1 4H27.5L18.3 28H13.2Z" />
+      <path d="M24.5 29C25.8807 29 27 27.8807 27 26.5C27 25.1193 25.8807 24 24.5 24C23.1193 24 22 25.1193 22 26.5C22 27.8807 23.1193 29 24.5 29Z" />
     </svg>
   );
 }

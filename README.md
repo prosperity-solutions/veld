@@ -542,13 +542,32 @@ A project can also **pre-answer permissions for its own origins**, in `veld.json
 }
 ```
 
-A grant you make by hand always beats the file, in both directions, and anything from the file is labelled *set by veld.json* in the site panel where you can revoke it — so this is a default, not a decision taken out of your hands. Understand what you are declaring, though: an entry for a *remote* origin hands that server's JavaScript a standing capability on the machine of anyone who opens it in a pane, which is a step beyond what the rest of a config does. See [docs/configuration.md](docs/configuration.md#ide-quicklinks-permissions-external-origins-and-panes) for the origin syntax, the full id list and the defaults.
+A grant you make by hand always beats the file, in both directions, and anything from the file is labelled *set by veld.json* in the site panel where you can revoke it — so this is a default, not a decision taken out of your hands. Understand what you are declaring, though: an entry for a *remote* origin hands that server's JavaScript a standing capability on the machine of anyone who opens it in a pane, which is a step beyond what the rest of a config does. See [docs/configuration.md](docs/configuration.md#ide-quicklinks-permissions-external-origins-panes-and-news) for the origin syntax, the full id list and the defaults.
 
 One permission is answered without asking anyone: a pane may **capture its own contents** at an origin veld serves. That is what `veld feedback` needs to take a screenshot, and a pane that could not screenshot the page it is showing was the one place the feature should have worked best.
 
 `ide.externalOrigins` is the third key in that block: origins a URL from a terminal must open in the *system* browser rather than in a pane — the sign-ins your app's login goes through, which need the browser the developer is already logged into. It is unioned with each user's own exempt list rather than replacing it.
 
 `ide.quicklinks` is the other half of the same block, and the other half of a pane's start page: veld lists the URLs it made, and these are the ones it didn't — staging, a dashboard, an internal wiki — versioned with the repo so a teammate who clones it gets the same links. They sit behind that page's *Bookmarks* button, and the address bar matches them as you type.
+
+**A project can tell its own team something changed** (`ide.news`). Somebody moves the test command or adds a required env var, and the people it affects normally find out when it breaks for them. A news entry is a short card — an eyebrow, a headline, one sentence and a date — merged alongside the change it describes; a teammate pulls, and the next time they open the IDE they are told, once. It rides the same channel veld uses for its own announcements, so reading clears it, dismissing keeps it counted, and everything stays revisitable under *What's new…* in the project ⋯ menu. Cards carry the project's name where veld's carry the wordmark, so a teammate's sentence can never read as something veld said.
+
+The limits are the point rather than an implementation detail: a headline of 44 characters, a body of 160, and **five live items at most** — with retiring one meaning deleting it. A surface that interrupts everybody on the team is worth having only while opening it is reliably worth their attention, which is also why the honest advice is to write the *outcome* ("stop guessing which test script works") and not the change ("test wrappers removed"). Anything malformed, or past the cap, is a `veld lint` warning and never a load failure; only news on your **main** branch counts, so a card drafted on a feature branch cannot prompt anybody early. A reader who wants none of it turns off *Settings → General → Show news from your projects*. See [docs/promotions.md](docs/promotions.md).
+
+```jsonc
+"ide": {
+  "news": [
+    {
+      "id": "one-command-tests",
+      "since": "2026-08-12",
+      "eyebrow": "Heads up",
+      "headline": "Stop guessing which test script works",
+      "body": "The wrappers are gone — `just test` runs everything, and your old local alias is the one thing that will still fail today.",
+      "glyph": "terminal"
+    }
+  ]
+}
+```
 
 **A project can add its own panes** (`ide.panes`), which is how the dock stops being a fixed set of four kinds. A declared pane is a terminal that runs *your* command inside your **login shell** — the same shell a plain terminal opens, so it inherits everything `.zprofile`/`.zshrc` export (model tokens, tool paths) — and it appears in the `+` menu, the pane chooser and ⌘K alongside veld's own. The chooser shows them as **equal cards in declaration order**, beside veld's plain Terminal, each with its `description` under its label — nothing is promoted, because a repo that declares Claude, Pi, Codex and a git log has four things a contributor might want and picking one for them would be a guess dressed as a default.
 

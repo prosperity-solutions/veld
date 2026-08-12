@@ -110,7 +110,7 @@ When a change introduces new config fields, CLI flags, subcommands, or user-visi
 | `schema/v3/veld.schema.json` | JSON Schema for v3 configs. **Hand-maintained — there is no compiler check tying it to the Rust types.** Any config field you add or change must be reflected here AND covered by `schema/v3/examples/`, which `tests/validate-schema.sh` validates against the schema and `schema_v3_examples_round_trip` deserializes with serde. That pair is the drift gate; skipping it ships a schema that confidently reports the wrong thing in the editor |
 | `docs/migrating-to-v3.md` | Migration guide. Update whenever v3 gains a field, or whenever something changes for v1/v2 configs too |
 | `docs/extensions-vision.md` | **Customization backlog.** When a proposed change is a *new feature* in the customization realm (needs a provider API, provider-specific schema, or provider-specific auth — see the universal-primitive test there), add a row to its extension backlog. Never build the extension itself in that PR; capture the need. See the Rules for agents section |
-| `crates/veld-daemon/ui/src/promotions/content.ts` | **Feature promotions.** Ask, for every change, whether users should be *told* — see [docs/promotions.md](docs/promotions.md). "No" is the expected answer: a promotion interrupts every user once, and the channel is only worth having while opening it is worth their attention. Promote a change that alters how somebody works and that they would not otherwise find; never a fix, a perf win, a flag, or a config field. State the call either way. If you do write one: **the outcome, not the mechanism** — the headline is what the reader can now do or stop doing, not what Veld now displays. *"Walk away from a running agent; the worktree that needs you says so"*, never *"each worktree shows a glyph for its terminals"*. If the sentence reads as true to somebody who will never use the feature, it is describing the product instead of their day |
+| `crates/veld-daemon/ui/src/promotions/content.ts` | **Feature promotions.** Ask, for every change, whether users should be *told* — see [docs/promotions.md](docs/promotions.md). "No" is the expected answer: a promotion interrupts every user once, and the channel is only worth having while opening it is worth their attention. Promote a change that alters how somebody works and that they would not otherwise find; never a fix, a perf win, a flag, or a config field. State the call either way. If you do write one: **the outcome, not the mechanism** — the headline is what the reader can now do or stop doing, not what Veld now displays. *"Walk away from a running agent; the worktree that needs you says so"*, never *"each worktree shows a glyph for its terminals"*. If the sentence reads as true to somebody who will never use the feature, it is describing the product instead of their day. (Not to be confused with `ide.news`, which is how a *project* tells its own team something changed — same vocabulary and same storage, but authored in a repo's `veld.json`, not here) |
 | `website/index.html` | **Marketing site.** If the change adds or renames a user-visible capability, decide whether it belongs on the site and, if so, update the relevant part — the features grid, CLI reference, sharing section, or the architecture diagram (`for the nerds`). Keep the brand tokens per `website/AGENTS.md` / `docs/branding.md`. |
 | `website/llms-full.txt` | LLM-facing docs — sync with any `index.html` content change (see `website/AGENTS.md`) |
 
@@ -655,7 +655,7 @@ run, while a plain terminal in the same app works perfectly.
   what's-new channel (`docs/promotions.md`) splits the same way pane layouts do:
   the daemon stores a map of ids to `dismissed`/`read` in `kv` under
   `promotions.state`, plus a `promotions.firstUse` stamp, and answers questions
-  about them — while every headline, sentence, glyph, kind and date lives in the
+  about them — while every headline, sentence, glyph and date lives in the
   `/ide` bundle, along with every decision made from them. So adding a promotion
   is a UI-only change and an older daemon serving a newer bundle still works;
   **never teach the daemon what a promotion contains.** The date gate is computed
@@ -669,8 +669,10 @@ run, while a plain terminal in the same app works perfectly.
   namespace into the same store without collisions — that reservation was made
   ahead of need because ids live in users' databases forever, and
   `a_veld_promotion_id_can_never_occupy_a_namespace` fails if the pattern is
-  loosened; **every promotion carries a mandatory `since` day**, shown on the
-  card, with the *kind* deciding only whether that date gates it; and
+  loosened; **every promotion carries a mandatory `since` day** that is shown on
+  the card *and* gates it — there is deliberately no evergreen kind, because a card
+  with no date gate is the only shape that never stops reaching people and
+  therefore the only one that can rot; and
   **`promotions.firstUse` is stamped once and never overwritten**,
   because a "when did they arrive" that drifts forward on every load makes the
   date gate meaningless — and it is stamped from the **oldest registered repo**

@@ -1120,6 +1120,22 @@ struct RepoView {
     /// router must not spawn subprocesses, and git status is computed only by
     /// the CSRF-gated POST paths.
     git: Option<RepoGitStatus>,
+    /// `ide.news` from this repo's **main** checkout — the cards the project shows
+    /// its own team.
+    ///
+    /// On the repo rather than on each worktree because news belongs to the
+    /// project, and because only what has reached main counts: a card being
+    /// drafted on a feature branch must not prompt a teammate, and a repo with
+    /// five worktrees must not put the same card in front of somebody five times.
+    /// [`repo_view`] takes it from the main worktree and discards the rest.
+    ///
+    /// **Always present, possibly empty** — the `ide` block's rule, not
+    /// `presets`': a project that declares no news and a project whose config
+    /// could not be read are the same thing to this surface, because both mean
+    /// "nothing to tell you", and neither is worth a control the user could act
+    /// on. Bounded by `veld_core::ide::MAX_NEWS_ITEMS`, which is what makes it
+    /// safe on an endpoint every IDE window polls.
+    news: Vec<veld_core::ide::NewsItem>,
 }
 
 /// Git-derived staleness for one repo's main checkout.
@@ -1275,6 +1291,19 @@ struct IdeView {
     /// a global curve. Floored to `0.1` so a hand-written `0` cannot divide by
     /// zero or invert the curve.
     staleness_sensitivity: f64,
+    /// This checkout's `ide.news`, **deliberately never serialized** — it is moved
+    /// up to [`RepoView::news`] from the *main* worktree by [`repo_view`], and
+    /// every other checkout's copy is discarded there.
+    ///
+    /// It rides here rather than being parsed a second time because
+    /// [`worktree_view`] already has the config open, and it is `skip`ped rather
+    /// than merely ignored by the client because the rule it enforces is a
+    /// promise about what a card can do: news counts only once it has reached
+    /// main, so a card being drafted on a feature branch must not be able to
+    /// prompt a teammate. A client-side filter would make that promise
+    /// re-breakable by the next person to touch the renderer.
+    #[serde(skip)]
+    news: Vec<veld_core::ide::NewsItem>,
 }
 
 /// A config-declared pane as the UI needs to see it.
@@ -1429,6 +1458,7 @@ fn worktree_view(wt: WorktreeRecord) -> WorktreeView {
                 permissions: section.permissions,
                 panes,
                 staleness_sensitivity,
+                news: section.news,
             }
         })
         .unwrap_or_default();
@@ -1459,12 +1489,27 @@ async fn repo_view(
     available: bool,
     git: Option<RepoGitStatus>,
 ) -> Result<RepoView, ApiError> {
-    let worktrees = db
+    let mut worktrees: Vec<WorktreeView> = db
         .list_worktrees(FsPath::new(&repo.root))
         .map_err(db_err)?
         .into_iter()
         .map(worktree_view)
         .collect();
+    // News belongs to the *project*, and only what has landed on main counts.
+    //
+    // Taking it here — rather than letting each checkout carry its own — is what
+    // makes "a card being drafted on a feature branch cannot prompt anybody" true
+    // by construction. It also keeps the payload one copy per repo on an endpoint
+    // every IDE window polls, instead of one per worktree.
+    //
+    // Every other checkout's list is dropped with the `WorktreeView` it rode in
+    // on: `IdeView::news` is `#[serde(skip)]`, so nothing but this line can move
+    // a card onto the wire.
+    let news = worktrees
+        .iter_mut()
+        .find(|w| w.worktree.is_main)
+        .map(|w| std::mem::take(&mut w.ide.news))
+        .unwrap_or_default();
     let lanes = db.list_lanes(FsPath::new(&repo.root)).map_err(db_err)?;
     Ok(RepoView {
         repo,
@@ -1472,6 +1517,7 @@ async fn repo_view(
         worktrees,
         lanes,
         git,
+        news,
     })
 }
 

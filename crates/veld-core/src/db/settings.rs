@@ -354,6 +354,7 @@ pub enum SettingKey {
     BrowserExternalOrigins,
     BrowserSearchUrl,
     UiHideDisabledActions,
+    UiShowProjectNews,
     GitCreateFrom,
     WorktreeStorageMode,
     WorktreeStorageDir,
@@ -403,6 +404,7 @@ impl SettingKey {
         Self::BrowserExternalOrigins,
         Self::BrowserSearchUrl,
         Self::UiHideDisabledActions,
+        Self::UiShowProjectNews,
         Self::GitCreateFrom,
         Self::WorktreeStorageMode,
         Self::WorktreeStorageDir,
@@ -441,6 +443,7 @@ impl SettingKey {
             Self::BrowserExternalOrigins => "browser.externalOrigins",
             Self::BrowserSearchUrl => "browser.searchUrl",
             Self::UiHideDisabledActions => "ui.hideDisabledActions",
+            Self::UiShowProjectNews => "ui.showProjectNews",
             Self::GitCreateFrom => "git.createFrom",
             Self::WorktreeStorageMode => "worktree.storageMode",
             Self::WorktreeStorageDir => "worktree.storageDir",
@@ -481,6 +484,7 @@ impl SettingKey {
             "browser.externalOrigins" => Self::BrowserExternalOrigins,
             "browser.searchUrl" => Self::BrowserSearchUrl,
             "ui.hideDisabledActions" => Self::UiHideDisabledActions,
+            "ui.showProjectNews" => Self::UiShowProjectNews,
             "git.createFrom" => Self::GitCreateFrom,
             "worktree.storageMode" => Self::WorktreeStorageMode,
             "worktree.storageDir" => Self::WorktreeStorageDir,
@@ -568,7 +572,8 @@ impl SettingKey {
             | Self::ActivityNotifyAgentFinished
             | Self::BrowserQuickSwitchResponsive
             | Self::BrowserQuickSwitchColorScheme
-            | Self::UiHideDisabledActions => Value::from(value.as_bool().ok_or_else(bad)?),
+            | Self::UiHideDisabledActions
+            | Self::UiShowProjectNews => Value::from(value.as_bool().ok_or_else(bad)?),
             // The one list-valued setting, and the one whose entries are checked
             // by a parser that lives elsewhere: `veld_core::ide::parse_origin` is
             // what `ide.externalOrigins` in a project config goes through, and the
@@ -1099,6 +1104,21 @@ pub fn defaults() -> BTreeMap<String, Value> {
         // nothing still has to be read before it is dismissed. This is a rendering
         // choice only; nothing the daemon enforces reads it.
         (SettingKey::UiHideDisabledActions, Value::from(true)),
+        // Whether a project's own `ide.news` cards are shown at all. Veld's own
+        // are not affected and have no such switch.
+        //
+        // On by default, because a project's first card has to reach somebody or
+        // the channel does not exist — an opt-in news channel is a news channel
+        // whose launch announcement nobody sees. It is a *user*-level switch
+        // rather than a per-project one for the same reason: per-project consent
+        // would have to be given before the first card, i.e. before there is any
+        // reason to give it.
+        //
+        // It exists because this is the one surface where somebody other than
+        // Veld can put a modal in front of the user. The caps in
+        // `veld_core::ide` bound how much they can say; this is the reader's own
+        // answer to being told anything at all. Read only by the IDE bundle.
+        (SettingKey::UiShowProjectNews, Value::from(true)),
         // Where a new worktree's branch is cut from. `origin` is the point of
         // this setting: a worktree created from a stale local `main` is born
         // behind the remote — missing the latest DB migrations, conflicting with

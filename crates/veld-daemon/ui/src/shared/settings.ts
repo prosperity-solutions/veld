@@ -126,6 +126,12 @@ const FALLBACK = {
   // key that decides whether controls appear takes the shipped default so an older
   // daemon (which cannot know the key) does not look like a broken new UI.
   hideDisabledActions: true,
+  // Matches the Rust default rather than the previous release's behaviour, and
+  // the two disagree here: before this key there were no project cards at all,
+  // so the rule would say `false`. But an older daemon cannot know the key, and
+  // defaulting to silence would mean a project's news reaching nobody with no
+  // way for either side to tell — the exact failure the channel cannot survive.
+  showProjectNews: true,
   // The shipped default for a new control, by the file's `quickSwitch*`
   // exception: the create dialog renders "based on the latest origin" unless an
   // older daemon says otherwise, which is the behaviour this setting ships with.
@@ -531,6 +537,25 @@ export function logsTimeZone(doc: SettingsDoc): LogTimeZone {
  */
 export function hideDisabledActions(doc: SettingsDoc): boolean {
   return bool(doc, "ui.hideDisabledActions", FALLBACK.hideDisabledActions);
+}
+
+/**
+ * Whether a project's own `ide.news` cards are shown. **Defaults on.**
+ *
+ * Veld's own promotions are not affected and have no such switch, and that
+ * asymmetry is the whole point of the setting: this is the one surface where
+ * somebody other than Veld — a teammate with commit access to `veld.json` — can
+ * put a modal in front of the reader. The caps in `veld_core::ide` bound how much
+ * a project can say; this is the reader's own answer to being told anything at
+ * all.
+ *
+ * A user-level switch rather than a per-project one, because per-project consent
+ * would have to be given before the first card, i.e. before there is anything to
+ * consent to. Off hides the cards and their share of the unread badge; it does
+ * not mark them read, so turning it back on shows what was missed.
+ */
+export function showProjectNews(doc: SettingsDoc): boolean {
+  return bool(doc, "ui.showProjectNews", FALLBACK.showProjectNews);
 }
 
 /**

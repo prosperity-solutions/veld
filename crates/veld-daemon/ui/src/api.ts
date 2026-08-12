@@ -505,6 +505,42 @@ export interface Repo {
    * gated `refreshRepos` poll computes it (the plain GET must not spawn git).
    */
   git: RepoGitStatus | null;
+  /**
+   * `ide.news` from this repo's **main** checkout — what the project tells its
+   * own team.
+   *
+   * On the repo and not on a worktree, because news belongs to the project and
+   * only what has landed on main counts: the daemon takes it from the main
+   * checkout and discards every other worktree's copy, so a card being drafted
+   * on a feature branch cannot prompt anybody. Always present, possibly empty,
+   * and bounded by `MAX_NEWS_ITEMS` in `veld_core::ide` — which is what makes it
+   * safe on an endpoint every window polls.
+   */
+  news: ProjectNewsItem[];
+}
+
+/**
+ * One `ide.news` entry, as `GET /api/repos` sends it — see `NewsItem` in
+ * `crates/veld-core/src/ide.rs`.
+ *
+ * **Already validated by the daemon.** `veld_core::ide::parse_news` enforces the
+ * copy caps, the glyph, the `YYYY-MM-DD` day, the id grammar and the
+ * per-project item cap, and reports each breach through `veld lint` — because
+ * that is the process that reads `veld.json` and therefore the only one that can
+ * tell an author their headline ran long. What the bundle still owns is
+ * namespacing the id and deciding what any of it means; see
+ * `promotions/model.ts`.
+ */
+export interface ProjectNewsItem {
+  /** The author's kebab-case slug. Namespaced per project before it is stored. */
+  id: string;
+  /** The day it was written, `YYYY-MM-DD`. Required, and it gates the card. */
+  since: string;
+  eyebrow: string;
+  headline: string;
+  body: string;
+  /** One of `GLYPH_NAMES`; an unknown name falls back to `inbox` client-side. */
+  glyph: string;
 }
 
 /**
