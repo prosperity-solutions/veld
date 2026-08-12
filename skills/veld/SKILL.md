@@ -562,7 +562,16 @@ The four things that decide whether it works:
    `system`, the default, because a pane has its own cookie jar and lands them on a
    sign-in page. Served by the run itself (localhost, staging on the same session, a
    local report) → `pane`. In doubt: are they already signed in to it elsewhere?
-4. **`requires_bin` asks `PATH`, so never use it for a GUI application.** `code`,
+4. **`${veld.branch}` is slugified, so it is not a git ref.** `feat/foo` arrives as
+   `feat-foo`. `gh pr view "${veld.branch}"` is therefore not an error but a *wrong
+   answer* — on any branch with a `/`, a `.` or a capital it reports no pull request
+   and offers to create a second one. Read the real ref inside the command
+   (`git rev-parse --abbrev-ref HEAD`), which is what this repo's adapter does. The
+   slugging is deliberate: the branch name belongs to whoever opened the pull
+   request you checked out, so a `shell` command interpolating it raw would be
+   running their string. The scope is otherwise the pane one minus `pane.*`:
+   `${veld.root}`, `${veld.worktree}`, `${veld.project}`, `${veld.username}`.
+5. **`requires_bin` asks `PATH`, so never use it for a GUI application.** `code`,
    `webstorm` and `idea` are launchers installed *separately* from the editor, so
    the check hides the option on a machine where the app is right there. Leave it
    off and let the command fall back to the bundle, as the `vscode` entry above

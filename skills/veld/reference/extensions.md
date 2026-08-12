@@ -190,10 +190,16 @@ abuse that: `hint` for something optional is a nag with no off switch.
 `${output.*}` and the `pane.*` family — is a **`veld lint` problem**, not a runtime
 failure, so `veld lint` is the check that a command will resolve.
 
-**Quote interpolations in a `shell` command.** `${veld.root}` can contain spaces, and
-`${veld.branch}` is a name an outsider chooses — check out someone's pull-request
-branch and you are running their string. Prefer `argv`, which cannot change its
-argument count.
+**`${veld.branch}` is slugified — it is not a git ref.** `feat/foo` arrives as
+`feat-foo`. This is the trap to avoid: `gh pr view "${veld.branch}"` is not an
+error, it is a *wrong answer* — on any branch with a `/`, a `.` or a capital it
+reports no pull request and offers to create a second one. Read the real ref inside
+the command with `git rev-parse --abbrev-ref HEAD`. (The slugging is deliberate: the
+branch name is chosen by whoever opened the pull request you checked out, so a
+`shell` command interpolating it raw would be running their string.)
+
+**Quote interpolations in a `shell` command.** `${veld.root}` can contain spaces.
+Prefer `argv`, which cannot change its argument count.
 
 ---
 

@@ -108,7 +108,11 @@
       // one that explains itself, and these live inside a menu, so an entry that
       // might not work costs a line in a popover rather than space in the bar.
       //
-      // So each tries the launcher and falls back to the application bundle.
+      // So each tries the launcher first, then falls back to the application
+      // bundle — but **only on macOS**: `open` does not exist on Linux, or is
+      // `openvt` from the `kbd` package, which reads `-a` as "activate the virtual
+      // console" and needs root. A Linux contributor without the launcher on PATH
+      // gets a sentence naming what to install instead of an error about VTs.
       // `open -a` exits non-zero when the app is genuinely absent, and veld turns
       // that into a toast carrying the reason. `${veld.root}` is quoted because a
       // checkout path can contain spaces.
@@ -121,13 +125,13 @@
         "id": "vscode",
         "type": "action",
         "label": "VS Code",
-        "shell": "command -v code >/dev/null 2>&1 && exec code \"${veld.root}\" || exec open -a \"Visual Studio Code\" \"${veld.root}\""
+        "shell": "command -v code >/dev/null 2>&1 && exec code \"${veld.root}\"; [ \"$(uname -s)\" = Darwin ] || { echo \"install the 'code' command (VS Code: Shell Command: Install 'code' command in PATH)\" >&2; exit 1; }; exec open -a \"Visual Studio Code\" \"${veld.root}\""
       },
       {
         "id": "webstorm",
         "type": "action",
         "label": "WebStorm",
-        "shell": "command -v webstorm >/dev/null 2>&1 && exec webstorm \"${veld.root}\" || exec open -a WebStorm \"${veld.root}\""
+        "shell": "command -v webstorm >/dev/null 2>&1 && exec webstorm \"${veld.root}\"; [ \"$(uname -s)\" = Darwin ] || { echo \"install the 'webstorm' launcher (JetBrains Toolbox \u2192 Settings \u2192 Shell scripts)\" >&2; exit 1; }; exec open -a WebStorm \"${veld.root}\""
       }
     ],
     // Dogfooding, and the worked examples: this is a repo whose contributors

@@ -33,6 +33,9 @@ for tool in gh python3; do
   fi
 done
 
+# `git rev-parse`, not `${veld.branch}`: veld slugifies that one (a branch name is
+# chosen by whoever opened the PR you checked out), so `feat/foo` would arrive as
+# `feat-foo` and gh would report no pull request for it.
 branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null) || branch=""
 if [ -z "$branch" ] || [ "$branch" = "HEAD" ]; then
   # A detached HEAD has no pull request to have. Not an error, nothing to show.
@@ -46,7 +49,12 @@ fi
 # gh writes on a *successful* call into the JSON — and then `json.load` threw and
 # the badge's tooltip was a Python traceback. So stderr goes to a file and is only
 # read on failure.
-errfile=$(mktemp -t veld-pr-badge)
+# An explicit template, not `mktemp -t`: BSD's `-t` takes a *prefix* and GNU's takes
+# a *template* needing at least three trailing X's, so `mktemp -t veld-pr-badge`
+# works on macOS and exits 1 on Linux ("too few X's") — which would leave $errfile
+# empty, fail the redirection below before gh ever ran, and make this badge
+# permanently red on every Linux install.
+errfile=$(mktemp "${TMPDIR:-/tmp}/veld-pr-badge.XXXXXX")
 trap 'rm -f "$errfile"' EXIT
 if ! payload=$(gh pr view "$branch" \
   --json number,state,isDraft,url,mergeable,statusCheckRollup 2>"$errfile"); then

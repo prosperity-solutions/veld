@@ -2762,6 +2762,16 @@ the [pane variables](#variables-in-a-pane-command) minus the `pane.*` family:
 `${veld.username}`. Anything else is a `veld lint` finding rather than a badge
 that fails to run.
 
+**`${veld.branch}` is slugified, so it is not a git ref.** `feat/foo` reaches the
+command as `feat-foo`, and `Fix.Thing` as `fix-thing`. That is deliberate — the same
+value in a pane command is slugified because a branch name is chosen by whoever
+opened the pull request you checked out, so a `shell` command interpolating it raw
+would run their string — but it means the obvious
+`gh pr view "${veld.branch}"` is **not an error, it is a wrong answer**: on any
+branch with a `/`, a `.` or a capital it reports no pull request and offers to
+create a second one. Get the real ref inside the command
+(`git rev-parse --abbrev-ref HEAD`), which is what this repo's own adapter does.
+
 #### `type: "status"` — a badge
 
 Veld runs the command in the worktree root and reads stdout:

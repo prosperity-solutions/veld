@@ -106,18 +106,31 @@ const MAX_TRACKED: usize = 256;
 /// is the stampede a TTL cache produces at the moment it expires.
 type Cell = Arc<tokio::sync::Mutex<Option<(Instant, StatusView)>>>;
 
-static RESULTS: LazyLock<Mutex<HashMap<(i64, String), Cell>>> =
+/// Both maps are keyed on the worktree's **path**, never on its database id.
+///
+/// `worktrees.id` is an `INTEGER PRIMARY KEY` with no `AUTOINCREMENT` and rows are
+/// hard-deleted, so **SQLite reuses the id**. These maps live as long as the daemon
+/// does, so a reused id means a new checkout's first poll can be answered from a
+/// deleted one's value — and because every project copying the documented example
+/// names its badge `pr`, that puts one repo's pull request number, link and offered
+/// actions in another repo's top bar.
+static RESULTS: LazyLock<Mutex<HashMap<(String, String), Cell>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-static INVALIDATED: LazyLock<Mutex<HashMap<i64, Instant>>> =
+static INVALIDATED: LazyLock<Mutex<HashMap<String, Instant>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// Whether a value produced at `at` is still trustworthy for this worktree.
-fn invalidated_since(worktree: i64, at: Instant) -> bool {
+/// Whether a value whose run **started** at `at` is still trustworthy.
+///
+/// `at` is the run's start, not its finish — see [`evaluate`]. A run already in
+/// flight when the action landed started *before* the stamp and is therefore
+/// rejected, which is the whole point; stamping completion instead let exactly that
+/// run's pre-action value satisfy this gate.
+fn invalidated_since(worktree: &str, at: Instant) -> bool {
     INVALIDATED
         .lock()
         .expect("extension invalidations poisoned")
-        .get(&worktree)
+        .get(worktree)
         .is_some_and(|stamp| *stamp >= at)
 }
 
@@ -140,17 +153,27 @@ fn invalidated_since(worktree: i64, at: Instant) -> bool {
 /// against this stamp is the same ordering with no waiting: a value produced before
 /// the action is stale by definition, including one produced by a run that was
 /// already in flight when the action landed.
-fn invalidate(worktree: i64) {
+fn invalidate(worktree: &str) {
     let mut stamps = INVALIDATED
         .lock()
         .expect("extension invalidations poisoned");
     if stamps.len() > MAX_TRACKED {
-        stamps.clear();
+        // The **oldest** stamp, not the whole map. A stamp is the only thing that
+        // makes a post-action refresh really re-run, so clearing them all meant a
+        // click landing just as the cap was hit could be answered from before
+        // itself — for every worktree at once.
+        if let Some(oldest) = stamps
+            .iter()
+            .min_by_key(|(_, at)| **at)
+            .map(|(path, _)| path.clone())
+        {
+            stamps.remove(&oldest);
+        }
     }
-    stamps.insert(worktree, Instant::now());
+    stamps.insert(worktree.to_owned(), Instant::now());
 }
 
-fn cell(worktree: i64, id: &str) -> Cell {
+fn cell(worktree: &str, id: &str) -> Cell {
     let mut map = RESULTS.lock().expect("extension results poisoned");
     if map.len() > MAX_TRACKED {
         // `try_lock` is the "nobody is using this" test — see MAX_TRACKED. An
@@ -158,7 +181,7 @@ fn cell(worktree: i64, id: &str) -> Cell {
         // can be waiting on. Anything smarter (true LRU) buys nothing at this size.
         map.retain(|_, cell| Arc::strong_count(cell) > 1 || cell.try_lock().is_err());
     }
-    Arc::clone(map.entry((worktree, id.to_owned())).or_default())
+    Arc::clone(map.entry((worktree.to_owned(), id.to_owned())).or_default())
 }
 
 /// What a status extension produced, as the UI consumes it.
@@ -253,7 +276,6 @@ pub(crate) async fn status(
         // re-run and the rest answer from what they already had.
         let forced = query.force && query.id.as_ref().is_none_or(|want| *want == ext.id);
         runs.push(evaluate(
-            id,
             ext.clone(),
             Arc::clone(&section),
             root.clone(),
@@ -267,7 +289,6 @@ pub(crate) async fn status(
 
 /// One badge, single-flighted and rate-limited by its own `refresh_seconds`.
 async fn evaluate(
-    worktree: i64,
     ext: Extension,
     section: Arc<IdeSection>,
     root: String,
@@ -277,7 +298,7 @@ async fn evaluate(
     let ExtensionBody::Status(status) = &ext.body else {
         unreachable!("callers filter to status extensions");
     };
-    let cell = cell(worktree, &ext.id);
+    let cell = cell(&root, &ext.id);
     // Held across the run on purpose: a second window arriving mid-run waits here
     // and then finds the fresh value below, instead of starting a parallel `gh`.
     let mut guard = cell.lock().await;
@@ -288,13 +309,28 @@ async fn evaluate(
         } else {
             Duration::from_secs(status.refresh_seconds)
         };
-        if age < floor && !invalidated_since(worktree, *at) {
+        if age < floor && !invalidated_since(&root, *at) {
             let mut view = view.clone();
             view.age_seconds = age.as_secs();
             return view;
         }
     }
 
+    // **Stamped before the run, not after, and both halves matter.**
+    //
+    // The freshness gate below measures `refresh_seconds` from this instant while
+    // the client's timer measures it from when it *asked*, so stamping completion
+    // instead made every declared interval effectively double: the next poll arrives
+    // one run-duration early, is answered from memory, and only the one after it
+    // re-runs.
+    //
+    // It is also what makes `invalidated_since` mean what it claims. A run already
+    // in flight when an action lands finishes *after* the invalidation stamp, so a
+    // completion timestamp would let that run's pre-action value pass the gate —
+    // reintroducing the "clicking loads but nothing changes" bug for the specific
+    // case where a poll overlaps the click, which is the *correlated* case, since
+    // people click the action a badge just offered them.
+    let started = Instant::now();
     let missing = missing_pane_binaries(&ext.requires_bin);
     let view = if missing.is_empty() {
         run_status(&ext, status, &section, &root, &builtins).await
@@ -316,7 +352,7 @@ async fn evaluate(
             age_seconds: 0,
         }
     };
-    *guard = Some((Instant::now(), view.clone()));
+    *guard = Some((started, view.clone()));
     view
 }
 
@@ -375,6 +411,20 @@ async fn run_status(
         };
     }
 
+    if out.truncated {
+        // Deliberately *not* the tolerant path. A contract object cut mid-JSON
+        // fails to parse, and treating that as "not the contract" would render 60
+        // characters of raw JSON as the badge's text — which looks like the author's
+        // mistake rather than a limit they hit.
+        return StatusView {
+            text: Some(ext.label.clone()),
+            tooltip: Some(format!(
+                "printed more than {} KiB, which is more than a badge can carry",
+                MAX_OUTPUT_BYTES / 1024
+            )),
+            ..base("failed", "danger")
+        };
+    }
     let stdout = out.stdout.trim();
     if stdout.is_empty() {
         // "Nothing to show" — the badge is simply absent. See `StatusView::state`.
@@ -572,7 +622,7 @@ pub(crate) async fn activate(
     // request and then fail, and a badge left on its pre-action value for a full
     // interval is the worse answer. The cost of being wrong this way is one extra
     // child run per failed click.
-    invalidate(id);
+    invalidate(&root);
     if !out.success && !out.timed_out {
         return Err(err(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -594,6 +644,11 @@ pub(crate) async fn activate(
 
 struct Output {
     stdout: String,
+    /// True when the child wrote more than [`MAX_OUTPUT_BYTES`] and the rest was
+    /// discarded. The caller must not parse a truncated payload: a contract object
+    /// cut mid-JSON fails to deserialize and would fall through the *tolerant* path,
+    /// putting 60 characters of raw JSON in the bar.
+    truncated: bool,
     stderr: String,
     success: bool,
     code: Option<i32>,
@@ -686,12 +741,13 @@ async fn spawn_command(
 
     match tokio::time::timeout(timeout, collect).await {
         Ok(result) => {
-            let (status, stdout, stderr) =
+            let (status, (stdout, truncated), (stderr, _)) =
                 result.map_err(|e| format!("could not read the command's output: {e}"))?;
             // It exited on its own, so there is no group left to signal.
             guard.disarm();
             Ok(Output {
                 stdout,
+                truncated,
                 stderr,
                 success: status.success(),
                 code: status.code(),
@@ -701,6 +757,7 @@ async fn spawn_command(
         // The guard kills the group on the way out of this scope.
         Err(_) => Ok(Output {
             stdout: String::new(),
+            truncated: false,
             stderr: String::new(),
             success: false,
             code: None,
@@ -727,15 +784,16 @@ async fn spawn_command(
 /// So: drain to EOF, discarding past the cap. Memory is bounded, a well-behaved
 /// command still succeeds and gets a truncated badge, and an *endless* writer still
 /// hits the deadline — which is the only case where killing it is right.
-async fn read_capped<R>(pipe: &mut Option<R>) -> std::io::Result<String>
+async fn read_capped<R>(pipe: &mut Option<R>) -> std::io::Result<(String, bool)>
 where
     R: tokio::io::AsyncRead + Unpin,
 {
     use tokio::io::AsyncReadExt as _;
     let Some(pipe) = pipe.as_mut() else {
-        return Ok(String::new());
+        return Ok((String::new(), false));
     };
     let mut kept = Vec::new();
+    let mut truncated = false;
     let mut chunk = [0u8; 8 * 1024];
     loop {
         let n = pipe.read(&mut chunk).await?;
@@ -745,11 +803,14 @@ where
         if kept.len() < MAX_OUTPUT_BYTES {
             let room = MAX_OUTPUT_BYTES - kept.len();
             kept.extend_from_slice(&chunk[..n.min(room)]);
+            truncated |= n > room;
+        } else {
+            truncated = true;
         }
         // Past the cap the bytes are read and dropped: the child keeps making
         // progress, and nothing accumulates.
     }
-    Ok(String::from_utf8_lossy(&kept).into_owned())
+    Ok((String::from_utf8_lossy(&kept).into_owned(), truncated))
 }
 
 /// Kills a child's **process group** unless disarmed.
@@ -945,6 +1006,11 @@ mod tests {
                 "nothing was dropped — kept all {over} bytes, so the cap is not applied"
             );
             assert!(
+                out.truncated,
+                "a run that lost output must say so, or a payload cut mid-JSON is \
+                 rendered as if it were the author's text"
+            );
+            assert!(
                 !out.stdout.is_empty() && out.stdout.len() <= MAX_OUTPUT_BYTES,
                 "read {} bytes, cap is {MAX_OUTPUT_BYTES}",
                 out.stdout.len()
@@ -1020,8 +1086,8 @@ mod tests {
     /// was never in either.
     #[tokio::test]
     async fn an_action_makes_earlier_values_untrustworthy() {
-        let mine = 4242;
-        let other = 4343;
+        let mine = "/tmp/wt-mine";
+        let other = "/tmp/wt-other";
         let before = Instant::now();
         // A stamp has to be strictly later than the value it invalidates, and
         // `Instant` resolution is fine but not zero — sleep past it rather than
@@ -1051,7 +1117,70 @@ mod tests {
         INVALIDATED
             .lock()
             .expect("extension invalidations poisoned")
-            .retain(|wt, _| *wt != mine && *wt != other);
+            .retain(|wt, _| wt != mine && wt != other);
+    }
+
+    /// A run already in flight when an action lands does not satisfy the gate.
+    ///
+    /// The case `an_action_makes_earlier_values_untrustworthy` cannot see, because it
+    /// never calls [`evaluate`] — and the *correlated* case in practice, since people
+    /// click the action a badge just offered them, so a poll is often mid-flight.
+    /// With the value stamped at completion this passed the freshness gate (finish >
+    /// stamp) and the post-action refresh was answered from the pre-action value:
+    /// exactly the "clicking loads but nothing changes" bug, in a narrower window.
+    #[tokio::test]
+    async fn a_run_in_flight_when_an_action_lands_is_not_reused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let runs = dir.path().join("runs");
+        let root = dir.path().to_string_lossy().into_owned();
+        // Appends a line per run, so "did it re-run" is countable rather than
+        // inferred from the rendered value.
+        let section = Arc::new(veld_core::ide::parse(Some(&serde_json::json!({
+            "extensions": [{
+                "id": "slow", "slot": "topBar", "type": "status", "label": "slow",
+                "shell": format!("echo run >> {}; sleep 0.4; echo value", runs.display()),
+                "refresh_seconds": 3600,
+            }]
+        }))));
+        let ext = section.extension("slow").expect("declared").clone();
+
+        let count = || {
+            std::fs::read_to_string(&runs)
+                .map(|t| t.lines().count())
+                .unwrap_or(0)
+        };
+
+        let first = tokio::spawn(evaluate(
+            ext.clone(),
+            Arc::clone(&section),
+            root.clone(),
+            HashMap::new(),
+            false,
+        ));
+        // Let it get past the spawn and into the sleep, then act while it runs.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        invalidate(&root);
+        first.await.expect("first run").text.expect("a value");
+        assert_eq!(count(), 1, "the first evaluation ran once");
+
+        // `refresh_seconds` is an hour and this is *not* forced, so the only thing
+        // that can make this re-run is the invalidation.
+        let after = evaluate(ext, section, root.clone(), HashMap::new(), false).await;
+        assert_eq!(
+            count(),
+            2,
+            "a value from a run that started before the action must not be reused"
+        );
+        assert_eq!(after.text.as_deref(), Some("value"));
+
+        RESULTS
+            .lock()
+            .expect("extension results poisoned")
+            .retain(|(wt, _), _| wt != &root);
+        INVALIDATED
+            .lock()
+            .expect("extension invalidations poisoned")
+            .retain(|wt, _| wt != &root);
     }
 
     /// Eviction never drops a cell a run is in flight on.
@@ -1061,19 +1190,19 @@ mod tests {
     /// child for the same extension, which is the single-flight guarantee gone.
     #[tokio::test]
     async fn eviction_spares_cells_with_a_run_in_flight() {
-        let busy = 5150;
+        let busy = "/tmp/wt-busy";
         let held = cell(busy, "in-flight");
         let guard = held.lock().await;
 
         // Push the map over the threshold with idle cells.
         for i in 0..=MAX_TRACKED {
-            let _ = cell(9000 + i as i64, "idle");
+            let _ = cell(&format!("/tmp/wt-idle-{i}"), "idle");
         }
 
         {
             let map = RESULTS.lock().expect("extension results poisoned");
             assert!(
-                map.contains_key(&(busy, "in-flight".to_owned())),
+                map.contains_key(&(busy.to_owned(), "in-flight".to_owned())),
                 "a locked cell must survive eviction"
             );
         }
@@ -1081,7 +1210,7 @@ mod tests {
         RESULTS
             .lock()
             .expect("extension results poisoned")
-            .retain(|(wt, _), _| *wt != busy && (*wt < 9000 || *wt > 9000 + MAX_TRACKED as i64));
+            .retain(|(wt, _), _| wt != busy && !wt.starts_with("/tmp/wt-idle-"));
     }
 
     #[test]

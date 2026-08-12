@@ -357,6 +357,18 @@ body[data-fullscreen="true"] .topbar.electron {
   --button-color: color-mix(in oklab, var(--tone, var(--muted)) 75%, var(--text)) !important;
   --button-bg: var(--tone-bg, transparent) !important;
   --button-hover: color-mix(in oklab, var(--tone, var(--muted)) 18%, transparent) !important;
+  /* `MAX_TEXT_CHARS` bounds the badge's *characters*, which is not a width: 60 CJK
+     or emoji characters are roughly twice as wide as 60 Latin ones, and a badge
+     showing a commit subject can be long in any script. `.topbar` is a flex row with
+     no `overflow`, so without a width bound the badge either collapses its
+     shrinkable siblings or pushes the row past the window. */
+  max-width: 22ch;
+}
+.topbar .ext-badge .mantine-Button-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: block;
 }
 .topbar .ext-badge.tone-success {
   --tone: var(--live);

@@ -118,19 +118,39 @@ export function useExtensionStatus(
    * tell "still working" from "this project declares nothing".
    */
   const [busy, setBusy] = React.useState<Set<string>>(new Set());
+  /** The worktree a response must still be about to be applied — see `load`. */
+  const latest = React.useRef<number | null>(worktreeId);
+  latest.current = worktreeId;
+  /**
+   * Wall-clock of the last completed load.
+   *
+   * The daemon ages its values with `Instant`, which **excludes suspend** on both
+   * platforms — so after a lid-close the badge's own age looks tiny and the value is
+   * served as fresh, with the tooltip cheerfully reporting "40s ago" about
+   * yesterday's pull request state. A monotonic clock cannot see that; a wall clock
+   * can, so a resume with a big real-time gap forces a re-run.
+   */
+  const lastWall = React.useRef(0);
 
   const load = React.useCallback(
     (opts?: { force?: boolean; id?: string }) => {
       if (worktreeId === null) return;
       const mark = opts?.id ?? "*";
       setBusy((prev) => new Set(prev).add(mark));
+      // Captured, then checked on arrival. A status command can take seconds, so a
+      // slow response for worktree A routinely lands after a fast one for B — and
+      // applying it would set `valuesFor` back to A, which makes every lookup return
+      // undefined and empties the whole slot until the next tick (up to a minute).
+      const requested = worktreeId;
       api
-        .extensionStatus(worktreeId, opts)
+        .extensionStatus(requested, opts)
         .then((res) => {
+          if (requested !== latest.current) return;
           const next: Record<string, ExtensionStatus> = {};
           for (const item of res.items) next[item.id] = item;
           setValues(next);
-          setValuesFor(worktreeId);
+          setValuesFor(requested);
+          lastWall.current = Date.now();
         })
         // A background poll is deliberately silent — a daemon restart or a
         // sleeping laptop would otherwise raise a toast per badge, and a badge
@@ -165,7 +185,12 @@ export function useExtensionStatus(
     poll();
     const timer = window.setInterval(poll, interval);
     const onVisible = () => {
-      if (!document.hidden) poll();
+      if (document.hidden) return;
+      // A real-time gap much larger than the interval means the machine slept (or
+      // the tab was throttled for a long time), and the daemon's monotonic age
+      // cannot tell. Force, so what comes back is not from before the nap.
+      const slept = lastWall.current > 0 && Date.now() - lastWall.current > interval * 2;
+      load(slept ? { force: true } : undefined);
     };
     document.addEventListener("visibilitychange", onVisible);
     return () => {
@@ -176,11 +201,27 @@ export function useExtensionStatus(
   }, [worktreeId, hasStatus, interval, load]);
 
   const statusCount = live.filter((r) => r.spec.kind === "status" && !r.disabled).length;
+  const hold = React.useCallback(
+    (id: string) => setBusy((prev) => new Set(prev).add(id)),
+    [],
+  );
+  const release = React.useCallback(
+    (id: string) =>
+      setBusy((prev) => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      }),
+    [],
+  );
+
   return {
     value: (id: string) => (valuesFor === worktreeId ? values[id] : undefined),
     busy: (id: string) => busy.has(id) || busy.has("*"),
     statusCount,
     refresh: load,
+    hold,
+    release,
   };
 }
 
@@ -189,6 +230,9 @@ export interface ExtensionStatusState {
   busy: (id: string) => boolean;
   statusCount: number;
   refresh: (opts?: { force?: boolean; id?: string }) => void;
+  /** Mark an id in flight, so a second click cannot fire it. */
+  hold: (id: string) => void;
+  release: (id: string) => void;
 }
 
 function isResolved(r: Resolved | null): r is Resolved {
@@ -223,6 +267,11 @@ export function TopBarExtensions(props: {
   if (mine.length === 0 || worktreeId === null) return null;
 
   const activate = (id: string) => {
+    // An action gets no feedback for up to its grace window, so a double-click was
+    // two `gh pr create --web` runs and two browser tabs. The daemon's 3s floor
+    // covers *status* refreshes only.
+    if (status.busy(id)) return;
+    status.hold(id);
     api
       .activateExtension(worktreeId, id)
       // An action usually changes what a badge says — creating the pull request
@@ -234,7 +283,8 @@ export function TopBarExtensions(props: {
       .then(() => {
         if (status.statusCount > 0) status.refresh({ force: true });
       })
-      .catch((e) => notifyError("Run this action", e));
+      .catch((e) => notifyError("Run this action", e))
+      .finally(() => status.release(id));
   };
   const open = (url: string, where: "system" | "pane") => {
     if (where === "pane" && props.onOpenInPane) {
@@ -294,7 +344,9 @@ function ExtensionControl(props: {
       ? hintHref
         ? () => props.onOpen(hintHref, "system")
         : undefined
-      : () => props.onActivate(spec.id);
+      : props.busy
+        ? undefined
+        : () => props.onActivate(spec.id);
     return (
       <Tooltip
         label={
@@ -319,6 +371,7 @@ function ExtensionControl(props: {
               className={disabled ? "ext-action ext-unavailable" : "ext-action"}
               disabled={disabled && !hintHref}
               aria-label={spec.label}
+              loading={props.busy}
               onClick={press}
             >
               {paneIcon(spec.icon, 14)}
@@ -332,6 +385,8 @@ function ExtensionControl(props: {
               size="compact-xs"
               className={disabled ? "ext-action-label ext-unavailable" : "ext-action-label"}
               disabled={disabled && !hintHref}
+              loading={props.busy}
+              loaderProps={{ size: 11 }}
               onClick={press}
             >
               {spec.label}
