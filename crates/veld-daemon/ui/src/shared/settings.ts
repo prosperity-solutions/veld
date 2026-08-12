@@ -431,8 +431,10 @@ export function terminalShellIntegration(doc: SettingsDoc): boolean {
  * Whether Veld wraps a coding agent's CLI to install lifecycle hooks, so an agent
  * waiting on you reaches the rail's badge. **Defaults on.**
  *
- * Display only. Nothing of the user's is edited either way — the hooks ride an
- * ephemeral `--settings` file, never a merge into `~/.claude/settings.json`.
+ * Display only. Nothing of the user's is edited either way: for Claude the hooks
+ * ride an ephemeral `--settings` file, merged rather than replacing
+ * `~/.claude/settings.json`; for Codex it's a one-invocation `-c notify=[...]`
+ * override, never a write to `~/.codex/config.toml`.
  */
 export function terminalAgentIntegration(doc: SettingsDoc): boolean {
   return bool(

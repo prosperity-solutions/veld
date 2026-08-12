@@ -1009,12 +1009,29 @@ fn agent_script(tool: veld_core::agent::AgentTool, dir: &Path, cli: &Path) -> St
     let name = tool.shim_name();
     let (inject_flag, injection) = tool.injection();
     let own_patterns = tool.own_injection_flag_patterns();
+    let extra_first_words = tool.extra_interactive_first_words();
+    // Rule 1's bare-first-word case, widened with this tool's own interactive
+    // subcommands (empty for every tool that has none). See
+    // `AgentTool::extra_interactive_first_words`.
+    let rule1_pattern = if extra_first_words.is_empty() {
+        "\"\" | -*".to_owned()
+    } else {
+        format!("\"\" | -* | {extra_first_words}")
+    };
     // The one place `SettingsFile` and `ConfigOverride` actually differ: whether
     // `agent-settings`'s stdout names something that has to exist on disk before it is
-    // safe to hand to the real binary. See `veld_core::agent::Injection`.
-    let file_check = match injection {
-        veld_core::agent::Injection::SettingsFile => r#" && [ -f "$veld_settings" ]"#,
-        veld_core::agent::Injection::ConfigOverride => "",
+    // safe to hand to the real binary, versus a value that must merely be *shaped*
+    // right. See `veld_core::agent::Injection`.
+    let (file_check, value_guard) = match injection {
+        veld_core::agent::Injection::SettingsFile => {
+            (r#" && [ -f "$veld_settings" ]"#, String::new())
+        }
+        veld_core::agent::Injection::ConfigOverride { key_prefix } => (
+            "",
+            format!(
+                "  case \"$veld_settings\" in\n    {key_prefix}*) ;;\n    *) veld_settings= ;;\n  esac\n"
+            ),
+        ),
     };
     format!(
         r#"#!/bin/sh
@@ -1106,11 +1123,13 @@ if [ "$veld_real" = "$veld_self_dir/{name}" ]; then
   exit 127
 fi
 
-# Rules 1 and 2. A bare first word is a subcommand and is never touched.
+# Rules 1 and 2. A bare first word is a subcommand and is never touched, except for
+# a short, named list of this tool's own subcommands that are themselves interactive
+# (Codex's `resume`/`fork` — see `AgentTool::extra_interactive_first_words`).
 veld_inject=
 if [ -n "${{VELD_AGENT_HOOKS-}}" ] && [ -n "${{VELD_PTY_SESSION-}}" ]; then
   case "${{1-}}" in
-    "" | -*) veld_inject=1 ;;
+    {rule1_pattern}) veld_inject=1 ;;
   esac
   for veld_arg in "$@"; do
     case "$veld_arg" in
@@ -1135,7 +1154,7 @@ if [ -n "$veld_inject" ]; then
   # something to hand-roll, and the daemon must not be in this path at all — an agent
   # launch cannot depend on an HTTP round trip.
   veld_settings=$({cli} agent-settings --tool {flag} 2>/dev/null) || veld_settings=
-  if [ -n "$veld_settings" ]{file_check}; then
+{value_guard}  if [ -n "$veld_settings" ]{file_check}; then
     exec "$veld_real" {inject_flag} "$veld_settings" "$@"
   fi
 fi
@@ -1149,6 +1168,8 @@ exec "$veld_real" "$@"
         own_patterns = own_patterns,
         inject_flag = inject_flag,
         file_check = file_check,
+        rule1_pattern = rule1_pattern,
+        value_guard = value_guard,
     )
 }
 
@@ -1490,6 +1511,25 @@ mod tests {
         assert!(agent_only.contains_key("VELD_SHIM_DIR"));
         assert!(agent_only.contains_key("ZDOTDIR"));
         assert!(!agent_only.contains_key("BROWSER"));
+
+        // Only ONE of the two agent wrappers present on disk (a `claude` wrapper
+        // removed by `clear_unbacked`, say) must still turn agent integration on: the
+        // check widened from "does the Claude file exist" to "does any AgentTool's
+        // file exist" specifically so a single surviving wrapper is enough. Done last,
+        // since it mutates the shared shim directory every earlier assertion in this
+        // test depends on having both wrappers present.
+        std::fs::remove_file(shims.join("claude")).unwrap();
+        let one_wrapper = env(SessionOptions::all_on());
+        assert_eq!(
+            one_wrapper.get("VELD_AGENT_HOOKS").map(String::as_str),
+            Some("1"),
+            "codex's wrapper alone must still enable the feature"
+        );
+        // And with BOTH gone, the feature is truly off — the widened check must not
+        // report a wrapper that isn't there.
+        std::fs::remove_file(shims.join("codex")).unwrap();
+        let no_wrapper = env(SessionOptions::all_on());
+        assert!(!no_wrapper.contains_key("VELD_AGENT_HOOKS"));
     }
 
     /// The `.zshenv` wins against a hostile rc file, and leaves the user's own
@@ -1806,6 +1846,65 @@ mod tests {
         assert_eq!(
             run(&["exec", "do the thing"]).trim(),
             "REAL exec do the thing"
+        );
+        // `resume`/`fork` are bare first words too, but they are Codex's OWN
+        // interactive-continuation subcommands — unlike Claude, whose subcommands are
+        // all non-interactive, so injecting ahead of them is the whole point of the
+        // feature (README's own `ide.panes` example resumes a Codex pane this way).
+        for args in [
+            vec!["resume", "--last"],
+            vec!["resume"],
+            vec!["fork", "--last"],
+        ] {
+            let expected = format!(
+                r#"REAL -c notify=["/opt/veld/bin/veld","agent-state","--tool","codex","--session","pane-1"] {}"#,
+                args.join(" ")
+            );
+            assert_eq!(run(&args).trim(), expected.trim(), "{args:?}");
+        }
+    }
+
+    /// A malformed value from `agent-settings` — not just an empty one — must not
+    /// reach the real binary. Codex parses a broken `-c` value as a literal string
+    /// rather than rejecting it, so `[ -n ]` alone would hand it a `notify` set to
+    /// garbage instead of failing open the way a missing `--settings` file does.
+    #[test]
+    fn a_malformed_config_override_is_dropped_before_it_reaches_the_real_binary() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let shims = tmp.path().join("shims");
+        let real_dir = tmp.path().join("bin");
+        std::fs::create_dir_all(&real_dir).unwrap();
+
+        // A `veld` whose `agent-settings` prints something non-empty but NOT shaped
+        // like `notify=...` — the failure this guard exists for.
+        let fake_cli = tmp.path().join("veld");
+        std::fs::write(
+            &fake_cli,
+            "#!/bin/sh\n[ \"$1\" = agent-settings ] || exit 2\nprintf 'not-notify-garbage\\n'\n",
+        )
+        .unwrap();
+        set_mode(&fake_cli, 0o755).unwrap();
+        prepare_in(&shims, &fake_cli).unwrap();
+
+        let real = real_dir.join("codex");
+        std::fs::write(&real, "#!/bin/sh\necho \"REAL $*\"\n").unwrap();
+        set_mode(&real, 0o755).unwrap();
+
+        let out = std::process::Command::new(shims.join("codex"))
+            .env_clear()
+            .env(
+                "PATH",
+                format!("{}:{}", shims.display(), real_dir.display()),
+            )
+            .env("VELD_AGENT_HOOKS", "1")
+            .env("VELD_PTY_SESSION", "pane-1")
+            .output()
+            .expect("run the codex shim");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            "REAL",
+            "a value not shaped like `notify=...` must fall through to a bare exec, \
+             not reach codex as a `-c` override"
         );
     }
 

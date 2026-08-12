@@ -46,7 +46,7 @@ pub fn settings(tool: Option<String>, session: Option<String>) -> i32 {
     };
 
     match tool {
-        AgentTool::Claude => write_settings_file(tool, &cli, &session),
+        AgentTool::Claude => write_claude_settings_file(&cli, &session),
         // No file: the value itself is the whole answer, and nothing here can fail
         // short of stdout being gone — which println's own ignored result already
         // treats as "the caller stopped listening", the same as every other exit.
@@ -57,13 +57,21 @@ pub fn settings(tool: Option<String>, session: Option<String>) -> i32 {
     }
 }
 
-/// The [`agent::Injection::SettingsFile`] half of [`settings`]: write the tool's
+/// The [`agent::Injection::SettingsFile`] half of [`settings`]: write Claude's
 /// settings document to this session's ephemeral file and print its path.
-fn write_settings_file(tool: AgentTool, cli: &Path, session: &str) -> i32 {
+///
+/// Hardcoded to Claude rather than generic over `AgentTool`, on purpose: it is the
+/// only `SettingsFile` tool today, and `settings()` above is what decides which of
+/// the two `agent-settings` shapes a tool gets. A generic version with a runtime
+/// assertion is a guard a release build compiles out; naming the tool in the
+/// function makes a mis-route a compile error for whoever adds a second
+/// `SettingsFile` tool, instead of a debug-only assertion nobody sees fire in the
+/// binary users actually run.
+fn write_claude_settings_file(cli: &Path, session: &str) -> i32 {
     let Some(dir) = shim_dir() else {
         return 1;
     };
-    let path = agent::settings_path(&dir, tool, session);
+    let path = agent::settings_path(&dir, AgentTool::Claude, session);
     let Some(parent) = path.parent() else {
         return 1;
     };
@@ -75,10 +83,6 @@ fn write_settings_file(tool: AgentTool, cli: &Path, session: &str) -> i32 {
     let _ = set_mode(parent, 0o700);
     sweep(parent);
 
-    // The only `SettingsFile` tool today. `settings()` is what decides which of the
-    // two `agent-settings` shapes a tool gets; a second file-configured tool adds a
-    // branch here rather than turning this one generic ahead of needing to be.
-    debug_assert_eq!(tool, AgentTool::Claude);
     let doc = agent::claude_settings_doc(cli, session);
     let Ok(body) = serde_json::to_vec_pretty(&doc) else {
         return 1;
@@ -138,8 +142,8 @@ pub async fn state(
         let payload: agent::HookPayload = match tool {
             // Codex's `notify` never writes to stdin at all (it is explicitly nulled),
             // so reading it here would just be a wasted read, not a second source.
-            AgentTool::Codex => match payload_arg {
-                Some(body) => serde_json::from_str(&body).unwrap_or_default(),
+            AgentTool::Codex => match payload_from_arg(payload_arg) {
+                Some(payload) => payload,
                 None => return 1,
             },
             AgentTool::Claude => match read_stdin() {
@@ -261,6 +265,20 @@ fn sweep(dir: &Path) {
     }
 }
 
+/// The hook payload, from a tool that appends it as the final argv entry rather than
+/// piping it on stdin (Codex).
+///
+/// `None` only when the argument itself is absent — the wrapper always passes one for
+/// a real hook invocation, so its absence means something upstream is wrong and the
+/// caller exits 1. A *present-but-malformed* argument is not that: it degrades to a
+/// default (all-`None`) [`agent::HookPayload`], which every tool's mapping function
+/// already turns into [`agent::State::Unknown`], the same silent "we don't know"
+/// [`read_stdin`]'s own malformed case produces.
+fn payload_from_arg(payload_arg: Option<String>) -> Option<agent::HookPayload> {
+    let body = payload_arg?;
+    Some(serde_json::from_str(&body).unwrap_or_default())
+}
+
 /// The hook payload, bounded.
 ///
 /// A hook's stdin is somebody else's output, so it gets a ceiling: a `PostToolUse`
@@ -291,6 +309,23 @@ fn set_mode(_path: &Path, _mode: u32) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_missing_argv_payload_is_an_error_but_a_malformed_one_is_unknown() {
+        assert!(payload_from_arg(None).is_none());
+        // Malformed JSON degrades to a default (all-`None`) payload, same silent
+        // "we don't know" `read_stdin`'s own malformed case produces — never an error
+        // exit for a hook that is somebody else's process misbehaving, not veld's.
+        let garbage = payload_from_arg(Some("not json".to_owned()))
+            .expect("a present argument is always Some, even if unparseable");
+        assert_eq!(agent::codex_state(&garbage), agent::State::Unknown);
+        // A real Codex payload parses and maps correctly through this path.
+        let real = payload_from_arg(Some(
+            r#"{"type":"agent-turn-complete","thread-id":"t1"}"#.to_owned(),
+        ))
+        .expect("a present, well-formed argument parses");
+        assert_eq!(agent::codex_state(&real), agent::State::Idle);
+    }
 
     #[test]
     fn a_session_comes_from_the_flag_before_the_environment() {

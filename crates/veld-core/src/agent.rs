@@ -41,6 +41,16 @@
 //! the property that makes this safe and the one to re-check if the flag's semantics
 //! ever change.
 //!
+//! It does not touch `~/.codex/config.toml` either. Codex's ephemeral configuration
+//! is a `-c notify=[...]` override on the command line, not a file — see
+//! [`codex_notify_config`]. **This one does not merge**: it replaces whatever
+//! `notify` the user configured for the duration of the wrapped launch, which is a
+//! real, user-visible behaviour change (their own notifier goes quiet in a veld
+//! terminal) that `--settings`'s merge does not have. There is no cheap fix for
+//! that asymmetry — chaining to the user's own notifier means resolving and parsing
+//! their config, including profile layering, just to build an argv that also invokes
+//! it — so it is a documented cost (README's "What it cannot do"), not a bug.
+//!
 //! # Adding another agent
 //!
 //! Everything downstream of this module is **already generic** — the daemon endpoint
@@ -61,7 +71,7 @@
 //!    optional and unknown fields are ignored, so adding one cannot break an existing tool.
 //! 5. Docs: the two settings rows, README, `skills/veld/SKILL.md`, `llms-full.txt`.
 //!
-//! ## The four traps, each already paid for once
+//! ## The five traps, each already paid for once
 //!
 //! - **Only hook events the tool does not wait on.** Claude's `PreToolUse`,
 //!   `UserPromptSubmit`, `PermissionRequest` and `Stop` block, with ceilings up to
@@ -81,10 +91,33 @@
 //!   overrides a config value for one invocation without touching `~/.codex/config.toml`.
 //!   If a tool has no equivalent flag, that is a reason to leave it unsupported and say
 //!   so, not a reason to edit somebody's dotfile. See [`Injection`] for the two shapes
-//!   this can take and why they need different wrapper logic.
+//!   this can take and why they need different wrapper logic. **"Override" is not
+//!   "merge", and the difference is user-visible**: `--settings` merges, so a Claude
+//!   user's own hooks still run alongside veld's; `-c notify=[...]` *replaces* whatever
+//!   `notify` a Codex user configured in `~/.codex/config.toml`, silently, for the
+//!   duration of the wrapped launch. There is no cheap fix — chaining to the user's own
+//!   notifier means resolving and parsing their config (including profile layering) just
+//!   to build an argv to also invoke — so this is a documented cost, not a bug, laid out
+//!   in README's "What it cannot do".
+//! - **A richer signal is not automatically the right one to use.** Codex's `notify` is
+//!   not its only lifecycle mechanism — it also ships a `hooks` system whose event names
+//!   echo Claude's (`pre_tool_use`, `permission_request`, `user_prompt_submit`,
+//!   `session_end`, …) closely enough to look like deliberate compatibility. Using it
+//!   would give Codex the same `Working`/`Blocked` fidelity Claude has. It was not
+//!   chosen because it costs something `notify` does not: an interactive **hook-trust
+//!   review** the first time Codex sees a hook, or `--dangerously-bypass-hook-trust`,
+//!   which is not scoped to veld's own hook and disables trust review for every hook
+//!   configured for that invocation. Neither is compatible with a wrapper that must stay
+//!   invisible. See [`codex_state`] for the full reasoning and the version this was
+//!   measured against — check it again before trading `notify` for `hooks`.
 //! - **The wrapper must be unreachable for anything but a plain interactive launch.**
 //!   See `agent_script` in `veld-daemon/src/pty/shims.rs` for the rule and for the
-//!   upstream bug (`anthropics/claude-code#42485`) that makes it necessary.
+//!   upstream bug (`anthropics/claude-code#42485`) that makes it necessary. "Bare first
+//!   word ⇒ subcommand, not interactive" is close to exhaustive for Claude but is not
+//!   for every tool: Codex's `resume`/`fork` are bare first words that ARE interactive
+//!   sessions, and [`AgentTool::extra_interactive_first_words`] is the per-tool escape
+//!   hatch for exactly that — a short, stable list of a tool's own subcommand names,
+//!   never content-guessed.
 //!
 //! ## What is deliberately *not* extensible
 //!
@@ -145,7 +178,12 @@ impl AgentTool {
     pub fn injection(self) -> (&'static str, Injection) {
         match self {
             Self::Claude => ("--settings", Injection::SettingsFile),
-            Self::Codex => ("-c", Injection::ConfigOverride),
+            Self::Codex => (
+                "-c",
+                Injection::ConfigOverride {
+                    key_prefix: "notify=",
+                },
+            ),
         }
     }
 
@@ -162,11 +200,47 @@ impl AgentTool {
             // spelling alone would inject `--settings` ahead of the very path the docs
             // promise is left untouched.
             Self::Claude => "-p* | --print | --settings | --settings=*",
-            // `-c*` catches `-cnotify=...` the same way. Any `-c`/`--config` at all is
-            // excluded, not just one that happens to set `notify` — a second `-c` for an
-            // unrelated key is still two overrides in one invocation, and which one a
-            // duplicate key resolves to is not veld's to gamble on.
+            // `-c*` catches `-cnotify=...` the same way. Excluded on ANY `-c`/`--config`,
+            // not only one that happens to set `notify`: telling the two apart from a
+            // POSIX `case` pattern against a single token means parsing `-c`'s *value*,
+            // which is either a second `-c<key>=<value>` token or a following separate
+            // one — real parsing this script does not otherwise do anywhere. `--enable`/
+            // `--disable` are overrides too (Codex's own docs: "equivalent to
+            // `-c features.<name>=…`") but are deliberately NOT excluded here, because
+            // they can never collide with the `notify` key this wrapper sets — the
+            // conservative case is `-c`/`--config` specifically, not "any flag that is
+            // secretly a config override". Cost: `codex -c model="o3"` gets no badge for
+            // that session, silently — accepted in exchange for not hand-rolling a second
+            // parser in shell.
             Self::Codex => "-c* | --config | --config=*",
+        }
+    }
+
+    /// Bare first words that count as an interactive launch for this tool even though
+    /// rule 1 in `agent_script` (`veld-daemon/src/pty/shims.rs`) would otherwise treat
+    /// any bare first word as a subcommand.
+    ///
+    /// Empty for Claude: none of its subcommands are interactive-continuation entry
+    /// points, so the plain rule already gets it right. Not empty for Codex: `resume`
+    /// and `fork` are Codex's *own* stable subcommand names for continuing a past
+    /// interactive session — this is the same shape as
+    /// [`Self::own_injection_flag_patterns`], a short list of a tool's own vocabulary,
+    /// never a guess about arbitrary prompt content (that guess is what rule 1's own
+    /// doc comment calls out as the road to `anthropics/claude-code#42485`).
+    ///
+    /// This matters beyond correctness-in-principle: `README.md`'s own example
+    /// `ide.panes` entry for Codex sets `resume: {argv: ["codex", "resume", "--last"]}`,
+    /// so without this every resumed/auto-resumed Codex pane got zero hook injection —
+    /// the feature silently off for the exact pattern the docs hold up as supported.
+    /// Verified (codex-cli 0.146.0) that `-c key=value` parses identically whether it
+    /// precedes or follows `resume`/`fork` on the command line, which is what makes
+    /// prepending the injected flag ahead of `"$@"` — this wrapper's one strategy,
+    /// unconditional on subcommand — safe for these two as well as for a bare launch.
+    #[must_use]
+    pub fn extra_interactive_first_words(self) -> &'static str {
+        match self {
+            Self::Claude => "",
+            Self::Codex => "resume | fork",
         }
     }
 }
@@ -180,17 +254,28 @@ impl AgentTool {
 /// actually exists on disk, because a script that failed midway must not hand a
 /// nonexistent path to `--settings` and get a hard error instead of a quiet
 /// passthrough. Codex's `-c key=value` takes a literal value on the command line, so
-/// `agent-settings` prints the *value* directly and there is no file to check —
-/// injecting an empty string would be the only failure mode, and an empty check
-/// already covers it.
+/// `agent-settings` prints the *value* directly and there is no file to check.
+///
+/// Injecting an empty string is not the only failure mode here, though it looked that
+/// way at first: Codex parses a malformed `-c` value as TOML and, on a parse failure,
+/// falls back to treating it as a **literal string** rather than rejecting it — so a
+/// non-empty-but-broken value does not fail closed the way a missing file does. An
+/// empty check catches "nothing printed"; it does not catch "printed garbage".
+/// `ConfigOverride`'s `key_prefix` is the cheap guard for that second case: the
+/// wrapper checks the printed value actually starts with the key this tool's
+/// `agent-settings` arm is supposed to set, and drops it otherwise (belt-and-braces
+/// alongside `agent-settings`'s own correctness, the same relationship `sh_quote` has
+/// to its callers).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Injection {
     /// `agent-settings` writes a file and prints its path; inject only once that
     /// file exists.
     SettingsFile,
-    /// `agent-settings` prints a literal value with no file behind it; inject
-    /// whenever it printed anything at all.
-    ConfigOverride,
+    /// `agent-settings` prints a literal value with no file behind it; inject once
+    /// it starts with `key_prefix` (e.g. `"notify="`), the wrapper's cheap check that
+    /// what it is about to hand the real binary is shaped like the value this tool's
+    /// `agent-settings` arm actually produces.
+    ConfigOverride { key_prefix: &'static str },
 }
 
 /// What a surface running an agent is doing.
@@ -367,14 +452,28 @@ pub fn claude_state(payload: &HookPayload) -> State {
 ///
 /// # Why this can only ever return `Idle` or `Unknown`
 ///
-/// Codex's `notify` fires on exactly one event, `agent-turn-complete` — there is no
-/// approval-request or turn-started notification the way Claude has `Notification`
-/// and `UserPromptSubmit`. So there is no signal this function could map to
-/// [`State::Blocked`] or [`State::Working`] even in principle: Codex does not tell
-/// veld either of those things. That is a real, measured gap in what a Codex pane's
-/// badge can say — not an oversight here — and [`State::Ready`], reported by the
-/// wrapper itself before Codex even starts, is what a Codex pane shows for the
-/// entire time it is genuinely working, same as before its first prompt.
+/// `notify` fires on exactly one event, `agent-turn-complete` — no approval-request,
+/// no turn-started. **This is a choice of mechanism, not a fact about Codex**: Codex
+/// also ships a newer `hooks` system (`pre_tool_use`, `permission_request`,
+/// `user_prompt_submit`, `session_end`, …) that mirrors Claude's own event names
+/// closely enough to suggest deliberate compatibility. Codex genuinely has the
+/// richer signals `--enable`ing that system would need. What it does not have is a
+/// way to use them for free: a hook installed via `-c hooks.*=…` needs interactive
+/// **trust review** the first time Codex sees it ("New hook — review required"),
+/// or `--dangerously-bypass-hook-trust`, which is not scoped to veld's own hook — it
+/// disables trust review for *every* configured hook for that invocation, described
+/// by Codex's own `--help` as "DANGEROUS… intended only for automation that already
+/// vets hook sources". Neither is compatible with an ephemeral, invisible wrapper:
+/// the first is a security prompt the user never asked for, appearing because veld
+/// silently added a hook to their session; the second is a blanket bypass veld would
+/// be injecting on every launch, for hooks that are not veld's to vouch for.
+///
+/// `notify`/`legacy_notify` has neither problem — it takes effect immediately, no
+/// review, no bypass flag — at the cost of the one event it fires. veld takes that
+/// trade deliberately: a narrower badge over a security prompt or a standing bypass.
+/// If Codex ever offers a way to pre-trust a single named hook non-interactively,
+/// this is the function to widen — measured at codex-cli 0.146.0, and worth
+/// re-checking against whatever version is current before concluding it still holds.
 ///
 /// Matched by value rather than defaulted to `Idle`, for the same reason
 /// [`claude_state`] does not default to `Blocked`: an event type Codex adds later
@@ -461,12 +560,17 @@ pub fn claude_settings_doc(cli: &Path, session_id: &str) -> serde_json::Value {
 ///
 /// # Why the array elements are JSON-escaped, not TOML-escaped
 ///
-/// The value Codex parses is TOML, but the string literal this builds — double
-/// quotes, `\\`/`\"`/control-character escapes — is the same core grammar TOML's
-/// basic strings use, and every element here is either an absolute path or one of a
-/// handful of ASCII flag names this crate controls. `serde_json::to_string` on a
-/// `&str` is infallible and gives that escaping for free, without a second
-/// hand-rolled escaper to keep in sync with [`sh_quote`].
+/// The value Codex parses is TOML, but every element here is either an absolute path
+/// or one of a handful of ASCII flag names this crate controls — never arbitrary
+/// user text — and for that controlled set, JSON's basic-string escaping
+/// (`\\`/`\"`/control characters) and TOML's agree closely enough that
+/// `serde_json::to_string` on a `&str`, infallible and free, does the job without a
+/// second hand-rolled escaper to keep in sync with [`sh_quote`]. This is **not** a
+/// claim that JSON and TOML string escaping are interchangeable in general — U+007F
+/// (DEL) is the one character TOML forbids unescaped that JSON does not escape, and
+/// it is excluded here only by the inputs being what they are, not by construction.
+/// A future caller feeding this function less controlled input (raw user text, say)
+/// should not lean on this comment as proof the encoding is safe.
 ///
 /// # Why there is no timeout here
 ///
@@ -783,7 +887,12 @@ mod tests {
         );
         assert_eq!(
             AgentTool::Codex.injection(),
-            ("-c", Injection::ConfigOverride)
+            (
+                "-c",
+                Injection::ConfigOverride {
+                    key_prefix: "notify="
+                }
+            )
         );
     }
 
