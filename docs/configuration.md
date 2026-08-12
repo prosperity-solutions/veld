@@ -2034,7 +2034,7 @@ already lost its leading zero, so it is refused rather than guessed at.
 ## `ide`: the project's own IDE surfaces
 
 `ide` is where a project configures Veld's own IDE surfaces — Veld Desktop and
-the `/ide` view in a browser. Six keys under it are interpreted — `quicklinks`,
+the `/ide` view in a browser. Seven keys under it are interpreted — `quicklinks`,
 `permissions`, `externalOrigins`, `panes`, `extensions`, `news` and the `git`
 subscope; the rest of `ide` stays reserved and opaque (see
 [below](#reserved-hooks-and-the-rest-of-ide)), so a JSON-defined IDE extension is

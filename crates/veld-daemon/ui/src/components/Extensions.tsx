@@ -16,7 +16,7 @@
  *   one worktree — the one on screen — and re-asks on the shortest declared
  *   interval while the document is visible. A hidden window asks for nothing,
  *   which is what keeps a badge that calls a rate-limited API from being
- *   evaluated for eighteen worktrees nobody is looking at.
+ *   evaluated for the seventeen worktrees nobody is looking at.
  */
 import { ActionIcon, Button, Menu, Tooltip } from "@mantine/core";
 import { IconChevronDown, IconExternalLink, IconRefresh } from "@tabler/icons-react";

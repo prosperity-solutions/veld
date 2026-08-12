@@ -458,9 +458,9 @@ Rejected, with reasons:
   indicator has.
 - **A daemon-wide work queue with values in SQLite, delivered on the existing
   `/api/repos` poll.** Warmest first paint and simplest wire shape, but it spends a
-  rate-limited token on 18 worktrees to serve the one being looked at, forever,
-  including overnight with the IDE closed. Its *delivery* half is the right answer
-  later; its *trigger* half is not.
+  rate-limited token on all 18 registered worktrees to serve the one being looked
+  at, forever, including overnight with the IDE closed. Its *delivery* half is the
+  right answer later; its *trigger* half is not.
 - **An actor per observed worktree driven by the IDE ownership registry, pushing
   over the control WebSocket.** This is where the system should end up and it was
   the sparring round's pick. Deferred because the registry's claim means
