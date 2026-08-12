@@ -373,6 +373,24 @@ let persistTimer = null;
  * — the one field in the state file that survives having no windows.
  */
 let lastMainBounds = null;
+/**
+ * The bounds to persist for a window: always its live rect, never
+ * `getNormalBounds()`.
+ *
+ * The latter looked like the right call — a window remembered while
+ * maximised should restore to the size it had before, not to a literal
+ * full-screen rect — until it was measured against a real resize: dragging a
+ * window's edges to fill its display flips `isMaximized()` true on this
+ * platform exactly the same as clicking the maximize control does, so
+ * `getNormalBounds()` cannot tell "the user maximised this" from "the user
+ * dragged it to nearly this size" apart — both land on the pre-drag restore
+ * rect, which is stale in the second case. There is no reliable signal here
+ * to recover the graceful-unmaximize behaviour with, so the simpler, correct
+ * rule wins: what you see is what gets restored.
+ */
+function capturedBounds(win) {
+  return win.getBounds();
+}
 function persistWindows() {
   // A quit closes every window one by one, and each `closed` would shrink the
   // recorded set — the last write winning would be "one window", which is what
@@ -388,15 +406,14 @@ function persistWindows() {
     // point some windows are already destroyed and would be filtered out of the
     // very list the next launch reopens.
     if (!deps || quitting) return;
-    // The last live main window's normal bounds, captured *while it is still
+    // The last live main window's bounds, captured *while it is still
     // alive* — the fallback bounds a fresh main window opens at. Captured here
     // rather than in `close` so it is current by the time the last window is
     // being torn down: when `closed` empties the set this has already been
     // updated by the resizes that led up to it, and writing it is what lets a
-    // macOS red-X close followed by a reopen recall the size. Normal bounds, so
-    // a window remembered while maximised restores to the size it had before.
+    // macOS red-X close followed by a reopen recall the size.
     const main = allRecords().find((r) => r.kind === "main" && !r.win.isDestroyed());
-    if (main) lastMainBounds = safeBounds(main.win.getNormalBounds());
+    if (main) lastMainBounds = safeBounds(capturedBounds(main.win));
     try {
       const records = allRecords()
         .filter((r) => !r.win.isDestroyed())
@@ -406,10 +423,9 @@ function persistWindows() {
           origin: r.origin,
           worktreeId: r.worktreeId,
           repoRoot: r.repoRoot,
-          // Normal bounds, not `getBounds()`: a window remembered while
-          // maximised or full-screen restores as a window with no way back to
-          // the size it had before.
-          bounds: safeBounds(r.win.getNormalBounds()),
+          // See `capturedBounds` for why this is the live rect, never
+          // `getNormalBounds()`.
+          bounds: safeBounds(capturedBounds(r.win)),
         }));
       fs.mkdirSync(path.dirname(deps.stateFile), { recursive: true });
       // Write-then-rename, because a torn file is worse than a stale one: a
@@ -617,7 +633,11 @@ function openWindow(options = {}) {
           titleBarStyle: "hiddenInset",
           trafficLightPosition: {
             x: 13,
-            y: Math.round((deps.topbarHeight - deps.trafficLightSize) / 2),
+            // The centred value reads 2px low against the bar's own controls
+            // on the current build; nudged up rather than folded into the
+            // centring math, which is a separately-verified measurement (see
+            // `TRAFFIC_LIGHT_SIZE` in `main.js`).
+            y: Math.round((deps.topbarHeight - deps.trafficLightSize) / 2) - 2,
           },
         }),
     backgroundColor: "#0d0e10",
