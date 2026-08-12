@@ -3580,6 +3580,18 @@ mod tests {
                 ("DELETE", "/api/lanes/x?repo_root=/tmp", ""),
                 ("POST", "/api/pick-directory", ""),
                 ("POST", "/api/open-worktree-storage-dir", ""),
+                // Both of these execute a project-declared command, so a
+                // missing header must never reach them. Note that this proves
+                // nothing about the routes *existing* — `csrf_layer` wraps the
+                // whole router and answers before routing, so a misspelled path
+                // passes here too. `extension_routes_are_reachable` is the check
+                // for that half.
+                ("POST", "/api/worktrees/1/extensions/status", ""),
+                (
+                    "POST",
+                    "/api/worktrees/1/extensions/activate",
+                    r#"{"id":"pr"}"#,
+                ),
             ] {
                 let res = super::super::routes()
                     .oneshot(req(method, uri, false, body))
@@ -3658,6 +3670,39 @@ mod tests {
                     res.status(),
                     StatusCode::BAD_REQUEST,
                     "{method} {uri} must reject invalid input"
+                );
+            }
+        }
+
+        /// The extension endpoints are actually mounted.
+        ///
+        /// Needed as its own test because the CSRF enumeration above cannot see
+        /// it: that layer wraps the whole router and rejects before routing, so a
+        /// typo in a path is invisible there. Both an unrouted path and this
+        /// handler's own "worktree not found" answer 404, so the assertion is on
+        /// the **body** — axum's own 404 is empty, while anything that reached a
+        /// handler carries the JSON error shape.
+        #[tokio::test]
+        async fn extension_routes_are_reachable() {
+            for (uri, body) in [
+                ("/api/worktrees/999999/extensions/status", ""),
+                (
+                    "/api/worktrees/999999/extensions/activate",
+                    r#"{"id":"nope"}"#,
+                ),
+            ] {
+                let res = super::super::routes()
+                    .oneshot(req("POST", uri, true, body))
+                    .await
+                    .unwrap();
+                let status = res.status();
+                let bytes = axum::body::to_bytes(res.into_body(), 64 * 1024)
+                    .await
+                    .expect("body");
+                assert!(
+                    !bytes.is_empty(),
+                    "POST {uri} produced an empty {status} body, which is axum's \
+                     unrouted answer — the route is not mounted"
                 );
             }
         }
