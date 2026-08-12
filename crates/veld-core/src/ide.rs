@@ -4046,6 +4046,49 @@ mod tests {
         );
     }
 
+    /// The documented icon list is the fourth copy of this set, and was the only one
+    /// with nothing checking it.
+    ///
+    /// It went stale immediately: the list stayed at the original 32 names while the
+    /// allowlist grew to 63, and `docs/configuration.md` points `ide.extensions`'
+    /// own `icon` field at that section — so its worked examples used
+    /// `external-link` and `git-pull-request`, neither of which the list it cites
+    /// contained. A reader checking the example against the allowlist in the same
+    /// document found a contradiction, and nothing failed.
+    #[test]
+    fn the_documented_icon_list_matches_the_allowlist() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .expect("workspace root")
+            .join("docs/configuration.md");
+        let doc = std::fs::read_to_string(&path).expect("configuration.md is readable");
+        let marker = "the same allowlist [`ide.extensions`](#ideextensions) draws on";
+        let start = doc
+            .find(marker)
+            .unwrap_or_else(|| panic!("the pane-icon paragraph moved; update this test"));
+        // The `·`-separated run that follows, up to the next blank line.
+        let list_start = doc[start..]
+            .find("\n\n`")
+            .map(|o| start + o + 2)
+            .expect("a list follows the paragraph");
+        let list_end = doc[list_start..]
+            .find("\n\n")
+            .map(|o| list_start + o)
+            .expect("the list ends");
+        let mut documented: Vec<&str> = doc[list_start..list_end]
+            .split('·')
+            .map(|n| n.trim().trim_matches('`'))
+            .filter(|n| !n.is_empty())
+            .collect();
+        documented.sort_unstable();
+        assert_eq!(
+            documented,
+            PANE_ICON_NAMES.to_vec(),
+            "docs/configuration.md's icon list has drifted from PANE_ICON_NAMES"
+        );
+    }
+
     /// The key list and the schema's terminal branch are two hand-maintained
     /// copies of one set; nothing but this ties them together.
     #[test]

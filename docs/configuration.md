@@ -2657,14 +2657,22 @@ every other daemon-spawned command follows.
 #### Pane icons
 
 `icon` takes either an emoji (any non-ASCII string, e.g. `"🤖"`) or one of these
-names, from [Tabler](https://tabler.io/icons), which is the set every built-in
-pane tab uses:
+names, from [Tabler](https://tabler.io/icons) — the set every built-in pane tab
+uses, and the same allowlist [`ide.extensions`](#ideextensions) draws on. The list
+below is checked against `veld_core::ide::PANE_ICON_NAMES` by a test, so it cannot
+drift out of date:
 
-`atom` · `bolt` · `book` · `brain` · `bug` · `bulb` · `chart-line` · `cloud` ·
-`code` · `compass` · `cpu` · `database` · `flask` · `git-branch` · `key` ·
-`map` · `message-chatbot` · `notebook` · `package` · `player-play` · `plug` ·
-`puzzle` · `refresh` · `robot` · `rocket` · `search` · `server` · `shield` ·
-`sparkles` · `terminal-2` · `tool` · `wand`
+`alert-triangle` · `app-window` · `atom` · `bolt` · `book` · `brain` ·
+`brand-github` · `brand-gitlab` · `brand-vscode` · `browser` · `bug` · `bulb`
+· `chart-line` · `check` · `circle-check` · `clock` · `cloud` · `cloud-upload`
+· `code` · `compass` · `cpu` · `database` · `device-desktop` · `download` ·
+`external-link` · `eye` · `file-code` · `flag` · `flask` · `folder` · `gauge`
+· `git-branch` · `git-commit` · `git-merge` · `git-pull-request` · `hourglass`
+· `key` · `link` · `list-check` · `lock` · `map` · `message-chatbot` ·
+`notebook` · `package` · `palette` · `player-play` · `plug` · `puzzle` ·
+`refresh` · `robot` · `rocket` · `search` · `server` · `shield` ·
+`shield-check` · `sparkles` · `star` · `tag` · `terminal-2` · `tool` ·
+`upload` · `wand` · `x`
 
 It is an allowlist rather than "any Tabler name" because the app has to bundle
 every icon that can be rendered. An ASCII string means "this is a name", so a

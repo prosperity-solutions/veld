@@ -443,6 +443,14 @@ export function terminalShellIntegration(doc: SettingsDoc): boolean {
  * `~/.claude/settings.json`; for Codex it's a one-invocation `-c notify=[...]`
  * override, never a write to `~/.codex/config.toml`.
  */
+export function terminalAgentIntegration(doc: SettingsDoc): boolean {
+  return bool(
+    doc,
+    "terminal.agentIntegration",
+    FALLBACK.terminalAgentIntegration,
+  );
+}
+
 /**
  * Whether the daemon may evaluate a project's `ide.extensions` status badges on
  * a timer.
@@ -453,14 +461,6 @@ export function terminalShellIntegration(doc: SettingsDoc): boolean {
  */
 export function extensionsAutoRefresh(doc: SettingsDoc): boolean {
   return bool(doc, "extensions.autoRefresh", FALLBACK.extensionsAutoRefresh);
-}
-
-export function terminalAgentIntegration(doc: SettingsDoc): boolean {
-  return bool(
-    doc,
-    "terminal.agentIntegration",
-    FALLBACK.terminalAgentIntegration,
-  );
 }
 
 /** What the rail shows about unseen activity, and what is allowed to interrupt you. */
