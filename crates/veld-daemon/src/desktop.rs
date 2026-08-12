@@ -41,6 +41,7 @@ pub fn routes() -> Router {
         .route("/api/repos", get(list_repos).delete(remove_repo))
         .route("/api/repos/refresh", post(refresh_repos))
         .route("/api/repos/update-main", post(update_main))
+        .route("/api/repos/revert-root", post(revert_repo_root))
         .route("/api/repos/import", post(import_repo))
         .route("/api/worktrees", post(create_worktree))
         .route(
@@ -1675,6 +1676,43 @@ struct UpdateMainBody {
     root: String,
 }
 
+/// Resolve the main checkout's branch — what the IDE means by "main" even
+/// when the project calls it something else — and refuse to touch the repo
+/// root unless it is actually checked out on that branch.
+///
+/// Shared by [`update_main`] and [`revert_repo_root`]: a revert that discards
+/// uncommitted work only for the fast-forward that follows to refuse anyway
+/// for an unrelated reason (wrong branch) destroys work for nothing, so both
+/// callers apply the same gate before doing anything destructive. A detached
+/// HEAD fails `symbolic-ref` and lands here too.
+async fn checked_default_branch(db: &Db, repo_root: &FsPath) -> Result<String, ApiError> {
+    let default_branch = db
+        .list_worktrees(repo_root)
+        .map_err(db_err)?
+        .into_iter()
+        .find(|w| w.is_main)
+        .map(|w| w.branch)
+        .ok_or_else(|| err(StatusCode::CONFLICT, "cannot determine the default branch"))?;
+    let head_branch = git(repo_root, &["symbolic-ref", "--short", "HEAD"])
+        .await
+        .map_err(|e| {
+            err(
+                StatusCode::CONFLICT,
+                format!("repo root is not on a branch: {e}"),
+            )
+        })?;
+    if head_branch != default_branch {
+        return Err(err(
+            StatusCode::CONFLICT,
+            format!(
+                "repo root is on \"{head_branch}\", not \"{default_branch}\" — \
+                 switch it to update {default_branch}"
+            ),
+        ));
+    }
+    Ok(default_branch)
+}
+
 /// Bring the repo's main checkout up to date with `origin/<default>`: fetch,
 /// then fast-forward-only.
 ///
@@ -1702,35 +1740,7 @@ async fn update_main(Json(body): Json<UpdateMainBody>) -> Result<Json<RepoView>,
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "repo not imported"))?;
     let repo_root = PathBuf::from(&repo.root);
 
-    // The default branch is the main checkout's branch — what the IDE means by
-    // "main" even when the project calls it something else.
-    let default_branch = db
-        .list_worktrees(&repo_root)
-        .map_err(db_err)?
-        .into_iter()
-        .find(|w| w.is_main)
-        .map(|w| w.branch)
-        .ok_or_else(|| err(StatusCode::CONFLICT, "cannot determine the default branch"))?;
-
-    // Fast-forwarding only moves the checkout's *current* branch, so it must be
-    // the default. A detached HEAD fails `symbolic-ref` and lands here too.
-    let head_branch = git(&repo_root, &["symbolic-ref", "--short", "HEAD"])
-        .await
-        .map_err(|e| {
-            err(
-                StatusCode::CONFLICT,
-                format!("repo root is not on a branch: {e}"),
-            )
-        })?;
-    if head_branch != default_branch {
-        return Err(err(
-            StatusCode::CONFLICT,
-            format!(
-                "repo root is on \"{head_branch}\", not \"{default_branch}\" — \
-                 switch it to update {default_branch}"
-            ),
-        ));
-    }
+    let default_branch = checked_default_branch(&db, &repo_root).await?;
     // Empty porcelain output is a clean tree; anything else is uncommitted work
     // that a fast-forward would fight. Reuses the shared `git_status` helper the
     // worktree delete flow uses (one spelling of `status --porcelain`, not two).
@@ -1775,6 +1785,50 @@ async fn update_main(Json(body): Json<UpdateMainBody>) -> Result<Json<RepoView>,
         })?;
     let git = repo_git_status(&db, &repo_root).await;
     Ok(Json(repo_view(&db, repo, true, Some(git)).await?))
+}
+
+/// Discard the repo root's uncommitted changes so [`update_main`] can
+/// fast-forward it.
+///
+/// The "revert changes" half of the top bar's dirty confirm — the same trade
+/// [`revert_worktree`] makes for a worktree, but reached by repo root rather
+/// than worktree id, since that endpoint refuses on the main checkout on
+/// purpose. Shares [`update_main`]'s branch and live-run gates: reverting is
+/// destructive, so it must refuse under exactly the conditions that would make
+/// the fast-forward it exists to unblock refuse anyway — otherwise a dirty
+/// repo root on the wrong branch would lose its uncommitted work for nothing.
+async fn revert_repo_root(Json(body): Json<UpdateMainBody>) -> Result<Json<StatusView>, ApiError> {
+    let db = open_desktop_db()?;
+    let repo = db
+        .get_repo(FsPath::new(&body.root))
+        .map_err(db_err)?
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "repo not imported"))?;
+    let repo_root = PathBuf::from(&repo.root);
+    // Refuse before doing anything destructive if the fast-forward this revert
+    // exists to unblock would refuse anyway (wrong branch): discarding real,
+    // uncommitted work only to hit an unrelated refusal a moment later is a
+    // pure loss, not progress. See `checked_default_branch`.
+    checked_default_branch(&db, &repo_root).await?;
+    let live = db.live_run_names(&repo_root).map_err(db_err)?;
+    if !live.is_empty() {
+        return Err(err(
+            StatusCode::CONFLICT,
+            format!(
+                "a run is live in the repo root ({}) — stop it before reverting",
+                live.join(", ")
+            ),
+        ));
+    }
+    revert_git_changes(&repo_root)
+        .await
+        .map_err(|e| err(StatusCode::UNPROCESSABLE_ENTITY, e))?;
+    let files = git_status(&repo_root)
+        .await
+        .map_err(|e| err(StatusCode::UNPROCESSABLE_ENTITY, e))?;
+    Ok(Json(StatusView {
+        dirty: !files.is_empty(),
+        files,
+    }))
 }
 
 #[derive(Deserialize)]
@@ -3407,6 +3461,7 @@ mod tests {
             for (method, uri, body) in [
                 ("POST", "/api/repos/refresh", ""),
                 ("POST", "/api/repos/import", r#"{"path":"/tmp"}"#),
+                ("POST", "/api/repos/revert-root", r#"{"root":"/tmp"}"#),
                 ("DELETE", "/api/repos", r#"{"root":"/tmp"}"#),
                 (
                     "POST",
@@ -3617,5 +3672,52 @@ mod tests {
             age < 600,
             "commit B was just made, so the newest missing commit should be recent (age {age}s)"
         );
+    }
+
+    /// `checked_default_branch` must refuse a repo root that isn't on the
+    /// registered default branch, and must do so *before* the caller does
+    /// anything destructive — `revert_repo_root` relies on this running ahead
+    /// of `revert_git_changes` so a wrong-branch repo root never has its
+    /// uncommitted work discarded for a fast-forward that was going to refuse
+    /// anyway.
+    #[tokio::test]
+    async fn checked_default_branch_refuses_a_repo_root_on_the_wrong_branch() {
+        fn git(cwd: &std::path::Path, args: &[&str]) {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(cwd)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let work = dir.path().join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        git(&work, &["init", "-b", "main"]);
+        git(&work, &["config", "user.email", "t@t"]);
+        git(&work, &["config", "user.name", "t"]);
+        std::fs::write(work.join("a.txt"), "a").unwrap();
+        git(&work, &["add", "a.txt"]);
+        git(&work, &["commit", "-m", "A"]);
+
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = veld_core::db::Db::open_at(&db_dir.path().join("veld.db")).unwrap();
+        db.upsert_repo(&work, "test").unwrap();
+        sync_repo_worktrees(&db, &work).await.unwrap();
+
+        // On "main" (the registered default branch): the gate passes.
+        assert_eq!(checked_default_branch(&db, &work).await.unwrap(), "main");
+
+        // Switched to a feature branch: the gate must refuse rather than let a
+        // caller proceed to something destructive.
+        git(&work, &["checkout", "-qb", "feature"]);
+        let refusal = checked_default_branch(&db, &work).await.unwrap_err();
+        assert_eq!(refusal.0, StatusCode::CONFLICT);
     }
 }

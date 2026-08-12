@@ -913,6 +913,71 @@ export function ConfirmDeleteWorktreeDialog(props: {
 }
 
 /**
+ * Warn before fast-forwarding main over a dirty repo root.
+ *
+ * `merge --ff-only` refuses on uncommitted changes the same way
+ * `git worktree remove` does, so this mirrors the trash flow's dirty confirm:
+ * show what is in the way and let the user revert first instead of hitting
+ * the daemon's refusal blind. There is no "update anyway" — reverting is the
+ * only path that makes the fast-forward possible, unlike the trash flow's
+ * discard-and-proceed option.
+ */
+export function UpdateMainDirtyDialog(props: {
+  status: WorktreeGitStatus;
+  onClose: () => void;
+  /** Revert the repo root's changes, then fetch and fast-forward main. */
+  onRevertThenUpdate: () => Promise<void>;
+}) {
+  const revert = useSubmit(props.onRevertThenUpdate);
+  const count = props.status.files.length;
+  return (
+    <Modal title="Update main" onClose={props.onClose}>
+      <Stack gap="md">
+        <Alert color="yellow" variant="light" p="sm">
+          <Text size="sm" fw={600}>
+            The main checkout has {count} uncommitted change
+            {count === 1 ? "" : "s"} a fast-forward would refuse on.
+          </Text>
+          <Text size="xs" c="dimmed" mt={2}>
+            These files are not saved to git yet.
+          </Text>
+          <div style={{ marginTop: 8 }}>
+            <DirtyFileList files={props.status.files} />
+          </div>
+        </Alert>
+        <Text size="sm" c="dimmed">
+          Revert these changes and update main, or cancel and handle them
+          yourself first.
+        </Text>
+        <Group>
+          <Tooltip
+            label="Reverts these changes (reset to the last commit, remove untracked files), then fetches and fast-forwards main. This cannot be undone."
+            multiline
+            w={260}
+          >
+            <Button
+              color="yellow"
+              variant="light"
+              loading={revert.busy}
+              onClick={(e) => {
+                e.preventDefault();
+                void revert.submit(e);
+              }}
+            >
+              Revert changes, then update main
+            </Button>
+          </Tooltip>
+          <Button variant="default" onClick={props.onClose}>
+            Cancel
+          </Button>
+        </Group>
+        <ErrorText error={revert.error} />
+      </Stack>
+    </Modal>
+  );
+}
+
+/**
  * Edit a worktree's name and alias. Purely editing — trashing/deletion has its
  * own dialog ([`TrashWorktreeDialog`]), so a rename action can never
  * accidentally read as a delete, and the trash flow is never buried under a

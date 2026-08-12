@@ -1026,6 +1026,16 @@ export const api = {
       body: JSON.stringify({ root }),
     }),
   /**
+   * Discard the repo root's uncommitted changes so `updateMain` can
+   * fast-forward it: tracked files reset to HEAD, untracked files removed.
+   * Returns the post-revert status. Destructive — the UI must ask first.
+   */
+  revertRepoRoot: (root: string) =>
+    request<WorktreeGitStatus>("/api/repos/revert-root", {
+      method: "POST",
+      body: JSON.stringify({ root }),
+    }),
+  /**
    * Create a worktree.
    *
    * `emoji`/`marker_color` are the create dialog's marker pick. Sent with the create

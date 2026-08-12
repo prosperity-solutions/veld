@@ -226,6 +226,7 @@ import {
   RemoveRepoDialog,
   RenameWorktreeDialog,
   TrashWorktreeDialog,
+  UpdateMainDirtyDialog,
 } from "./components/dialogs";
 
 import {
@@ -1873,6 +1874,12 @@ function AppInner(props: {
      * state; the dialog turns it into a choice (discard vs revert first).
      */
     | { kind: "confirm-delete"; worktree: Worktree; status: WorktreeGitStatus }
+    /**
+     * The top bar's "update main" hit a dirty repo root. `status` is the
+     * fetched dirty state; the dialog turns it into a choice (revert first, or
+     * cancel) instead of the daemon's refusal landing as a bare toast.
+     */
+    | { kind: "update-main-dirty"; root: string; status: WorktreeGitStatus }
     | { kind: "marker"; worktree: Worktree }
     /** `worktree` set means "create it, then move this one into it". */
     | { kind: "new-lane"; worktree?: Worktree }
@@ -4193,14 +4200,11 @@ function AppInner(props: {
     );
   }
 
-  /**
-   * The one-click "update main": fetch + fast-forward the main checkout, then
-   * re-read the repo so the staleness badge clears in the same breath. The
-   * daemon refuses a dirty tree, a root not on the default branch, or a root
-   * with a live run — the error is the "why" a greyed button cannot say.
-   */
-  const updateMain = async () => {
-    if (!repo || updatingMain) return;
+  /** Fetch + fast-forward the main checkout, then re-read the repo so the
+   *  staleness badge clears in the same breath. Shared by the direct click
+   *  and the dirty-confirm dialog's "revert, then update" button. */
+  const doUpdateMain = async () => {
+    if (!repo) return;
     setUpdatingMain(true);
     try {
       await api.updateMain(repo.root);
@@ -4211,6 +4215,31 @@ function AppInner(props: {
     } finally {
       setUpdatingMain(false);
     }
+  };
+
+  /**
+   * The one-click "update main". Mirrors the trash flow: check the repo
+   * root's dirty state up front (same `git status` the daemon's own refusal
+   * would otherwise surface a moment later as a bare toast) and, if dirty,
+   * turn it into a choice — revert first, or cancel — instead of failing
+   * blind. A clean tree skips straight to the fast-forward as before.
+   */
+  const updateMain = async () => {
+    if (!repo || updatingMain) return;
+    const main = worktrees.find((w) => w.is_main);
+    if (main) {
+      try {
+        const status = await api.worktreeGitStatus(main.id);
+        if (status.dirty) {
+          setDialog({ kind: "update-main-dirty", root: repo.root, status });
+          return;
+        }
+      } catch {
+        // Status unavailable (git error, checkout gone): fall through and let
+        // the daemon's own dirty check surface the refusal, as before.
+      }
+    }
+    await doUpdateMain();
   };
 
   return (
@@ -4621,6 +4650,17 @@ function AppInner(props: {
           onRevertThenDelete={async () => {
             await api.revertWorktree(dialog.worktree.id);
             await enqueueDelete(dialog.worktree);
+            closeDialog();
+          }}
+        />
+      )}
+      {dialog.kind === "update-main-dirty" && (
+        <UpdateMainDirtyDialog
+          status={dialog.status}
+          onClose={closeDialog}
+          onRevertThenUpdate={async () => {
+            await api.revertRepoRoot(dialog.root);
+            await doUpdateMain();
             closeDialog();
           }}
         />
