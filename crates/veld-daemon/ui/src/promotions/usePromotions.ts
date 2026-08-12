@@ -24,12 +24,12 @@ import { PROMOTIONS } from "./content";
 import {
   buildCards,
   type Card,
+  markableIds,
   mergeStates,
   type ProjectNewsItem,
   type PromotionState,
   toPrompt,
   unreadCount,
-  unreadOf,
   utcDay,
 } from "./model";
 
@@ -197,16 +197,26 @@ export function usePromotions(options: {
   const promptable = states ? toPrompt(all, states) : [];
 
   useEffect(() => {
-    // **Waits for the settings document too**, not only for cards to exist. The
-    // prompt latches — `setSettledFor` runs when the reader closes it — so opening
-    // before `ui.showProjectNews` is known means opening a panel that *cannot*
-    // contain the project's cards, and then never auto-prompting them for the rest
-    // of the page load. Badge only, which is the promise quietly downgraded. Same
-    // reason `suppressAuto` waits for `repoList`.
-    if (options.settings === null) return;
+    // **Waits for the settings document, but only while a project could contribute
+    // cards.** The prompt latches — `setSettledFor` runs when the reader closes it —
+    // so opening before `ui.showProjectNews` is known means opening a panel that
+    // *cannot* contain the project's cards and then never auto-prompting them for the
+    // rest of the page load. Badge only, which is the promise quietly downgraded.
+    //
+    // Scoped to `options.project`, because Veld's own cards do not depend on settings
+    // at all and blocking them too would be an unrelated regression: `useSettings`
+    // retries only on window focus, so one failed `GET /api/settings` would otherwise
+    // cost this session its own prompt. With no project selected there is nothing the
+    // document could add, so there is nothing to wait for.
+    //
+    // What this still costs, stated rather than hidden: if a project *is* selected and
+    // the settings request keeps failing, nothing auto-prompts this session. The badge
+    // and the ⋯ menu both still work, and showing repo-authored cards to somebody who
+    // switched them off is the worse of the two failures.
+    if (options.project !== null && options.settings === null) return;
     if (settled || options.suppressAuto || promptable.length === 0 || open) return;
     setOpen({ cards: promptable, automatic: true, project: projectRoot });
-  }, [settled, options.suppressAuto, options.settings, promptable, open, projectRoot]);
+  }, [settled, options.suppressAuto, options.settings, options.project, promptable, open, projectRoot]);
 
   /**
    * Record a state for whatever the panel is showing, and close it.
@@ -227,19 +237,16 @@ export function usePromotions(options: {
       // already failed.
       setSettledFor(open.project);
       setOpen(null);
-      // **Nothing is written until both halves of the arrival answer are known.**
-      // A null `states` means the request carrying it failed. A null `firstUse` means
-      // the cards in `open.cards` were built with `UNKNOWN_ARRIVAL`, so *none* of
-      // them counts as predating this reader — and `browse()` is reachable before
-      // that request lands, so a panel opened then and closed after `states` arrives
-      // would write a row for every promotion in the build, including all the ones
-      // that predate them. That is exactly what `unreadOf` exists to avoid. Closing
-      // is still closing; the next page load asks again.
-      if (!states || !firstUse) return;
-      // Only what this user actually has outstanding. Browsing shows every card
-      // there is, and marking the auto-read ones would write a row per card the
-      // user never had.
-      const ids = unreadOf(open.cards, states);
+      // Nothing is written against an unknown state map: a null `states` means the
+      // request carrying it failed, and closing is still closing — the next page
+      // load asks again. (`firstUse` rides the same response, so it is known
+      // exactly when `states` is; checking it too would be a dead branch.)
+      if (!states) return;
+      // What the panel showed, gated against the cards as they stand *now* — see
+      // `markableIds`, which is where that distinction is explained and tested. The
+      // panel's snapshot can predate the arrival stamp, and marking the snapshot is
+      // how a reader ends up with a stored row for the entire back-catalogue.
+      const ids = markableIds(open.cards, all, states);
       if (ids.length === 0) return;
       setStates((current) => mergeStates(current ?? {}, ids, state));
       // Never block the close on the write. The merge is idempotent, so a failed
@@ -250,7 +257,7 @@ export function usePromotions(options: {
         .then((res) => setStates(res.states))
         .catch(() => {});
     },
-    [open, states, firstUse],
+    [open, states, all],
   );
 
   const markRead = useCallback(() => settle("read"), [settle]);

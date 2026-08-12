@@ -570,6 +570,39 @@ export function unreadOf(
     .map((c) => c.id);
 }
 
+/**
+ * What closing the panel should actually write.
+ *
+ * `shown` is the snapshot the panel is displaying; `current` is the card list as it
+ * stands now. **The gate is applied to `current`, restricted to what `shown`
+ * contained** — and that split is the whole point of this function existing.
+ *
+ * The panel captures its cards when it opens, and it can open before the arrival
+ * stamp has loaded, at which point every card in the snapshot carries
+ * {@link UNKNOWN_ARRIVAL} and none of them looks like it predates the reader. Mark
+ * *that* list and you write a row for every promotion in the build, including the
+ * whole back-catalogue the reader never had — exactly what {@link unreadOf} exists
+ * to prevent. Two attempts to fix it by guarding *the moment* (checking whether the
+ * stamp had arrived, at close time) both failed, because the stale value is in the
+ * snapshot rather than in the clock. Reading the gate off `current` fixes it by
+ * construction: staleness is a value, not an ordering.
+ *
+ * Restricted to `shown` because closing must never mark something the reader did not
+ * have in front of them — cards that arrived on a poll while the panel was open are
+ * not theirs to have read.
+ */
+export function markableIds(
+  shown: readonly Card[],
+  current: readonly Card[],
+  states: Readonly<Record<string, PromotionState>>,
+): string[] {
+  const wasShown = new Set(shown.map((c) => c.id));
+  return unreadOf(
+    current.filter((c) => wasShown.has(c.id)),
+    states,
+  );
+}
+
 /** Problems with a promotion, on top of {@link sectionProblems}. */
 export function promotionProblems(p: Promotion): string[] {
   const problems = sectionProblems(p);

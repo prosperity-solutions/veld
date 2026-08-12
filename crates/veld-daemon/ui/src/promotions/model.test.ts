@@ -19,6 +19,7 @@ import {
   MAX_EYEBROW,
   MAX_HEADLINE,
   manifestIds,
+  markableIds,
   mergeStates,
   NAMESPACE_SEPARATOR,
   namespacedId,
@@ -504,6 +505,34 @@ describe("buildCards — the two channels, and the gates on each", () => {
   it("survives having no project selected", () => {
     const none = buildCards({ ...base, project: null });
     expect(none.every((c) => c.source.kind === "veld")).toBe(true);
+  });
+});
+
+describe("markableIds — what closing the panel writes", () => {
+  const cards = [news("fresh", "2026-07-01"), news("ancient", "2020-01-01")];
+
+  it("gates against the cards as they are now, not as the panel captured them", () => {
+    // The defect this exists for, which survived two attempts to fix it by
+    // guarding *the moment* instead of the value: the panel can open before the
+    // arrival stamp loads, and every card it captured then carries
+    // `UNKNOWN_ARRIVAL`, so none of them looks like it predates the reader.
+    const snapshot = cards.map((c) => ({ ...c, arrivedAt: UNKNOWN_ARRIVAL }));
+    // Marking the snapshot would write a row for `ancient` — a card that predates
+    // this reader and was never theirs to read.
+    expect(unreadOf(snapshot, NONE)).toContain("ancient");
+    // Marking through the current list does not.
+    expect(markableIds(snapshot, cards, NONE)).toEqual(["fresh"]);
+  });
+
+  it("never marks a card the panel did not show", () => {
+    // A poll can add a card while the panel is open. The reader did not have it in
+    // front of them, so closing must not claim they read it.
+    const arrived = [...cards, news("landed-while-open", "2026-08-01")];
+    expect(markableIds(cards, arrived, NONE)).toEqual(["fresh"]);
+  });
+
+  it("still writes nothing for a card the reader already read", () => {
+    expect(markableIds(cards, cards, { fresh: "read" })).toEqual([]);
   });
 });
 
