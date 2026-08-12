@@ -502,7 +502,7 @@ run, while a plain terminal in the same app works perfectly.
   of that is already generic — the daemon endpoint takes a `State` and not a vendor
   payload, the wire carries a tool *name*, and the rail glyph, the pane dot and the
   notification table key on the state — so **a new tool is five edits and no new
-  concepts**; `veld_core::agent`'s module docs carry the recipe and the four traps.
+  concepts**; `veld_core::agent`'s module docs carry the recipe and the five traps.
   The ones worth repeating here because they are invariants rather than steps: **never
   merge into a user's config file** (`~/.claude/settings.json` and a project's
   `.claude/` are both off limits — the ephemeral flag exists precisely so nothing of

@@ -41,7 +41,17 @@
 //! the property that makes this safe and the one to re-check if the flag's semantics
 //! ever change.
 //!
-//! # Adding a second agent
+//! It does not touch `~/.codex/config.toml` either. Codex's ephemeral configuration
+//! is a `-c notify=[...]` override on the command line, not a file — see
+//! [`codex_notify_config`]. **This one does not merge**: it replaces whatever
+//! `notify` the user configured for the duration of the wrapped launch, which is a
+//! real, user-visible behaviour change (their own notifier goes quiet in a veld
+//! terminal) that `--settings`'s merge does not have. There is no cheap fix for
+//! that asymmetry — chaining to the user's own notifier means resolving and parsing
+//! their config, including profile layering, just to build an argv that also invokes
+//! it — so it is a documented cost (README's "What it cannot do"), not a bug.
+//!
+//! # Adding another agent
 //!
 //! Everything downstream of this module is **already generic** — the daemon endpoint
 //! takes a state rather than a vendor payload, the wire carries a tool name, and the
@@ -49,35 +59,68 @@
 //! [`State`] and never on which tool produced it. So a new tool is an installer plus a
 //! mapping, in five edits, and nothing else has to move:
 //!
-//! 1. A variant on [`AgentTool`] (and its `ALL`, `shim_name`, `as_str`). `shim_name` is
-//!    the command the wrapper stands in front of.
-//! 2. A `<tool>_state(&HookPayload) -> State` beside [`claude_state`], and an arm in
-//!    `veld agent-state`'s `match tool` (`crates/veld/src/commands/agent.rs`).
-//! 3. A `<tool>_settings_doc` beside [`claude_settings_doc`], if the tool is configured
-//!    by a file. `prepare_in` in `veld-daemon/src/pty/shims.rs` already generates one
-//!    wrapper per `AgentTool::ALL`, so the script itself comes for free.
+//! 1. A variant on [`AgentTool`], and an arm in every `match self` on it — `ALL`,
+//!    `shim_name`, `as_str`, `injection`, `own_injection_flag_patterns`,
+//!    `extra_interactive_first_words` today, and whatever this list has grown to by
+//!    the time you read it; the compiler enforces exhaustiveness, this comment does
+//!    not. `shim_name` is the command the wrapper stands in front of.
+//! 2. A `<tool>_state(&HookPayload) -> State` beside [`claude_state`]/[`codex_state`],
+//!    and an arm in `veld agent-state`'s `match tool` (`crates/veld/src/commands/agent.rs`).
+//! 3. A `<tool>_settings_doc`/`<tool>_notify_config` beside [`claude_settings_doc`]/
+//!    [`codex_notify_config`], depending on [`Injection`] — see below. `prepare_in` in
+//!    `veld-daemon/src/pty/shims.rs` already generates one wrapper per `AgentTool::ALL`,
+//!    so the script itself comes for free either way.
 //! 4. Whatever [`HookPayload`] is missing for the new tool's schema — every field is
-//!    optional and unknown fields are ignored, so adding one cannot break the first tool.
+//!    optional and unknown fields are ignored, so adding one cannot break an existing tool.
 //! 5. Docs: the two settings rows, README, `skills/veld/SKILL.md`, `llms-full.txt`.
 //!
-//! ## The four traps, each already paid for once
+//! ## The five traps, each already paid for once
 //!
 //! - **Only hook events the tool does not wait on.** Claude's `PreToolUse`,
 //!   `UserPromptSubmit`, `PermissionRequest` and `Stop` block, with ceilings up to
 //!   600s. Installing veld on a blocking path means a wedged daemon can stall somebody's
 //!   agent, which is never worth a badge. Prefer the fire-and-forget events, and bound
 //!   whatever you must use twice ([`HOOK_TIMEOUT_SECS`] in the generated config *and*
-//!   [`HOOK_REQUEST_TIMEOUT_MS`] in the CLI).
+//!   [`HOOK_REQUEST_TIMEOUT_MS`] in the CLI). Codex's `notify` needs neither: it
+//!   `spawn()`s the program without ever awaiting it, so there is no ceiling to bound —
+//!   the trap does not disappear, it just moves to whichever tool arrives blocking next.
 //! - **Do not assume stdin.** Claude pipes the payload as JSON on stdin; **Codex's
-//!   `notify` hook appends the event JSON as the final `argv` entry instead.** So a
-//!   second tool may need `agent-state` to read an argument rather than stdin — which is
-//!   why the payload parse lives in the CLI and not in the daemon.
+//!   `notify` hook appends the event JSON as the final `argv` entry instead.** This is
+//!   why `veld agent-state`'s payload parse lives in the CLI (`crates/veld/src/commands/agent.rs`)
+//!   and not in the daemon, and why its clap definition carries a trailing positional
+//!   for the argument-borne payload alongside the stdin path.
 //! - **Never merge into a user's config file.** The ephemeral `--settings` shape exists
-//!   for this. If a tool has no equivalent flag, that is a reason to leave it unsupported
-//!   and say so, not a reason to edit somebody's dotfile.
+//!   for this, and Codex has its own equivalent for the same reason: `-c key=value`
+//!   overrides a config value for one invocation without touching `~/.codex/config.toml`.
+//!   If a tool has no equivalent flag, that is a reason to leave it unsupported and say
+//!   so, not a reason to edit somebody's dotfile. See [`Injection`] for the two shapes
+//!   this can take and why they need different wrapper logic. **"Override" is not
+//!   "merge", and the difference is user-visible**: `--settings` merges, so a Claude
+//!   user's own hooks still run alongside veld's; `-c notify=[...]` *replaces* whatever
+//!   `notify` a Codex user configured in `~/.codex/config.toml`, silently, for the
+//!   duration of the wrapped launch. There is no cheap fix — chaining to the user's own
+//!   notifier means resolving and parsing their config (including profile layering) just
+//!   to build an argv to also invoke — so this is a documented cost, not a bug, laid out
+//!   in README's "What it cannot do".
+//! - **A richer signal is not automatically the right one to use.** Codex's `notify` is
+//!   not its only lifecycle mechanism — it also ships a `hooks` system whose event names
+//!   echo Claude's (`pre_tool_use`, `permission_request`, `user_prompt_submit`,
+//!   `session_end`, …) closely enough to look like deliberate compatibility. Using it
+//!   would give Codex the same `Working`/`Blocked` fidelity Claude has. It was not
+//!   chosen because it costs something `notify` does not: an interactive **hook-trust
+//!   review** the first time Codex sees a hook, or `--dangerously-bypass-hook-trust`,
+//!   which is not scoped to veld's own hook and disables trust review for every hook
+//!   configured for that invocation. Neither is compatible with a wrapper that must stay
+//!   invisible. See [`codex_state`] for the full reasoning and the version this was
+//!   measured against — check it again before trading `notify` for `hooks`.
 //! - **The wrapper must be unreachable for anything but a plain interactive launch.**
 //!   See `agent_script` in `veld-daemon/src/pty/shims.rs` for the rule and for the
-//!   upstream bug (`anthropics/claude-code#42485`) that makes it necessary.
+//!   upstream bug (`anthropics/claude-code#42485`) that makes it necessary. "Bare first
+//!   word ⇒ subcommand, not interactive" is close to exhaustive for Claude but is not
+//!   for every tool: Codex's `resume`/`fork` are bare first words that ARE interactive
+//!   sessions, and [`AgentTool::extra_interactive_first_words`] is the per-tool escape
+//!   hatch for exactly that — a short, stable list of a tool's own subcommand names,
+//!   never content-guessed.
 //!
 //! ## What is deliberately *not* extensible
 //!
@@ -93,19 +136,19 @@ use serde::{Deserialize, Serialize};
 
 /// A coding agent veld can install hooks into.
 ///
-/// One variant today. The receiving end ([`State`], the daemon endpoint, the
-/// inbox) is deliberately generic, so a second tool is a hook installer plus a
-/// variant here — not a redesign.
+/// The receiving end ([`State`], the daemon endpoint, the inbox) is deliberately
+/// generic, so a new tool is a hook installer plus a variant here — not a redesign.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentTool {
     Claude,
+    Codex,
 }
 
 impl AgentTool {
     /// Every tool a shim is generated for. Iterated by the generator and its tests
     /// rather than a hand-written list, for the reason `opener::Tool::ALL` exists.
-    pub const ALL: &'static [AgentTool] = &[Self::Claude];
+    pub const ALL: &'static [AgentTool] = &[Self::Claude, Self::Codex];
 
     /// The command name the shim stands in front of, and the name of the generated
     /// file.
@@ -113,6 +156,7 @@ impl AgentTool {
     pub fn shim_name(self) -> &'static str {
         match self {
             Self::Claude => "claude",
+            Self::Codex => "codex",
         }
     }
 
@@ -121,6 +165,7 @@ impl AgentTool {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Claude => "claude",
+            Self::Codex => "codex",
         }
     }
 
@@ -128,6 +173,112 @@ impl AgentTool {
     pub fn parse(s: &str) -> Option<Self> {
         Self::ALL.iter().copied().find(|t| t.as_str() == s)
     }
+
+    /// How this tool's ephemeral hook configuration reaches its own invocation, and
+    /// the flag the wrapper prepends it with. See [`Injection`] for why the two
+    /// tools need different wrapper logic and not just a different flag name.
+    #[must_use]
+    pub fn injection(self) -> (&'static str, Injection) {
+        match self {
+            Self::Claude => ("--settings", Injection::SettingsFile),
+            Self::Codex => (
+                "-c",
+                Injection::ConfigOverride {
+                    key_prefix: "notify=",
+                },
+            ),
+        }
+    }
+
+    /// Shell `case` patterns (already `|`-joined, ready to drop into a POSIX `case`
+    /// arm) matching an argv token that is this tool's own spelling of the
+    /// injection flag above, or something close enough that veld's own must not be
+    /// added on top of it. See rule 2 in `agent_script`
+    /// (`veld-daemon/src/pty/shims.rs`): two of these in one invocation means one
+    /// loses silently, and it must not be the user's.
+    #[must_use]
+    pub fn own_injection_flag_patterns(self) -> &'static str {
+        match self {
+            // `-p*` (not just `-p`) catches a glued short option like `-pfoo`; the exact
+            // spelling alone would inject `--settings` ahead of the very path the docs
+            // promise is left untouched.
+            Self::Claude => "-p* | --print | --settings | --settings=*",
+            // `-c*` catches `-cnotify=...` the same way. Excluded on ANY `-c`/`--config`,
+            // not only one that happens to set `notify`: telling the two apart from a
+            // POSIX `case` pattern against a single token means parsing `-c`'s *value*,
+            // which is either a second `-c<key>=<value>` token or a following separate
+            // one — real parsing this script does not otherwise do anywhere. `--enable`/
+            // `--disable` are overrides too (Codex's own docs: "equivalent to
+            // `-c features.<name>=…`") but are deliberately NOT excluded here, because
+            // they can never collide with the `notify` key this wrapper sets — the
+            // conservative case is `-c`/`--config` specifically, not "any flag that is
+            // secretly a config override". Cost: `codex -c model="o3"` gets no badge for
+            // that session, silently — accepted in exchange for not hand-rolling a second
+            // parser in shell.
+            Self::Codex => "-c* | --config | --config=*",
+        }
+    }
+
+    /// Bare first words that count as an interactive launch for this tool even though
+    /// rule 1 in `agent_script` (`veld-daemon/src/pty/shims.rs`) would otherwise treat
+    /// any bare first word as a subcommand.
+    ///
+    /// Empty for Claude: none of its subcommands are interactive-continuation entry
+    /// points, so the plain rule already gets it right. Not empty for Codex: `resume`
+    /// and `fork` are Codex's *own* stable subcommand names for continuing a past
+    /// interactive session — this is the same shape as
+    /// [`Self::own_injection_flag_patterns`], a short list of a tool's own vocabulary,
+    /// never a guess about arbitrary prompt content (that guess is what rule 1's own
+    /// doc comment calls out as the road to `anthropics/claude-code#42485`).
+    ///
+    /// This matters beyond correctness-in-principle: `README.md`'s own example
+    /// `ide.panes` entry for Codex sets `resume: {argv: ["codex", "resume", "--last"]}`,
+    /// so without this every resumed/auto-resumed Codex pane got zero hook injection —
+    /// the feature silently off for the exact pattern the docs hold up as supported.
+    /// Verified (codex-cli 0.146.0) that `-c key=value` parses identically whether it
+    /// precedes or follows `resume`/`fork` on the command line, which is what makes
+    /// prepending the injected flag ahead of `"$@"` — this wrapper's one strategy,
+    /// unconditional on subcommand — safe for these two as well as for a bare launch.
+    #[must_use]
+    pub fn extra_interactive_first_words(self) -> &'static str {
+        match self {
+            Self::Claude => "",
+            Self::Codex => "resume | fork",
+        }
+    }
+}
+
+/// The two shapes a tool's ephemeral hook configuration can take, and therefore the
+/// two things `agent_script` (`veld-daemon/src/pty/shims.rs`) has to do differently
+/// after calling `veld agent-settings`.
+///
+/// Claude has no CLI override for `--settings`'s contents, so `agent-settings`
+/// writes a **file** and prints its *path*; the wrapper only injects once that path
+/// actually exists on disk, because a script that failed midway must not hand a
+/// nonexistent path to `--settings` and get a hard error instead of a quiet
+/// passthrough. Codex's `-c key=value` takes a literal value on the command line, so
+/// `agent-settings` prints the *value* directly and there is no file to check.
+///
+/// Injecting an empty string is not the only failure mode here, though it looked that
+/// way at first: Codex parses a malformed `-c` value as TOML and, on a parse failure,
+/// falls back to treating it as a **literal string** rather than rejecting it — so a
+/// non-empty-but-broken value does not fail closed the way a missing file does. An
+/// empty check catches "nothing printed"; it does not catch "printed garbage".
+/// `ConfigOverride`'s `key_prefix` is the cheap guard for that second case: the
+/// wrapper checks the printed value actually starts with the key this tool's
+/// `agent-settings` arm is supposed to set, and drops it otherwise (belt-and-braces
+/// alongside `agent-settings`'s own correctness, the same relationship `sh_quote` has
+/// to its callers).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Injection {
+    /// `agent-settings` writes a file and prints its path; inject only once that
+    /// file exists.
+    SettingsFile,
+    /// `agent-settings` prints a literal value with no file behind it; inject once
+    /// it starts with `key_prefix` (e.g. `"notify="`), the wrapper's cheap check that
+    /// what it is about to hand the real binary is shaped like the value this tool's
+    /// `agent-settings` arm actually produces.
+    ConfigOverride { key_prefix: &'static str },
 }
 
 /// What a surface running an agent is doing.
@@ -198,8 +349,12 @@ impl State {
 /// A hook payload, as far as veld reads it.
 ///
 /// Every field optional and `deny_unknown_fields` deliberately **absent**: this is
-/// somebody else's schema, it grows, and a hook that fails to parse is a hook that
-/// silently stops reporting. `hook_event_name` is what discriminates.
+/// somebody else's schema (two of them, now), it grows, and a hook that fails to
+/// parse is a hook that silently stops reporting. Claude's fields are snake_case and
+/// discriminated by `hook_event_name`; Codex's are kebab-case (`serde(rename)`) and
+/// discriminated by `event_type`. Neither tool's fields collide with the other's
+/// spelling, so one struct reads both without either seeing the fields it does not
+/// understand.
 #[derive(Debug, Default, Deserialize)]
 pub struct HookPayload {
     #[serde(default)]
@@ -211,6 +366,13 @@ pub struct HookPayload {
     /// `PreToolUse`/`PostToolUse`.
     #[serde(default)]
     pub tool_name: Option<String>,
+    /// Codex's discriminator, `"type"` on the wire. Today only ever
+    /// `"agent-turn-complete"` — Codex's `notify` fires on exactly one event — but
+    /// matched by value rather than assumed, the same as Claude's `notification_type`,
+    /// so a future event this code has never seen becomes [`State::Unknown`] instead
+    /// of a guess.
+    #[serde(default, rename = "type")]
+    pub event_type: Option<String>,
 }
 
 /// The state a Claude Code hook payload reports.
@@ -289,6 +451,45 @@ pub fn claude_state(payload: &HookPayload) -> State {
     }
 }
 
+/// The state a Codex `notify` payload reports.
+///
+/// # Why this can only ever return `Idle` or `Unknown`
+///
+/// `notify` fires on exactly one event, `agent-turn-complete` — no approval-request,
+/// no turn-started. **This is a choice of mechanism, not a fact about Codex**: Codex
+/// also ships a newer `hooks` system (`pre_tool_use`, `permission_request`,
+/// `user_prompt_submit`, `session_end`, …) that mirrors Claude's own event names
+/// closely enough to suggest deliberate compatibility. Codex genuinely has the
+/// richer signals `--enable`ing that system would need. What it does not have is a
+/// way to use them for free: a hook installed via `-c hooks.*=…` needs interactive
+/// **trust review** the first time Codex sees it ("New hook — review required"),
+/// or `--dangerously-bypass-hook-trust`, which is not scoped to veld's own hook — it
+/// disables trust review for *every* configured hook for that invocation, described
+/// by Codex's own `--help` as "DANGEROUS… intended only for automation that already
+/// vets hook sources". Neither is compatible with an ephemeral, invisible wrapper:
+/// the first is a security prompt the user never asked for, appearing because veld
+/// silently added a hook to their session; the second is a blanket bypass veld would
+/// be injecting on every launch, for hooks that are not veld's to vouch for.
+///
+/// `notify`/`legacy_notify` has neither problem — it takes effect immediately, no
+/// review, no bypass flag — at the cost of the one event it fires. veld takes that
+/// trade deliberately: a narrower badge over a security prompt or a standing bypass.
+/// If Codex ever offers a way to pre-trust a single named hook non-interactively,
+/// this is the function to widen — measured at codex-cli 0.146.0, and worth
+/// re-checking against whatever version is current before concluding it still holds.
+///
+/// Matched by value rather than defaulted to `Idle`, for the same reason
+/// [`claude_state`] does not default to `Blocked`: an event type Codex adds later
+/// must read as "we don't know" rather than silently claim to be the one event this
+/// was written against.
+#[must_use]
+pub fn codex_state(payload: &HookPayload) -> State {
+    match payload.event_type.as_deref() {
+        Some("agent-turn-complete") => State::Idle,
+        _ => State::Unknown,
+    }
+}
+
 /// The ephemeral settings document handed to `claude --settings`.
 ///
 /// # Why the session id is baked into the command
@@ -346,6 +547,65 @@ pub fn claude_settings_doc(cli: &Path, session_id: &str) -> serde_json::Value {
             "SessionEnd": entry,
         },
     })
+}
+
+/// The literal value handed to Codex's `-c` override — `notify=[...]`, never written
+/// to `~/.codex/config.toml`.
+///
+/// # Why a config override and not a settings file
+///
+/// Codex has no `--settings`-shaped flag that merges into a settings hierarchy; what
+/// it has is `-c key=value`, which overrides one config key for one invocation. That
+/// is the same property `--settings` gives Claude — nothing of the user's is
+/// touched — so [`AgentTool::injection`] treats it as [`Injection::ConfigOverride`]
+/// rather than leaving Codex unsupported: `veld agent-settings` prints this value
+/// directly instead of a file path, and the wrapper passes it straight through.
+///
+/// # Why the array elements are JSON-escaped, not TOML-escaped
+///
+/// The value Codex parses is TOML, but every element here is either an absolute path
+/// or one of a handful of ASCII flag names this crate controls — never arbitrary
+/// user text — and for that controlled set, JSON's basic-string escaping
+/// (`\\`/`\"`/control characters) and TOML's agree closely enough that
+/// `serde_json::to_string` on a `&str`, infallible and free, does the job without a
+/// second hand-rolled escaper to keep in sync with [`sh_quote`]. This is **not** a
+/// claim that JSON and TOML string escaping are interchangeable in general — U+007F
+/// (DEL) is the one character TOML forbids unescaped that JSON does not escape, and
+/// it is excluded here only by the inputs being what they are, not by construction.
+/// A future caller feeding this function less controlled input (raw user text, say)
+/// should not lean on this comment as proof the encoding is safe.
+///
+/// # Why there is no timeout here
+///
+/// Codex's `notify` is fire-and-forget — it spawns the program and does not await
+/// it — so there is nothing here for [`HOOK_TIMEOUT_SECS`] to bound. The CLI's own
+/// [`HOOK_REQUEST_TIMEOUT_MS`] still applies: Codex not waiting for the notifier
+/// does not mean the notifier should wait forever on the daemon.
+#[must_use]
+pub fn codex_notify_config(cli: &Path, session_id: &str) -> String {
+    let tokens = [
+        cli.as_os_str().to_string_lossy().into_owned(),
+        "agent-state".to_owned(),
+        "--tool".to_owned(),
+        "codex".to_owned(),
+        "--session".to_owned(),
+        session_id.to_owned(),
+    ];
+    let elements = tokens
+        .iter()
+        .map(|t| serde_json::to_string(t).expect("a String serializes to JSON infallibly"))
+        .collect::<Vec<_>>()
+        .join(",");
+    // The prefix comes from `AgentTool::Codex.injection()` rather than a second
+    // `"notify="` literal: the wrapper's `value_guard` checks a value against that
+    // same prefix before ever handing it to the real binary, and two independent
+    // literals here would let one drift from the other with every test still green
+    // — the fake `veld` those tests use to stand in for this function hardcodes the
+    // same string, which would hide exactly that drift.
+    let (_, Injection::ConfigOverride { key_prefix }) = AgentTool::Codex.injection() else {
+        unreachable!("Codex is a ConfigOverride tool")
+    };
+    format!("{key_prefix}[{elements}]")
 }
 
 /// What each generated hook is allowed to take, in seconds.
@@ -417,6 +677,7 @@ mod tests {
             hook_event_name: event.to_owned(),
             notification_type: notification.map(str::to_owned),
             tool_name: tool.map(str::to_owned),
+            event_type: None,
         }
     }
 
@@ -591,6 +852,62 @@ mod tests {
         );
     }
 
+    /// Codex's `notify` fires on exactly one event; everything else, including no
+    /// event at all, is `Unknown` rather than a guess.
+    #[test]
+    fn codex_only_reports_turn_complete_as_idle() {
+        let turn_complete = HookPayload {
+            event_type: Some("agent-turn-complete".to_owned()),
+            ..Default::default()
+        };
+        assert_eq!(codex_state(&turn_complete), State::Idle);
+
+        for kind in [None, Some("session-configured"), Some("invented-later")] {
+            let payload = HookPayload {
+                event_type: kind.map(str::to_owned),
+                ..Default::default()
+            };
+            assert_eq!(codex_state(&payload), State::Unknown, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn the_notify_config_bakes_the_cli_and_session_into_a_toml_array() {
+        let value = codex_notify_config(Path::new("/opt/veld/bin/veld"), "pane-7");
+        assert_eq!(
+            value,
+            r#"notify=["/opt/veld/bin/veld","agent-state","--tool","codex","--session","pane-7"]"#
+        );
+    }
+
+    #[test]
+    fn a_quote_in_a_session_id_cannot_break_the_notify_array_out_of_its_string() {
+        // A double quote is what a TOML/JSON basic string escapes; the element stays
+        // one array entry rather than closing early and adding a second.
+        let value = codex_notify_config(Path::new("/a b/veld"), r#"it"s"#);
+        assert_eq!(
+            value,
+            r#"notify=["/a b/veld","agent-state","--tool","codex","--session","it\"s"]"#
+        );
+    }
+
+    #[test]
+    fn each_tool_carries_its_own_injection_shape() {
+        assert_eq!(
+            AgentTool::Claude.injection(),
+            ("--settings", Injection::SettingsFile)
+        );
+        assert_eq!(
+            AgentTool::Codex.injection(),
+            (
+                "-c",
+                Injection::ConfigOverride {
+                    key_prefix: "notify="
+                }
+            )
+        );
+    }
+
     #[test]
     fn a_quote_in_a_session_id_cannot_break_out_of_the_hook_command() {
         let doc = claude_settings_doc(Path::new("/a b/veld"), "it's");
@@ -630,7 +947,8 @@ mod tests {
         for tool in AgentTool::ALL.iter().copied() {
             assert_eq!(AgentTool::parse(tool.as_str()), Some(tool));
         }
-        assert_eq!(AgentTool::parse("codex"), None);
+        assert_eq!(AgentTool::parse("codex"), Some(AgentTool::Codex));
+        assert_eq!(AgentTool::parse("cursor"), None);
         for state in [
             State::Working,
             State::Blocked,

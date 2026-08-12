@@ -20,13 +20,17 @@ use std::path::{Path, PathBuf};
 
 use veld_core::agent::{self, AgentTool};
 
-/// `veld agent-settings [--tool claude] [--session <id>]`
+/// `veld agent-settings [--tool claude|codex] [--session <id>]`
 ///
-/// Writes this session's ephemeral settings file and prints its path on stdout.
+/// Prints this session's ephemeral hook configuration on stdout: a settings file's
+/// path for a tool [`agent::Injection::SettingsFile`] describes (Claude), or a
+/// literal config-override value for one [`agent::Injection::ConfigOverride`]
+/// describes (Codex) — see [`agent::AgentTool::injection`].
 ///
-/// Stdout is the path and nothing else — the caller is a shell doing
-/// `settings=$(veld agent-settings ...)`, so a stray diagnostic there becomes a
-/// filename (AGENTS.md: machine-readable output on stdout, chrome on stderr).
+/// Stdout is that value and nothing else — the caller is a shell doing
+/// `settings=$(veld agent-settings ...)`, so a stray diagnostic there becomes part
+/// of a filename or a `-c` value (AGENTS.md: machine-readable output on stdout,
+/// chrome on stderr).
 pub fn settings(tool: Option<String>, session: Option<String>) -> i32 {
     let Some(tool) = parse_tool(tool.as_deref()) else {
         return 1;
@@ -37,14 +41,37 @@ pub fn settings(tool: Option<String>, session: Option<String>) -> i32 {
         // would have happened anyway.
         return 1;
     };
-    let Some(dir) = shim_dir() else {
-        return 1;
-    };
     let Ok(cli) = std::env::current_exe() else {
         return 1;
     };
 
-    let path = agent::settings_path(&dir, tool, &session);
+    match tool {
+        AgentTool::Claude => write_claude_settings_file(&cli, &session),
+        // No file: the value itself is the whole answer, and nothing here can fail
+        // short of stdout being gone — which println's own ignored result already
+        // treats as "the caller stopped listening", the same as every other exit.
+        AgentTool::Codex => {
+            println!("{}", agent::codex_notify_config(&cli, &session));
+            0
+        }
+    }
+}
+
+/// The [`agent::Injection::SettingsFile`] half of [`settings`]: write Claude's
+/// settings document to this session's ephemeral file and print its path.
+///
+/// Hardcoded to Claude rather than generic over `AgentTool`, on purpose: it is the
+/// only `SettingsFile` tool today, and `settings()` above is what decides which of
+/// the two `agent-settings` shapes a tool gets. A generic version with a runtime
+/// assertion is a guard a release build compiles out; naming the tool in the
+/// function makes a mis-route a compile error for whoever adds a second
+/// `SettingsFile` tool, instead of a debug-only assertion nobody sees fire in the
+/// binary users actually run.
+fn write_claude_settings_file(cli: &Path, session: &str) -> i32 {
+    let Some(dir) = shim_dir() else {
+        return 1;
+    };
+    let path = agent::settings_path(&dir, AgentTool::Claude, session);
     let Some(parent) = path.parent() else {
         return 1;
     };
@@ -56,7 +83,7 @@ pub fn settings(tool: Option<String>, session: Option<String>) -> i32 {
     let _ = set_mode(parent, 0o700);
     sweep(parent);
 
-    let doc = agent::claude_settings_doc(&cli, &session);
+    let doc = agent::claude_settings_doc(cli, session);
     let Ok(body) = serde_json::to_vec_pretty(&doc) else {
         return 1;
     };
@@ -76,10 +103,12 @@ pub fn settings(tool: Option<String>, session: Option<String>) -> i32 {
     0
 }
 
-/// `veld agent-state [--tool claude] [--session <id>]`
+/// `veld agent-state [--tool claude|codex] [--session <id>] [--launched] [PAYLOAD]`
 ///
-/// Reads a hook payload on **stdin**, works out what state it reports, and tells the
-/// daemon. Called by the hooks in the file [`settings`] writes.
+/// Reads a hook payload — on **stdin** for a tool that pipes it there (Claude), or
+/// from `PAYLOAD` for one that appends it as the final argument instead (Codex's
+/// `notify`) — works out what state it reports, and tells the daemon. Called by the
+/// hooks in the file [`settings`] installs.
 ///
 /// # Why the payload is parsed here and not in the daemon
 ///
@@ -88,7 +117,12 @@ pub fn settings(tool: Option<String>, session: Option<String>) -> i32 {
 /// installer, with nothing to change in the daemon, the wire, or the UI — which is the
 /// whole claim the "one generic receiving end" design makes. It also keeps a
 /// third-party schema out of a long-lived process.
-pub async fn state(tool: Option<String>, session: Option<String>, launched: bool) -> i32 {
+pub async fn state(
+    tool: Option<String>,
+    session: Option<String>,
+    launched: bool,
+    payload_arg: Option<String>,
+) -> i32 {
     let Some(tool) = parse_tool(tool.as_deref()) else {
         return 1;
     };
@@ -96,7 +130,7 @@ pub async fn state(tool: Option<String>, session: Option<String>, launched: bool
         return 1;
     };
     // `--launched` is the wrapper's own report, fired just before it `exec`s the agent.
-    // No stdin: there is no hook payload, because no hook has run — that is the point.
+    // No payload: there is no hook event, because no hook has run — that is the point.
     // It claims hook authority for the pane while saying nothing is happening, which is
     // what stops the shell's "a command is running here" driving an activity spinner for
     // a session sitting idle at its prompt.
@@ -105,12 +139,21 @@ pub async fn state(tool: Option<String>, session: Option<String>, launched: bool
     } else {
         // A hook that sends nothing, or sends something unparseable, is not an error worth
         // reporting into somebody's agent session — it is a state we do not know.
-        let payload: agent::HookPayload = match read_stdin() {
-            Some(body) => serde_json::from_slice(&body).unwrap_or_default(),
-            None => return 1,
+        let payload: agent::HookPayload = match tool {
+            // Codex's `notify` never writes to stdin at all (it is explicitly nulled),
+            // so reading it here would just be a wasted read, not a second source.
+            AgentTool::Codex => match payload_from_arg(payload_arg) {
+                Some(payload) => payload,
+                None => return 1,
+            },
+            AgentTool::Claude => match read_stdin() {
+                Some(body) => serde_json::from_slice(&body).unwrap_or_default(),
+                None => return 1,
+            },
         };
         match tool {
             AgentTool::Claude => agent::claude_state(&payload),
+            AgentTool::Codex => agent::codex_state(&payload),
         }
     };
     // `Unknown` is a decision, not a failure: an unrecognised notification type must
@@ -155,10 +198,11 @@ async fn report(session: &str, tool: AgentTool, reported: agent::State) -> i32 {
 /// The caller exits **1** on `None`, never 2: on `UserPromptSubmit` and `Stop` — both of
 /// which the generated settings file installs — exit 2 is Claude Code's *blocking* status,
 /// which feeds stderr back into the session and, on `UserPromptSubmit`, discards the user's
-/// prompt. Unreachable through the generated file today (it always passes `--tool claude`),
-/// but adding a second tool is documented as a five-edit change and a session's settings
-/// file persists on disk between launches. The failure mode of getting this wrong is
-/// "veld erased your prompt", not "no badge" — the one outcome this module exists to avoid.
+/// prompt. Unreachable through a generated file today (each one always passes its own
+/// `--tool`), but a session's settings file persists on disk between launches, so a third
+/// tool arriving must not make a stale Claude one start exiting 2 by accident. The failure
+/// mode of getting this wrong is "veld erased your prompt", not "no badge" — the one
+/// outcome this module exists to avoid.
 fn parse_tool(tool: Option<&str>) -> Option<AgentTool> {
     match tool {
         None => Some(AgentTool::Claude),
@@ -221,6 +265,20 @@ fn sweep(dir: &Path) {
     }
 }
 
+/// The hook payload, from a tool that appends it as the final argv entry rather than
+/// piping it on stdin (Codex).
+///
+/// `None` only when the argument itself is absent — Codex's `notify` always appends
+/// one for a real hook invocation, so its absence means something upstream is wrong
+/// and the caller exits 1. A *present-but-malformed* argument is not that: it degrades to a
+/// default (all-`None`) [`agent::HookPayload`], which every tool's mapping function
+/// already turns into [`agent::State::Unknown`], the same silent "we don't know"
+/// [`read_stdin`]'s own malformed case produces.
+fn payload_from_arg(payload_arg: Option<String>) -> Option<agent::HookPayload> {
+    let body = payload_arg?;
+    Some(serde_json::from_str(&body).unwrap_or_default())
+}
+
 /// The hook payload, bounded.
 ///
 /// A hook's stdin is somebody else's output, so it gets a ceiling: a `PostToolUse`
@@ -253,6 +311,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_missing_argv_payload_is_an_error_but_a_malformed_one_is_unknown() {
+        assert!(payload_from_arg(None).is_none());
+        // Malformed JSON degrades to a default (all-`None`) payload, same silent
+        // "we don't know" `read_stdin`'s own malformed case produces — never an error
+        // exit for a hook that is somebody else's process misbehaving, not veld's.
+        let garbage = payload_from_arg(Some("not json".to_owned()))
+            .expect("a present argument is always Some, even if unparseable");
+        assert_eq!(agent::codex_state(&garbage), agent::State::Unknown);
+        // A real Codex payload parses and maps correctly through this path.
+        let real = payload_from_arg(Some(
+            r#"{"type":"agent-turn-complete","thread-id":"t1"}"#.to_owned(),
+        ))
+        .expect("a present, well-formed argument parses");
+        assert_eq!(agent::codex_state(&real), agent::State::Idle);
+    }
+
+    #[test]
     fn a_session_comes_from_the_flag_before_the_environment() {
         assert_eq!(
             session_id(Some("explicit".into())).as_deref(),
@@ -267,7 +342,8 @@ mod tests {
     fn an_unknown_tool_is_a_usage_error_and_the_default_is_claude() {
         assert_eq!(parse_tool(None), Some(AgentTool::Claude));
         assert_eq!(parse_tool(Some("claude")), Some(AgentTool::Claude));
-        assert_eq!(parse_tool(Some("codex")), None);
+        assert_eq!(parse_tool(Some("codex")), Some(AgentTool::Codex));
+        assert_eq!(parse_tool(Some("cursor")), None);
     }
 
     /// The sweep is bounded by age, and never touches a file that is still current.
