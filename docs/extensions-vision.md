@@ -581,12 +581,13 @@ legibility are not readable off a diff.
   cannot fork a process per click, and it reports its own errors — unlike the
   background poll, which stays silent by design. **Running an action also forces a
   re-read**, because an action usually changes what a badge says.
-- **A tone-demo extension ships in this repo's own config**, cycling all five
-  tones one click apart. It is the worked example of two things that are easy to
-  get wrong — a badge command is re-run from scratch so its state lives on disk,
-  and a badge cannot advance itself, so the cycling is an `action` the badge
-  offers by id. Delete it and `scripts/veld/tone-demo.sh` once the palette is
-  settled.
+- **A tone-demo extension was added and then removed.** It cycled all five tones
+  one click apart, in this repo's own bar, because badge colour is the one part of
+  this feature no test can check — a contrast ratio is arithmetic, "is this
+  readable at 12px" is not. It paid for itself twice over: it is what surfaced the
+  cache-invalidation defect below, and it settled the palette. Deleted once it
+  had, rather than left in every contributor's bar as permanent scaffolding — but
+  worth rebuilding the same way next time a purely visual property needs judging.
 
 ### 2026-08-12 — A badge is a Button, not a Badge
 

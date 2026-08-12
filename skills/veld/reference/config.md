@@ -870,6 +870,10 @@ their day. Ask the user before adding one unless they asked: it is a message
 published to their colleagues in their name.
 ### `ide.extensions`
 
+> **Authoring guide: [extensions.md](extensions.md).** This is the field table; that
+> is how to decide what to write, with worked adapters. Read it before adding one —
+> the commonest mistake is a badge nobody needed, not a malformed entry.
+
 Badges, buttons and menus the project contributes to the IDE chrome. One flat
 array; **`slot` is a field, not a level of structure**, so a future slot costs a
 string. `type` discriminates the shape.
