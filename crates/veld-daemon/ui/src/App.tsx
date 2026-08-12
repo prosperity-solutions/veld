@@ -32,6 +32,9 @@ import {
 } from "./shared/settings";
 import { pruneRunHistory } from "./shared/runHistory";
 import { applyTerminalPrefs, setPaneCloseHandler } from "./panes/terminalHost";
+import { StartScreen } from "./promotions/StartScreen";
+import { usePromotions } from "./promotions/usePromotions";
+import { WhatsNewDialog } from "./promotions/WhatsNew";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { InboxIcon, inboxDescription } from "./inbox/InboxIcon";
 import { inbox, notifyKey } from "./inbox/inbox";
@@ -78,6 +81,7 @@ import { nodeRows, type NodeRow } from "./shared/NodeList";
 import { NodeActions } from "./shared/NodeActions";
 import {
   ActionIcon,
+  Badge,
   Button,
   Loader,
   MantineProvider,
@@ -105,6 +109,7 @@ import {
   IconRefreshDot,
   IconSearch,
   IconSettings,
+  IconSparkles,
   IconBuildingBroadcastTower,
   IconShare,
   IconTrash,
@@ -829,6 +834,11 @@ function AppInner(props: {
   } = useUrlSelection();
 
   const repos = useMemo(() => repoList?.repos ?? [], [repoList]);
+  // Feature promotions. Suppressed while the first-run screen is up (or before
+  // the first fetch has said whether it will be): a panel thrown over the screen
+  // that is trying to get somebody started is the wrong moment, and `repoList ===
+  // null` is the pre-data state, not "no projects".
+  const promotions = usePromotions({ suppressAuto: repoList === null || repos.length === 0 });
   const repo: Repo | null =
     repos.find((r) => r.root === activeRepoRoot) ?? repos[0] ?? null;
   const worktrees = useMemo(() => repo?.worktrees ?? [], [repo]);
@@ -3988,6 +3998,22 @@ function AppInner(props: {
   );
 
   /**
+   * Hoisted for the same reason as `settingsDialog`, with a sharper version of
+   * it: this one can open *itself*. Runs mode returns early before the dialog
+   * list, so a promotion that came up while the user was over there would set
+   * the state, render nothing, and never be marked — leaving a panel
+   * permanently "open" that they can neither see nor dismiss.
+   */
+  const whatsNewDialog = promotions.open && (
+    <WhatsNewDialog
+      promotions={promotions.open.promotions}
+      automatic={promotions.open.automatic}
+      onRead={promotions.markRead}
+      onDismiss={promotions.dismiss}
+    />
+  );
+
+  /**
    * Hoisted for the same reason as `settingsDialog`: a start can be held back
    * from either mode, so the dialog that unblocks it has to render in both.
    */
@@ -4017,6 +4043,7 @@ function AppInner(props: {
         />
         {settingsDialog}
         {configVarsDialog}
+        {whatsNewDialog}
       </div>
     );
   }
@@ -4250,6 +4277,9 @@ function AppInner(props: {
         }}
         onImport={() => setDialog({ kind: "import" })}
         onRemoveRepo={() => repo && setDialog({ kind: "remove-repo", repo })}
+        onWhatsNew={promotions.browse}
+        hasNews={promotions.any}
+        unreadNews={promotions.unread}
         // The bound run, named explicitly: the top bar is the run-level surface,
         // and ■ here must end the run whose name the selector is showing — never
         // whichever one `activeRun` would have picked.
@@ -4328,11 +4358,7 @@ function AppInner(props: {
           <Loader size="sm" aria-label="Loading" />
         </div>
       ) : repos.length === 0 ? (
-        <div className="center-page">
-          <Button size="md" onClick={() => setDialog({ kind: "import" })}>
-            Import your first project
-          </Button>
-        </div>
+        <StartScreen onImport={() => setDialog({ kind: "import" })} />
       ) : (
         <div className="workspace">
           <Rail
@@ -4631,6 +4657,7 @@ function AppInner(props: {
       )}
       {settingsDialog}
       {configVarsDialog}
+      {whatsNewDialog}
       {sharingDialog}
       {dialog.kind === "search" && (
         <CommandPalette
@@ -4962,6 +4989,13 @@ function TopBar(props: {
   onSelectRepo: (root: string) => void;
   onImport: () => void;
   onRemoveRepo: () => void;
+  onWhatsNew: () => void;
+  /** Whether this build ships any promotions at all. Retiring one is deleting it
+   *  (see docs/promotions.md), so the last deletion must not leave a menu entry
+   *  that opens an empty dialog. */
+  hasNews: boolean;
+  /** Unread *and* dismissed promotions — dismissing is not reading. */
+  unreadNews: number;
   onStart: () => void;
   onStop: () => void;
   onRestart: () => void;
@@ -5003,10 +5037,32 @@ function TopBar(props: {
   // No run controls for a repo we can't see on disk — git/veld actions would
   // only fail later with a worse error.
   const canRun = !!worktree?.has_veld_config && repoAvailable;
+  // No unread dot while the start screen is up. Zero projects means the whole
+  // window is one instruction — "import something" — and a second thing on the
+  // bar asking to be clicked is the only competition it has. The news keeps;
+  // the menu still carries it the moment there is a project.
+  const unreadNews = props.repos.length === 0 ? 0 : props.unreadNews;
   return (
     <div className={topbarClass}>
       {props.modeSwitch}
-      {props.repos.length > 0 && (
+      {props.repos.length === 0 ? (
+        // Nothing to select between, so the bar offers the only move there is.
+        // The selector is *absent* at zero projects rather than empty, which left
+        // the import affordance buried in the neighbouring "…" menu — the one
+        // control a first-time user has no reason to open.
+        //
+        // Neutral, not the primary green: the start screen below carries the real
+        // call to action, and two green buttons on one screen make the wrong one
+        // look like the point.
+        <Button
+          size="xs"
+          variant="default"
+          leftSection={<IconFolderPlus size={14} />}
+          onClick={props.onImport}
+        >
+          Import first project
+        </Button>
+      ) : (
         <div className="project-select" title={props.repo ? repoLabel : "Switch project"}>
           {/* Hidden mirror for `projectWidth` above — measuring it is how the
               select shrinks to its value rather than always filling 170px. */}
@@ -5036,8 +5092,21 @@ function TopBar(props: {
       )}
       <Menu position="bottom-start" width={200}>
         <Menu.Target>
-          <ActionIcon size="md" variant="default" title="Project actions">
+          {/* The dot is the only hint that unread news exists — the entry is a
+              menu item, and a menu nobody opens is a channel nobody reads.
+
+              A positioned span rather than Mantine's `Indicator`: `Menu.Target`
+              clones its child to attach the ref and the click handler, so an
+              `Indicator` wrapper would take both and the button would lose the
+              menu's aria wiring. */}
+          <ActionIcon
+            size="md"
+            variant="default"
+            className="project-actions"
+            title={unreadNews > 0 ? `Project actions — ${unreadNews} unread` : "Project actions"}
+          >
             <IconDots size={14} />
+            {unreadNews > 0 && <span className="project-actions-dot" aria-hidden="true" />}
           </ActionIcon>
         </Menu.Target>
         <Menu.Dropdown>
@@ -5055,6 +5124,27 @@ function TopBar(props: {
           >
             Remove project…
           </Menu.Item>
+          {props.hasNews && (
+            <>
+              <Menu.Divider />
+              {/* On demand, showing everything this build ships whatever its
+                  state — the only way to revisit a promotion, and to catch up on
+                  news that predates you. */}
+              <Menu.Item
+                leftSection={<IconSparkles size={14} />}
+                rightSection={
+                  unreadNews > 0 ? (
+                    <Badge size="xs" circle variant="filled">
+                      {unreadNews}
+                    </Badge>
+                  ) : undefined
+                }
+                onClick={props.onWhatsNew}
+              >
+                What's new…
+              </Menu.Item>
+            </>
+          )}
         </Menu.Dropdown>
       </Menu>
       {worktree && (

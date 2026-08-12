@@ -1150,6 +1150,34 @@ export const api = {
       body: JSON.stringify(patch),
     }),
   /**
+   * What this user has done about each promotion, plus when they first opened
+   * the IDE.
+   *
+   * The daemon has no idea what a promotion is — it stores opaque ids against
+   * `dismissed`/`read` and hands back the arrival stamp, and every decision made
+   * from that (which are unread, which predate the user, which may prompt) is
+   * `model.ts`'s. Same split as `pane_layouts`: adding a promotion is a UI-only
+   * change, and an older daemon serving a newer bundle still works.
+   *
+   * A `POST` because it *stamps* `first_use` on first contact, and a safe method
+   * with that side effect is reachable from any page via a bare `<img src=…>`.
+   */
+  promotionState: () =>
+    request<{ states: Record<string, "dismissed" | "read">; first_use: string }>(
+      "/api/promotions/state",
+      { method: "POST" },
+    ),
+  /**
+   * Record a state for promotions. A monotone merge server-side — `read` wins
+   * over `dismissed` and neither is undone — so two windows acting on the same
+   * card converge instead of one overwriting the other.
+   */
+  markPromotions: (ids: string[], state: "dismissed" | "read") =>
+    request<{ states: Record<string, "dismissed" | "read"> }>("/api/promotions/mark", {
+      method: "POST",
+      body: JSON.stringify({ ids, state }),
+    }),
+  /**
    * The shells this machine offers for `terminal.shell`, plus what `"auto"`
    * resolves to. Read once when the settings dialog opens: a client cannot work
    * either out itself — a browser has no `$SHELL`, and Veld Desktop's is

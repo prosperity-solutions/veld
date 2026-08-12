@@ -110,6 +110,7 @@ When a change introduces new config fields, CLI flags, subcommands, or user-visi
 | `schema/v3/veld.schema.json` | JSON Schema for v3 configs. **Hand-maintained — there is no compiler check tying it to the Rust types.** Any config field you add or change must be reflected here AND covered by `schema/v3/examples/`, which `tests/validate-schema.sh` validates against the schema and `schema_v3_examples_round_trip` deserializes with serde. That pair is the drift gate; skipping it ships a schema that confidently reports the wrong thing in the editor |
 | `docs/migrating-to-v3.md` | Migration guide. Update whenever v3 gains a field, or whenever something changes for v1/v2 configs too |
 | `docs/extensions-vision.md` | **Customization backlog.** When a proposed change is a *new feature* in the customization realm (needs a provider API, provider-specific schema, or provider-specific auth — see the universal-primitive test there), add a row to its extension backlog. Never build the extension itself in that PR; capture the need. See the Rules for agents section |
+| `crates/veld-daemon/ui/src/promotions/content.ts` | **Feature promotions.** Ask, for every change, whether users should be *told* — see [docs/promotions.md](docs/promotions.md). "No" is the expected answer: a promotion interrupts every user once, and the channel is only worth having while opening it is worth their attention. Promote a change that alters how somebody works and that they would not otherwise find; never a fix, a perf win, a flag, or a config field. State the call either way. If you do write one: **the outcome, not the mechanism** — the headline is what the reader can now do or stop doing, not what Veld now displays. *"Walk away from a running agent; the worktree that needs you says so"*, never *"each worktree shows a glyph for its terminals"*. If the sentence reads as true to somebody who will never use the feature, it is describing the product instead of their day |
 | `website/index.html` | **Marketing site.** If the change adds or renames a user-visible capability, decide whether it belongs on the site and, if so, update the relevant part — the features grid, CLI reference, sharing section, or the architecture diagram (`for the nerds`). Keep the brand tokens per `website/AGENTS.md` / `docs/branding.md`. |
 | `website/llms-full.txt` | LLM-facing docs — sync with any `index.html` content change (see `website/AGENTS.md`) |
 
@@ -650,6 +651,45 @@ run, while a plain terminal in the same app works perfectly.
   otherwise truncate into some *other* live process). Nothing in veld stores 0 to
   mean a real pid; it means "no process", and any new pid predicate must read it
   that way.
+- **A promotion is an opaque id to the daemon, and its id is forever.** The
+  what's-new channel (`docs/promotions.md`) splits the same way pane layouts do:
+  the daemon stores a map of ids to `dismissed`/`read` in `kv` under
+  `promotions.state`, plus a `promotions.firstUse` stamp, and answers questions
+  about them — while every headline, sentence, glyph, kind and date lives in the
+  `/ide` bundle, along with every decision made from them. So adding a promotion
+  is a UI-only change and an older daemon serving a newer bundle still works;
+  **never teach the daemon what a promotion contains.** The date gate is computed
+  client-side for exactly that reason — a daemon that filtered by date would have
+  to know promotions have dates. Four rules underneath, each of which fails
+  silently:
+  **an id is never renamed** (a rename re-promotes the entry to every existing
+  user) and **never reused** (the new promotion is suppressed for everyone who
+  saw the old one); **`:` is reserved and unrepresentable in a Veld id**, so a
+  second source of promotions (a project's own news, declared in `veld.json`) can
+  namespace into the same store without collisions — that reservation was made
+  ahead of need because ids live in users' databases forever, and
+  `a_veld_promotion_id_can_never_occupy_a_namespace` fails if the pattern is
+  loosened; **every promotion carries a mandatory `since` day**, shown on the
+  card, with the *kind* deciding only whether that date gates it; and
+  **`promotions.firstUse` is stamped once and never overwritten**,
+  because a "when did they arrive" that drifts forward on every load makes the
+  date gate meaningless — and it is stamped from the **oldest registered repo**
+  rather than from the clock, because every existing user meets that code on the
+  day they upgrade and "now" would declare them brand new, auto-reading the very
+  promotion that release shipped. That last one is the load-bearing part, and the tempting
+  alternative is the trap: **nothing may key any of this on database freshness**,
+  because `veld start --preset dev` mints `.veld-dev/<run>/veld.db` several times
+  a day and either the CLI or the daemon may be the process that creates one, so
+  a freshness test concludes "brand-new human" repeatedly. A stamp written on
+  first contact stays true afterwards; database age does not.
+  **Dismissing is not reading**, and collapsing the two is the other easy
+  regression: dismissed stops the modal and still counts toward the ⋯ menu's
+  unread badge, so clearing a dialog mid-task cannot lose the card. The merge is
+  monotone — `read` wins, neither is undone — which is also what lets two windows
+  act on one card with no compare-and-swap. The **first-run start screen is
+  deliberately not part of any of this**: it is derived from "this user has zero
+  projects" and carries no persisted state at all, so it cannot strand somebody
+  on a blank page the way a dismissable one would.
 - **Every user-facing HTML surface carries the Veld brand.** Any HTML a Veld
   binary serves to a browser — management UI, gateway pages (index, login,
   404), overlays, error pages, and every future surface — must follow
