@@ -54,6 +54,7 @@ pub fn settings(tool: Option<String>, session: Option<String>) -> i32 {
             println!("{}", agent::codex_notify_config(&cli, &session));
             0
         }
+        AgentTool::Pi => write_pi_extension_file(&cli, &session),
     }
 }
 
@@ -103,7 +104,44 @@ fn write_claude_settings_file(cli: &Path, session: &str) -> i32 {
     0
 }
 
-/// `veld agent-state [--tool claude|codex] [--session <id>] [--launched] [PAYLOAD]`
+/// The [`agent::Injection::SettingsFile`] half of [`settings`] for Pi: write the
+/// generated extension module to this session's ephemeral file and print its path.
+///
+/// Hardcoded to Pi rather than generic, for the same reason [`write_claude_settings_file`]
+/// is: it is the second `SettingsFile` tool, not a template for a third, and a
+/// mis-route between them is a compile error this way instead of a runtime assertion.
+fn write_pi_extension_file(cli: &Path, session: &str) -> i32 {
+    let Some(dir) = shim_dir() else {
+        return 1;
+    };
+    let path = agent::settings_path(&dir, AgentTool::Pi, session);
+    let Some(parent) = path.parent() else {
+        return 1;
+    };
+    if std::fs::create_dir_all(parent).is_err() {
+        return 1;
+    }
+    let _ = set_mode(parent, 0o700);
+    sweep(parent);
+
+    let body = agent::pi_extension_doc(cli, session);
+    // Write-then-rename, for the same reason `write_claude_settings_file` uses it: `pi
+    // -e` may be reading this module while a relaunch rewrites it, and a truncated
+    // module is one Pi's loader fails to import rather than one it ignores.
+    let tmp = path.with_extension("ts.new");
+    if std::fs::write(&tmp, body.as_bytes()).is_err() {
+        return 1;
+    }
+    let _ = set_mode(&tmp, 0o600);
+    if std::fs::rename(&tmp, &path).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        return 1;
+    }
+    println!("{}", path.display());
+    0
+}
+
+/// `veld agent-state [--tool claude|codex|pi] [--session <id>] [--launched] [PAYLOAD]`
 ///
 /// Reads a hook payload — on **stdin** for a tool that pipes it there (Claude), or
 /// from `PAYLOAD` for one that appends it as the final argument instead (Codex's
@@ -142,7 +180,10 @@ pub async fn state(
         let payload: agent::HookPayload = match tool {
             // Codex's `notify` never writes to stdin at all (it is explicitly nulled),
             // so reading it here would just be a wasted read, not a second source.
-            AgentTool::Codex => match payload_from_arg(payload_arg) {
+            // Pi's generated extension (`agent::pi_extension_doc`) follows the same
+            // shape by choice, not by any constraint of Pi's own — see that
+            // function's doc for why.
+            AgentTool::Codex | AgentTool::Pi => match payload_from_arg(payload_arg) {
                 Some(payload) => payload,
                 None => return 1,
             },
@@ -154,6 +195,7 @@ pub async fn state(
         match tool {
             AgentTool::Claude => agent::claude_state(&payload),
             AgentTool::Codex => agent::codex_state(&payload),
+            AgentTool::Pi => agent::pi_state(&payload),
         }
     };
     // `Unknown` is a decision, not a failure: an unrecognised notification type must
@@ -325,6 +367,10 @@ mod tests {
         ))
         .expect("a present, well-formed argument parses");
         assert_eq!(agent::codex_state(&real), agent::State::Idle);
+        // Pi's generated extension delivers its payload the same way, by choice.
+        let pi_real = payload_from_arg(Some(r#"{"event":"turn_end"}"#.to_owned()))
+            .expect("a present, well-formed argument parses");
+        assert_eq!(agent::pi_state(&pi_real), agent::State::Idle);
     }
 
     #[test]
@@ -343,6 +389,7 @@ mod tests {
         assert_eq!(parse_tool(None), Some(AgentTool::Claude));
         assert_eq!(parse_tool(Some("claude")), Some(AgentTool::Claude));
         assert_eq!(parse_tool(Some("codex")), Some(AgentTool::Codex));
+        assert_eq!(parse_tool(Some("pi")), Some(AgentTool::Pi));
         assert_eq!(parse_tool(Some("cursor")), None);
     }
 
