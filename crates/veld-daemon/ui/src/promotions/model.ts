@@ -596,11 +596,24 @@ export function markableIds(
   current: readonly Card[],
   states: Readonly<Record<string, PromotionState>>,
 ): string[] {
-  const wasShown = new Set(shown.map((c) => c.id));
-  return unreadOf(
-    current.filter((c) => wasShown.has(c.id)),
-    states,
-  );
+  const fresh = new Map(current.map((c) => [c.id, c]));
+  const resolved = shown
+    // Prefer the current card, fall back to the one the panel showed. **Absence
+    // from `current` must mean "use the snapshot", never "drop the write."** An
+    // intersection was the first version of this and it lost real reads: `current`
+    // legitimately stops containing a project's cards when the selection moves
+    // (another window removes a repo and `repos[0]` shifts) or when a second window
+    // switches `ui.showProjectNews` off — and in both cases the reader is looking at
+    // those cards, clicks *Got it!*, and nothing is recorded, so they come back.
+    .map((c) => fresh.get(c.id) ?? c)
+    // What cannot be marked either way: a card whose arrival is still unknown. The
+    // gate is meaningless against it, so writing a row would be guessing — and
+    // guessing here is the stale-snapshot bug this function exists for. Unreachable
+    // through `settle`, which needs a loaded state map (and therefore a loaded
+    // arrival), and kept because the fallback above is what would otherwise let one
+    // through.
+    .filter((c) => c.arrivedAt !== UNKNOWN_ARRIVAL);
+  return unreadOf(resolved, states);
 }
 
 /** Problems with a promotion, on top of {@link sectionProblems}. */

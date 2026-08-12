@@ -531,6 +531,28 @@ describe("markableIds — what closing the panel writes", () => {
     expect(markableIds(cards, arrived, NONE)).toEqual(["fresh"]);
   });
 
+  it("still records a card that has left the current list", () => {
+    // The mirror of the first case, and the failure the first version of this
+    // function had: an *intersection* dropped the write entirely. `current` stops
+    // containing a project's cards for ordinary reasons — another window removes a
+    // repo and the selection shifts, or a second window switches
+    // `ui.showProjectNews` off — while the reader is looking at those cards. They
+    // click *Got it!*; if nothing is written, the cards come back next page load.
+    const stillShown = [news("read-then-vanished", "2026-07-01")];
+    expect(markableIds(stillShown, [], NONE)).toEqual(["read-then-vanished"]);
+    // And the fallback must not smuggle the stale-arrival bug back in through that
+    // door: a card whose arrival is unknown is not markable by either route.
+    const unknown = stillShown.map((c) => ({ ...c, arrivedAt: UNKNOWN_ARRIVAL }));
+    expect(markableIds(unknown, [], NONE)).toEqual([]);
+  });
+
+  it("prefers the current card over the shown one where both exist", () => {
+    // The whole point of taking two lists. Same id, stale arrival in the snapshot,
+    // real arrival now — and the card predates the reader, so it must not be marked.
+    const stale = [{ ...cards[1], arrivedAt: UNKNOWN_ARRIVAL }];
+    expect(markableIds(stale, [cards[1]], NONE)).toEqual([]);
+  });
+
   it("still writes nothing for a card the reader already read", () => {
     expect(markableIds(cards, cards, { fresh: "read" })).toEqual([]);
   });
