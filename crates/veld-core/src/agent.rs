@@ -313,8 +313,11 @@ pub enum State {
     Idle,
     /// The session ended.
     Done,
-    /// Told something we do not understand. Produces no inbox event — silence beats
-    /// a badge the user cannot act on.
+    /// Told something we do not understand — **or something we understand and have
+    /// chosen not to report**, which is the larger population. Produces no inbox event
+    /// and touches no state: silence beats a badge the user cannot act on. See
+    /// [`claude_state`] for both kinds, and `veld agent-state` for the early return
+    /// that makes this reach nothing at all.
     Unknown,
 }
 
@@ -391,6 +394,45 @@ pub struct HookPayload {
 /// `auth_success` is a `Notification` too, and it wants nothing from anybody. A
 /// default of `Blocked` would badge on it — and on every notification type Claude
 /// adds after this code was written.
+///
+/// # A subagent's turn is not the session's turn
+///
+/// Only the **session** reports state here. A subagent finishing produces no event and
+/// no state, because it is not something the user acts on and it is not the pane's
+/// state either — and the two failures compound: `agent_completed` used to map to
+/// [`State::Idle`], so a subagent ending put an "Agent finished" in the inbox (a
+/// notification for work nobody asked about) *and* cleared the pane's working flag, so
+/// the spinner died while the session was still mid-turn with no further signal until it
+/// really ended. One arm, both symptoms. Claude gates the notification — a subagent the
+/// user stopped produces none — so this was *most* agent-tool calls rather than all of
+/// them, which changes how loud the bug was and not whether the mapping was wrong.
+///
+/// It is also not only about *finishing*: Claude sends `agent_completed` for a subagent
+/// that **failed** as well (its message is `"<label> failed"`), so the old mapping
+/// reported a failure as the session having finished.
+///
+/// Measured on **Claude Code 2.1.228**, the same way [`codex_state`] names its version:
+/// this is somebody else's schema, and the next person to doubt these strings needs to
+/// know what they were checked against. Both `agent_completed` and `agent_needs_input`
+/// come from one agent-session state machine, keyed on a subagent's own label and session
+/// id; `notification_type` there is one of `permission_prompt`, `idle_prompt`,
+/// `auth_success`, `elicitation_dialog`, `elicitation_complete`, `elicitation_response`,
+/// `agent_needs_input`, `agent_completed`. A rename lands on the `_` arm and reports
+/// nothing, which is the safe direction to fail.
+///
+/// `agent_needs_input` is the deliberate asymmetry and stays [`State::Blocked`]: a
+/// subagent that needs an answer is a real claim on the user, wherever in the session
+/// it came from, and dropping it would lose the one thing the badge exists for. The
+/// test is *"would the user do something about it"*, not *"which agent produced it"* —
+/// which is why the two halves of the same producer split.
+///
+/// The session's own turn boundaries are `UserPromptSubmit`/`Stop`, and the subagent
+/// counterparts (`SubagentStart`, `SubagentStop`) get their own [`State::Unknown`] arm
+/// rather than being left to the fall-through. That arm is a guard, not decoration:
+/// adding `SubagentStop` to `Stop`'s arm — the natural mistake, since it reads like the
+/// same event — makes the later pattern unreachable, and `unreachable_patterns` is denied
+/// by CI's `-D warnings`. So the mistake fails the build instead of quietly reinstating
+/// this bug.
 #[must_use]
 pub fn claude_state(payload: &HookPayload) -> State {
     match payload.hook_event_name.as_str() {
@@ -431,13 +473,30 @@ pub fn claude_state(payload: &HookPayload) -> State {
                 | "elicitation_url_dialog",
             ) => State::Blocked,
             // The turn ended. See the note above.
-            Some("idle_prompt" | "agent_completed") => State::Idle,
+            Some("idle_prompt") => State::Idle,
+            // **A subagent, not the session** — see this function's "A subagent's turn is
+            // not the session's turn". Deliberately `Unknown`, which sends nothing at all.
+            Some("agent_completed") => State::Unknown,
             _ => State::Unknown,
         },
         // The turn ended without a notification. Redundant with `idle_prompt` on a
         // Claude that sends one, and the only signal on a Claude that does not —
         // the two collapse to the same state, so a duplicate costs nothing.
+        //
+        // `Stop` is the *session's* turn ending. Its subagent counterparts are matched
+        // below and answer `Unknown`, so this arm cannot widen by accident.
         "Stop" => State::Idle,
+        // A subagent's lifecycle, which is not this pane's state — see this function's
+        // "A subagent's turn is not the session's turn". Neither is installed; matched
+        // here for the same reason `SessionStart` is, so the receiving end is never
+        // narrower than a future installer.
+        //
+        // **Not dead code, even though `_` answers `Unknown` too.** This arm is what
+        // makes folding a subagent event into a session-state arm a *compile* failure
+        // rather than a silent regression: `"Stop" | "SubagentStop" => State::Idle` above
+        // makes this pattern unreachable, and `unreachable_patterns` is denied by CI's
+        // `-D warnings`. That is the whole reason to spell it out — measured, not assumed.
+        "SubagentStart" | "SubagentStop" => State::Unknown,
         "SessionEnd" => State::Done,
         // A tool call that cannot proceed without the user. `PreToolUse` is a
         // *blocking* event, so veld does not install it — it is matched here only
@@ -694,11 +753,47 @@ mod tests {
             claude_state(&payload("Notification", Some("idle_prompt"), None)),
             State::Idle
         );
+        assert_eq!(claude_state(&payload("Stop", None, None)), State::Idle);
+    }
+
+    /// A subagent ending is not the session ending and reports nothing at all — while a
+    /// subagent *asking* still does, which is the one exception and is asserted here
+    /// beside the rule rather than left to a reader to discover.
+    ///
+    /// Two bugs in one arm, both reported from real use. `agent_completed` mapped to
+    /// [`State::Idle`], so a subagent ending (a) filed an "Agent finished" the user had
+    /// no reason to act on and (b) cleared the pane's working flag — nothing reports a
+    /// turn *starting* except `UserPromptSubmit`, so the spinner stayed dead for the rest
+    /// of a turn that was still running.
+    ///
+    /// `Unknown` and not some new state on purpose: the CLI drops `Unknown` without
+    /// contacting the daemon, so this is the only answer that touches neither the inbox
+    /// nor the pane's working flag. Asserted as the *state* rather than as "no request"
+    /// because that is where the decision lives; `agent-state`'s own early return is what
+    /// turns it into silence.
+    #[test]
+    fn a_subagent_ending_reports_nothing_but_one_asking_still_does() {
+        // One notification for both outcomes — Claude's message is `"<label> finished"`
+        // or `"<label> failed"` — so the old mapping also reported a subagent's failure
+        // as the session having finished.
         assert_eq!(
             claude_state(&payload("Notification", Some("agent_completed"), None)),
-            State::Idle
+            State::Unknown,
+            "a subagent finishing is neither an event for the user nor the pane's state"
         );
-        assert_eq!(claude_state(&payload("Stop", None, None)), State::Idle);
+        for event in ["SubagentStart", "SubagentStop"] {
+            assert_eq!(
+                claude_state(&payload(event, None, None)),
+                State::Unknown,
+                "{event}: a subagent's lifecycle is not the session's"
+            );
+        }
+        // The deliberate asymmetry: the *other* half of the same producer survives,
+        // because a subagent waiting on an answer is still the user's to answer.
+        assert_eq!(
+            claude_state(&payload("Notification", Some("agent_needs_input"), None)),
+            State::Blocked
+        );
     }
 
     /// Every notification type that genuinely stops the session, and nothing else.
@@ -821,7 +916,8 @@ mod tests {
             "SessionStart is BLOCKING and its state was a lie — a session starting is not \
              a session working, and what it was reaching for is the wrapper's `Ready`; \
              PostToolUse fires per tool call to learn what UserPromptSubmit says once per \
-             turn; PermissionRequest blocks with nothing to contribute"
+             turn; PermissionRequest blocks with nothing to contribute; SubagentStart and \
+             SubagentStop report a subagent's turn, which is not this pane's state"
         );
         for (event, entry) in hooks {
             let hook = &entry[0]["hooks"][0];
