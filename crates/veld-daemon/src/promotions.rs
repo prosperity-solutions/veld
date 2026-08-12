@@ -3,7 +3,7 @@
 //! **The daemon never looks inside a promotion, and does not know what one is.**
 //! It stores a map of opaque ids to `dismissed`/`read`, plus the instant this
 //! user first opened the IDE, and hands both to whoever asks. Every headline,
-//! sentence, glyph, date and kind lives in the `/ide` bundle, and so does the
+//! sentence, glyph and date lives in the `/ide` bundle, and so does the
 //! decision about what any of it means.
 //!
 //! That is the same split `pane_layouts` takes, and it buys the same two things:

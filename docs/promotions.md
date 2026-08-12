@@ -293,12 +293,24 @@ stack. Retiring is deleting, here as everywhere. Items over the cap, and any
 malformed entry, are dropped with a `veld lint` warning — never a load error,
 because a config that will not load takes `veld stop` and `veld logs` with it.
 
-Over the cap it is the **oldest** entries that go, and that direction is
-load-bearing: authors are told to append, and the history view breaks a shared day
-by reverse array order, so the *last* entry is the newest thing. Refusing items once
-the cap was reached — the first version of this — dropped precisely the card that had
-just landed, the only one with an audience, and reported it through a lint nobody
-runs on a pull.
+Over the cap it is the entries with the **oldest `since`** that go, named in the
+warning. Two wrong versions preceded that, and both are worth knowing because both
+look right:
+
+1. *Refusing items once the cap is reached.* That drops whatever comes last — and
+   since authors are told to append, last is the card that just landed, the only one
+   with an audience. Reported through a lint nobody runs on a pull.
+2. *Dropping from the front of the array.* Better, and still wrong: **array position
+   is not chronology.** `ide` arrays concatenate across `include` files in sorted
+   filename order, so a second news file sorting earlier puts a newer card at the
+   front — and an author who prepends, which is how changelogs are written, does the
+   same. That version dropped the newest card while calling it the oldest.
+
+`since` is the field that means "when", so `since` decides; the array index only
+breaks a tie, ascending, matching the history view's own within-a-day order. The
+schema's `maxItems: 5` bounds one **file**, so a project splitting news across
+included files can validate green in an editor and still lose its oldest card at
+load — `veld lint` is what says so.
 
 **A `since` in the future is refused.** It is the one typo that re-creates the
 never-expiring card: the date is the only thing that retires an item, so a day that
