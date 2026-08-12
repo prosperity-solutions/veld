@@ -7,15 +7,24 @@
  * `model.ts`, where the node-environment test suite can reach it.
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { api } from "../api";
 import { PROMOTIONS } from "./content";
-import { manifestIds, type Promotion, type PromotionState, toPrompt, unreadCount } from "./model";
+import {
+  mergeStates,
+  type Promotion,
+  type PromotionState,
+  toPrompt,
+  unreadCount,
+  unreadOf,
+} from "./model";
 
 export interface PromotionsState {
   /** The panel's contents, or `null` when it is closed. */
   open: { promotions: Promotion[]; automatic: boolean } | null;
+  /** Whether there is anything to reopen at all. */
+  any: boolean;
   /** What the indicator shows: unread *and* dismissed, never auto-read. */
   unread: number;
   /** Open everything this build ships, on demand. */
@@ -41,6 +50,17 @@ export function usePromotions(options: {
   const [states, setStates] = useState<Record<string, PromotionState> | null>(null);
   const [firstUse, setFirstUse] = useState<string | null>(null);
   const [open, setOpen] = useState<PromotionsState["open"]>(null);
+  /**
+   * Whether the user has already settled the panel this session.
+   *
+   * It gates **the auto-open effect only**, not the mount fetch. The fetch can
+   * resolve after the user reached the ⋯ menu and closed the panel, and applying
+   * that older snapshot refills `promptable` — so the effect must not act on it.
+   * Discarding the fetch outright instead was worse: a browse-and-close landing
+   * mid-flight left `states`/`firstUse` null for the rest of the session, which
+   * pins the badge at zero and makes every later settle a no-op.
+   */
+  const settled = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -48,6 +68,9 @@ export function usePromotions(options: {
       try {
         const res = await api.promotionState();
         if (cancelled) return;
+        // Applied even after a settle. It may briefly undo the optimistic merge,
+        // which the mark's own response then corrects; the auto-open effect is
+        // what must not fire, and that is gated separately.
         setStates(res.states);
         setFirstUse(res.first_use);
       } catch {
@@ -74,36 +97,44 @@ export function usePromotions(options: {
   );
 
   useEffect(() => {
-    if (options.suppressAuto || promptable.length === 0 || open) return;
+    if (settled.current || options.suppressAuto || promptable.length === 0 || open) return;
     setOpen({ promotions: promptable, automatic: true });
   }, [options.suppressAuto, promptable, open]);
 
   /**
-   * Record a state for whatever the panel is showing and close it.
+   * Record a state for whatever the panel is showing, and close it.
    *
    * The optimistic local merge matters: the server is the record, but the panel
    * has to stop re-prompting *now*, and `promptable` is recomputed from `states`
-   * — so without it the auto-open effect would fire again on the next render.
-   * The merge mirrors the daemon's, where read wins and neither is undone.
+   * — so without it the auto-open effect fires again on the next render. The
+   * server's own merged map is then applied when it answers, which is what makes
+   * a second window's concurrent change visible without a reload.
    */
   const settle = useCallback(
     (state: PromotionState) => {
       if (!open) return;
-      const ids = manifestIds(open.promotions);
-      setStates((current) => {
-        const next = { ...(current ?? {}) };
-        for (const id of ids) {
-          if (next[id] !== "read") next[id] = state;
-        }
-        return next;
-      });
+      // Close first, unconditionally. The marking below needs `firstUse` to know
+      // what is outstanding, but a dialog that will not shut because a fetch
+      // failed is far worse than a card shown again — and `browse()` can open
+      // this panel while that fetch is still in flight or has already failed.
+      settled.current = true;
+      setOpen(null);
+      if (!firstUse) return;
+      // Only what this user actually has outstanding. Browsing shows every card
+      // the build ships, and marking the auto-read ones would write a row per
+      // promotion the user never had.
+      const ids = unreadOf(open.promotions, states ?? {}, firstUse);
+      if (ids.length === 0) return;
+      setStates((current) => mergeStates(current ?? {}, ids, state));
       // Never block the close on the write. The merge is idempotent, so a failed
       // request costs the user seeing the card once more rather than a dialog
       // that will not shut.
-      void api.markPromotions(ids, state).catch(() => {});
-      setOpen(null);
+      void api
+        .markPromotions(ids, state)
+        .then((res) => setStates(res.states))
+        .catch(() => {});
     },
-    [open],
+    [open, states, firstUse],
   );
 
   const markRead = useCallback(() => settle("read"), [settle]);
@@ -116,5 +147,5 @@ export function usePromotions(options: {
     setOpen({ promotions: PROMOTIONS, automatic: false });
   }, []);
 
-  return { open, unread, browse, markRead, dismiss };
+  return { open, any: PROMOTIONS.length > 0, unread, browse, markRead, dismiss };
 }

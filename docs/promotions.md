@@ -91,13 +91,13 @@ know which. The gate compares the **UTC** day and is strictly *before* the
 arrival day, so something shipped on release day still reaches the person who
 installed that morning.
 
-## Three states, and dismiss is not read
+## Four states, and dismiss is not read
 
 | State | How you get there | Prompts again? | Counts as unread? |
 |---|---|---|---|
 | unread | the default — no stored row | yes | yes |
 | `dismissed` | Esc, the close button, the overlay | **no** | **yes** |
-| `read` | the *Got it* button, or closing the panel you opened yourself | no | no |
+| `read` | the *Got it!* button, or closing the panel you opened yourself | no | no |
 | auto-read | `news` predating your first session | no | no |
 
 **Dismissing is not reading**, and keeping them apart is the point: clearing a
@@ -115,13 +115,14 @@ Content lives in `crates/veld-daemon/ui/src/promotions/content.ts`. Append to
 
 ```ts
 {
-  id: "worktree-inbox",          // kebab-case, stable forever
+  // Kebab-case, stable forever, and never one already in the file — see below.
+  id: "browser-device-frames",
   kind: "news",
-  since: "2026-08-12",           // the day it ships
-  eyebrow: "New",                // <= 24 chars
-  headline: "The panes you weren't watching",   // <= 44 chars
-  body: "Each worktree now shows one glyph for what its terminals have to say.",
-  glyph: "inbox",                // from the closed set in model.ts
+  since: "2026-09-04",          // the day it ships
+  eyebrow: "New",               // <= 24 chars
+  headline: "Check the phone layout without a phone",   // <= 44 chars
+  body: "Size any browser pane to a device and keep it beside the terminal, so a layout bug shows up while you are still in the file.",
+  glyph: "device",              // from the closed set in model.ts
 }
 ```
 
@@ -157,9 +158,17 @@ The daemon stores two things in `kv` and has no idea what either means:
 
 - `promotions.state` — a map of opaque ids to `dismissed` / `read`. Unread is the
   *absence* of an entry, so the map stays proportional to what the user acted on.
-- `promotions.firstUse` — when this user first opened the IDE. Stamped once, on
-  the first client request, and **never overwritten**; the date gate is
-  meaningless if "when did they arrive" drifts forward on every load.
+- `promotions.firstUse` — when this user arrived. Stamped once, on the first
+  client request, and **never overwritten**; the date gate is meaningless if
+  "when did they arrive" drifts forward on every load.
+
+  The stamp is **the earliest evidence the user predates now, not the clock** —
+  the oldest registered repo when there is one, otherwise now. Reaching for
+  `now()` alone looks obviously right and quietly breaks the cohort that matters
+  most: every *existing* user meets this code for the first time on the day they
+  upgrade, so "now" declares an eight-month user brand new, and the promotion
+  shipped in that very release is dated before their "arrival" and auto-read for
+  everyone who opens a day late. The channel would launch reaching almost nobody.
 
 `POST /api/promotions/state` returns both (stamping `first_use` if absent);
 `POST /api/promotions/mark` merges ids into a state. That is the whole server
@@ -173,9 +182,11 @@ by date would have to know that promotions have dates.
 **Nothing may key any of this on database freshness.** The tempting version — "a
 database with no rows is a new user" — is wrong here in a way that bites daily:
 `veld start --preset dev` mints `.veld-dev/<run>/veld.db` several times a day,
-and either the CLI or the daemon may be the process that creates one. A stamp
-written on first contact is a fact that stays true afterwards; database age is
-not.
+and either the CLI or the daemon may be the process that creates one. Note the
+asymmetry that makes the repo evidence above safe where freshness is not: a repo
+row is proof the user *was* here, while an empty table proves nothing at all — so
+the evidence only ever moves the stamp **backwards**, and a throwaway dev
+database simply falls through to now and stays quiet.
 
 To revisit anything — including auto-read items from before you arrived — open
 **What's new…** from the project ⋯ menu. That shows everything the build ships

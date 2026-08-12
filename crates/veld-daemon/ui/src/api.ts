@@ -879,7 +879,7 @@ export async function errorMessage(res: Response): Promise<string> {
   // a surrogate pair — the daemon quotes paths and worktree aliases, and those can
   // hold an emoji, which would otherwise render as U+FFFD.
   if (raw.length <= 600) return raw;
-  const cut = /[\uD800-\uDBFF]$/u.test(raw.slice(0, 600)) ? 599 : 600;
+  const cut = /[\uD800-\uDBFF]$/.test(raw.slice(0, 600)) ? 599 : 600;
   return `${raw.slice(0, cut)}…`;
 }
 
@@ -1088,9 +1088,9 @@ export const api = {
   deleteTrashedWorktree: (id: number) =>
     request<void>(`/api/worktrees/${id}/delete`, { method: "POST" }),
   /** Delete every trashed worktree of a repo now. */
-  emptyTrash: (repoRoot: string) =>
+  emptyTrash: (repo_root: string) =>
     request<{ queued: number }>(
-      `/api/trash?repo_root=${encodeURIComponent(repoRoot)}`,
+      `/api/trash?repo_root=${encodeURIComponent(repo_root)}`,
       { method: "DELETE" },
     ),
   /** Clear a recorded deletion failure — the user has read it. */
@@ -1103,31 +1103,31 @@ export const api = {
    * `worktrees.id` is a reused rowid, and the full list because that makes the
    * write idempotent — omitted paths go back to unplaced.
    */
-  reorderWorktrees: (repoRoot: string, order: string[]) =>
+  reorderWorktrees: (repo_root: string, order: string[]) =>
     request<void>("/api/worktree-order", {
       method: "POST",
-      body: JSON.stringify({ repo_root: repoRoot, order }),
+      body: JSON.stringify({ repo_root, order }),
     }),
-  createLane: (repoRoot: string, name: string) =>
+  createLane: (repo_root: string, name: string) =>
     request<{ lane: Lane }>("/api/lanes", {
       method: "POST",
-      body: JSON.stringify({ repo_root: repoRoot, name }),
+      body: JSON.stringify({ repo_root, name }),
     }),
-  renameLane: (repoRoot: string, from: string, name: string) =>
+  renameLane: (repo_root: string, from: string, name: string) =>
     request<void>(`/api/lanes/${encodeURIComponent(from)}`, {
       method: "PATCH",
-      body: JSON.stringify({ repo_root: repoRoot, name }),
+      body: JSON.stringify({ repo_root, name }),
     }),
   /** Delete a lane. Its members are ungrouped, never removed. */
-  deleteLane: (repoRoot: string, name: string) =>
+  deleteLane: (repo_root: string, name: string) =>
     request<void>(
-      `/api/lanes/${encodeURIComponent(name)}?repo_root=${encodeURIComponent(repoRoot)}`,
+      `/api/lanes/${encodeURIComponent(name)}?repo_root=${encodeURIComponent(repo_root)}`,
       { method: "DELETE" },
     ),
-  reorderLanes: (repoRoot: string, order: string[]) =>
+  reorderLanes: (repo_root: string, order: string[]) =>
     request<void>("/api/lane-order", {
       method: "POST",
-      body: JSON.stringify({ repo_root: repoRoot, order }),
+      body: JSON.stringify({ repo_root, order }),
     }),
   /**
    * Every setting's **effective** value — the daemon merges its own defaults

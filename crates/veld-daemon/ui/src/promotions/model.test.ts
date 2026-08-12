@@ -7,6 +7,7 @@ import {
   IDENTITY_COUNT,
   MAX_BODY,
   manifestIds,
+  mergeStates,
   NAMESPACE_SEPARATOR,
   type Promotion,
   type PromotionState,
@@ -15,6 +16,7 @@ import {
   sectionProblems,
   toPrompt,
   unreadCount,
+  unreadOf,
   utcDay,
   visibilityOf,
 } from "./model";
@@ -187,5 +189,43 @@ describe("prompting and the unread count", () => {
     const arrivedToday = "2027-01-01T00:00:00Z";
     expect(manifestIds(toPrompt(all, NONE, arrivedToday))).toEqual(["intro"]);
     expect(unreadCount(all, NONE, arrivedToday)).toBe(1);
+  });
+});
+
+describe("mergeStates — the client's copy of the daemon's merge", () => {
+  // Held against the Rust tests' own cases in `kv.rs`. The two merges must agree
+  // or the panel and the badge disagree with the server until a reload.
+  it("read wins over dismissed and neither is ever undone", () => {
+    expect(mergeStates({ a: "dismissed" }, ["a"], "read")).toEqual({ a: "read" });
+    expect(mergeStates({ a: "read" }, ["a"], "dismissed")).toEqual({ a: "read" });
+  });
+
+  it("leaves ids it was not given alone", () => {
+    expect(mergeStates({ a: "read" }, ["b"], "dismissed")).toEqual({ a: "read", b: "dismissed" });
+  });
+
+  it("does not mutate the map it was handed", () => {
+    const before: Record<string, PromotionState> = { a: "dismissed" };
+    mergeStates(before, ["a"], "read");
+    expect(before).toEqual({ a: "dismissed" });
+  });
+});
+
+describe("unreadOf — what a settle actually writes", () => {
+  const all = [onboarding("intro"), news("fresh", "2026-07-01"), news("ancient", "2020-01-01")];
+
+  it("never writes a row for a card the user never had", () => {
+    // Browsing shows every card the build ships, `ancient` included. Marking that
+    // read would store a row for a promotion that predates the user, against the
+    // store's rule that the map stays proportional to what they acted on.
+    expect(unreadOf(all, NONE, ARRIVED)).toEqual(["intro", "fresh"]);
+  });
+
+  it("includes a dismissed card, because dismissing is not reading", () => {
+    expect(unreadOf(all, { fresh: "dismissed" }, ARRIVED)).toEqual(["intro", "fresh"]);
+  });
+
+  it("is empty once everything outstanding is read", () => {
+    expect(unreadOf(all, { intro: "read", fresh: "read" }, ARRIVED)).toEqual([]);
   });
 });

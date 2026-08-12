@@ -246,6 +246,50 @@ export function unreadCount(
   }).length;
 }
 
+/**
+ * Apply a state to `ids`, the way the daemon does.
+ *
+ * A second copy of the daemon's merge, and it has to be: the panel must stop
+ * re-prompting the instant it closes, and what may prompt is recomputed from
+ * this map. It lives here rather than in the hook so the node-environment test
+ * suite can hold it against the Rust tests' own cases — a merge rule duplicated
+ * into TSX is a rule nothing checks.
+ *
+ * Monotone, like the daemon's: `read` wins and neither state is ever undone.
+ */
+export function mergeStates(
+  current: Readonly<Record<string, PromotionState>>,
+  ids: readonly string[],
+  state: PromotionState,
+): Record<string, PromotionState> {
+  const next = { ...current };
+  for (const id of ids) {
+    if (next[id] !== "read") next[id] = state;
+  }
+  return next;
+}
+
+/**
+ * The subset of `ids` worth sending — those the user has not already read.
+ *
+ * Browsing the panel from the menu shows everything the build ships, including
+ * items auto-read because they predate the user. Marking all of those `read`
+ * would write a row per promotion for cards this user never had, against the
+ * store's own rule that the map stays proportional to what they acted on.
+ */
+export function unreadOf(
+  promotions: readonly Promotion[],
+  states: Readonly<Record<string, PromotionState>>,
+  firstUseIso: string,
+): string[] {
+  return promotions
+    .filter((p) => {
+      const v = visibilityOf(p, states, firstUseIso);
+      return v === "unread" || v === "dismissed";
+    })
+    .map((p) => p.id);
+}
+
 /** Problems with a promotion, on top of {@link sectionProblems}. */
 export function promotionProblems(p: Promotion): string[] {
   const problems = sectionProblems(p);
@@ -265,7 +309,7 @@ export function duplicateIds(sections: readonly Section[]): string[] {
   return [...dupes];
 }
 
-/** What the bundle tells the daemon it ships. Order is the order they'd show. */
+/** Just the ids, in author order. */
 export function manifestIds(sections: readonly Section[]): string[] {
   return sections.map((s) => s.id);
 }

@@ -673,7 +673,10 @@ run, while a plain terminal in the same app works perfectly.
   card, with the *kind* deciding only whether that date gates it; and
   **`promotions.firstUse` is stamped once and never overwritten**,
   because a "when did they arrive" that drifts forward on every load makes the
-  date gate meaningless. That last one is the load-bearing part, and the tempting
+  date gate meaningless — and it is stamped from the **oldest registered repo**
+  rather than from the clock, because every existing user meets that code on the
+  day they upgrade and "now" would declare them brand new, auto-reading the very
+  promotion that release shipped. That last one is the load-bearing part, and the tempting
   alternative is the trap: **nothing may key any of this on database freshness**,
   because `veld start --preset dev` mints `.veld-dev/<run>/veld.db` several times
   a day and either the CLI or the daemon may be the process that creates one, so

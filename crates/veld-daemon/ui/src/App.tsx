@@ -1,50 +1,7 @@
-import {
-  ActionIcon,
-  Badge,
-  Button,
-  Loader,
-  MantineProvider,
-  Menu,
-  Select,
-  TextInput,
-  Tooltip,
-} from "@mantine/core";
-import { Notifications } from "@mantine/notifications";
-import {
-  IconAdjustments,
-  IconAlertTriangleFilled,
-  IconArrowBackUp,
-  IconArrowsExchange,
-  IconBuildingBroadcastTower,
-  IconChevronLeft,
-  IconChevronRight,
-  IconDeviceDesktop,
-  IconDots,
-  IconDotsVertical,
-  IconExternalLink,
-  IconFolderPlus,
-  IconHelp,
-  IconHistory,
-  IconMoon,
-  IconPlayerPlayFilled,
-  IconPlayerStopFilled,
-  IconPlus,
-  IconRefreshDot,
-  IconReload,
-  IconSearch,
-  IconSettings,
-  IconShare,
-  IconSparkles,
-  IconSun,
-  IconTools,
-  IconTrash,
-  IconWorld,
-  IconX,
-} from "@tabler/icons-react";
-import { ContextMenuProvider, useContextMenu } from "mantine-contextmenu";
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   api,
+  runRef,
   type EmojiHolder,
   type EnvironmentList,
   type Lane,
@@ -54,13 +11,210 @@ import {
   type RepoList,
   type RunInfo,
   type RunRef,
-  runRef,
-  type SettingsDoc,
   type SharesList,
+  type SettingsDoc,
   type StatsResponse,
   type Worktree,
   type WorktreeGitStatus,
 } from "./api";
+import {
+  gitCreateFrom,
+  hideDisabledActions,
+  logsTimeZone,
+  stalenessHue,
+  markerFace,
+  markerStyle,
+  quickSwitchPrefs,
+  runHistoryDays,
+  searchUrl,
+  terminalPrefs,
+  activityPrefs,
+} from "./shared/settings";
+import { pruneRunHistory } from "./shared/runHistory";
+import { applyTerminalPrefs, setPaneCloseHandler } from "./panes/terminalHost";
+import { StartScreen } from "./promotions/StartScreen";
+import { usePromotions } from "./promotions/usePromotions";
+import { WhatsNewDialog } from "./promotions/WhatsNew";
+import { SettingsDialog } from "./components/SettingsDialog";
+import { InboxIcon, inboxDescription } from "./inbox/InboxIcon";
+import { inbox, notifyKey } from "./inbox/inbox";
+import { useInbox } from "./inbox/useInbox";
+import { useSettings } from "./shared/useSettings";
+import {
+  activeRun,
+  bestFuzzyMatch,
+  freshRunName,
+  fuzzyMatch,
+  laneDropTarget,
+  liveRuns,
+  moveLane,
+  moveWorktree,
+  needsAttention,
+  parsePendingKey,
+  pendingKey,
+  pickRun,
+  prunePending,
+  railGroups,
+  runSignatureFor,
+  runStatus,
+  runsForWorktree,
+  selectorRuns,
+  siblingRuns,
+  sortRunsForDisplay,
+  sortedUrls,
+  spinnerAction,
+  startRunName,
+  worktreeStatus,
+  worstStatus,
+  DELETING_LANE,
+  DETACHED_LANE,
+  isDetached,
+  TRASH_LANE,
+  type PendingAction,
+  type RailGroup,
+  type PendingMap,
+  type WorktreeStatus,
+} from "./model";
+import { startOriginLabel } from "./shared/startOrigin";
+import { worktreeLabel } from "./shared/worktreeName";
+import { nodeRows, type NodeRow } from "./shared/NodeList";
+import { NodeActions } from "./shared/NodeActions";
+import {
+  ActionIcon,
+  Badge,
+  Button,
+  Loader,
+  MantineProvider,
+  Menu,
+  Select,
+  Tooltip,
+  TextInput,
+} from "@mantine/core";
+import {
+  IconAlertTriangleFilled,
+  IconArrowBackUp,
+  IconArrowsExchange,
+  IconChevronLeft,
+  IconChevronRight,
+  IconDots,
+  IconDotsVertical,
+  IconFolderPlus,
+  IconHistory,
+  IconMoon,
+  IconPlayerPlayFilled,
+  IconPlayerStopFilled,
+  IconPlus,
+  IconAdjustments,
+  IconReload,
+  IconRefreshDot,
+  IconSearch,
+  IconSettings,
+  IconSparkles,
+  IconBuildingBroadcastTower,
+  IconShare,
+  IconTrash,
+  IconSun,
+  IconDeviceDesktop,
+  IconExternalLink,
+  IconWorld,
+  IconTools,
+  IconX,
+  IconHelp,
+} from "@tabler/icons-react";
+import { Notifications } from "@mantine/notifications";
+import { ContextMenuProvider, useContextMenu } from "mantine-contextmenu";
+import { theme as mantineTheme } from "./theme";
+import { RunsMode } from "./runs/RunsMode";
+import { PaneArea } from "./panes/PaneArea";
+import type { RunPaneContext } from "./panes/RunPanes";
+import { notifyDone, notifyError, notifyRedirect, notifyTerminal, showSystemNotification } from "./shared/notify";
+import {
+  JoinRequestRow,
+  RunSharePanel,
+  runOfShare,
+  sharesForRun,
+} from "./shared/Sharing";
+import {
+  type BrowserProfile,
+  DEFAULT_RATIO,
+  type PaneLayout,
+  type PaneLayoutUpdate,
+  SESSIONS_STORAGE_KEY,
+  activateTab,
+  activeTab,
+  addTab,
+  addTabToFocused,
+  adoptTabs,
+  allTabs,
+  findTab,
+  browserIds,
+  browserTab,
+  closeTab,
+  configPaneTab,
+  defaultLayout,
+  diagTab,
+  dockOf,
+  lastBlankBrowserId,
+  loadLayouts,
+  newTabId,
+  nextFreeProfile,
+  paneTabBaseLabel,
+  paneTabLabel,
+  parseSessionSets,
+  parseTransferTabs,
+  revealDiagPane,
+  saveLayouts,
+  serializeSessionSets,
+  sessionSetFor,
+  normalizeBrowserUrl,
+  terminalIds,
+  updateTab,
+  urlLabel,
+} from "./panes/model";
+import { acquireWorktree } from "./ide/acquire";
+import { channel, type ClaimResult, type ClientInfo } from "./ide/channel";
+import { awayNote, openableWorktrees, worktreeSetKey } from "./ide/ownership";
+import {
+  adoptLegacyLayouts,
+  cancelPendingWrite,
+  dropLayout,
+  flushPendingOnUnload,
+  onExternalLayoutChange,
+  readLayout,
+  refreshLayout,
+  syncLayouts,
+} from "./ide/layoutStore";
+import {
+  applyTerminalTheme,
+  onTerminalOpenUrl,
+  onTerminalTitleChange,
+  openExternally,
+  pruneTerminals,
+  noteExpectedResumes,
+  releaseTerminal,
+  restartTerminal,
+} from "./panes/terminalHost";
+import {
+  onBrowserAccelerator,
+  onBrowserOpenRequest,
+  popBrowserSuspend,
+  pruneBrowsers,
+  pushBrowserSuspend,
+  reloadBrowser,
+  setBrowserPolicy,
+} from "./panes/browserHost";
+import { watchOverlays } from "./panes/overlayGuard";
+import {
+  StartConfig,
+  defaultStartSelection,
+  parseStartSelection,
+  pruneStartSelection,
+  resolveStartSelection,
+  resolveStoredSelection,
+  startBody,
+  startSelectionLabel,
+  startStorageKey,
+} from "./components/StartConfig";
 import { ConfigVarsDialog } from "./components/ConfigVars";
 import {
   ChangeMarkerDialog,
@@ -73,157 +227,7 @@ import {
   RenameWorktreeDialog,
   TrashWorktreeDialog,
 } from "./components/dialogs";
-import { SettingsDialog } from "./components/SettingsDialog";
-import {
-  defaultStartSelection,
-  parseStartSelection,
-  pruneStartSelection,
-  resolveStartSelection,
-  resolveStoredSelection,
-  StartConfig,
-  startBody,
-  startSelectionLabel,
-  startStorageKey,
-} from "./components/StartConfig";
-import { acquireWorktree } from "./ide/acquire";
-import { type ClaimResult, type ClientInfo, channel } from "./ide/channel";
-import {
-  adoptLegacyLayouts,
-  cancelPendingWrite,
-  dropLayout,
-  flushPendingOnUnload,
-  onExternalLayoutChange,
-  readLayout,
-  refreshLayout,
-  syncLayouts,
-} from "./ide/layoutStore";
-import { awayNote, openableWorktrees, worktreeSetKey } from "./ide/ownership";
-import { InboxIcon, inboxDescription } from "./inbox/InboxIcon";
-import { inbox, notifyKey } from "./inbox/inbox";
-import { useInbox } from "./inbox/useInbox";
-import {
-  activeRun,
-  bestFuzzyMatch,
-  DELETING_LANE,
-  DETACHED_LANE,
-  freshRunName,
-  fuzzyMatch,
-  isDetached,
-  laneDropTarget,
-  liveRuns,
-  moveLane,
-  moveWorktree,
-  needsAttention,
-  type PendingAction,
-  type PendingMap,
-  parsePendingKey,
-  pendingKey,
-  pickRun,
-  prunePending,
-  type RailGroup,
-  railGroups,
-  runSignatureFor,
-  runStatus,
-  runsForWorktree,
-  selectorRuns,
-  siblingRuns,
-  sortedUrls,
-  sortRunsForDisplay,
-  spinnerAction,
-  startRunName,
-  TRASH_LANE,
-  type WorktreeStatus,
-  worktreeStatus,
-  worstStatus,
-} from "./model";
-import {
-  onBrowserAccelerator,
-  onBrowserOpenRequest,
-  popBrowserSuspend,
-  pruneBrowsers,
-  pushBrowserSuspend,
-  reloadBrowser,
-  setBrowserPolicy,
-} from "./panes/browserHost";
-import {
-  activateTab,
-  activeTab,
-  addTab,
-  addTabToFocused,
-  adoptTabs,
-  allTabs,
-  type BrowserProfile,
-  browserIds,
-  browserTab,
-  closeTab,
-  configPaneTab,
-  DEFAULT_RATIO,
-  defaultLayout,
-  diagTab,
-  dockOf,
-  findTab,
-  lastBlankBrowserId,
-  loadLayouts,
-  newTabId,
-  nextFreeProfile,
-  normalizeBrowserUrl,
-  type PaneLayout,
-  type PaneLayoutUpdate,
-  paneTabBaseLabel,
-  paneTabLabel,
-  parseSessionSets,
-  parseTransferTabs,
-  revealDiagPane,
-  SESSIONS_STORAGE_KEY,
-  saveLayouts,
-  serializeSessionSets,
-  sessionSetFor,
-  terminalIds,
-  updateTab,
-  urlLabel,
-} from "./panes/model";
-import { watchOverlays } from "./panes/overlayGuard";
-import { PaneArea } from "./panes/PaneArea";
-import type { RunPaneContext } from "./panes/RunPanes";
-import { applyTerminalPrefs, 
-  applyTerminalTheme,
-  noteExpectedResumes,
-  onTerminalOpenUrl,
-  onTerminalTitleChange,
-  openExternally,
-  pruneTerminals,
-  releaseTerminal,
-  restartTerminal,setPaneCloseHandler, } from "./panes/terminalHost";
-import { StartScreen } from "./promotions/StartScreen";
-import { usePromotions } from "./promotions/usePromotions";
-import { WhatsNewDialog } from "./promotions/WhatsNew";
-import { RunsMode } from "./runs/RunsMode";
-import { NodeActions } from "./shared/NodeActions";
-import { type NodeRow, nodeRows } from "./shared/NodeList";
-import { notifyDone, notifyError, notifyRedirect, notifyTerminal, showSystemNotification } from "./shared/notify";
-import { pruneRunHistory } from "./shared/runHistory";
-import {
-  JoinRequestRow,
-  RunSharePanel,
-  runOfShare,
-  sharesForRun,
-} from "./shared/Sharing";
-import {
-  activityPrefs,
-  gitCreateFrom,
-  hideDisabledActions,
-  logsTimeZone,
-  markerFace,
-  markerStyle,
-  quickSwitchPrefs,
-  runHistoryDays,
-  searchUrl,
-  stalenessHue,
-  terminalPrefs,
-} from "./shared/settings";
-import { startOriginLabel } from "./shared/startOrigin";
-import { useSettings } from "./shared/useSettings";
-import { worktreeLabel } from "./shared/worktreeName";
+
 import {
   chromeless,
   desktopApp,
@@ -235,7 +239,6 @@ import {
   windowRestored,
   windowSeed,
 } from "./shell";
-import { theme as mantineTheme } from "./theme";
 
 const POLL_MS = 5000;
 
@@ -258,10 +261,10 @@ function clientLabel(): string {
   if (isElectron) return "another Veld Desktop window";
   const ua = navigator.userAgent;
   for (const [name, probe] of [
-    ["Firefox", /Firefox\//u],
-    ["Edge", /Edg\//u],
-    ["Chrome", /Chrome\//u],
-    ["Safari", /Safari\//u],
+    ["Firefox", /Firefox\//],
+    ["Edge", /Edg\//],
+    ["Chrome", /Chrome\//],
+    ["Safari", /Safari\//],
   ] as const) {
     if (probe.test(ua)) return name;
   }
@@ -385,7 +388,7 @@ function WorktreeMark(props: {
       // would add nothing a screen reader user can act on. That the label is always
       // present is also the colour-vision answer — the swatch is a scanning aid over
       // text, never the identifier.
-      aria-hidden={true}
+      aria-hidden
     />
   );
 }
@@ -1024,7 +1027,7 @@ function AppInner(props: {
         // the second case a window that had yielded sat empty for good: the boot
         // effect is keyed on a selection that has not changed, and nothing else
         // re-acquires.
-        const mayAskAgain = !(grantedRef.current && sameEpoch);
+        const mayAskAgain = !grantedRef.current || !sameEpoch;
         const wanted = shownRef.current ?? (mayAskAgain ? selectedRef.current : null);
         const target = worktreesRef.current.find((w) => w.id === wanted);
         // Gone from the list between the disconnect and now — a `git worktree
@@ -1337,13 +1340,13 @@ function AppInner(props: {
       ? stats?.projects?.[worktree.path]?.[diagRun.name]
       : undefined;
   /** Why a worktree has nothing to show — the one wording for every empty pane. */
-  const runEmptyHint = worktree
-    ? worktree.has_veld_config
-      ? repo?.available
-        ? "Start the run and its logs, nodes and URLs appear here."
-        : "Repository directory not found on disk — showing last known state."
-      : "This worktree has no veld.json, so there is nothing to run."
-    : "Select a worktree.";
+  const runEmptyHint = !worktree
+    ? "Select a worktree."
+    : !worktree.has_veld_config
+      ? "This worktree has no veld.json, so there is nothing to run."
+      : !repo?.available
+        ? "Repository directory not found on disk — showing last known state."
+        : "Start the run and its logs, nodes and URLs appear here.";
 
   // Start configuration (preset or explicit node selections), remembered
   // per worktree. Falls back to a sensible default: first preset, else all
@@ -1481,7 +1484,7 @@ function AppInner(props: {
     // No config (or one that declares nothing) cannot be overridden. `null`
     // `machine_vars` (an unreadable config) falls through to the fetch, which
     // errors and reads as not-overridden — the honest answer.
-    if (!(path && worktree.has_veld_config ) || worktree.machine_vars === 0) {
+    if (!path || !worktree.has_veld_config || worktree.machine_vars === 0) {
       setConfigVarsOverridden(false);
       return;
     }
@@ -1978,7 +1981,7 @@ function AppInner(props: {
           {
             key: "run",
             title: running ? "Stop run" : "Start run",
-            disabled: busy || (!(running || canStartWorktree(w))),
+            disabled: busy || (!running && !canStartWorktree(w)),
             onClick: () => (running ? stopWorktree(w) : startWorktree(w)),
           },
           {
@@ -3076,7 +3079,7 @@ function AppInner(props: {
    * the answer has to already be in the main process when it fires.
    */
   useEffect(() => {
-    if (!((chromeless && desktopWindow ) && worktree)) return;
+    if (!chromeless || !desktopWindow || !worktree) return;
     // Only while the resolved worktree is still the one this window was opened
     // for. When it stops existing, `worktree` falls back to another one in the
     // same commit — and this effect is declared before the close effect below,
@@ -3104,7 +3107,7 @@ function AppInner(props: {
    */
   const heldTabs = useRef(false);
   useEffect(() => {
-    if (!(chromeless && desktopWindow)) return;
+    if (!chromeless || !desktopWindow) return;
     // The worktree this window was opened for is gone (removed, or its repo
     // unregistered). `worktree` resolves by *falling back* — first main, then
     // the first of the first repo — which in a full window is right and here is
@@ -3216,7 +3219,7 @@ function AppInner(props: {
   // another tab may have taken this one in the meantime.
   const nextSession = worktree ? nextFreeProfile(new Set(sessions)) : null;
   const addSession = (tabId: string) => {
-    if (!(worktree && layout)) return;
+    if (!worktree || !layout) return;
     let chosen: BrowserProfile | null = null;
     editSessions(worktree.id, (current) => {
       // Taken from the slots this worktree does not already list — not from
@@ -3428,7 +3431,7 @@ function AppInner(props: {
       // better than a generic error for a race the design admits to. Anything else
       // (a 500, a dead daemon) must NOT claim the worktree was removed, because it
       // is still there and the user would stop looking for it.
-      const gone = e instanceof Error && /not found|already removed/iu.test(e.message);
+      const gone = e instanceof Error && /not found|already removed/i.test(e.message);
       notifyError(
         gone
           ? `${worktreeLabel(w)} has already been deleted`
@@ -3997,8 +4000,8 @@ function AppInner(props: {
   /**
    * Hoisted for the same reason as `settingsDialog`, with a sharper version of
    * it: this one can open *itself*. Runs mode returns early before the dialog
-   * list, so a promotion that came up pending while the user was over there
-   * would set the state, render nothing, and never be acked — leaving a panel
+   * list, so a promotion that came up while the user was over there would set
+   * the state, render nothing, and never be marked — leaving a panel
    * permanently "open" that they can neither see nor dismiss.
    */
   const whatsNewDialog = promotions.open && (
@@ -4016,7 +4019,7 @@ function AppInner(props: {
    */
   const configVarsDialog = dialog.kind === "config-vars" && (
     <ConfigVarsDialog
-      opened={true}
+      opened
       project={dialog.project}
       onRetry={dialog.retry}
       // Closing re-reads whether any var is now overridden — the dialog is the
@@ -4055,13 +4058,13 @@ function AppInner(props: {
    * modal also means `overlayGuard` hides the embedded browser panes while it is
    * open, which the popover only got by being portalled.
    */
-  const shareEmptyHint = worktree
-    ? worktree.has_veld_config
-      ? diagRun
-        ? "This run has nothing shared yet."
-        : "Start the run to share it."
-      : "This worktree has no veld.json, so it has no run to share."
-    : "Select a worktree.";
+  const shareEmptyHint = !worktree
+    ? "Select a worktree."
+    : !worktree.has_veld_config
+      ? "This worktree has no veld.json, so it has no run to share."
+      : !diagRun
+        ? "Start the run to share it."
+        : "This run has nothing shared yet.";
   // Shown while the worktree *could* run something, and also whenever a share is
   // live: a repo whose directory has gone missing still has a share to stop, and
   // gating on startability was the one path that hid the only control that ends it.
@@ -4261,7 +4264,8 @@ function AppInner(props: {
           ) : null
         }
         runSelectDisabled={
-          !(worktree &&canRunWorktreeNow(worktree) ) ||
+          !worktree ||
+          !canRunWorktreeNow(worktree) ||
           (runs.length < 2 && !canStartAnother(worktree))
         }
         urls={urls}
@@ -4274,6 +4278,7 @@ function AppInner(props: {
         onImport={() => setDialog({ kind: "import" })}
         onRemoveRepo={() => repo && setDialog({ kind: "remove-repo", repo })}
         onWhatsNew={promotions.browse}
+        hasNews={promotions.any}
         unreadNews={promotions.unread}
         // The bound run, named explicitly: the top bar is the run-level surface,
         // and ■ here must end the run whose name the selector is showing — never
@@ -4913,7 +4918,7 @@ function NodeActionsButton(props: {
     return (
       <Tooltip label="Start the run to act on its nodes">
         <span style={{ display: "inline-flex" }}>
-          <ActionIcon size="md" variant="default" aria-label="Node actions" disabled={true}>
+          <ActionIcon size="md" variant="default" aria-label="Node actions" disabled>
             <IconTools size={14} />
           </ActionIcon>
         </span>
@@ -4926,7 +4931,7 @@ function NodeActionsButton(props: {
   // caller could trip.
   if (!props.run) return null;
   return (
-    <Menu position="bottom-start" width={280} withinPortal={true}>
+    <Menu position="bottom-start" width={280} withinPortal>
       <Menu.Target>
         <Tooltip label="Node actions">
           <ActionIcon size="md" variant="default" aria-label="Node actions">
@@ -4985,6 +4990,10 @@ function TopBar(props: {
   onImport: () => void;
   onRemoveRepo: () => void;
   onWhatsNew: () => void;
+  /** Whether this build ships any promotions at all. Retiring one is deleting it
+   *  (see docs/promotions.md), so the last deletion must not leave a menu entry
+   *  that opens an empty dialog. */
+  hasNews: boolean;
   /** Unread *and* dismissed promotions — dismissing is not reading. */
   unreadNews: number;
   onStart: () => void;
@@ -5038,12 +5047,13 @@ function TopBar(props: {
       {props.modeSwitch}
       {props.repos.length === 0 ? (
         // Nothing to select between, so the bar offers the only move there is.
-        // The selector is *absent* at zero projects rather than empty, which
-        // left the import affordance buried in the neighbouring "…" menu — the
-        // one control a first-time user has no reason to open.
-        // Neutral, not the primary green: the start screen below carries the
-        // real call to action, and two green buttons on one screen make the
-        // wrong one look like the point.
+        // The selector is *absent* at zero projects rather than empty, which left
+        // the import affordance buried in the neighbouring "…" menu — the one
+        // control a first-time user has no reason to open.
+        //
+        // Neutral, not the primary green: the start screen below carries the real
+        // call to action, and two green buttons on one screen make the wrong one
+        // look like the point.
         <Button
           size="xs"
           variant="default"
@@ -5093,11 +5103,7 @@ function TopBar(props: {
             size="md"
             variant="default"
             className="project-actions"
-            title={
-              unreadNews > 0
-                ? `Project actions — ${unreadNews} unread`
-                : "Project actions"
-            }
+            title={unreadNews > 0 ? `Project actions — ${unreadNews} unread` : "Project actions"}
           >
             <IconDots size={14} />
             {unreadNews > 0 && <span className="project-actions-dot" aria-hidden="true" />}
@@ -5118,23 +5124,27 @@ function TopBar(props: {
           >
             Remove project…
           </Menu.Item>
-          <Menu.Divider />
-          {/* On demand, showing everything this build ships regardless of what
-              has been acked — the only way to revisit a promotion, and the only
-              way to see one during the release that introduced it. */}
-          <Menu.Item
-            leftSection={<IconSparkles size={14} />}
-            rightSection={
-              unreadNews > 0 ? (
-                <Badge size="xs" circle={true} variant="filled">
-                  {unreadNews}
-                </Badge>
-              ) : undefined
-            }
-            onClick={props.onWhatsNew}
-          >
-            What's new…
-          </Menu.Item>
+          {props.hasNews && (
+            <>
+              <Menu.Divider />
+              {/* On demand, showing everything this build ships whatever its
+                  state — the only way to revisit a promotion, and to catch up on
+                  news that predates you. */}
+              <Menu.Item
+                leftSection={<IconSparkles size={14} />}
+                rightSection={
+                  unreadNews > 0 ? (
+                    <Badge size="xs" circle variant="filled">
+                      {unreadNews}
+                    </Badge>
+                  ) : undefined
+                }
+                onClick={props.onWhatsNew}
+              >
+                What's new…
+              </Menu.Item>
+            </>
+          )}
         </Menu.Dropdown>
       </Menu>
       {worktree && (
@@ -5194,9 +5204,9 @@ function TopBar(props: {
                     style={{
                       background: `hsl(${stalenessHue(
                         props.gitStatus.behind,
-                        props.gitStatus.latest_commit == null
-                          ? 0
-                          : Math.max(0, Date.now() / 1000 - props.gitStatus.latest_commit),
+                        props.gitStatus.latest_commit != null
+                          ? Math.max(0, Date.now() / 1000 - props.gitStatus.latest_commit)
+                          : 0,
                         // The selected worktree's project config tunes how
                         // sensitive the colouring is (`ide.git.stalenessSensitivity`).
                         props.worktree?.ide.staleness_sensitivity ?? 1,
@@ -5213,7 +5223,7 @@ function TopBar(props: {
               — the bar reads "what I'll run, which run, run it". Disabled (or
               hidden, per `ui.hideDisabledActions`) when the worktree has no runs
               to choose from. */}
-          {(!(props.hideDisabled && props.runSelectDisabled)) && props.runSelect}
+          {(!props.hideDisabled || !props.runSelectDisabled) && props.runSelect}
           {canRun && (
             <>
               {/* The spinner belongs on the button that was pressed. Putting
@@ -5267,7 +5277,7 @@ function TopBar(props: {
                     }
                     disabled={
                       (props.pending !== null && !starting) ||
-                      (!((props.running || props.canStart ) || starting))
+                      (!props.running && !props.canStart && !starting)
                     }
                     onClick={props.running || starting ? props.onStop : props.onStart}
                   >
@@ -5338,7 +5348,7 @@ function TopBar(props: {
           {!canRun && (
             <span
               className="chip"
-              style={repoAvailable ? undefined : { color: "var(--warn)" }}
+              style={!repoAvailable ? { color: "var(--warn)" } : undefined}
               title={
                 repoAvailable
                   ? "No veld.json in this worktree"
@@ -5505,7 +5515,7 @@ function below(e: React.DragEvent): boolean {
  * mid-drag.
  */
 function RailCaret() {
-  return <div className="rail-caret" aria-hidden={true} />;
+  return <div className="rail-caret" aria-hidden />;
 }
 
 function Rail(props: {
@@ -5705,7 +5715,7 @@ function Rail(props: {
    */
   const dropZone = (group: RailGroup, index: number, half = false) => ({
     onDragOver: (e: React.DragEvent) => {
-      if (!(dragPath && canDropOn(group))) return;
+      if (!dragPath || !canDropOn(group)) return;
       // Both required: preventDefault marks the element a valid drop target, and
       // without stopPropagation the enclosing section's own zone also fires and the
       // indicator flickers between the two.
@@ -5714,7 +5724,7 @@ function Rail(props: {
       setDropAt({ key: group.key, index: index + (half && below(e) ? 1 : 0) });
     },
     onDrop: (e: React.DragEvent) => {
-      if (!(dragPath && canDropOn(group))) return;
+      if (!dragPath || !canDropOn(group)) return;
       e.preventDefault();
       e.stopPropagation();
       if (group.key === TRASH_LANE) {
@@ -6207,7 +6217,7 @@ function Rail(props: {
                          "open in another window Sonnet feat/x" — and the `title`
                          that already says it would be demoted to the description,
                          announcing it a second time. The title carries it. */
-                      aria-hidden={true}
+                      aria-hidden
                     />
                   )}
                   <WorktreeMark settings={props.settings} worktree={w} />
@@ -6315,7 +6325,7 @@ function Rail(props: {
                         // seen land disables the control, which is what stops a
                         // double fire.
                         disabled={
-                          pending !== null || (!(running || props.canStart(w)))
+                          pending !== null || (!running && !props.canStart(w))
                         }
                         onClick={(e) => {
                           // The row is clickable too; without this, starting a run
@@ -6654,7 +6664,7 @@ function CommandPalette(props: {
           styles={{
             input: { fontFamily: "var(--mantine-font-family-monospace)" },
           }}
-          data-autofocus={true}
+          data-autofocus
         />
         <div className="palette-list">
           {matches.map(({ item, label }, i) => {
@@ -6670,7 +6680,7 @@ function CommandPalette(props: {
                   ref={
                     i === active
                       ? (el) => {
-                          if (!(el && scrollToCursor.current)) return;
+                          if (!el || !scrollToCursor.current) return;
                           scrollToCursor.current = false;
                           el.scrollIntoView({ block: "nearest" });
                         }

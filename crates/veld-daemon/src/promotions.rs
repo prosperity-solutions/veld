@@ -34,12 +34,17 @@ use veld_core::db::PromotionState;
 
 use super::management::{check_csrf, open_db};
 
-/// Ceiling on how many ids one request may carry.
+/// Ceiling on how many ids **one request** may carry.
 ///
-/// Not a security boundary — the endpoint is same-origin and CSRF-checked — but
-/// the state map is stored as one JSON row, so an unbounded request is an
-/// unbounded row. Promotions are for changes big enough to be worth interrupting
-/// somebody over, so a real request carries a handful.
+/// Not a security boundary — the endpoint is same-origin and CSRF-checked — and
+/// note what it does *not* bound: the stored map is one JSON row that grows
+/// monotonically across requests, and the daemon treats ids as opaque so it can
+/// never prune one. Repeated calls with novel ids grow that row without limit.
+/// That is acceptable only because reaching this endpoint at all already means
+/// same-origin JS or local code, which could write the database directly — do
+/// not read this constant as "the row is bounded". Promotions are for changes
+/// big enough to be worth interrupting somebody over, so a real request carries
+/// a handful.
 const MAX_IDS: usize = 256;
 
 /// Ceiling on one id's length. Ids are short kebab-case slugs, or a namespaced
@@ -109,7 +114,52 @@ async fn post_mark(
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_ID_LEN, MAX_IDS, MarkBody, validate};
+    use super::{MAX_ID_LEN, MAX_IDS, MarkBody, routes, validate};
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    fn req(uri: &str, csrf: bool, body: &str) -> Request<Body> {
+        let mut b = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("content-type", "application/json");
+        if csrf {
+            b = b.header("x-veld-request", "1");
+        }
+        b.body(Body::from(body.to_string())).unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_csrf_gate_applies_to_both_routes() {
+        // Both write: `mark` obviously, and `state` stamps `first_use` on first
+        // contact. The gate is two hand-placed `check_csrf` lines that nothing
+        // else exercises — delete either and every other test stays green.
+        for uri in ["/api/promotions/state", "/api/promotions/mark"] {
+            let res = routes()
+                .oneshot(req(uri, false, r#"{"ids":["a"],"state":"read"}"#))
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::FORBIDDEN, "{uri}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_gate_lets_a_same_origin_call_through() {
+        // The negative half alone cannot tell a working gate from a handler that
+        // refuses everything. This one gets past `check_csrf` and fails later on
+        // the database (no daemon instance in a unit test), which is exactly the
+        // distinction being asserted: anything but 403.
+        let res = routes()
+            .oneshot(req(
+                "/api/promotions/mark",
+                true,
+                r#"{"ids":[],"state":"read"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_ne!(res.status(), StatusCode::FORBIDDEN);
+    }
 
     #[test]
     fn validate_rejects_empty_oversized_and_overlong_lists() {

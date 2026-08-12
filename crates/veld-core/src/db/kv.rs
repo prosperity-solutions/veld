@@ -153,16 +153,29 @@ impl Db {
     ///
     /// **The date gate hangs off this, so it is written exactly once and never
     /// overwritten.** A dated promotion older than this timestamp is *auto-read*:
-    /// it is visible in the history but is never counted as unread and never
-    /// prompts, which is how somebody installing Veld today avoids a modal about
-    /// a change that shipped last spring.
+    /// visible in the history, never counted as unread, never prompted — which is
+    /// how somebody installing Veld today avoids a modal about a change that
+    /// shipped last spring.
     ///
-    /// Deliberately **not** derived from anything that looks like database age.
-    /// The tempting version of this — "a database with no rows is a new user" —
-    /// is wrong here in a way that bites daily: `veld start --preset dev` mints
+    /// **The stamp is the earliest evidence this user predates now, not the
+    /// clock.** Reaching for `now()` looks obviously right and is wrong for the
+    /// cohort that matters most: every *existing* user meets this code for the
+    /// first time on the day they upgrade, so a stamp of "now" declares an
+    /// eight-month user brand new, and the promotion shipped in that very release
+    /// is dated before their "arrival" and auto-read for everyone who opens a day
+    /// late. The channel would launch reaching almost nobody. So the oldest
+    /// registered repo wins when there is one: a user with repos has demonstrably
+    /// been here since that day, whatever this row says.
+    ///
+    /// Deliberately **not** derived from anything that looks like database *age*.
+    /// The tempting version — "a database with no rows is a new user" — is wrong
+    /// here in a way that bites daily: `veld start --preset dev` mints
     /// `.veld-dev/<run>/veld.db` several times a day, and either the CLI or the
-    /// daemon may be the process that creates one. This is a stamp, written the
-    /// first time a client asks, and a stamp stays true afterwards.
+    /// daemon may be the process that creates one. Note the asymmetry that makes
+    /// the repo evidence safe where freshness is not: a repo row is proof the
+    /// user *was* here, while an empty table proves nothing at all, so this only
+    /// ever moves the stamp **backwards** and a fresh dev database simply falls
+    /// through to now.
     ///
     /// A caller that only wants to *read* it without establishing it would be
     /// asking a question with no answer — "when did they arrive, if they have
@@ -183,13 +196,29 @@ impl Db {
         let first_use = match stored.as_deref().and_then(parse_ts) {
             Some(t) => t,
             None => {
-                let now = chrono::Utc::now();
+                // The oldest repo this user registered, or now. See the note
+                // above on why "now" alone silently kills the launch cohort.
+                let oldest: Option<String> = tx
+                    .query_row("SELECT MIN(created_at) FROM repos", [], |r| r.get(0))
+                    .optional()?
+                    .flatten();
+                let stamp = oldest
+                    .as_deref()
+                    .and_then(parse_ts)
+                    .unwrap_or_else(chrono::Utc::now);
+                let encoded = super::ts_to_str(stamp);
                 tx.execute(
                     "INSERT INTO kv (key, value, updated_at) VALUES (?1, ?2, ?2)
                      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
-                    params![PROMOTIONS_FIRST_USE_KEY, super::ts_to_str(now)],
+                    params![PROMOTIONS_FIRST_USE_KEY, encoded],
                 )?;
-                now
+                // Return what was *stored*, never what was measured. `ts_to_str`
+                // truncates to microseconds, so on a clock with finer resolution
+                // (Linux; macOS is microsecond-granular and hides this) the
+                // stamping call would report an instant no later call ever
+                // reproduces — and "stamped once and never moves" would be false
+                // for exactly one caller, the one that established it.
+                parse_ts(&encoded).unwrap_or(stamp)
             }
         };
         tx.commit()?;
@@ -222,19 +251,36 @@ impl Db {
                 |r| r.get(0),
             )
             .optional()?;
-        let mut states = stored.as_deref().map(decode_states).unwrap_or_default();
+        // Merge over the **raw** map, not the decoded one. `decode_states` drops
+        // entries this build has no name for, and its doc calls that loss
+        // temporary — "costs one re-shown card". Decoding here and writing the
+        // result back would make it permanent on the very next mark, which is
+        // precisely the downgrade case the forward-compatibility is for: a newer
+        // daemon writes a state this one cannot read, this one marks anything,
+        // and the newer daemon's knowledge is gone.
+        let mut raw: BTreeMap<String, serde_json::Value> = stored
+            .as_deref()
+            .and_then(|v| serde_json::from_str(v).ok())
+            .unwrap_or_default();
+        let read = serde_json::to_value(PromotionState::Read).expect("an enum serialises");
+        let target = serde_json::to_value(state).expect("an enum serialises");
         for id in ids {
-            let entry = states.entry(id.clone()).or_insert(state);
-            if state == PromotionState::Read {
-                *entry = PromotionState::Read;
+            match raw.get(id) {
+                // A read is never walked back — not by a concurrent dismiss, and
+                // not by this client's own later one.
+                Some(existing) if *existing == read => {}
+                _ => {
+                    raw.insert(id.clone(), target.clone());
+                }
             }
         }
-        let encoded = serde_json::to_string(&states).expect("a map of plain strings serialises");
+        let encoded = serde_json::to_string(&raw).expect("a map of JSON values serialises");
         tx.execute(
             "INSERT INTO kv (key, value, updated_at) VALUES (?1, ?2, ?3)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
             params![PROMOTIONS_STATE_KEY, encoded, now_str()],
         )?;
+        let states = decode_states(&encoded);
         tx.commit()?;
         Ok(states)
     }
@@ -351,6 +397,72 @@ mod tests {
         // Every later call reports the same instant — the date gate would be
         // meaningless if "when did they arrive" drifted forward on every load.
         assert_eq!(db.promotions_first_use().unwrap(), first);
+    }
+
+    #[test]
+    fn the_stamp_it_returns_parses_back_out_of_what_it_stored() {
+        let (_dir, db) = test_db();
+        let stamped = db.promotions_first_use().unwrap();
+        let stored = db.kv_get("promotions.firstUse").unwrap().unwrap();
+        // Assert the **parse** direction. Comparing `ts_to_str(stamped)` to the
+        // stored string instead is a tautology that passes against the bug: it
+        // applies the same microsecond truncation to both sides, so the returned
+        // value could be a finer instant and nothing would notice.
+        //
+        // Scope of the claim, stated because the name cannot carry it: this only
+        // *fails* where the clock is finer than microseconds. macOS's
+        // `CLOCK_REALTIME` is microsecond-granular, so the original bug was
+        // invisible here and red on CI's Linux — no assertion can close that gap
+        // on a clock that cannot express the difference.
+        assert_eq!(super::super::parse_ts(&stored), Some(stamped));
+    }
+
+    #[test]
+    fn an_existing_user_is_dated_by_their_oldest_repo_not_by_the_upgrade() {
+        let (_dir, db) = test_db();
+        db.upsert_repo(std::path::Path::new("/tmp/some-repo"), "some-repo")
+            .unwrap();
+        {
+            let conn = db.lock();
+            conn.execute(
+                "UPDATE repos SET created_at = '2025-03-04T10:00:00.000000Z'",
+                [],
+            )
+            .unwrap();
+        }
+        // Every existing user meets this code for the first time on the day they
+        // upgrade. Stamping "now" would call them brand new and auto-read the
+        // promotion shipped in that very release — the channel would launch
+        // reaching almost nobody.
+        let first_use = db.promotions_first_use().unwrap();
+        assert_eq!(first_use.to_rfc3339(), "2025-03-04T10:00:00+00:00");
+    }
+
+    #[test]
+    fn a_user_with_no_repos_is_dated_now_so_a_fresh_dev_db_stays_quiet() {
+        let (_dir, db) = test_db();
+        let before = chrono::Utc::now() - chrono::Duration::seconds(5);
+        // An empty repos table proves nothing, so the evidence only ever moves
+        // the stamp backwards — a throwaway `.veld-dev/<run>/veld.db` falls
+        // through to now and gets no back-catalogue.
+        assert!(db.promotions_first_use().unwrap() > before);
+    }
+
+    #[test]
+    fn a_mark_preserves_a_state_name_this_build_cannot_read() {
+        let (_dir, db) = test_db();
+        db.kv_set(
+            "promotions.state",
+            r#"{"a":"read","b":"snoozed-until-tuesday"}"#,
+        )
+        .unwrap();
+        db.mark_promotions(&ids(&["c"]), PromotionState::Dismissed)
+            .unwrap();
+        // The downgrade case the forward-compatibility exists for: decoding the
+        // map and writing the decoded result back would erase `b` on the first
+        // mark, turning a re-shown card into permanent data loss.
+        let raw = db.kv_get("promotions.state").unwrap().unwrap();
+        assert!(raw.contains("snoozed-until-tuesday"), "{raw}");
     }
 
     #[test]
