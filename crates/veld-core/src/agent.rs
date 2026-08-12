@@ -59,8 +59,11 @@
 //! [`State`] and never on which tool produced it. So a new tool is an installer plus a
 //! mapping, in five edits, and nothing else has to move:
 //!
-//! 1. A variant on [`AgentTool`] (and its `ALL`, `shim_name`, `as_str`, `injection`).
-//!    `shim_name` is the command the wrapper stands in front of.
+//! 1. A variant on [`AgentTool`], and an arm in every `match self` on it — `ALL`,
+//!    `shim_name`, `as_str`, `injection`, `own_injection_flag_patterns`,
+//!    `extra_interactive_first_words` today, and whatever this list has grown to by
+//!    the time you read it; the compiler enforces exhaustiveness, this comment does
+//!    not. `shim_name` is the command the wrapper stands in front of.
 //! 2. A `<tool>_state(&HookPayload) -> State` beside [`claude_state`]/[`codex_state`],
 //!    and an arm in `veld agent-state`'s `match tool` (`crates/veld/src/commands/agent.rs`).
 //! 3. A `<tool>_settings_doc`/`<tool>_notify_config` beside [`claude_settings_doc`]/
@@ -593,7 +596,16 @@ pub fn codex_notify_config(cli: &Path, session_id: &str) -> String {
         .map(|t| serde_json::to_string(t).expect("a String serializes to JSON infallibly"))
         .collect::<Vec<_>>()
         .join(",");
-    format!("notify=[{elements}]")
+    // The prefix comes from `AgentTool::Codex.injection()` rather than a second
+    // `"notify="` literal: the wrapper's `value_guard` checks a value against that
+    // same prefix before ever handing it to the real binary, and two independent
+    // literals here would let one drift from the other with every test still green
+    // — the fake `veld` those tests use to stand in for this function hardcodes the
+    // same string, which would hide exactly that drift.
+    let (_, Injection::ConfigOverride { key_prefix }) = AgentTool::Codex.injection() else {
+        unreachable!("Codex is a ConfigOverride tool")
+    };
+    format!("{key_prefix}[{elements}]")
 }
 
 /// What each generated hook is allowed to take, in seconds.

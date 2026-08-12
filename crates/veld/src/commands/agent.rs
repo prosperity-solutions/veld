@@ -268,9 +268,9 @@ fn sweep(dir: &Path) {
 /// The hook payload, from a tool that appends it as the final argv entry rather than
 /// piping it on stdin (Codex).
 ///
-/// `None` only when the argument itself is absent — the wrapper always passes one for
-/// a real hook invocation, so its absence means something upstream is wrong and the
-/// caller exits 1. A *present-but-malformed* argument is not that: it degrades to a
+/// `None` only when the argument itself is absent — Codex's `notify` always appends
+/// one for a real hook invocation, so its absence means something upstream is wrong
+/// and the caller exits 1. A *present-but-malformed* argument is not that: it degrades to a
 /// default (all-`None`) [`agent::HookPayload`], which every tool's mapping function
 /// already turns into [`agent::State::Unknown`], the same silent "we don't know"
 /// [`read_stdin`]'s own malformed case produces.
