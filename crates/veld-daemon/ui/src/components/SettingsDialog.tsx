@@ -172,7 +172,7 @@ const NOTIFY_ROWS: { key: string; label: string; help: string }[] = [
   {
     key: "activity.notifyAgentFinished",
     label: "A coding agent finished",
-    help: "Note the frequency: an agent's end-of-turn signal fires after every response, not once per session — so this is a banner each time one hands control back while you are elsewhere. That is the point if you walked away, and the first row to turn off if it is not.",
+    help: "Note the frequency: an agent's end-of-turn signal fires after every response, not once per session — so this is a banner each time one hands control back while you are elsewhere. That is the point if you walked away, and the first row to turn off if it is not. Sub-agents do not count: an agent that farms work out announces each helper finishing, and none of those is yours to act on, so only the session's own turn is reported here.",
   },
   {
     key: "activity.notifyNoticed",
@@ -1279,7 +1279,7 @@ export function SettingsDialog(props: {
               </Row>
               <Row
                 label="Show what is working"
-                help="A spinner on any worktree with a command running in it. Off by default because the signal is uneven: for a shell command it is exact — a start marker with no end marker yet genuinely means 'running here' — but a coding agent does not report it (the hook that would is one Veld will not install, because it blocks the agent), and an agent Veld has no integration for reports nothing at all. Useful if you mainly want to know whether a build is still going. It is the quietest thing the rail shows either way: it loses to every unseen event, so a worktree with an agent waiting for you still reads as waiting."
+                help="A spinner on any worktree with a command running in it. Off by default because the signal is uneven: for a shell command it is exact — a start marker with no end marker yet genuinely means 'running here'. A Claude session reports it per turn, from the prompt you sent, so a turn that starts any other way — an agent picking work back up after a background command it left running — spins down early; Codex reports no start of turn at all, and an agent Veld has no integration for reports nothing. Useful if you mainly want to know whether a build is still going. It is the quietest thing the rail shows either way: it loses to every unseen event, so a worktree with an agent waiting for you still reads as waiting."
               >
                 <Checkbox
                   size="xs"
