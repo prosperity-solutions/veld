@@ -158,40 +158,74 @@ item, not a level of structure**:
           "href": "https://cli.github.com"
         }
       },
-      {
-        "id": "webstorm",
-        "slot": "topBar",
-        "type": "action",
-        "label": "Open in WebStorm",
-        "icon": "code",
+
+      // A group. It occupies the slot; its members do not.
+      { "id": "open-in", "slot": "topBar", "type": "menu", "label": "Open in",
+        "icon": "external-link", "items": ["webstorm", "vscode"] },
+
+      // No `slot`, so it is declared but never rendered on its own — it is
+      // reachable only by reference, from the menu above.
+      { "id": "webstorm", "type": "action", "label": "WebStorm",
         "argv": ["webstorm", "${root}"],
-        "requiresBin": "webstorm",
-        "whenMissing": "hide"
-      }
+        "requiresBin": "webstorm", "whenMissing": "hide" },
+
+      { "id": "vscode", "type": "action", "label": "VS Code",
+        "shell": "code '${root}'",
+        "requiresBin": "code", "whenMissing": "hide" },
+
+      // Referenced from the `pr` badge's stdout when no PR exists yet.
+      { "id": "create-pr", "type": "action", "label": "Create pull request",
+        "argv": ["gh", "pr", "create", "--web"], "requiresBin": "gh" }
     ]
   }
 }
 ```
 
 Fields common to every type: `id` (stable, safe identifier, unique per project),
-`slot`, `type`, `label`, optional `icon` (from the existing pane-icon allowlist),
-`requiresBin`, `whenMissing`, `hint`. `argv`/`shell` follow the house rule for
-anything that runs something; `${…}` interpolation reuses the **pane variable
-context** (`root`, `branch`, `worktree`, `project`, `username`) so extensions do
-not introduce a second vocabulary.
+`slot`, `align`, `type`, `label`, optional `icon` (from the existing pane-icon
+allowlist), `requiresBin`, `whenMissing`, `hint`.
+
+**`align` picks the side of the slot**, `start` (default) or `end`. The top bar
+already has a stated convention — *left is what this project does, right is what
+the app does* — so a project's extensions default to the left cluster, and `end`
+is the deliberate opt-out for something that reads as chrome rather than as
+project state. It is a field rather than a `topBar.start` / `topBar.end` slot name
+because a dotted selector is a path grammar, which was rejected for the same
+reason elsewhere in this document. A slot with no meaningful sides ignores it, and
+setting it there is a `validate` finding.
+
+**`slot` is optional.** An item with a slot renders there; an item without one is
+declared but never rendered directly, and is reachable only **by reference** —
+from a `menu`'s `items`, or from a badge's stdout (see below). That is what lets
+five editor actions exist without five buttons in a 42px bar.
+
+**Anything that runs something takes `argv` *or* `shell`**, flattened exactly as
+node-level `actions` already do — `argv` is spawned directly and is the default
+recommendation, `shell` is the permanently-supported escape hatch, and the legacy
+`command` alias comes along with the shared type. `${…}` interpolation reuses the
+**pane variable context** (`root`, `branch`, `worktree`, `project`, `username`) so
+extensions do not introduce a second vocabulary.
 
 Order within a slot is array order. An unknown `slot` or `type` is a non-fatal
 `validate` finding and the item is ignored — the same leniency the rest of the
 `ide` block already has, so a project can adopt a newer Veld's slot without
-breaking on an older one.
+breaking on an older one. A reference to an id that does not exist, or to an item
+of the wrong type, is likewise a `validate` finding, not a load failure.
 
-### The two types
+### The three types
 
 **`type: "status"`** — a badge. The daemon runs the command in the worktree root
 and parses stdout as the badge contract:
 
 ```json
-{ "text": "PR #283 · merged", "tone": "success", "tooltip": "…", "href": "https://…" }
+{
+  "text": "PR #283 · merged",
+  "tone": "success",
+  "tooltip": "…",
+  "href": "https://github.com/…/pull/283",
+  "openIn": "system",
+  "actions": [{ "id": "pr-checks", "label": "Watch checks" }]
+}
 ```
 
 `tone` is one of `neutral` / `info` / `success` / `warning` / `danger`. Three
@@ -205,12 +239,52 @@ tolerances make the simple case free and the failure case legible:
 - non-zero exit → the badge renders in a failed state with the stderr tail as its
   tooltip. A broken extension is visible, never silent.
 
-`href` is opened in a browser pane. Only `http`/`https` are accepted, matching the
-refusal `ide.quicklinks` already applies to `vscode://` and `file://`.
+**`actions` are references, never commands.** An entry names the `id` of a declared
+`type: "action"` extension in the same project; the daemon resolves it against the
+on-disk config and runs *that* declaration's command. An optional `label`
+overrides presentation only. This is the invariant the rest of the codebase already
+holds — the browser sends a name, `run_action` looks the command up in config,
+`resolve_pane` refuses a pane the config does not declare — extended one step: a
+**runtime value may choose which declared action is offered, and may never
+contribute one.** Without that rule a badge's stdout would be a command-injection
+surface with no place to validate it, since there is no declaration to compare it
+against.
 
-**`type: "action"`** — a button. Click runs the command; there is no output
-contract and no refresh. Failure surfaces as a toast, the established error
-surface for run diagnostics.
+That is what makes the flagship badge work properly: no PR yet → `{"text": "No PR",
+"tone": "neutral", "actions": [{"id": "create-pr"}]}`; PR open → an `href` to it
+plus whatever action is useful next.
+
+Click semantics: `href` alone opens it; one action and no href runs it; anything
+more opens a small menu.
+
+**Where an `href` opens** is `openIn`: `system` (default) or `pane`. Declarable on
+the extension and overridable per value in stdout. The default is the system
+browser because an extension's `href` is, by construction, a *provider's*
+authenticated web surface — a pull request, a CI run, a dashboard — where the user
+is already signed in, and a Veld browser pane has its own cookie jar. That is the
+opposite population from `ide.quicklinks`, which point at localhost and staging and
+therefore belong in a pane; hence the opposite default. Only `http`/`https` are
+accepted either way, matching the refusal quicklinks already applies to
+`vscode://` and `file://`.
+
+**`type: "action"`** — a button, or a menu member. Click runs the command; there is
+no output contract and no refresh. Failure surfaces as a toast, the established
+error surface for run diagnostics.
+
+**`type: "menu"`** — a group. It occupies the slot and its `items` — id references
+to declared `action` extensions — appear in a popover, so "Open in ▾" costs one
+control instead of one per editor. Grouping is not cosmetic at this size: the top
+bar carries around sixteen elements already, and a system that lets a project add
+buttons without letting it group them makes the bar unusable at the third
+extension.
+
+A menu is itself an item, so ordering, `align`, `icon`, `requiresBin` and
+`whenMissing` work on it exactly as on anything else. A menu whose members are all
+unavailable follows its own `whenMissing` (default `hide`) rather than rendering an
+empty popover.
+
+Nesting is one level: a menu references actions, never other menus. Two levels of
+popover in a 42px bar is a worse answer than a second menu.
 
 ### Availability, and why it is a teaching surface
 
@@ -419,6 +493,50 @@ Rejected, with reasons:
   the rule breaks the primary use case while buying nothing, since
   `["node", "-e", "…"]` is equivalent. The same reasoning keeps `shell` permitted —
   forbidding it while allowing `argv: ["sh", "-c", …]` is theatre.
+
+### 2026-08-12 — Five corrections from the design review
+
+The design above went to the maintainer before any code existed. Five changes came
+back; all five are folded into [the contract](#the-tier-1-contract). Recorded here
+because each one closes off an alternative.
+
+- **`argv` *and* `shell`, from the shared flattened command type.** The original
+  draft showed only `argv`. Diverging from the house rule here would have given
+  extensions their own command vocabulary — the one thing this design is most
+  concerned not to do.
+- **A badge's stdout may offer actions, but only as `id` references.** The obvious
+  reading of "let the script offer an action" is to let stdout carry an `argv`, and
+  it is exactly wrong: a command arriving at runtime has no declaration to be
+  validated against, which is the invariant `run_action` and `resolve_pane` both
+  exist to hold. So the rule is **a runtime value may choose which declared action
+  is offered, and may never contribute one.** The cost is dangling-reference
+  validation, accepted once and then reused by menus.
+- **`openIn` defaults to the system browser, not a pane.** The original draft sent
+  every `href` to a browser pane, inherited from how `ide.quicklinks` behaves. Wrong
+  population: a quicklink points at localhost or staging, an extension's `href`
+  points at a provider's authenticated surface where the user is already signed in
+  and a pane's separate cookie jar is not. Rejected alternative: routing extension
+  hrefs through `ide.externalOrigins` / `route_url` and requiring projects to list
+  `github.com` there — it makes the good outcome opt-in and the broken one the
+  default for every fresh clone.
+- **`type: "menu"` in round 1, not deferred.** Grouping was going to wait for a
+  second round. It cannot: the bar carries ~16 controls already, and a system that
+  lets a project add buttons without grouping them is unusable at the third
+  extension. Its `items` are id references — the *same* mechanism the badge actions
+  needed, which is why this costs almost nothing on top. Rejected alternatives:
+  inline nested item objects (a second shape for the same thing, and it hides
+  members from `validate`'s uniqueness check), and a `group: "open-in"` string tag
+  (the group then has no declaration, so its own label, icon and `whenMissing` have
+  nowhere to live). Nesting is capped at one level.
+  This does **not** revive the rejected `ide.commands` registry: there is still one
+  flat collection, every item is still a full declaration, and keys still live at
+  the use site. A menu references its siblings; it is not a second tier they live
+  inside.
+- **`align: "start" | "end"`.** Which side of the bar an extension sits on is the
+  project's call, defaulting to `start` because the bar's existing convention is
+  *left is what this project does, right is what the app does*. A field, not
+  `slot: "topBar.end"` — a dotted selector is the path grammar rejected further up
+  this log.
 
 ## The extension backlog
 
