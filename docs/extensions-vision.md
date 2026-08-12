@@ -588,6 +588,33 @@ legibility are not readable off a diff.
   offers by id. Delete it and `scripts/veld/tone-demo.sh` once the palette is
   settled.
 
+### 2026-08-12 — A badge is a Button, not a Badge
+
+Reported as an alignment and corner-radius mismatch against the buttons beside it,
+and the underlying cause was the element choice.
+
+A Mantine `Badge` is a *label*. Using one for a control meant re-deriving, by hand
+and slightly differently, everything the bar already levels for a button: height
+(`--badge-height`), font size, weight, corner radius, and the vertical centring of
+a leading glyph — which is why it sat as a 20px pill with its own radius among 26px
+boxes. Three consequences of switching to `Button variant="light" size="compact-sm"`:
+
+- **The bar's existing rules apply.** `--button-height`, `--button-fz: 12px`,
+  `font-weight: 400` and the theme's `md` radius all arrive from the
+  `.mantine-Button-root` block, so the CSS here is *only* colour now. It also
+  means a badge can no longer drift out of step with the bar, since there is
+  nothing left to keep in step.
+- **`loading` is Mantine's**, so the first-run spinner is centred in place of the
+  glyph and the width does not change when a refresh starts — no shuffling of the
+  controls beside it.
+- **It is the honest element.** These are clickable and carry a context menu, so a
+  real `<button>` is what a keyboard and a screen reader should find. A clickable
+  `Badge` is a `<div>` with an `onClick`.
+
+The general rule, worth keeping: **a thing in the chrome that responds to a click
+is a Button, and reaching for a Badge to get a pill shape means re-implementing a
+control.** `leftSection` is how a glyph goes in one, never a hand-spaced `<span>`.
+
 ## The extension backlog
 
 Everything in this table is **customization-layer by the tests above** — none of

@@ -328,13 +328,19 @@ body[data-fullscreen="true"] .topbar.electron {
 .topbar .mantine-Input-wrapper {
   --input-height: var(--topbar-control-h) !important;
 }
-/* `ide.extensions` status badges. A Mantine Badge is a control here — it is
-   clickable and it opens a menu — so it is levelled like the rest rather than
-   taking `.chip`'s not-a-control exemption. Mantine's own Badge is 20px, which
-   sits visibly low against a row of 26px boxes. */
+/* `ide.extensions` status badges.
+ *
+ * **A Button, not a Badge.** These *are* controls — a click opens the pull
+ * request, a right-click opens a menu — so a real `<button>` is the honest
+ * element, and it is what a keyboard reaches. It also stops this block
+ * re-deriving what the bar already levels: height, font size, weight and the
+ * theme's `md` radius all arrive from the `.mantine-Button-root` rules above, so
+ * a badge is the same box as the buttons beside it instead of a 20px pill with
+ * its own corner radius. Mantine's `loading` prop then supplies the first-run
+ * spinner, centred, in place of the icon and without changing the width.
+ *
+ * What is left here is only the colour. */
 .topbar .ext-badge {
-  --badge-height: var(--topbar-control-h) !important;
-  --badge-fz: 12px !important;
   /* The product tone tokens, not Mantine's palette. Mantine's `light` variant
      puts its own shade-6 text on a shade-0 fill, which measured 3.0:1 for
      yellow — bright fill, unreadable label, and the first thing anyone
@@ -348,11 +354,9 @@ body[data-fullscreen="true"] .topbar.electron {
      touching tokens other surfaces already depend on, and without a second set
      of near-duplicate colors to keep in step. Do not "simplify" it back to the
      bare token: the ratio is the accessibility property, not a style choice. */
-  --badge-color: color-mix(in oklab, var(--tone, var(--muted)) 75%, var(--text)) !important;
-  --badge-bg: var(--tone-bg, transparent) !important;
-  font-weight: 400;
-  text-transform: none;
-  letter-spacing: 0;
+  --button-color: color-mix(in oklab, var(--tone, var(--muted)) 75%, var(--text)) !important;
+  --button-bg: var(--tone-bg, transparent) !important;
+  --button-hover: color-mix(in oklab, var(--tone, var(--muted)) 18%, transparent) !important;
 }
 .topbar .ext-badge.tone-success {
   --tone: var(--live);
@@ -374,29 +378,21 @@ body[data-fullscreen="true"] .topbar.electron {
   --tone: var(--muted);
   --tone-bg: color-mix(in oklab, var(--muted) 12%, transparent);
 }
-/* The badge's own glyph, and the first-load spinner, share this: sized to the
-   label rather than to the 26px box, so a badge with an icon is the same height
-   as one without. */
-.topbar .ext-badge .ext-badge-glyph {
-  display: inline-flex;
-  align-items: center;
-  margin-right: 5px;
-  opacity: 0.85;
-}
 /* An unavailable extension rendered as a hint: legible, but plainly not live
    state. Dashed rather than dimmer, because a project's install instruction has
    to survive being ignored twice. */
 .topbar .ext-badge-hint {
-  border: 1px dashed var(--border2);
+  --button-bd: 1px dashed var(--border2) !important;
   --tone-bg: transparent;
 }
-/* The first evaluation. Deliberately the label the config declared rather than a
-   blank box: something in the bar is about to say something about this worktree,
-   and a placeholder that names it is more useful than a grey rectangle. */
+/* The first evaluation, before there is a value. Deliberately still the label the
+   config declared: something in the bar is about to say something about this
+   worktree, and a placeholder that names it beats a grey rectangle. */
 .topbar .ext-badge-loading {
   --tone: var(--faint);
   --tone-bg: color-mix(in oklab, var(--muted) 8%, transparent);
 }
+
 /* One type size and one weight for the whole bar, matching the fields.
  *
  * Mantine's `compact-sm` button is 14px medium, its `xs` input 12px regular, and

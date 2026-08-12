@@ -18,7 +18,7 @@
  *   which is what keeps a badge that calls a rate-limited API from being
  *   evaluated for eighteen worktrees nobody is looking at.
  */
-import { ActionIcon, Badge, Button, Loader, Menu, Tooltip } from "@mantine/core";
+import { ActionIcon, Button, Menu, Tooltip } from "@mantine/core";
 import { IconChevronDown, IconExternalLink, IconRefresh } from "@tabler/icons-react";
 import { useContextMenu } from "mantine-contextmenu";
 import React from "react";
@@ -318,15 +318,16 @@ function ExtensionBadge(props: {
         multiline
         w={260}
       >
-        <Badge
+        <Button
           variant="light"
-          color="gray"
-          className="ext-badge ext-badge-hint"
-          style={hintHref ? { cursor: "pointer" } : undefined}
+          size="compact-sm"
+          className="ext-badge ext-badge-hint tone-neutral"
+          leftSection={spec.icon ? paneIcon(spec.icon, 12) : undefined}
+          style={hintHref ? undefined : { cursor: "default" }}
           onClick={hintHref ? () => props.onOpen(hintHref, "system") : undefined}
         >
           {spec.label}
-        </Badge>
+        </Button>
       </Tooltip>
     );
   }
@@ -338,12 +339,16 @@ function ExtensionBadge(props: {
     if (!props.busy) return null;
     return (
       <Tooltip label={`Checking ${spec.label}…`} withArrow openDelay={200}>
-        <Badge variant="light" className="ext-badge ext-badge-loading tone-neutral">
-          <span className="ext-badge-glyph">
-            <Loader size={9} color="var(--faint)" />
-          </span>
+        <Button
+          variant="light"
+          size="compact-sm"
+          className="ext-badge ext-badge-loading tone-neutral"
+          loading
+          loaderProps={{ size: 11 }}
+          style={{ cursor: "default" }}
+        >
           {spec.label}
-        </Badge>
+        </Button>
       </Tooltip>
     );
   }
@@ -363,10 +368,16 @@ function ExtensionBadge(props: {
   // a sensible one before the first run.
   const glyph = value.icon ?? spec.icon;
   const badge = (
-    <Badge
+    <Button
       variant="light"
+      size="compact-sm"
       className={`ext-badge tone-${value.tone}`}
-      style={clickable ? { cursor: "pointer" } : undefined}
+      // `loading` keeps the label and swaps the glyph for a centred spinner, so a
+      // refresh does not change the badge's width and shuffle the bar.
+      loading={props.busy}
+      loaderProps={{ size: 11 }}
+      leftSection={glyph ? paneIcon(glyph, 12) : undefined}
+      style={clickable ? undefined : { cursor: "default" }}
       onClick={
         // One link and no actions is a plain link; one action and no link runs
         // it. Anything more needs the menu below, so this handler is not used.
@@ -377,15 +388,8 @@ function ExtensionBadge(props: {
             : () => props.onActivate(actions[0].id)
       }
     >
-      {props.busy ? (
-        <span className="ext-badge-glyph">
-          <Loader size={9} color="currentColor" />
-        </span>
-      ) : (
-        glyph && <span className="ext-badge-glyph">{paneIcon(glyph, 12)}</span>
-      )}
       {value.text ?? spec.label}
-    </Badge>
+    </Button>
   );
 
   const wrapped = tooltip ? (
