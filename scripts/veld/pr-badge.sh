@@ -22,12 +22,16 @@
 # unauthenticated `gh` fails with its login hint instead of waiting forever.
 set -uo pipefail
 
-if ! command -v gh >/dev/null 2>&1; then
-  # Unreachable in normal use — `requires_bin: ["gh"]` keeps the badge from
-  # running at all without it. Kept so a hand-run explains itself.
-  echo "gh (the GitHub CLI) is not installed — see https://cli.github.com" >&2
-  exit 1
-fi
+for tool in gh python3; do
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    # Unreachable in normal use — `requires_bin` in veld.json keeps the badge from
+    # running at all without these. Kept so a hand-run explains itself, and
+    # because macOS ships a `python3` *stub* that is on PATH and fails when run:
+    # `requires_bin` can only ask whether a name resolves.
+    echo "$tool is not installed — the PR badge needs gh and python3" >&2
+    exit 1
+  fi
+done
 
 branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null) || branch=""
 if [ -z "$branch" ] || [ "$branch" = "HEAD" ]; then
@@ -35,11 +39,18 @@ if [ -z "$branch" ] || [ "$branch" = "HEAD" ]; then
   exit 0
 fi
 
-# One API call for everything the badge shows. stderr is captured rather than
-# printed straight through, because "no pull requests found" is an *expected*
-# answer that deserves a badge of its own rather than a failure.
+# One API call for everything the badge shows.
+#
+# **stdout and stderr are kept apart.** An earlier version used `2>&1` to capture
+# gh's diagnostics for the empty-state check below, which also merged any warning
+# gh writes on a *successful* call into the JSON — and then `json.load` threw and
+# the badge's tooltip was a Python traceback. So stderr goes to a file and is only
+# read on failure.
+errfile=$(mktemp -t veld-pr-badge)
+trap 'rm -f "$errfile"' EXIT
 if ! payload=$(gh pr view "$branch" \
-  --json number,state,isDraft,url,mergeable,statusCheckRollup 2>&1); then
+  --json number,state,isDraft,url,mergeable,statusCheckRollup 2>"$errfile"); then
+  payload=$(cat "$errfile")
   case "$payload" in
     *"no pull requests found"* | *"no open pull requests"* | *"Could not resolve"*)
       # The interesting empty state: no PR *yet*. The badge says so, and offers

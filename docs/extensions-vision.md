@@ -313,10 +313,17 @@ Round 1 is a **stateless, single-flight RPC**, not a daemon-side scheduler:
   `POST`, on worktree switch and then on its own interval while the window is
   focused. Nothing is evaluated for the other 17 registered worktrees, and
   nothing is evaluated while no window is open.
-- The daemon holds no badge values — only a map of in-flight runs, so three
-  windows asking at once collapse to **one child process**, and a request inside
-  the minimum interval is refused rather than re-run. There is no TTL cache, and
-  therefore no stampede at the moment a TTL expires.
+- The daemon **remembers each badge's last value for its own `refresh_seconds`**,
+  and the thing that prevents a stampede is *not* the absence of storage — it is
+  that the lock is held across the child run. Three windows asking at once collapse
+  to **one child process**: the second and third wait on the mutex and are then
+  answered from the run the first made, with the value's age reported. A
+  conventional TTL cache reads stale-and-returns on a miss, so all three would
+  launch a refresh at the tick the TTL expired; here there is nothing to miss on.
+  An **action** does not rate-limit against that memory, it invalidates it — a
+  state change is not a repeated question — and it does so with a per-worktree
+  timestamp rather than by taking the cells' locks, because those locks are held
+  across a run.
 - The response is the badge, or an explicit `failed`/`timeout` state. A run never
   hangs a response.
 
@@ -343,9 +350,19 @@ So the budget goes on bounding and exposing execution rather than on asking:
 
 - **`stdin` is closed and no tty is attached**, so a CLI that would prompt for
   credentials fails instead of hanging forever.
-- **A hard timeout**, enforced by killing the **process group**, not the pid.
-- **A byte cap on captured output**, and stdout is rendered as text — never as
-  markup.
+- **A hard timeout**, enforced by killing the **process group**, not the pid — and
+  from a *drop guard*, so the kill cannot be skipped by the request future being
+  dropped. Axum drops a handler when the client disconnects (a page reload, a closed
+  window, a quit app), and a deadline that lives only on the awaited path leaves the
+  repo's command running with nothing left to signal it. `kill_on_drop` alone is not
+  enough either: it reaps the direct child, so a `shell` command's `sh` dies while
+  whatever it forked keeps the pipe.
+- **A byte cap on captured output, applied while reading** — the pipes are drained
+  to EOF but at most 64 KiB is ever kept, so a badge that prints a log file is
+  truncated rather than growing the daemon's heap. Draining rather than *stopping*
+  at the cap is deliberate: an unread pipe fills, the child blocks in `write`, and
+  a merely chatty command that would have exited fine becomes a 20-second timeout
+  with no output at all. stdout is rendered as text — never as markup.
 - **A minimum `refresh_seconds` floor (15s) and a cap on how many extensions a
   project may declare (24)**, both named constants in `veld_core::ide`, so the
   cost bound is set by Veld and not by a file in somebody's repo (the same

@@ -37,7 +37,7 @@ const SLOT = "topBar";
  * project declaring the minimum does not make the browser wake up more often
  * than the daemon will ever answer differently.
  */
-const MIN_POLL_MS = 15_000;
+export const MIN_POLL_MS = 15_000;
 
 /** What one extension looks like once availability has been decided. */
 type Resolved = {
@@ -83,28 +83,27 @@ export function pollInterval(specs: ExtensionSpec[]): number {
   return Math.max(MIN_POLL_MS, Math.min(...declared));
 }
 
-export function TopBarExtensions(props: {
-  /** All of the worktree's declarations, in config order. */
-  extensions: ExtensionSpec[];
-  /** Which side of the bar this instance renders. */
-  align: "start" | "end";
-  /** The worktree the badges describe. Every call is scoped to it. */
-  worktreeId: number | null;
-  /** Open a URL in a browser pane, or `undefined` when there is no layout to
-   *  open into — then a `pane` link falls back to the system browser rather
-   *  than doing nothing. */
-  onOpenInPane: ((url: string) => void) | undefined;
-}) {
-  const { worktreeId } = props;
-  const mine = React.useMemo(
-    () =>
-      props.extensions
-        .filter((e) => e.slot === SLOT && (e.align ?? "start") === props.align)
-        .map(resolveExtension)
-        .filter((r): r is Resolved => r !== null),
-    [props.extensions, props.align],
+/**
+ * The slot's data: one poll, one timer, shared by both `align` clusters.
+ *
+ * **A hook rather than state inside the component, because the top bar mounts
+ * `TopBarExtensions` twice** — once per side. With the fetch inside, a project with
+ * a badge in each cluster got two timers and two whole-worktree requests per
+ * interval, and "Refresh all badges" updated only the cluster that was
+ * right-clicked while the other kept rendering pre-refresh values. The response
+ * always covers every badge in the worktree, so there was never a reason for the
+ * request to be per-cluster. Call this once, above both.
+ */
+export function useExtensionStatus(
+  worktreeId: number | null,
+  extensions: ExtensionSpec[],
+): ExtensionStatusState {
+  const live = React.useMemo(
+    () => extensions.filter((e) => e.slot === SLOT).map(resolveExtension).filter(isResolved),
+    [extensions],
   );
-  const hasStatus = mine.some((r) => r.spec.kind === "status" && !r.disabled);
+  const hasStatus = live.some((r) => r.spec.kind === "status" && !r.disabled);
+  const interval = pollInterval(live.map((r) => r.spec));
 
   const [values, setValues] = React.useState<Record<string, ExtensionStatus>>({});
   // Keyed by worktree so a switch cannot render the previous worktree's PR
@@ -119,15 +118,7 @@ export function TopBarExtensions(props: {
    * tell "still working" from "this project declares nothing".
    */
   const [busy, setBusy] = React.useState<Set<string>>(new Set());
-  const interval = pollInterval(mine.map((r) => r.spec));
 
-  /**
-   * Fetch this worktree's badge values.
-   *
-   * One function for the poll and for both Refresh entries, so a forced refresh
-   * lands in state the same way a polled one does. `live` is a ref rather than a
-   * closure flag because a Refresh outlives the effect that a poll belongs to.
-   */
   const load = React.useCallback(
     (opts?: { force?: boolean; id?: string }) => {
       if (worktreeId === null) return;
@@ -165,11 +156,11 @@ export function TopBarExtensions(props: {
       setValuesFor(null);
       return;
     }
-    let live = true;
+    let alive = true;
     const poll = () => {
       // A hidden window asks for nothing: the badge is not on screen, and the
       // command behind it may cost an API call.
-      if (!document.hidden && live) load();
+      if (!document.hidden && alive) load();
     };
     poll();
     const timer = window.setInterval(poll, interval);
@@ -178,17 +169,58 @@ export function TopBarExtensions(props: {
     };
     document.addEventListener("visibilitychange", onVisible);
     return () => {
-      live = false;
+      alive = false;
       window.clearInterval(timer);
       document.removeEventListener("visibilitychange", onVisible);
     };
   }, [worktreeId, hasStatus, interval, load]);
 
+  const statusCount = live.filter((r) => r.spec.kind === "status" && !r.disabled).length;
+  return {
+    value: (id: string) => (valuesFor === worktreeId ? values[id] : undefined),
+    busy: (id: string) => busy.has(id) || busy.has("*"),
+    statusCount,
+    refresh: load,
+  };
+}
+
+export interface ExtensionStatusState {
+  value: (id: string) => ExtensionStatus | undefined;
+  busy: (id: string) => boolean;
+  statusCount: number;
+  refresh: (opts?: { force?: boolean; id?: string }) => void;
+}
+
+function isResolved(r: Resolved | null): r is Resolved {
+  return r !== null;
+}
+
+export function TopBarExtensions(props: {
+  /** All of the worktree's declarations, in config order. */
+  extensions: ExtensionSpec[];
+  /** Which side of the bar this instance renders. */
+  align: "start" | "end";
+  /** The worktree the badges describe. Every call is scoped to it. */
+  worktreeId: number | null;
+  /** The slot's shared poll — see {@link useExtensionStatus}. Owned above this
+   *  component because the bar mounts it once per side. */
+  status: ExtensionStatusState;
+  /** Open a URL in a browser pane, or `undefined` when there is no layout to
+   *  open into — then a `pane` link falls back to the system browser rather
+   *  than doing nothing. */
+  onOpenInPane: ((url: string) => void) | undefined;
+}) {
+  const { worktreeId, status } = props;
+  const mine = React.useMemo(
+    () =>
+      props.extensions
+        .filter((e) => e.slot === SLOT && (e.align ?? "start") === props.align)
+        .map(resolveExtension)
+        .filter(isResolved),
+    [props.extensions, props.align],
+  );
+
   if (mine.length === 0 || worktreeId === null) return null;
-
-  const valueFor = (id: string) => (valuesFor === worktreeId ? values[id] : undefined);
-
-  const statusCount = mine.filter((r) => r.spec.kind === "status" && !r.disabled).length;
 
   const activate = (id: string) => {
     api
@@ -196,9 +228,11 @@ export function TopBarExtensions(props: {
       // An action usually changes what a badge says — creating the pull request
       // the badge just reported missing is the flagship case — so the badges are
       // re-read rather than left stale until the next interval. Forced, since the
-      // interval has almost certainly not elapsed.
+      // interval has almost certainly not elapsed. The daemon also invalidates its
+      // own memory on an action, so this really re-runs rather than being answered
+      // from before the click.
       .then(() => {
-        if (statusCount > 0) load({ force: true });
+        if (status.statusCount > 0) status.refresh({ force: true });
       })
       .catch((e) => notifyError("Run this action", e));
   };
@@ -219,13 +253,13 @@ export function TopBarExtensions(props: {
         <ExtensionControl
           key={r.spec.id}
           resolved={r}
-          value={valueFor(r.spec.id)}
-          busy={busy.has(r.spec.id) || busy.has("*")}
+          value={status.value(r.spec.id)}
+          busy={status.busy(r.spec.id)}
           all={props.extensions}
-          statusCount={statusCount}
+          statusCount={status.statusCount}
           onActivate={activate}
           onOpen={open}
-          onRefresh={load}
+          onRefresh={status.refresh}
         />
       ))}
     </>
@@ -248,19 +282,44 @@ function ExtensionControl(props: {
   const { spec, disabled, reason } = props.resolved;
   if (spec.kind === "menu") return <ExtensionMenu {...props} />;
   if (spec.kind === "action") {
+    // **A disabled control still has to hand over its install link.** The docs
+    // promise that a `when_missing: "hint"` entry opens `hint.href` on click, and a
+    // Mantine `disabled` control has `pointer-events: none` — so wiring it to
+    // `onClick` there does nothing. Instead the control stays enabled and *reads*
+    // as unavailable, and the click opens the hint rather than running the command:
+    // that is the newcomer path the feature exists for, and a dead button on it is
+    // the one place this must not be dead.
+    const hintHref = disabled ? spec.hint?.href : undefined;
+    const press = disabled
+      ? hintHref
+        ? () => props.onOpen(hintHref, "system")
+        : undefined
+      : () => props.onActivate(spec.id);
     return (
-      <Tooltip label={reason ?? spec.description ?? spec.label} withArrow openDelay={300}>
-        {/* A disabled Mantine control has `pointer-events: none`, so the tooltip
-            needs a wrapper to have anything to hover. */}
+      <Tooltip
+        label={
+          reason
+            ? hintHref
+              ? `${reason} (click to open)`
+              : reason
+            : (spec.description ?? spec.label)
+        }
+        withArrow
+        openDelay={300}
+        multiline
+        w={260}
+      >
+        {/* Wrapped so the tooltip has something to hover even when the inner
+            control ends up disabled. */}
         <span style={{ display: "inline-flex" }}>
           {spec.icon ? (
             <ActionIcon
               variant="subtle"
               size="sm"
-              className="ext-action"
-              disabled={disabled}
+              className={disabled ? "ext-action ext-unavailable" : "ext-action"}
+              disabled={disabled && !hintHref}
               aria-label={spec.label}
-              onClick={() => props.onActivate(spec.id)}
+              onClick={press}
             >
               {paneIcon(spec.icon, 14)}
             </ActionIcon>
@@ -271,9 +330,9 @@ function ExtensionControl(props: {
             <Button
               variant="subtle"
               size="compact-xs"
-              className="ext-action-label"
-              disabled={disabled}
-              onClick={() => props.onActivate(spec.id)}
+              className={disabled ? "ext-action-label ext-unavailable" : "ext-action-label"}
+              disabled={disabled && !hintHref}
+              onClick={press}
             >
               {spec.label}
             </Button>
@@ -472,6 +531,7 @@ function ExtensionMenu(props: {
   resolved: Resolved;
   all: ExtensionSpec[];
   onActivate: (id: string) => void;
+  onOpen: (url: string, where: "system" | "pane") => void;
 }) {
   const { spec, disabled, reason } = props.resolved;
   const members = (spec.items ?? [])
@@ -500,17 +560,30 @@ function ExtensionMenu(props: {
       </Menu.Target>
       <Menu.Dropdown>
         <Menu.Label>{spec.label}</Menu.Label>
-        {members.map((m) => (
-          <Menu.Item
-            key={m.spec.id}
-            disabled={m.disabled}
-            leftSection={m.spec.icon ? paneIcon(m.spec.icon, 14) : undefined}
-            onClick={() => props.onActivate(m.spec.id)}
-          >
-            {m.spec.label}
-            {m.disabled && m.reason ? ` — ${m.reason}` : ""}
-          </Menu.Item>
-        ))}
+        {members.map((m) => {
+          // Same rule as a standalone action: an unavailable member with an install
+          // link stays clickable *for the link*, because a menu item that reads
+          // "Needs code. Install …" and does nothing when clicked is the newcomer
+          // path failing at the last step.
+          const href = m.disabled ? m.spec.hint?.href : undefined;
+          return (
+            <Menu.Item
+              key={m.spec.id}
+              disabled={m.disabled && !href}
+              leftSection={m.spec.icon ? paneIcon(m.spec.icon, 14) : undefined}
+              onClick={
+                m.disabled
+                  ? href
+                    ? () => props.onOpen(href, "system")
+                    : undefined
+                  : () => props.onActivate(m.spec.id)
+              }
+            >
+              {m.spec.label}
+              {m.disabled && m.reason ? ` — ${m.reason}` : ""}
+            </Menu.Item>
+          );
+        })}
       </Menu.Dropdown>
     </Menu>
   );

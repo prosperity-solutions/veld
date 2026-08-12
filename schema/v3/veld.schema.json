@@ -483,7 +483,7 @@
       ]
     },
     "extension": {
-      "description": "One badge, button or menu this project contributes to the IDE chrome. What it does is keyed by the `type` discriminator.",
+      "description": "One badge, button or menu this project contributes to the IDE chrome. What it does is keyed by the `type` discriminator. NOTE: like `$defs.pane`, the per-type key checking lives in `if`/`then` branches with no `else`, so an entry whose `type` matches none of them is not validated here at all — that is deliberate, so a config written for a newer veld with more types is not red-squiggled wholesale, and the cost is that a *typo* in `type` passes the schema silently. `veld lint` is what catches it: the parser reports an unknown type, names the ones this version renders, and skips that entry while the rest of `ide.extensions` still applies.",
       "type": "object",
       "required": [
         "id",

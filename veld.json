@@ -66,7 +66,10 @@
         "open_in": "system",
         "argv": ["scripts/veld/pr-badge.sh"],
         "refresh_seconds": 60,
-        "requires_bin": ["gh"],
+        // Both, because the adapter script pipes gh's JSON through python3. A
+        // predicate that named only `gh` left the badge red with a python error on
+        // a machine without it, instead of taking the `hint` path below.
+        "requires_bin": ["gh", "python3"],
         // `hint` rather than `hide`: a fresh clone should *say* what this repo
         // expects you to have, and the href opens the install page.
         "when_missing": "hint",

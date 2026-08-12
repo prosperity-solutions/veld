@@ -58,9 +58,15 @@ const STATUS_TIMEOUT: Duration = Duration::from_secs(20);
 /// silently does nothing.
 const ACTIVATE_GRACE: Duration = Duration::from_secs(3);
 
-/// Bytes of stdout/stderr kept per run. Beyond this the child is still killed at
-/// the deadline, but nothing unbounded is buffered — a badge that accidentally
-/// `cat`s a log file must not grow the daemon's memory.
+/// Bytes of stdout/stderr read per run, **enforced while reading**.
+///
+/// This has to be a read-time bound, not a truncation afterwards. `wait_with_output`
+/// is `read_to_end` into a fresh `Vec` (tokio 1.50, `process/mod.rs`), so capping the
+/// result would mean the whole stream reached memory first: a badge that `cat`s a
+/// large file — re-run on a timer, unattended — could take the daemon's memory with
+/// it, and with the daemon go every terminal and run on the machine. So both pipes
+/// are read through a limited reader and the child's group is killed once either
+/// side is full.
 const MAX_OUTPUT_BYTES: usize = 64 * 1024;
 
 /// Characters of `text` a badge may render, and of a tooltip.
@@ -78,10 +84,16 @@ const MAX_TOOLTIP_CHARS: usize = 400;
 /// that click-spam cannot fork a process per click.
 const FORCED_REFRESH_FLOOR: Duration = Duration::from_secs(3);
 
-/// Live entries in [`RESULTS`] before the oldest are dropped.
+/// Live entries in [`RESULTS`] before idle ones are evicted.
 ///
 /// Bounded because the key space is (worktree × extension) and a long-lived daemon
-/// sees every worktree the user ever opens. Eviction only costs a re-run.
+/// sees every worktree the user ever opens. **Only unlocked cells are evicted**, and
+/// that restriction is the whole point: a locked cell is one a run is in flight on,
+/// and dropping it would let the next caller mint a fresh cell and start a second
+/// child for the same extension — losing exactly the single-flight property this
+/// module exists to hold, and putting `invalidate`'s snapshot out of reach of the
+/// run it needs to invalidate. Evicting an idle cell costs one re-run and nothing
+/// else. Reachable without malice: 24 badges across 11 worktrees.
 const MAX_TRACKED: usize = 256;
 
 /// The last result of one extension in one worktree, with when it was produced.
@@ -97,43 +109,54 @@ type Cell = Arc<tokio::sync::Mutex<Option<(Instant, StatusView)>>>;
 static RESULTS: LazyLock<Mutex<HashMap<(i64, String), Cell>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// Forget every remembered value for a worktree, so the next request re-runs.
+static INVALIDATED: LazyLock<Mutex<HashMap<i64, Instant>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Whether a value produced at `at` is still trustworthy for this worktree.
+fn invalidated_since(worktree: i64, at: Instant) -> bool {
+    INVALIDATED
+        .lock()
+        .expect("extension invalidations poisoned")
+        .get(&worktree)
+        .is_some_and(|stamp| *stamp >= at)
+}
+
+/// When a worktree's remembered values last stopped being trustworthy.
 ///
 /// **An action is a state change, not a repeated question.** Running one usually
 /// changes what a badge would say — creating the pull request a badge just
-/// reported missing is the flagship case — so the memory of the previous run has
-/// to be dropped rather than rate-limited against. Without this, an action
-/// followed immediately by a refresh is answered from the run made *before* the
-/// action, and the badge shows a spinner and then the old value: it looks like
-/// the refresh did nothing, intermittently, depending on whether
-/// [`FORCED_REFRESH_FLOOR`] had elapsed.
+/// reported missing is the flagship case — so the memory of the previous run has to
+/// be discarded rather than rate-limited against. Without this, an action followed
+/// immediately by a refresh is answered from the run made *before* the action, and
+/// the badge shows a spinner and then the old value: it looks like the refresh did
+/// nothing, intermittently, depending on whether [`FORCED_REFRESH_FLOOR`] had
+/// elapsed.
 ///
-/// The cells are **cleared in place rather than removed** from the map, so the
-/// `Arc` every concurrent caller is already waiting on stays the one they get.
-/// Dropping the entry instead would let the next request mint a fresh cell and
-/// start a second child while the first was still running, which is the
-/// single-flight property this module exists to hold. Awaiting each lock is what
-/// makes it ordered: an in-flight run finishes, its value is discarded, and the
-/// next caller re-runs.
-async fn invalidate(worktree: i64) {
-    let cells: Vec<Cell> = {
-        let map = RESULTS.lock().expect("extension results poisoned");
-        map.iter()
-            .filter(|((wt, _), _)| *wt == worktree)
-            .map(|(_, cell)| Arc::clone(cell))
-            .collect()
-    };
-    for cell in cells {
-        *cell.lock().await = None;
+/// **A timestamp, not a walk over the cells.** Clearing the cells would mean taking
+/// each of their locks, and [`evaluate`] holds one across a child run bounded by
+/// [`STATUS_TIMEOUT`] — so a click on an unrelated button waited out a slow badge
+/// (up to ~23s with the grace window), and every control in the project read as
+/// broken because one badge was network-bound. Comparing a stored value's `Instant`
+/// against this stamp is the same ordering with no waiting: a value produced before
+/// the action is stale by definition, including one produced by a run that was
+/// already in flight when the action landed.
+fn invalidate(worktree: i64) {
+    let mut stamps = INVALIDATED
+        .lock()
+        .expect("extension invalidations poisoned");
+    if stamps.len() > MAX_TRACKED {
+        stamps.clear();
     }
+    stamps.insert(worktree, Instant::now());
 }
 
 fn cell(worktree: i64, id: &str) -> Cell {
     let mut map = RESULTS.lock().expect("extension results poisoned");
     if map.len() > MAX_TRACKED {
-        // Cheap and correct: a dropped entry costs one extra run. Anything
-        // smarter (LRU bookkeeping) buys nothing at this size.
-        map.clear();
+        // `try_lock` is the "nobody is using this" test — see MAX_TRACKED. An
+        // `Arc` held only by the map, whose mutex is free, is an entry no caller
+        // can be waiting on. Anything smarter (true LRU) buys nothing at this size.
+        map.retain(|_, cell| Arc::strong_count(cell) > 1 || cell.try_lock().is_err());
     }
     Arc::clone(map.entry((worktree, id.to_owned())).or_default())
 }
@@ -207,9 +230,11 @@ pub(crate) async fn status(
     axum::extract::Query(query): axum::extract::Query<StatusQuery>,
 ) -> Result<Json<StatusResponse>, ApiError> {
     let (root, branch, auto_refresh) = worktree_target(id)?;
-    // The machine-global off switch. Answered with an empty list rather than an
-    // error: the declarations still travel on the worktree listing, so the UI can
-    // say the badges are switched off instead of showing a broken one.
+    // The machine-global off switch. An empty list rather than an error, because
+    // the user turned it off and a control reporting that back at them is noise —
+    // the badges simply do not render. The declarations still travel on the
+    // worktree listing, so `action` and `menu` entries keep working: a click is the
+    // user asking, which is the half this switch does not gate.
     if !auto_refresh {
         return Ok(Json(StatusResponse { items: Vec::new() }));
     }
@@ -263,7 +288,7 @@ async fn evaluate(
         } else {
             Duration::from_secs(status.refresh_seconds)
         };
-        if age < floor {
+        if age < floor && !invalidated_since(worktree, *at) {
             let mut view = view.clone();
             view.age_seconds = age.as_secs();
             return view;
@@ -542,9 +567,13 @@ pub(crate) async fn activate(
     let out = spawn_command(&action.command, &root, &builtins, ACTIVATE_GRACE)
         .await
         .map_err(|message| err(StatusCode::UNPROCESSABLE_ENTITY, message))?;
+    // Invalidate whatever the exit status. A non-zero exit does **not** mean
+    // nothing happened: `gh pr create && notify-something` can create the pull
+    // request and then fail, and a badge left on its pre-action value for a full
+    // interval is the worse answer. The cost of being wrong this way is one extra
+    // child run per failed click.
+    invalidate(id);
     if !out.success && !out.timed_out {
-        // A failed action changed nothing worth re-reading, so the remembered
-        // values stay — the badge keeps saying what it last truthfully said.
         return Err(err(
             StatusCode::UNPROCESSABLE_ENTITY,
             format!(
@@ -555,9 +584,6 @@ pub(crate) async fn activate(
             ),
         ));
     }
-    // Anything that ran — finished, or still running past the grace window —
-    // may have changed what a badge reports.
-    invalidate(id).await;
     // Still running at the deadline is the *expected* outcome for an editor
     // launcher, so the grace window's timeout is success here — unlike a status
     // run, where it means the badge never produced a value.
@@ -632,42 +658,130 @@ async fn spawn_command(
         .stderr(std::process::Stdio::piped())
         .process_group(0);
 
-    let child = cmd
+    // `kill_on_drop` covers the direct child; the guard below covers its whole
+    // group. Both are needed — see `GroupKill`.
+    cmd.kill_on_drop(true);
+
+    let mut child = cmd
         .spawn()
         .map_err(|e| format!("could not start {}: {e}", spec.display()))?;
-    let pid = child.id().map(|p| p as i32);
+    // Armed immediately, so every exit from this function — the deadline, an I/O
+    // error, or the request future being dropped under us — kills the group.
+    let mut guard = GroupKill(child.id().map(|p| p as i32));
 
-    match tokio::time::timeout(timeout, child.wait_with_output()).await {
+    let mut stdout_pipe = child.stdout.take();
+    let mut stderr_pipe = child.stderr.take();
+    let collect = async {
+        // Both pipes are drained concurrently with the wait. Draining matters as
+        // much as the cap: a child that fills a pipe nobody reads blocks in
+        // `write` and then dies at the deadline having done nothing, which reads
+        // as "your command is slow" rather than "veld stopped listening".
+        let (status, stdout, stderr) = tokio::try_join!(
+            child.wait(),
+            read_capped(&mut stdout_pipe),
+            read_capped(&mut stderr_pipe),
+        )?;
+        Ok::<_, std::io::Error>((status, stdout, stderr))
+    };
+
+    match tokio::time::timeout(timeout, collect).await {
         Ok(result) => {
-            let out = result.map_err(|e| format!("could not read the command's output: {e}"))?;
+            let (status, stdout, stderr) =
+                result.map_err(|e| format!("could not read the command's output: {e}"))?;
+            // It exited on its own, so there is no group left to signal.
+            guard.disarm();
             Ok(Output {
-                stdout: cap(&out.stdout),
-                stderr: cap(&out.stderr),
-                success: out.status.success(),
-                code: out.status.code(),
+                stdout,
+                stderr,
+                success: status.success(),
+                code: status.code(),
                 timed_out: false,
             })
         }
-        Err(_) => {
-            // The group, not the pid: a `shell` command's `sh` may have forked the
-            // thing that is actually stuck, and killing only the shell leaves it
-            // holding the pipe.
-            if let Some(pid) = pid {
-                // SAFETY: `killpg` on a pid that led its own group (set by
-                // `process_group(0)` above) either signals that group or fails
-                // with ESRCH because it already exited. It cannot reach the
-                // daemon's own group, which is what the spawn-time call bought.
-                unsafe {
-                    libc::killpg(pid, libc::SIGKILL);
-                }
-            }
-            Ok(Output {
-                stdout: String::new(),
-                stderr: String::new(),
-                success: false,
-                code: None,
-                timed_out: true,
-            })
+        // The guard kills the group on the way out of this scope.
+        Err(_) => Ok(Output {
+            stdout: String::new(),
+            stderr: String::new(),
+            success: false,
+            code: None,
+            timed_out: true,
+        }),
+    }
+}
+
+/// Reads a pipe to EOF while **keeping** at most [`MAX_OUTPUT_BYTES`].
+///
+/// Two requirements pull in opposite directions and both matter.
+///
+/// The cap has to be applied *while reading*: `wait_with_output` is `read_to_end`
+/// into a fresh `Vec`, so truncating its result means the whole stream reached
+/// memory first, and a badge that `cat`s a large file — unattended, on a timer —
+/// could take the daemon down with it.
+///
+/// But the read must not simply **stop** at the cap either. A pipe nobody drains
+/// fills, the child blocks in `write`, and it is then killed at the deadline: a
+/// merely chatty command that would have exited fine turns into a 20-second
+/// timeout with no output at all. That is a worse answer for the careless case than
+/// truncation, and the careless case is the common one.
+///
+/// So: drain to EOF, discarding past the cap. Memory is bounded, a well-behaved
+/// command still succeeds and gets a truncated badge, and an *endless* writer still
+/// hits the deadline — which is the only case where killing it is right.
+async fn read_capped<R>(pipe: &mut Option<R>) -> std::io::Result<String>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::AsyncReadExt as _;
+    let Some(pipe) = pipe.as_mut() else {
+        return Ok(String::new());
+    };
+    let mut kept = Vec::new();
+    let mut chunk = [0u8; 8 * 1024];
+    loop {
+        let n = pipe.read(&mut chunk).await?;
+        if n == 0 {
+            break;
+        }
+        if kept.len() < MAX_OUTPUT_BYTES {
+            let room = MAX_OUTPUT_BYTES - kept.len();
+            kept.extend_from_slice(&chunk[..n.min(room)]);
+        }
+        // Past the cap the bytes are read and dropped: the child keeps making
+        // progress, and nothing accumulates.
+    }
+    Ok(String::from_utf8_lossy(&kept).into_owned())
+}
+
+/// Kills a child's **process group** unless disarmed.
+///
+/// A guard rather than a line in the timeout branch, because the timeout branch is
+/// not the only way out. Axum drops a handler's future when the client disconnects
+/// — a page reload, a closed window, a quit app — and a bare
+/// `timeout(.., child.wait())` dropped that way leaves the repo's command running
+/// with no deadline and nothing left to signal it. `kill_on_drop` alone is not
+/// enough either: it reaps the direct child, so a `shell` command's `sh` dies while
+/// whatever it forked keeps the pipe and the CPU.
+///
+/// It also removes a subtler dependency: the previous version's `killpg` was sound
+/// only because the `Child` happened to still be alive as the match scrutinee, so an
+/// ordinary refactor could have made it signal a recycled pgid.
+struct GroupKill(Option<i32>);
+
+impl GroupKill {
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for GroupKill {
+    fn drop(&mut self) {
+        let Some(pid) = self.0 else { return };
+        // SAFETY: the pid led its own group (`process_group(0)` at spawn), so this
+        // either signals that group or fails with ESRCH because it has already
+        // exited. It cannot reach the daemon's own group. `kill_on_drop` reaps the
+        // child itself, so this is not racing a `wait` we still owe.
+        unsafe {
+            libc::killpg(pid, libc::SIGKILL);
         }
     }
 }
@@ -707,11 +821,6 @@ fn open_in_str(open_in: OpenIn) -> &'static str {
         OpenIn::System => "system",
         OpenIn::Pane => "pane",
     }
-}
-
-fn cap(bytes: &[u8]) -> String {
-    let end = bytes.len().min(MAX_OUTPUT_BYTES);
-    String::from_utf8_lossy(&bytes[..end]).into_owned()
 }
 
 fn first_line(s: &str) -> &str {
@@ -782,55 +891,197 @@ mod tests {
         parse_badge(stdout, &ext, &section, base)
     }
 
-    /// Running an action forgets the worktree's remembered values.
+    /// The child-process hygiene, against real processes.
+    ///
+    /// **These bounds are what veld shipped instead of a consent prompt**
+    /// (`docs/extensions-vision.md`), and every one of them could be deleted
+    /// without breaking a compile, a lint or another test. The symptom of losing
+    /// one is a leaked process tree, a hung request, or the daemon's memory — none
+    /// of which anybody reproduces from a diff.
+    mod hygiene {
+        use super::*;
+
+        fn shell(script: &str) -> veld_core::config::CommandSpec {
+            veld_core::config::CommandSpec::Shell(script.to_owned())
+        }
+
+        async fn run(script: &str, timeout: Duration) -> Output {
+            spawn_command(&shell(script), "/tmp", &HashMap::new(), timeout)
+                .await
+                .expect("spawned")
+        }
+
+        #[tokio::test]
+        async fn stdin_is_closed_so_a_prompt_cannot_hang_the_run() {
+            // A CLI that reads stdin must reach EOF at once rather than waiting on a
+            // pipe nobody will ever write to. This is what makes an unauthenticated
+            // `gh` fail with its login hint instead of wedging until the deadline.
+            let out = run("cat; echo done", Duration::from_secs(5)).await;
+            assert!(!out.timed_out, "a command reading stdin must not block");
+            assert!(out.success);
+            assert_eq!(out.stdout.trim(), "done");
+        }
+
+        #[tokio::test]
+        async fn output_is_capped_while_reading_not_afterwards() {
+            // Writes well past the cap and then **exits**, so this runs on the
+            // success path. That matters: the timeout path returns an empty
+            // `stdout` by contract, so a command that had to be killed would
+            // satisfy a length assertion without the cap existing at all — the
+            // test would pass for the wrong reason.
+            let over = MAX_OUTPUT_BYTES * 3;
+            let out = run(
+                &format!("yes veld | head -c {over}"),
+                Duration::from_secs(10),
+            )
+            .await;
+            assert!(!out.timed_out, "must exit on its own, not be killed");
+            // Stated against what was *written*, not only against the constant: an
+            // assertion of the form `len() <= MAX_OUTPUT_BYTES` alone is satisfied
+            // by a cap of any size, including one large enough to be no cap at all,
+            // because the input is sized from the same constant.
+            assert!(
+                out.stdout.len() < over,
+                "nothing was dropped — kept all {over} bytes, so the cap is not applied"
+            );
+            assert!(
+                !out.stdout.is_empty() && out.stdout.len() <= MAX_OUTPUT_BYTES,
+                "read {} bytes, cap is {MAX_OUTPUT_BYTES}",
+                out.stdout.len()
+            );
+        }
+
+        #[tokio::test]
+        async fn the_deadline_kills_the_whole_group_not_just_the_shell() {
+            // The reason the kill is `killpg` and not `kill`: a `shell` command's
+            // `sh` forks the thing that is actually stuck, so killing the shell
+            // alone leaves a process holding the pipe and the CPU forever.
+            //
+            // The grandchild reports its own pid to a file rather than to stdout,
+            // because stdout is empty on the timeout path by contract — and the pid
+            // is then checked directly. A `pgrep -f "sleep 30"` would match the
+            // `sh -c 'sleep 30 …'` wrapper's own command line too and pass or fail
+            // for the wrong reason.
+            let dir = tempfile::tempdir().expect("tempdir");
+            let pidfile = dir.path().join("grandchild.pid");
+            let out = run(
+                &format!("sleep 30 & echo $! > {}; wait", pidfile.display()),
+                Duration::from_millis(300),
+            )
+            .await;
+            assert!(out.timed_out, "the deadline must fire");
+
+            let pid: i32 = std::fs::read_to_string(&pidfile)
+                .expect("the shell wrote its grandchild's pid")
+                .trim()
+                .parse()
+                .expect("a pid");
+            // SIGKILL is asynchronous; give the kernel a moment to reap.
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            assert!(
+                !veld_core::process::is_alive(pid as u32),
+                "pid {pid} (`sleep 30`) survived the deadline — killing the direct \
+                 child is not enough, the group has to go"
+            );
+        }
+
+        #[tokio::test]
+        async fn the_child_environment_cannot_colour_the_contract() {
+            // A tool that thinks it is on a terminal emits escape sequences, and
+            // those would land inside the badge's text.
+            let out = run("echo \"$NO_COLOR|$TERM\"", Duration::from_secs(5)).await;
+            assert_eq!(out.stdout.trim(), "1|dumb");
+        }
+
+        #[tokio::test]
+        async fn the_command_runs_in_the_worktree() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let out = spawn_command(
+                &shell("pwd -P"),
+                &dir.path().to_string_lossy(),
+                &HashMap::new(),
+                Duration::from_secs(5),
+            )
+            .await
+            .expect("spawned");
+            let expected = std::fs::canonicalize(dir.path()).expect("canonical");
+            assert_eq!(out.stdout.trim(), expected.to_string_lossy());
+        }
+    }
+
+    /// Running an action makes the worktree's remembered values untrustworthy.
     ///
     /// The regression this pins was reported as "clicking sometimes loads but the
     /// colour does not change": an action changed state, the client forced a
     /// refresh, and `FORCED_REFRESH_FLOOR` answered it from the run made *before*
-    /// the action — so it depended on how fast you clicked. Asserted at the cache
-    /// level because the handler needs a database and a real child process, and the
-    /// defect was never in either.
+    /// the action — so it depended on how fast you clicked. Asserted against
+    /// `invalidated_since`, which is what `evaluate`'s freshness gate consults,
+    /// because the handler needs a database and a real child process and the defect
+    /// was never in either.
     #[tokio::test]
-    async fn an_action_forgets_what_the_badges_last_said() {
+    async fn an_action_makes_earlier_values_untrustworthy() {
         let mine = 4242;
         let other = 4343;
-        let view = |id: &str| StatusView {
-            id: id.to_owned(),
-            state: "ok",
-            text: Some("before".to_owned()),
-            icon: None,
-            tone: "neutral",
-            tooltip: None,
-            href: None,
-            open_in: "system",
-            actions: Vec::new(),
-            refresh_seconds: 60,
-            age_seconds: 0,
-        };
-        for (wt, id) in [(mine, "pr"), (mine, "tone"), (other, "pr")] {
-            let cell = cell(wt, id);
-            *cell.lock().await = Some((Instant::now(), view(id)));
-        }
+        let before = Instant::now();
+        // A stamp has to be strictly later than the value it invalidates, and
+        // `Instant` resolution is fine but not zero — sleep past it rather than
+        // relying on two adjacent calls differing.
+        tokio::time::sleep(Duration::from_millis(2)).await;
 
-        invalidate(mine).await;
+        invalidate(mine);
 
-        for id in ["pr", "tone"] {
-            assert!(
-                cell(mine, id).lock().await.is_none(),
-                "{id} must be re-run after an action, not answered from before it"
-            );
-        }
-        // Scoped to the worktree: another checkout's badges were not affected by
-        // an action taken over here.
         assert!(
-            cell(other, "pr").lock().await.is_some(),
+            invalidated_since(mine, before),
+            "a value produced before the action must be re-run, not served"
+        );
+        // Including one produced by a run that was already in flight when the
+        // action landed — that is the case a walk over the cells could not cover
+        // without waiting for the run to finish.
+        assert!(
+            !invalidated_since(mine, Instant::now()),
+            "a value produced after the action is trustworthy"
+        );
+        // Scoped to the worktree: an action here says nothing about another
+        // checkout's badges.
+        assert!(
+            !invalidated_since(other, before),
             "another worktree's values must survive"
         );
-        // Leave the shared static as it was found — these tests run in one process.
+        // Leave the shared statics as they were found — these tests share a process.
+        INVALIDATED
+            .lock()
+            .expect("extension invalidations poisoned")
+            .retain(|wt, _| *wt != mine && *wt != other);
+    }
+
+    /// Eviction never drops a cell a run is in flight on.
+    ///
+    /// The property `MAX_TRACKED` documents, and the one a `map.clear()` broke: a
+    /// dropped locked cell lets the next caller mint a fresh one and start a second
+    /// child for the same extension, which is the single-flight guarantee gone.
+    #[tokio::test]
+    async fn eviction_spares_cells_with_a_run_in_flight() {
+        let busy = 5150;
+        let held = cell(busy, "in-flight");
+        let guard = held.lock().await;
+
+        // Push the map over the threshold with idle cells.
+        for i in 0..=MAX_TRACKED {
+            let _ = cell(9000 + i as i64, "idle");
+        }
+
+        {
+            let map = RESULTS.lock().expect("extension results poisoned");
+            assert!(
+                map.contains_key(&(busy, "in-flight".to_owned())),
+                "a locked cell must survive eviction"
+            );
+        }
+        drop(guard);
         RESULTS
             .lock()
             .expect("extension results poisoned")
-            .retain(|(wt, _), _| *wt != mine && *wt != other);
+            .retain(|(wt, _), _| *wt != busy && (*wt < 9000 || *wt > 9000 + MAX_TRACKED as i64));
     }
 
     #[test]

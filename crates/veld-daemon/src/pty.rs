@@ -3889,6 +3889,42 @@ mod tests {
         assert_eq!(names, veld_core::ide::PANE_BUILTINS.to_vec());
     }
 
+    /// The same gate for `ide.extensions`, whose scope is one name-family narrower.
+    ///
+    /// `worktree_builtins` is what *resolves* and `EXTENSION_BUILTINS` is what
+    /// `veld lint` *accepts*, and they are a second hand-maintained pair. Drift
+    /// either way is silent and confusing in opposite directions: a name in
+    /// `worktree_builtins` but not the allowlist is a lint error for a variable
+    /// that would have resolved fine, and the reverse is a badge that lints clean
+    /// and then fails at spawn with "could not resolve the command".
+    #[test]
+    fn extension_commands_resolve_exactly_the_names_lint_accepts() {
+        let cfg: veld_core::config::VeldConfig = serde_json::from_value(serde_json::json!({
+            "schemaVersion": "3",
+            "name": "probe",
+            "nodes": {},
+        }))
+        .expect("minimal config");
+        let builtins = worktree_builtins(FsPath::new("/tmp/wt"), "main", &cfg);
+        let mut names: Vec<&str> = builtins.keys().map(String::as_str).collect();
+        names.sort_unstable();
+        assert_eq!(names, veld_core::ide::EXTENSION_BUILTINS.to_vec());
+
+        // And the relationship to the pane scope is the one documented on
+        // `EXTENSION_BUILTINS`: identical apart from the `pane.*` family, which
+        // exists only while a pane is launching.
+        let pane_only: Vec<&str> = veld_core::ide::PANE_BUILTINS
+            .iter()
+            .filter(|n| !veld_core::ide::EXTENSION_BUILTINS.contains(n))
+            .copied()
+            .collect();
+        assert!(
+            pane_only.iter().all(|n| n.starts_with("pane.")),
+            "a pane builtin that is not `pane.*` should be available to an \
+             extension too, but these are not: {pane_only:?}"
+        );
+    }
+
     /// A holder speaking a version this build does not know must be refused —
     /// **and** told to hang up, or its shell would outlive every daemon that will
     /// ever refuse it identically.

@@ -1223,9 +1223,6 @@ fn parse_extension(item: &serde_json::Value, at: &str, out: &mut IdeSection) -> 
     })
 }
 
-/// Every key this extension type may declare, sorted — the union of the common set
-/// and the type's own. Built rather than listed per type so a new common key cannot
-/// be added to one type's list and forgotten in the others.
 fn parse_extension_command(
     entry: &serde_json::Map<String, serde_json::Value>,
     location: &str,
@@ -1234,6 +1231,9 @@ fn parse_extension_command(
     parse_command_in_scope(entry, location, "extension", EXTENSION_BUILTINS, out)
 }
 
+/// Every key this extension type may declare, sorted — the union of the common set
+/// and the type's own. Built rather than listed per type so a new common key cannot
+/// be added to one type's list and forgotten in the others.
 fn extension_keys(kind: &str) -> Vec<&'static str> {
     let extra = match kind {
         "status" => STATUS_EXTENSION_KEYS,
@@ -1426,6 +1426,18 @@ pub fn is_web_url(url: &str) -> bool {
     url.starts_with("http://") || url.starts_with("https://")
 }
 
+/// How many characters an emoji icon may be.
+///
+/// A glyph, not a string. Bounded because this parses a *runtime* value — a status
+/// extension's stdout — and it is rendered as text into a 42px bar, so an unbounded
+/// one destroys the bar for that worktree. Two rather than one because a single
+/// user-perceived emoji is routinely several `char`s (a variation selector, a skin
+/// tone, a ZWJ sequence), and the alternative — counting graphemes — would mean a
+/// segmentation dependency in `veld-core` for one field. Anything longer is not a
+/// glyph and is refused rather than truncated, since half a ZWJ sequence renders as
+/// something the author did not write.
+const MAX_EMOJI_CHARS: usize = 8;
+
 /// Read an icon out of a string, or `None` if it names nothing.
 ///
 /// The same rule [`parse_pane_icon`] applies, without a problem to report: a
@@ -1440,7 +1452,7 @@ pub fn parse_icon_name(text: &str) -> Option<PaneIcon> {
         return None;
     }
     if !text.is_ascii() {
-        return Some(PaneIcon::Emoji(text.to_owned()));
+        return (text.chars().count() <= MAX_EMOJI_CHARS).then(|| PaneIcon::Emoji(text.to_owned()));
     }
     PANE_ICON_NAMES
         .contains(&text)
@@ -3645,6 +3657,28 @@ mod tests {
         // Still accepted: an unknown key is a warning, never a dropped entry —
         // the same leniency panes have.
         assert_eq!(parsed.extensions.len(), 1);
+    }
+
+    #[test]
+    fn an_icon_from_a_runtime_value_is_bounded() {
+        // A badge's stdout may name an icon, and an emoji is unbounded by nature —
+        // but it is rendered as text into a 42px bar, so a 20KB "emoji" would
+        // destroy the bar. Refused rather than truncated: half a ZWJ sequence is a
+        // different glyph.
+        assert_eq!(
+            parse_icon_name("🦊"),
+            Some(PaneIcon::Emoji("🦊".to_owned()))
+        );
+        // A flag is two scalars plus a joiner; a family is more. These must pass.
+        for ok in ["🏳️\u{200d}🌈", "👩\u{200d}💻"] {
+            assert!(parse_icon_name(ok).is_some(), "{ok:?} is one glyph");
+        }
+        assert_eq!(parse_icon_name(&"好".repeat(200)), None);
+        assert_eq!(parse_icon_name("not-an-icon-name"), None);
+        assert_eq!(
+            parse_icon_name("code"),
+            Some(PaneIcon::Name("code".to_owned()))
+        );
     }
 
     #[test]

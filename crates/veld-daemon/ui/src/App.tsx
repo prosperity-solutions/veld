@@ -217,7 +217,7 @@ import {
   startStorageKey,
 } from "./components/StartConfig";
 import { ConfigVarsDialog } from "./components/ConfigVars";
-import { TopBarExtensions } from "./components/Extensions";
+import { TopBarExtensions, useExtensionStatus } from "./components/Extensions";
 import {
   ChangeMarkerDialog,
   ConfirmDeleteWorktreeDialog,
@@ -5093,6 +5093,10 @@ function TopBar(props: {
   onOpenInPane: ((url: string) => void) | undefined;
 }) {
   const { worktree, run } = props;
+  // One poll for the whole slot, not one per cluster: this component renders
+  // `TopBarExtensions` twice (start and end) and the response covers every badge
+  // in the worktree either way. See `useExtensionStatus`.
+  const extensionStatus = useExtensionStatus(worktree?.id ?? null, props.extensions);
   const repoAvailable = props.repo?.available ?? false;
   const repoLabel = props.repo
     ? props.repo.available
@@ -5412,6 +5416,7 @@ function TopBar(props: {
                 extensions={props.extensions}
                 align="start"
                 worktreeId={worktree?.id ?? null}
+                status={extensionStatus}
                 onOpenInPane={props.onOpenInPane}
               />
               {run && (props.hideDisabled ? props.urls.length > 0 : true) && (
@@ -5460,6 +5465,7 @@ function TopBar(props: {
           extensions={props.extensions}
           align="end"
           worktreeId={worktree.id}
+          status={extensionStatus}
           onOpenInPane={props.onOpenInPane}
         />
       )}

@@ -385,6 +385,14 @@ body[data-fullscreen="true"] .topbar.electron {
   --button-bd: 1px dashed var(--border2) !important;
   --tone-bg: transparent;
 }
+/* An unavailable action or menu that is still clickable, because it has an install
+   link to hand over. It must *read* as unavailable without being `disabled`, which
+   would take `pointer-events` with it and leave the newcomer path dead at its last
+   step. */
+.topbar .ext-unavailable {
+  opacity: 0.55;
+}
+
 /* The first evaluation, before there is a value. Deliberately still the label the
    config declared: something in the bar is about to say something about this
    worktree, and a placeholder that names it beats a grey rectangle. */
