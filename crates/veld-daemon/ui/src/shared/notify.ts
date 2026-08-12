@@ -210,7 +210,9 @@ export interface TerminalNotifyOptions {
 }
 
 export function notifyTerminal(opts: TerminalNotifyOptions): void {
+  const id = `veld-terminal-notify-${Math.random().toString(36).slice(2)}`;
   notifications.show({
+    id,
     title: opts.title,
     // The toast's whole surface is clickable, but that is only discoverable if
     // it says so — a visible "click to focus" hint on its own line.
@@ -221,7 +223,13 @@ export function notifyTerminal(opts: TerminalNotifyOptions): void {
       createElement("span", { className: "term-notify-focus" }, "Click to focus"),
     ),
     color: "teal",
-    onClick: opts.onClick,
+    // Hide on click rather than relying on Mantine's default (which leaves the
+    // toast up until its own timeout) — the click already did the thing the
+    // toast was offering, so lingering is stale, not informative.
+    onClick: () => {
+      notifications.hide(id);
+      opts.onClick();
+    },
     autoClose: 8000,
   });
 }

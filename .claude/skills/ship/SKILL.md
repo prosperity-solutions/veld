@@ -48,14 +48,22 @@ in their request):
    - *Light (`SPAWNS: 6`, `ROUNDS: 2`)* — for a small / mechanical change. The
      doc's own trivia clause (§11) still applies underneath: a sub-50-line,
      no-stakes diff with a green pre-pass gets angles 4+5 at sonnet, one round.
+   - *Super light (`SPAWNS: 1`, `ROUNDS: 1`)* — for a tiny, obviously-scoped fix
+     (a handful of lines, one clear behavior change, no new surface). One sonnet
+     agent reads the diff once for correctness — no staged angles, no separate
+     verify pass — and reports findings directly. This is a further step down
+     from Light's own trivia-clause floor (§11's angles 4+5, one round); reach
+     for it only when a second opinion would be reading the same three lines
+     twice. Skips the loop's ledger and multi-round structure entirely — there
+     is no round two to carry state into.
    - *None* — skip review. AGENTS.md makes the multi-angle review **mandatory for
      every change**, so this is the maintainer explicitly overriding that step;
      confirm they mean it and note the risk in the PR body.
 
    The stakes override (§3.3 — privileged helper, secrets/relay tokens, gateway
    auth, proxy headers, daemon API, SQLite migrations) is **not** downgradable by
-   this answer. If *Light* is chosen and the diff turns out to touch one of those
-   paths, run the standard loop and say so in the final report.
+   this answer. If *Light* or *Super light* is chosen and the diff turns out to
+   touch one of those paths, run the standard loop and say so in the final report.
 2. **Merge policy** (AGENTS.md's default posture is **ask-first**; bypass is the
    exception and requires the maintainer's explicit upfront authorization, which
    this questionnaire captures)

@@ -41,15 +41,18 @@
     // `claude` or `codex` is known to veld — they are names in this file, the
     // same way `npx browser-sync` below is.
     //
-    // The two agents demonstrate the **two shapes** a resumable pane can take,
-    // which is why both are here rather than one:
+    // These panes demonstrate the **two shapes** a resumable pane can take:
     //
-    //   claude — accepts an id veld chose, so each pane owns its own
-    //            conversation and two panes never collide.
+    //   claude / claude-sonnet / pi — each accepts an id veld chose, so every
+    //            pane owns its own conversation and two panes never collide.
     //   codex  — mints its own id and cannot be told one, so the pane carries
     //            no token and leans on the tool's own "most recent session".
     //
-    // Both are offered in **auto mode only**. There used to be a second Claude
+    // `claude` and `claude-sonnet` are the same pane pinned to different
+    // models (Opus, Sonnet) — the model that's pinned is what the label
+    // names, so a resumed session can never drift out from under its label.
+    //
+    // All are offered in **auto mode only**. There used to be a second Claude
     // pane running `--dangerously-skip-permissions`; it is gone on purpose, so
     // that the panes this repo hands a contributor are the ones that still stop
     // and ask. Run the unsandboxed variant from a plain terminal if you want it.
@@ -57,8 +60,8 @@
       {
         "id": "claude",
         "type": "terminal",
-        "label": "Claude - auto",
-        "description": "Claude Code in this worktree, in auto permission mode",
+        "label": "Claude Opus",
+        "description": "Claude Code (Opus) in this worktree, in auto permission mode",
         "icon": "robot",
         "requires_bin": ["claude"],
         // This moved in both directions, so read it as both. Against the pane
@@ -70,25 +73,66 @@
         // `auto` gates is the CLI's business and is not documented here; check
         // `claude --help` for the current set rather than trusting this comment.
         //
+        // `--model opus` is pinned rather than left to the CLI's own default,
+        // because the label says "Opus" — an unpinned model would drift out
+        // from under a label that stopped being true.
+        //
         // `--session-id` creates the conversation under an id veld chose, which
         // is what makes the `resume` below able to name it after a reboot.
         "argv": [
           "claude",
           "--permission-mode",
           "auto",
+          "--model",
+          "opus",
           "--session-id",
           "${veld.pane.token}"
         ],
-        // Repeated on resume: the pane's label promises auto mode, and a
-        // resumed session that quietly came back in a different one would make
-        // that label a lie for the rest of the conversation.
+        // Repeated on resume: the pane's label promises auto mode on Opus, and
+        // a resumed session that quietly came back in a different mode or
+        // model would make that label a lie for the rest of the conversation.
         "resume": {
           "argv": [
             "claude",
             "--resume",
             "${veld.pane.token}",
             "--permission-mode",
-            "auto"
+            "auto",
+            "--model",
+            "opus"
+          ]
+        },
+        "auto_resume": true
+      },
+      {
+        // Same shape as `claude` above, pinned to Sonnet instead of Opus —
+        // a distinct pane rather than a variant of the other, because the
+        // token is per-pane: two panes means two independent conversations
+        // that can both be open at once.
+        "id": "claude-sonnet",
+        "type": "terminal",
+        "label": "Claude Sonnet",
+        "description": "Claude Code (Sonnet) in this worktree, in auto permission mode",
+        "icon": "robot",
+        "requires_bin": ["claude"],
+        "argv": [
+          "claude",
+          "--permission-mode",
+          "auto",
+          "--model",
+          "sonnet",
+          "--session-id",
+          "${veld.pane.token}"
+        ],
+        "resume": {
+          "argv": [
+            "claude",
+            "--resume",
+            "${veld.pane.token}",
+            "--permission-mode",
+            "auto",
+            "--model",
+            "sonnet"
           ]
         },
         "auto_resume": true
