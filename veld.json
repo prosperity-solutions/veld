@@ -93,7 +93,7 @@
         // `external-link`, not `code`: the `</>` glyph reads as "source code"
         // rather than "hand this to another application".
         "icon": "external-link",
-        "items": ["webstorm", "vscode", "idea"]
+        "items": ["vscode", "webstorm"]
       },
       // **No `requires_bin` on the editors, and that is the interesting part.**
       // Every one of these ships a command-line launcher that is *not installed
@@ -114,22 +114,16 @@
       // application is installed", which is a first-class case for the very
       // feature it is being used for.
       {
-        "id": "webstorm",
-        "type": "action",
-        "label": "WebStorm",
-        "shell": "command -v webstorm >/dev/null 2>&1 && exec webstorm \"${veld.root}\" || exec open -a WebStorm \"${veld.root}\""
-      },
-      {
         "id": "vscode",
         "type": "action",
         "label": "VS Code",
         "shell": "command -v code >/dev/null 2>&1 && exec code \"${veld.root}\" || exec open -a \"Visual Studio Code\" \"${veld.root}\""
       },
       {
-        "id": "idea",
+        "id": "webstorm",
         "type": "action",
-        "label": "IntelliJ IDEA",
-        "shell": "command -v idea >/dev/null 2>&1 && exec idea \"${veld.root}\" || exec open -a \"IntelliJ IDEA\" \"${veld.root}\""
+        "label": "WebStorm",
+        "shell": "command -v webstorm >/dev/null 2>&1 && exec webstorm \"${veld.root}\" || exec open -a WebStorm \"${veld.root}\""
       },
       // A badge that walks through every tone, one click at a time. Badge colour
       // is the one part of this feature no test can check — a contrast ratio is

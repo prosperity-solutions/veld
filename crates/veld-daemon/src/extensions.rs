@@ -97,6 +97,37 @@ type Cell = Arc<tokio::sync::Mutex<Option<(Instant, StatusView)>>>;
 static RESULTS: LazyLock<Mutex<HashMap<(i64, String), Cell>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+/// Forget every remembered value for a worktree, so the next request re-runs.
+///
+/// **An action is a state change, not a repeated question.** Running one usually
+/// changes what a badge would say — creating the pull request a badge just
+/// reported missing is the flagship case — so the memory of the previous run has
+/// to be dropped rather than rate-limited against. Without this, an action
+/// followed immediately by a refresh is answered from the run made *before* the
+/// action, and the badge shows a spinner and then the old value: it looks like
+/// the refresh did nothing, intermittently, depending on whether
+/// [`FORCED_REFRESH_FLOOR`] had elapsed.
+///
+/// The cells are **cleared in place rather than removed** from the map, so the
+/// `Arc` every concurrent caller is already waiting on stays the one they get.
+/// Dropping the entry instead would let the next request mint a fresh cell and
+/// start a second child while the first was still running, which is the
+/// single-flight property this module exists to hold. Awaiting each lock is what
+/// makes it ordered: an in-flight run finishes, its value is discarded, and the
+/// next caller re-runs.
+async fn invalidate(worktree: i64) {
+    let cells: Vec<Cell> = {
+        let map = RESULTS.lock().expect("extension results poisoned");
+        map.iter()
+            .filter(|((wt, _), _)| *wt == worktree)
+            .map(|(_, cell)| Arc::clone(cell))
+            .collect()
+    };
+    for cell in cells {
+        *cell.lock().await = None;
+    }
+}
+
 fn cell(worktree: i64, id: &str) -> Cell {
     let mut map = RESULTS.lock().expect("extension results poisoned");
     if map.len() > MAX_TRACKED {
@@ -511,13 +542,9 @@ pub(crate) async fn activate(
     let out = spawn_command(&action.command, &root, &builtins, ACTIVATE_GRACE)
         .await
         .map_err(|message| err(StatusCode::UNPROCESSABLE_ENTITY, message))?;
-    // Still running at the deadline is the *expected* outcome for an editor
-    // launcher, so the grace window's timeout is success here — unlike a status
-    // run, where it means the badge never produced a value.
-    if out.timed_out {
-        return Ok(Json(ActivateResponse { state: "started" }));
-    }
-    if !out.success {
+    if !out.success && !out.timed_out {
+        // A failed action changed nothing worth re-reading, so the remembered
+        // values stay — the badge keeps saying what it last truthfully said.
         return Err(err(
             StatusCode::UNPROCESSABLE_ENTITY,
             format!(
@@ -528,7 +555,15 @@ pub(crate) async fn activate(
             ),
         ));
     }
-    Ok(Json(ActivateResponse { state: "finished" }))
+    // Anything that ran — finished, or still running past the grace window —
+    // may have changed what a badge reports.
+    invalidate(id).await;
+    // Still running at the deadline is the *expected* outcome for an editor
+    // launcher, so the grace window's timeout is success here — unlike a status
+    // run, where it means the badge never produced a value.
+    Ok(Json(ActivateResponse {
+        state: if out.timed_out { "started" } else { "finished" },
+    }))
 }
 
 struct Output {
@@ -745,6 +780,57 @@ mod tests {
             age_seconds: 0,
         };
         parse_badge(stdout, &ext, &section, base)
+    }
+
+    /// Running an action forgets the worktree's remembered values.
+    ///
+    /// The regression this pins was reported as "clicking sometimes loads but the
+    /// colour does not change": an action changed state, the client forced a
+    /// refresh, and `FORCED_REFRESH_FLOOR` answered it from the run made *before*
+    /// the action — so it depended on how fast you clicked. Asserted at the cache
+    /// level because the handler needs a database and a real child process, and the
+    /// defect was never in either.
+    #[tokio::test]
+    async fn an_action_forgets_what_the_badges_last_said() {
+        let mine = 4242;
+        let other = 4343;
+        let view = |id: &str| StatusView {
+            id: id.to_owned(),
+            state: "ok",
+            text: Some("before".to_owned()),
+            icon: None,
+            tone: "neutral",
+            tooltip: None,
+            href: None,
+            open_in: "system",
+            actions: Vec::new(),
+            refresh_seconds: 60,
+            age_seconds: 0,
+        };
+        for (wt, id) in [(mine, "pr"), (mine, "tone"), (other, "pr")] {
+            let cell = cell(wt, id);
+            *cell.lock().await = Some((Instant::now(), view(id)));
+        }
+
+        invalidate(mine).await;
+
+        for id in ["pr", "tone"] {
+            assert!(
+                cell(mine, id).lock().await.is_none(),
+                "{id} must be re-run after an action, not answered from before it"
+            );
+        }
+        // Scoped to the worktree: another checkout's badges were not affected by
+        // an action taken over here.
+        assert!(
+            cell(other, "pr").lock().await.is_some(),
+            "another worktree's values must survive"
+        );
+        // Leave the shared static as it was found — these tests run in one process.
+        RESULTS
+            .lock()
+            .expect("extension results poisoned")
+            .retain(|(wt, _), _| *wt != mine && *wt != other);
     }
 
     #[test]

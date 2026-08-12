@@ -615,6 +615,34 @@ The general rule, worth keeping: **a thing in the chrome that responds to a clic
 is a Button, and reaching for a Badge to get a pill shape means re-implementing a
 control.** `leftSection` is how a glyph goes in one, never a hand-spaced `<span>`.
 
+### 2026-08-12 — An action invalidates; it is not rate-limited against
+
+Reported from use as "clicking the demo badge sometimes loads but the colour does
+not change". The script was correct and the system was wrong, which is worth
+recording because the shape recurs.
+
+Running an action, then forcing a refresh, was answered from the run made
+*before* the action — because a forced refresh is bounded by
+`FORCED_REFRESH_FLOOR` (3s), and a click plus a re-read lands well inside it. So
+the badge showed a spinner and then the old value, intermittently, depending on
+how fast the user clicked.
+
+**The fix is a distinction the cache did not make: a repeated question deserves a
+rate limit, a state change deserves an invalidation.** An action now forgets the
+worktree's remembered values, so the next request must re-run whatever the clock
+says. The floor stays for the user's own Refresh, where it does the job it was
+written for.
+
+Two details in the implementation that are easy to get wrong the other way:
+
+- **The cells are cleared in place, not removed from the map.** Dropping the entry
+  would let the next request mint a fresh cell and start a second child while the
+  first was still running — reintroducing the stampede the single-flight design
+  exists to prevent, in a narrower window.
+- **A *failed* action invalidates nothing.** It changed nothing worth re-reading,
+  so the badge keeps saying what it last truthfully said rather than being reset
+  by an action that did not happen.
+
 ## The extension backlog
 
 Everything in this table is **customization-layer by the tests above** — none of
