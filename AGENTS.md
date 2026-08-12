@@ -186,6 +186,22 @@ and several were paid for in this codebase already.
   Design context that must outlive a working document belongs in the PR
   description, commit messages, or `docs/` — don't cite `notes/` files from
   code comments, since readers of the repo can't see them.
+- **Never root a filesystem search at `/`, or scan wider than the question
+  needs.** `find /`, `grep -r` from `/`, or any traversal that isn't scoped to
+  `.`, the repo root, or a specific real path can walk into macOS's TCC-
+  protected folders (Photos Library, Music Library, Mail, and others) — even a
+  plain `stat` of those directories triggers a permission dialog, repeatedly,
+  for every protected folder the traversal reaches. This has actually happened:
+  an agent chasing a path under a not-yet-installed `node_modules` reached for
+  `find / -path /proc -prune -o -type d -name "@mantine" -print` instead of
+  scoping down, and it fired a stack of Photos/Music access prompts with no
+  useful result. A `PreToolUse` hook in `.claude/settings.json` now blocks a
+  `find` rooted at bare `/` before it runs, but the hook is a backstop, not a
+  substitute for judgement — the same hazard applies to any other unscoped
+  system-wide traversal (`grep -r / …`, `mdfind` with no scope, etc.) that the
+  hook doesn't pattern-match. If you don't know where something lives, narrow
+  by directory (the repo root, `~/Library/…`, a specific crate) before
+  reaching for a broad search.
 - **Leave a worktree clean before you stop in it.** Building and running tests
   drifts `Cargo.lock`, and experiment scaffolding lands untracked (`.idea/`,
   a scratch dir, a prototype). A worktree carrying uncommitted changes or
