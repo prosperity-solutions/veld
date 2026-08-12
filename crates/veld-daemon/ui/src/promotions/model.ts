@@ -281,8 +281,12 @@ export function veldCards(promotions: readonly Promotion[], firstUseIso: string)
  *   card, so a day that has not happened yet is after *every* arrival, forever —
  *   the never-expiring card this channel deleted the `onboarding` kind to be rid
  *   of. `parse_news` refuses it too and tells the author, which is where the fix
- *   belongs; this is what protects a reader whose daemon predates that check, or
- *   whose clock disagrees with the author's.
+ *   belongs; this is the second half, for the case the parser cannot see: **the
+ *   two sides read different clocks.** The daemon compares against the later of its
+ *   local and UTC day, this compares against the reader's UTC day, and the reader
+ *   and the daemon can be different machines. (It is *not* protection against an
+ *   older daemon: the bundle is `include_str!`'d into the daemon binary, so a bundle
+ *   is never newer than the daemon serving it.)
  * - **An unknown glyph falls back to `inbox`.** Also parser-enforced; the
  *   fallback exists so a newer daemon naming a glyph this bundle has not learned
  *   renders a card with the wrong mark rather than no card at all.

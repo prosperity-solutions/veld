@@ -2389,8 +2389,10 @@ the primary clone and you will see your own card — which is a fine way to prev
 one, as long as you know it is what is happening.
 
 **Five live items, and retiring one is deleting it.** Over the cap it is the
-entries with the **oldest `since`** that go, named in the warning — so a card you
-just added always survives and you never need to delete a good one to make room.
+entries with the **oldest `since`** that go, named in the warning — so an ordinary
+new card, dated today, survives and you never need to delete a good one to make
+room. It goes by the date, not by where the entry sits, so a *backdated* addition
+can be the one dropped.
 Items over the cap are
 dropped with a `veld lint` warning, as is any malformed entry — nothing here can
 fail a config load. Delete a card once it has stopped being news; the caps and the

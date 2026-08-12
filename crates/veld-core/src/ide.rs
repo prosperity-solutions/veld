@@ -1088,16 +1088,27 @@ fn plausible_day(day: &str) -> bool {
     (1..=12).contains(&num(5, 7)) && (1..=31).contains(&num(8, 10))
 }
 
-/// Today, as the `YYYY-MM-DD` string [`plausible_day`] accepts.
+/// The latest day it currently is anywhere this machine can name — the **later** of
+/// its local day and the UTC day, as the `YYYY-MM-DD` string [`plausible_day`]
+/// accepts.
 ///
-/// **Local**, not UTC, and that is the lenient direction on purpose: an author east
-/// of UTC writing "today" would otherwise have their own card rejected for being in
-/// the future. The consumer's gate is the UTC day (see `utcDay` in the bundle's
-/// `model.ts`), so the two can disagree by less than a day — the same edge that
-/// gate already documents, and it costs a card being invisible for some hours
-/// rather than a card that is never anybody's news.
-fn today_local() -> String {
-    chrono::Local::now().format("%Y-%m-%d").to_string()
+/// One of the two is always "tomorrow" relative to the other, and picking either one
+/// alone is strict in one hemisphere. Local alone is strict in the **west**: an
+/// author in Berlin dates a card today, and on a Los Angeles machine after 17:00 the
+/// UTC day has already rolled over while the local day has not — so the card would
+/// be dropped as "in the future" on the very day it was written. That is
+/// fail-*closed* on the one thing this feature exists to do, which is deliver the
+/// card. UTC alone is strict in the **east**, where an author writing their own local
+/// today is a day ahead of it.
+///
+/// Taking the later of the two gives a day of slack in whichever direction the
+/// machine needs, with no date arithmetic anywhere — both are `YYYY-MM-DD` strings,
+/// so "later" is `max`. A transposed year (`2062` for `2026`) is still refused
+/// everywhere, which is the typo this check exists for.
+fn today_anywhere() -> String {
+    let local = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let utc = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    local.max(utc)
 }
 
 /// Characters a card's copy may not contain at all.
@@ -1153,7 +1164,7 @@ fn parse_news(value: &serde_json::Value, out: &mut IdeSection) {
         });
         return;
     };
-    let today = today_local();
+    let today = today_anywhere();
     for (index, item) in items.iter().enumerate() {
         let at = format!("ide.news[{index}]");
         let Some(entry) = item.as_object() else {
@@ -2907,10 +2918,17 @@ mod tests {
 
     // -- ide.news --------------------------------------------------------------
 
+    /// A well-formed item. Its `since` is **comfortably in the past**, not "today":
+    /// `parse_news` reads the real clock (`today_anywhere`), so a fixture dated on
+    /// the day these tests were written would be refused as future-dated on any
+    /// machine whose clock reads earlier — a stale container image, or a clock rolled
+    /// back to bisect. The failure would then point at the date gate while claiming
+    /// to test the cap. Only `a_news_item_dated_in_the_future_is_dropped` should
+    /// depend on where "now" is.
     fn news_item(extra: serde_json::Value) -> serde_json::Value {
         let mut item = json!({
             "id": "build-moved",
-            "since": "2026-08-12",
+            "since": "2020-01-02",
             "eyebrow": "Heads up",
             "headline": "Run the suite with one command",
             "body": "The test script moved behind `just test`, so a stale local wrapper is the one thing that will still fail today.",
@@ -3022,14 +3040,15 @@ mod tests {
     #[test]
     fn the_live_item_cap_goes_by_date_not_by_position() {
         // Newest first, oldest last — the exact inverse of the append convention.
+        // All in the past, so the future-date gate can never be what fails here.
         let days = [
-            "2026-08-12",
-            "2026-08-11",
-            "2026-08-10",
-            "2026-08-09",
-            "2026-08-08",
-            "2026-01-02",
-            "2026-01-01",
+            "2020-06-12",
+            "2020-06-11",
+            "2020-06-10",
+            "2020-06-09",
+            "2020-06-08",
+            "2020-01-02",
+            "2020-01-01",
         ];
         let items: Vec<serde_json::Value> = days
             .iter()
@@ -3064,7 +3083,7 @@ mod tests {
         }
         // Today itself is fine — a card written and merged the same day is the
         // normal case, and the local day is what the author is working in.
-        let today = today_local();
+        let today = today_anywhere();
         let parsed = one_news(news_item(json!({ "since": today })));
         assert_eq!(parsed.news.len(), 1, "{:?}", parsed.problems);
     }

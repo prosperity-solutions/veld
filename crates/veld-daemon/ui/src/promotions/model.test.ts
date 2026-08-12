@@ -343,7 +343,8 @@ describe("a project's own news", () => {
     // never-expiring card the `onboarding` kind was deleted to be rid of, arriving
     // through the one channel veld does not author, and `2062` for `2026` is one
     // keystroke. `parse_news` refuses it and tells the author; this is the guard
-    // for a reader whose daemon predates that check.
+    // for the case the parser cannot see — the two sides read different clocks, on
+    // what may be different machines.
     expect(projectCards(REPO, [item({ since: "2062-08-12" })], TODAY)).toEqual([]);
     // Today itself ships — a card written and merged the same day is the normal
     // case, and it is the reader's own UTC day that decides.

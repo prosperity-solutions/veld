@@ -197,9 +197,16 @@ export function usePromotions(options: {
   const promptable = states ? toPrompt(all, states) : [];
 
   useEffect(() => {
+    // **Waits for the settings document too**, not only for cards to exist. The
+    // prompt latches — `setSettledFor` runs when the reader closes it — so opening
+    // before `ui.showProjectNews` is known means opening a panel that *cannot*
+    // contain the project's cards, and then never auto-prompting them for the rest
+    // of the page load. Badge only, which is the promise quietly downgraded. Same
+    // reason `suppressAuto` waits for `repoList`.
+    if (options.settings === null) return;
     if (settled || options.suppressAuto || promptable.length === 0 || open) return;
     setOpen({ cards: promptable, automatic: true, project: projectRoot });
-  }, [settled, options.suppressAuto, promptable, open, projectRoot]);
+  }, [settled, options.suppressAuto, options.settings, promptable, open, projectRoot]);
 
   /**
    * Record a state for whatever the panel is showing, and close it.
@@ -220,12 +227,15 @@ export function usePromotions(options: {
       // already failed.
       setSettledFor(open.project);
       setOpen(null);
-      // **Nothing is written against an unknown state map.** A null `states` means
-      // the request that carries it failed, so the panel is showing an ungated list
-      // (see `buildCards`) — and marking that read would write a row per card,
-      // including every one that predates this reader. Closing is still closing; the
-      // next page load asks again.
-      if (!states) return;
+      // **Nothing is written until both halves of the arrival answer are known.**
+      // A null `states` means the request carrying it failed. A null `firstUse` means
+      // the cards in `open.cards` were built with `UNKNOWN_ARRIVAL`, so *none* of
+      // them counts as predating this reader — and `browse()` is reachable before
+      // that request lands, so a panel opened then and closed after `states` arrives
+      // would write a row for every promotion in the build, including all the ones
+      // that predate them. That is exactly what `unreadOf` exists to avoid. Closing
+      // is still closing; the next page load asks again.
+      if (!states || !firstUse) return;
       // Only what this user actually has outstanding. Browsing shows every card
       // there is, and marking the auto-read ones would write a row per card the
       // user never had.
@@ -240,7 +250,7 @@ export function usePromotions(options: {
         .then((res) => setStates(res.states))
         .catch(() => {});
     },
-    [open, states],
+    [open, states, firstUse],
   );
 
   const markRead = useCallback(() => settle("read"), [settle]);

@@ -316,8 +316,10 @@ load — `veld lint` is what says so.
 never-expiring card: the date is the only thing that retires an item, so a day that
 has not happened yet is after every arrival, forever — including everyone who joins
 later. `2062` for `2026` is one keystroke. Both halves check it: `parse_news` drops
-the entry and tells the author, and `projectCards` drops it again client-side for a
-reader whose daemon predates that check.
+the entry and tells the author, and `projectCards` drops it again client-side —
+because the two compare against different clocks (the daemon against the later of
+its local and UTC day, the reader against their own UTC day) and the reader and the
+daemon need not be the same machine.
 
 Deliberately **not** built: a rate limit (whose clock? and three cards in a
 migration week is legitimate) and per-project opt-in (consent would have to be

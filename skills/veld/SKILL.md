@@ -459,8 +459,9 @@ that is documentation, and the docs already have it.
 **Rules with teeth:**
 
 - **Five live items, maximum.** Over the cap, the entries with the **oldest
-  `since`** are dropped with a `veld lint` warning naming them — so a card you just
-  added always survives, and you never have to delete a good one to make room. **Retiring an item is deleting it** — when you add one, delete anything
+  `since`** are dropped with a `veld lint` warning naming them — so a card dated
+  today survives and you never have to delete a good one to make room. By date, not
+  by position, so a backdated entry can be the one dropped. **Retiring an item is deleting it** — when you add one, delete anything
   that has stopped being news.
 - **Never rename an id, never reuse a retired one.** The id is what each
   teammate's read state is stored against: a rename re-shows the card to the whole
