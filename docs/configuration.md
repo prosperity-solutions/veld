@@ -2722,16 +2722,19 @@ and neither one is a veld feature.
 
       // One control, not one button per editor.
       { "id": "open-in", "slot": "topBar", "type": "menu", "label": "Open this worktree in",
-        "icon": "code", "items": ["webstorm", "vscode"] },
+        "icon": "external-link", "items": ["vscode", "webstorm"] },
 
-      // No `slot`, so these never render on their own — the menu above is how
-      // they are reached.
-      { "id": "webstorm", "type": "action", "label": "WebStorm",
-        "argv": ["webstorm", "${veld.root}"],
-        "requires_bin": ["webstorm"], "when_missing": "hide" },
+      // No `slot`, so these never render on their own — the menu above is how they
+      // are reached, in the order it lists them.
+      //
+      // **And no `requires_bin`, deliberately** — see [when the tool is not
+      // installed](#when-the-tool-is-not-installed). `code` and `webstorm` are
+      // launchers installed *separately* from the editor, so a PATH check hides the
+      // option on a machine that has the application. The command finds it instead.
       { "id": "vscode", "type": "action", "label": "VS Code",
-        "argv": ["code", "${veld.root}"],
-        "requires_bin": ["code"], "when_missing": "hide" }
+        "shell": "command -v code >/dev/null 2>&1 && exec code \"${veld.root}\" || exec open -a \"Visual Studio Code\" \"${veld.root}\"" },
+      { "id": "webstorm", "type": "action", "label": "WebStorm",
+        "shell": "command -v webstorm >/dev/null 2>&1 && exec webstorm \"${veld.root}\" || exec open -a WebStorm \"${veld.root}\"" }
     ]
   }
 }

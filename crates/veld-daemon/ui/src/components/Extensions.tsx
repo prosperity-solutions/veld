@@ -569,6 +569,12 @@ function ExtensionMenu(props: {
           return (
             <Menu.Item
               key={m.spec.id}
+              // Dimmed the same way a standalone unavailable action is
+              // (`ext-unavailable`). Without it a member that stays clickable *for
+              // its install link* renders at full opacity and reads as a working
+              // command, distinguished only by a text suffix — the opposite of the
+              // "greyed" the docs promise for `when_missing: "hint"`.
+              className={m.disabled ? "ext-unavailable" : undefined}
               disabled={m.disabled && !href}
               leftSection={m.spec.icon ? paneIcon(m.spec.icon, 14) : undefined}
               onClick={

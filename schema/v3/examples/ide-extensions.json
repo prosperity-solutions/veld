@@ -54,23 +54,24 @@
         "type": "menu",
         "label": "Open this worktree in",
         "icon": "code",
-        "items": ["webstorm", "vscode"]
+        "items": ["vscode", "webstorm"]
+      },
+      // **No `requires_bin` on an editor, deliberately.** It asks the user's PATH,
+      // and `code`/`webstorm` are launchers installed *separately* from the
+      // application — so a PATH check hides the option on a machine that has the
+      // editor. The command falls back to the bundle instead, and `open -a` exits
+      // non-zero for one that is genuinely absent.
+      {
+        "id": "vscode",
+        "type": "action",
+        "label": "VS Code",
+        "shell": "command -v code >/dev/null 2>&1 && exec code \"${veld.root}\" || exec open -a \"Visual Studio Code\" \"${veld.root}\""
       },
       {
         "id": "webstorm",
         "type": "action",
         "label": "WebStorm",
-        "argv": ["webstorm", "${veld.root}"],
-        "requires_bin": ["webstorm"],
-        "when_missing": "hide"
-      },
-      {
-        "id": "vscode",
-        "type": "action",
-        "label": "VS Code",
-        "argv": ["code", "${veld.root}"],
-        "requires_bin": ["code"],
-        "when_missing": "hide"
+        "shell": "command -v webstorm >/dev/null 2>&1 && exec webstorm \"${veld.root}\" || exec open -a WebStorm \"${veld.root}\""
       }
     ]
   },

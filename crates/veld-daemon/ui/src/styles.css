@@ -392,6 +392,12 @@ body[data-fullscreen="true"] .topbar.electron {
 .topbar .ext-unavailable {
   opacity: 0.55;
 }
+/* A menu member is rendered in a portal, so it is not inside `.topbar` — the same
+   class needs an unscoped rule to reach it. Without this an unavailable member that
+   stays clickable for its install link looks like a working command. */
+.ext-unavailable {
+  opacity: 0.55;
+}
 
 /* The first evaluation, before there is a value. Deliberately still the label the
    config declared: something in the bar is about to say something about this
