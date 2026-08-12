@@ -163,8 +163,8 @@ pub const MAX_NEWS_BODY: usize = 160;
 /// so a project that has more than this many things to say at once has a
 /// changelog to say them in.
 ///
-/// Over the cap, the **oldest** entries are dropped — see the tail of
-/// [`parse_news`] for why that direction and not the other.
+/// Over the cap, the entries with the **oldest `since`** are dropped — see the tail
+/// of [`parse_news`] for why by date and not by array position.
 pub const MAX_NEWS_ITEMS: usize = 5;
 
 /// Every key a `terminal` pane may declare, in sorted order.
@@ -1310,33 +1310,48 @@ fn parse_news(value: &serde_json::Value, out: &mut IdeSection) {
         });
     }
 
-    // **Over the cap, the OLDEST entries go.** Applied after the whole array is
-    // parsed, rather than refusing items once the cap is reached, because those are
-    // opposite answers to "whose card is expendable" and only one of them is
-    // compatible with the rest of the feature: authors are told to *append*
-    // (`docs/promotions.md`), and the history view breaks a shared day by reverse
-    // array order — so the last entry is the newest thing, and refusing past the cap
-    // would have dropped precisely the card that just landed. That is the one card
-    // with an audience; the entries at the front are the ones already auto-read for
-    // most of the team.
+    // **Over the cap, the oldest entries by `since` go — not the ones at the front
+    // of the array.**
     //
-    // It still reports, and it still says the same thing: retiring a news item is
-    // deleting it, and a project with more than this many live cards has a changelog
-    // to put them in.
+    // Two decisions here, and the second corrects the first. Applying the cap after
+    // the whole array is parsed, rather than refusing items once the cap is reached,
+    // is what stops the card that *just landed* being the one dropped: authors are
+    // told to append, and the history view breaks a shared day by reverse array
+    // order, so the last entry is the newest thing.
+    //
+    // But array position is **not** chronology, and assuming it was would have made
+    // this a worse version of the bug it fixed. `ide` arrays *concatenate across
+    // `include` files* in sorted-filename order (see `merge_reserved` in
+    // `include.rs`), and `docs/configuration.md` actively suggests moving news into
+    // `veld.d/news.jsonc` — so a second file sorting earlier puts a newer card at
+    // the front. An author who prepends, which is how changelogs are written, does
+    // the same thing. `since` is the field that means "when", so `since` is what
+    // decides; the array index only breaks a tie, ascending, matching the history
+    // view's own within-a-day order.
+    //
+    // Survivors keep their relative order, because that order is what `historyOf`
+    // ties-breaks on.
     if out.news.len() > MAX_NEWS_ITEMS {
-        let dropped = out.news.len() - MAX_NEWS_ITEMS;
-        let ids: Vec<String> = out
-            .news
-            .drain(..dropped)
-            .map(|item| format!("{:?}", item.id))
+        let mut by_age: Vec<usize> = (0..out.news.len()).collect();
+        by_age.sort_by(|&a, &b| out.news[a].since.cmp(&out.news[b].since).then(a.cmp(&b)));
+        let mut doomed: Vec<usize> = by_age
+            .into_iter()
+            .take(out.news.len() - MAX_NEWS_ITEMS)
+            .collect();
+        doomed.sort_unstable();
+        let ids: Vec<String> = doomed
+            .iter()
+            .rev()
+            .map(|&i| format!("{:?}", out.news.remove(i).id))
             .collect();
         out.problems.push(IdeProblem {
             location: "ide.news".to_owned(),
             message: format!(
                 "a project may have at most {MAX_NEWS_ITEMS} news items live at once, so the \
-                 {dropped} oldest were dropped: {}. Retiring a news item is deleting it — \
-                 remove the ones that have stopped being news",
-                ids.join(", ")
+                 {} with the oldest `since` were dropped: {}. Retiring a news item is deleting \
+                 it — remove the ones that have stopped being news",
+                doomed.len(),
+                ids.iter().rev().cloned().collect::<Vec<_>>().join(", ")
             ),
         });
     }
@@ -2979,15 +2994,14 @@ mod tests {
 
     #[test]
     fn the_live_item_cap_keeps_the_newest_and_names_what_it_dropped() {
+        // Same date on every entry, so the tie-break is what is under test: the
+        // author appended, and appending must never cost you the card you just
+        // wrote. If this ever keeps `item-0`, dropping-from-the-end is back.
         let items: Vec<serde_json::Value> = (0..MAX_NEWS_ITEMS + 2)
             .map(|i| news_item(json!({ "id": format!("item-{i}") })))
             .collect();
         let parsed = section(json!({ "news": items }));
         assert_eq!(parsed.news.len(), MAX_NEWS_ITEMS);
-        // **The entries an author just appended survive.** Authors are told to
-        // append, and the history view treats the last element as the newest, so
-        // dropping from the end would have dropped the card that just landed — the
-        // only one with an audience. If this ever reads `item-0`, that is back.
         assert_eq!(parsed.news[0].id, "item-2");
         assert_eq!(parsed.news[MAX_NEWS_ITEMS - 1].id, "item-6");
         // One problem for the whole overflow, naming every id the author has to go
@@ -2997,6 +3011,43 @@ mod tests {
         assert!(parsed.problems[0].message.contains("\"item-0\""));
         assert!(parsed.problems[0].message.contains("\"item-1\""));
         assert!(parsed.problems[0].message.contains("Retiring"));
+    }
+
+    /// **Array position is not chronology.** `ide` arrays concatenate across
+    /// `include` files in sorted-filename order, and `docs/configuration.md`
+    /// suggests putting news in `veld.d/news.jsonc` — so a file sorting earlier can
+    /// put a *newer* card at the front, and an author who prepends does the same. A
+    /// cap that dropped the front of the array would then drop the newest card while
+    /// reporting it as the oldest.
+    #[test]
+    fn the_live_item_cap_goes_by_date_not_by_position() {
+        // Newest first, oldest last — the exact inverse of the append convention.
+        let days = [
+            "2026-08-12",
+            "2026-08-11",
+            "2026-08-10",
+            "2026-08-09",
+            "2026-08-08",
+            "2026-01-02",
+            "2026-01-01",
+        ];
+        let items: Vec<serde_json::Value> = days
+            .iter()
+            .enumerate()
+            .map(|(i, day)| news_item(json!({ "id": format!("item-{i}"), "since": day })))
+            .collect();
+        let parsed = section(json!({ "news": items }));
+        assert_eq!(parsed.news.len(), MAX_NEWS_ITEMS);
+        // The two January entries go; every August one survives, in the order the
+        // merged array had them, because `historyOf` ties-breaks on that order.
+        let kept: Vec<&str> = parsed.news.iter().map(|n| n.id.as_str()).collect();
+        assert_eq!(
+            kept,
+            ["item-0", "item-1", "item-2", "item-3", "item-4"],
+            "the cap must drop the oldest by `since`, not the front of the array"
+        );
+        assert!(parsed.problems[0].message.contains("\"item-5\""));
+        assert!(parsed.problems[0].message.contains("\"item-6\""));
     }
 
     /// The gate's load-bearing half: `since` is the only thing that retires a card,

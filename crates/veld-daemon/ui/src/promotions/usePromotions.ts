@@ -18,14 +18,15 @@
 
 import { useCallback, useEffect, useState } from "react";
 
-import { api } from "../api";
+import { api, type SettingsDoc } from "../api";
+import { showProjectNews } from "../shared/settings";
 import { PROMOTIONS } from "./content";
 import {
+  buildCards,
   type Card,
+  mergeStates,
   type ProjectNewsItem,
   type PromotionState,
-  buildCards,
-  mergeStates,
   toPrompt,
   unreadCount,
   unreadOf,
@@ -41,8 +42,17 @@ export interface NewsProject {
 }
 
 export interface PromotionsState {
-  /** The panel's contents, or `null` when it is closed. */
-  open: { cards: Card[]; automatic: boolean } | null;
+  /**
+   * The panel's contents, or `null` when it is closed.
+   *
+   * `project` is the root that was selected **when the panel opened**, carried here
+   * rather than read at close time: the selection can move on its own (a claim hunt
+   * retargets it, and `repos[0]` shifts when another window imports or removes a
+   * repo), and settling the *current* selection would then mark a project settled
+   * that never prompted — silencing its news for the rest of the page load, which is
+   * the exact regression `settledFor` exists to prevent.
+   */
+  open: { cards: Card[]; automatic: boolean; project: string | null } | null;
   /** Everything this build and this project ship, for the history view. */
   all: Card[];
   /**
@@ -93,8 +103,17 @@ export function usePromotions(options: {
    * checkout is read as it stands, so a card drafted there is live.)
    */
   project: NewsProject | null;
-  /** `ui.showProjectNews`. When off, a project's cards are not built at all. */
-  showProject: boolean;
+  /**
+   * The settings document, or `null` while it has not loaded.
+   *
+   * Taken raw rather than as a resolved boolean so that "not known yet" stays
+   * distinguishable from "absent, take the default". `ui.showProjectNews` defaults
+   * to **on**, so resolving it early would auto-open a project's cards in front of
+   * a reader who had switched them off — and the *Got it!* that follows writes read
+   * rows for cards they opted out of. Settings arriving later cannot re-close a
+   * dialog that already latched.
+   */
+  settings: SettingsDoc | null;
 }): PromotionsState {
   const [states, setStates] = useState<Record<string, PromotionState> | null>(null);
   const [firstUse, setFirstUse] = useState<string | null>(null);
@@ -170,7 +189,7 @@ export function usePromotions(options: {
     promotions: PROMOTIONS,
     firstUseIso: firstUse,
     project: options.project,
-    showProject: options.showProject,
+    showProject: options.settings === null ? null : showProjectNews(options.settings),
     today: utcDay(new Date().toISOString()),
   });
 
@@ -179,8 +198,8 @@ export function usePromotions(options: {
 
   useEffect(() => {
     if (settled || options.suppressAuto || promptable.length === 0 || open) return;
-    setOpen({ cards: promptable, automatic: true });
-  }, [settled, options.suppressAuto, promptable, open]);
+    setOpen({ cards: promptable, automatic: true, project: projectRoot });
+  }, [settled, options.suppressAuto, promptable, open, projectRoot]);
 
   /**
    * Record a state for whatever the panel is showing, and close it.
@@ -199,12 +218,18 @@ export function usePromotions(options: {
       // because a fetch failed is far worse than a card shown again — and
       // `browse()` can open this panel while that fetch is still in flight or has
       // already failed.
-      setSettledFor(projectRoot);
+      setSettledFor(open.project);
       setOpen(null);
+      // **Nothing is written against an unknown state map.** A null `states` means
+      // the request that carries it failed, so the panel is showing an ungated list
+      // (see `buildCards`) — and marking that read would write a row per card,
+      // including every one that predates this reader. Closing is still closing; the
+      // next page load asks again.
+      if (!states) return;
       // Only what this user actually has outstanding. Browsing shows every card
       // there is, and marking the auto-read ones would write a row per card the
       // user never had.
-      const ids = unreadOf(open.cards, states ?? {});
+      const ids = unreadOf(open.cards, states);
       if (ids.length === 0) return;
       setStates((current) => mergeStates(current ?? {}, ids, state));
       // Never block the close on the write. The merge is idempotent, so a failed
@@ -215,7 +240,7 @@ export function usePromotions(options: {
         .then((res) => setStates(res.states))
         .catch(() => {});
     },
-    [open, states, projectRoot],
+    [open, states],
   );
 
   const markRead = useCallback(() => settle("read"), [settle]);
@@ -225,8 +250,8 @@ export function usePromotions(options: {
     // Everything there is, whatever its state — including auto-read items, which
     // is how somebody catches up on what changed before they arrived. Closing
     // this marks read: they came here on purpose.
-    setOpen({ cards: all, automatic: false });
-  }, [all]);
+    setOpen({ cards: all, automatic: false, project: projectRoot });
+  }, [all, projectRoot]);
 
   return {
     open,
@@ -234,7 +259,10 @@ export function usePromotions(options: {
     // Only when its news is actually being shown: with `ui.showProjectNews` off,
     // a tab named after the project would offer to filter to cards this session
     // has deliberately not built.
-    projectName: options.showProject ? (options.project?.name ?? null) : null,
+    projectName:
+      options.settings !== null && showProjectNews(options.settings)
+        ? (options.project?.name ?? null)
+        : null,
     any: all.length > 0,
     unread,
     browse,

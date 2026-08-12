@@ -2388,7 +2388,10 @@ directory's working tree at whatever it has checked out. Draft a card on a branc
 the primary clone and you will see your own card — which is a fine way to preview
 one, as long as you know it is what is happening.
 
-**Five live items, and retiring one is deleting it.** Items past the cap are
+**Five live items, and retiring one is deleting it.** Over the cap it is the
+entries with the **oldest `since`** that go, named in the warning — so a card you
+just added always survives and you never need to delete a good one to make room.
+Items over the cap are
 dropped with a `veld lint` warning, as is any malformed entry — nothing here can
 fail a config load. Delete a card once it has stopped being news; the caps and the
 scarcity are the whole reason a surface that interrupts people stays worth being
@@ -2399,6 +2402,13 @@ string each teammate's read/dismissed state is stored against, so a rename
 re-shows the card to the whole team. Never reuse a retired one — the new card is
 suppressed for everyone who saw the old one. Ids are namespaced per project
 before they are stored, so another repo shipping the same slug is not a collision.
+
+**A teammate's "when did I join" is when they imported the project.** Which means
+removing and re-importing a repo — or a fresh machine, or a wiped database — moves
+that answer *forwards*, so the back-catalogue becomes silently caught-up rather than
+a stack of modals. That is the right direction for somebody who has just imported a
+repo, but it does mean a card merged last week can be missed by somebody who
+re-imported yesterday.
 
 Cards say which project they came from, beside Veld's own, so a project's card can
 never be mistaken for something Veld said. A reader who wants none of them turns

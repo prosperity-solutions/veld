@@ -53,7 +53,7 @@ import { Button, SegmentedControl, Stack, Text } from "@mantine/core";
 import { useState } from "react";
 
 import { Modal } from "../components/dialogs";
-import { type Card, type SourceFilter, filterOptions, historyOf } from "./model";
+import { type Card, filterOptions, historyOf, type SourceFilter } from "./model";
 import { PromoSection } from "./Section";
 
 export function WhatsNewDialog(props: {

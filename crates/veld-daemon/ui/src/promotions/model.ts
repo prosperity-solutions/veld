@@ -353,7 +353,19 @@ export function utcDay(iso: string): string {
   return iso.slice(0, 10);
 }
 
-/** What the surface hands {@link buildCards} — both channels, and the two gates. */
+/**
+ * Stands in for an arrival nobody knows yet.
+ *
+ * Empty string, and the choice is deliberate: `since < utcDay("")` is `false` for
+ * every real date, so **nothing is auto-read** under an unknown arrival. The reader
+ * sees the whole list, which is the right answer for a *browsing* surface — and the
+ * prompt and the badge are gated on the stored state map instead, which arrives in
+ * the same response as the arrival stamp and is therefore null in exactly the same
+ * circumstances.
+ */
+export const UNKNOWN_ARRIVAL = "";
+
+/** What the surface hands {@link buildCards} — both channels, and their gates. */
 export interface CardSources {
   /** Veld's own, from `content.ts`. */
   promotions: readonly Promotion[];
@@ -361,8 +373,18 @@ export interface CardSources {
   firstUseIso: string | null;
   /** The selected project and its main checkout's news, or `null` for none. */
   project: (NewsRepo & { news: readonly ProjectNewsItem[] }) | null;
-  /** `ui.showProjectNews` — the reader's own switch. */
-  showProject: boolean;
+  /**
+   * `ui.showProjectNews` — the reader's own switch — or `null` while their settings
+   * have not loaded.
+   *
+   * Tri-state on purpose. The setting defaults to **on**, so resolving an unloaded
+   * document to its default would show a project's cards to somebody who had turned
+   * them off, and the prompt latches: settings arriving a moment later cannot
+   * re-close a dialog, and *Got it!* has by then written read rows for cards they
+   * opted out of. Unknown therefore means **build none** — the same answer this
+   * function gives every other question it cannot yet answer.
+   */
+  showProject: boolean | null;
   /** Today, `YYYY-MM-DD`. See {@link projectCards}. */
   today: string;
 }
@@ -378,19 +400,25 @@ export interface CardSources {
  * left in a `.tsx`/hook is a decision nothing can test — and the switch this gates
  * is the only mitigation a reader has against repo-authored modals.
  *
- * Empty while `firstUseIso` is null: with no arrival there is no date gate, and
- * guessing one is how a fresh install gets a modal about last spring. That gates
- * the project's cards on Veld's own stamp too, which is right — the request that
- * carries `firstUse` is the same one that carries the read/dismissed map, so
- * without it there is nothing to compare a read against either.
+ * **A null `firstUseIso` does not empty the list**, and getting that wrong hid the
+ * whole feature once: returning `[]` there also emptied the "is there anything to
+ * reopen" check, so one failed state request removed *What's new…* from the ⋯ menu
+ * for the rest of the page load — the only route back to a card somebody dismissed.
+ * The arrival is needed for the date *gate*, not for the list, and the gate that
+ * actually matters (what may prompt, what the badge counts, what a close writes)
+ * hangs off the stored state map — which arrives in the same response, so it is null
+ * in exactly the same circumstances. With no arrival, {@link UNKNOWN_ARRIVAL} makes
+ * nothing auto-read and the caller's null state map makes nothing prompt.
  */
 export function buildCards(sources: CardSources): Card[] {
-  if (!sources.firstUseIso) return [];
   const project =
     sources.showProject && sources.project
       ? projectCards(sources.project, sources.project.news, sources.today)
       : [];
-  return [...veldCards(sources.promotions, sources.firstUseIso), ...project];
+  return [
+    ...veldCards(sources.promotions, sources.firstUseIso ?? UNKNOWN_ARRIVAL),
+    ...project,
+  ];
 }
 
 /** One tab on the history view's source filter. */

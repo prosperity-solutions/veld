@@ -412,13 +412,25 @@ you can leave the team a card in the Veld IDE instead of hoping they read the
 commit. Merge it with the change; a teammate pulls; the next time they open the IDE
 they are told, once.
 
+**Read this paragraph before the example below.** These interrupt everybody on the
+team, exactly once, whether or not it was worth it — so writing one is mostly
+"don't". Write one when somebody would otherwise be *bitten* by the change or would
+never find it: the command they type daily now does something else, a step they must
+take once before their next pull works, a convention that has changed. Never for a
+bug fix, a refactor, a dependency bump, a new optional flag, or anything only the
+person who made the change would look for. **Ask the user before adding one** unless
+they asked for it — it is a message to their colleagues, published in their name.
+
+Once that is settled:
+
 ```jsonc
 // veld.json, or veld.d/news.jsonc — `ide` may be split across include files
 "ide": {
   "news": [
     {
       "id": "one-command-tests",       // kebab-case, ≤64 chars, NEVER renamed or reused
-      "since": "2026-08-12",           // required, YYYY-MM-DD; also decides who sees it
+      "since": "2026-08-12",           // required, YYYY-MM-DD, never in the future;
+                                       // also decides who sees it
       "eyebrow": "Heads up",           // ≤24 chars
       "headline": "Stop guessing which test script works",   // ≤44 chars
       "body": "The wrappers are gone — `just test` runs everything, and your old local alias is the one thing that will still fail today.",  // ≤160
@@ -427,15 +439,6 @@ they are told, once.
   ]
 }
 ```
-
-**When to write one, which is mostly "don't".** These interrupt everybody on the
-team, exactly once, whether or not it was worth it. Write one when somebody would
-otherwise be *bitten* by the change or would never find it: the command they type
-daily now does something else, a step they must take once before their next pull
-works, a convention that has changed. Never for a bug fix, a refactor, a
-dependency bump, a new optional flag, or anything only the person who made the
-change would look for. **Ask the user before adding one** unless they asked for it
-— it is a message to their colleagues, published in their name.
 
 **Write the outcome, not the mechanism.** This is the rule agents get wrong by
 default, because you have just spent an hour inside the change and the change is
@@ -455,8 +458,9 @@ that is documentation, and the docs already have it.
 
 **Rules with teeth:**
 
-- **Five live items, maximum.** Extra items are dropped with a `veld lint`
-  warning. **Retiring an item is deleting it** — when you add one, delete anything
+- **Five live items, maximum.** Over the cap, the entries with the **oldest
+  `since`** are dropped with a `veld lint` warning naming them — so a card you just
+  added always survives, and you never have to delete a good one to make room. **Retiring an item is deleting it** — when you add one, delete anything
   that has stopped being news.
 - **Never rename an id, never reuse a retired one.** The id is what each
   teammate's read state is stored against: a rename re-shows the card to the whole

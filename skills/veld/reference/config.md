@@ -847,8 +847,10 @@ project ⋯ menu.
 
 Rules that are enforced rather than advised:
 
-- **At most 5 live items.** Extras are dropped with a `veld lint` warning.
-  **Retiring an item is deleting it.**
+- **At most 5 live items.** Over the cap the entries with the **oldest `since`** are
+  dropped, named in a `veld lint` warning — by date, not by position in the array,
+  because `ide` arrays concatenate across `include` files in filename order. A card
+  you just added always survives. **Retiring an item is deleting it.**
 - **Only the repo's main checkout is read** — the primary clone, at whatever it has
   checked out. A card drafted in a *worktree* prompts nobody until it lands, and news
   stays silent until somebody pulls on main. A card on a branch in the main clone

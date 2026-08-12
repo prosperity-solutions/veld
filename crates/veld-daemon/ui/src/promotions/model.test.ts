@@ -6,14 +6,14 @@ import schema from "../../../../../schema/v3/veld.schema.json";
 
 import { IDENTITY, PROMOTIONS } from "./content";
 import {
+  buildCards,
   type Card,
   duplicateIds,
+  filterOptions,
   formatDay,
   GLYPH_NAMES,
-  ID_PATTERN,
-  buildCards,
-  filterOptions,
   historyOf,
+  ID_PATTERN,
   IDENTITY_COUNT,
   MAX_BODY,
   MAX_EYEBROW,
@@ -34,6 +34,7 @@ import {
   sourceLabel,
   sourcesOf,
   toPrompt,
+  UNKNOWN_ARRIVAL,
   unreadCount,
   unreadOf,
   utcDay,
@@ -450,12 +451,30 @@ describe("buildCards — the two channels, and the gates on each", () => {
     today: "2026-12-31",
   };
 
-  it("builds nothing at all until the arrival stamp has loaded", () => {
-    // With no arrival there is no date gate, and guessing one is how a fresh
-    // install gets a modal about last spring. It gates BOTH channels: the request
-    // that carries `firstUse` also carries the read/dismissed map, so without it
-    // there is nothing to compare a read against either.
-    expect(buildCards({ ...base, firstUseIso: null })).toEqual([]);
+  it("still builds a readable list when the arrival stamp is unknown", () => {
+    // Emptying the list here hid the whole feature once: `any` is derived from it,
+    // so one failed state request removed *What's new…* from the ⋯ menu for the
+    // rest of the page load — the only route back to a dismissed card. The arrival
+    // is needed for the date gate, not for the list.
+    const cards = buildCards({ ...base, firstUseIso: null });
+    expect(cards.length).toBeGreaterThan(0);
+    // Only VELD's cards lose their arrival — a project's is the repo's own
+    // `created_at`, which this reader has regardless of the promotions request.
+    const veld = cards.filter((c) => c.source.kind === "veld");
+    const theirs = cards.filter((c) => c.source.kind === "project");
+    expect(veld.every((c) => c.arrivedAt === UNKNOWN_ARRIVAL)).toBe(true);
+    expect(theirs.every((c) => c.arrivedAt === ARRIVED)).toBe(true);
+    // With no arrival, nothing of Veld's is auto-read — so the reader sees the
+    // whole list rather than a panel that silently hid its own back-catalogue.
+    expect(veld.every((c) => visibilityOf(c, NONE) === "unread")).toBe(true);
+  });
+
+  it("builds no project cards until the reader's settings are known", () => {
+    // `ui.showProjectNews` defaults to ON, so resolving an unloaded document to
+    // its default would put a project's cards in front of somebody who switched
+    // them off — and the prompt latches, so settings arriving later cannot undo it.
+    const unknown = buildCards({ ...base, showProject: null });
+    expect(unknown.every((c) => c.source.kind === "veld")).toBe(true);
   });
 
   it("honours ui.showProjectNews — the reader's only switch", () => {

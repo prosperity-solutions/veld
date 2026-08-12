@@ -20,7 +20,6 @@ import {
 import {
   gitCreateFrom,
   hideDisabledActions,
-  showProjectNews,
   logsTimeZone,
   stalenessHue,
   markerFace,
@@ -856,7 +855,15 @@ function AppInner(props: {
         created_at: repo.created_at,
         news: repo.news,
       },
-    showProject: showProjectNews(settings ?? {}),
+    // `settings` itself, not `settings ?? {}`. Every other reader here can take the
+    // fallback for one frame and reflow; this one cannot. `showProjectNews`
+    // defaults to *true*, so a reader who switched project news off would — on a
+    // first load in this browser profile, where there is no localStorage mirror —
+    // get their project's cards auto-opened before their answer arrived, and *Got
+    // it!* then writes read rows for cards they opted out of. Arriving settings
+    // cannot re-close a latched dialog. `null` means "not known yet", and
+    // `usePromotions` builds no project cards until it is.
+    settings,
   });
   const worktrees = useMemo(() => repo?.worktrees ?? [], [repo]);
   // Mirrored, like `layoutsRef` below, so an effect can read the current list
