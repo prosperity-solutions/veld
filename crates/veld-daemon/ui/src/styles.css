@@ -324,6 +324,24 @@ body[data-fullscreen="true"] .topbar.electron {
 .topbar .mantine-Input-wrapper {
   --input-height: var(--topbar-control-h) !important;
 }
+/* `ide.extensions` status badges. A Mantine Badge is a control here — it is
+   clickable and it opens a menu — so it is levelled like the rest rather than
+   taking `.chip`'s not-a-control exemption. Mantine's own Badge is 20px, which
+   sits visibly low against a row of 26px boxes. */
+.topbar .ext-badge {
+  --badge-height: var(--topbar-control-h) !important;
+  --badge-fz: 12px !important;
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+}
+/* An unavailable extension rendered as a hint: legible, but plainly not live
+   state. Dashed rather than dimmer, because a project's install instruction has
+   to survive being ignored twice. */
+.topbar .ext-badge-hint {
+  border: 1px dashed var(--mantine-color-dark-3);
+  background: transparent;
+}
 /* One type size and one weight for the whole bar, matching the fields.
  *
  * Mantine's `compact-sm` button is 14px medium, its `xs` input 12px regular, and

@@ -130,8 +130,8 @@ contract stays the safe default; the sandbox is for extensions that earn it.
 ## The Tier 1 contract
 
 This is the specification the implementation is built against. It is deliberately
-narrower than the vision: **one slot, two extension types, no lifecycle hooks, no
-sandbox.** What it fixes for good is the *vocabulary and the placement* — those
+narrower than the vision: **one slot, three extension types, no lifecycle hooks,
+no sandbox.** What it fixes for good is the *vocabulary and the placement* — those
 live in users' committed config files forever, so they are the expensive half.
 Which extension types exist, and which slots, stays cheap to extend.
 
@@ -150,9 +150,9 @@ item, not a level of structure**:
         "type": "status",
         "label": "PR",
         "argv": ["scripts/veld/pr-badge.sh"],
-        "refreshSeconds": 60,
-        "requiresBin": "gh",
-        "whenMissing": "hint",
+        "refresh_seconds": 60,
+        "requires_bin": ["gh"],
+        "when_missing": "hint",
         "hint": {
           "text": "Install the GitHub CLI to see this branch's pull request.",
           "href": "https://cli.github.com"
@@ -166,16 +166,16 @@ item, not a level of structure**:
       // No `slot`, so it is declared but never rendered on its own — it is
       // reachable only by reference, from the menu above.
       { "id": "webstorm", "type": "action", "label": "WebStorm",
-        "argv": ["webstorm", "${root}"],
-        "requiresBin": "webstorm", "whenMissing": "hide" },
+        "argv": ["webstorm", "${veld.root}"],
+        "requires_bin": ["webstorm"], "when_missing": "hide" },
 
       { "id": "vscode", "type": "action", "label": "VS Code",
-        "shell": "code '${root}'",
-        "requiresBin": "code", "whenMissing": "hide" },
+        "shell": "code '${veld.root}'",
+        "requires_bin": ["code"], "when_missing": "hide" },
 
       // Referenced from the `pr` badge's stdout when no PR exists yet.
       { "id": "create-pr", "type": "action", "label": "Create pull request",
-        "argv": ["gh", "pr", "create", "--web"], "requiresBin": "gh" }
+        "argv": ["gh", "pr", "create", "--web"], "requires_bin": ["gh"] }
     ]
   }
 }
@@ -183,7 +183,7 @@ item, not a level of structure**:
 
 Fields common to every type: `id` (stable, safe identifier, unique per project),
 `slot`, `align`, `type`, `label`, optional `icon` (from the existing pane-icon
-allowlist), `requiresBin`, `whenMissing`, `hint`.
+allowlist), `requires_bin`, `when_missing`, `hint`.
 
 **`align` picks the side of the slot**, `start` (default) or `end`. The top bar
 already has a stated convention — *left is what this project does, right is what
@@ -203,8 +203,10 @@ five editor actions exist without five buttons in a 42px bar.
 node-level `actions` already do — `argv` is spawned directly and is the default
 recommendation, `shell` is the permanently-supported escape hatch, and the legacy
 `command` alias comes along with the shared type. `${…}` interpolation reuses the
-**pane variable context** (`root`, `branch`, `worktree`, `project`, `username`) so
-extensions do not introduce a second vocabulary.
+**pane variable context** minus its `pane.*` family — `${veld.root}`,
+`${veld.branch}`, `${veld.worktree}`, `${veld.project}`, `${veld.username}` — so
+extensions do not introduce a second vocabulary. A reference outside that closed
+set is a `validate` finding, not a badge that fails at spawn time.
 
 Order within a slot is array order. An unknown `slot` or `type` is a non-fatal
 `validate` finding and the item is ignored — the same leniency the rest of the
@@ -223,7 +225,7 @@ and parses stdout as the badge contract:
   "tone": "success",
   "tooltip": "…",
   "href": "https://github.com/…/pull/283",
-  "openIn": "system",
+  "open_in": "system",
   "actions": [{ "id": "pr-checks", "label": "Watch checks" }]
 }
 ```
@@ -257,7 +259,7 @@ plus whatever action is useful next.
 Click semantics: `href` alone opens it; one action and no href runs it; anything
 more opens a small menu.
 
-**Where an `href` opens** is `openIn`: `system` (default) or `pane`. Declarable on
+**Where an `href` opens** is `open_in`: `system` (default) or `pane`. Declarable on
 the extension and overridable per value in stdout. The default is the system
 browser because an extension's `href` is, by construction, a *provider's*
 authenticated web surface — a pull request, a CI run, a dashboard — where the user
@@ -278,9 +280,9 @@ bar carries around sixteen elements already, and a system that lets a project ad
 buttons without letting it group them makes the bar unusable at the third
 extension.
 
-A menu is itself an item, so ordering, `align`, `icon`, `requiresBin` and
-`whenMissing` work on it exactly as on anything else. A menu whose members are all
-unavailable follows its own `whenMissing` (default `hide`) rather than rendering an
+A menu is itself an item, so ordering, `align`, `icon`, `requires_bin` and
+`when_missing` work on it exactly as on anything else. A menu whose members are all
+unavailable follows its own `when_missing` (default `hide`) rather than rendering an
 empty popover.
 
 Nesting is one level: a menu references actions, never other menus. Two levels of
@@ -288,17 +290,17 @@ popover in a 42px bar is a worse answer than a second menu.
 
 ### Availability, and why it is a teaching surface
 
-`requiresBin` is resolved daemon-side against `cached_user_path()` — the same
-check `ide.panes` already does for `requires_bin`. `whenMissing` decides what an
+`requires_bin` is resolved daemon-side through the same cached `PATH` lookup
+`ide.panes` already uses for its own `requires_bin`. `when_missing` decides what an
 unavailable item looks like:
 
-| `whenMissing` | Behaviour |
+| `when_missing` | Behaviour |
 |---|---|
 | `hide` | The item is not rendered. For optional tooling nobody should be nagged about (a specific editor). |
 | `disable` | Rendered greyed, tooltip names the missing binary. |
-| `hint` (default) | Rendered greyed with the `hint` text, and its `href` opens the install page. This is the newcomer path: a fresh clone *shows you* what the project expects you to have. |
+| `hint` (default) | Rendered greyed and dashed with the `hint` text, and its `href` opens the install page. This is the newcomer path: a fresh clone *shows you* what the project expects you to have. |
 
-**An explicit `whenMissing` wins over the global `ui.hideDisabledActions`
+**An explicit `when_missing` wins over the global `ui.hideDisabledActions`
 setting.** That setting is about hiding inapplicable *core* actions; an extension
 author choosing `hint` is teaching, and a user preference about clutter must not
 silently delete the lesson.
@@ -344,14 +346,17 @@ So the budget goes on bounding and exposing execution rather than on asking:
 - **A hard timeout**, enforced by killing the **process group**, not the pid.
 - **A byte cap on captured output**, and stdout is rendered as text — never as
   markup.
-- **A minimum `refreshSeconds` floor and a maximum extension count per worktree**,
-  both named constants, so the cost bound is set by Veld and not by a file in
-  somebody's repo (the same reasoning as `PRESETS_EXPANDED_PER_LISTING`).
+- **A minimum `refresh_seconds` floor (15s) and a cap on how many extensions a
+  project may declare (24)**, both named constants in `veld_core::ide`, so the
+  cost bound is set by Veld and not by a file in somebody's repo (the same
+  reasoning as `PRESETS_EXPANDED_PER_LISTING`). A status run's deadline is 20s.
 - **`NO_COLOR=1` / `TERM=dumb`** in the child environment, so a CLI that colours
   its piped output cannot corrupt the contract.
 - **Every execution is logged with its full argv** to the daemon log.
-- **A machine-global off switch** in settings disables all automatic evaluation —
-  the answer for a paranoid machine or a CI box, at zero cost to everyone else.
+- **A machine-global off switch** — the `extensions.autoRefresh` setting, on by
+  default — disables all automatic evaluation while leaving buttons and menus
+  clickable, because a click is the user asking. The answer for a cautious machine
+  or a CI box, at zero cost to everyone else.
 - **No secrets and no config-supplied `env`** in round 1. When provider tokens
   arrive they follow the AGENTS.md secret rule (pointer plus sensitivity flag,
   never into an argv or a log).
@@ -369,7 +374,7 @@ client.
 - No lifecycle hooks. The reserved top-level `hooks` key is their home and
   predates this work; **a slot is a place in the UI and an event is not a place**,
   so forcing lifecycle into `ide.extensions` would be a category error. The
-  *item vocabulary* (`type`, `argv`, `requiresBin`, …) is meant to be reused there
+  *item vocabulary* (`type`, `argv`, `requires_bin`, …) is meant to be reused there
   verbatim, which is what keeps the two homes from drifting.
 - No second slot (rail, worktree detail, context menu). `slot` exists so adding
   one is a string constant.
@@ -511,7 +516,7 @@ because each one closes off an alternative.
   exist to hold. So the rule is **a runtime value may choose which declared action
   is offered, and may never contribute one.** The cost is dangling-reference
   validation, accepted once and then reused by menus.
-- **`openIn` defaults to the system browser, not a pane.** The original draft sent
+- **`open_in` defaults to the system browser, not a pane.** The original draft sent
   every `href` to a browser pane, inherited from how `ide.quicklinks` behaves. Wrong
   population: a quicklink points at localhost or staging, an extension's `href`
   points at a provider's authenticated surface where the user is already signed in
@@ -526,7 +531,7 @@ because each one closes off an alternative.
   needed, which is why this costs almost nothing on top. Rejected alternatives:
   inline nested item objects (a second shape for the same thing, and it hides
   members from `validate`'s uniqueness check), and a `group: "open-in"` string tag
-  (the group then has no declaration, so its own label, icon and `whenMissing` have
+  (the group then has no declaration, so its own label, icon and `when_missing` have
   nowhere to live). Nesting is capped at one level.
   This does **not** revive the rejected `ide.commands` registry: there is still one
   flat collection, every item is still a full declaration, and keys still live at
@@ -586,7 +591,7 @@ bugfix in an existing one):
    system's memory across sessions; a decision whose alternatives are lost gets
    re-argued from scratch by the next agent.
 6. **A new extension `type` or `slot` is cheap; a change to the item vocabulary is
-   not.** `id`/`slot`/`type`/`label`/`icon`/`requiresBin`/`whenMissing`/`argv` are
+   not.** `id`/`slot`/`type`/`label`/`icon`/`requires_bin`/`when_missing`/`argv` are
    shared across every present and future extension kind, including the lifecycle
    hooks that will live under `hooks`. Adding a field is fine; renaming or
    repurposing one of those breaks every project that adopted it.

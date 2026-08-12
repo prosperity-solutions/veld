@@ -1526,10 +1526,28 @@ fn pane_context(
     branch: &str,
     config: &veld_core::config::VeldConfig,
 ) -> veld_core::variables::VariableContext {
-    let mut builtins = HashMap::new();
+    let mut builtins = worktree_builtins(worktree_path, branch, config);
     builtins.insert("pane.id".to_owned(), pane.id.clone());
     builtins.insert("pane.label".to_owned(), pane.label.clone());
     builtins.insert("pane.token".to_owned(), token.to_owned());
+    veld_core::variables::VariableContext {
+        builtins,
+        ..Default::default()
+    }
+}
+
+/// The `${veld.*}` names any command scoped to a *worktree* resolves against.
+///
+/// One owner for these meanings, shared by pane commands and by `ide.extensions`
+/// commands. A second copy is the bug this shape prevents: the names below are
+/// each a deliberate choice, and a module that rebuilt them from scratch would get
+/// one of them subtly different.
+pub(crate) fn worktree_builtins(
+    worktree_path: &FsPath,
+    branch: &str,
+    config: &veld_core::config::VeldConfig,
+) -> HashMap<String, String> {
+    let mut builtins = HashMap::new();
     // **The same meanings these names have everywhere else.** `${veld.worktree}`
     // is the slugified directory *name* and `${veld.branch}` is slugified too
     // (`orchestrator.rs`'s `BuiltinScope::apply`, and the reference table in
@@ -1558,10 +1576,7 @@ fn pane_context(
         "username".to_owned(),
         veld_core::orchestrator::whoami_username(),
     );
-    veld_core::variables::VariableContext {
-        builtins,
-        ..Default::default()
-    }
+    builtins
 }
 
 /// How long a `requires_bin` answer is reused before the filesystem is asked

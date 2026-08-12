@@ -1,0 +1,87 @@
+{
+  "$schema": "https://veld.oss.life.li/schema/v3/veld.schema.json",
+  "schemaVersion": "3",
+  "name": "ide-extensions",
+  // Badges, buttons and menus this project adds to the IDE's top bar. Nothing
+  // here is specific to a vendor: veld runs a command in the worktree and
+  // renders the small contract it prints, and the config decides what that
+  // command is — so a GitLab project ships the same declaration with a `glab`
+  // script behind it.
+  "ide": {
+    "extensions": [
+      {
+        "id": "pr",
+        "slot": "topBar",
+        "type": "status",
+        "label": "PR",
+        "description": "This branch's pull request",
+        "icon": "git-branch",
+        "argv": ["scripts/pr-badge.sh"],
+        "refresh_seconds": 60,
+        "requires_bin": ["gh"],
+        "when_missing": "hint",
+        "hint": {
+          "text": "Install the GitHub CLI to see this branch's pull request.",
+          "href": "https://cli.github.com"
+        }
+      },
+      {
+        "id": "coverage",
+        "slot": "topBar",
+        "align": "end",
+        "type": "status",
+        "label": "Coverage",
+        "shell": "cat target/coverage/summary.txt",
+        "refresh_seconds": 300,
+        "open_in": "pane"
+      },
+      {
+        // No `slot`, so it never renders on its own — it exists to be named by
+        // the `pr` badge's output when the branch has no pull request yet. veld
+        // resolves that id against this file before offering it, which is why a
+        // badge's output may *choose* an action and can never contribute one.
+        "id": "create-pr",
+        "type": "action",
+        "label": "Create a pull request",
+        "argv": ["gh", "pr", "create", "--web"],
+        "requires_bin": ["gh"]
+      },
+      {
+        // One control instead of one button per editor. `items` are ids of the
+        // `action` entries below, which have no slot of their own.
+        "id": "open-in",
+        "slot": "topBar",
+        "type": "menu",
+        "label": "Open this worktree in",
+        "icon": "code",
+        "items": ["webstorm", "vscode"]
+      },
+      {
+        "id": "webstorm",
+        "type": "action",
+        "label": "WebStorm",
+        "argv": ["webstorm", "${veld.root}"],
+        "requires_bin": ["webstorm"],
+        "when_missing": "hide"
+      },
+      {
+        "id": "vscode",
+        "type": "action",
+        "label": "VS Code",
+        "argv": ["code", "${veld.root}"],
+        "requires_bin": ["code"],
+        "when_missing": "hide"
+      }
+    ]
+  },
+  "nodes": {
+    "web": {
+      "type": "start_server",
+      "default_variant": "dev",
+      "probes": { "readiness": { "type": "port" } },
+      "variants": {
+        "dev": { "argv": ["npm", "run", "dev"] }
+      }
+    }
+  }
+}

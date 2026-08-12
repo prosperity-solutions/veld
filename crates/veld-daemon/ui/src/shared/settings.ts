@@ -104,6 +104,7 @@ const FALLBACK = {
   // must not behave as though the feature were off because the daemon predates the key.
   terminalShellIntegration: true,
   terminalAgentIntegration: true,
+  extensionsAutoRefresh: true,
   // **Off**, matching the Rust default — and here the file's "shipped default" exception
   // and the "previous release's behaviour" rule agree, because the honest reason is the
   // signal's own unevenness: exact for a shell command, absent for a supported agent, and
@@ -442,6 +443,18 @@ export function terminalShellIntegration(doc: SettingsDoc): boolean {
  * `~/.claude/settings.json`; for Codex it's a one-invocation `-c notify=[...]`
  * override, never a write to `~/.codex/config.toml`.
  */
+/**
+ * Whether the daemon may evaluate a project's `ide.extensions` status badges on
+ * a timer.
+ *
+ * The one machine-global off switch for the only thing Veld runs from a repo's
+ * config with no user action. Off leaves the buttons clickable — a click is the
+ * user asking — and stops the unattended half only.
+ */
+export function extensionsAutoRefresh(doc: SettingsDoc): boolean {
+  return bool(doc, "extensions.autoRefresh", FALLBACK.extensionsAutoRefresh);
+}
+
 export function terminalAgentIntegration(doc: SettingsDoc): boolean {
   return bool(
     doc,

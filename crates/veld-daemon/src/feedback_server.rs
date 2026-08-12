@@ -26,6 +26,10 @@ pub mod management;
 #[path = "desktop.rs"]
 mod desktop;
 
+/// Running the commands `ide.extensions` declares.
+#[path = "extensions.rs"]
+mod extensions;
+
 #[path = "worktree_trash.rs"]
 pub mod worktree_trash;
 

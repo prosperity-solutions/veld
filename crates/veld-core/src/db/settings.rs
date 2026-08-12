@@ -339,6 +339,7 @@ pub enum SettingKey {
     TerminalInterceptSystemOpen,
     TerminalShellIntegration,
     TerminalAgentIntegration,
+    ExtensionsAutoRefresh,
     ActivityShowWorking,
     ActivityNotifyCommandFinished,
     ActivityNotifyCommandFailed,
@@ -389,6 +390,7 @@ impl SettingKey {
         Self::TerminalInterceptSystemOpen,
         Self::TerminalShellIntegration,
         Self::TerminalAgentIntegration,
+        Self::ExtensionsAutoRefresh,
         Self::ActivityShowWorking,
         Self::ActivityNotifyCommandFinished,
         Self::ActivityNotifyCommandFailed,
@@ -428,6 +430,7 @@ impl SettingKey {
             Self::TerminalInterceptSystemOpen => "terminal.interceptSystemOpen",
             Self::TerminalShellIntegration => "terminal.shellIntegration",
             Self::TerminalAgentIntegration => "terminal.agentIntegration",
+            Self::ExtensionsAutoRefresh => "extensions.autoRefresh",
             Self::ActivityShowWorking => "activity.showWorking",
             Self::ActivityNotifyCommandFinished => "activity.notifyCommandFinished",
             Self::ActivityNotifyCommandFailed => "activity.notifyCommandFailed",
@@ -469,6 +472,7 @@ impl SettingKey {
             "terminal.interceptSystemOpen" => Self::TerminalInterceptSystemOpen,
             "terminal.shellIntegration" => Self::TerminalShellIntegration,
             "terminal.agentIntegration" => Self::TerminalAgentIntegration,
+            "extensions.autoRefresh" => Self::ExtensionsAutoRefresh,
             "activity.showWorking" => Self::ActivityShowWorking,
             "activity.notifyCommandFinished" => Self::ActivityNotifyCommandFinished,
             "activity.notifyCommandFailed" => Self::ActivityNotifyCommandFailed,
@@ -564,6 +568,7 @@ impl SettingKey {
             | Self::TerminalInterceptSystemOpen
             | Self::TerminalShellIntegration
             | Self::TerminalAgentIntegration
+            | Self::ExtensionsAutoRefresh
             | Self::ActivityShowWorking
             | Self::ActivityNotifyCommandFinished
             | Self::ActivityNotifyCommandFailed
@@ -1006,6 +1011,10 @@ pub fn defaults() -> BTreeMap<String, Value> {
         // agents. Nothing of the user's is edited either way: no
         // `~/.claude/settings.json` merge, ever.
         (SettingKey::TerminalAgentIntegration, Value::from(true)),
+        // On: a project that declares badges declared them to be seen, and the
+        // switch exists for the machine that wants none rather than as a gate
+        // everybody steps through. See `Db::extensions_auto_refresh`.
+        (SettingKey::ExtensionsAutoRefresh, Value::from(true)),
         // **Off**, reversing an earlier default-on decision on evidence from real use.
         //
         // The signal is only as good as its producers, and today they are uneven. A plain
@@ -1323,6 +1332,25 @@ impl Db {
     /// shell already open.
     pub fn terminal_agent_integration(&self) -> bool {
         self.setting(&SettingKey::TerminalAgentIntegration)
+            .ok()
+            .flatten()
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true)
+    }
+
+    /// Whether the daemon may evaluate a project's `ide.extensions` status badges
+    /// automatically.
+    ///
+    /// The one machine-global off switch for the only thing veld runs from a repo's
+    /// config with no user action. Off leaves the declarations visible and the
+    /// buttons clickable — a click is the user asking — and stops only the
+    /// unattended, repeated half. It exists because that half is the part a
+    /// consent prompt would have gated, and a prompt was rejected: bound to the
+    /// declared commands it must re-prompt on every `git pull` that touches
+    /// `veld.json`, and unbound it is decorative. A switch costs the cautious one
+    /// decision and everybody else nothing.
+    pub fn extensions_auto_refresh(&self) -> bool {
+        self.setting(&SettingKey::ExtensionsAutoRefresh)
             .ok()
             .flatten()
             .and_then(|v| v.as_bool())

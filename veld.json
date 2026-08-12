@@ -36,6 +36,83 @@
         "allow": ["notifications", "display-capture"]
       }
     ],
+    // Dogfooding the extension system, and the worked example for it. Nothing
+    // here is known to veld: `gh`, `webstorm` and `code` are names in this file,
+    // the same way `claude` is in the panes below.
+    //
+    // Note the two shapes a declaration takes. An entry **with** a `slot`
+    // renders there; one **without** is declared to be referenced — by the
+    // menu's `items`, or by the `pr` badge's own output — which is what keeps
+    // three editor buttons out of a 42px bar.
+    "extensions": [
+      {
+        // The badge runs scripts/veld/pr-badge.sh, which is the whole
+        // provider-specific half: it knows `gh`, and veld only ever sees the
+        // small badge contract the script prints. Swap the script for one
+        // calling `glab` and this declaration does not change.
+        "id": "pr",
+        "slot": "topBar",
+        "type": "status",
+        "label": "PR",
+        "argv": ["scripts/veld/pr-badge.sh"],
+        "refresh_seconds": 60,
+        "requires_bin": ["gh"],
+        // `hint` rather than `hide`: a fresh clone should *say* what this repo
+        // expects you to have, and the href opens the install page.
+        "when_missing": "hint",
+        "hint": {
+          "text": "Install the GitHub CLI to see this branch's pull request.",
+          "href": "https://cli.github.com"
+        }
+      },
+      {
+        // No `slot`: this exists to be named by the `pr` badge's output when the
+        // branch has no pull request yet. veld resolves that id against this
+        // file before offering it, so the badge chooses among declared actions
+        // and can never contribute one.
+        "id": "create-pr",
+        "type": "action",
+        "label": "Create a pull request",
+        "argv": ["gh", "pr", "create", "--web"],
+        "requires_bin": ["gh"]
+      },
+      {
+        "id": "open-in",
+        "slot": "topBar",
+        "type": "menu",
+        "label": "Open this worktree in",
+        "icon": "code",
+        "items": ["webstorm", "vscode", "idea"]
+      },
+      // `hide` for the editors, deliberately unlike the `pr` badge: which editor
+      // a contributor uses is their business, and a project has no standing to
+      // suggest installing one. A menu whose members are all missing renders
+      // nothing at all.
+      {
+        "id": "webstorm",
+        "type": "action",
+        "label": "WebStorm",
+        "argv": ["webstorm", "${veld.root}"],
+        "requires_bin": ["webstorm"],
+        "when_missing": "hide"
+      },
+      {
+        "id": "vscode",
+        "type": "action",
+        "label": "VS Code",
+        "argv": ["code", "${veld.root}"],
+        "requires_bin": ["code"],
+        "when_missing": "hide"
+      },
+      {
+        "id": "idea",
+        "type": "action",
+        "label": "IntelliJ IDEA",
+        "argv": ["idea", "${veld.root}"],
+        "requires_bin": ["idea"],
+        "when_missing": "hide"
+      }
+    ],
     // Dogfooding, and the worked examples: this is a repo whose contributors
     // run a coding agent in a terminal all day. Note that nothing about
     // `claude` or `codex` is known to veld — they are names in this file, the
