@@ -834,13 +834,37 @@ function AppInner(props: {
   } = useUrlSelection();
 
   const repos = useMemo(() => repoList?.repos ?? [], [repoList]);
-  // Feature promotions. Suppressed while the first-run screen is up (or before
-  // the first fetch has said whether it will be): a panel thrown over the screen
-  // that is trying to get somebody started is the wrong moment, and `repoList ===
-  // null` is the pre-data state, not "no projects".
-  const promotions = usePromotions({ suppressAuto: repoList === null || repos.length === 0 });
   const repo: Repo | null =
     repos.find((r) => r.root === activeRepoRoot) ?? repos[0] ?? null;
+  // Feature promotions, Veld's and the selected project's. Suppressed while the
+  // first-run screen is up (or before the first fetch has said whether it will
+  // be): a panel thrown over the screen that is trying to get somebody started is
+  // the wrong moment, and `repoList === null` is the pre-data state, not "no
+  // projects".
+  //
+  // The *selected* project only, not every imported one. The stored state row
+  // grows monotonically and the daemon cannot prune an id it does not understand,
+  // so "everything the user has a repo for" is a row that only gets bigger — and
+  // the selected project is the one whose news the reader has any context for.
+  const promotions = usePromotions({
+    suppressAuto: repoList === null || repos.length === 0,
+    project:
+      repo && {
+        root: repo.root,
+        name: repo.name,
+        created_at: repo.created_at,
+        news: repo.news,
+      },
+    // `settings` itself, not `settings ?? {}`. Every other reader here can take the
+    // fallback for one frame and reflow; this one cannot. `showProjectNews`
+    // defaults to *true*, so a reader who switched project news off would — on a
+    // first load in this browser profile, where there is no localStorage mirror —
+    // get their project's cards auto-opened before their answer arrived, and *Got
+    // it!* then writes read rows for cards they opted out of. Arriving settings
+    // cannot re-close a latched dialog. `null` means "not known yet", and
+    // `usePromotions` builds no project cards until it is.
+    settings,
+  });
   const worktrees = useMemo(() => repo?.worktrees ?? [], [repo]);
   // Mirrored, like `layoutsRef` below, so an effect can read the current list
   // without being *keyed* on it: this list is replaced on every 5s poll, and the
@@ -4006,8 +4030,9 @@ function AppInner(props: {
    */
   const whatsNewDialog = promotions.open && (
     <WhatsNewDialog
-      promotions={promotions.open.promotions}
+      cards={promotions.open.cards}
       automatic={promotions.open.automatic}
+      projectName={promotions.projectName}
       onRead={promotions.markRead}
       onDismiss={promotions.dismiss}
     />

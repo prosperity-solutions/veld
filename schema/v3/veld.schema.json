@@ -136,7 +136,7 @@
     },
     "ide": {
       "type": "object",
-      "description": "Per-project settings for Veld's own IDE surfaces — Veld Desktop and the /ide view in a browser. `quicklinks`, `permissions`, `externalOrigins` and the `git` subscope are rendered; every other key here is RESERVED — parsed and stored, but not rendered by this version, and `veld lint` says so. Spelled `ui` while the whole key was reserved; renamed in the release that first gave it a meaning, so a config carrying the old spelling gets an unknown-top-level-key error naming the rename.",
+      "description": "Per-project settings for Veld's own IDE surfaces — Veld Desktop and the /ide view in a browser. `quicklinks`, `permissions`, `externalOrigins`, `panes`, `news` and the `git` subscope are rendered; every other key here is RESERVED — parsed and stored, but not rendered by this version, and `veld lint` says so. Spelled `ui` while the whole key was reserved; renamed in the release that first gave it a meaning, so a config carrying the old spelling gets an unknown-top-level-key error naming the rename.",
       "additionalProperties": true,
       "properties": {
         "quicklinks": {
@@ -230,6 +230,24 @@
             ]
           ]
         },
+        "news": {
+          "type": "array",
+          "description": "Cards this project shows its own team in the Veld IDE, through the same channel Veld uses to announce its own changes. Merge a card with the change it describes; a teammate pulls, and the next time they open the IDE they are told once. Only news in the repo's MAIN checkout counts — the primary clone, at whatever it currently has checked out — so a card being drafted in a WORKTREE cannot prompt anybody until it lands, and five worktrees cannot show the same card five times. (A branch in the main clone itself is live: the isolation is per worktree, not per branch.) Reading a card clears it; dismissing it stops the prompt but keeps it counted, and everything is revisitable from What's new… in the project ⋯ menu. Write the OUTCOME, not the mechanism: the headline is what a teammate can now do, or stop doing. At most 5 items may be live at once — counted ACROSS `include` files, which `maxItems` here cannot express, so splitting news over two files can validate green in your editor and still drop the oldest card at load (`veld lint` says which). Over the cap it is the entries with the oldest `since` that go — so an ordinary new card, dated today, survives; a BACKDATED addition can be the one dropped. RETIRING AN ITEM IS DELETING IT — the cap and the short field limits are what keep a surface that interrupts people worth being interrupted by. Items past the cap are dropped with a `veld lint` warning, as is any malformed entry; nothing here can fail a config load.",
+          "maxItems": 5,
+          "items": { "$ref": "#/$defs/newsItem" },
+          "examples": [
+            [
+              {
+                "id": "one-command-tests",
+                "since": "2026-08-12",
+                "eyebrow": "Heads up",
+                "headline": "Stop guessing which test script works",
+                "body": "The wrappers are gone — `just test` runs everything, and your old local alias is the one thing that will still fail today.",
+                "glyph": "terminal"
+              }
+            ]
+          ]
+        },
         "git": {
           "type": "object",
           "description": "Per-project knobs for Veld's git-powered IDE surfaces. Only the keys below are interpreted; other keys here are RESERVED (parsed and stored, not rendered).",
@@ -249,6 +267,54 @@
     }
   },
   "$defs": {
+    "newsItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "since", "eyebrow", "headline", "body"],
+      "description": "One card. The field set is closed and short on purpose — a headline and one sentence, with a mark beside it. There is no link, no CTA and no Markdown: the limit is what stops an interrupting surface becoming a wall of prose, which is the only thing that keeps it worth interrupting for. If a change genuinely needs more room, say the outcome here and let the reader find the detail where detail belongs.",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+          "maxLength": 64,
+          "description": "A kebab-case slug, stable forever, unique within this project. It is what each teammate's own read/dismissed state is stored against — so NEVER RENAME ONE (a rename re-shows the card to the whole team) and NEVER REUSE A RETIRED ONE (the new card is suppressed for everyone who saw the old one). Both failures are silent. It is namespaced per project before it is stored, so another repo shipping the same slug is not a collision.",
+          "examples": ["one-command-tests"]
+        },
+        "since": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$",
+          "description": "The day this was written, YYYY-MM-DD. REQUIRED, shown on every card, and it GATES: a teammate who imported this project after that day never sees the card, so cloning a repo with a year of history never means a stack of modals about changes that predate them. That is also what makes an item nobody deleted stop reaching people. There is deliberately no default — a defaulted date would gate the card wrongly and silently. Compared as a UTC day, and strictly BEFORE the import day, so a card written today still reaches somebody who joined this morning. A day in the FUTURE is refused with a `veld lint` warning and the card is dropped: it would be after every arrival forever, so nothing would ever retire it — and a transposed year is one keystroke.",
+          "examples": ["2026-08-12"]
+        },
+        "eyebrow": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 24,
+          "description": "Two or three words above the headline.",
+          "examples": ["Heads up"]
+        },
+        "headline": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 44,
+          "description": "What a teammate can now DO, or stop doing — in their words, not the implementation's. Never open with the project name, a feature name, or a list of options: that is documentation, and the docs already have it. The check: if the sentence would still read as true to somebody who will never touch this part of the repo, it is describing the change instead of their day.",
+          "examples": ["Stop guessing which test script works"]
+        },
+        "body": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160,
+          "description": "One sentence on what changes about their day, and only then where to look. Not two sentences, and not a changelog entry with nicer type.",
+          "examples": ["The wrappers are gone — `just test` runs everything, and your old local alias is the one thing that will still fail today."]
+        },
+        "glyph": {
+          "type": "string",
+          "enum": ["terminal", "panes", "device", "inbox"],
+          "default": "inbox",
+          "description": "The line-art mark beside the eyebrow, drawn in the current text colour. A closed set of four, deliberately much smaller than the pane icon list: a card is one sentence with a mark, and the set staying small is what keeps a project's card looking like it belongs beside Veld's own rather than pasted in. Prefer the closest fit over asking for a new one."
+        }
+      }
+    },
     "paneIconName": {
       "type": "string",
       "description": "A Tabler icon name (tabler.io/icons), the icon set every built-in pane tab uses. An allowlist rather than any Tabler name, because the UI imports each icon component statically — a name resolved at runtime would either pull the whole set into the bundle or render nothing. Use an emoji for anything not listed.",

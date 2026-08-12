@@ -16,6 +16,7 @@ import {
   terminalShellIntegration,
   terminalShell,
   hideDisabledActions,
+  showProjectNews,
   gitCreateFrom,
   worktreeStorageMode,
   worktreeStorageDir,
@@ -193,6 +194,23 @@ describe("logsTimeZone", () => {
       expect(logsTimeZone({ "logs.timeZone": bad as unknown as string })).toBe(
         "local",
       );
+    }
+  });
+});
+
+describe("showProjectNews", () => {
+  it("defaults on, because an opt-in news channel launches to nobody", () => {
+    expect(showProjectNews({})).toBe(true);
+  });
+
+  it("is the one thing that can silence a project's cards", () => {
+    expect(showProjectNews({ "ui.showProjectNews": false })).toBe(false);
+    expect(showProjectNews({ "ui.showProjectNews": true })).toBe(true);
+  });
+
+  it("falls back rather than trusting a non-boolean", () => {
+    for (const bad of [null, 0, "false", []]) {
+      expect(showProjectNews({ "ui.showProjectNews": bad as unknown as boolean })).toBe(true);
     }
   });
 });

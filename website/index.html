@@ -250,13 +250,16 @@
        (span 2) exists to absorb the slack when the raw count doesn't divide.
        The invariant: (feature cells + 1 for each `cell-wide`) mod 3 == 0, with
        the joke bar spanning the full 3 after them.
-       Currently 20 cells, the last one wide → 21 slots = 7 full rows, + [joke
-       bar full width]. When the next feature lands, 22 slots don't divide —
-       drop `cell-wide` off the last cell (21 + span 3 = 24) or add two. */
+       Currently 21 cells, none wide → 21 slots = 7 full rows, + [joke bar full
+       width]. When the next feature lands, 22 slots don't divide — put
+       `cell-wide` back on the last cell (22 + 1 = 23, still no) so in practice:
+       add two features, or add one and make one wide (21 + 1 + 1 = 23 — no), or
+       add one and mark *two* cells wide (22 + 2 = 24 ✓). Check the arithmetic
+       rather than the habit; `cell-wide` still exists for exactly this. */
     .grid .cell-wide { grid-column: span 2; }
     /* Spans exactly the columns the feature cells leave over, so the grid has no
-       gray gap. 20 cells + 1 for the wide one = 21, + span 3 = 24 = 8 full rows;
-       changing the cell count means changing this number. */
+       gray gap. 21 cells, none wide = 21, + span 3 = 24 = 8 full rows; changing
+       the cell count means redoing this arithmetic. */
     .grid .cell-next { grid-column: span 3; background: color-mix(in srgb, var(--accent-ink) 6%, var(--bg)); }
     @media (max-width: 760px) {
       /* 2 columns: span 3 would overflow, and the wide cell should just fill a row. */
@@ -434,8 +437,9 @@ veld share <span class="kw">--web</span>
         <div class="cell"><h3>Memory numbers that are actually true</h3><p>Adding up a process tree&rsquo;s memory double-counts everything its processes share, so Veld reports the real footprint instead. Expand a service for a scrubbable graph of memory or CPU &mdash; by memory type, or by which subprocess is eating it.</p></div>
         <div class="cell"><h3>What your build actually costs</h3><p>Measuring starts when the run does, not when it finishes. Your build steps and installs are graphed while they run, and a dev server&rsquo;s startup ramp is recorded &mdash; so &ldquo;why does this need 12&nbsp;GB&rdquo; is a question you can answer.</p></div>
         <div class="cell"><h3>Browser errors in your terminal</h3><p>Captures the app's console logs and crashes so you can read them from the CLI.</p></div>
+        <div class="cell"><h3>Tell your team what changed</h3><p>You move the test command; everyone else finds out when it breaks for them. Write a short note into the project&rsquo;s config alongside the change &mdash; a headline and one sentence &mdash; and each teammate is told once, the next time they open the IDE. Capped at five notes and 44 characters of headline, so it stays worth reading.</p></div>
         <div class="cell"><h3>Share with a teammate</h3><p>Send a colleague an encrypted link; they open the same URLs on their machine. No accounts, no server.</p></div>
-        <div class="cell cell-wide"><h3>Or share with anyone</h3><p><code>veld share --web</code> gives you a real public URL — the other person doesn't need Veld at all.</p></div>
+        <div class="cell"><h3>Or share with anyone</h3><p><code>veld share --web</code> gives you a real public URL — the other person doesn't need Veld at all.</p></div>
         <div class="cell cell-next">
           <div class="next-line">
             <span class="next-prompt">$ claude</span>

@@ -1,5 +1,5 @@
 /**
- * The `veld.` wordmark and the promotion glyph set.
+ * The `veld.` wordmark, the `V.` icon mark, and the promotion glyph set.
  *
  * The wordmark is the brand mark for this surface. `docs/branding.md` keeps it
  * out of the `/ide` top bar — 40–42px of pure controls, which is the documented
@@ -9,6 +9,8 @@
  * it, and the app's brand stops riding on the favicon alone at the one moment a
  * new user is deciding what this thing is.
  */
+
+import type { GlyphName } from "./model";
 
 /**
  * `veld.`, coloured from the theme.
@@ -40,13 +42,52 @@ export function Wordmark(props: { height?: number; className?: string }) {
 }
 
 /**
+ * The `V.` icon mark, coloured from the theme.
+ *
+ * The wordmark's sibling from `crates/veld-daemon/assets/logo.svg` — same two
+ * paths, dot already last, and the hard-coded `fill="white"` / `fill="#C4F56A"`
+ * dropped so CSS owns both colours (the asset is drawn for a dark tile; a white
+ * `V` on a light dialog would be an invisible byline).
+ *
+ * Used where the wordmark is too wide to sit inside a line of text: a byline is
+ * one line at 10.5px, and `veld.` at that height is four glyphs of letterform
+ * fighting the sentence it is attached to. The mark is one glyph, and it is still
+ * the thing a repo cannot produce, which is the whole job.
+ */
+export function Logomark(props: { size?: number; className?: string }) {
+  const size = props.size ?? 14;
+  return (
+    <svg
+      className={`logomark${props.className ? ` ${props.className}` : ""}`}
+      width={size}
+      height={size}
+      viewBox="0 0 32 32"
+      role="img"
+      aria-label="veld"
+      focusable="false"
+    >
+      <path d="M13.2 28L4 4H8.4L15.7 23.8H15.8L23.1 4H27.5L18.3 28H13.2Z" />
+      <path d="M24.5 29C25.8807 29 27 27.8807 27 26.5C27 25.1193 25.8807 24 24.5 24C23.1193 24 22 25.1193 22 26.5C22 27.8807 23.1193 29 24.5 29Z" />
+    </svg>
+  );
+}
+
+/**
  * The glyph set, drawn in `currentColor` at a 24-box.
  *
  * Line art, never a raster and never a screenshot — see `model.ts`. Stroke-only
  * so both themes get a correct mark from one definition, and so the whole set
  * costs a few hundred bytes in a bundle that inlines everything it ships.
  */
-const GLYPH_PATHS: Record<string, React.ReactNode> = {
+/**
+ * Keyed by `GlyphName`, not by `string`, so the art cannot lag the vocabulary.
+ * Adding a glyph means adding it to `GLYPH_NAMES`, the parser's `NEWS_GLYPHS` and
+ * the schema's enum — three surfaces with drift gates between them — and with a
+ * `string` key you could do all three and still forget the drawing, at which point
+ * `Glyph` renders nothing and the card shows an empty mark slot. Now that is a
+ * type error.
+ */
+const GLYPH_PATHS: Record<GlyphName, React.ReactNode> = {
   terminal: (
     <>
       <rect x="2.75" y="4.75" width="18.5" height="14.5" rx="2" />
@@ -78,7 +119,11 @@ const GLYPH_PATHS: Record<string, React.ReactNode> = {
 };
 
 export function Glyph(props: { name: string; size?: number }) {
-  const paths = GLYPH_PATHS[props.name];
+  // Still a `string` in, and still a null return: `name` reaches this from a
+  // project's config through a newer daemon, so an unknown one has to render as
+  // nothing rather than throw. `projectCards` coerces to `inbox` before this,
+  // which is why nothing should ever reach the null.
+  const paths = GLYPH_PATHS[props.name as GlyphName];
   if (!paths) return null;
   return (
     <svg

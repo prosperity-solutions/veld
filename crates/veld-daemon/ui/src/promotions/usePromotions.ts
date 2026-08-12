@@ -1,33 +1,74 @@
 /**
- * The client half of the promotion channel.
+ * The client half of the promotion channel — Veld's cards and the selected
+ * project's, as one list.
  *
  * Reads the state map and the arrival stamp once per page load, and owns the
  * open/close state of the panel. Deliberately thin: every decision — what counts
- * as unread, what may prompt, whether a dated item predates the user — lives in
- * `model.ts`, where the node-environment test suite can reach it.
+ * as unread, what may prompt, whether a dated item predates the reader, how an
+ * id is namespaced — lives in `model.ts`, where the node-environment test suite
+ * can reach it.
+ *
+ * **The two channels differ in exactly two places, and both are handled by
+ * `model.ts` before anything here sees them.** A project's ids are namespaced,
+ * so a repo shipping `new-build` can never collide with a Veld card or with
+ * another repo's; and a project's cards gate on when this user imported *that
+ * project* rather than on when they arrived at Veld. Past that point a card is a
+ * card, which is what keeps one unread count, one panel and one merge.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
-import { api } from "../api";
+import { api, type SettingsDoc } from "../api";
+import { showProjectNews } from "../shared/settings";
 import { PROMOTIONS } from "./content";
 import {
+  buildCards,
+  type Card,
+  markableIds,
   mergeStates,
-  type Promotion,
+  type ProjectNewsItem,
   type PromotionState,
   toPrompt,
   unreadCount,
-  unreadOf,
+  utcDay,
 } from "./model";
 
+/** The selected project and the news its main checkout declares. */
+export interface NewsProject {
+  root: string;
+  name: string;
+  created_at: string;
+  news: ProjectNewsItem[];
+}
+
 export interface PromotionsState {
-  /** The panel's contents, or `null` when it is closed. */
-  open: { promotions: Promotion[]; automatic: boolean } | null;
+  /**
+   * The panel's contents, or `null` when it is closed.
+   *
+   * `project` is the root that was selected **when the panel opened**, carried here
+   * rather than read at close time: the selection can move on its own (a claim hunt
+   * retargets it, and `repos[0]` shifts when another window imports or removes a
+   * repo), and settling the *current* selection would then mark a project settled
+   * that never prompted — silencing its news for the rest of the page load, which is
+   * the exact regression `settledFor` exists to prevent.
+   */
+  open: { cards: Card[]; automatic: boolean; project: string | null } | null;
+  /** Everything this build and this project ship, for the history view. */
+  all: Card[];
+  /**
+   * The selected project's name, or `null` when there is none.
+   *
+   * Passed through so the history view can offer a **disabled** tab for a project
+   * with no news, rather than omitting it — "this project has told you nothing"
+   * is an answer, and a missing tab reads as a missing feature. It is not derived
+   * from `all` for exactly that reason: a project with no cards contributes none.
+   */
+  projectName: string | null;
   /** Whether there is anything to reopen at all. */
   any: boolean;
   /** What the indicator shows: unread *and* dismissed, never auto-read. */
   unread: number;
-  /** Open everything this build ships, on demand. */
+  /** Open everything, on demand. */
   browse: () => void;
   /** "Got it" — actually read. Clears the indicator. */
   markRead: () => void;
@@ -42,16 +83,44 @@ export function usePromotions(options: {
    *
    * Suppresses the *automatic* prompt only — the ⋯ menu still works. A panel
    * thrown over the screen that is trying to get somebody started is the wrong
-   * moment, and it is a real collision now that onboarding-kind promotions are
-   * shown to brand-new users by design.
+   * moment. Rarer than it looks, since every card is date-gated and a genuinely
+   * new user therefore has none — but an existing user who removed their last
+   * project lands on that screen with a real backlog, and that is the collision.
    */
   suppressAuto: boolean;
+  /**
+   * The selected project, or `null` when there is none.
+   *
+   * One project at a time, not every imported repo: the stored state row grows
+   * monotonically and the daemon cannot prune an id it does not understand, so
+   * "mark everything the user has ever had a repo for" is a row that only ever
+   * gets bigger. The selected project is also the only one whose news the reader
+   * has any context for.
+   *
+   * Its `news` comes from the repo's **main** checkout — the daemon takes it from
+   * there and discards every other worktree's copy, so a card being drafted on a
+   * branch **in a worktree** cannot prompt anybody until it lands. (The main
+   * checkout is read as it stands, so a card drafted there is live.)
+   */
+  project: NewsProject | null;
+  /**
+   * The settings document, or `null` while it has not loaded.
+   *
+   * Taken raw rather than as a resolved boolean so that "not known yet" stays
+   * distinguishable from "absent, take the default". `ui.showProjectNews` defaults
+   * to **on**, so resolving it early would auto-open a project's cards in front of
+   * a reader who had switched them off — and the *Got it!* that follows writes read
+   * rows for cards they opted out of. Settings arriving later cannot re-close a
+   * dialog that already latched.
+   */
+  settings: SettingsDoc | null;
 }): PromotionsState {
   const [states, setStates] = useState<Record<string, PromotionState> | null>(null);
   const [firstUse, setFirstUse] = useState<string | null>(null);
   const [open, setOpen] = useState<PromotionsState["open"]>(null);
   /**
-   * Whether the user has already settled the panel this session.
+   * **Which project** the user has already settled the panel for — not *whether*
+   * they have.
    *
    * It gates **the auto-open effect only**, not the mount fetch. The fetch can
    * resolve after the user reached the ⋯ menu and closed the panel, and applying
@@ -59,8 +128,22 @@ export function usePromotions(options: {
    * Discarding the fetch outright instead was worse: a browse-and-close landing
    * mid-flight left `states`/`firstUse` null for the rest of the session, which
    * pins the badge at zero and makes every later settle a no-op.
+   *
+   * A project root rather than a boolean, because a session spans projects and a
+   * single flag made the second one silent: close Veld's own prompt, switch to a
+   * project with unread news, and that project's cards never interrupted for the
+   * rest of the page load — only the badge moved, which is a worse version of the
+   * promise ("a teammate pulls, and the next time they open the IDE they are
+   * told"). Re-arming per project cannot re-prompt anything already acted on: a
+   * read or dismissed card is suppressed by the stored state map, not by this.
+   *
+   * `undefined` is "nothing settled yet" and is deliberately distinct from `null`,
+   * which is a real selection state (no project). A value rather than an effect
+   * that resets a flag, because the ordering version of this is a race.
    */
-  const settled = useRef(false);
+  const [settledFor, setSettledFor] = useState<string | null | undefined>(undefined);
+  const projectRoot = options.project?.root ?? null;
+  const settled = settledFor === projectRoot;
 
   useEffect(() => {
     let cancelled = false;
@@ -86,20 +169,54 @@ export function usePromotions(options: {
     };
   }, []);
 
-  const unread = useMemo(
-    () => (states && firstUse ? unreadCount(PROMOTIONS, states, firstUse) : 0),
-    [states, firstUse],
-  );
+  /**
+   * Every card, from both sources — assembled by {@link buildCards}, which is pure
+   * and tested. The gates it applies (no cards before `firstUse` loads, the
+   * `showProject` switch, each channel's own arrival, the future-date drop) are
+   * user-visible promises, so they live somewhere the no-jsdom suite can reach.
+   *
+   * Recomputed each render rather than memoised, deliberately. `project` arrives
+   * from the `/api/repos` poll, so it is a fresh object every few seconds — a
+   * `useMemo` keyed on it would rebuild anyway, and a `useMemo` keyed on a
+   * hand-rolled signature string would be a second, subtler source of truth
+   * about when news changed. The work is a hash of one path and a map over at
+   * most a handful of items.
+   *
+   * `today` is read from the clock here, at the one edge that is allowed to have
+   * one, and in **UTC** to match `utcDay`'s boundary.
+   */
+  const all: Card[] = buildCards({
+    promotions: PROMOTIONS,
+    firstUseIso: firstUse,
+    project: options.project,
+    showProject: options.settings === null ? null : showProjectNews(options.settings),
+    today: utcDay(new Date().toISOString()),
+  });
 
-  const promptable = useMemo(
-    () => (states && firstUse ? toPrompt(PROMOTIONS, states, firstUse) : []),
-    [states, firstUse],
-  );
+  const unread = states ? unreadCount(all, states) : 0;
+  const promptable = states ? toPrompt(all, states) : [];
 
   useEffect(() => {
-    if (settled.current || options.suppressAuto || promptable.length === 0 || open) return;
-    setOpen({ promotions: promptable, automatic: true });
-  }, [options.suppressAuto, promptable, open]);
+    // **Waits for the settings document, but only while a project could contribute
+    // cards.** The prompt latches — `setSettledFor` runs when the reader closes it —
+    // so opening before `ui.showProjectNews` is known means opening a panel that
+    // *cannot* contain the project's cards and then never auto-prompting them for the
+    // rest of the page load. Badge only, which is the promise quietly downgraded.
+    //
+    // Scoped to `options.project`, because Veld's own cards do not depend on settings
+    // at all and blocking them too would be an unrelated regression: `useSettings`
+    // retries only on window focus, so one failed `GET /api/settings` would otherwise
+    // cost this session its own prompt. With no project selected there is nothing the
+    // document could add, so there is nothing to wait for.
+    //
+    // What this still costs, stated rather than hidden: if a project *is* selected and
+    // the settings request keeps failing, nothing auto-prompts this session. The badge
+    // and the ⋯ menu both still work, and showing repo-authored cards to somebody who
+    // switched them off is the worse of the two failures.
+    if (options.project !== null && options.settings === null) return;
+    if (settled || options.suppressAuto || promptable.length === 0 || open) return;
+    setOpen({ cards: promptable, automatic: true, project: projectRoot });
+  }, [settled, options.suppressAuto, options.settings, options.project, promptable, open, projectRoot]);
 
   /**
    * Record a state for whatever the panel is showing, and close it.
@@ -113,17 +230,23 @@ export function usePromotions(options: {
   const settle = useCallback(
     (state: PromotionState) => {
       if (!open) return;
-      // Close first, unconditionally. The marking below needs `firstUse` to know
-      // what is outstanding, but a dialog that will not shut because a fetch
-      // failed is far worse than a card shown again — and `browse()` can open
-      // this panel while that fetch is still in flight or has already failed.
-      settled.current = true;
+      // Close first, unconditionally. The marking below needs the cards' stored
+      // state to know what is outstanding, but a dialog that will not shut
+      // because a fetch failed is far worse than a card shown again — and
+      // `browse()` can open this panel while that fetch is still in flight or has
+      // already failed.
+      setSettledFor(open.project);
       setOpen(null);
-      if (!firstUse) return;
-      // Only what this user actually has outstanding. Browsing shows every card
-      // the build ships, and marking the auto-read ones would write a row per
-      // promotion the user never had.
-      const ids = unreadOf(open.promotions, states ?? {}, firstUse);
+      // Nothing is written against an unknown state map: a null `states` means the
+      // request carrying it failed, and closing is still closing — the next page
+      // load asks again. (`firstUse` rides the same response, so it is known
+      // exactly when `states` is; checking it too would be a dead branch.)
+      if (!states) return;
+      // What the panel showed, gated against the cards as they stand *now* — see
+      // `markableIds`, which is where that distinction is explained and tested. The
+      // panel's snapshot can predate the arrival stamp, and marking the snapshot is
+      // how a reader ends up with a stored row for the entire back-catalogue.
+      const ids = markableIds(open.cards, all, states);
       if (ids.length === 0) return;
       setStates((current) => mergeStates(current ?? {}, ids, state));
       // Never block the close on the write. The merge is idempotent, so a failed
@@ -134,18 +257,33 @@ export function usePromotions(options: {
         .then((res) => setStates(res.states))
         .catch(() => {});
     },
-    [open, states, firstUse],
+    [open, states, all],
   );
 
   const markRead = useCallback(() => settle("read"), [settle]);
   const dismiss = useCallback(() => settle("dismissed"), [settle]);
 
   const browse = useCallback(() => {
-    // Everything this build ships, whatever its state — including auto-read
-    // items, which is how somebody catches up on what changed before they
-    // arrived. Closing this marks read: they came here on purpose.
-    setOpen({ promotions: PROMOTIONS, automatic: false });
-  }, []);
+    // Everything there is, whatever its state — including auto-read items, which
+    // is how somebody catches up on what changed before they arrived. Closing
+    // this marks read: they came here on purpose.
+    setOpen({ cards: all, automatic: false, project: projectRoot });
+  }, [all, projectRoot]);
 
-  return { open, any: PROMOTIONS.length > 0, unread, browse, markRead, dismiss };
+  return {
+    open,
+    all,
+    // Only when its news is actually being shown: with `ui.showProjectNews` off,
+    // a tab named after the project would offer to filter to cards this session
+    // has deliberately not built.
+    projectName:
+      options.settings !== null && showProjectNews(options.settings)
+        ? (options.project?.name ?? null)
+        : null,
+    any: all.length > 0,
+    unread,
+    browse,
+    markRead,
+    dismiss,
+  };
 }

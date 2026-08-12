@@ -3801,6 +3801,24 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
   fill: var(--accent);
 }
 
+/* The `V.` icon mark. Same split as the wordmark — letterform, then the accent dot
+   — but the `V` takes `currentColor` rather than `--text`, because this one is used
+   inline in a byline that is deliberately dimmer than body copy and the mark has to
+   dim with it. The dot keeps the accent at every size: it is the half of the mark a
+   repo cannot reproduce. */
+.logomark {
+  display: block;
+  flex: none;
+}
+
+.logomark path {
+  fill: currentColor;
+}
+
+.logomark path:last-child {
+  fill: var(--accent);
+}
+
 .start-screen {
   flex: 1;
   display: flex;
@@ -3949,11 +3967,115 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
   gap: 10px;
 }
 
+/* Row four, and only on a surface that mixes sources: who said this.
+   `--faint` and 10.5px, because attribution is what a reader looks for after the
+   sentence rather than before it — a byline competing with the headline would be
+   the crowding the lede row was kept clear of. */
+.promo-section-source {
+  display: flex;
+  align-items: center;
+  margin-top: 1px;
+  min-width: 0;
+}
+
+/* Veld's own mark, dimmed to byline weight. `currentColor` is what the mark's
+   letterform paints with, so the colour is set here rather than on the svg.
+   `center`, not `baseline`: an svg has no baseline of its own, so the mark hung
+   below the text it is set against. */
+.promo-section-source-veld {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--faint);
+}
+
+/* The claim beside the mark. Sentence case, not the eyebrow's small caps: three
+   uppercase words under a headline is a second headline, and this is the line a
+   reader looks at *after* the sentence rather than instead of it. */
+.promo-section-official {
+  font-size: 10.5px;
+  font-weight: 600;
+}
+
+/* The dash between mark and claim, and between claim and project name. Its own
+   element so it can be dimmer than both halves and hidden from a screen reader,
+   which gets the two strings as separate phrases anyway. */
+.promo-section-source-sep {
+  flex: none;
+  opacity: 0.55;
+}
+
+/* A project's card drops the brand accent entirely: green is Veld's colour, and
+   repo-authored text wearing it is the mistakability the byline exists to
+   prevent. Colour reads before text does, which is why this — and not a bigger
+   byline — is what tells the two apart at a glance. */
+.promo-section-from-project .promo-section-glyph {
+  color: var(--muted);
+  background: color-mix(in srgb, var(--muted) 12%, transparent);
+}
+
+.promo-section-from-project .promo-section-eyebrow {
+  color: var(--muted);
+}
+
+/* A project's name, as a label attached to the card rather than a logo on it.
+   The bordered pill is deliberately a different *kind* of mark from the
+   wordmark above: a repo can call itself anything, including "veld", so the two
+   must not be told apart by their text. */
+.promo-section-project {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  padding: 1px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg);
+  color: var(--faint);
+  font-size: 10.5px;
+  font-weight: 500;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+/* The name carries the weight; the phrase before it is scaffolding. A long repo
+   name shortens here rather than pushing the pill past the card. */
+.promo-section-project-name {
+  color: var(--muted);
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The wordmark has moved onto the cards, so the button sits at the end rather
+   than opposite a mark that is no longer there.
+
+   A plain row below a bounded scroller — the same shape `NewWorktreeDialog` uses,
+   and for the same reason its comment gives: the modal body is the scroller
+   otherwise, so a sticky child sticks to the wrong box. Three versions of this were
+   wrong before landing on the house pattern: a Mantine `ScrollArea` over an
+   unbounded body gave two scrollbars side by side; making the body a fixed-height
+   flex column clipped the filter row off the *top*; and `position: sticky` left the
+   button floating over the cards with the body's own scrollbar pinned to the modal
+   edge. Bounding the list is what leaves exactly one scrollbar, inset, with the
+   footer under it. */
 .promo-dialog-foot {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+/* The list's own scroll region, bounded so the modal body never becomes a second
+   scroller. The right padding keeps a card's border off the scrollbar, and the
+   equal negative margin gives that space back so the cards stay full width. */
+.promo-dialog-scroll {
+  max-height: min(58vh, 560px);
+  overflow-y: auto;
+  padding-right: 8px;
+  margin-right: -8px;
 }
 
 /* Unread-news dot on the project-actions button. `overflow: visible` because a

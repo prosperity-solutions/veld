@@ -1,0 +1,57 @@
+{
+  "$schema": "https://veld.oss.life.li/schema/v3/veld.schema.json",
+  "schemaVersion": "3",
+  "name": "ide-news",
+  "ide": {
+    // News this project tells its own team. Merge a card with the change it
+    // describes; a teammate pulls, and the next time they open the IDE they are
+    // told once. Only the repo's MAIN checkout counts — the primary clone, at
+    // whatever it has checked out — so a card drafted in a WORKTREE cannot prompt
+    // anybody until it lands.
+    //
+    // At most 5 live at once, and retiring one is DELETING it. The cap and the
+    // short field limits are the whole reason this surface stays worth being
+    // interrupted by.
+    "news": [
+      {
+        // Kebab-case, stable forever. Never renamed (a rename re-shows the card
+        // to the whole team) and never reused (the new card is suppressed for
+        // everyone who saw the old one). Both failures are silent.
+        "id": "one-command-tests",
+        // Required, shown on the card, and it decides who sees it: a teammate who
+        // imported this project after this day never meets the card, so a new hire
+        // does not get a year of back-catalogue at once. No default — a guessed
+        // date would gate silently and wrongly.
+        "since": "2026-08-12",
+        "eyebrow": "Heads up",
+        // What a teammate can now DO, or stop doing — never "we changed X".
+        "headline": "Stop guessing which test script works",
+        "body": "The wrappers are gone — `just test` runs everything, and your old local alias is the one thing that will still fail today.",
+        "glyph": "terminal"
+      },
+      {
+        // A change to how the team works is still news — it happened on a day, and
+        // the people who need telling are the ones who were here before it. There
+        // is no evergreen "how we work in this repo" card: standing practice
+        // belongs in the repo's docs, which `ide.quicklinks` can point at.
+        "id": "branch-from-main",
+        "since": "2026-08-12",
+        "eyebrow": "How we work",
+        "headline": "Branch from main, not from a worktree",
+        "body": "New checkouts start from origin/main now, so a rebase never replays somebody else's half-finished work through yours.",
+        "glyph": "panes"
+      }
+    ]
+  },
+  "nodes": {
+    "web": {
+      "default_variant": "dev",
+      "type": "start_server",
+      "ports": { "http": 5173 },
+      "probes": { "readiness": { "type": "http", "path": "/" } },
+      "variants": {
+        "dev": { "argv": ["node", "server.js"] }
+      }
+    }
+  }
+}

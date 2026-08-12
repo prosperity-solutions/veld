@@ -149,10 +149,10 @@ position named — which is a useful final check in its own right.
 
 - **`hooks` and `ide`.** Opaque to veld. A `command` key *inside* them is not
   veld's key and must not be touched — the loader deliberately does not look
-  there. (This is the rule the removed converter broke.) Four keys under `ide`
-  are now interpreted — `quicklinks`, `permissions`, `externalOrigins`, `panes`
-  and the `git` subscope (`ide.git.stalenessSensitivity`), see
-  [configuration.md](configuration.md#ide-quicklinks-permissions-external-origins-and-panes) — but they are additions
+  there. (This is the rule the removed converter broke.) Five keys under `ide`
+  are now interpreted — `quicklinks`, `permissions`, `externalOrigins`, `panes`,
+  `news` and the `git` subscope (`ide.git.stalenessSensitivity`), see
+  [configuration.md](configuration.md#ide-quicklinks-permissions-external-origins-panes-and-news) — but they are additions
   rather than a migration: a config that has none of them is unaffected, and the
   rest of `ide` stays opaque, including the `command` exemption. Note that
   `ide.panes[]` entries *do* use `argv`/`shell` and are read by veld, so unlike
@@ -427,6 +427,18 @@ the object form.
 ports at all, `protocol` and `host` on a named port, the `settle` readiness probe,
 and per-port sharing consent. All of it is additive *within* `schemaVersion: "3"`:
 there is no v4, and no config that loads today stops loading tomorrow.
+
+### Telling your team something changed
+
+`ide.news[]` is new: a short card your project shows its own team in the Veld IDE,
+merged with the change it describes and shown once to each teammate who pulls it.
+Five fields, all capped (a headline and one sentence), at most five live items, and
+`veld lint` reports anything malformed rather than failing the load. The date is
+required and gates the card, so a teammate who joined after it never sees it.
+Purely
+additive — a config without it is unaffected — and see
+[configuration.md](configuration.md#idenews-telling-your-own-team-something-changed)
+for the fields and [promotions.md](promotions.md) for how the channel behaves.
 
 ### Terminal ergonomics
 

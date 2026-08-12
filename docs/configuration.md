@@ -2031,11 +2031,11 @@ already lost its leading zero, so it is refused rather than guessed at.
 
 ---
 
-## `ide`: quicklinks, permissions, external origins and panes
+## `ide`: quicklinks, permissions, external origins, panes and news
 
 `ide` is where a project configures Veld's own IDE surfaces — Veld Desktop and
-the `/ide` view in a browser. Four keys under it are interpreted — `quicklinks`,
-`permissions`, `externalOrigins` and the `git` subscope; the rest of `ide`
+the `/ide` view in a browser. Five keys under it are interpreted — `quicklinks`,
+`permissions`, `externalOrigins`, `news` and the `git` subscope; the rest of `ide`
 stays reserved and opaque (see
 [below](#reserved-hooks-and-the-rest-of-ide)), so a JSON-defined IDE extension is
 free to use whatever shape it likes.
@@ -2313,6 +2313,111 @@ A useful calibration: `s` should be high enough that a normal worktree-creation
 cycle never trips it, but low enough that a `main` nobody has updated for a
 sprint reads clearly red.
 
+### `ide.news`: telling your own team something changed
+
+Somebody changes how the project runs — the test command moves, a service needs a
+new env var, the branch convention changes. The people it affects find out when it
+breaks for them, or in a message they have already scrolled past.
+
+`ide.news` is a card your project shows its own team in the Veld IDE, through the
+same channel Veld uses to announce its own changes. You merge it with the change
+it describes; a teammate pulls; the next time they open *that project* in the IDE
+they are told once (the cards belong to the selected project, so a teammate working
+in another repo hears about it when they come back to this one). Reading it clears it. Dismissing it stops the prompt but keeps it counted,
+so closing a modal mid-thought does not lose it, and everything stays revisitable
+under **What's new…** in the project ⋯ menu.
+
+```jsonc
+"ide": {
+  "news": [
+    {
+      "id": "one-command-tests",
+      "since": "2026-08-12",
+      "eyebrow": "Heads up",
+      "headline": "Stop guessing which test script works",
+      "body": "The wrappers are gone — `just test` runs everything, and your old local alias is the one thing that will still fail today.",
+      "glyph": "terminal"
+    }
+  ]
+}
+```
+
+| Field | |
+|---|---|
+| `id` | **Required.** Kebab-case, ≤64 chars, unique within the project. Never rename one and never reuse a retired one — see below. |
+| `since` | **Required**, `YYYY-MM-DD`. The day you wrote it. Shown on the card, and it decides who is too new to need it. No default. |
+| `eyebrow` | **Required**, ≤24 chars. Two or three words above the headline. |
+| `headline` | **Required**, ≤44 chars. What a teammate can now *do*, or stop doing. |
+| `body` | **Required**, ≤160 chars. One sentence on what changes about their day. |
+| `glyph` | `terminal`, `panes`, `device` or `inbox`. Defaults to `inbox`. |
+
+**Write the outcome, not the mechanism.** The headline is what the reader can now
+do — in their words, not your implementation's. This is the rule that decides
+whether anybody keeps reading these, and the one that is hardest to follow right
+after you have finished the change:
+
+> ✗ *"Test wrappers removed"* — "The `scripts/test-*.sh` wrappers have been
+> deleted and replaced by a `just test` recipe that calls cargo and vitest."
+>
+> ✓ *"Stop guessing which test script works"* — "The wrappers are gone — `just
+> test` runs everything, and your old local alias is the one thing that will still
+> fail today."
+
+The check: if the sentence would still read as true to somebody who will never
+touch that part of the repo, it is describing your change instead of their day.
+
+**Every card is a change, and its date gates it.** An item is **auto-read** for a
+teammate who imported the project *after* `since` — so a new hire cloning a repo
+with a year of history never meets a stack of modals about changes that predate
+them, and a card you forgot to delete stops reaching people anyway.
+
+There is deliberately no evergreen kind. "How we work in this repo" is standing
+practice, and a card with no date gate never stops greeting new teammates, which is
+how a channel turns into a tip-of-the-day nobody reads. Put standing practice in
+your `CONTRIBUTING.md` and point at it with `ide.quicklinks`; "we *changed* how we
+work here" is news like anything else.
+
+**Only your main checkout counts.** Veld reads `ide.news` from the repo's **main
+checkout** — the primary clone — and ignores every other worktree's copy, so a card
+you are still drafting *in a worktree* cannot prompt anybody. The flip side: it
+stays silent until somebody pulls on main, which the top bar's "update main"
+control drives.
+
+It is the main *checkout*, though, not the default *branch*: Veld reads that
+directory's working tree at whatever it has checked out. Draft a card on a branch in
+the primary clone and you will see your own card — which is a fine way to preview
+one, as long as you know it is what is happening.
+
+**Five live items, and retiring one is deleting it.** Over the cap it is the
+entries with the **oldest `since`** that go, named in the warning — so an ordinary
+new card, dated today, survives and you never need to delete a good one to make
+room. It goes by the date, not by where the entry sits, so a *backdated* addition
+can be the one dropped.
+Items over the cap are
+dropped with a `veld lint` warning, as is any malformed entry — nothing here can
+fail a config load. Delete a card once it has stopped being news; the caps and the
+scarcity are the whole reason a surface that interrupts people stays worth being
+interrupted by.
+
+**Two id rules, both of which fail silently.** Never rename an id — it is the
+string each teammate's read/dismissed state is stored against, so a rename
+re-shows the card to the whole team. Never reuse a retired one — the new card is
+suppressed for everyone who saw the old one. Ids are namespaced per project
+before they are stored, so another repo shipping the same slug is not a collision.
+
+**A teammate's "when did I join" is when they imported the project.** Which means
+removing and re-importing a repo — or a fresh machine, or a wiped database — moves
+that answer *forwards*, so the back-catalogue becomes silently caught-up rather than
+a stack of modals. That is the right direction for somebody who has just imported a
+repo, but it does mean a card merged last week can be missed by somebody who
+re-imported yesterday.
+
+Cards say which project they came from, beside Veld's own, so a project's card can
+never be mistaken for something Veld said. A reader who wants none of them turns
+off *Settings → General → Show news from your projects*; that hides them without
+marking them read. See [docs/promotions.md](promotions.md) for the whole channel,
+including how the date gate and the four states work.
+
 ### Splitting `ide` across files
 
 `ide` may appear in any file an `include` glob picks up — `veld.d/ide.jsonc` is
@@ -2323,6 +2428,10 @@ rather than the later file replacing the earlier one:
 // veld.json          → "include": ["veld.d/*.jsonc"]
 // veld.d/ide.jsonc   → { "ide": { "permissions": [ … ] } }
 ```
+
+`news` benefits from this most: `veld.d/news.jsonc` keeps a channel that changes
+with every announcement out of the file everything else lives in, which is the
+"separate `news/` directory" idea served by a mechanism that already exists.
 
 That matters for `permissions` specifically: `deny` beats `allow` across *all*
 matching rules, so a rule arriving from another file can tighten the result but
@@ -2584,7 +2693,8 @@ conversation am I resuming" from having an answer nobody can predict.
 Both are **reserved**: they parse, are stored, and are **not executed by this
 version**. `veld lint` says so, so a hook that does nothing is distinguishable
 from a config mistake. For `ide` the notice now names the specific keys that are
-inert, since `quicklinks`, `permissions`, `externalOrigins` and `panes` are not.
+inert, since `quicklinks`, `permissions`, `externalOrigins`, `panes` and
+`news` are not.
 
 ```jsonc
 // veld.d/hooks.jsonc

@@ -76,6 +76,7 @@ import {
   gitCreateFrom,
   hideDisabledActions,
   logsTimeZone,
+  showProjectNews,
   searchUrl,
   activityPrefs,
   terminalAgentIntegration,
@@ -286,6 +287,7 @@ export function SettingsDialog(props: {
   const activity = activityPrefs(settings ?? {});
   const logsTz = logsTimeZone(settings ?? {});
   const hideDisabled = hideDisabledActions(settings ?? {});
+  const projectNews = showProjectNews(settings ?? {});
 
   // Not persisted, and deliberately so: the dialog is remounted on every open, so
   // it always opens on General rather than wherever a previous visit ended up.
@@ -692,6 +694,17 @@ export function SettingsDialog(props: {
                   onChange={(e) =>
                     set({ "ui.hideDisabledActions": e.currentTarget.checked })
                   }
+                />
+              </Row>
+              <Row
+                label="Show news from your projects"
+                help="On, a project can tell its own team something changed — a card written into its veld.json, shown once, labelled with the project's name. Off, only Veld's own news appears. Turning it off does not mark anything read, so anything you missed is still in What's new when you turn it back on."
+              >
+                <Checkbox
+                  size="xs"
+                  checked={projectNews}
+                  disabled={locked}
+                  onChange={(e) => set({ "ui.showProjectNews": e.currentTarget.checked })}
                 />
               </Row>
             </Stack>
