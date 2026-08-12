@@ -635,6 +635,20 @@ idea.
 | Launch a local review tool and open it in a browser pane (e.g. [difit](https://github.com/yoshiko-pg/difit)) | a local binary that serves HTTP on a port | top bar action + browser pane | backlog — needs an action that can *start a server and route a pane at it*, which round 1's fire-and-forget action cannot express |
 | Badges on every worktree at once | same as the badges themselves | rail row | backlog — the trigger for moving evaluation to the daemon-owned push model |
 | Migrate `ide.quicklinks` into `ide.extensions` as `type: "link"` | none (static) | browser pane place list | backlog — the first planned breaking consolidation |
+| An availability predicate for a **GUI application**, not just a `PATH` binary | a filesystem probe (`/Applications/X.app`, a Windows registry key, a `.desktop` file) | every slot | backlog — see the note below |
+
+> **Note on `requires_bin` and GUI apps:** `requires_bin` asks the user's `PATH`,
+> which is the right question for a CLI and the *wrong* one for the flagship
+> "open this worktree in my editor" case. VS Code's `code`, and JetBrains'
+> `webstorm`/`idea`, are shell launchers that are **not installed by default** —
+> so a PATH check hides the option on a machine where the editor is sitting in
+> `/Applications`. Hiding a working option is worse than offering one that
+> explains itself, so this repo's own config drops `requires_bin` on its editor
+> entries and falls back to the application bundle inside the command. That works,
+> and it is a workaround: the missing thing is a predicate that can ask "is this
+> application installed", which is per-platform and therefore a real design
+> question rather than a field to bolt on. Until then, prefer *no* predicate over
+> a `PATH` one for anything with a GUI.
 
 > **Note on staleness:** the data this badge would render is *core* — the daemon
 > computes "main checkout is N commits behind `origin/<default>`" and carries it
@@ -662,7 +676,18 @@ bugfix in an existing one):
    alternatives with the argument that killed each one*. This document is the
    system's memory across sessions; a decision whose alternatives are lost gets
    re-argued from scratch by the next agent.
-6. **A new extension `type` or `slot` is cheap; a change to the item vocabulary is
+6. **Choosing `open_in` is a judgement about *whose session* the page belongs
+   to, and it is the field an agent writing a config gets wrong.** The rule:
+   **anything behind a login the developer holds — a code host, a CI dashboard, a
+   cloud console, an error tracker — is `system`**, because a Veld browser pane
+   has its own cookie jar and lands them on a sign-in page (or a dead end, for an
+   SSO flow that will not run in a fresh partition). **`pane` is for what the run
+   itself serves**: localhost, a staging URL behind the same session the app
+   already uses, a local report a tool just generated. `system` is the default for
+   exactly this reason, so the field is usually only written to say `pane`. When
+   in doubt, ask whether the reader is already signed in to it somewhere else; if
+   yes, it is `system`.
+7. **A new extension `type` or `slot` is cheap; a change to the item vocabulary is
    not.** `id`/`slot`/`type`/`label`/`icon`/`requires_bin`/`when_missing`/`argv` are
    shared across every present and future extension kind, including the lifecycle
    hooks that will live under `hooks`. Adding a field is fine; renaming or

@@ -913,7 +913,15 @@ Gotchas worth knowing before writing one:
   lint problem, not a runtime failure.
 - **`open_in` defaults to `system`**, the opposite of `ide.quicklinks` — a badge's
   link is a provider page the user is signed in to, and a pane has its own cookie
-  jar.
+  jar. **The rule when writing one:** behind a login the developer holds (code
+  host, CI, cloud console, error tracker) → `system`; served by the run itself
+  (localhost, staging on the same session, a local report) → `pane`. In doubt, ask
+  whether they are already signed in to it elsewhere.
+- **Never put `requires_bin` on something with a GUI.** `code`, `webstorm` and
+  `idea` are launchers installed *separately* from the editor, so a PATH check
+  hides the option on a machine that has the app. Leave it off and let the command
+  fall back:
+  `command -v code >/dev/null 2>&1 && exec code "${veld.root}" || exec open -a "Visual Studio Code" "${veld.root}"`.
 - **An explicit `when_missing` beats the user's "hide disabled actions" setting**,
   so a project's install hint cannot be silenced by a clutter preference.
 - **A `menu` whose `items` all resolve to nothing is dropped whole**, and one whose

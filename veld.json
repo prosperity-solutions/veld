@@ -57,6 +57,12 @@
         // The declaration's glyph. The script's output may override it per
         // state, which is what `tone-demo` below demonstrates.
         "icon": "git-pull-request",
+        // Explicit, though `system` is already the default: a pull request is
+        // behind a login the developer holds in their *own* browser, and a Veld
+        // browser pane has a separate cookie jar, so opening it in a pane is a
+        // second sign-in at best. Written out because this file is where someone
+        // copying the pattern will look for the choice.
+        "open_in": "system",
         "argv": ["scripts/veld/pr-badge.sh"],
         "refresh_seconds": 60,
         "requires_bin": ["gh"],
@@ -89,33 +95,41 @@
         "icon": "external-link",
         "items": ["webstorm", "vscode", "idea"]
       },
-      // `hide` for the editors, deliberately unlike the `pr` badge: which editor
-      // a contributor uses is their business, and a project has no standing to
-      // suggest installing one. A menu whose members are all missing renders
-      // nothing at all.
+      // **No `requires_bin` on the editors, and that is the interesting part.**
+      // Every one of these ships a command-line launcher that is *not installed
+      // by default* — VS Code needs "Shell Command: Install 'code' command in
+      // PATH", JetBrains needs the Toolbox shell scripts — so a PATH check hides
+      // the option on a machine where the editor is sitting right there in
+      // /Applications. Hiding a working option is a worse failure than offering
+      // one that explains itself, and these live inside a menu, so an entry that
+      // might not work costs a line in a popover rather than space in the bar.
+      //
+      // So each tries the launcher and falls back to the application bundle.
+      // `open -a` exits non-zero when the app is genuinely absent, and veld turns
+      // that into a toast carrying the reason. `${veld.root}` is quoted because a
+      // checkout path can contain spaces.
+      //
+      // The general gap this works around is recorded in
+      // docs/extensions-vision.md: `requires_bin` cannot express "this GUI
+      // application is installed", which is a first-class case for the very
+      // feature it is being used for.
       {
         "id": "webstorm",
         "type": "action",
         "label": "WebStorm",
-        "argv": ["webstorm", "${veld.root}"],
-        "requires_bin": ["webstorm"],
-        "when_missing": "hide"
+        "shell": "command -v webstorm >/dev/null 2>&1 && exec webstorm \"${veld.root}\" || exec open -a WebStorm \"${veld.root}\""
       },
       {
         "id": "vscode",
         "type": "action",
         "label": "VS Code",
-        "argv": ["code", "${veld.root}"],
-        "requires_bin": ["code"],
-        "when_missing": "hide"
+        "shell": "command -v code >/dev/null 2>&1 && exec code \"${veld.root}\" || exec open -a \"Visual Studio Code\" \"${veld.root}\""
       },
       {
         "id": "idea",
         "type": "action",
         "label": "IntelliJ IDEA",
-        "argv": ["idea", "${veld.root}"],
-        "requires_bin": ["idea"],
-        "when_missing": "hide"
+        "shell": "command -v idea >/dev/null 2>&1 && exec idea \"${veld.root}\" || exec open -a \"IntelliJ IDEA\" \"${veld.root}\""
       },
       // A badge that walks through every tone, one click at a time. Badge colour
       // is the one part of this feature no test can check — a contrast ratio is

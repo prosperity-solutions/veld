@@ -2794,6 +2794,20 @@ browser**, because a badge's link is normally a page you are already signed in t
 and a Veld browser pane has its own cookie jar. `pane` opens it in a pane instead.
 A badge may override it per value by printing `"open_in"` itself.
 
+**Which one to pick is a question about whose session the page belongs to**, and it
+is the easiest field to get wrong when writing a config (including for a coding
+agent doing it on a project's behalf):
+
+| The link points at | Use | Because |
+|---|---|---|
+| A code host, CI, a cloud console, an error tracker — **anything behind a login you hold** | `system` | A pane has its own cookie jar, so it lands on a sign-in page; an SSO flow started there is a second login at best and a dead end at worst |
+| What the run itself serves — localhost, a staging URL on the same session the app uses, a report a local tool just wrote | `pane` | It belongs beside the code, and the pane is already the right browser for it |
+
+`system` is the default precisely because the first row is the common case, so in
+practice the field is only written in order to say `pane`. If you are unsure, ask
+whether the reader is already signed in to that site somewhere else — if they are,
+it is `system`.
+
 `refresh_seconds` defaults to 60 and is floored at 15. Veld only evaluates the
 worktree you are looking at, only while a window is open, and only once however
 many windows ask — see [how badges are run](#how-a-badge-is-run).
@@ -2838,6 +2852,18 @@ decides what you see:
 **An explicit `when_missing` wins over the "hide disabled actions" setting.** That
 setting is about veld's own inapplicable actions; a project asking for `hint` is
 teaching, and a preference about clutter must not delete the lesson.
+
+**Do not put `requires_bin` on something with a GUI.** It asks your `PATH`, which
+is the right question for a CLI and the wrong one for an application: VS Code's
+`code` and JetBrains' `webstorm`/`idea` are launchers you have to install
+*separately* from the editor, so a `PATH` check hides the option on a machine where
+the editor is sitting in `/Applications`. Leave the predicate off and let the
+command find the app — this repo's own config does
+`command -v code >/dev/null 2>&1 && exec code "${veld.root}" || exec open -a "Visual Studio Code" "${veld.root}"`,
+so the launcher is used when it exists and the bundle otherwise, and a genuinely
+missing app fails with a message you can read. Inside a `menu` this costs a line in
+a popover rather than space in the bar, which is the trade worth making: hiding an
+option that would have worked is worse than offering one that explains itself.
 
 #### How a badge is run
 
