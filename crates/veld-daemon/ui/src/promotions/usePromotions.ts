@@ -22,14 +22,14 @@ import { api } from "../api";
 import { PROMOTIONS } from "./content";
 import {
   type Card,
-  mergeStates,
   type ProjectNewsItem,
   type PromotionState,
-  projectCards,
+  buildCards,
+  mergeStates,
   toPrompt,
   unreadCount,
   unreadOf,
-  veldCards,
+  utcDay,
 } from "./model";
 
 /** The selected project and the news its main checkout declares. */
@@ -89,7 +89,8 @@ export function usePromotions(options: {
    *
    * Its `news` comes from the repo's **main** checkout — the daemon takes it from
    * there and discards every other worktree's copy, so a card being drafted on a
-   * feature branch cannot prompt anybody until it lands.
+   * branch **in a worktree** cannot prompt anybody until it lands. (The main
+   * checkout is read as it stands, so a card drafted there is live.)
    */
   project: NewsProject | null;
   /** `ui.showProjectNews`. When off, a project's cards are not built at all. */
@@ -99,7 +100,8 @@ export function usePromotions(options: {
   const [firstUse, setFirstUse] = useState<string | null>(null);
   const [open, setOpen] = useState<PromotionsState["open"]>(null);
   /**
-   * Whether the user has already settled the panel this session.
+   * **Which project** the user has already settled the panel for — not *whether*
+   * they have.
    *
    * It gates **the auto-open effect only**, not the mount fetch. The fetch can
    * resolve after the user reached the ⋯ menu and closed the panel, and applying
@@ -108,11 +110,21 @@ export function usePromotions(options: {
    * mid-flight left `states`/`firstUse` null for the rest of the session, which
    * pins the badge at zero and makes every later settle a no-op.
    *
-   * A `useState` rather than a `useRef` because it is read by the effect below
-   * and an effect must not depend on a value React does not track — but it is
-   * only ever set to `true`, so the extra render it costs happens once.
+   * A project root rather than a boolean, because a session spans projects and a
+   * single flag made the second one silent: close Veld's own prompt, switch to a
+   * project with unread news, and that project's cards never interrupted for the
+   * rest of the page load — only the badge moved, which is a worse version of the
+   * promise ("a teammate pulls, and the next time they open the IDE they are
+   * told"). Re-arming per project cannot re-prompt anything already acted on: a
+   * read or dismissed card is suppressed by the stored state map, not by this.
+   *
+   * `undefined` is "nothing settled yet" and is deliberately distinct from `null`,
+   * which is a real selection state (no project). A value rather than an effect
+   * that resets a flag, because the ordering version of this is a race.
    */
-  const [settled, setSettled] = useState(false);
+  const [settledFor, setSettledFor] = useState<string | null | undefined>(undefined);
+  const projectRoot = options.project?.root ?? null;
+  const settled = settledFor === projectRoot;
 
   useEffect(() => {
     let cancelled = false;
@@ -139,7 +151,10 @@ export function usePromotions(options: {
   }, []);
 
   /**
-   * Every card, from both sources.
+   * Every card, from both sources — assembled by {@link buildCards}, which is pure
+   * and tested. The gates it applies (no cards before `firstUse` loads, the
+   * `showProject` switch, each channel's own arrival, the future-date drop) are
+   * user-visible promises, so they live somewhere the no-jsdom suite can reach.
    *
    * Recomputed each render rather than memoised, deliberately. `project` arrives
    * from the `/api/repos` poll, so it is a fresh object every few seconds — a
@@ -148,20 +163,16 @@ export function usePromotions(options: {
    * about when news changed. The work is a hash of one path and a map over at
    * most a handful of items.
    *
-   * Nothing is built while `firstUse` is null: with no arrival there is no date
-   * gate, and guessing one is how a fresh install gets a modal about last spring.
-   * That deliberately gates the project's cards on Veld's own stamp being loaded
-   * too — the request that carries it is the same one that carries `states`, so
-   * without it there is nothing to compare a read against either.
+   * `today` is read from the clock here, at the one edge that is allowed to have
+   * one, and in **UTC** to match `utcDay`'s boundary.
    */
-  const all: Card[] = firstUse
-    ? [
-        ...veldCards(PROMOTIONS, firstUse),
-        ...(options.showProject && options.project
-          ? projectCards(options.project, options.project.news)
-          : []),
-      ]
-    : [];
+  const all: Card[] = buildCards({
+    promotions: PROMOTIONS,
+    firstUseIso: firstUse,
+    project: options.project,
+    showProject: options.showProject,
+    today: utcDay(new Date().toISOString()),
+  });
 
   const unread = states ? unreadCount(all, states) : 0;
   const promptable = states ? toPrompt(all, states) : [];
@@ -188,7 +199,7 @@ export function usePromotions(options: {
       // because a fetch failed is far worse than a card shown again — and
       // `browse()` can open this panel while that fetch is still in flight or has
       // already failed.
-      setSettled(true);
+      setSettledFor(projectRoot);
       setOpen(null);
       // Only what this user actually has outstanding. Browsing shows every card
       // there is, and marking the auto-read ones would write a row per card the
@@ -204,7 +215,7 @@ export function usePromotions(options: {
         .then((res) => setStates(res.states))
         .catch(() => {});
     },
-    [open, states],
+    [open, states, projectRoot],
   );
 
   const markRead = useCallback(() => settle("read"), [settle]);

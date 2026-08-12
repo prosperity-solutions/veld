@@ -1125,7 +1125,7 @@ struct RepoView {
     ///
     /// On the repo rather than on each worktree because news belongs to the
     /// project, and because only what has reached main counts: a card being
-    /// drafted on a feature branch must not prompt a teammate, and a repo with
+    /// drafted in a worktree must not prompt a teammate, and a repo with
     /// five worktrees must not put the same card in front of somebody five times.
     /// [`repo_view`] takes it from the main worktree and discards the rest.
     ///
@@ -1299,7 +1299,7 @@ struct IdeView {
     /// [`worktree_view`] already has the config open, and it is `skip`ped rather
     /// than merely ignored by the client because the rule it enforces is a
     /// promise about what a card can do: news counts only once it has reached
-    /// main, so a card being drafted on a feature branch must not be able to
+    /// main, so a card being drafted in another worktree must not be able to
     /// prompt a teammate. A client-side filter would make that promise
     /// re-breakable by the next person to touch the renderer.
     #[serde(skip)]
@@ -1498,7 +1498,7 @@ async fn repo_view(
     // News belongs to the *project*, and only what has landed on main counts.
     //
     // Taking it here — rather than letting each checkout carry its own — is what
-    // makes "a card being drafted on a feature branch cannot prompt anybody" true
+    // makes "a card being drafted in a worktree cannot prompt anybody" true
     // by construction. It also keeps the payload one copy per repo on an endpoint
     // every IDE window polls, instead of one per worktree.
     //

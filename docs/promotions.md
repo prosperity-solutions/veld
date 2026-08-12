@@ -248,11 +248,19 @@ the implementation is the most available thing in their head.
 Four of those are load-bearing enough to say why.
 
 **Only the main checkout's news counts.** The daemon reads `ide.news` from the
-repo's *main* worktree and discards every other checkout's copy. So a card being
-drafted on a feature branch cannot prompt anybody until it lands — and a repo with
-five worktrees cannot put the same card in front of somebody five times. The cost
-is that news is silent until main is pulled, which the top bar's "update main"
-control already drives.
+repo's *main* worktree — the primary clone — and discards every other checkout's
+copy. So a card being drafted **in a worktree** cannot prompt anybody until it
+lands, and a repo with five worktrees cannot put the same card in front of somebody
+five times. The cost is that news is silent until main is pulled, which the top
+bar's "update main" control already drives.
+
+Note what this is keyed on, because the shorter version of the sentence is wrong:
+it is the main **checkout**, whatever that checkout currently has *checked out* —
+not the default branch. Veld reads the working tree, and `GET /api/repos` is polled
+by every window and may not spawn `git`, so there is nothing there that could read
+`main:veld.json` instead. Draft a card on a branch in the primary clone and you
+will see your own card. That is the honest boundary: worktrees are isolated, the
+main clone is not.
 
 **Ids are namespaced, and the namespace is the repo's path.** `proj:<hash>:<slug>`,
 where the hash is FNV-1a over the main-checkout root. Two unrelated repos both
@@ -281,9 +289,23 @@ opposite safe direction, and the reason is who is holding it.
 channel every teammate can push a modal through to every other teammate, and the
 honest technical mitigations are the ones that also improve authoring: the copy
 limits (24 / 44 / 160) stop a wall of prose, and `MAX_NEWS_ITEMS = 5` stops a
-stack. Retiring is deleting, here as everywhere. Items past the cap, and any
+stack. Retiring is deleting, here as everywhere. Items over the cap, and any
 malformed entry, are dropped with a `veld lint` warning — never a load error,
 because a config that will not load takes `veld stop` and `veld logs` with it.
+
+Over the cap it is the **oldest** entries that go, and that direction is
+load-bearing: authors are told to append, and the history view breaks a shared day
+by reverse array order, so the *last* entry is the newest thing. Refusing items once
+the cap was reached — the first version of this — dropped precisely the card that had
+just landed, the only one with an audience, and reported it through a lint nobody
+runs on a pull.
+
+**A `since` in the future is refused.** It is the one typo that re-creates the
+never-expiring card: the date is the only thing that retires an item, so a day that
+has not happened yet is after every arrival, forever — including everyone who joins
+later. `2062` for `2026` is one keystroke. Both halves check it: `parse_news` drops
+the entry and tells the author, and `projectCards` drops it again client-side for a
+reader whose daemon predates that check.
 
 Deliberately **not** built: a rate limit (whose clock? and three cards in a
 migration week is legitimate) and per-project opt-in (consent would have to be
@@ -320,7 +342,18 @@ not carry the wordmark; `docs/branding.md` records the exception.
 
 Repo-declared content is untrusted input: plain text, escaped, no HTML, no images,
 no remote fetches. It renders in a page same-origin with the daemon API and with
-PTY tickets.
+PTY tickets. `parse_news` additionally refuses copy that contains control, bidi or
+zero-width characters — the bidi controls because the line a project's card sits in
+is the byline the reader is checking provenance against, and the zero-width ones
+because `trim` does not remove them, so a card can otherwise pass a 24-character cap
+and render as nothing.
+
+**What attribution does not defend against, stated plainly:** a repo may write
+"Official veld news" into its own `eyebrow`. Nothing filters copy by content, and
+filtering it would be a homoglyph arms race. What survives that is the part the copy
+cannot reach — a project's card has no `V.` mark, carries the "News from your
+project" pill, and drops the brand accent, so the two are still different-looking
+cards. The claim is "not mistakable at a glance", not "cannot contain a lie".
 
 ### The history view
 

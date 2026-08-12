@@ -2321,8 +2321,9 @@ breaks for them, or in a message they have already scrolled past.
 
 `ide.news` is a card your project shows its own team in the Veld IDE, through the
 same channel Veld uses to announce its own changes. You merge it with the change
-it describes; a teammate pulls; the next time they open the IDE they are told
-once. Reading it clears it. Dismissing it stops the prompt but keeps it counted,
+it describes; a teammate pulls; the next time they open *that project* in the IDE
+they are told once (the cards belong to the selected project, so a teammate working
+in another repo hears about it when they come back to this one). Reading it clears it. Dismissing it stops the prompt but keeps it counted,
 so closing a modal mid-thought does not lose it, and everything stays revisitable
 under **What's new…** in the project ⋯ menu.
 
@@ -2376,10 +2377,16 @@ how a channel turns into a tip-of-the-day nobody reads. Put standing practice in
 your `CONTRIBUTING.md` and point at it with `ide.quicklinks`; "we *changed* how we
 work here" is news like anything else.
 
-**Only your main branch counts.** Veld reads `ide.news` from the repo's **main
-checkout** and ignores every other worktree's copy, so a card you are still
-drafting on a branch cannot prompt anybody. The flip side: it stays silent until
-somebody pulls on main, which the top bar's "update main" control drives.
+**Only your main checkout counts.** Veld reads `ide.news` from the repo's **main
+checkout** — the primary clone — and ignores every other worktree's copy, so a card
+you are still drafting *in a worktree* cannot prompt anybody. The flip side: it
+stays silent until somebody pulls on main, which the top bar's "update main"
+control drives.
+
+It is the main *checkout*, though, not the default *branch*: Veld reads that
+directory's working tree at whatever it has checked out. Draft a card on a branch in
+the primary clone and you will see your own card — which is a fine way to preview
+one, as long as you know it is what is happening.
 
 **Five live items, and retiring one is deleting it.** Items past the cap are
 dropped with a `veld lint` warning, as is any malformed entry — nothing here can

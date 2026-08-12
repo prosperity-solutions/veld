@@ -466,9 +466,11 @@ that is documentation, and the docs already have it.
   never sees it, so a new hire meets no back-catalogue. There is no evergreen kind:
   standing practice ("how we work in this repo") belongs in the repo's docs, which
   `ide.quicklinks` can point at. Only a *change* goes here.
-- **Only `main` counts.** Veld reads this from the repo's main checkout, so a card
-  on a feature branch prompts nobody until it lands. It also means the card is
-  silent until somebody pulls on main.
+- **Only the main checkout counts.** Veld reads this from the repo's main checkout —
+  the primary clone, at whatever it has checked out — so a card drafted in a
+  *worktree* prompts nobody until it lands, and the card is silent until somebody
+  pulls on main. A branch in the main clone itself is live: the isolation is per
+  worktree, not per branch.
 - **`veld lint` reports every mistake here**; nothing under `ide.news` can fail a
   config load.
 

@@ -40,11 +40,17 @@ use super::management::{check_csrf, open_db};
 /// note what it does *not* bound: the stored map is one JSON row that grows
 /// monotonically across requests, and the daemon treats ids as opaque so it can
 /// never prune one. Repeated calls with novel ids grow that row without limit.
-/// That is acceptable only because reaching this endpoint at all already means
-/// same-origin JS or local code, which could write the database directly — do
-/// not read this constant as "the row is bounded". Promotions are for changes
-/// big enough to be worth interrupting somebody over, so a real request carries
-/// a handful.
+/// **Novel ids no longer require local code**, which is what that used to rest
+/// on. A project declares its own news in `veld.json` (`ide.news`), so whoever
+/// can land a commit on a repo the user has imported can mint ids the user then
+/// stores by reading or dismissing them — each pull bringing a new slug adds a
+/// row. Growth is slow rather than a denial of service: at most
+/// `veld_core::ide::MAX_NEWS_ITEMS` per config, only the *selected* project's news
+/// is ever sent, and a row is ~86 bytes. Project ids are also the prunable kind,
+/// since they carry a `proj:<hash>:` prefix and the daemon knows which roots are
+/// imported — nobody has needed to yet. Do not read this constant as "the row is
+/// bounded". Promotions are for changes big enough to be worth interrupting
+/// somebody over, so a real request carries a handful.
 const MAX_IDS: usize = 256;
 
 /// Ceiling on one id's length. Ids are short kebab-case slugs, or a namespaced

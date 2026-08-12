@@ -129,7 +129,7 @@ pub const PANE_ICON_NAMES: &[&str] = &[
 ///
 /// Two gates keep this list, the schema's `enum`, and the bundle's `GLYPH_NAMES`
 /// from drifting: [`tests::the_glyph_set_matches_the_published_schema`] here, and
-/// `a_project_glyph_set_matches_the_schema` in `model.test.ts`.
+/// `it("matches the published schema's glyph set and every cap")` in `model.test.ts`.
 pub const NEWS_GLYPHS: &[&str] = &["device", "inbox", "panes", "terminal"];
 
 /// Every key one `ide.news` entry may declare, in sorted order.
@@ -163,8 +163,8 @@ pub const MAX_NEWS_BODY: usize = 160;
 /// so a project that has more than this many things to say at once has a
 /// changelog to say them in.
 ///
-/// Items past the cap are dropped **from the end**, so the ones an author wrote
-/// first keep working rather than the list silently reordering what is seen.
+/// Over the cap, the **oldest** entries are dropped — see the tail of
+/// [`parse_news`] for why that direction and not the other.
 pub const MAX_NEWS_ITEMS: usize = 5;
 
 /// Every key a `terminal` pane may declare, in sorted order.
@@ -1088,6 +1088,54 @@ fn plausible_day(day: &str) -> bool {
     (1..=12).contains(&num(5, 7)) && (1..=31).contains(&num(8, 10))
 }
 
+/// Today, as the `YYYY-MM-DD` string [`plausible_day`] accepts.
+///
+/// **Local**, not UTC, and that is the lenient direction on purpose: an author east
+/// of UTC writing "today" would otherwise have their own card rejected for being in
+/// the future. The consumer's gate is the UTC day (see `utcDay` in the bundle's
+/// `model.ts`), so the two can disagree by less than a day — the same edge that
+/// gate already documents, and it costs a card being invisible for some hours
+/// rather than a card that is never anybody's news.
+fn today_local() -> String {
+    chrono::Local::now().format("%Y-%m-%d").to_string()
+}
+
+/// Characters a card's copy may not contain at all.
+///
+/// Two groups, both invisible and both able to make a card claim something the text
+/// does not say:
+///
+/// - **Zero-width and word-joiners** (`200B`–`200D`, `2060`, `FEFF`, `00AD`, `180E`).
+///   `str::trim` removes `White_Space`, which does *not* include these — so
+///   `"\u{200b}".repeat(24)` passes a 24-character eyebrow cap and renders as
+///   nothing, spending a reader's one interrupt on a blank card.
+/// - **Bidi controls** (`200E`/`200F`, `202A`–`202E`, `2066`–`2069`). These reorder
+///   the line they sit in, and the line a project's card sits in is the byline the
+///   reader is meant to be checking provenance against. Flex makes each string its
+///   own bidi paragraph, which bounds the damage to one field — refusing them
+///   removes it.
+///
+/// C0/C1 controls (`char::is_control`) are refused by the same check, one range up.
+const INVISIBLE_COPY_CHARS: &[char] = &[
+    '\u{00ad}', '\u{180e}', '\u{200b}', '\u{200c}', '\u{200d}', '\u{200e}', '\u{200f}', '\u{202a}',
+    '\u{202b}', '\u{202c}', '\u{202d}', '\u{202e}', '\u{2060}', '\u{2066}', '\u{2067}', '\u{2068}',
+    '\u{2069}', '\u{feff}',
+];
+
+/// Whether copy is text a reader can actually see.
+///
+/// The length caps bound how *much* text a card carries; this bounds whether it
+/// carries any. See [`INVISIBLE_COPY_CHARS`] for what is refused and why.
+fn has_visible_text(text: &str) -> bool {
+    if text
+        .chars()
+        .any(|c| c.is_control() || INVISIBLE_COPY_CHARS.contains(&c))
+    {
+        return false;
+    }
+    text.chars().any(|c| !c.is_whitespace())
+}
+
 /// Parse `ide.news` — the cards this project shows its own team.
 ///
 /// Lenient like every other `ide` key: a malformed entry is dropped with a
@@ -1105,22 +1153,9 @@ fn parse_news(value: &serde_json::Value, out: &mut IdeSection) {
         });
         return;
     };
+    let today = today_local();
     for (index, item) in items.iter().enumerate() {
         let at = format!("ide.news[{index}]");
-        // Checked before the item is parsed, so the finding names the entry the
-        // author would have to delete rather than a validation detail of a card
-        // that was never going to be shown anyway.
-        if out.news.len() >= MAX_NEWS_ITEMS {
-            out.problems.push(IdeProblem {
-                location: at,
-                message: format!(
-                    "a project may have at most {MAX_NEWS_ITEMS} news items live at once; \
-                     this one was dropped. Retiring a news item is deleting it — remove the \
-                     ones that have stopped being news"
-                ),
-            });
-            continue;
-        }
         let Some(entry) = item.as_object() else {
             out.problems.push(IdeProblem {
                 location: at,
@@ -1166,6 +1201,27 @@ fn parse_news(value: &serde_json::Value, out: &mut IdeSection) {
             continue;
         };
 
+        // **A future day is refused, and this is the gate's load-bearing half.**
+        // `since` is the only thing that retires a card: a reader who arrived after
+        // it never sees it. A day that has not happened yet is therefore after
+        // *every* arrival, forever — which re-creates exactly the never-expiring
+        // card this channel deleted the `onboarding` kind to be rid of, in the one
+        // half of it veld does not author. It is also the single likeliest typo
+        // (`2062` for `2026`), which is why it is refused rather than reported: a
+        // card that prompts the whole team until somebody notices is worse than a
+        // card the author is told to date correctly.
+        if since > today.as_str() {
+            out.problems.push(IdeProblem {
+                location: format!("{at}.since"),
+                message: format!(
+                    "is in the future ({since:?}, and today is {today:?}), so it was dropped. \
+                     A card is retired by its date — one that has not happened yet would \
+                     reach every teammate forever, including everybody who joins later"
+                ),
+            });
+            continue;
+        }
+
         // The three copy fields, each dropped rather than truncated on a breach:
         // half a sentence reads as a bug in veld, where a lint finding reads as
         // what it is.
@@ -1178,7 +1234,10 @@ fn parse_news(value: &serde_json::Value, out: &mut IdeSection) {
         ] {
             let text = entry.get(key).and_then(serde_json::Value::as_str);
             match text {
-                Some(text) if !text.trim().is_empty() && text.chars().count() <= max => {
+                // `has_visible_text` rather than `!trim().is_empty()`: trim only
+                // removes `White_Space`, so zero-width padding is text by the cap's
+                // reckoning and nothing at all by the reader's.
+                Some(text) if has_visible_text(text) && text.chars().count() <= max => {
                     copy.push(text);
                 }
                 _ => {
@@ -1186,9 +1245,9 @@ fn parse_news(value: &serde_json::Value, out: &mut IdeSection) {
                     out.problems.push(IdeProblem {
                         location: format!("{at}.{key}"),
                         message: format!(
-                            "required, and must be 1-{max} characters (got {}). The cap is \
-                             the point: a card is a headline and one sentence, so it is \
-                             worth being interrupted by",
+                            "required, and must be 1-{max} characters of visible plain text \
+                             (got {}). The cap is the point: a card is a headline and one \
+                             sentence, so it is worth being interrupted by",
                             text.map_or_else(
                                 || "nothing".to_owned(),
                                 |t| format!("{}", t.chars().count())
@@ -1248,6 +1307,37 @@ fn parse_news(value: &serde_json::Value, out: &mut IdeSection) {
             headline: copy[1].to_owned(),
             body: copy[2].to_owned(),
             glyph: glyph.to_owned(),
+        });
+    }
+
+    // **Over the cap, the OLDEST entries go.** Applied after the whole array is
+    // parsed, rather than refusing items once the cap is reached, because those are
+    // opposite answers to "whose card is expendable" and only one of them is
+    // compatible with the rest of the feature: authors are told to *append*
+    // (`docs/promotions.md`), and the history view breaks a shared day by reverse
+    // array order — so the last entry is the newest thing, and refusing past the cap
+    // would have dropped precisely the card that just landed. That is the one card
+    // with an audience; the entries at the front are the ones already auto-read for
+    // most of the team.
+    //
+    // It still reports, and it still says the same thing: retiring a news item is
+    // deleting it, and a project with more than this many live cards has a changelog
+    // to put them in.
+    if out.news.len() > MAX_NEWS_ITEMS {
+        let dropped = out.news.len() - MAX_NEWS_ITEMS;
+        let ids: Vec<String> = out
+            .news
+            .drain(..dropped)
+            .map(|item| format!("{:?}", item.id))
+            .collect();
+        out.problems.push(IdeProblem {
+            location: "ide.news".to_owned(),
+            message: format!(
+                "a project may have at most {MAX_NEWS_ITEMS} news items live at once, so the \
+                 {dropped} oldest were dropped: {}. Retiring a news item is deleting it — \
+                 remove the ones that have stopped being news",
+                ids.join(", ")
+            ),
         });
     }
 }
@@ -2888,21 +2978,65 @@ mod tests {
     }
 
     #[test]
-    fn the_live_item_cap_drops_from_the_end_and_says_why() {
+    fn the_live_item_cap_keeps_the_newest_and_names_what_it_dropped() {
         let items: Vec<serde_json::Value> = (0..MAX_NEWS_ITEMS + 2)
             .map(|i| news_item(json!({ "id": format!("item-{i}") })))
             .collect();
         let parsed = section(json!({ "news": items }));
         assert_eq!(parsed.news.len(), MAX_NEWS_ITEMS);
-        // The author's first entries survive; the list does not silently reorder
-        // which of them is seen.
-        assert_eq!(parsed.news[0].id, "item-0");
-        assert_eq!(parsed.problems.len(), 2);
-        assert_eq!(
-            parsed.problems[0].location,
-            format!("ide.news[{MAX_NEWS_ITEMS}]")
-        );
+        // **The entries an author just appended survive.** Authors are told to
+        // append, and the history view treats the last element as the newest, so
+        // dropping from the end would have dropped the card that just landed — the
+        // only one with an audience. If this ever reads `item-0`, that is back.
+        assert_eq!(parsed.news[0].id, "item-2");
+        assert_eq!(parsed.news[MAX_NEWS_ITEMS - 1].id, "item-6");
+        // One problem for the whole overflow, naming every id the author has to go
+        // and delete — not one anonymous complaint per entry.
+        assert_eq!(parsed.problems.len(), 1);
+        assert_eq!(parsed.problems[0].location, "ide.news");
+        assert!(parsed.problems[0].message.contains("\"item-0\""));
+        assert!(parsed.problems[0].message.contains("\"item-1\""));
         assert!(parsed.problems[0].message.contains("Retiring"));
+    }
+
+    /// The gate's load-bearing half: `since` is the only thing that retires a card,
+    /// so a day that has not happened yet is after every arrival, forever. That is
+    /// the never-expiring card the `onboarding` kind was deleted to be rid of, and
+    /// `2062` for `2026` is one keystroke.
+    #[test]
+    fn a_news_item_dated_in_the_future_is_dropped() {
+        for future in ["2062-08-12", "2099-01-01", "9999-12-31"] {
+            let parsed = one_news(news_item(json!({ "since": future })));
+            assert!(parsed.news.is_empty(), "{future} must not ship");
+            assert_eq!(parsed.problems[0].location, "ide.news[0].since");
+            assert!(parsed.problems[0].message.contains("future"));
+        }
+        // Today itself is fine — a card written and merged the same day is the
+        // normal case, and the local day is what the author is working in.
+        let today = today_local();
+        let parsed = one_news(news_item(json!({ "since": today })));
+        assert_eq!(parsed.news.len(), 1, "{:?}", parsed.problems);
+    }
+
+    /// The caps bound how much text a card carries; this bounds whether it carries
+    /// any. `trim` only removes `White_Space`, so zero-width padding is text by the
+    /// cap's reckoning and nothing at all by the reader's.
+    #[test]
+    fn invisible_copy_is_not_text() {
+        for bad in [
+            "\u{200b}\u{200b}\u{200b}",
+            "\u{feff}",
+            "ok\u{202e}reversed",
+            "line\u{7}break",
+            "\u{00ad}",
+        ] {
+            let parsed = one_news(news_item(json!({ "eyebrow": bad })));
+            assert!(parsed.news.is_empty(), "{bad:?} must not ship");
+            assert_eq!(parsed.problems[0].location, "ide.news[0].eyebrow");
+        }
+        // Ordinary copy with punctuation, an em dash and non-ASCII letters is text.
+        let ok = one_news(news_item(json!({ "eyebrow": "Grüße — ok" })));
+        assert_eq!(ok.news.len(), 1, "{:?}", ok.problems);
     }
 
     /// The reason `proj:<hash>:<slug>` is unambiguous, asserted rather than
@@ -2990,7 +3124,7 @@ mod tests {
     }
 
     /// Same drift gate as the pane icons and the permission ids. The bundle's half
-    /// of it is `a_project_glyph_set_matches_the_schema` in `model.test.ts`, so
+    /// of it is `it("matches the published schema's glyph set and every cap")`, so
     /// all three — parser, schema, renderer — are pinned to one list.
     #[test]
     fn the_glyph_set_matches_the_published_schema() {
@@ -3025,6 +3159,49 @@ mod tests {
             .collect();
         keys.sort_unstable();
         assert_eq!(keys, NEWS_ITEM_KEYS.to_vec());
+
+        // **Every cap, not just the key names.** The caps are the mechanism, and
+        // widening one in the schema alone fails in the worst direction: the
+        // author's editor accepts a headline this parser then drops, so the change
+        // the card was announcing never reaches the team, and the only report is a
+        // `veld lint` run by whoever thinks to.
+        for (key, max) in [
+            ("eyebrow", MAX_NEWS_EYEBROW),
+            ("headline", MAX_NEWS_HEADLINE),
+            ("body", MAX_NEWS_BODY),
+        ] {
+            assert_eq!(
+                item["properties"][key]["maxLength"],
+                serde_json::json!(max),
+                "schema {key}.maxLength must match this parser's cap"
+            );
+        }
+        assert_eq!(
+            item["properties"]["id"]["maxLength"],
+            serde_json::json!(64),
+            "schema id.maxLength must match valid_news_id"
+        );
+        // The array cap too, so an editor cannot bless a sixth item the parser will
+        // silently retire.
+        assert_eq!(
+            schema["properties"]["ide"]["properties"]["news"]["maxItems"],
+            serde_json::json!(MAX_NEWS_ITEMS),
+            "schema ide.news.maxItems must match MAX_NEWS_ITEMS"
+        );
+        // And the day pattern. `plausible_day` range-checks the month and the day,
+        // so a looser schema would green-light `2026-13-45` in the editor and then
+        // drop the card at load — the exact inversion of what `NEWS_ITEM_KEYS`
+        // exists to prevent. Pinned as a literal rather than executed, because
+        // veld-core has no regex dependency and adding one to assert four dates
+        // would be the more expensive half of this check.
+        assert_eq!(
+            item["properties"]["since"]["pattern"],
+            serde_json::json!("^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$"),
+            "the published pattern must range-check the month and day like plausible_day"
+        );
+        for bad in ["2026-13-04", "2026-00-10", "2026-08-32", "2026-08-00"] {
+            assert!(!plausible_day(bad), "{bad} must not be a plausible day");
+        }
     }
 
     #[test]

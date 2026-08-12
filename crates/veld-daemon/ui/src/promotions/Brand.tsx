@@ -10,6 +10,8 @@
  * new user is deciding what this thing is.
  */
 
+import type { GlyphName } from "./model";
+
 /**
  * `veld.`, coloured from the theme.
  *
@@ -77,7 +79,15 @@ export function Logomark(props: { size?: number; className?: string }) {
  * so both themes get a correct mark from one definition, and so the whole set
  * costs a few hundred bytes in a bundle that inlines everything it ships.
  */
-const GLYPH_PATHS: Record<string, React.ReactNode> = {
+/**
+ * Keyed by `GlyphName`, not by `string`, so the art cannot lag the vocabulary.
+ * Adding a glyph means adding it to `GLYPH_NAMES`, the parser's `NEWS_GLYPHS` and
+ * the schema's enum — three surfaces with drift gates between them — and with a
+ * `string` key you could do all three and still forget the drawing, at which point
+ * `Glyph` renders nothing and the card shows an empty mark slot. Now that is a
+ * type error.
+ */
+const GLYPH_PATHS: Record<GlyphName, React.ReactNode> = {
   terminal: (
     <>
       <rect x="2.75" y="4.75" width="18.5" height="14.5" rx="2" />
@@ -109,7 +119,11 @@ const GLYPH_PATHS: Record<string, React.ReactNode> = {
 };
 
 export function Glyph(props: { name: string; size?: number }) {
-  const paths = GLYPH_PATHS[props.name];
+  // Still a `string` in, and still a null return: `name` reaches this from a
+  // project's config through a newer daemon, so an unknown one has to render as
+  // nothing rather than throw. `projectCards` coerces to `inbox` before this,
+  // which is why nothing should ever reach the null.
+  const paths = GLYPH_PATHS[props.name as GlyphName];
   if (!paths) return null;
   return (
     <svg

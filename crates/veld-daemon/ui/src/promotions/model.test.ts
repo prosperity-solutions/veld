@@ -10,9 +10,14 @@ import {
   duplicateIds,
   formatDay,
   GLYPH_NAMES,
+  ID_PATTERN,
+  buildCards,
+  filterOptions,
   historyOf,
   IDENTITY_COUNT,
   MAX_BODY,
+  MAX_EYEBROW,
+  MAX_HEADLINE,
   manifestIds,
   mergeStates,
   NAMESPACE_SEPARATOR,
@@ -253,6 +258,14 @@ describe("a project's own news", () => {
     created_at: ARRIVED,
   };
 
+  /**
+   * A day after every `since` in this block, so the future-date guard is never what
+   * is accidentally under test. The guard has its own case below.
+   */
+  const TODAY = "2026-12-31";
+  const cardsFor = (repo: typeof REPO, news: ProjectNewsItem[]) =>
+    projectCards(repo, news, TODAY);
+
   const item = (over: Partial<ProjectNewsItem> = {}): ProjectNewsItem => ({
     id: "build-moved",
     since: "2026-07-01",
@@ -264,8 +277,8 @@ describe("a project's own news", () => {
   });
 
   it("namespaces every id, so two repos shipping one slug never collide", () => {
-    const a = projectCards(REPO, [item()]);
-    const b = projectCards({ ...REPO, root: "/Users/dev/git/other", name: "other" }, [item()]);
+    const a = cardsFor(REPO, [item()]);
+    const b = cardsFor({ ...REPO, root: "/Users/dev/git/other", name: "other" }, [item()]);
     expect(a[0].id).not.toBe(b[0].id);
     // Both are `proj:<namespace>:<slug>`, and the slug is the last field — so the
     // author's own id is still legible in a database row.
@@ -280,7 +293,7 @@ describe("a project's own news", () => {
   it("can never collide with a Veld id, in either direction", () => {
     // The reservation this whole scheme rests on. A Veld id cannot contain `:`
     // (`sectionProblems` rejects it), and a project id always does.
-    const project = projectCards(REPO, [item({ id: "worktree-inbox" })])[0];
+    const project = cardsFor(REPO, [item({ id: "worktree-inbox" })])[0];
     expect(project.id).toContain(NAMESPACE_SEPARATOR);
     expect(PROMOTIONS.some((p) => p.id === project.id)).toBe(false);
     // Even when the author picks the exact slug of a shipped Veld promotion.
@@ -290,7 +303,7 @@ describe("a project's own news", () => {
   it("keeps the stored id as the card's ONLY id", () => {
     // Two ids for one card is how the wrong one reaches the state map, and the
     // state map is forever. `id` is the namespaced one, everywhere.
-    const [c] = projectCards(REPO, [item()]);
+    const [c] = cardsFor(REPO, [item()]);
     expect(c.id.startsWith("proj:")).toBe(true);
     expect(unreadOf([c], {})).toEqual([c.id]);
     expect(visibilityOf(c, { [c.id]: "read" })).toBe("read");
@@ -313,18 +326,31 @@ describe("a project's own news", () => {
 
   it("gates a project's news on when the reader imported THAT project", () => {
     // The whole reason `arrivedAt` is per-card. Same item, two teammates.
-    const veteran = projectCards({ ...REPO, created_at: "2025-01-01T00:00:00Z" }, [
+    const veteran = cardsFor({ ...REPO, created_at: "2025-01-01T00:00:00Z" }, [
       item({ since: "2026-01-15" }),
     ]);
-    const newHire = projectCards({ ...REPO, created_at: "2026-08-01T00:00:00Z" }, [
+    const newHire = cardsFor({ ...REPO, created_at: "2026-08-01T00:00:00Z" }, [
       item({ since: "2026-01-15" }),
     ]);
     expect(visibilityOf(veteran[0], {})).toBe("unread");
     expect(visibilityOf(newHire[0], {})).toBe("auto-read");
   });
 
+  it("drops a future-dated item rather than letting it never expire", () => {
+    // `since` is the ONLY thing that retires a card, so a day that has not
+    // happened yet is after every arrival — present and future. That is the
+    // never-expiring card the `onboarding` kind was deleted to be rid of, arriving
+    // through the one channel veld does not author, and `2062` for `2026` is one
+    // keystroke. `parse_news` refuses it and tells the author; this is the guard
+    // for a reader whose daemon predates that check.
+    expect(projectCards(REPO, [item({ since: "2062-08-12" })], TODAY)).toEqual([]);
+    // Today itself ships — a card written and merged the same day is the normal
+    // case, and it is the reader's own UTC day that decides.
+    expect(projectCards(REPO, [item({ since: TODAY })], TODAY)).toHaveLength(1);
+  });
+
   it("attributes every card to the project by name", () => {
-    const [c] = projectCards(REPO, [item()]);
+    const [c] = cardsFor(REPO, [item()]);
     expect(c.source).toEqual({ kind: "project", name: "acme-api" });
     expect(sourceLabel(c.source)).toBe("acme-api");
     // "Official", not "Veld" — this very repo is named `veld`, so a label of
@@ -350,23 +376,23 @@ describe("a project's own news", () => {
     // grammar is ever loosened, a repo could write `proj:<other>:<slug>` and
     // suppress another project's card; this is the guard that keeps the namespace
     // claim true here rather than assumed.
-    expect(projectCards(REPO, [item({ id: "proj:deadbeef:hi" })])).toEqual([]);
+    expect(cardsFor(REPO, [item({ id: "proj:deadbeef:hi" })])).toEqual([]);
   });
 
   it("falls back to a known glyph rather than dropping the card", () => {
     // A newer daemon naming a glyph this bundle has not learned should cost the
     // right mark, never the whole card.
-    const [c] = projectCards(REPO, [item({ glyph: "rocket" })]);
+    const [c] = cardsFor(REPO, [item({ glyph: "rocket" })]);
     expect(c.glyph).toBe("inbox");
     expect(GLYPH_NAMES).toContain(c.glyph);
     // Every name the schema allows still renders as itself.
     for (const glyph of GLYPH_NAMES) {
-      expect(projectCards(REPO, [item({ glyph })])[0].glyph).toBe(glyph);
+      expect(cardsFor(REPO, [item({ glyph })])[0].glyph).toBe(glyph);
     }
   });
 
   it("shares one unread count and one merge with Veld's own cards", () => {
-    const cards = [...veldCards(PROMOTIONS, ARRIVED), ...projectCards(REPO, [item()])];
+    const cards = [...veldCards(PROMOTIONS, ARRIVED), ...cardsFor(REPO, [item()])];
     const outstanding = unreadOf(cards, {});
     expect(outstanding).toContain(namespacedId(REPO.root, "build-moved"));
     expect(unreadCount(cards, {})).toBe(outstanding.length);
@@ -378,14 +404,122 @@ describe("a project's own news", () => {
     );
   });
 
-  it("matches the published schema's glyph set", () => {
+  it("matches the published schema's glyph set and every cap", () => {
     // The bundle's half of the drift gate; `the_glyph_set_matches_the_published_schema`
     // in `veld-core/src/ide.rs` is the parser's. Three surfaces, one list.
     const fields = schema.$defs.newsItem.properties;
     expect(fields.glyph.enum).toEqual([...GLYPH_NAMES]);
     expect(fields.glyph.default).toBe("inbox");
-    // And the caps, which are the mechanism rather than style advice.
+    // **All three caps, not just one.** The caps are the mechanism rather than
+    // style advice, and the failure they guard against is silent in the worst
+    // direction: widen the schema alone and an author's editor accepts a headline
+    // the daemon then drops, so the change the card announced never reaches the
+    // team. `veld lint` says why, to whoever runs it.
+    expect(fields.eyebrow.maxLength).toBe(MAX_EYEBROW);
+    expect(fields.headline.maxLength).toBe(MAX_HEADLINE);
     expect(fields.body.maxLength).toBe(MAX_BODY);
+    // And the id grammar, which is what the namespace claim rests on: a schema
+    // that admits `:` would let an editor bless an id the parser must refuse.
+    expect(fields.id.pattern).toBe(ID_PATTERN.source);
+    // `maxItems` is pinned against `MAX_NEWS_ITEMS` on the Rust side, where that
+    // constant lives — see `the_glyph_set_matches_the_published_schema`.
+  });
+});
+
+describe("buildCards — the two channels, and the gates on each", () => {
+  const REPO = {
+    root: "/Users/dev/git/acme-api",
+    name: "acme-api",
+    created_at: ARRIVED,
+    news: [
+      {
+        id: "build-moved",
+        since: "2026-07-01",
+        eyebrow: "Heads up",
+        headline: "A headline",
+        body: "A sentence.",
+        glyph: "terminal",
+      },
+    ],
+  };
+  const base = {
+    promotions: PROMOTIONS,
+    firstUseIso: ARRIVED,
+    project: REPO,
+    showProject: true,
+    today: "2026-12-31",
+  };
+
+  it("builds nothing at all until the arrival stamp has loaded", () => {
+    // With no arrival there is no date gate, and guessing one is how a fresh
+    // install gets a modal about last spring. It gates BOTH channels: the request
+    // that carries `firstUse` also carries the read/dismissed map, so without it
+    // there is nothing to compare a read against either.
+    expect(buildCards({ ...base, firstUseIso: null })).toEqual([]);
+  });
+
+  it("honours ui.showProjectNews — the reader's only switch", () => {
+    // This is the whole mitigation against repo-authored modals, so it has to
+    // remove the cards from the count as well as from the prompt, not just hide
+    // them in the panel.
+    const off = buildCards({ ...base, showProject: false });
+    expect(off.every((c) => c.source.kind === "veld")).toBe(true);
+    expect(unreadCount(off, {})).toBe(unreadCount(veldCards(PROMOTIONS, ARRIVED), {}));
+    const on = buildCards(base);
+    expect(on.some((c) => c.source.kind === "project")).toBe(true);
+  });
+
+  it("gates each channel on its own arrival", () => {
+    // Veld's cards on `firstUse`, the project's on when this reader imported that
+    // repo. One card each way, so a swapped comparison shows up here.
+    const newHire = buildCards({
+      ...base,
+      project: { ...REPO, created_at: "2026-12-01T00:00:00Z" },
+    });
+    const theirs = newHire.find((c) => c.source.kind === "project");
+    expect(theirs && visibilityOf(theirs, {})).toBe("auto-read");
+    expect(buildCards(base).find((c) => c.source.kind === "project")).toBeDefined();
+  });
+
+  it("survives having no project selected", () => {
+    const none = buildCards({ ...base, project: null });
+    expect(none.every((c) => c.source.kind === "veld")).toBe(true);
+  });
+});
+
+describe("filterOptions", () => {
+  const veld = news("veld-thing", "2026-07-01");
+  const project = card({
+    id: "proj:abc:mine",
+    since: "2026-07-15",
+    source: { kind: "project", name: "acme-api" },
+  });
+
+  it("offers nothing to the interrupting entrance", () => {
+    // Filtering a list of things you have not read yet is asking the reader to
+    // curate their own interruption.
+    expect(filterOptions([veld, project], "acme-api", true)).toBeNull();
+  });
+
+  it("offers nothing when there is nothing to filter between", () => {
+    expect(filterOptions([veld], null, false)).toBeNull();
+  });
+
+  it("gives a project with no news a tab anyway, disabled", () => {
+    // "This project has told you nothing" is an answer worth being able to see; a
+    // missing tab reads as the feature not existing. Documented in three places
+    // and, before this, enforced in none.
+    const tabs = filterOptions([veld], "acme-api", false);
+    expect(tabs?.map((t) => [t.label, t.disabled])).toEqual([
+      ["Everything", false],
+      ["Official", false],
+      ["acme-api", true],
+    ]);
+  });
+
+  it("enables the project tab once it has said something", () => {
+    const tabs = filterOptions([veld, project], "acme-api", false);
+    expect(tabs?.find((t) => t.value === "project")?.disabled).toBe(false);
   });
 });
 

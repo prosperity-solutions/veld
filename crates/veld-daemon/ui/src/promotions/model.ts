@@ -88,7 +88,13 @@ export const IDENTITY_COUNT = 3;
  */
 export const NAMESPACE_SEPARATOR = ":";
 
-const ID_PATTERN = /^[a-z0-9]+(-[a-z0-9]+)*$/u;
+/**
+ * Exported so `model.test.ts` can hold it against the published schema's
+ * `$defs.newsItem.properties.id.pattern`. A schema that admitted `:` while this
+ * did not would bless, in an author's editor, an id the parser must refuse — and
+ * the namespace claim rests on the two agreeing.
+ */
+export const ID_PATTERN = /^[a-z0-9]+(-[a-z0-9]+)*$/u;
 
 /**
  * Everything wrong with a section, as human-readable lines. Empty means valid.
@@ -221,6 +227,14 @@ const U64 = 0xffffffffffffffffn;
  * A 64-bit collision would mean two repos sharing a namespace, so a card in one
  * could suppress a same-slug card in the other. Across the handful of repos one
  * person imports, that is not a risk worth a wider hash.
+ *
+ * FNV-1a is not collision-resistant, so be honest about the other case: the hashed
+ * input ends in a directory name that is usually the remote's own repo name, so a
+ * collision here is **constructible**, not merely improbable — somebody who knows
+ * where a target keeps their checkouts could name a repo to land on another repo's
+ * namespace and pre-claim one state slot. The whole prize is one card of theirs not
+ * being shown, on a machine where the attacker already got the target to clone
+ * their repository. Not worth a wider hash either; worth not overstating.
  */
 export function projectNamespace(repoRoot: string): string {
   let hash = FNV_OFFSET;
@@ -254,22 +268,36 @@ export function veldCards(promotions: readonly Promotion[], firstUseIso: string)
 /**
  * One project's cards, gated by when this user imported that project.
  *
- * Two guards, both cheap and both about invariants rather than about validation
- * the parser already did:
+ * Three guards, all cheap, and all about invariants rather than about validation
+ * the parser already did — this is the boundary untrusted content crosses, so a
+ * guard here is worth having even where the daemon already has one:
  *
  * - **A slug containing `:` is dropped.** `veld_core::ide::valid_news_id` cannot
  *   admit one, so this only fires if that grammar is ever loosened — at which
  *   point a repo could write an id indistinguishable from one of Veld's, and
  *   dropping it here is what keeps the namespace claim locally true instead of
  *   locally assumed.
+ * - **A future-dated item is dropped.** `since` is the only thing that retires a
+ *   card, so a day that has not happened yet is after *every* arrival, forever —
+ *   the never-expiring card this channel deleted the `onboarding` kind to be rid
+ *   of. `parse_news` refuses it too and tells the author, which is where the fix
+ *   belongs; this is what protects a reader whose daemon predates that check, or
+ *   whose clock disagrees with the author's.
  * - **An unknown glyph falls back to `inbox`.** Also parser-enforced; the
  *   fallback exists so a newer daemon naming a glyph this bundle has not learned
  *   renders a card with the wrong mark rather than no card at all.
+ *
+ * `today` is passed in rather than read from the clock so this stays pure and the
+ * date gate stays testable — the same reason `arrivedAt` rides on the card.
  */
-export function projectCards(repo: NewsRepo, news: readonly ProjectNewsItem[]): Card[] {
+export function projectCards(
+  repo: NewsRepo,
+  news: readonly ProjectNewsItem[],
+  today: string,
+): Card[] {
   const source: Source = { kind: "project", name: repo.name };
   return news
-    .filter((item) => !item.id.includes(NAMESPACE_SEPARATOR))
+    .filter((item) => !item.id.includes(NAMESPACE_SEPARATOR) && item.since <= today)
     .map((item) => ({
       ...item,
       id: namespacedId(repo.root, item.id),
@@ -323,6 +351,81 @@ export function formatDay(day: string): string {
  */
 export function utcDay(iso: string): string {
   return iso.slice(0, 10);
+}
+
+/** What the surface hands {@link buildCards} — both channels, and the two gates. */
+export interface CardSources {
+  /** Veld's own, from `content.ts`. */
+  promotions: readonly Promotion[];
+  /** `promotions.firstUse`, or `null` while it has not loaded. */
+  firstUseIso: string | null;
+  /** The selected project and its main checkout's news, or `null` for none. */
+  project: (NewsRepo & { news: readonly ProjectNewsItem[] }) | null;
+  /** `ui.showProjectNews` — the reader's own switch. */
+  showProject: boolean;
+  /** Today, `YYYY-MM-DD`. See {@link projectCards}. */
+  today: string;
+}
+
+/**
+ * Every card a surface should consider, from both channels.
+ *
+ * Pure, and here rather than in the hook that calls it, because this is where the
+ * feature's user-visible promises actually live: that `ui.showProjectNews: false`
+ * removes a project's cards from the prompt *and* the badge, that a project's
+ * cards are gated on that project's own arrival, and that **nothing** is built
+ * before `firstUse` has loaded. The UI suite runs with no jsdom, so a decision
+ * left in a `.tsx`/hook is a decision nothing can test — and the switch this gates
+ * is the only mitigation a reader has against repo-authored modals.
+ *
+ * Empty while `firstUseIso` is null: with no arrival there is no date gate, and
+ * guessing one is how a fresh install gets a modal about last spring. That gates
+ * the project's cards on Veld's own stamp too, which is right — the request that
+ * carries `firstUse` is the same one that carries the read/dismissed map, so
+ * without it there is nothing to compare a read against either.
+ */
+export function buildCards(sources: CardSources): Card[] {
+  if (!sources.firstUseIso) return [];
+  const project =
+    sources.showProject && sources.project
+      ? projectCards(sources.project, sources.project.news, sources.today)
+      : [];
+  return [...veldCards(sources.promotions, sources.firstUseIso), ...project];
+}
+
+/** One tab on the history view's source filter. */
+export interface FilterOption {
+  value: SourceFilter;
+  label: string;
+  disabled: boolean;
+}
+
+/**
+ * The filter tabs, or `null` when there is nothing worth filtering between.
+ *
+ * Pure and here for the same reason as {@link buildCards}: the rule that a
+ * selected project with **no** news still gets a tab — present but disabled — is
+ * the kind of thing three docs assert and nothing checks. "This project has told
+ * you nothing" is an answer worth being able to see; a missing tab reads as the
+ * feature not existing at all.
+ *
+ * `null` for the interrupting entrance, where a filter would ask the reader to
+ * curate a list of things they have not read yet.
+ */
+export function filterOptions(
+  cards: readonly Card[],
+  projectName: string | null,
+  automatic: boolean,
+): FilterOption[] | null {
+  const hasProjectCards = sourcesOf(cards).some((s) => s.kind === "project");
+  if (automatic || (!hasProjectCards && projectName === null)) return null;
+  return [
+    { value: "all", label: "Everything", disabled: false },
+    // "Official" rather than "Veld": this repo is *named* veld, so a "Veld" tab
+    // beside a "veld" tab distinguishes nothing.
+    { value: "veld", label: sourceLabel({ kind: "veld" }), disabled: false },
+    { value: "project", label: projectName ?? "Project", disabled: !hasProjectCards },
+  ];
 }
 
 /**

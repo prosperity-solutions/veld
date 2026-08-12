@@ -512,7 +512,9 @@ export interface Repo {
    * On the repo and not on a worktree, because news belongs to the project and
    * only what has landed on main counts: the daemon takes it from the main
    * checkout and discards every other worktree's copy, so a card being drafted
-   * on a feature branch cannot prompt anybody. Always present, possibly empty,
+   * in a worktree cannot prompt anybody. It is the main *checkout*, not the
+   * default branch: a card on a branch in the primary clone is live. Always
+   * present, possibly empty,
    * and bounded by `MAX_NEWS_ITEMS` in `veld_core::ide` — which is what makes it
    * safe on an endpoint every window polls.
    */

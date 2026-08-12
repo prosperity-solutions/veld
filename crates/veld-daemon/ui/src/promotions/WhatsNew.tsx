@@ -53,7 +53,7 @@ import { Button, SegmentedControl, Stack, Text } from "@mantine/core";
 import { useState } from "react";
 
 import { Modal } from "../components/dialogs";
-import { type Card, historyOf, type SourceFilter, sourceLabel, sourcesOf } from "./model";
+import { type Card, type SourceFilter, filterOptions, historyOf } from "./model";
 import { PromoSection } from "./Section";
 
 export function WhatsNewDialog(props: {
@@ -73,16 +73,11 @@ export function WhatsNewDialog(props: {
   onDismiss: () => void;
 }) {
   const [filter, setFilter] = useState<SourceFilter>("all");
-  const hasProjectCards = sourcesOf(props.cards).some((s) => s.kind === "project");
-  /**
-   * The filter belongs to the browsing entrance only. In the interrupting one it
-   * would ask the reader to curate a list of things they have not read yet.
-   *
-   * Shown whenever a project is selected, not only when it has cards — see
-   * `projectName`.
-   */
-  const canFilter = !props.automatic && (hasProjectCards || props.projectName !== null);
-  const shown = historyOf(props.cards, canFilter ? filter : "all");
+  // `null` when there is nothing worth filtering between, including the whole
+  // interrupting entrance — `filterOptions` owns that rule (and is tested on it,
+  // which nothing here could be).
+  const tabs = filterOptions(props.cards, props.projectName, props.automatic);
+  const shown = historyOf(props.cards, tabs ? filter : "all");
   return (
     <Modal
       title="What's new"
@@ -91,26 +86,13 @@ export function WhatsNewDialog(props: {
       onClose={props.automatic ? props.onDismiss : props.onRead}
     >
       <Stack gap="md">
-        {canFilter && (
+        {tabs && (
           <SegmentedControl
             size="xs"
             fullWidth
             value={filter}
             onChange={(v) => setFilter(v as SourceFilter)}
-            data={[
-              { value: "all", label: "Everything" },
-              // "Official" rather than "Veld": this repo is *named* veld, so a
-              // "Veld" tab beside a "veld" tab distinguishes nothing. Provenance
-              // is the claim being made, and no project name can imitate it.
-              { value: "veld", label: sourceLabel({ kind: "veld" }) },
-              {
-                value: "project",
-                label: props.projectName ?? "Project",
-                // Selectable only when it has something to show — but present
-                // either way, so its emptiness is legible rather than invisible.
-                disabled: !hasProjectCards,
-              },
-            ]}
+            data={tabs}
           />
         )}
         {shown.length === 0 ? (

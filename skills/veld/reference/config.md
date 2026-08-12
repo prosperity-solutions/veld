@@ -58,7 +58,7 @@ unreadable.
   // "default_preset": "<preset-name>",  // root file only
   "nodes": { },
   "hooks": { },   // reserved: parsed, stored, NOT executed by this version
-  "ide": { }      // quicklinks + permissions + externalOrigins + git (stalenessSensitivity) are rendered; every other key is reserved
+  "ide": { }      // quicklinks + permissions + externalOrigins + panes + news + git (stalenessSensitivity) are rendered; every other key is reserved
 }
 ```
 
@@ -587,7 +587,7 @@ Note: `${VAR}` (braces) is parsed by Veld, so use `$VAR` (no braces) for plain s
 | `ports` | node, variant | Named ports: `{"http": "auto", "debug": "auto"}`, or an entry's long form `{"port": …, "protocol": "http"\|"tcp", "host": "<template>"}`. `${veld.ports.<name>}`, `VELD_PORT_<NAME>`; an `http` port also gets a hostname, a route, `${veld.urls.<name>}` and `VELD_URL_<NAME>`. `${veld.port}` = primary. Protocol defaults: `http` for the primary, `tcp` for the rest. **`null` = no ports at all** (portless `long_running`); absent = one auto http port. |
 | `files` | node, variant | Values delivered to disk: `{"<path>": {source, secret?, mode?}}`. Mode defaults `0600`. |
 | `hooks` | project (any file) | **Reserved.** Parsed and stored, NOT executed by this version. `veld lint` emits a notice. |
-| `ide` | project (any file) | Veld's own IDE surfaces (Veld Desktop, `/ide`). `ide.quicklinks`, `ide.permissions`, `ide.externalOrigins` and `ide.panes` are rendered; **every other key under `ide` is reserved** — parsed, stored, NOT rendered. See the section below. |
+| `ide` | project (any file) | Veld's own IDE surfaces (Veld Desktop, `/ide`). `ide.quicklinks`, `ide.permissions`, `ide.externalOrigins`, `ide.panes` and `ide.news` are rendered; **every other key under `ide` is reserved** — parsed, stored, NOT rendered. See the section below. |
 
 Any **other** top-level key is an error reported by `veld lint` and `veld start`
 (rule `unknown-top-level-key`) — deliberately not a load failure, so a typo cannot
@@ -849,8 +849,10 @@ Rules that are enforced rather than advised:
 
 - **At most 5 live items.** Extras are dropped with a `veld lint` warning.
   **Retiring an item is deleting it.**
-- **Only the repo's main checkout is read**, so a card on a feature branch prompts
-  nobody until it lands — and stays silent until somebody pulls on main.
+- **Only the repo's main checkout is read** — the primary clone, at whatever it has
+  checked out. A card drafted in a *worktree* prompts nobody until it lands, and news
+  stays silent until somebody pulls on main. A card on a branch in the main clone
+  itself IS live; the isolation is per worktree, not per branch.
 - **Every item is a change and its date gates it.** There is no evergreen kind:
   standing practice belongs in the repo's docs (point at them with
   `ide.quicklinks`), so a card can never outlive the change it describes.

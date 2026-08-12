@@ -5,8 +5,9 @@
   "ide": {
     // News this project tells its own team. Merge a card with the change it
     // describes; a teammate pulls, and the next time they open the IDE they are
-    // told once. Only what has reached the repo's MAIN checkout counts, so a
-    // card being drafted on a branch cannot prompt anybody until it lands.
+    // told once. Only the repo's MAIN checkout counts — the primary clone, at
+    // whatever it has checked out — so a card drafted in a WORKTREE cannot prompt
+    // anybody until it lands.
     //
     // At most 5 live at once, and retiring one is DELETING it. The cap and the
     // short field limits are the whole reason this surface stays worth being
