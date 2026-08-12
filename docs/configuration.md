@@ -2764,12 +2764,16 @@ that fails to run.
 Veld runs the command in the worktree root and reads stdout:
 
 ```json
-{ "text": "PR #284 · checks green", "tone": "success", "tooltip": "…",
-  "href": "https://github.com/…/pull/284", "actions": [{ "id": "create-pr" }] }
+{ "text": "PR #284 · checks green", "tone": "success", "icon": "git-pull-request",
+  "tooltip": "…", "href": "https://github.com/…/pull/284",
+  "actions": [{ "id": "create-pr" }] }
 ```
 
-`tone` is one of `neutral`, `info`, `success`, `warning`, `danger`. Everything is
-optional, and three tolerances mean most commands need no adapter at all:
+`tone` is one of `neutral`, `info`, `success`, `warning`, `danger`. `icon` takes
+the same names and emoji the declaration's `icon` does, and **overrides it** — a
+badge showing a merge mark once merged and a clock while CI runs is the point.
+Everything is optional, and three tolerances mean most commands need no adapter at
+all:
 
 - **Output that is not this contract** becomes the badge text, first line only. So
   `"argv": ["git", "rev-parse", "--short", "HEAD"]` is already a working badge.
@@ -2793,6 +2797,14 @@ A badge may override it per value by printing `"open_in"` itself.
 `refresh_seconds` defaults to 60 and is floored at 15. Veld only evaluates the
 worktree you are looking at, only while a window is open, and only once however
 many windows ask — see [how badges are run](#how-a-badge-is-run).
+
+**Right-click a badge to re-run it now**, or to re-run every badge in the bar. A
+refresh you asked for ignores `refresh_seconds` (bounded instead by a 3-second
+floor, so holding the button down cannot fork a process per click), and it reports
+its own failure rather than staying quiet the way a background poll does. Running
+an **action** also re-reads the badges immediately, because an action usually
+changes what one of them says — creating the pull request a badge just reported
+missing is the case that matters.
 
 #### `type: "action"` — a button
 

@@ -72,7 +72,7 @@ pub const PERMISSION_IDS: &[&str] = &[
     "window-management",
 ];
 
-/// Every icon name a pane may name, in sorted order.
+/// Every icon name a pane or an `ide.extensions` entry may name, in sorted order.
 ///
 /// These are [Tabler](https://tabler.io/icons) names, the icon set every other
 /// pane tab already uses, so a config-declared pane sits beside the built-in
@@ -84,25 +84,51 @@ pub const PERMISSION_IDS: &[&str] = &[
 /// needs no entry here. The two forms are told apart by ASCII-ness, so this list
 /// can only ever grow with ASCII names.
 pub const PANE_ICON_NAMES: &[&str] = &[
+    "alert-triangle",
+    "app-window",
     "atom",
     "bolt",
     "book",
     "brain",
+    "brand-github",
+    "brand-gitlab",
+    "brand-vscode",
+    "browser",
     "bug",
     "bulb",
     "chart-line",
+    "check",
+    "circle-check",
+    "clock",
     "cloud",
+    "cloud-upload",
     "code",
     "compass",
     "cpu",
     "database",
+    "device-desktop",
+    "download",
+    "external-link",
+    "eye",
+    "file-code",
+    "flag",
     "flask",
+    "folder",
+    "gauge",
     "git-branch",
+    "git-commit",
+    "git-merge",
+    "git-pull-request",
+    "hourglass",
     "key",
+    "link",
+    "list-check",
+    "lock",
     "map",
     "message-chatbot",
     "notebook",
     "package",
+    "palette",
     "player-play",
     "plug",
     "puzzle",
@@ -112,10 +138,15 @@ pub const PANE_ICON_NAMES: &[&str] = &[
     "search",
     "server",
     "shield",
+    "shield-check",
     "sparkles",
+    "star",
+    "tag",
     "terminal-2",
     "tool",
+    "upload",
     "wand",
+    "x",
 ];
 
 /// Every illustration a news item may name, in sorted order.
@@ -1393,6 +1424,27 @@ fn parse_extension_hint(
 #[must_use]
 pub fn is_web_url(url: &str) -> bool {
     url.starts_with("http://") || url.starts_with("https://")
+}
+
+/// Read an icon out of a string, or `None` if it names nothing.
+///
+/// The same rule [`parse_pane_icon`] applies, without a problem to report: a
+/// *status extension's output* may name an icon too, and there the answer arrives
+/// at runtime rather than at lint time, so an unknown name has nobody to tell and
+/// simply renders no glyph. Sharing the allowlist is the point — a name that works
+/// in `veld.json` works in a badge's output and vice versa.
+#[must_use]
+pub fn parse_icon_name(text: &str) -> Option<PaneIcon> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    if !text.is_ascii() {
+        return Some(PaneIcon::Emoji(text.to_owned()));
+    }
+    PANE_ICON_NAMES
+        .contains(&text)
+        .then(|| PaneIcon::Name(text.to_owned()))
 }
 
 fn parse_pane(item: &serde_json::Value, at: &str, out: &mut IdeSection) -> Option<PaneDef> {

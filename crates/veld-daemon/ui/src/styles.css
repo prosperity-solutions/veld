@@ -40,6 +40,8 @@
   --warn-bg: rgba(230, 180, 60, 0.14);
   --danger: oklch(0.68 0.17 22);
   --danger-bg: rgba(224, 90, 80, 0.14);
+  --info: oklch(0.74 0.11 250);
+  --info-bg: rgba(90, 150, 240, 0.14);
   --accent: oklch(0.74 0.14 158);
   --shadow: 0 20px 50px -20px rgba(0, 0, 0, 0.6);
   --pop: 0 24px 60px -18px rgba(0, 0, 0, 0.7);
@@ -97,6 +99,8 @@ body[data-theme="light"] {
   --warn-bg: rgba(180, 130, 20, 0.12);
   --danger: oklch(0.56 0.16 25);
   --danger-bg: rgba(200, 60, 50, 0.1);
+  --info: oklch(0.52 0.14 255);
+  --info-bg: rgba(50, 110, 210, 0.12);
   --accent: oklch(0.58 0.13 158);
   --shadow: 0 18px 44px -22px rgba(30, 40, 50, 0.28);
   --pop: 0 22px 54px -20px rgba(30, 40, 50, 0.32);
@@ -331,16 +335,67 @@ body[data-fullscreen="true"] .topbar.electron {
 .topbar .ext-badge {
   --badge-height: var(--topbar-control-h) !important;
   --badge-fz: 12px !important;
+  /* The product tone tokens, not Mantine's palette. Mantine's `light` variant
+     puts its own shade-6 text on a shade-0 fill, which measured 3.0:1 for
+     yellow — bright fill, unreadable label, and the first thing anyone
+     complained about.
+   *
+   * **The text is the tone mixed 75% with `--text`, and that mix is the fix.**
+     The bare tokens are tuned for icons, pills and borders, where a 3:1 ratio
+     is fine; as *text on a tinted fill* the light theme measured 3.29:1 for
+     `--warn` and 4.36:1 for `--danger`, both under 4.5:1. Mixing toward the
+     foreground clears it in both themes at once — 4.9:1 worst case — without
+     touching tokens other surfaces already depend on, and without a second set
+     of near-duplicate colors to keep in step. Do not "simplify" it back to the
+     bare token: the ratio is the accessibility property, not a style choice. */
+  --badge-color: color-mix(in oklab, var(--tone, var(--muted)) 75%, var(--text)) !important;
+  --badge-bg: var(--tone-bg, transparent) !important;
   font-weight: 400;
   text-transform: none;
   letter-spacing: 0;
+}
+.topbar .ext-badge.tone-success {
+  --tone: var(--live);
+  --tone-bg: var(--live-bg);
+}
+.topbar .ext-badge.tone-warning {
+  --tone: var(--warn);
+  --tone-bg: var(--warn-bg);
+}
+.topbar .ext-badge.tone-danger {
+  --tone: var(--danger);
+  --tone-bg: var(--danger-bg);
+}
+.topbar .ext-badge.tone-info {
+  --tone: var(--info);
+  --tone-bg: var(--info-bg);
+}
+.topbar .ext-badge.tone-neutral {
+  --tone: var(--muted);
+  --tone-bg: color-mix(in oklab, var(--muted) 12%, transparent);
+}
+/* The badge's own glyph, and the first-load spinner, share this: sized to the
+   label rather than to the 26px box, so a badge with an icon is the same height
+   as one without. */
+.topbar .ext-badge .ext-badge-glyph {
+  display: inline-flex;
+  align-items: center;
+  margin-right: 5px;
+  opacity: 0.85;
 }
 /* An unavailable extension rendered as a hint: legible, but plainly not live
    state. Dashed rather than dimmer, because a project's install instruction has
    to survive being ignored twice. */
 .topbar .ext-badge-hint {
-  border: 1px dashed var(--mantine-color-dark-3);
-  background: transparent;
+  border: 1px dashed var(--border2);
+  --tone-bg: transparent;
+}
+/* The first evaluation. Deliberately the label the config declared rather than a
+   blank box: something in the bar is about to say something about this worktree,
+   and a placeholder that names it is more useful than a grey rectangle. */
+.topbar .ext-badge-loading {
+  --tone: var(--faint);
+  --tone-bg: color-mix(in oklab, var(--muted) 8%, transparent);
 }
 /* One type size and one weight for the whole bar, matching the fields.
  *

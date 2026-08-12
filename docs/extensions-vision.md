@@ -543,6 +543,51 @@ because each one closes off an alternative.
   `slot: "topBar.end"` — a dotted selector is the path grammar rejected further up
   this log.
 
+### 2026-08-12 — Seven corrections from driving the running feature
+
+Everything in this round came from the maintainer using the built feature, which
+is the class of finding no review subagent produces: colour, latency and glyph
+legibility are not readable off a diff.
+
+- **A first evaluation now renders.** The badge was absent until its command
+  returned, so a `gh` call over slow wifi left a gap in the bar that was
+  indistinguishable from a project declaring no badges. It shows the declared
+  label with a spinner instead.
+- **Tone colours moved off Mantine's palette onto the product tokens**, and the
+  text is the tone **mixed 75% toward `--text`**. Measured, which is why the
+  numbers are here: Mantine's `light` yellow put shade-6 text on a shade-0 fill,
+  and even the bare product tokens are only 3.29:1 (`--warn`) and 4.36:1
+  (`--danger`) as text on the light theme — both under 4.5:1. The mix clears it
+  in both themes from one declaration. Rejected: darkening `--warn`/`--danger`
+  themselves, which every other surface already depends on, and a second set of
+  near-duplicate `-ink` tokens to keep in step.
+- **`--info` is a new palette token.** There was no blue, so an `info` badge had
+  to borrow `--live` and read as success — four tones pretending to be five.
+- **The icon allowlist grew from 32 to 63 names** and is now shared by panes and
+  extensions. Rejected: allowing *any* Tabler name via a dynamic `import()`. The
+  bundle must contain every icon it can render, and per-icon code-splitting buys
+  ~6000 names at the cost of a fetch-and-flash on first render plus a hard
+  dependency on the package's internal file layout. A curated list that a test
+  ties to the schema is worth more than exhaustiveness here.
+- **A badge's *output* may name an `icon`**, overriding the declaration's, so a
+  glyph can track state. No special syntax — it is one more field in the contract,
+  resolved against the same allowlist, and an unknown name renders no glyph rather
+  than failing the badge.
+- **Refresh is a right-click on the badge**, for one or for all, using the same
+  `mantine-contextmenu` the worktree rail's rows use. Rejected: putting Refresh in
+  a left-click dropdown, which would cost *every* badge its one-click primary
+  action ("open the pull request") to expose something wanted once a week. A
+  forced refresh ignores `refresh_seconds`, bounded by a 3s floor so click-spam
+  cannot fork a process per click, and it reports its own errors — unlike the
+  background poll, which stays silent by design. **Running an action also forces a
+  re-read**, because an action usually changes what a badge says.
+- **A tone-demo extension ships in this repo's own config**, cycling all five
+  tones one click apart. It is the worked example of two things that are easy to
+  get wrong — a badge command is re-run from scratch so its state lives on disk,
+  and a badge cannot advance itself, so the cycling is an `action` the badge
+  offers by id. Delete it and `scripts/veld/tone-demo.sh` once the palette is
+  settled.
+
 ## The extension backlog
 
 Everything in this table is **customization-layer by the tests above** — none of

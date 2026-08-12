@@ -35,7 +35,7 @@ use axum::extract::Path;
 use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use veld_core::ide::{Extension, ExtensionBody, IdeSection, OpenIn};
+use veld_core::ide::{Extension, ExtensionBody, IdeSection, OpenIn, PaneIcon};
 
 use crate::feedback_server::desktop::{ApiError, db_err, err, open_desktop_db};
 use crate::feedback_server::pty::{missing_pane_binaries, worktree_builtins};
@@ -69,6 +69,14 @@ const MAX_OUTPUT_BYTES: usize = 64 * 1024;
 /// author's intent is legible and a dropped badge teaches less than a clipped one.
 const MAX_TEXT_CHARS: usize = 60;
 const MAX_TOOLTIP_CHARS: usize = 400;
+
+/// The shortest gap between two runs of one extension when the **user** asked.
+///
+/// A click is the user saying "now", so the declared `refresh_seconds` is not the
+/// bound that matters — but something has to be, or holding the mouse down on
+/// Refresh spawns a child per event. Short enough to feel immediate, long enough
+/// that click-spam cannot fork a process per click.
+const FORCED_REFRESH_FLOOR: Duration = Duration::from_secs(3);
 
 /// Live entries in [`RESULTS`] before the oldest are dropped.
 ///
@@ -111,6 +119,11 @@ pub(crate) struct StatusView {
     state: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     text: Option<String>,
+    /// A glyph the *output* asked for, from the same allowlist `veld.json` uses.
+    /// The declaration's own `icon` is on the worktree listing; this is how a
+    /// badge changes its glyph with its state (a merge mark once merged).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    icon: Option<PaneIcon>,
     tone: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     tooltip: Option<String>,
@@ -130,7 +143,7 @@ pub(crate) struct StatusView {
     age_seconds: u64,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 struct StatusActionView {
     id: String,
     label: String,
@@ -141,12 +154,27 @@ pub(crate) struct StatusResponse {
     items: Vec<StatusView>,
 }
 
+/// Query for the status endpoint.
+#[derive(Deserialize, Default)]
+pub(crate) struct StatusQuery {
+    /// The user asked, so ignore the declared interval and re-run — bounded by
+    /// [`FORCED_REFRESH_FLOOR`] rather than unbounded. Absent means the ordinary
+    /// poll, which honours `refresh_seconds`.
+    #[serde(default)]
+    force: bool,
+    /// Force just this one extension. Absent with `force` set means all of them.
+    id: Option<String>,
+}
+
 /// Evaluate every `status` extension a worktree declares.
 ///
 /// One request for the whole worktree rather than one per badge: the client asks
 /// about the worktree it is showing, and batching means a switch costs one round
 /// trip. The commands run concurrently.
-pub(crate) async fn status(Path(id): Path<i64>) -> Result<Json<StatusResponse>, ApiError> {
+pub(crate) async fn status(
+    Path(id): Path<i64>,
+    axum::extract::Query(query): axum::extract::Query<StatusQuery>,
+) -> Result<Json<StatusResponse>, ApiError> {
     let (root, branch, auto_refresh) = worktree_target(id)?;
     // The machine-global off switch. Answered with an empty list rather than an
     // error: the declarations still travel on the worktree listing, so the UI can
@@ -165,12 +193,16 @@ pub(crate) async fn status(Path(id): Path<i64>) -> Result<Json<StatusResponse>, 
         let ExtensionBody::Status(_) = &ext.body else {
             continue;
         };
+        // `force` with no id means every badge; with one, only that badge is
+        // re-run and the rest answer from what they already had.
+        let forced = query.force && query.id.as_ref().is_none_or(|want| *want == ext.id);
         runs.push(evaluate(
             id,
             ext.clone(),
             Arc::clone(&section),
             root.clone(),
             ctx.clone(),
+            forced,
         ));
     }
     let items = futures_util::future::join_all(runs).await;
@@ -184,6 +216,7 @@ async fn evaluate(
     section: Arc<IdeSection>,
     root: String,
     builtins: HashMap<String, String>,
+    forced: bool,
 ) -> StatusView {
     let ExtensionBody::Status(status) = &ext.body else {
         unreachable!("callers filter to status extensions");
@@ -194,7 +227,12 @@ async fn evaluate(
     let mut guard = cell.lock().await;
     if let Some((at, view)) = guard.as_ref() {
         let age = at.elapsed();
-        if age < Duration::from_secs(status.refresh_seconds) {
+        let floor = if forced {
+            FORCED_REFRESH_FLOOR
+        } else {
+            Duration::from_secs(status.refresh_seconds)
+        };
+        if age < floor {
             let mut view = view.clone();
             view.age_seconds = age.as_secs();
             return view;
@@ -212,6 +250,7 @@ async fn evaluate(
             id: ext.id.clone(),
             state: "unavailable",
             text: None,
+            icon: None,
             tone: "neutral",
             tooltip: Some(format!("needs {}", missing.join(", "))),
             href: None,
@@ -236,6 +275,7 @@ async fn run_status(
         id: ext.id.clone(),
         state,
         text: None,
+        icon: None,
         tone,
         tooltip: None,
         href: None,
@@ -353,6 +393,11 @@ fn parse_badge(
         _ => base.open_in,
     };
 
+    let icon = obj
+        .get("icon")
+        .and_then(Value::as_str)
+        .and_then(veld_core::ide::parse_icon_name);
+
     let actions = obj
         .get("actions")
         .and_then(Value::as_array)
@@ -361,6 +406,7 @@ fn parse_badge(
 
     StatusView {
         text,
+        icon,
         tone,
         tooltip,
         href,
@@ -658,5 +704,153 @@ fn tail_suffix(stderr: &str) -> String {
         String::new()
     } else {
         format!(": {}", clip(tail, MAX_TOOLTIP_CHARS))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A project declaring one badge and one action it can offer.
+    fn section() -> IdeSection {
+        veld_core::ide::parse(Some(&serde_json::json!({
+            "extensions": [
+                { "id": "pr", "slot": "topBar", "type": "status", "label": "PR",
+                  "argv": ["true"] },
+                { "id": "create-pr", "type": "action", "label": "Create a PR",
+                  "argv": ["true"] },
+                { "id": "menu", "slot": "topBar", "type": "menu",
+                  "items": ["create-pr"] },
+            ]
+        })))
+    }
+
+    fn badge(stdout: &str) -> StatusView {
+        let section = section();
+        let ext = section.extension("pr").expect("declared").clone();
+        let ExtensionBody::Status(status) = &ext.body else {
+            panic!("pr is a status extension");
+        };
+        let base = StatusView {
+            id: ext.id.clone(),
+            state: "ok",
+            text: None,
+            icon: None,
+            tone: "neutral",
+            tooltip: None,
+            href: None,
+            open_in: open_in_str(status.open_in),
+            actions: Vec::new(),
+            refresh_seconds: status.refresh_seconds,
+            age_seconds: 0,
+        };
+        parse_badge(stdout, &ext, &section, base)
+    }
+
+    #[test]
+    fn output_that_is_not_the_contract_becomes_the_text() {
+        // The tolerance that makes `git rev-parse --short HEAD` a working badge
+        // with no adapter at all. First line only — a command that prints a page
+        // must not paste it into a 42px bar.
+        let view = badge("a1b2c3d\nand some more\n");
+        assert_eq!(view.text.as_deref(), Some("a1b2c3d"));
+        assert_eq!(view.tone, "neutral");
+        assert!(view.href.is_none());
+    }
+
+    #[test]
+    fn the_contract_is_read_when_it_is_there() {
+        let view = badge(
+            r#"{"text":"PR #7 · merged","tone":"success","tooltip":"t",
+                "href":"https://example.com/7","open_in":"pane","icon":"git-merge"}"#,
+        );
+        assert_eq!(view.text.as_deref(), Some("PR #7 · merged"));
+        assert_eq!(view.tone, "success");
+        assert_eq!(view.tooltip.as_deref(), Some("t"));
+        assert_eq!(view.href.as_deref(), Some("https://example.com/7"));
+        assert_eq!(
+            view.open_in, "pane",
+            "the output may override the declaration"
+        );
+        assert_eq!(
+            view.icon,
+            Some(veld_core::ide::PaneIcon::Name("git-merge".to_owned()))
+        );
+    }
+
+    #[test]
+    fn an_unknown_tone_or_icon_is_dropped_rather_than_taking_the_badge_with_it() {
+        let view = badge(r#"{"text":"x","tone":"chartreuse","icon":"nonesuch"}"#);
+        assert_eq!(view.tone, "neutral", "a typo in a colour is not an error");
+        assert!(view.icon.is_none());
+        assert_eq!(view.text.as_deref(), Some("x"), "the information survives");
+    }
+
+    #[test]
+    fn a_non_web_href_is_dropped_and_the_badge_stays() {
+        // Same rule `ide.quicklinks` carries: a click hands this to the OS, so a
+        // custom scheme would make a badge a launcher for whatever is registered.
+        // The badge is kept, because vanishing over its own link is worse.
+        for href in ["vscode://open", "file:///etc/passwd", "javascript:alert(1)"] {
+            let view = badge(&format!(r#"{{"text":"x","href":"{href}"}}"#));
+            assert!(view.href.is_none(), "{href} must not survive");
+            assert_eq!(view.text.as_deref(), Some("x"));
+        }
+    }
+
+    #[test]
+    fn an_object_with_no_text_falls_back_to_the_declared_label() {
+        // An author emitting only `{ "href": … }` clearly meant "keep my label,
+        // make it clickable".
+        let view = badge(r#"{"href":"https://example.com"}"#);
+        assert_eq!(view.text.as_deref(), Some("PR"));
+    }
+
+    #[test]
+    fn only_declared_actions_survive_and_only_actions() {
+        // **The security boundary of the output contract.** A runtime value may
+        // choose which declared action is offered; it may never introduce one, and
+        // it may not reach a `menu` or a `status` either.
+        let view = badge(
+            r#"{"text":"x","actions":[
+                 "create-pr",
+                 {"id":"create-pr","label":"again"},
+                 {"id":"ghost"},
+                 {"id":"menu"},
+                 {"id":"pr"},
+                 {"argv":["rm","-rf","/"]}
+               ]}"#,
+        );
+        assert_eq!(view.actions.len(), 1, "{:?}", view.actions);
+        assert_eq!(view.actions[0].id, "create-pr");
+        assert_eq!(
+            view.actions[0].label, "Create a PR",
+            "the bare-string form takes the declaration's label"
+        );
+    }
+
+    #[test]
+    fn an_action_label_from_the_output_overrides_presentation_only() {
+        let view = badge(r#"{"text":"x","actions":[{"id":"create-pr","label":"Open one"}]}"#);
+        assert_eq!(view.actions[0].id, "create-pr");
+        assert_eq!(view.actions[0].label, "Open one");
+    }
+
+    #[test]
+    fn a_badge_cannot_render_more_than_the_bar_can_hold() {
+        let long = "x".repeat(500);
+        let view = badge(&format!(r#"{{"text":"{long}"}}"#));
+        let text = view.text.expect("text");
+        assert_eq!(text.chars().count(), MAX_TEXT_CHARS);
+        assert!(text.ends_with('…'));
+    }
+
+    #[test]
+    fn clipping_counts_characters_not_bytes() {
+        // A byte slice would panic on a multi-byte boundary, and emoji in a badge
+        // are entirely expected.
+        let view = badge(&format!(r#"{{"text":"{}"}}"#, "🦊".repeat(200)));
+        let text = view.text.expect("text");
+        assert_eq!(text.chars().count(), MAX_TEXT_CHARS);
     }
 }

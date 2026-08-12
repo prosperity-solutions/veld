@@ -54,6 +54,9 @@
         "slot": "topBar",
         "type": "status",
         "label": "PR",
+        // The declaration's glyph. The script's output may override it per
+        // state, which is what `tone-demo` below demonstrates.
+        "icon": "git-pull-request",
         "argv": ["scripts/veld/pr-badge.sh"],
         "refresh_seconds": 60,
         "requires_bin": ["gh"],
@@ -81,7 +84,9 @@
         "slot": "topBar",
         "type": "menu",
         "label": "Open this worktree in",
-        "icon": "code",
+        // `external-link`, not `code`: the `</>` glyph reads as "source code"
+        // rather than "hand this to another application".
+        "icon": "external-link",
         "items": ["webstorm", "vscode", "idea"]
       },
       // `hide` for the editors, deliberately unlike the `pr` badge: which editor
@@ -111,6 +116,30 @@
         "argv": ["idea", "${veld.root}"],
         "requires_bin": ["idea"],
         "when_missing": "hide"
+      },
+      // A badge that walks through every tone, one click at a time. Badge colour
+      // is the one part of this feature no test can check — a contrast ratio is
+      // arithmetic, "is this readable at 12px" is not — so the tones sit one
+      // click apart in a real bar. **Delete these two entries and
+      // scripts/veld/tone-demo.sh once the palette is settled.**
+      {
+        "id": "tone-demo",
+        "slot": "topBar",
+        "align": "end",
+        "type": "status",
+        "label": "tone",
+        "argv": ["scripts/veld/tone-demo.sh"],
+        // The floor. Nothing here needs polling at all — it changes only when
+        // clicked, and an action re-reads the badges — but a status extension
+        // has to declare something.
+        "refresh_seconds": 15
+      },
+      {
+        // No slot: reached only from the badge's own output.
+        "id": "tone-demo-next",
+        "type": "action",
+        "label": "Next tone",
+        "argv": ["scripts/veld/tone-demo.sh", "next"]
       }
     ],
     // Dogfooding, and the worked examples: this is a repo whose contributors

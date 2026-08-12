@@ -118,6 +118,7 @@ fonts are bundled into the page, not fetched).
   --live:oklch(0.74 0.14 158);--live-ink:#04140b;--live-bg:rgba(63,191,127,.14);
   --warn:oklch(0.82 0.13 82);--warn-bg:rgba(230,180,60,.14);
   --danger:oklch(0.68 0.17 22);--danger-bg:rgba(224,90,80,.14);
+  --info:oklch(0.74 0.11 250);--info-bg:rgba(90,150,240,.14);
   --accent:oklch(0.74 0.14 158);
 }
 /* light — body[data-theme="light"]; see crates/veld-daemon/ui/src/styles.css */
@@ -157,6 +158,14 @@ OS via `prefers-color-scheme` and offers a three-state toggle
   --blue:#2E5BD0;--muted:#74747e;--code-bg:#F5F5F0;
 }
 ```
+
+**A tone used as text is mixed toward `--text`.** The tone tokens are tuned for
+icons, pills and borders, where 3:1 is enough. As *text on its own tinted fill*
+they are not: measured on the light theme, `--warn` is 3.29:1 and `--danger`
+4.36:1, both under 4.5:1. `color-mix(in oklab, var(--warn) 75%, var(--text))` is
+the form to use, which clears 4.5:1 in both themes from one declaration — see
+`.ext-badge` in `styles.css`. `--info` is the fourth tone and exists because
+"informational" otherwise had to borrow `--live` and read as success.
 
 **Two-token accent rule:** lime (`--accent`) is only legible on dark. Use it for
 subtle fills and tints; use `--accent-ink` for anything that must read as

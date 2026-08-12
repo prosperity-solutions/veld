@@ -892,7 +892,9 @@ string. `type` discriminates the shape.
 | `items` | `menu` only. Ids of declared `action` extensions, ≥1 |
 
 A `status` command's stdout is the badge:
-`{ "text", "tone": neutral|info|success|warning|danger, "tooltip", "href", "open_in", "actions": [{ "id", "label" }] }`.
+`{ "text", "tone": neutral|info|success|warning|danger, "icon", "tooltip", "href", "open_in", "actions": [{ "id", "label" }] }`.
+`icon` takes the same allowlist/emoji the declaration's does and **overrides it**,
+so a badge can change its glyph with its state.
 Three tolerances carry most of the ergonomics: **non-contract output becomes the
 text** (first line only — so `git rev-parse --short HEAD` is a working badge with
 no adapter), **exit 0 with no output hides the badge** ("not applicable here"), and
@@ -926,6 +928,11 @@ Gotchas worth knowing before writing one:
   half off machine-wide; actions and menus keep working, because a click is the
   user asking. There is no consent prompt by design — see
   `docs/extensions-vision.md`.
+- **A right-click on a badge re-runs it** (or all of them). A forced refresh
+  ignores `refresh_seconds`, bounded by a 3s floor instead, and surfaces its own
+  errors — unlike the background poll, which is deliberately silent. Running an
+  `action` also forces a re-read, since an action usually changes what a badge
+  says.
 
 ### `ide.panes`
 

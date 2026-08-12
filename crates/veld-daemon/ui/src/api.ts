@@ -365,6 +365,9 @@ export interface ExtensionSpec {
 /** Mirrors `StatusView` in `crates/veld-daemon/src/extensions.rs`. */
 export interface ExtensionStatus {
   id: string;
+  /** A glyph the command's *output* asked for, from the same allowlist
+   *  `veld.json` uses — so a badge can change its glyph with its state. */
+  icon?: PaneIcon;
   /**
    * `empty` is not a failure — a command that exits 0 with no output is saying
    * "nothing to show for this worktree", and the badge is simply not rendered.
@@ -1359,11 +1362,26 @@ export const api = {
    * Returns an empty list when the machine's `extensions.autoRefresh` setting
    * is off, or when the worktree has no loadable veld config.
    */
-  extensionStatus: (worktreeId: number) =>
-    request<{ items: ExtensionStatus[] }>(
-      `/api/worktrees/${worktreeId}/extensions/status`,
+  extensionStatus: (
+    worktreeId: number,
+    opts?: {
+      /** The user asked: ignore the declared interval and re-run. Bounded
+       *  server-side by a 3s floor, so click-spam cannot fork a process per
+       *  click. */
+      force?: boolean;
+      /** Force only this extension; the rest answer from what they had. */
+      id?: string;
+    },
+  ) => {
+    const q = new URLSearchParams();
+    if (opts?.force) q.set("force", "true");
+    if (opts?.id) q.set("id", opts.id);
+    const qs = q.size > 0 ? `?${q}` : "";
+    return request<{ items: ExtensionStatus[] }>(
+      `/api/worktrees/${worktreeId}/extensions/status${qs}`,
       { method: "POST" },
-    ),
+    );
+  },
   /**
    * Run an `action` extension the user clicked.
    *

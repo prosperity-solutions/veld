@@ -18,8 +18,9 @@
  *   which is what keeps a badge that calls a rate-limited API from being
  *   evaluated for eighteen worktrees nobody is looking at.
  */
-import { ActionIcon, Badge, Button, Menu, Tooltip } from "@mantine/core";
-import { IconChevronDown, IconExternalLink } from "@tabler/icons-react";
+import { ActionIcon, Badge, Button, Loader, Menu, Tooltip } from "@mantine/core";
+import { IconChevronDown, IconExternalLink, IconRefresh } from "@tabler/icons-react";
+import { useContextMenu } from "mantine-contextmenu";
 import React from "react";
 import { type ExtensionSpec, type ExtensionStatus, api } from "../api";
 import { paneIcon } from "../panes/paneIcons";
@@ -110,7 +111,53 @@ export function TopBarExtensions(props: {
   // number against the new one for a poll's width. Effects cannot un-render a
   // value that is already on screen, so the guard has to be in the data.
   const [valuesFor, setValuesFor] = React.useState<number | null>(null);
+  /**
+   * Which badges have a request in flight, or `"*"` for the whole slot.
+   *
+   * Needed because a first evaluation runs a command that may take seconds, and
+   * without it the bar simply has a hole in it for that long — the user cannot
+   * tell "still working" from "this project declares nothing".
+   */
+  const [busy, setBusy] = React.useState<Set<string>>(new Set());
   const interval = pollInterval(mine.map((r) => r.spec));
+
+  /**
+   * Fetch this worktree's badge values.
+   *
+   * One function for the poll and for both Refresh entries, so a forced refresh
+   * lands in state the same way a polled one does. `live` is a ref rather than a
+   * closure flag because a Refresh outlives the effect that a poll belongs to.
+   */
+  const load = React.useCallback(
+    (opts?: { force?: boolean; id?: string }) => {
+      if (worktreeId === null) return;
+      const mark = opts?.id ?? "*";
+      setBusy((prev) => new Set(prev).add(mark));
+      api
+        .extensionStatus(worktreeId, opts)
+        .then((res) => {
+          const next: Record<string, ExtensionStatus> = {};
+          for (const item of res.items) next[item.id] = item;
+          setValues(next);
+          setValuesFor(worktreeId);
+        })
+        // A background poll is deliberately silent — a daemon restart or a
+        // sleeping laptop would otherwise raise a toast per badge, and a badge
+        // that cannot be evaluated already renders as absent. A refresh the user
+        // clicked is not silent: they are owed an answer.
+        .catch((e) => {
+          if (opts?.force) notifyError("Refresh this project's badges", e);
+        })
+        .finally(() =>
+          setBusy((prev) => {
+            const next = new Set(prev);
+            next.delete(mark);
+            return next;
+          }),
+        );
+    },
+    [worktreeId],
+  );
 
   React.useEffect(() => {
     if (worktreeId === null || !hasStatus || interval === 0) {
@@ -119,29 +166,15 @@ export function TopBarExtensions(props: {
       return;
     }
     let live = true;
-    const load = () => {
+    const poll = () => {
       // A hidden window asks for nothing: the badge is not on screen, and the
       // command behind it may cost an API call.
-      if (document.hidden) return;
-      api
-        .extensionStatus(worktreeId)
-        .then((res) => {
-          if (!live) return;
-          const next: Record<string, ExtensionStatus> = {};
-          for (const item of res.items) next[item.id] = item;
-          setValues(next);
-          setValuesFor(worktreeId);
-        })
-        // Deliberately silent: this is a background poll the user did not ask
-        // for, and a daemon restart or a sleeping laptop would otherwise raise a
-        // toast per badge. A badge that cannot be evaluated renders as absent,
-        // which is the same thing the user sees for one that has nothing to say.
-        .catch(() => {});
+      if (!document.hidden && live) load();
     };
-    load();
-    const timer = window.setInterval(load, interval);
+    poll();
+    const timer = window.setInterval(poll, interval);
     const onVisible = () => {
-      if (!document.hidden) load();
+      if (!document.hidden) poll();
     };
     document.addEventListener("visibilitychange", onVisible);
     return () => {
@@ -149,14 +182,25 @@ export function TopBarExtensions(props: {
       window.clearInterval(timer);
       document.removeEventListener("visibilitychange", onVisible);
     };
-  }, [worktreeId, hasStatus, interval]);
+  }, [worktreeId, hasStatus, interval, load]);
 
   if (mine.length === 0 || worktreeId === null) return null;
 
   const valueFor = (id: string) => (valuesFor === worktreeId ? values[id] : undefined);
 
+  const statusCount = mine.filter((r) => r.spec.kind === "status" && !r.disabled).length;
+
   const activate = (id: string) => {
-    api.activateExtension(worktreeId, id).catch((e) => notifyError("Run this action", e));
+    api
+      .activateExtension(worktreeId, id)
+      // An action usually changes what a badge says — creating the pull request
+      // the badge just reported missing is the flagship case — so the badges are
+      // re-read rather than left stale until the next interval. Forced, since the
+      // interval has almost certainly not elapsed.
+      .then(() => {
+        if (statusCount > 0) load({ force: true });
+      })
+      .catch((e) => notifyError("Run this action", e));
   };
   const open = (url: string, where: "system" | "pane") => {
     if (where === "pane" && props.onOpenInPane) {
@@ -176,9 +220,12 @@ export function TopBarExtensions(props: {
           key={r.spec.id}
           resolved={r}
           value={valueFor(r.spec.id)}
+          busy={busy.has(r.spec.id) || busy.has("*")}
           all={props.extensions}
+          statusCount={statusCount}
           onActivate={activate}
           onOpen={open}
+          onRefresh={load}
         />
       ))}
     </>
@@ -188,9 +235,15 @@ export function TopBarExtensions(props: {
 function ExtensionControl(props: {
   resolved: Resolved;
   value: ExtensionStatus | undefined;
+  /** A request covering this extension is in flight. */
+  busy: boolean;
   all: ExtensionSpec[];
+  /** How many live badges the slot has, so "Refresh all" only appears when it
+   *  would mean something more than "Refresh". */
+  statusCount: number;
   onActivate: (id: string) => void;
   onOpen: (url: string, where: "system" | "pane") => void;
+  onRefresh: (opts?: { force?: boolean; id?: string }) => void;
 }) {
   const { spec, disabled, reason } = props.resolved;
   if (spec.kind === "menu") return <ExtensionMenu {...props} />;
@@ -245,11 +298,15 @@ function ExtensionControl(props: {
 function ExtensionBadge(props: {
   resolved: Resolved;
   value: ExtensionStatus | undefined;
+  busy: boolean;
+  statusCount: number;
   onActivate: (id: string) => void;
   onOpen: (url: string, where: "system" | "pane") => void;
+  onRefresh: (opts?: { force?: boolean; id?: string }) => void;
 }) {
   const { spec, disabled, reason } = props.resolved;
   const value = props.value;
+  const { showContextMenu } = useContextMenu();
 
   if (disabled) {
     const hintHref = spec.hint?.href;
@@ -273,8 +330,26 @@ function ExtensionBadge(props: {
       </Tooltip>
     );
   }
-  // No value yet (first poll in flight) or nothing to show.
-  if (!value || value.state === "empty") return null;
+  // The first evaluation. A badge's command can take seconds — a network call to
+  // a code host is the flagship case — and with nothing rendered the bar just has
+  // a gap in it, which is indistinguishable from a project that declares no
+  // badges. So the declared label appears with a spinner until there is an answer.
+  if (!value) {
+    if (!props.busy) return null;
+    return (
+      <Tooltip label={`Checking ${spec.label}…`} withArrow openDelay={200}>
+        <Badge variant="light" className="ext-badge ext-badge-loading tone-neutral">
+          <span className="ext-badge-glyph">
+            <Loader size={9} color="var(--faint)" />
+          </span>
+          {spec.label}
+        </Badge>
+      </Tooltip>
+    );
+  }
+  // Nothing to show: the command exited 0 with no output, which is how an
+  // extension says "not applicable to this worktree".
+  if (value.state === "empty") return null;
 
   const href = value.href;
   const actions = value.actions ?? [];
@@ -283,11 +358,14 @@ function ExtensionBadge(props: {
     .filter(Boolean)
     .join(" · ");
 
+  // The output's icon wins over the declaration's: that is what lets one badge
+  // change its glyph with its state (a merge mark once merged) while still having
+  // a sensible one before the first run.
+  const glyph = value.icon ?? spec.icon;
   const badge = (
     <Badge
       variant="light"
-      color={toneColor(value.tone)}
-      className="ext-badge"
+      className={`ext-badge tone-${value.tone}`}
       style={clickable ? { cursor: "pointer" } : undefined}
       onClick={
         // One link and no actions is a plain link; one action and no link runs
@@ -299,6 +377,13 @@ function ExtensionBadge(props: {
             : () => props.onActivate(actions[0].id)
       }
     >
+      {props.busy ? (
+        <span className="ext-badge-glyph">
+          <Loader size={9} color="currentColor" />
+        </span>
+      ) : (
+        glyph && <span className="ext-badge-glyph">{paneIcon(glyph, 12)}</span>
+      )}
       {value.text ?? spec.label}
     </Badge>
   );
@@ -311,10 +396,36 @@ function ExtensionBadge(props: {
     badge
   );
 
-  // A badge with both a link and actions, or with several actions, gets a menu —
-  // a click has to be able to mean more than one thing.
-  if ((href && actions.length > 0) || actions.length > 1) {
-    return (
+  // **Refresh lives on the right-click menu, never on the primary click.** A
+  // badge whose one useful meaning is "open the pull request" must keep that as a
+  // single click; promoting Refresh into a left-click dropdown would cost every
+  // badge its directness to expose something wanted once a week. Uses
+  // `mantine-contextmenu`, the same mechanism the worktree rail's rows use, so a
+  // right-click anywhere in the app behaves the same way.
+  const refreshMenu = showContextMenu([
+    {
+      key: "refresh",
+      icon: <IconRefresh size={14} />,
+      title: `Refresh ${spec.label}`,
+      onClick: () => props.onRefresh({ force: true, id: spec.id }),
+    },
+    // Only when it would mean more than the entry above it.
+    ...(props.statusCount > 1
+      ? [
+          {
+            key: "refresh-all",
+            icon: <IconRefresh size={14} />,
+            title: "Refresh all badges",
+            onClick: () => props.onRefresh({ force: true }),
+          },
+        ]
+      : []),
+  ]);
+
+  // A badge with both a link and actions, or with several actions, still needs a
+  // left-click menu: one click cannot mean two things.
+  const body =
+    (href && actions.length > 0) || actions.length > 1 ? (
       <Menu position="bottom-start" withinPortal>
         <Menu.Target>{wrapped}</Menu.Target>
         <Menu.Dropdown>
@@ -333,9 +444,15 @@ function ExtensionBadge(props: {
           ))}
         </Menu.Dropdown>
       </Menu>
+    ) : (
+      wrapped
     );
-  }
-  return wrapped;
+
+  return (
+    <span style={{ display: "inline-flex" }} onContextMenu={refreshMenu}>
+      {body}
+    </span>
+  );
 }
 
 /**
@@ -395,18 +512,3 @@ function ExtensionMenu(props: {
   );
 }
 
-/** The badge tone vocabulary, mapped onto Mantine's palette. */
-export function toneColor(tone: ExtensionStatus["tone"]): string {
-  switch (tone) {
-    case "success":
-      return "teal";
-    case "warning":
-      return "yellow";
-    case "danger":
-      return "red";
-    case "info":
-      return "blue";
-    default:
-      return "gray";
-  }
-}
