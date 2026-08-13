@@ -853,10 +853,13 @@ Rules that are enforced rather than advised:
   because `ide` arrays concatenate across `include` files in filename order. A card
   dated today survives; a backdated one can be the entry that goes. **Retiring an
   item is deleting it.**
-- **Only the repo's main checkout is read** — the primary clone, at whatever it has
-  checked out. A card drafted in a *worktree* prompts nobody until it lands, and news
-  stays silent until somebody pulls on main. A card on a branch in the main clone
-  itself IS live; the isolation is per worktree, not per branch.
+- **Only the repo's main checkout is read, by default** — the primary clone, at
+  whatever it has checked out. A card drafted in a *worktree* prompts nobody
+  until it lands, and news stays silent until somebody pulls on main. A card
+  on a branch in the main clone itself IS live; the isolation is per worktree,
+  not per branch. The `news.source` setting (`main` by default) can switch
+  this to `worktree`, unioning every checked-out worktree's own `ide.news` —
+  for previewing a card before it merges, not for daily use.
 - **Every item is a change and its date gates it.** There is no evergreen kind:
   standing practice belongs in the repo's docs (point at them with
   `ide.quicklinks`), so a card can never outlive the change it describes.

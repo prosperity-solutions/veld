@@ -350,14 +350,23 @@ config, which is exactly what AGENTS.md requires. What is new is that execution 
 unattended, repeated, and its output is squeezed into a dozen rendered characters.
 So the budget goes on bounding and exposing execution rather than on asking:
 
-**Say the consequence out loud, because it is not obvious:** the declarations come
-from the **checked-out** worktree, so checking out a branch and selecting it in the
-IDE runs that branch's badge commands. Reviewing a fork pull request by checking it
-out is therefore an act of trust in its author, the same way `veld start` on that
-branch already is. That placement is deliberate and argued in the
-[Decision log](#decision-log); the lever for somebody who reviews branches they do
-not trust is `extensions.autoRefresh`, which stops the unattended half machine-wide
-and leaves clicks working.
+**Say the consequence out loud, because it is not obvious:** by default (`main`,
+the reversed decision below), declarations come from the project's **main
+checkout**, so checking out an untrusted branch and selecting it in the IDE runs
+only whatever that project's badge commands already are on main — not the
+branch's own. Setting `extensions.source` to `worktree` restores the original
+placement, where **checking out a branch and selecting it runs that branch's own
+badge commands**; reviewing a fork pull request that way is an act of trust in
+its author, the same way `veld start` on that branch already is. Two residuals
+worth naming even under the `main` default: the command still *executes* with
+the viewed worktree as its working directory, so a main-declared badge shelling
+out to a repo-relative script still runs whatever that path resolves to in the
+untrusted checkout — and "main" means the main *checkout*, not the default
+*branch*, so a primary clone itself sitting on an untrusted branch (a `gh pr
+checkout` run there) is the one case where `main` mode does not hold. Either
+mode's placement is argued in the [Decision log](#decision-log); the lever for
+somebody who wants the unattended half off entirely, regardless of source, is
+`extensions.autoRefresh`, which stops it machine-wide and leaves clicks working.
 
 - **`stdin` is closed and no tty is attached**, so a CLI that would prompt for
   credentials fails instead of hanging forever.
@@ -847,6 +856,79 @@ Rejected:
   permanent name in a closed set plus one scope rule (§`check_command_variables`
   in `crates/veld-core/src/ide.rs`) — judged worth it because the alternative
   is a footgun that stays documented as a footgun forever rather than fixed.
+
+### 2026-08-13 — Reversed: extensions default to the main checkout, and it is now a setting on both surfaces
+
+The same day's "Extensions are worktree-based, and `ide.news` is not the
+precedent" entry above is **reversed** here, on maintainer instruction, once its
+cost showed up in the one scenario that entry's threat-model argument did not
+weigh: **onboarding.** A new user's existing worktrees were cloned before the
+project's `veld.json` gained `ide.extensions` (or before a given badge was
+added to it), so the worktree-based default rendered nothing in them — a user
+who saw an "extensions" news card and then went to keep working in an old
+checkout found no evidence the feature existed until they created a fresh one.
+`ide.news` never had this problem, because it was already resolved from the
+main checkout for an unrelated reason (publication to a whole team).
+
+**Chosen:** a new setting on each surface, both defaulting to `main`:
+
+- `extensions.source` (`main` | `worktree`, default `main`) — see
+  `ConfigSource` in `crates/veld-core/src/db/settings.rs`. `main` reads
+  `ide.extensions` from the repo's main checkout regardless of which worktree
+  is being looked at; commands still execute in the worktree on screen, with
+  its own `branch`/`root` builtins — only the *declarations* move. `worktree`
+  restores the original, still-available behaviour, for testing a new or
+  edited declaration in the branch that is writing it, before merging.
+- `news.source` (`main` | `worktree`, default `main`) — makes the existing
+  main-checkout behaviour a setting rather than a hardcoded rule, for the same
+  testing reason. `worktree` unions every checked-out worktree's own
+  `ide.news` (deduped by id, still capped at `MAX_NEWS_ITEMS`) rather than
+  picking one, because there is no single "current worktree" at the layer
+  `repo_view` answers from (one response describes every worktree of a repo,
+  for every window's poll) — this is explicitly a testing posture, not a
+  production one, and it trades away the "a draft cannot reach a teammate"
+  guarantee the `main` default exists to hold.
+
+**The reversal is a net security improvement for the flagship threat, not a
+regression of it.** The prior entry's own worked example — reviewing a fork
+pull request by checking it out — is exactly the case `main`-by-default now
+protects: an untrusted branch's `ide.extensions` no longer run automatically
+just because it is checked out, since the declarations consulted are the
+project's already-merged ones. What is genuinely given up is the *test-before-merge*
+loop that entry was written to protect, and `extensions.source = worktree`
+exists to restore it on demand — the same shape `extensions.autoRefresh`
+already uses for "off machine-wide, on for a click."
+
+Rejected:
+
+- **Leaving extensions worktree-based and fixing onboarding some other way**
+  (e.g. seeding new worktrees with the project's current `ide.extensions` at
+  creation time). Rejected because it only fixes *future* worktrees — every
+  worktree that already existed before this shipped stays blank forever, which
+  is the actual reported case (an existing worktree, not a new one), and it
+  reintroduces a second, harder-to-explain rule (worktrees created before date
+  X behave differently from ones created after).
+- **Making `main` the only behaviour, with no setting.** Rejected because it
+  deletes the test-before-merge loop the original entry designed for, with no
+  way back — and because `ide.news` already established the pattern of "a
+  setting, not a hardcoded rule" being worth the small cost for exactly this
+  kind of testing need.
+- **One setting governing both surfaces.** Rejected: `extensions.source` and
+  `news.source` are independent decisions in practice — someone testing an
+  extension does not necessarily want every worktree's draft news card
+  reaching them too, and vice versa — and coupling them would be the same
+  mistake `terminal.shellIntegration`/`terminal.agentIntegration` were split
+  apart to avoid (see that pair's own history above).
+
+**Should this be promoted?** No. `ide.extensions` itself has never had a
+promotion card — nobody outside the person who wrote this document's Tier 1
+round has been told the capability exists yet, so there is no population of
+users who already formed an expectation this reversal could violate. The only
+readers who would notice a default flip are project maintainers who have
+themselves already written `ide.extensions` in a `veld.json`, in the roughly
+one day since it shipped — a small, technically-engaged group who reads
+`docs/configuration.md` and `Settings → General`, not the audience a
+once-ever interrupt exists to reach.
 
 ## The extension backlog
 

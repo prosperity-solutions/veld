@@ -84,6 +84,8 @@ import {
   FOCUS_SUPPRESS_TOASTS,
   FOCUS_SUPPRESS_OS_NOTIFICATIONS,
   extensionsAutoRefresh,
+  extensionsSource,
+  newsSource,
   terminalAgentIntegration,
   terminalInterceptSystemOpen,
   terminalShellIntegration,
@@ -96,6 +98,7 @@ import {
   terminalPrefs,
   worktreeStorageDir,
   worktreeStorageMode,
+  type ConfigSourcePref,
   type GitCreateFrom,
   type LogTimeZone,
   type MarkerStyle,
@@ -312,6 +315,8 @@ export function SettingsDialog(props: {
   const shellIntegration = terminalShellIntegration(settings ?? {});
   const agentIntegration = terminalAgentIntegration(settings ?? {});
   const autoRefresh = extensionsAutoRefresh(settings ?? {});
+  const extSource = extensionsSource(settings ?? {});
+  const newsSourcePref = newsSource(settings ?? {});
   const activity = activityPrefs(settings ?? {});
   const focus = focusPrefs(settings ?? {});
   const logsTz = logsTimeZone(settings ?? {});
@@ -604,6 +609,27 @@ export function SettingsDialog(props: {
                 />
               </Row>
               <Row
+                label="Read a project's extensions from"
+                help="Main checkout: every worktree of a project sees whatever extensions are declared in your primary clone, at whatever it has checked out — the setting for everyone, so a worktree cloned before a project added ide.extensions still sees them. This worktree: the checked-out worktree's own veld.json decides, so you can test a new or edited declaration before merging it. Either way commands still run in the worktree you're looking at, using its own branch and root."
+              >
+                <NativeSelect
+                  size="xs"
+                  w={190}
+                  value={extSource}
+                  disabled={locked}
+                  data={[
+                    { value: "main", label: "Main checkout" },
+                    { value: "worktree", label: "This worktree" },
+                  ]}
+                  onChange={(e) =>
+                    set({
+                      "extensions.source": e.currentTarget
+                        .value as ConfigSourcePref,
+                    })
+                  }
+                />
+              </Row>
+              <Row
                 label="Worktree marker"
                 help="Both a colour and a glyph are stored for every worktree, so switching here never loses the other one. Pick either from a worktree's context menu → Change marker…"
               >
@@ -747,6 +773,26 @@ export function SettingsDialog(props: {
                   checked={projectNews}
                   disabled={locked}
                   onChange={(e) => set({ "ui.showProjectNews": e.currentTarget.checked })}
+                />
+              </Row>
+              <Row
+                label="Read project news from"
+                help="Main checkout: a card only reaches you once it's checked out in your primary clone — the setting for everyone, so a card being drafted on a branch never prompts a teammate. This worktree: every checked-out worktree's own veld.json is read and merged in, so you can preview a card before merging it. Meant for testing a card you're writing, not for daily use — reading or dismissing a preview marks its id read for real, so the merged card won't prompt you again either."
+              >
+                <NativeSelect
+                  size="xs"
+                  w={190}
+                  value={newsSourcePref}
+                  disabled={locked}
+                  data={[
+                    { value: "main", label: "Main checkout" },
+                    { value: "worktree", label: "Every worktree" },
+                  ]}
+                  onChange={(e) =>
+                    set({
+                      "news.source": e.currentTarget.value as ConfigSourcePref,
+                    })
+                  }
                 />
               </Row>
             </Stack>
