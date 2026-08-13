@@ -377,27 +377,33 @@ PR is ready, so waiting on a draft's checks is an infinite wait, not patience.
    report. A red or pending check is not a pass. **A *skipped* check is also not a
    pass, and it looks exactly like one:** a draft's jobs all skip, `gh pr checks`
    files those under the `skipping` bucket, exits 0, and prints "All checks were
-   successful". So the exit code cannot tell you whether anything ran. Assert on
-   the buckets — and scope the assertion to the **CI** workflow, because
-   `release.yml`'s push-only jobs are skipped on every healthy PR:
+   successful". So the exit code cannot tell you whether anything ran. **Read the
+   run, not the rollup** — the rollup has a second, unrecoverable lie: a skipped
+   **matrix** job reports its name as the literal un-expanded template string
+   (`Release Build (${{ matrix.suffix }})`) instead of the ready run's expanded
+   names, so those `skipping` entries never get replaced and the rollup assertion
+   fails on every healthy PR that was ever a draft (every PR `/ship` produces).
+   The authoritative answer is the ready-for-review run's jobs:
 
    ```sh
-   gh pr view --json isDraft,mergeable        # isDraft must be false
-   gh pr checks --json name,bucket,workflow \
-     --jq '[.[] | select(.workflow == "CI" and .bucket == "skipping")]'   # must be []
+   gh pr view --json isDraft,mergeable            # isDraft must be false
+   RID=$(gh run list --workflow CI --commit "$(git rev-parse HEAD)" \
+           --json databaseId,event --jq '[.[] | select(.event == "pull_request")][0].databaseId')
+   gh run view "$RID" --json jobs \
+     --jq '[.jobs[] | select(.conclusion != "success") | {name,conclusion}]'   # must be []
    ```
 
-   Apply that assertion **only when no CI check is `pending`** — it is a terminal
-   test. The ready run's check replaces the draft's for a given job name (names do
-   not duplicate), but a name whose ready-run job has not started yet still shows
-   the draft's `skipping` entry; measured on #209, four CI names read `skipping`
-   while `check` was in progress because their jobs `needs:` it. Read the run
-   itself if you want an unambiguous answer at any moment:
-
-   ```sh
-   gh run list --workflow CI --commit "$(git rev-parse HEAD)" --json databaseId
-   gh run view <id> --json jobs
-   ```
+   The run list is newest-first, so `[0]` is the ready run, but the `event ==
+   "pull_request"` selection makes that explicit rather than an accident of
+   ordering, since a draft push and the `ready_for_review` flip sit on the same
+   commit. Scope to the **CI** workflow's jobs only — `release.yml`'s push-only
+   jobs are skipped on every healthy PR. Do not instead filter the rollup for
+   un-expanded template names (`select(.name | test("\\$\\{\\{") | not)`): that
+   silences the symptom by pattern-matching a formatting accident. Apply the run
+   check only once no CI job is `pending` — until a job has *started*, the
+   earlier run's `skipping` entry is still the one showing; measured on #209,
+   four CI names read `skipping` while `check` was in progress because their jobs
+   `needs:` it.
 
    This is the failure mode to fear under autonomy: forget step 2, poll, read
    "All checks were successful", and report a green CI on a diff nothing ran.
