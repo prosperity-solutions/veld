@@ -216,18 +216,36 @@ abuse that: `hint` for something optional is a nag with no off switch.
 
 ### Variables
 
-`${veld.root}` (worktree path), `${veld.branch}`, `${veld.worktree}` (slug),
-`${veld.project}`, `${veld.username}`. Anything else — including `${veld.port}`,
-`${output.*}` and the `pane.*` family — is a **`veld lint` problem**, not a runtime
-failure, so `veld lint` is the check that a command will resolve.
+`${veld.root}` (worktree path), `${veld.branch}`, `${veld.branch_raw}` (`argv`
+only), `${veld.worktree}` (slug), `${veld.project}`, `${veld.username}`.
+Anything else — including `${veld.port}`, `${output.*}` and the `pane.*` family
+— is a **`veld lint` problem**, not a runtime failure, so `veld lint` is the
+check that a command will resolve.
 
 **`${veld.branch}` is slugified — it is not a git ref.** `feat/foo` arrives as
 `feat-foo`. This is the trap to avoid: `gh pr view "${veld.branch}"` is not an
 error, it is a *wrong answer* — on any branch with a `/`, a `.` or a capital it
-reports no pull request and offers to create a second one. Read the real ref inside
-the command with `git rev-parse --abbrev-ref HEAD`. (The slugging is deliberate: the
-branch name is chosen by whoever opened the pull request you checked out, so a
-`shell` command interpolating it raw would be running their string.)
+reports no pull request and offers to create a second one. Use
+**`${veld.branch_raw}`** in `argv` instead:
+
+```jsonc
+"argv": ["gh", "pr", "view", "${veld.branch_raw}"]
+```
+
+(The slugging on `${veld.branch}` is deliberate: the branch name is chosen by
+whoever opened the pull request you checked out, so a `shell` command
+interpolating it raw would be running their string. `${veld.branch_raw}` is
+the escape hatch, but `veld lint` refuses it in `shell` for the same reason —
+`git check-ref-format --branch` accepts `foo$(id)` and `foo'bar` as valid
+branch names, so a `shell` string built from one is command execution on
+checkout, and no quoting closes that; `argv` closes it because the element
+count is fixed before the value is substituted in. A branch starting with `-`
+is a different hole — `argv` has no shell to protect against there, but a
+name like `-x` is still text `gh`'s own flag parser can read as an option, and
+a checkout really can be on one (`git switch -- -x` succeeds). veld closes
+that at the source: `${veld.branch_raw}` is not populated at all on such a
+branch, so the command reports an unresolved variable instead of handing it a
+flag.)
 
 **Quote interpolations in a `shell` command.** `${veld.root}` can contain spaces.
 Prefer `argv`, which cannot change its argument count.

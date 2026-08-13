@@ -204,9 +204,11 @@ node-level `actions` already do — `argv` is spawned directly and is the defaul
 recommendation, `shell` is the permanently-supported escape hatch, and the legacy
 `command` alias comes along with the shared type. `${…}` interpolation reuses the
 **pane variable context** minus its `pane.*` family — `${veld.root}`,
-`${veld.branch}`, `${veld.worktree}`, `${veld.project}`, `${veld.username}` — so
-extensions do not introduce a second vocabulary. A reference outside that closed
-set is a `validate` finding, not a badge that fails at spawn time.
+`${veld.branch}`, `${veld.branch_raw}` (unslugified, `argv` only — refused in
+`shell`, see the 2026-08-13 decision-log entry), `${veld.worktree}`,
+`${veld.project}`, `${veld.username}` — so extensions do not introduce a second
+vocabulary. A reference outside that closed set is a `validate` finding, not a
+badge that fails at spawn time.
 
 Order within a slot is array order. An unknown `slot` or `type` is a non-fatal
 `validate` finding and the item is ignored — the same leniency the rest of the
@@ -746,6 +748,105 @@ Rejected, with reasons:
   grow a third rendering later without becoming two fields that can disagree,
   which `display` as an enum does not have to solve for because it already isn't
   one.
+
+### 2026-08-13 — `${veld.branch_raw}`: unslugified, `argv` only, refused in `shell`
+
+**Decision: add `${veld.branch_raw}` — the checkout branch name, unslugified —
+to the pane and extension variable scopes, permitted in `argv`, and a `veld
+lint` finding when used in `shell`.**
+
+`${veld.branch}` is slugified (`feat/foo` → `feat-foo`), which is documented
+across every reference for this scope as a trap: the obvious
+`["gh", "pr", "view", "${veld.branch}"]` is not an error, it is a wrong
+answer, and every worked adapter sidesteps it with
+`git rev-parse --abbrev-ref HEAD` inside the command instead. The slugging
+itself stays — `${veld.branch}` also reaches hostnames, and the value is one
+an outsider chooses (checking out somebody's pull-request branch), so an
+unslugified `${veld.branch}` would be a second, worse footgun. This adds the
+raw value under its own name rather than changing what `branch` means.
+
+**The `argv`/`shell` split is measured, not assumed.**
+`git check-ref-format --branch` on this machine accepts `foo$(id)`, `foo|bar`
+and `foo'bar` as valid branch names, alongside the intended `feat/foo` and
+`UPPER.Case`. Two consequences follow, and both are load-bearing:
+
+- **`shell` cannot be made safe by advice.** A raw ref substituted into a
+  `shell` string is command execution on checkout of somebody's PR branch, and
+  the standard mitigation — quote your interpolations — does not work, because
+  `foo'bar` breaks out of a single-quoted substitution too. So `shell` refuses
+  it outright rather than warning about it.
+- **`argv` closes the shell hole**, because interpolation runs after the
+  argv's element count is already fixed, so `$(...)`, `|` and `&&` are inert
+  text inside one argument.
+
+**A first draft of this entry additionally claimed "`argv` is safe" outright,
+reasoning that git refuses a leading `-`.** That is true of the `git branch`
+porcelain but not of the ref grammar: `git switch -- -foo` (or fetching and
+checking out a remote branch already carrying that name) succeeds, and `git
+worktree list --porcelain` reports it verbatim, with no validation on that
+discovery path (`validate_branch` in `crates/veld-daemon/src/desktop.rs` only
+guards branch names the daemon *creates*). `["gh", "pr", "view",
+"${veld.branch_raw}"]` on such a worktree would hand `gh` a flag, not a ref —
+argument injection, not shell injection, but a real hole in a design whose
+whole premise is an attacker-chosen branch name. Caught in review before this
+shipped, not after. The fix is at the same source `validate_branch` already
+treats as the threat: `worktree_builtins` in `crates/veld-daemon/src/pty.rs`
+now omits the `branch_raw` key entirely when the branch starts with `-`, so
+`${veld.branch_raw}` fails closed with the same "unresolved built-in" error
+any other unpopulated variable produces, rather than resolving to something
+usable as a flag. `${veld.branch}` never needed this: `url::slugify` never
+starts or ends with `-`, which is the one respect in which the slugified and
+raw forms are not simply the same value minus formatting.
+
+This holds for extensions unconditionally (`spawn_command` in
+`crates/veld-daemon/src/extensions.rs` execs the resolved `argv` directly, no
+shell). For panes it holds by a different, and equally deliberate, mechanism:
+a pane's `argv` command is still run inside the user's login+interactive shell
+(`login_shell_command` in `crates/veld-daemon/src/pty.rs`), but each element is
+re-quoted with `veld_core::console::quote` — correct POSIX single-quote
+escaping — before being joined into the script handed to `sh -c`, so
+`foo'bar` still arrives as one shell word.
+
+**Panes get it too, deliberately, not by the shared builtin map's inertia.**
+`worktree_builtins` (`pty.rs`) is the single source both `ide::PANE_BUILTINS`
+and `ide::EXTENSION_BUILTINS` are tested against
+(`pane_context_populates_every_lintable_name`,
+`extension_commands_resolve_exactly_the_names_lint_accepts`), so adding
+`branch_raw` there and to only one of the two allowlists would fail a test —
+but the reason to add it to both is independent of that test: a pane command
+has the identical footgun (`${veld.branch}` reads wrong to a `gh`/`glab` call)
+and, per the point above, the `shell`-refusal reasoning applies with *more*
+force there, not less, since a pane's `shell` form is always fed to an
+interactive login shell.
+
+Rejected:
+
+- **`${veld.ref}`.** Short and it is git's own word for "a name that resolves
+  to a commit", but GitHub's own Actions runner had to split `GITHUB_REF`
+  (`refs/heads/foo`) from `GITHUB_REF_NAME` (the short name) precisely because
+  "ref" alone reads as the former to anyone who has used `git symbolic-ref` or
+  `git for-each-ref`. Naming it `ref` here would reintroduce the exact
+  ambiguity GitHub's own convention exists to avoid, in a name that — being
+  `veld.*` — can never be renamed once someone's config depends on it.
+- **`${veld.ref_name}`.** Mirrors `GITHUB_REF_NAME` and avoids the ambiguity
+  above, but sorts away from `${veld.branch}` in every allowlist, error
+  message and doc table (`branch`, `pane.id`, … vs `branch`, `branch_raw`,
+  `pane.id`, …). `branch_raw` lands immediately next to `branch` everywhere the
+  trap is already documented, so the escape hatch appears beside the trap with
+  no cross-reference needed — including in the `veld lint` error message
+  itself, which lists the allowed set. Adopted instead.
+- **Not adding it at all**, and documenting `git rev-parse --abbrev-ref HEAD`
+  harder instead. That one line is arguably *more* correct — it reads live
+  `HEAD`, while veld's `branch` comes from a synced database row and can
+  disagree if something else was checked out in that worktree since the last
+  sync — and every adapter wanting the ref is already running git or a
+  provider CLI with somewhere to put it. Rejected on convenience and
+  discoverability grounds: this repo's own adapters, and every doc file listed
+  above, already carry the `git rev-parse` idiom as a workaround for a trap
+  that a lint-time escape hatch removes at the source. The cost taken on is a
+  permanent name in a closed set plus one scope rule (§`check_command_variables`
+  in `crates/veld-core/src/ide.rs`) — judged worth it because the alternative
+  is a footgun that stays documented as a footgun forever rather than fixed.
 
 ## The extension backlog
 

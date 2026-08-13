@@ -915,8 +915,8 @@ Gotchas worth knowing before writing one:
   `menu`'s bad `items` are dropped with a lint problem instead, because those are
   visible at parse time.
 - **Variables are the pane set minus `pane.*`**: `${veld.root}`, `${veld.branch}`,
-  `${veld.worktree}`, `${veld.project}`, `${veld.username}`. Anything else is a
-  lint problem, not a runtime failure.
+  `${veld.branch_raw}` (`argv` only), `${veld.worktree}`, `${veld.project}`,
+  `${veld.username}`. Anything else is a lint problem, not a runtime failure.
 - **`open_in` defaults to `system`**, the opposite of `ide.quicklinks` — a badge's
   link is a provider page the user is signed in to, and a pane has its own cookie
   jar. **The rule when writing one:** behind a login the developer holds (code
@@ -1026,11 +1026,20 @@ someone's PR branch and the name is theirs), so unquoted in a `shell` command a
 branch named `` `curl …` `` executes at pane launch. `argv` interpolates per
 element after the array is fixed and cannot change the argument count.
 
+**Need the real branch name, not the slug? `${veld.branch_raw}`, `argv` only.**
+`veld lint` refuses it in `shell` — `git check-ref-format --branch` accepts
+`foo$(id)` and `foo'bar` as valid branch names, so no quoting closes a `shell`
+string built from it, while `argv` closes that hole because the element count
+is fixed before the value is substituted in. A branch starting with `-` is a
+separate case veld closes at the source: on one, `${veld.branch_raw}` simply
+isn't populated, so the command reports an unresolved variable instead of
+handing a flag to whatever it runs.
+
 **Variable scope is small** (a pane has no run, no node, no ports); anything else
 is a lint problem: `${veld.pane.id}`, `${veld.pane.label}`, `${veld.pane.token}`,
-`${veld.worktree}`, `${veld.root}`, `${veld.branch}`, `${veld.project}`,
-`${veld.username}`. `VELD_PANE_ID` and `VELD_PANE_TOKEN` are in the environment
-too, for a `shell` pane.
+`${veld.worktree}`, `${veld.root}`, `${veld.branch}`, `${veld.branch_raw}`
+(`argv` only), `${veld.project}`, `${veld.username}`. `VELD_PANE_ID` and
+`VELD_PANE_TOKEN` are in the environment too, for a `shell` pane.
 
 **A pane command runs inside your login+interactive shell** (`<shell> -l -i -c
 '<command>'`) — the same shell a plain terminal opens, i.e. the one the
