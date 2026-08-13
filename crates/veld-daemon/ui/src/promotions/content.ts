@@ -108,8 +108,8 @@ export const PROMOTIONS: Promotion[] = [
     id: "browser-find-in-page",
     since: "2026-08-13",
     eyebrow: "New",
-    headline: "Stop hunting a page by eye for one word",
-    body: "A browser pane now searches its own live page: type to search, see how many matches turned up, and step between them with Enter or the arrows.",
+    headline: "Search available for embedded browsers",
+    body: "Find text on the page you're viewing without leaving Veld — see the match count and step through hits with Enter or the arrows.",
     glyph: "panes",
   },
   {

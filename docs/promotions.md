@@ -76,6 +76,17 @@ Three habits that produce the wrong version:
 - **Listing the states, options, or fields.** Four enumerated glyph meanings is
   documentation. One sentence about walking away is news.
 
+**Outcome-framed is not the same as dramatic.** "Stop hunting a page by eye for
+one word" shipped as a real headline (find-in-page, 2026-08-13) and followed the
+*you*-first rule above, and it is still the wrong version: it spends the
+reader's attention on a mini-narrative — a small struggle, then relief — where a
+flat statement of the capability reads faster and costs less of the one-time
+budget this channel has. Prefer the plainest true sentence that still starts
+from the reader over one that reaches for a moment of frustration to resolve:
+"Search available for embedded browsers," not an imagined struggle it solves. If
+a headline needs a beat of scene-setting to land, cut the scene and keep the
+capability.
+
 ## One kind: a change, with the day it happened
 
 ```ts

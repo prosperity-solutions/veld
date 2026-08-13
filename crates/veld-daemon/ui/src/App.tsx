@@ -104,11 +104,12 @@ import {
   IconAlertTriangleFilled,
   IconArrowBackUp,
   IconArrowsExchange,
+  IconBell,
+  IconBellOff,
   IconChevronLeft,
   IconChevronRight,
   IconDots,
   IconDotsVertical,
-  IconFocus2,
   IconFolderPlus,
   IconHistory,
   IconMoon,
@@ -3996,7 +3997,7 @@ function AppInner(props: {
         aria-pressed={focus.enabled}
         onClick={() => void saveSettings({ "focus.enabled": !focus.enabled })}
       >
-        <IconFocus2 size={14} />
+        {focus.enabled ? <IconBellOff size={14} /> : <IconBell size={14} />}
       </ActionIcon>
     </Tooltip>
   );

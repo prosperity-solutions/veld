@@ -200,6 +200,14 @@ Three rules that make it worth the spend rather than theatre:
   before hand-rolling DOM+CSS for anything the library already provides; check
   [mantine.dev/llms.txt](https://mantine.dev/llms.txt) when unsure whether one
   exists).
+- **Never pick a Tabler icon glyph unilaterally.** Icon choice is a taste call,
+  not a mechanical one — propose 2-4 candidate icon names per state (checked
+  against imports already in the touched file, so a duplicate isn't reinvented),
+  ask the maintainer via `AskUserQuestion`, and print the literal URL
+  `https://tabler.io/icons` as plain text so they can browse and click it
+  themselves — never `WebFetch` it or auto-open it. This applies to a new icon
+  and to swapping an existing one; it does not apply to reusing an icon the
+  maintainer already picked elsewhere in the same feature.
 - Build, then `rustup update stable` (CI uses floating stable — drift blocks it),
   `cargo clippy --workspace --all-targets`, `cargo fmt --all`, and run the tests
   as you go. For a JS/TS change, run the Biome `lint` + `typecheck`/`test` in the
@@ -276,6 +284,17 @@ The check: if the sentence would still read as true to somebody who will never
 use the feature, it is describing the product instead of their day. Rewrite it
 starting from *you*. Never open with "Veld now…", a feature name, or a list of
 the states and options — that is documentation, and the docs already have it.
+
+**Outcome-framed is not the same as dramatic.** "Stop hunting a page by eye for
+one word" shipped as a real headline (find-in-page, 2026-08-13) and is the
+failure mode to avoid even though it followed the *you*-first rule above: it
+reaches for a mini-narrative (a struggle, then relief) where a plain statement
+of the capability would have read better and taken less of the reader's
+attention — the resource this whole feature spends exactly once. Prefer the
+flattest true sentence that still starts from the reader: "Search available for
+embedded browsers," not an imagined moment of frustration it solves. If a
+headline needs a beat of scene-setting to land, cut the scene and keep the
+capability.
 
 If Step 1 classified the change as **customization** (or it includes a
 customization-shaped request), add a row to the extension backlog in
