@@ -243,26 +243,41 @@ and several were paid for in this codebase already.
   *always* skipped on a PR, on every green PR this repo has ever merged (five of
   them — `Tag & Release`, `Publish Artifacts`, `Publish veld-gateway image`,
   `Build`, `Build Desktop`). A rule that fails on every healthy PR is a rule an
-  agent learns to ignore, which costs you the detection you added it for. Scope
-  the assertion to the CI workflow's own jobs:
+  agent learns to ignore, which costs you the detection you added it for.
+
+  **Read the run, not the rollup.** `gh pr checks` has two ways to lie about a
+  healthy PR. The first is the trap above: a *skipped* CI job on a draft run
+  sorts into the `skipping` bucket and reports as a passing check,
+  indistinguishable from a real pass by exit code. The second is one the rollup
+  can never recover from: a skipped **matrix** job never evaluates its matrix, so
+  GitHub reports its name as the literal, un-expanded template string
+  (`Release Build (${{ matrix.suffix }})`), while the ready run's expanded names
+  are different (`Release Build (macos-arm64)`, …). Those two names never merge —
+  the "the ready run's check for a job name replaces the draft run's" reasoning
+  holds for plain jobs, not matrix jobs — so a rollup `skipping` check on the CI
+  workflow comes back non-empty forever on every PR that was ever a draft, which
+  (given `/ship` always opens a draft) is every PR this repo produces. A rule
+  that fails on every healthy PR is the same failure mode as `release.yml`'s
+  push-only jobs, and an agent learns to ignore it the same way. The
+  authoritative answer is the run, selected by the ready-for-review event:
 
   ```sh
-  gh pr view --json isDraft,mergeable        # isDraft must be false
-  gh pr checks --json name,bucket,workflow \
-    --jq '[.[] | select(.workflow == "CI" and .bucket == "skipping")]'   # must be []
+  gh pr view --json isDraft,mergeable            # isDraft must be false
+  RID=$(gh run list --workflow CI --commit "$(git rev-parse HEAD)" \
+          --json databaseId,event --jq '[.[] | select(.event == "pull_request")][0].databaseId')
+  gh run view "$RID" --json jobs \
+    --jq '[.jobs[] | select(.conclusion != "success") | {name,conclusion}]'   # must be []
   ```
 
-  **This is a terminal test, not a progress test.** The ready run's check for a
-  job name replaces the draft run's, so names do not duplicate — but until the
-  ready run's job for a name has *started*, the draft's `skipping` entry is still
-  the one showing. Measured on #209: four CI names still read `skipping` while
-  `check` was in progress, because their jobs `needs:` it. So apply the assertion
-  only once no CI check is `pending`, or bypass the rollup and read the run:
-
-  ```sh
-  gh run list --workflow CI --commit "$(git rev-parse HEAD)" --json databaseId
-  gh run view <id> --json jobs      # authoritative per-job status/conclusion
-  ```
+  The run list is newest-first, so `[0]` is the ready run — but the `event ==
+  "pull_request"` selection is what makes that explicit rather than an accident
+  of ordering, since a draft push and the `ready_for_review` flip sit on the same
+  commit. Do **not** instead filter the rollup for un-expanded template names
+  (`select(.name | test("\\$\\{\\{") | not)`): that silences the symptom by
+  pattern-matching a formatting accident. Apply the run check only once no CI
+  job is `pending` — until a job has *started*, the earlier run's `skipping`
+  entry is still the one showing. Measured on #209: four CI names still read
+  `skipping` while `check` was in progress, because their jobs `needs:` it.
 
   The other consequence: **the local pre-pass is the only correctness signal a
   draft gets**, so never push-and-mark-ready on a red pre-pass hoping CI will

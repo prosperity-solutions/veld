@@ -273,18 +273,32 @@ if [ -n "$URLS_OUTPUT" ]; then
             # Extract hostname for --resolve (bypasses DNS for multi-level .localhost)
             CURL_HOST=$(echo "$url" | sed -E 's|https?://([^/:]+).*|\1|')
             CURL_OK=0
-            for _attempt in 1 2 3 4 5; do
-                if curl -sk --resolve "${CURL_HOST}:443:127.0.0.1" --resolve "${CURL_HOST}:80:127.0.0.1" \
-                        --max-time 5 "$url" >/dev/null 2>&1; then
+            # The route can lag the run reporting ready on a cold runner — most
+            # often for `frontend`, the one node with its own Caddy route config
+            # (`request.remove: ["Origin"]`) — while the identically-routed
+            # `backend` already answers. Widen the window past that and say how
+            # long a failure actually waited, so a genuinely missing route stays
+            # loud instead of being absorbed.
+            ATTEMPTS=10
+            DELAY=2
+            _start=$(date +%s)
+            _last="(no response)"
+            for _attempt in $(seq 1 "$ATTEMPTS"); do
+                _code=$(curl -sk -o /dev/null --resolve "${CURL_HOST}:443:127.0.0.1" --resolve "${CURL_HOST}:80:127.0.0.1" \
+                        --max-time 10 -w '%{http_code}' "$url" 2>/dev/null)
+                _rc=$?
+                if [ "$_rc" = "0" ]; then
                     CURL_OK=1
                     break
                 fi
-                sleep 1
+                _last="http=$_code curl_rc=$_rc"
+                sleep "$DELAY"
             done
             if [ "$CURL_OK" = "1" ]; then
                 pass "curl $url returned 200"
             else
-                fail "curl $url failed"
+                _elapsed=$(( $(date +%s) - _start ))
+                fail "curl $url failed after ${ATTEMPTS} attempts (~${_elapsed}s; last: $_last)"
             fi
         done <<< "$EXTRACTED_URLS"
     else

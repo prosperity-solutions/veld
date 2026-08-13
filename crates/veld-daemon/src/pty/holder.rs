@@ -1757,6 +1757,75 @@ mod tests {
         assert!(!named.contains("shell"), "{named:?}");
     }
 
+    /// Create a socket *file* at `path` that has no listener and never will.
+    ///
+    /// A killed holder's socket file is "stale" when nothing is left listening on
+    /// it, and this is how the stale case is made: a socket bound but never
+    /// `listen`ed. The *bound-but-not-listening* shape is what matters, not that a
+    /// listener happened to be dropped:
+    ///
+    /// - Bind a real listener and drop it, and the file is stale — *usually*.
+    ///   But in the shared test binary another test's `fork` can land in the
+    ///   window while the listener is still open, inherit its fd, and keep the
+    ///   path connectable for that child's whole lifetime — a child holding an
+    ///   inherited *listening* fd makes `connect` succeed, which is precisely the
+    ///   [`bind`] refusal this test is about. That flaked the full binary
+    ///   intermittently (and never in isolation), because it depends on a race
+    ///   with every other test's forks.
+    /// - A socket that was bound but never `listen`ed answers *no* connection,
+    ///   inherited fd or not, so the stale file is deterministic here.
+    ///
+    /// From [`bind`]'s probe — `connect` must fail for the file to count as
+    /// stale — the two shapes are indistinguishable, so this exercises the same
+    /// code path without the fork race.
+    fn stale_socket(path: &std::path::Path) {
+        use std::os::unix::ffi::OsStrExt;
+        let c_path = std::ffi::CString::new(path.as_os_str().as_bytes())
+            .expect("the test path has no interior NUL");
+        let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+        assert!(
+            fd >= 0,
+            "socket() failed: {}",
+            std::io::Error::last_os_error()
+        );
+        let mut addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+        addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
+        let bytes = c_path.as_bytes();
+        assert!(
+            bytes.len() < std::mem::size_of_val(&addr.sun_path),
+            "test socket path too long: {}",
+            path.display()
+        );
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                bytes.as_ptr(),
+                addr.sun_path.as_mut_ptr() as *mut u8,
+                bytes.len(),
+            );
+        }
+        #[cfg(target_os = "macos")]
+        {
+            addr.sun_len = (std::mem::offset_of!(libc::sockaddr_un, sun_path) + bytes.len() + 1)
+                as libc::c_uchar;
+        }
+        let len = (std::mem::offset_of!(libc::sockaddr_un, sun_path) + bytes.len() + 1)
+            as libc::socklen_t;
+        let rc = unsafe {
+            libc::bind(
+                fd,
+                &addr as *const libc::sockaddr_un as *const libc::sockaddr,
+                len,
+            )
+        };
+        if rc != 0 {
+            let e = std::io::Error::last_os_error();
+            unsafe { libc::close(fd) };
+            panic!("bind() failed on {}: {e}", path.display());
+        }
+        unsafe { libc::close(fd) };
+        assert!(path.exists(), "binding must leave a socket file behind");
+    }
+
     #[tokio::test]
     async fn binding_refuses_to_displace_a_live_holder() {
         let dir = tempfile::tempdir().unwrap();
@@ -1773,9 +1842,7 @@ mod tests {
     async fn binding_replaces_a_stale_socket_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("s.sock");
-        {
-            let _dead = bind(&path).unwrap();
-        }
+        stale_socket(&path);
         // The file outlives a killed holder; refusing to bind here would make a
         // session id permanently unusable.
         assert!(path.exists());
