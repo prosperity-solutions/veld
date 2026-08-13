@@ -1396,6 +1396,13 @@ struct ExtensionView {
     /// that are not evaluated.
     #[serde(skip_serializing_if = "Option::is_none")]
     refresh_seconds: Option<u64>,
+    /// A `status` extension's declared `display` (`"text"` or `"icon"`), so the
+    /// client can shape its pre-first-value placeholders (loading, disabled) the
+    /// same way the value it is about to replace will look, rather than showing
+    /// a full-width label that narrows to a glyph the moment the first run
+    /// answers. `None` for the kinds that have no `display`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    display: Option<&'static str>,
 }
 
 fn extension_view(ext: &veld_core::ide::Extension) -> ExtensionView {
@@ -1426,6 +1433,13 @@ fn extension_view(ext: &veld_core::ide::Extension) -> ExtensionView {
         },
         refresh_seconds: match &ext.body {
             ExtensionBody::Status(status) => Some(status.refresh_seconds),
+            _ => None,
+        },
+        display: match &ext.body {
+            ExtensionBody::Status(status) => Some(match status.display {
+                veld_core::ide::BadgeDisplay::Text => "text",
+                veld_core::ide::BadgeDisplay::Icon => "icon",
+            }),
             _ => None,
         },
     }

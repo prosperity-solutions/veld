@@ -266,6 +266,9 @@ pub const EXTENSION_WHEN_MISSING: &[&str] = &["disable", "hide", "hint"];
 /// Where a status extension's `href` opens.
 pub const EXTENSION_OPEN_IN: &[&str] = &["pane", "system"];
 
+/// How a status extension's badge renders: a label, or its glyph alone.
+pub const EXTENSION_DISPLAY: &[&str] = &["icon", "text"];
+
 /// Keys every extension may declare, whatever its type, in sorted order.
 pub const EXTENSION_COMMON_KEYS: &[&str] = &[
     "align",
@@ -281,7 +284,8 @@ pub const EXTENSION_COMMON_KEYS: &[&str] = &[
 ];
 
 /// Extra keys a `status` extension may declare, in sorted order.
-pub const STATUS_EXTENSION_KEYS: &[&str] = &["argv", "open_in", "refresh_seconds", "shell"];
+pub const STATUS_EXTENSION_KEYS: &[&str] =
+    &["argv", "display", "open_in", "refresh_seconds", "shell"];
 
 /// Extra keys an `action` extension may declare, in sorted order.
 pub const ACTION_EXTENSION_KEYS: &[&str] = &["argv", "shell"];
@@ -509,6 +513,12 @@ pub struct StatusExtension {
     /// Where the badge's `href` opens.
     #[serde(default)]
     pub open_in: OpenIn,
+    /// Whether the badge renders as a label (the default) or as its glyph
+    /// alone. The badge's own output may override this per value, the same as
+    /// `open_in`. Falls back to a label when the badge would otherwise have no
+    /// glyph to render — see [`BadgeDisplay`].
+    #[serde(default)]
+    pub display: BadgeDisplay,
 }
 
 /// A button: a command run on a click, with no output contract.
@@ -570,6 +580,22 @@ pub enum OpenIn {
     #[default]
     System,
     Pane,
+}
+
+/// How a status extension's badge renders: a label, or its glyph alone.
+///
+/// `Text` (the default) keeps today's rendering — the label, with a glyph
+/// beside it if one is set. `Icon` renders the glyph as the whole badge, with
+/// the label kept as the button's accessible name (a real `<button>` with no
+/// visible text needs one) and as the tooltip's fallback, rather than shown.
+/// Named `BadgeDisplay` rather than `Display` so it does not collide with
+/// `std::fmt::Display` at a call site that imports both.
+#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BadgeDisplay {
+    #[default]
+    Text,
+    Icon,
 }
 
 /// What to show for an extension whose tool is not installed.
@@ -1304,10 +1330,26 @@ fn parse_status_extension(
         },
     };
 
+    let display = match entry.get("display") {
+        None => BadgeDisplay::default(),
+        Some(v) => match v.as_str().map(str::trim) {
+            Some("text") => BadgeDisplay::Text,
+            Some("icon") => BadgeDisplay::Icon,
+            _ => {
+                out.problems.push(IdeProblem {
+                    location: format!("{at}.display"),
+                    message: format!("must be one of: {}", EXTENSION_DISPLAY.join(", ")),
+                });
+                return None;
+            }
+        },
+    };
+
     Some(StatusExtension {
         command,
         refresh_seconds,
         open_in,
+        display,
     })
 }
 
@@ -3434,6 +3476,11 @@ mod tests {
             OpenIn::System,
             "a badge's link is a provider page the user is already signed into"
         );
+        assert_eq!(
+            status.display,
+            BadgeDisplay::Text,
+            "today's rendering, unchanged for a config that says nothing about it"
+        );
     }
 
     #[test]
@@ -3450,6 +3497,7 @@ mod tests {
             "shell": "gh pr view --json state",
             "refresh_seconds": 120,
             "open_in": "pane",
+            "display": "icon",
             "when_missing": "disable",
             "hint": { "text": "install gh", "href": "https://cli.github.com" },
         }));
@@ -3466,6 +3514,7 @@ mod tests {
         };
         assert_eq!(status.refresh_seconds, 120);
         assert_eq!(status.open_in, OpenIn::Pane);
+        assert_eq!(status.display, BadgeDisplay::Icon);
         assert_eq!(
             ext.command(),
             Some(&crate::config::CommandSpec::Shell(
@@ -3473,6 +3522,16 @@ mod tests {
             )),
             "`shell` is accepted here exactly as it is everywhere else"
         );
+    }
+
+    #[test]
+    fn an_unknown_display_value_is_a_problem() {
+        let parsed = one_extension(json!({
+            "id": "pr", "slot": "topBar", "type": "status",
+            "argv": ["gh", "pr", "view"], "display": "chartreuse",
+        }));
+        assert!(parsed.extensions.is_empty());
+        assert!(problem_at(&parsed, ".display"), "{:?}", parsed.problems);
     }
 
     #[test]
@@ -3744,6 +3803,7 @@ mod tests {
             ("align", EXTENSION_ALIGNS),
             ("when_missing", EXTENSION_WHEN_MISSING),
             ("open_in", EXTENSION_OPEN_IN),
+            ("display", EXTENSION_DISPLAY),
         ] {
             let mut values: Vec<&str> = props[field]["enum"]
                 .as_array()

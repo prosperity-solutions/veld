@@ -35,7 +35,7 @@ use axum::extract::Path;
 use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use veld_core::ide::{Extension, ExtensionBody, IdeSection, OpenIn, PaneIcon};
+use veld_core::ide::{BadgeDisplay, Extension, ExtensionBody, IdeSection, OpenIn, PaneIcon};
 
 use crate::feedback_server::desktop::{ApiError, db_err, err, open_desktop_db};
 use crate::feedback_server::pty::{missing_pane_binaries, worktree_builtins};
@@ -201,6 +201,11 @@ pub(crate) struct StatusView {
     /// badge changes its glyph with its state (a merge mark once merged).
     #[serde(skip_serializing_if = "Option::is_none")]
     icon: Option<PaneIcon>,
+    /// `"text"` or `"icon"` — whether the badge renders its label or its glyph
+    /// alone. Resolved here rather than left to the client: only the daemon
+    /// knows both the declaration's `icon` and this run's, so only it can tell
+    /// whether `"icon"` actually has a glyph to render before promising one.
+    display: &'static str,
     tone: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     tooltip: Option<String>,
@@ -343,6 +348,10 @@ async fn evaluate(
             state: "unavailable",
             text: None,
             icon: None,
+            // A missing-tool message is the one thing this state has to say, so
+            // it always renders as text — `display` only applies to a value the
+            // command itself produced.
+            display: "text",
             tone: "neutral",
             tooltip: Some(format!("needs {}", missing.join(", "))),
             href: None,
@@ -368,6 +377,11 @@ async fn run_status(
         state,
         text: None,
         icon: None,
+        // A failure, timeout, or truncation always renders as text — the
+        // message in `tooltip` (or the label, for these states) is the point,
+        // and `display: "icon"` must never hide it. Only the "ok" contract
+        // value below opts into the declared `display`.
+        display: "text",
         tone,
         tooltip: None,
         href: None,
@@ -430,7 +444,9 @@ async fn run_status(
         // "Nothing to show" — the badge is simply absent. See `StatusView::state`.
         return base("empty", "neutral");
     }
-    parse_badge(stdout, ext, section, base("ok", "neutral"))
+    let mut ok_base = base("ok", "neutral");
+    ok_base.display = declared_display(status, ext);
+    parse_badge(stdout, ext, section, ok_base)
 }
 
 /// Read a badge out of a status command's stdout.
@@ -462,8 +478,10 @@ fn parse_badge(
         .filter(|t| !t.is_empty())
         .map(|t| clip(t, MAX_TEXT_CHARS));
     // An object with no `text` says nothing renderable. Falling back to the
-    // declared label keeps the badge visible and clickable, which is what an
-    // author emitting only `{ "href": … }` clearly meant.
+    // declared label keeps the badge clickable and named, which is what an
+    // author emitting only `{ "href": … }` clearly meant — named rather than
+    // shown, when `display` renders the glyph alone: this is also the
+    // accessible name and the tooltip's fallback in that case.
     let text = text.or_else(|| Some(clip(&ext.label, MAX_TEXT_CHARS)));
 
     let tone = match obj.get("tone").and_then(Value::as_str).map(str::trim) {
@@ -504,6 +522,23 @@ fn parse_badge(
         .and_then(Value::as_str)
         .and_then(veld_core::ide::parse_icon_name);
 
+    let display = match obj.get("display").and_then(Value::as_str).map(str::trim) {
+        Some("text") => "text",
+        Some("icon") => "icon",
+        // Absent, or not one of the two the parser accepts: the declaration's
+        // own default, already resolved onto `base.display`.
+        _ => base.display,
+    };
+    // `display: "icon"` needs an actual glyph to be the whole badge — this
+    // run's own `icon`, or failing that the declared one — or it falls back to
+    // text rather than rendering an empty box.
+    let icon_to_render = icon.clone().or_else(|| ext.icon.clone());
+    let display = if display == "icon" && icon_to_render.is_none() {
+        "text"
+    } else {
+        display
+    };
+
     let actions = obj
         .get("actions")
         .and_then(Value::as_array)
@@ -513,6 +548,7 @@ fn parse_badge(
     StatusView {
         text,
         icon,
+        display,
         tone,
         tooltip,
         href,
@@ -884,6 +920,25 @@ fn open_in_str(open_in: OpenIn) -> &'static str {
     }
 }
 
+fn display_str(display: BadgeDisplay) -> &'static str {
+    match display {
+        BadgeDisplay::Text => "text",
+        BadgeDisplay::Icon => "icon",
+    }
+}
+
+/// The declared `display`, falling back to `"text"` when it asks for `"icon"`
+/// but the declaration itself has no `icon` to render alone. A per-run value
+/// gets a second chance at this same fallback in [`parse_badge`], since its own
+/// `icon` can resolve what the declaration didn't.
+fn declared_display(status: &veld_core::ide::StatusExtension, ext: &Extension) -> &'static str {
+    if status.display == BadgeDisplay::Icon && ext.icon.is_none() {
+        "text"
+    } else {
+        display_str(status.display)
+    }
+}
+
 fn first_line(s: &str) -> &str {
     s.lines().next().unwrap_or("").trim()
 }
@@ -922,6 +977,8 @@ mod tests {
             "extensions": [
                 { "id": "pr", "slot": "topBar", "type": "status", "label": "PR",
                   "argv": ["true"] },
+                { "id": "pr-icon", "slot": "topBar", "type": "status", "label": "PR",
+                  "icon": "git-branch", "display": "icon", "argv": ["true"] },
                 { "id": "create-pr", "type": "action", "label": "Create a PR",
                   "argv": ["true"] },
                 { "id": "menu", "slot": "topBar", "type": "menu",
@@ -931,16 +988,21 @@ mod tests {
     }
 
     fn badge(stdout: &str) -> StatusView {
+        badge_for("pr", stdout)
+    }
+
+    fn badge_for(id: &str, stdout: &str) -> StatusView {
         let section = section();
-        let ext = section.extension("pr").expect("declared").clone();
+        let ext = section.extension(id).expect("declared").clone();
         let ExtensionBody::Status(status) = &ext.body else {
-            panic!("pr is a status extension");
+            panic!("{id} is a status extension");
         };
         let base = StatusView {
             id: ext.id.clone(),
             state: "ok",
             text: None,
             icon: None,
+            display: declared_display(status, &ext),
             tone: "neutral",
             tooltip: None,
             href: None,
@@ -1267,9 +1329,49 @@ mod tests {
     #[test]
     fn an_object_with_no_text_falls_back_to_the_declared_label() {
         // An author emitting only `{ "href": … }` clearly meant "keep my label,
-        // make it clickable".
+        // make it clickable" — the label survives as the accessible name even
+        // when `display` hides it from view.
         let view = badge(r#"{"href":"https://example.com"}"#);
         assert_eq!(view.text.as_deref(), Some("PR"));
+    }
+
+    #[test]
+    fn a_declared_icon_only_badge_renders_as_icon_by_default() {
+        let view = badge_for("pr-icon", "{}");
+        assert_eq!(view.display, "icon");
+        // The text survives regardless — it is the accessible name now, not the
+        // visible content.
+        assert_eq!(view.text.as_deref(), Some("PR"));
+    }
+
+    #[test]
+    fn an_icon_only_declaration_with_no_icon_anywhere_falls_back_to_text() {
+        // `pr` declares no `icon`, so asking for `display: "icon"` from the
+        // output alone has nothing to render alone — an empty box is worse than
+        // showing the label.
+        let view = badge(r#"{"display":"icon"}"#);
+        assert_eq!(view.display, "text");
+    }
+
+    #[test]
+    fn a_per_run_icon_can_satisfy_an_icon_only_request_the_declaration_could_not() {
+        let view = badge(r#"{"display":"icon","icon":"git-merge"}"#);
+        assert_eq!(view.display, "icon");
+    }
+
+    #[test]
+    fn a_per_run_display_overrides_the_declaration_like_open_in_does() {
+        let view = badge_for("pr-icon", r#"{"display":"text"}"#);
+        assert_eq!(
+            view.display, "text",
+            "the output may override the declaration"
+        );
+    }
+
+    #[test]
+    fn an_unknown_display_value_from_the_output_keeps_the_declared_one() {
+        let view = badge_for("pr-icon", r#"{"display":"chartreuse"}"#);
+        assert_eq!(view.display, "icon", "a typo in the output is not an error");
     }
 
     #[test]

@@ -22,7 +22,7 @@ import { ActionIcon, Button, Menu, Tooltip } from "@mantine/core";
 import { IconChevronDown, IconExternalLink, IconRefresh } from "@tabler/icons-react";
 import { useContextMenu } from "mantine-contextmenu";
 import React from "react";
-import { type ExtensionSpec, type ExtensionStatus, api } from "../api";
+import { type ExtensionSpec, type ExtensionStatus, type PaneIcon, api } from "../api";
 import { paneIcon } from "../panes/paneIcons";
 import { notifyError } from "../shared/notify";
 
@@ -399,6 +399,61 @@ function ExtensionControl(props: {
   return <ExtensionBadge {...props} />;
 }
 
+/** What an "ok" badge value renders as, decided without React so a test can
+ *  drive it directly. */
+export interface BadgeContent {
+  /** The glyph to show — this run's own `icon`, or the declaration's. */
+  glyph: PaneIcon | undefined;
+  /** The label: this run's `text`, or the declaration's `label`. Always
+   *  present, even when `iconOnly` keeps it out of view — it is the
+   *  accessible name and the tooltip's fallback then. */
+  name: string;
+  /** Whether the badge renders `glyph` alone rather than `name`. Only true
+   *  when there is actually a glyph to show — see `StatusView::display` on
+   *  the daemon side, which this mirrors as a second line of defence against
+   *  the two icon allowlists (Rust's, this build's) ever drifting apart. */
+  iconOnly: boolean;
+  /** The button's accessible name, set only when `iconOnly` hides `name`
+   *  from view — otherwise the visible content already serves as one. */
+  ariaLabel: string | undefined;
+  /** `value.tooltip`, with the age appended, falling back to `name` when
+   *  `iconOnly` would otherwise leave the badge with no visible explanation
+   *  of what the glyph means. Empty when there is nothing to show at all. */
+  tooltip: string;
+}
+
+export function badgeContent(
+  value: Pick<ExtensionStatus, "icon" | "text" | "display" | "tooltip" | "age_seconds">,
+  spec: Pick<ExtensionSpec, "icon" | "label">,
+): BadgeContent {
+  // The output's icon wins over the declaration's: that is what lets one badge
+  // change its glyph with its state (a merge mark once merged) while still
+  // having a sensible one before the first run.
+  const glyph = value.icon ?? spec.icon;
+  const name = value.text ?? spec.label;
+  const iconOnly = value.display === "icon" && Boolean(glyph);
+  const tooltip = [
+    // In icon mode `name` is not shown, so it is the tooltip's fallback rather
+    // than only its label — the one place left for the information to live.
+    value.tooltip ?? (iconOnly ? name : null),
+    value.age_seconds > 60 ? `${value.age_seconds}s ago` : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  return { glyph, name, iconOnly, ariaLabel: iconOnly ? name : undefined, tooltip };
+}
+
+/**
+ * Whether a badge's *declaration* alone already justifies icon-only styling,
+ * for the placeholders rendered before any value exists (loading, disabled).
+ * Mirrors `badgeContent`'s own fallback rule, one layer up: without this, those
+ * placeholders show the full label and only narrow to a glyph once the first
+ * run answers — a width change nobody asked to see.
+ */
+export function specIconOnly(spec: Pick<ExtensionSpec, "display" | "icon">): boolean {
+  return spec.display === "icon" && Boolean(spec.icon);
+}
+
 /**
  * A status badge.
  *
@@ -424,6 +479,7 @@ function ExtensionBadge(props: {
 
   if (disabled) {
     const hintHref = spec.hint?.href;
+    const iconOnly = specIconOnly(spec);
     return (
       <Tooltip
         label={hintHref ? `${reason} (click to open)` : reason}
@@ -435,12 +491,13 @@ function ExtensionBadge(props: {
         <Button
           variant="light"
           size="compact-sm"
-          className="ext-badge ext-badge-hint tone-neutral"
-          leftSection={spec.icon ? paneIcon(spec.icon, 12) : undefined}
+          className={`ext-badge ext-badge-hint tone-neutral${iconOnly ? " ext-badge-icon" : ""}`}
+          leftSection={!iconOnly && spec.icon ? paneIcon(spec.icon, 12) : undefined}
+          aria-label={iconOnly ? spec.label : undefined}
           style={hintHref ? undefined : { cursor: "default" }}
           onClick={hintHref ? () => props.onOpen(hintHref, "system") : undefined}
         >
-          {spec.label}
+          {iconOnly ? paneIcon(spec.icon, 12) : spec.label}
         </Button>
       </Tooltip>
     );
@@ -451,17 +508,19 @@ function ExtensionBadge(props: {
   // badges. So the declared label appears with a spinner until there is an answer.
   if (!value) {
     if (!props.busy) return null;
+    const iconOnly = specIconOnly(spec);
     return (
       <Tooltip label={`Checking ${spec.label}…`} withArrow openDelay={200}>
         <Button
           variant="light"
           size="compact-sm"
-          className="ext-badge ext-badge-loading tone-neutral"
+          className={`ext-badge ext-badge-loading tone-neutral${iconOnly ? " ext-badge-icon" : ""}`}
           loading
           loaderProps={{ size: 11 }}
+          aria-label={iconOnly ? spec.label : undefined}
           style={{ cursor: "default" }}
         >
-          {spec.label}
+          {iconOnly ? paneIcon(spec.icon, 12) : spec.label}
         </Button>
       </Tooltip>
     );
@@ -473,24 +532,23 @@ function ExtensionBadge(props: {
   const href = value.href;
   const actions = value.actions ?? [];
   const clickable = Boolean(href) || actions.length > 0;
-  const tooltip = [value.tooltip, value.age_seconds > 60 ? `${value.age_seconds}s ago` : null]
-    .filter(Boolean)
-    .join(" · ");
 
-  // The output's icon wins over the declaration's: that is what lets one badge
-  // change its glyph with its state (a merge mark once merged) while still having
-  // a sensible one before the first run.
-  const glyph = value.icon ?? spec.icon;
+  const { glyph, name, iconOnly, ariaLabel, tooltip } = badgeContent(value, spec);
+
   const badge = (
     <Button
       variant="light"
       size="compact-sm"
-      className={`ext-badge tone-${value.tone}`}
+      className={`ext-badge tone-${value.tone}${iconOnly ? " ext-badge-icon" : ""}`}
       // `loading` keeps the label and swaps the glyph for a centred spinner, so a
       // refresh does not change the badge's width and shuffle the bar.
       loading={props.busy}
       loaderProps={{ size: 11 }}
-      leftSection={glyph ? paneIcon(glyph, 12) : undefined}
+      leftSection={!iconOnly && glyph ? paneIcon(glyph, 12) : undefined}
+      // A real `<button>` whose only content is a glyph has no text an
+      // assistive technology can read, so the name that would otherwise be the
+      // label goes here instead.
+      aria-label={ariaLabel}
       style={clickable ? undefined : { cursor: "default" }}
       onClick={
         // One link and no actions is a plain link; one action and no link runs
@@ -502,12 +560,19 @@ function ExtensionBadge(props: {
             : () => props.onActivate(actions[0].id)
       }
     >
-      {value.text ?? spec.label}
+      {iconOnly ? paneIcon(glyph, 12) : name}
     </Button>
   );
 
   const wrapped = tooltip ? (
-    <Tooltip label={tooltip} withArrow openDelay={200} multiline w={300}>
+    <Tooltip
+      label={tooltip}
+      withArrow
+      openDelay={200}
+      multiline
+      w={300}
+      classNames={{ tooltip: "ext-badge-tooltip" }}
+    >
       {badge}
     </Tooltip>
   ) : (

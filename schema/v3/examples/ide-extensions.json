@@ -16,6 +16,7 @@
         "label": "PR",
         "description": "This branch's pull request",
         "icon": "git-branch",
+        "display": "icon",
         "argv": ["scripts/pr-badge.sh"],
         "refresh_seconds": 60,
         "requires_bin": ["gh"],

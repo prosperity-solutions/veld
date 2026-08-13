@@ -893,12 +893,14 @@ string. `type` discriminates the shape.
 | `argv` \| `shell` | `status`/`action` only, exactly one |
 | `refresh_seconds` | `status` only. Default 60, floored at 15 |
 | `open_in` | `status` only. `system` (default) \| `pane` — where `href` opens |
+| `display` | `status` only. `text` (default) \| `icon` — render the glyph alone as the whole badge, label kept as the accessible name |
 | `items` | `menu` only. Ids of declared `action` extensions, ≥1 |
 
 A `status` command's stdout is the badge:
-`{ "text", "tone": neutral|info|success|warning|danger, "icon", "tooltip", "href", "open_in", "actions": [{ "id", "label" }] }`.
-`icon` takes the same allowlist/emoji the declaration's does and **overrides it**,
-so a badge can change its glyph with its state.
+`{ "text", "tone": neutral|info|success|warning|danger, "icon", "tooltip", "href", "open_in", "display", "actions": [{ "id", "label" }] }`.
+`icon` and `display` take the same allowlist/enum the declaration does and
+**override it**, so a badge can change its glyph — or drop its text for the glyph
+alone — with its state.
 Three tolerances carry most of the ergonomics: **non-contract output becomes the
 text** (first line only — so `git rev-parse --short HEAD` is a working badge with
 no adapter), **exit 0 with no output hides the badge** ("not applicable here"), and
@@ -921,6 +923,10 @@ Gotchas worth knowing before writing one:
   host, CI, cloud console, error tracker) → `system`; served by the run itself
   (localhost, staging on the same session, a local report) → `pane`. In doubt, ask
   whether they are already signed in to it elsewhere.
+- **`display: "icon"` falls back to `text`** if there is no `icon` to render alone
+  — from this value or the declaration — rather than an empty box. `text` (or
+  `label`, absent that) is kept as the button's accessible name and the tooltip's
+  fallback either way, since a real `<button>` with no visible text still needs one.
 - **Never put `requires_bin` on something with a GUI.** `code`, `webstorm` and
   `idea` are launchers installed *separately* from the editor, so a PATH check
   hides the option on a machine that has the app. Leave it off and let the command

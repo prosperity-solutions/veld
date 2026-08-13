@@ -714,6 +714,39 @@ one lever for somebody who reviews untrusted branches — the machine-global
 `extensions.autoRefresh` switch, which stops the unattended half while leaving
 clicks working.
 
+### 2026-08-13 — An icon-only badge is a presentational field, `text` stays the name
+
+**Chosen:** `display: "text" | "icon"` on a `status` extension (default `"text"`),
+overridable per value the same as `open_in`. `icon` renders the glyph alone as the
+whole badge; `text` (or the declared `label`, absent that) is kept as the button's
+accessible name and the tooltip's fallback, never dropped. Falls back to `"text"`
+when there is no glyph to actually render alone, from either the value or the
+declaration, rather than an empty box.
+
+The motivating case is a worktree-staleness badge that wants to *be* a red
+`alert-triangle` rather than a pill of text — and specifically not a number: "0
+commits behind" reads as clean against a three-week-old `origin/main` with a
+history of small commits, so the honest signal is a colour and a shape, not a
+count. That case is core data (see the staleness note in the backlog below); only
+its *rendering* as a glyph-only badge is this decision.
+
+Rejected, with reasons:
+
+- **Omit `text` and let the label fall away on its own.** This is the bug the
+  issue started from, not a design: `crates/veld-daemon/src/extensions.rs`
+  already substitutes the declared label when `text` is absent, specifically so
+  an author emitting only `{ "href": … }` still gets a visible, clickable badge
+  (`an_object_with_no_text_falls_back_to_the_declared_label` pins it). That
+  fallback is deliberate and stays; "just omit `text`" would have to delete it to
+  work, trading a good invariant for this one's convenience.
+- **`"text": null`.** JSON `null` vs. absent is a distinction the lenient `ide`
+  parser deliberately makes nowhere else, and it still loses the accessible
+  name — a sighted-only fix for what is, underneath, an accessibility field.
+- **`"icon_only": true`.** A boolean can only ever mean "yes" or "no" — it cannot
+  grow a third rendering later without becoming two fields that can disagree,
+  which `display` as an enum does not have to solve for because it already isn't
+  one.
+
 ## The extension backlog
 
 Everything in this table is **customization-layer by the tests above** — none of

@@ -577,6 +577,11 @@ The four things that decide whether it works:
    off and let the command fall back to the bundle, as the `vscode` entry above
    does.
 
+A `status` badge can also add `"display": "icon"` to render its glyph **alone**,
+with the label kept as the accessible name (a badge is a real `<button>`) and the
+tooltip's fallback. Falls back to `text` if there is no glyph to show. Overridable
+per value the same way `open_in` is.
+
 Then verify — `veld lint` is the **only** check that a declaration took, because
 everything under `ide` is lenient by design (a malformed entry is a warning and a
 dropped entry, never a load error):
