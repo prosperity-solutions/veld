@@ -1525,9 +1525,10 @@ mod tests {
             Some("1"),
             "codex's wrapper alone must still enable the feature"
         );
-        // And with BOTH gone, the feature is truly off — the widened check must not
-        // report a wrapper that isn't there.
+        // And with ALL of them gone, the feature is truly off — the widened check must
+        // not report a wrapper that isn't there.
         std::fs::remove_file(shims.join("codex")).unwrap();
+        std::fs::remove_file(shims.join("pi")).unwrap();
         let no_wrapper = env(SessionOptions::all_on());
         assert!(!no_wrapper.contains_key("VELD_AGENT_HOOKS"));
     }
@@ -1861,6 +1862,87 @@ mod tests {
                 args.join(" ")
             );
             assert_eq!(run(&args).trim(), expected.trim(), "{args:?}");
+        }
+    }
+
+    /// The `pi` wrapper shares `claude`'s `SettingsFile` shape (a checked-for-existence
+    /// path, injected with `-e`) but its own flag and its own subcommands, which is
+    /// what a delta test has to prove separately: `own_injection_flag_patterns` names
+    /// `-e`/`--extension`, not `--settings`, and Pi's non-interactive subcommands
+    /// (`install`, `update`, `list`, `config`) are excluded by the same bare-first-word
+    /// rule as Claude's, with no Pi-specific escape hatch needed (unlike Codex's
+    /// `resume`/`fork`, which are bare first words that ARE interactive).
+    #[test]
+    fn the_pi_wrapper_shares_claudes_file_check_but_its_own_flag_and_subcommands() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let shims = tmp.path().join("shims");
+        let real_dir = tmp.path().join("bin");
+        std::fs::create_dir_all(&real_dir).unwrap();
+
+        let settings = tmp.path().join("ephemeral.ts");
+        std::fs::write(&settings, "export default function () {}\n").unwrap();
+        let fake_cli = tmp.path().join("veld");
+        std::fs::write(
+            &fake_cli,
+            format!(
+                "#!/bin/sh\n[ \"$1\" = agent-settings ] || exit 2\nprintf '%s\\n' {}\n",
+                quote(&settings)
+            ),
+        )
+        .unwrap();
+        set_mode(&fake_cli, 0o755).unwrap();
+        prepare_in(&shims, &fake_cli).unwrap();
+
+        let real = real_dir.join("pi");
+        std::fs::write(&real, "#!/bin/sh\necho \"REAL $*\"\n").unwrap();
+        set_mode(&real, 0o755).unwrap();
+
+        let path = format!("{}:{}", shims.display(), real_dir.display());
+        let run = |args: &[&str]| -> String {
+            let out = std::process::Command::new(shims.join("pi"))
+                .args(args)
+                .env_clear()
+                .env("PATH", &path)
+                .env("VELD_AGENT_HOOKS", "1")
+                .env("VELD_PTY_SESSION", "pane-1")
+                .output()
+                .expect("run the pi shim");
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            )
+        };
+
+        let injected = format!("REAL -e {}", settings.display());
+
+        // The bare interactive launch: `-e` and the file path, ahead of nothing else.
+        assert_eq!(run(&[]).trim(), injected.trim());
+        // Pi's own non-interactive subcommands are bare first words and untouched —
+        // no Pi-specific entry in `extra_interactive_first_words`, because none of
+        // these continue a past interactive session the way Codex's `resume`/`fork` do.
+        for subcommand in ["install", "update", "list", "config"] {
+            assert_eq!(
+                run(&[subcommand, "x"]).trim(),
+                format!("REAL {subcommand} x"),
+                "a subcommand must reach the real binary untouched"
+            );
+        }
+        // `-p`/`--print` is non-interactive, the same as Claude's.
+        assert_eq!(run(&["-p", "hello"]).trim(), "REAL -p hello");
+        // The user's own `-e`/`--extension` wins outright, in every spelling this
+        // wrapper recognises.
+        for args in [
+            vec!["-e", "/mine.ts"],
+            vec!["-emine.ts"],
+            vec!["--extension", "/mine.ts"],
+            vec!["--extension=/mine.ts"],
+        ] {
+            assert_eq!(
+                run(&args).trim(),
+                format!("REAL {}", args.join(" ")),
+                "{args:?}"
+            );
         }
     }
 

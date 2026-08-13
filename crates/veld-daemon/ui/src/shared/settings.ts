@@ -441,7 +441,9 @@ export function terminalShellIntegration(doc: SettingsDoc): boolean {
  * Display only. Nothing of the user's is edited either way: for Claude the hooks
  * ride an ephemeral `--settings` file, merged rather than replacing
  * `~/.claude/settings.json`; for Codex it's a one-invocation `-c notify=[...]`
- * override, never a write to `~/.codex/config.toml`.
+ * override, never a write to `~/.codex/config.toml`; for Pi it's an ephemeral
+ * extension module loaded once with `-e`, never a write to
+ * `~/.pi/agent/settings.json` or `~/.pi/agent/extensions/`.
  */
 export function terminalAgentIntegration(doc: SettingsDoc): boolean {
   return bool(

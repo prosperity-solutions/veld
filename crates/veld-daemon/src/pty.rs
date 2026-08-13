@@ -4541,11 +4541,12 @@ mod tests {
         );
         // A well-formed report for a session nobody has: 404, not a silent accept. A
         // hook cannot act on it, but a 202 here would make a broken wiring look healthy.
-        // Both known tools reach the same 404 — proof that `codex` is validated as a
-        // real tool now rather than rejected at the `tool` check above.
+        // All three known tools reach the same 404 — proof that `codex`/`pi` are
+        // validated as real tools now rather than rejected at the `tool` check above.
         for body in [
             r#"{"tool":"claude","state":"blocked"}"#,
             r#"{"tool":"codex","state":"idle"}"#,
+            r#"{"tool":"pi","state":"idle"}"#,
         ] {
             assert_eq!(
                 post("/api/pty/sessions/nosuchsession/agent-state", body).await,

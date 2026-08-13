@@ -51,6 +51,14 @@
 //! their config, including profile layering, just to build an argv that also invokes
 //! it — so it is a documented cost (README's "What it cannot do"), not a bug.
 //!
+//! It does not touch `~/.pi/agent/settings.json`, `.pi/settings.json`, or either of
+//! Pi's auto-discovered extension directories (`~/.pi/agent/extensions/`,
+//! `.pi/extensions/`) either. Pi's ephemeral configuration is a `-e <path>` flag
+//! pointing at a generated extension **module** — code, not a settings document — in
+//! this daemon's own shim directory. See [`pi_extension_doc`] for why an extension is
+//! the right-shaped hook for a tool with no `hooks`/`notify` config key at all, and
+//! [`pi_state`] for why it can report `Working`/`Idle` but never `Blocked`.
+//!
 //! # Adding another agent
 //!
 //! Everything downstream of this module is **already generic** — the daemon endpoint
@@ -69,7 +77,10 @@
 //! 3. A `<tool>_settings_doc`/`<tool>_notify_config` beside [`claude_settings_doc`]/
 //!    [`codex_notify_config`], depending on [`Injection`] — see below. `prepare_in` in
 //!    `veld-daemon/src/pty/shims.rs` already generates one wrapper per `AgentTool::ALL`,
-//!    so the script itself comes for free either way.
+//!    so the script itself comes for free either way. A new [`Injection::SettingsFile`]
+//!    tool also needs an arm in [`settings_path`]'s extension match (the compiler
+//!    refuses to build without one, since the match is exhaustive over
+//!    [`AgentTool`]) — easy to miss since it lives well below [`Injection`] itself.
 //! 4. Whatever [`HookPayload`] is missing for the new tool's schema — every field is
 //!    optional and unknown fields are ignored, so adding one cannot break an existing tool.
 //! 5. Docs: the two settings rows, README, `skills/veld/SKILL.md`, `llms-full.txt`.
@@ -143,12 +154,13 @@ use serde::{Deserialize, Serialize};
 pub enum AgentTool {
     Claude,
     Codex,
+    Pi,
 }
 
 impl AgentTool {
     /// Every tool a shim is generated for. Iterated by the generator and its tests
     /// rather than a hand-written list, for the reason `opener::Tool::ALL` exists.
-    pub const ALL: &'static [AgentTool] = &[Self::Claude, Self::Codex];
+    pub const ALL: &'static [AgentTool] = &[Self::Claude, Self::Codex, Self::Pi];
 
     /// The command name the shim stands in front of, and the name of the generated
     /// file.
@@ -157,6 +169,7 @@ impl AgentTool {
         match self {
             Self::Claude => "claude",
             Self::Codex => "codex",
+            Self::Pi => "pi",
         }
     }
 
@@ -166,6 +179,7 @@ impl AgentTool {
         match self {
             Self::Claude => "claude",
             Self::Codex => "codex",
+            Self::Pi => "pi",
         }
     }
 
@@ -187,6 +201,14 @@ impl AgentTool {
                     key_prefix: "notify=",
                 },
             ),
+            // `-e`/`--extension <path>` loads one extension module for this invocation
+            // only — documented as repeatable and additive, never touching
+            // `~/.pi/agent/settings.json` or the auto-discovered
+            // `~/.pi/agent/extensions/`/`.pi/extensions/` directories. That is the same
+            // "nothing of the user's is touched" property `--settings` gives Claude, by
+            // a different route: a file on disk rather than a merge into a settings
+            // hierarchy. See [`pi_extension_doc`].
+            Self::Pi => ("-e", Injection::SettingsFile),
         }
     }
 
@@ -216,6 +238,32 @@ impl AgentTool {
             // that session, silently — accepted in exchange for not hand-rolling a second
             // parser in shell.
             Self::Codex => "-c* | --config | --config=*",
+            // `-e`/`--extension <path>` is documented as repeatable, so a second `-e`
+            // from this wrapper would not silently displace the user's own — unlike
+            // Claude's `--settings` or Codex's `-c`. Excluded anyway, belt-and-braces:
+            // "repeatable" is measured at pi-coding-agent 0.84.1, and a version that
+            // ever changes that guarantee must not find this wrapper adding a second
+            // `-e` on top of the user's.
+            //
+            // `-p*`/`--print` too, for the same reason Claude's own pattern carries
+            // them: `-p`/`--print` is Pi's non-interactive print-and-exit mode
+            // (documented `pi -p "prompt"`, also reads piped stdin) — nobody is
+            // waiting on it, so there is nothing to badge and no reason to add `-e`
+            // to its argv.
+            //
+            // **Known, accepted gap**: `--mode json`/`--mode rpc` are equally
+            // non-interactive (they replace the TUI with a scripted event stream) and
+            // arguably deserve the same exclusion `-p`/`--print` gets, but are not
+            // listed here. A `case` pattern against one argv token at a time cannot
+            // tell `--mode json` (two tokens) from `--mode` followed by an unrelated
+            // positional, and pi's own docs show the space-separated form as the
+            // primary spelling — so only a glued `--mode=json`/`--mode=rpc` could ever
+            // be matched this way, covering a spelling nobody's docs recommend. Same
+            // shape as Codex's `-c` value-parsing limitation above: a real parser is
+            // the only way to close this, and it is not worth hand-rolling one in
+            // shell for an edge case (running `pi --mode rpc` inside a Veld terminal
+            // pane at all) this narrow.
+            Self::Pi => "-p* | --print | -e* | --extension | --extension=*",
         }
     }
 
@@ -244,6 +292,11 @@ impl AgentTool {
         match self {
             Self::Claude => "",
             Self::Codex => "resume | fork",
+            // Pi resumes a past session through flags (`-c`/`--continue`, `-r`/`--resume`,
+            // `--session <path|id>`, `--fork <path|id>`), never through a bare subcommand
+            // word — rule 1's plain heuristic already gets every one of those right, the
+            // same as Claude.
+            Self::Pi => "",
         }
     }
 }
@@ -376,6 +429,19 @@ pub struct HookPayload {
     /// of a guess.
     #[serde(default, rename = "type")]
     pub event_type: Option<String>,
+    /// Pi's discriminator. Unlike Claude's and Codex's fields, this is not somebody
+    /// else's schema — [`pi_extension_doc`] is the only thing that ever writes this
+    /// wire shape, so `event` is whichever `pi.on(...)` name veld's own generated
+    /// extension chose to forward: `"turn_start"`, `"turn_end"`, `"session_shutdown"`.
+    #[serde(default)]
+    pub event: Option<String>,
+    /// `session_shutdown`'s reason (`"quit" | "reload" | "new" | "resume" | "fork"`),
+    /// carried alongside `event` because only `"quit"` is the session actually
+    /// ending — the other four mean a new session is about to start in this same
+    /// pane, and reporting [`State::Done`] for those would badge a pane that is still
+    /// live.
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 /// The state a Claude Code hook payload reports.
@@ -549,6 +615,60 @@ pub fn codex_state(payload: &HookPayload) -> State {
     }
 }
 
+/// The state a Pi extension event reports.
+///
+/// # Why there is no `Blocked`
+///
+/// Pi's own docs are explicit that it "intentionally does not include built-in …
+/// permission popups, plan mode, to-dos" — there is no equivalent of Claude's
+/// `permission_prompt`/`agent_needs_input` or Codex's approval flow to observe. An
+/// extension *could* add a confirmation dialog (`ctx.ui.confirm`) around `tool_call`,
+/// but that would be a behaviour change layered on top of a vanilla session, not a
+/// signal [`pi_extension_doc`]'s generated extension can read — it has no visibility
+/// into some *other* extension's UI state. So this can only ever return `Working`,
+/// `Idle`, `Done`, or `Unknown`, the same shape [`codex_state`] settled on for the
+/// same reason: a narrower badge over inventing a signal that is not really there.
+///
+/// There is also no [`claude_state`]-style sub-agent carve-out to get wrong here:
+/// Pi's own docs say it has no sub-agent concept at all ("intentionally does not
+/// include built-in MCP, sub-agents, …"), so there is no second lifecycle a future
+/// event could conflate with the session's own turn.
+///
+/// # `turn_start`/`turn_end`, not `before_agent_start`/`agent_settled`
+///
+/// Pi fires both pairs. `turn_start`/`turn_end` are documented fire-and-forget and
+/// once per **turn**, the same shape as Claude's blocking `UserPromptSubmit`/`Stop` —
+/// except Pi's are not on a blocking path at all, so there is no ceiling to bound.
+/// `agent_start`/`agent_end`/`agent_settled` track a lower-level *agent run* inside a
+/// turn (retries, sub-runs) rather than the turn itself, which is one layer more than
+/// this pane's badge needs.
+///
+/// # `session_shutdown` only reports `Done` for `"quit"`
+///
+/// The event fires for `"quit"`, `"reload"`, `"new"`, `"resume"`, and `"fork"` — only
+/// the first is the session actually ending. `/new`/`/resume`/`/fork` all shut down
+/// the current session and immediately start a different one in the same pane, so
+/// mapping every reason to `Done` would badge a pane that is still live between one
+/// session ending and the next one's own `Ready` (the wrapper only fires that once,
+/// at process launch — a session switch inside one long-running `pi` process gets no
+/// second `Ready`). `"reload"` is `/reload`'s extension hot-reload, not a session
+/// boundary at all.
+///
+/// Measured at **pi-coding-agent 0.84.1** — the version to recheck this against if
+/// `turn_start`/`turn_end`/`session_shutdown` are ever renamed or regrouped.
+#[must_use]
+pub fn pi_state(payload: &HookPayload) -> State {
+    match payload.event.as_deref() {
+        Some("turn_start") => State::Working,
+        Some("turn_end") => State::Idle,
+        Some("session_shutdown") => match payload.reason.as_deref() {
+            Some("quit") => State::Done,
+            _ => State::Unknown,
+        },
+        _ => State::Unknown,
+    }
+}
+
 /// The ephemeral settings document handed to `claude --settings`.
 ///
 /// # Why the session id is baked into the command
@@ -667,6 +787,82 @@ pub fn codex_notify_config(cli: &Path, session_id: &str) -> String {
     format!("{key_prefix}[{elements}]")
 }
 
+/// The ephemeral extension module handed to `pi -e`.
+///
+/// # Why an extension file and not a settings-file hook
+///
+/// Pi has no equivalent of Claude's `hooks` key or Codex's `notify`/`hooks` config —
+/// its `settings.json` carries model, UI and tooling preferences, nothing that runs a
+/// command on a lifecycle event. What it has instead is an extension API
+/// (`pi.on(event, handler)`) reached by a JS/TS module, auto-discovered from
+/// `~/.pi/agent/extensions/`/`.pi/extensions/` or loaded ad hoc with `-e`/`--extension
+/// <path>` — documented for exactly this ("quick tests" without auto-discovery) and,
+/// per Pi's own docs, participating in `project_trust` only as a non-deciding
+/// bystander: a CLI `-e` extension never triggers the interactive trust prompt that
+/// gated Codex's richer `hooks` system out of [`codex_state`]. So this is a file, the
+/// same shape as [`Injection::SettingsFile`], carrying code instead of JSON.
+///
+/// # Why the reporting call is never awaited
+///
+/// `turn_start`/`turn_end` are fire-and-forget events already; `session_shutdown` is
+/// not — Pi awaits its handler before actually shutting down. The generated handler
+/// calls `child_process.execFile` and returns without awaiting the callback, so the
+/// handler's own promise resolves immediately regardless of how long (or whether) the
+/// spawned `veld agent-state` finishes — the same trade [`codex_notify_config`] takes
+/// for the same reason, just enforced in JS rather than by Codex's own `spawn()`
+/// never being awaited. [`HOOK_TIMEOUT_SECS`] still bounds the child process itself
+/// (`execFile`'s own `timeout`), so a hung `veld` binary cannot hold Pi's shutdown
+/// open either.
+///
+/// # Why the payload rides on `argv`, not `stdin`
+///
+/// Nothing here reads anybody else's schema — this module writes both the extension
+/// and [`pi_state`]'s reader — so the payload shape is a free choice, made to match
+/// Codex's rather than Claude's: a small JSON object as `agent-state`'s final
+/// argument, never on stdin. `veld agent-state`'s stdin path stays Claude-only.
+///
+/// # Escaping
+///
+/// `cli` and `session_id` are embedded as JS string literals via
+/// `serde_json::to_string`, the same trick [`codex_notify_config`] uses to get
+/// JSON-safe escaping essentially for free; a JSON string literal is also a valid JS
+/// string literal, so there is no second escaper to keep in sync with [`sh_quote`].
+#[must_use]
+pub fn pi_extension_doc(cli: &Path, session_id: &str) -> String {
+    let cli_js = serde_json::to_string(&cli.to_string_lossy().into_owned())
+        .expect("a String serializes to JSON infallibly");
+    let session_js =
+        serde_json::to_string(session_id).expect("a String serializes to JSON infallibly");
+    format!(
+        r#"// pi-veld-activity-reporter — generated by veld, rewritten on every launch.
+// Reports this session's turn/shutdown lifecycle to Veld's activity badge. Never edit by hand.
+import {{ execFile }} from "node:child_process";
+
+const CLI = {cli_js};
+const SESSION = {session_js};
+
+function report(event, reason) {{
+  const body = JSON.stringify(reason === undefined ? {{ event }} : {{ event, reason }});
+  execFile(
+    CLI,
+    ["agent-state", "--tool", "pi", "--session", SESSION, body],
+    {{ timeout: {timeout_ms} }},
+    () => {{}},
+  );
+}}
+
+export default function (pi) {{
+  pi.on("turn_start", async () => {{ report("turn_start"); }});
+  pi.on("turn_end", async () => {{ report("turn_end"); }});
+  pi.on("session_shutdown", async (event) => {{ report("session_shutdown", event.reason); }});
+}}
+"#,
+        cli_js = cli_js,
+        session_js = session_js,
+        timeout_ms = HOOK_TIMEOUT_SECS * 1000,
+    )
+}
+
 /// What each generated hook is allowed to take, in seconds.
 ///
 /// Two, not zero: the request itself is to `127.0.0.1` and answers in single-digit
@@ -687,11 +883,30 @@ pub const HOOK_REQUEST_TIMEOUT_MS: u64 = 1_000;
 ///
 /// Named after the session rather than the launch, so relaunching an agent in the
 /// same pane reuses one file instead of accumulating one per start.
+///
+/// The extension is per tool, not one hardcoded `.json`, because [`AgentTool::Pi`]'s
+/// [`Injection::SettingsFile`] file is JS/TS source Pi's loader (`jiti`) resolves by
+/// extension — a `.json` file handed to `pi -e` would not load as an extension at
+/// all. Never called for [`AgentTool::Codex`], whose [`Injection`] is
+/// [`Injection::ConfigOverride`] and has no file — panics rather than returning a
+/// plausible-looking `.json` path nothing would ever read, the same "loud failure
+/// beats a silent wrong answer" choice [`codex_notify_config`]'s own `unreachable!`
+/// makes for the same invariant.
+///
+/// Pi's file stem is `pi-veld-activity-reporter`, not just `tool.as_str()` — unlike
+/// Claude's settings file and Codex's literal `-c` value, Pi's is a **module** that
+/// can surface in Pi's own extension listing or an error message, so its name should
+/// say what it is on sight rather than reading as an unlabelled `pi-<session>.ts`.
 #[must_use]
 pub fn settings_path(shim_dir: &Path, tool: AgentTool, session_id: &str) -> PathBuf {
+    let (stem, ext) = match tool {
+        AgentTool::Claude => (tool.as_str(), "json"),
+        AgentTool::Pi => ("pi-veld-activity-reporter", "ts"),
+        AgentTool::Codex => unreachable!("Codex is ConfigOverride and has no settings file"),
+    };
     shim_dir
         .join("agent")
-        .join(format!("{}-{}.json", tool.as_str(), sanitize(session_id)))
+        .join(format!("{stem}-{}.{ext}", sanitize(session_id)))
 }
 
 /// How long an unused settings file is kept before the next write sweeps it.
@@ -736,7 +951,7 @@ mod tests {
             hook_event_name: event.to_owned(),
             notification_type: notification.map(str::to_owned),
             tool_name: tool.map(str::to_owned),
-            event_type: None,
+            ..Default::default()
         }
     }
 
@@ -987,6 +1202,82 @@ mod tests {
         );
     }
 
+    /// A turn starting and ending, and only `"quit"` ending the session.
+    #[test]
+    fn pi_reports_turns_and_only_a_real_quit_as_done() {
+        let event = |name: &str, reason: Option<&str>| HookPayload {
+            event: Some(name.to_owned()),
+            reason: reason.map(str::to_owned),
+            ..Default::default()
+        };
+        assert_eq!(pi_state(&event("turn_start", None)), State::Working);
+        assert_eq!(pi_state(&event("turn_end", None)), State::Idle);
+        assert_eq!(
+            pi_state(&event("session_shutdown", Some("quit"))),
+            State::Done
+        );
+        // `/new`, `/resume`, `/fork` and a dev `/reload` all fire the same event —
+        // none of them means this pane's agent is gone.
+        for reason in ["reload", "new", "resume", "fork"] {
+            assert_eq!(
+                pi_state(&event("session_shutdown", Some(reason))),
+                State::Unknown,
+                "{reason}"
+            );
+        }
+        assert_eq!(pi_state(&event("session_shutdown", None)), State::Unknown);
+    }
+
+    /// Nothing Pi has not been told to send is a guess.
+    #[test]
+    fn an_unrecognised_pi_event_is_unknown_not_a_guess() {
+        let event = HookPayload {
+            event: Some("invented_later".to_owned()),
+            ..Default::default()
+        };
+        assert_eq!(pi_state(&event), State::Unknown);
+        assert_eq!(pi_state(&HookPayload::default()), State::Unknown);
+    }
+
+    /// The generated extension names the CLI and session literally, subscribes to
+    /// exactly the three events `pi_state` understands, and never awaits the process
+    /// it spawns to report them.
+    #[test]
+    fn the_extension_module_bakes_the_cli_and_session_and_never_awaits_the_report() {
+        let doc = pi_extension_doc(Path::new("/opt/veld/bin/veld"), "pane-7");
+        assert!(
+            doc.contains(r#"const CLI = "/opt/veld/bin/veld";"#),
+            "{doc}"
+        );
+        assert!(doc.contains(r#"const SESSION = "pane-7";"#), "{doc}");
+        for event in ["turn_start", "turn_end", "session_shutdown"] {
+            assert!(
+                doc.contains(&format!(r#"pi.on("{event}""#)),
+                "{event} missing: {doc}"
+            );
+        }
+        assert!(
+            doc.contains("agent-state"),
+            "the generated command must call agent-state: {doc}"
+        );
+        assert!(
+            doc.contains("--tool") && doc.contains("\"pi\""),
+            "the payload must name the tool: {doc}"
+        );
+        // Fire-and-forget: a callback, not an `await`, on the spawn itself.
+        assert!(
+            !doc.contains("await execFile"),
+            "awaiting the spawned process would make session_shutdown wait on veld: {doc}"
+        );
+        assert!(doc.contains("timeout"), "{doc}");
+    }
+
+    #[test]
+    fn a_quote_in_a_pi_session_id_cannot_break_out_of_its_js_string_literal() {
+        let doc = pi_extension_doc(Path::new("/a b/veld"), r#"it"s"#);
+        assert!(doc.contains(r#"const SESSION = "it\"s";"#), "{doc}");
+    }
+
     #[test]
     fn each_tool_carries_its_own_injection_shape() {
         assert_eq!(
@@ -1002,6 +1293,7 @@ mod tests {
                 }
             )
         );
+        assert_eq!(AgentTool::Pi.injection(), ("-e", Injection::SettingsFile));
     }
 
     #[test]
@@ -1036,6 +1328,14 @@ mod tests {
             PathBuf::from("/tmp/shims/agent/claude-______etc_passwd.json")
         );
         assert!(escaped.starts_with("/tmp/shims/agent"));
+        // Pi's file is `.ts`, not `.json` — Pi's loader resolves an extension module
+        // by extension, and a `.json` file handed to `pi -e` would not load as one.
+        // Its stem also names what it is, not just the tool — this file can surface
+        // in Pi's own extension listing or an error message.
+        assert_eq!(
+            settings_path(dir, AgentTool::Pi, "abc-1"),
+            PathBuf::from("/tmp/shims/agent/pi-veld-activity-reporter-abc-1.ts")
+        );
     }
 
     #[test]
@@ -1044,6 +1344,7 @@ mod tests {
             assert_eq!(AgentTool::parse(tool.as_str()), Some(tool));
         }
         assert_eq!(AgentTool::parse("codex"), Some(AgentTool::Codex));
+        assert_eq!(AgentTool::parse("pi"), Some(AgentTool::Pi));
         assert_eq!(AgentTool::parse("cursor"), None);
         for state in [
             State::Working,
