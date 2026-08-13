@@ -24,6 +24,14 @@
 //! ([`Marker`]); nothing here touches `pmset` unless that marker says veld owns
 //! the value.
 //!
+//! Ownership is not frozen at the first take. If the marker says somebody else
+//! owned the value and a later renewal finds it *off*, they let it go and veld
+//! takes ownership — rewriting the marker — because the alternative is veld
+//! re-asserting a value it has recorded a rule against ever reverting, which
+//! ends with veld as the sole author of a permanent pin nobody owns. A live
+//! `false` can never be veld's own hold (veld only ever writes `true`), which is
+//! what makes that safe.
+//!
 //! **The marker, not the in-memory lease, is the ownership oracle.** That
 //! distinction is the whole correctness argument and it is easy to get backwards:
 //! deciding "am I taking this for the first time?" from the lease means a helper
@@ -48,6 +56,12 @@
 //! nothing visibly happened; a daemon that is gone lets it lapse and the watchdog
 //! hands the setting back through the single revert path. One revert path, not
 //! two, and no boot-time `pmset` failure that nothing retries.
+//!
+//! That grace is **bounded across restarts, not granted per restart** — the stamp
+//! lives in the marker. The helper runs under launchd `KeepAlive` with a ~10s
+//! relaunch, so a crash loop would otherwise mint a fresh window several times a
+//! minute and hold the setting forever with no daemon anywhere, which is strictly
+//! worse than the revert-on-startup adoption replaced.
 //!
 //! **Every mutating path takes one lock for its whole duration.** `main.rs` spawns
 //! a task per accepted connection, so two commands genuinely race — and the
@@ -113,7 +127,7 @@ const REVERT_RETRY: Duration = Duration::from_secs(15);
 /// daemon renews every 30s — and short enough that a machine whose daemon is gone
 /// is not pinned awake for long after a helper crash. Deliberately the same order
 /// as the lease the daemon asks for, since it is standing in for one.
-const ADOPTION_GRACE: Duration = Duration::from_secs(90);
+const ADOPTION_GRACE: Duration = Duration::from_secs(veld_core::helper::SLEEP_ADOPTION_GRACE_SECS);
 
 /// Clamp a requested lease to [`MAX_LEASE_SECS`].
 ///
@@ -175,6 +189,34 @@ struct Marker {
     /// else already had the machine pinned awake and veld must hand the value
     /// back untouched rather than "restoring" it to `false`.
     prior_disabled: bool,
+    /// Unix seconds at which a helper first *adopted* this marker without a
+    /// daemon renewing it — see [`SleepManager::reconcile_on_startup`].
+    ///
+    /// **The adoption grace is bounded across restarts, not per restart.** The
+    /// helper runs under launchd `KeepAlive` with the default ~10s relaunch, so a
+    /// crash-looping root helper restarts several times inside one grace window;
+    /// minting a fresh grace on each start would mean the lease never lapses and
+    /// the watchdog never reverts — a machine pinned indefinitely with no daemon,
+    /// which is strictly worse than the revert-on-startup it replaced. Stamped on
+    /// the first adoption, inherited by every later one, and cleared the moment a
+    /// daemon renews.
+    ///
+    /// `serde(default)` so a marker written before this field existed still
+    /// parses; `None` simply means "not adopted yet".
+    #[serde(default)]
+    adopted_at: Option<u64>,
+}
+
+/// Wall-clock seconds since the epoch, for [`Marker::adopted_at`].
+///
+/// Saturating rather than panicking on a clock before 1970: a nonsense clock must
+/// not take out the helper, and `0` makes an adoption look ancient, which expires
+/// it — the safe direction.
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// The two `pmset` operations, behind a trait so the lease state machine can be
@@ -249,23 +291,43 @@ pub struct SleepManager<S: SleepSetter = Pmset> {
     setter: S,
 }
 
+/// Where the ownership marker lives: a **root-only** directory.
+///
+/// Not beside the helper's Caddy state, and not anywhere under `lib_dir()`. That
+/// tree is user-owned (`~/.local/lib/veld` is `drwxr-xr-x <user>`), so a local
+/// process could rename the directory and substitute a forged marker —
+/// `{"prior_disabled":true}` makes root refuse to ever revert, which is a
+/// permanent pin that survives a reboot, and deleting it has the same effect by
+/// the other route. The non-adversarial version is just as real: `rm -rf
+/// ~/.local/lib/veld` during a botched reinstall, or re-running `setup
+/// privileged` with a different Caddy location, orphans the marker.
+///
+/// This file is the sole authority for whether root writes a durable
+/// system setting, so it lives where only root can write: `/var/db` is
+/// `root:wheel` on macOS and `/var/lib` likewise on Linux. `veld uninstall`
+/// sweeps it.
+pub fn marker_dir() -> PathBuf {
+    if cfg!(target_os = "macos") {
+        PathBuf::from("/var/db/veld")
+    } else {
+        PathBuf::from("/var/lib/veld")
+    }
+}
+
 impl SleepManager<Pmset> {
-    /// `marker_path` is supplied by the caller rather than resolved here.
-    ///
-    /// It must **not** come from `veld_core::paths::lib_dir()`. Under the root
-    /// LaunchDaemon `$HOME` is `/var/root`, so `lib_dir()` resolves away from the
-    /// tree the helper actually lives in — and it is existence-dependent, so a
-    /// `/usr/local/lib/veld` appearing later moves the path and orphans an armed
-    /// marker, leaving `disablesleep` set with nothing that will ever revert it.
-    /// The plist already passes `--caddy-bin` explicitly to escape exactly this
-    /// resolution; the marker rides the same override.
-    pub fn new(marker_path: PathBuf) -> Self {
-        Self::with_parts(marker_path, Pmset)
+    pub fn new() -> Self {
+        Self::with_parts(marker_dir().join("sleep-lease.json"), Pmset)
+    }
+}
+
+impl Default for SleepManager<Pmset> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 impl<S: SleepSetter> SleepManager<S> {
-    fn with_parts(marker_path: PathBuf, setter: S) -> Self {
+    pub(crate) fn with_parts(marker_path: PathBuf, setter: S) -> Self {
         Self {
             lease: Mutex::new(None),
             marker_path,
@@ -297,6 +359,7 @@ impl<S: SleepSetter> SleepManager<S> {
                        assuming veld owns the sleep setting");
                 Some(Marker {
                     prior_disabled: false,
+                    adopted_at: None,
                 })
             }
         }
@@ -312,6 +375,15 @@ impl<S: SleepSetter> SleepManager<S> {
     fn write_marker(&self, marker: Marker) -> Result<()> {
         if let Some(parent) = self.marker_path.parent() {
             let _ = std::fs::create_dir_all(parent);
+            // Owner-only, so the authority for a root write is not readable or
+            // replaceable by anything else on the machine. Best-effort: a
+            // pre-existing directory keeps its mode, and the root-only *parent*
+            // is what the guarantee actually rests on.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+            }
         }
         let tmp = self.marker_path.with_extension("json.tmp");
         let body = serde_json::to_vec(&marker).expect("marker serialisation cannot fail");
@@ -368,6 +440,7 @@ impl<S: SleepSetter> SleepManager<S> {
                 )?;
             self.write_marker(Marker {
                 prior_disabled: prior,
+                adopted_at: None,
             })?;
             // The marker is written first (see [`Marker`]) — so if the write that
             // follows fails, take it back. Otherwise a helper that cannot set the
@@ -382,6 +455,39 @@ impl<S: SleepSetter> SleepManager<S> {
             *lease = Some(Deadline::in_secs(secs));
             info!(lease_secs = secs, "sleep disabled (lease armed)");
             return Ok(());
+        }
+
+        let mut marker = self.read_marker().expect("checked just above");
+        if marker.prior_disabled {
+            // Somebody else owned this setting when veld arrived, so veld has
+            // recorded that it will never revert it. **Then veld must not write
+            // it either** — re-asserting `true` unconditionally would undo their
+            // switch-off, and since release leaves this marker's value alone the
+            // machine would end up durably pinned with nobody owning it and
+            // nothing to explain why.
+            //
+            // So ask who owns it now. A live `false` means they let it go, and
+            // veld may take ownership: from here on it is veld's to re-assert and
+            // veld's to give back. That cannot recreate the disown bug the marker
+            // exists to prevent, because a live `false` can never be veld's own
+            // hold — veld only ever writes `true`.
+            if self.setter.read().await? {
+                *lease = Some(Deadline::in_secs(secs));
+                return Ok(());
+            }
+            marker.prior_disabled = false;
+            self.write_marker(marker)?;
+            info!("the previous owner released the sleep setting; veld owns it now");
+        }
+
+        // A daemon is renewing again, so this is no longer an unattended
+        // adoption. Written only on the transition, not on every renewal.
+        if marker.adopted_at.is_some() {
+            self.write_marker(Marker {
+                adopted_at: None,
+                ..marker
+            })?;
+            info!("a daemon resumed renewing an adopted keep-awake");
         }
         self.setter.set(true).await?;
         *lease = Some(Deadline::in_secs(secs));
@@ -472,9 +578,35 @@ impl<S: SleepSetter> SleepManager<S> {
             info!("dropped a stale keep-awake claim; sleep was already disabled before veld");
             return;
         }
-        *lease = Some(Deadline::after(ADOPTION_GRACE));
+
+        // **One grace across every restart, not one per restart.** Stamped on the
+        // first adoption and inherited afterwards, so a helper crash-looping under
+        // launchd's ~10s relaunch cannot keep minting fresh windows and pin the
+        // machine indefinitely with no daemon anywhere — which would be strictly
+        // worse than the revert-on-startup this replaced.
+        let now = unix_now();
+        let adopted_at = match marker.adopted_at {
+            Some(stamp) => stamp,
+            None => {
+                if let Err(e) = self.write_marker(Marker {
+                    adopted_at: Some(now),
+                    ..marker
+                }) {
+                    // The stamp is what bounds this; without it the grace would
+                    // renew forever. Expire immediately rather than adopt blind.
+                    warn!(error = %format!("{e:#}"), "could not stamp the keep-awake adoption");
+                    *lease = Some(Deadline::after(Duration::ZERO));
+                    return;
+                }
+                now
+            }
+        };
+
+        let elapsed = Duration::from_secs(now.saturating_sub(adopted_at));
+        let remaining = ADOPTION_GRACE.saturating_sub(elapsed);
+        *lease = Some(Deadline::after(remaining));
         warn!(
-            grace_secs = ADOPTION_GRACE.as_secs(),
+            grace_secs = remaining.as_secs(),
             "adopted a keep-awake left by a previous run; \
              re-enabling sleep unless the daemon renews it"
         );
@@ -623,7 +755,8 @@ mod tests {
         assert_eq!(
             marker,
             Marker {
-                prior_disabled: false
+                prior_disabled: false,
+                adopted_at: None
             }
         );
     }
@@ -652,7 +785,8 @@ mod tests {
         assert_eq!(
             marker,
             Marker {
-                prior_disabled: false
+                prior_disabled: false,
+                adopted_at: None
             },
             "the renewal rewrote the marker from veld's own value"
         );
@@ -800,6 +934,112 @@ mod tests {
             "a failed first take left a claim behind"
         );
         assert!(!mgr.held().await);
+    }
+
+    /// Somebody else owns the setting, then lets it go while veld holds a lease.
+    ///
+    /// Veld must take ownership at that point rather than re-asserting a value it
+    /// has recorded a rule against reverting — otherwise it becomes the sole
+    /// author of a permanent pin nobody owns.
+    #[tokio::test]
+    async fn veld_takes_ownership_when_the_previous_owner_lets_go() {
+        let (mgr, fake, _dir) = manager();
+        *fake.value.lock().unwrap() = true;
+        mgr.hold(90).await.unwrap();
+
+        // The other owner switches it off.
+        *fake.value.lock().unwrap() = false;
+        fake.writes.lock().unwrap().clear();
+
+        mgr.hold(90).await.unwrap();
+        assert_eq!(
+            fake.writes(),
+            vec![true],
+            "veld did not re-take the setting"
+        );
+
+        // And now it is veld's to give back.
+        mgr.release().await.unwrap();
+        assert!(
+            !*fake.value.lock().unwrap(),
+            "veld pinned a setting nobody owns"
+        );
+        assert!(!mgr.marker_path.exists());
+    }
+
+    /// While the other owner still holds it, veld must not write at all.
+    #[tokio::test]
+    async fn veld_never_re_asserts_a_value_it_promised_not_to_revert() {
+        let (mgr, fake, _dir) = manager();
+        *fake.value.lock().unwrap() = true;
+        mgr.hold(90).await.unwrap();
+        fake.writes.lock().unwrap().clear();
+        mgr.hold(90).await.unwrap();
+        assert!(
+            fake.writes().is_empty(),
+            "veld wrote a value it will never revert"
+        );
+    }
+
+    /// The adoption grace is bounded across restarts, not minted afresh by each.
+    ///
+    /// A helper crash-looping under launchd's ~10s relaunch would otherwise never
+    /// let the lease lapse, pinning the machine with no daemon anywhere — strictly
+    /// worse than the revert-on-startup that adoption replaced.
+    #[tokio::test]
+    async fn repeated_restarts_share_one_adoption_grace() {
+        let (mgr, fake, dir) = manager();
+        mgr.hold(90).await.unwrap();
+        let path = dir.path().join("sleep-lease.json");
+
+        // First adoption stamps the marker.
+        let first = SleepManager::with_parts(path.clone(), fake.clone());
+        first.reconcile_on_startup().await;
+        let stamped: Marker =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(stamped.adopted_at.is_some(), "the adoption was not stamped");
+
+        // Backdate it past the grace: that is what a run of restarts looks like.
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&Marker {
+                prior_disabled: false,
+                adopted_at: Some(super::unix_now() - super::ADOPTION_GRACE.as_secs() - 1),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let later = SleepManager::with_parts(path.clone(), fake.clone());
+        later.reconcile_on_startup().await;
+        // Already lapsed, so the very next tick hands the setting back rather
+        // than granting another full window.
+        later.watchdog_tick().await;
+        assert!(
+            !*fake.value.lock().unwrap(),
+            "a restart minted a fresh grace"
+        );
+        assert!(!path.exists());
+    }
+
+    /// A daemon that resumes renewing clears the adoption stamp, so a *later*
+    /// crash gets a full grace again rather than inheriting an ancient one.
+    #[tokio::test]
+    async fn a_resumed_daemon_clears_the_adoption_stamp() {
+        let (mgr, fake, dir) = manager();
+        mgr.hold(90).await.unwrap();
+        let path = dir.path().join("sleep-lease.json");
+
+        let restarted = SleepManager::with_parts(path.clone(), fake.clone());
+        restarted.reconcile_on_startup().await;
+        restarted.hold(90).await.unwrap();
+
+        let marker: Marker =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            marker.adopted_at, None,
+            "the stamp outlived the daemon's return"
+        );
     }
 
     #[tokio::test]

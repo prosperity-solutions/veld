@@ -78,6 +78,25 @@ pub(crate) fn lock_db_env() -> std::sync::MutexGuard<'static, ()> {
 #[path = "caffeinate.rs"]
 mod caffeinate;
 
+/// Serialises every test in this binary that points the process-global
+/// `VELD_DB_PATH` at a temp database.
+///
+/// Crate-level rather than per-module because the tests that do this live in
+/// *different* modules (`extensions`, `settings`) and compile into one test
+/// binary, so a per-module lock serialises the wrong set: whichever test
+/// finished first removed the variable out from under one holding a different
+/// lock, and its `open_db()` then resolved a different database. That is a 404
+/// for a row that is really there — or, worse, a `PATCH /api/settings` landing
+/// in the developer's own dev DB, which is precisely what pointing the variable
+/// at a tempdir exists to prevent.
+///
+/// Async-aware because the holders are `#[tokio::test]`s that keep the guard
+/// across their awaits. Not reentrant: acquire exactly once per test, and bind
+/// the guard (`let _env = ...`) so it lives for the whole test rather than being
+/// dropped at the end of the statement.
+#[cfg(test)]
+pub(crate) static DB_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// Note the terminal sessions being left running.
 ///
 /// Re-exported for the daemon's shutdown path. It no longer *ends* anything: a

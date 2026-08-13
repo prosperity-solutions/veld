@@ -106,6 +106,16 @@ pub const HOLD_SLEEP_DISABLED: &str = "hold_sleep_disabled";
 /// anywhere. Whoever raises the daemon's ask must see this constant.
 pub const MAX_SLEEP_LEASE_SECS: u64 = 600;
 
+/// How long the helper holds an *adopted* keep-awake before its watchdog hands it
+/// back, in seconds — the window a daemon has to resume renewing after the helper
+/// restarted under it.
+///
+/// Shared for the same reason as the ceiling above, and this pairing is the more
+/// dangerous of the two: raise the daemon's renewal interval past this and every
+/// helper restart silently drops a live hold, with nothing failing anywhere.
+/// `veld-daemon` asserts the relation at compile time.
+pub const SLEEP_ADOPTION_GRACE_SECS: u64 = 90;
+
 /// Re-enable battery sleep now rather than waiting out the lease. Same
 /// version-skew rule as [`HOLD_SLEEP_DISABLED`].
 pub const RELEASE_SLEEP_DISABLED: &str = "release_sleep_disabled";

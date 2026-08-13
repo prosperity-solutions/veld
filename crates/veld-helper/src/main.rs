@@ -162,6 +162,7 @@ async fn main() -> Result<()> {
         config.http_port,
         config.caddy_bin,
         shutdown_tx,
+        is_system_socket(&config.socket_path),
     ));
 
     // Startup reconcile: if a Caddy is already running (orphaned across our own
@@ -181,7 +182,7 @@ async fn main() -> Result<()> {
     // cost an exec at every start and, worse, warn on every exit about a setting
     // that helper never touched — in exactly the log a support transcript reads.
     // Same predicate the binary-watcher below uses.
-    if is_system_socket(&config.socket_path) {
+    {
         // Reconcile first, and awaited rather than spawned: it must finish before
         // the accept loop can take a fresh lease, or a daemon renewing across our
         // restart could race the adoption. With no ownership marker on disk this
@@ -276,9 +277,7 @@ async fn main() -> Result<()> {
     // failure this mechanism is built to avoid — including on the exit path that
     // has no relaunch after it, which is what `veld uninstall` produces. A
     // setting veld did not take is left alone; that is `release`'s own rule.
-    if is_system_socket(&config.socket_path) {
-        state.release_sleep_on_exit().await;
-    }
+    state.release_sleep_on_exit().await;
 
     Ok(())
 }

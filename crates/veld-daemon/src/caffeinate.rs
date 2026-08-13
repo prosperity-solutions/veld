@@ -112,6 +112,13 @@ const HELPER_RENEW_EVERY: Duration = Duration::from_secs(30);
 /// numbers impossible to drift apart.
 const _: () = assert!(HELPER_LEASE_SECS <= veld_core::helper::MAX_SLEEP_LEASE_SECS);
 const _: () = assert!(HELPER_RENEW_EVERY.as_secs() * 2 < HELPER_LEASE_SECS);
+/// The coupling that actually bites, and the reason it is a compile error rather
+/// than prose: after the helper restarts it adopts the hold for
+/// `SLEEP_ADOPTION_GRACE_SECS` and then hands it back. Renew less often than that
+/// and every helper restart silently drops a live hold — nothing fails, nothing
+/// logs, the machine just starts sleeping again mid-session.
+const _: () =
+    assert!(HELPER_RENEW_EVERY.as_secs() * 2 < veld_core::helper::SLEEP_ADOPTION_GRACE_SECS);
 
 /// How long a "is there a privileged helper" answer is reused.
 ///
@@ -175,6 +182,16 @@ static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 /// Cached answer to "is a privileged helper reachable", with the time it was
 /// learned. See [`PRIVILEGED_PROBE_TTL`].
 static PRIVILEGED: LazyLock<Mutex<Option<(Instant, bool)>>> = LazyLock::new(|| Mutex::new(None));
+
+/// Sticky: this helper answered `unknown command`, so it predates the feature.
+///
+/// Separate from the cache above because that one is a *reachability* probe on a
+/// 60s TTL — it would expire this answer and flip back to "capable", swapping the
+/// actionable "run `veld setup privileged`" line for an unactionable fault report
+/// one minute into a session that may run all night. A helper only gains the
+/// command by being replaced, and that replaces this process's view with a
+/// restart.
+static NO_BATTERY_HALF: AtomicBool = AtomicBool::new(false);
 
 pub fn routes() -> Router {
     Router::new().route(
@@ -268,7 +285,7 @@ fn which_on_path(name: &str) -> Option<PathBuf> {
 /// helper runs as the user, `pmset` would refuse it, and the fallback would turn
 /// "this machine cannot do that" into an error that reads like a bug.
 async fn battery_capable() -> bool {
-    if !cfg!(target_os = "macos") {
+    if !cfg!(target_os = "macos") || NO_BATTERY_HALF.load(Ordering::Relaxed) {
         return false;
     }
     // **Single-flighted: the lock is held across the probe**, not just around the
@@ -298,6 +315,7 @@ async fn battery_capable() -> bool {
 /// naming `veld setup privileged`.
 async fn mark_not_battery_capable() {
     *PRIVILEGED.lock().await = Some((Instant::now(), false));
+    NO_BATTERY_HALF.store(true, Ordering::Relaxed);
 }
 
 /// Take the first lease, returning the helper to renew it on.

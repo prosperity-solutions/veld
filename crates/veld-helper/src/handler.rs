@@ -12,8 +12,15 @@ pub struct State {
     caddy: CaddyManager,
     https_port: u16,
     http_port: u16,
-    /// Root's half of the keep-awake switch. See [`crate::sleep`].
-    sleep: SleepManager,
+    /// Root's half of the keep-awake switch, or `None` on a helper that cannot
+    /// hold it. See [`crate::sleep`].
+    ///
+    /// An `Option` rather than two matching `is_system_socket` checks in `main`:
+    /// the watchdog that expires a lease and the exit path that hands it back are
+    /// privileged-only, so a helper that could *accept* a hold without them would
+    /// pin the machine with nothing left to revert it. Making the manager absent
+    /// is what stops the command being served at all.
+    sleep: Option<SleepManager>,
     shutdown_tx: tokio::sync::watch::Sender<bool>,
 }
 
@@ -23,18 +30,16 @@ impl State {
         http_port: u16,
         caddy_bin: Option<std::path::PathBuf>,
         shutdown_tx: tokio::sync::watch::Sender<bool>,
+        // Whether this helper runs as root on the system socket. Only such a
+        // helper may take the sleep setting — see the `sleep` field.
+        privileged: bool,
     ) -> Self {
-        // Beside the helper's other durable state, and derived from the same
-        // `--caddy-bin` override the plist already passes — never from
-        // `lib_dir()`, which resolves against `$HOME` and lands a root daemon's
-        // marker in `/var/root`, divorced from the tree it runs out of.
-        let marker_path = crate::caddy::caddy_data_dir(&caddy_bin).join("sleep-lease.json");
         Self {
             dns: DnsManager::new(),
             caddy: CaddyManager::new(https_port, http_port, caddy_bin),
             https_port,
             http_port,
-            sleep: SleepManager::new(marker_path),
+            sleep: privileged.then(SleepManager::new),
             shutdown_tx,
         }
     }
@@ -298,7 +303,10 @@ impl State {
             // support transcript can answer "why is this Mac not sleeping"
             // without anyone having to run `pmset -g` — including for a lease
             // taken straight on this socket, which the IDE never shows.
-            "sleep_disabled": self.sleep.held().await,
+            "sleep_disabled": match &self.sleep {
+                Some(sleep) => sleep.held().await,
+                None => false,
+            },
         }))
     }
 
@@ -309,11 +317,16 @@ impl State {
     /// some silently-chosen window. An old daemon never sends this command at
     /// all, so there is no compatibility case to default for.
     async fn handle_hold_sleep_disabled(&self, args: &Value) -> Response {
+        let Some(sleep) = &self.sleep else {
+            return Response::err(
+                "this helper is not privileged; it cannot hold the machine's sleep setting",
+            );
+        };
         let lease_secs = match args.get("lease_secs").and_then(Value::as_u64) {
             Some(s) if s > 0 => s,
             _ => return Response::err("missing or invalid 'lease_secs' in args"),
         };
-        match self.sleep.hold(lease_secs).await {
+        match sleep.hold(lease_secs).await {
             Ok(()) => Response::ok(),
             Err(e) => Response::err(format!("{e:#}")),
         }
@@ -321,7 +334,10 @@ impl State {
 
     /// Re-enable battery sleep now, rather than waiting out the lease.
     async fn handle_release_sleep_disabled(&self) -> Response {
-        match self.sleep.release().await {
+        let Some(sleep) = &self.sleep else {
+            return Response::ok();
+        };
+        match sleep.release().await {
             Ok(()) => Response::ok(),
             Err(e) => Response::err(format!("{e:#}")),
         }
@@ -332,13 +348,17 @@ impl State {
     /// recovery can take seconds, and the lease must not be held past its
     /// deadline because something unrelated was slow.
     pub async fn sleep_watchdog_tick(&self) {
-        self.sleep.watchdog_tick().await;
+        if let Some(sleep) = &self.sleep {
+            sleep.watchdog_tick().await;
+        }
     }
 
     /// Startup reconcile for the sleep lease — see
     /// [`crate::sleep::SleepManager::reconcile_on_startup`].
     pub async fn reconcile_sleep_on_startup(&self) {
-        self.sleep.reconcile_on_startup().await;
+        if let Some(sleep) = &self.sleep {
+            sleep.reconcile_on_startup().await;
+        }
     }
 
     /// Re-enable battery sleep on the way out.
@@ -350,7 +370,10 @@ impl State {
     /// answer: `veld uninstall` stops the service, and nothing would ever come
     /// back to clear the setting.
     pub async fn release_sleep_on_exit(&self) {
-        if let Err(e) = self.sleep.release().await {
+        let Some(sleep) = &self.sleep else {
+            return;
+        };
+        if let Err(e) = sleep.release().await {
             warn!(error = %format!("{e:#}"), "could not re-enable battery sleep while exiting");
         }
     }
@@ -419,7 +442,7 @@ mod tests {
         assert!(parse_proxy_arg(&args).is_empty());
     }
 
-    /// A `State` whose sleep marker lives in a tempdir.
+    /// A privileged `State` whose sleep marker lives in a tempdir.
     ///
     /// Load-bearing, not tidiness. With the production path these tests would
     /// read the **installed privileged helper's** real marker, and `release`
@@ -431,7 +454,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (tx, _rx) = tokio::sync::watch::channel(false);
         let caddy_bin = Some(dir.path().join("caddy"));
-        (State::new(443, 80, caddy_bin, tx), dir)
+        let mut state = State::new(443, 80, caddy_bin, tx, true);
+        // Privileged, so the sleep commands are actually dispatched — but pointed
+        // at a tempdir marker instead of the real root-only one. With no marker
+        // there, `release` returns before it reaches `pmset` and `hold` is
+        // rejected on its arguments first, so no test here can execute `pmset`.
+        state.sleep = Some(crate::sleep::SleepManager::with_parts(
+            dir.path().join("sleep-lease.json"),
+            crate::sleep::Pmset,
+        ));
+        (state, dir)
     }
 
     /// A lease request with no usable `lease_secs` is refused *before* anything
@@ -493,6 +525,6 @@ mod tests {
         // Idempotent: the daemon releases on every teardown without checking
         // whether it ever held one, and a stop must not surface an error for it.
         assert!(handled.response.ok, "{:?}", handled.response.error);
-        assert!(!state.sleep.held().await);
+        assert!(!state.sleep.as_ref().unwrap().held().await);
     }
 }
