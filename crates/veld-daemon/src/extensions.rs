@@ -1570,7 +1570,7 @@ mod tests {
             let only_path = repo_dir.path().join("only-worktree");
             std::fs::create_dir_all(&only_path).unwrap();
             std::fs::write(
-                only_path.join("veld.json"),
+                only_path.join("veld.json"), // root-config-gate-ok
                 r#"{"schemaVersion": "3", "name": "t", "nodes": {}}"#,
             )
             .unwrap();

@@ -3304,7 +3304,7 @@ mod tests {
         std::fs::create_dir_all(&main_path).unwrap();
         std::fs::create_dir_all(&old_path).unwrap();
         std::fs::write(
-            main_path.join("veld.json"),
+            main_path.join("veld.json"), // root-config-gate-ok
             r#"{"schemaVersion": "3", "name": "t", "nodes": {}, "ide": {"extensions": [
                 {"id": "pr", "slot": "topBar", "type": "action", "label": "PR", "argv": ["true"]}
             ]}}"#,
@@ -3371,7 +3371,7 @@ mod tests {
         let only_path = repo_dir.path().join("only-worktree");
         std::fs::create_dir_all(&only_path).unwrap();
         std::fs::write(
-            only_path.join("veld.json"),
+            only_path.join("veld.json"), // root-config-gate-ok
             r#"{"schemaVersion": "3", "name": "t", "nodes": {}, "ide": {"extensions": [
                 {"id": "own", "slot": "topBar", "type": "action", "label": "Own", "argv": ["true"]}
             ]}}"#,
