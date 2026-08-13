@@ -364,11 +364,15 @@ body[data-fullscreen="true"] .topbar.electron {
    no `overflow`, so without a width bound the badge either collapses its
    shrinkable siblings or pushes the row past the window. Excluded from an
    icon-only badge, which has no long text to clip and wants to be square rather
-   than however wide 22ch of nothing renders as. */
-.topbar .ext-badge:not(.ext-badge-icon) {
-  max-width: 22ch;
-}
+   than however wide 30ch of nothing renders as.
+ *
+ * The bound lives on the label span, not the button: putting it on the button
+   capped the whole box — icon, gap and text together — so the text was clipped
+   by the button's overflow before its own ellipsis ever ran, cutting a word in
+   half with no `…`. On the label the icon and gap render at full size and only
+   the text shrinks, so the ellipsis that already existed here actually shows. */
 .topbar .ext-badge:not(.ext-badge-icon) .mantine-Button-label {
+  max-width: 30ch;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
