@@ -153,6 +153,17 @@ interface DesktopBrowserApi {
     viewId: string,
     command: "back" | "forward" | "reload" | "stop" | "focus",
   ): Promise<void>;
+  /** Optional: arrived after the bridge did (see the note above the permission
+   *  helpers) — an older shell serving a newer bundle just has no find bar. */
+  find?(viewId: string, action: "start" | "next" | "previous" | "stop", text: string): Promise<void>;
+  onFindResult?(
+    fn: (payload: {
+      viewId: string;
+      requestId: number;
+      matches: number;
+      activeMatchOrdinal: number;
+    }) => void,
+  ): () => void;
   emulate(viewId: string, emulation: PaneEmulation | null): Promise<void>;
   /** Optional here, and in every permission method below: these arrived after
    *  the bridge did, and an older shell will not have them. See the note above
@@ -173,7 +184,7 @@ interface DesktopBrowserApi {
   onOpenRequest(
     fn: (payload: { viewId: string; url: string; profile: BrowserProfile }) => void,
   ): () => void;
-  onAccelerator(fn: (payload: { accelerator: string }) => void): () => void;
+  onAccelerator(fn: (payload: { viewId: string; accelerator: string }) => void): () => void;
   onPointer(
     fn: (payload: { viewId: string; type: string; x: number; y: number }) => void,
   ): () => void;
@@ -976,6 +987,64 @@ export function reloadBrowser(id: string): void {
 }
 
 /**
+ * Whether this shell's bridge actually has `find` — not just whether it's
+ * Electron. The two halves of Veld Desktop update independently (see the note
+ * above the permission helpers below), so a bundle newer than the app it's
+ * running in is a real pairing, not a hypothetical one. Without this, `find`'s
+ * being `?`-optional only stops the *call* from throwing; the button and the
+ * bar would still render, open, and sit there silently doing nothing — a
+ * find bar with no way to ever show a real count is worse than no find bar,
+ * the same reasoning that gates the permission shield icon on `site.origin`
+ * actually arriving rather than on the backend alone.
+ */
+export const findSupported: boolean = typeof desktop?.find === "function";
+
+/**
+ * Find-in-page for one pane's find bar. Electron only: an `<iframe>` cannot read
+ * cross-origin content to search it (`contentWindow` throws), so these are
+ * no-ops under the iframe backend and `BrowserPane` hides the find bar entirely
+ * there (`iframeBackend`).
+ *
+ * Operates on the pane's real `WebContents` regardless of whether the view is
+ * currently painted live or is hidden behind a frozen still while suspended —
+ * there is no "frozen" copy of the page to search, only a paint substitute; see
+ * `veld:browser:find` in `desktop/src/browserViews.js`.
+ *
+ * Errors are swallowed rather than surfaced through `reportFailure`: a failed
+ * find is not a reason to blank the pane with a load error.
+ */
+export function startFind(id: string, text: string): void {
+  if (!desktop) return;
+  void desktop.find?.(id, "start", text).catch(() => {});
+}
+
+export function findNext(id: string, text: string): void {
+  if (!desktop) return;
+  void desktop.find?.(id, "next", text).catch(() => {});
+}
+
+export function findPrevious(id: string, text: string): void {
+  if (!desktop) return;
+  void desktop.find?.(id, "previous", text).catch(() => {});
+}
+
+export function stopFind(id: string): void {
+  if (!desktop) return;
+  void desktop.find?.(id, "stop", "").catch(() => {});
+}
+
+export function onFindResult(
+  fn: (payload: {
+    viewId: string;
+    requestId: number;
+    matches: number;
+    activeMatchOrdinal: number;
+  }) => void,
+): () => void {
+  return desktop?.onFindResult ? desktop.onFindResult(fn) : () => {};
+}
+
+/**
  * Clear one session slot's cookies and storage, then reload any pane using it.
  *
  * Addressed by slot rather than by pane, so a session with no pane open can still
@@ -1500,8 +1569,10 @@ export function onBrowserOpenRequest(
   return desktop ? desktop.onOpenRequest(fn) : () => {};
 }
 
-export function onBrowserAccelerator(fn: (accelerator: string) => void): () => void {
-  return desktop ? desktop.onAccelerator((p) => fn(p.accelerator)) : () => {};
+export function onBrowserAccelerator(
+  fn: (payload: { viewId: string; accelerator: string }) => void,
+): () => void {
+  return desktop ? desktop.onAccelerator(fn) : () => {};
 }
 
 // ---------------------------------------------------------------------------

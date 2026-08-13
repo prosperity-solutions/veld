@@ -22,6 +22,8 @@ import {
   IconBookmark,
   IconBug,
   IconCheck,
+  IconChevronDown,
+  IconChevronUp,
   IconClockExclamation,
   IconCode,
   IconDeviceMobile,
@@ -36,6 +38,7 @@ import {
   IconRefresh,
   IconRestore,
   IconRotateClockwise,
+  IconSearch,
   IconShieldLock,
   IconSun,
   IconSunMoon,
@@ -105,9 +108,14 @@ import {
   browserDevTools,
   browserStatus,
   clearBrowserSession,
+  findNext,
+  findPrevious,
+  findSupported,
   mountBrowser,
   navigateBrowser,
+  onBrowserAccelerator,
   onBrowserPointer,
+  onFindResult,
   onPermissionRequest,
   onPermissionSettings,
   originOf,
@@ -121,6 +129,8 @@ import {
   setBrowserResizing,
   setBrowserZoom,
   setPermission,
+  startFind,
+  stopFind,
   subscribeBrowser,
   unmountBrowser,
   type PermissionPrompt,
@@ -305,6 +315,13 @@ export function BrowserPane(props: {
     const unsubscribe = subscribeBrowser(id, bump);
     return () => {
       unsubscribe();
+      // The find bar is this component's own state, and unmounting here is a
+      // detach, not a close — the view (and Chromium's highlights on it) lives
+      // on. Without this, switching away from a pane mid-search leaves
+      // highlights painted on a page with no bar and no React state left to
+      // clear them from; returning to the tab shows a plain closed pane over a
+      // still-highlighted page.
+      stopFind(id);
       // Detach only — the view lives on; `pruneBrowsers` in App.tsx is what
       // closes one for good.
       unmountBrowser(id);
@@ -524,6 +541,143 @@ export function BrowserPane(props: {
   const [confirmClear, setConfirmClear] = useState<BrowserProfile | "all" | null>(
     null,
   );
+
+  // ---- Find in page --------------------------------------------------------
+  //
+  // A bar in flow between the chrome and the slot, exactly like the permission
+  // prompt above and for the same reason: a native view paints over DOM
+  // whatever the z-index says, so an overlay is not an option here — shrinking
+  // the slot is, and its `ResizeObserver` republishes the view's box the same
+  // way it does for every other row this pane inserts above it.
+  //
+  // Electron only. An `<iframe>` cannot read cross-origin content to search it
+  // (`contentWindow` throws for the pane's whole reason to exist — a page that
+  // refuses to be framed elsewhere), so the button and the `Ctrl/⌘+F` bind are
+  // both gated on `canFind` and there is nothing here to disable-and-explain.
+  //
+  // `findSupported`, not just `!iframeBackend`: the app shell and this bundle
+  // update independently, so an app older than this feature has no `find` on
+  // its bridge at all. Gating on the backend alone would still render an open,
+  // typeable bar that silently does nothing — worse than no bar.
+  const canFind = !iframeBackend && findSupported;
+  const [findOpen, setFindOpen] = useState(false);
+  const [findQuery, setFindQuery] = useState("");
+  const [findResult, setFindResult] = useState<{
+    matches: number;
+    activeMatchOrdinal: number;
+  } | null>(null);
+  /**
+   * `null` is overloaded on `findResult` for two different things — "have not
+   * asked" and "asked, no answer yet" — and the count/prev/next below need to
+   * tell them apart from a third: "asked, and the page really has none." This
+   * flag is that third state. Without it, clearing `findResult` the instant a
+   * new query starts (so a stale count from the *previous* query does not
+   * linger) reads, until the reply lands, as an equally confident "No
+   * results" for the *current* one — flashing that on every keystroke of a
+   * page that has matches, which is worse than the stale count it replaced.
+   */
+  const [findPending, setFindPending] = useState(false);
+  const findInputRef = useRef<HTMLInputElement>(null);
+
+  const closeFind = () => {
+    stopFind(id);
+    setFindOpen(false);
+    setFindQuery("");
+    setFindResult(null);
+    setFindPending(false);
+  };
+
+  // `Ctrl/⌘+F` while this pane's native view has keyboard focus: the shell
+  // cannot forward it as a normal keystroke (a focused `WebContentsView`
+  // swallows every key), so it comes back as an accelerator naming which pane
+  // asked — filtered here rather than in `App.tsx`, since only the one pane the
+  // key was pressed in should open its bar.
+  useEffect(() => {
+    if (!canFind) return;
+    return onBrowserAccelerator((payload) => {
+      if (payload.accelerator !== "find" || payload.viewId !== id) return;
+      setFindOpen(true);
+      // A repeat `Ctrl/⌘+F` after clicking back into the page is the common
+      // case a real find bar handles by refocusing — but the bar is already
+      // open here, so `setFindOpen(true)` is a no-op React bails out of, and
+      // the mount-triggered focus effect below (keyed on `findOpen`) never
+      // reruns. Focus directly for that case; a no-op when the bar isn't
+      // mounted yet, which the effect below still covers on first open.
+      findInputRef.current?.focus();
+    });
+  }, [id, canFind]);
+
+  // The match count, from the page's own search — never derived here, since
+  // only Chromium knows what its highlighter actually found. Clears the
+  // pending flag: this reply is the answer the last `startFind` was waiting on
+  // (main-process forwards only Chromium's `finalUpdate` reply per request, so
+  // there is exactly one of these per query, not an intermediate scoping tick).
+  useEffect(() => {
+    return onFindResult((payload) => {
+      if (payload.viewId !== id) return;
+      setFindResult({ matches: payload.matches, activeMatchOrdinal: payload.activeMatchOrdinal });
+      setFindPending(false);
+    });
+  }, [id]);
+
+  // Live search-as-you-type, the same as a real browser's find bar. An empty
+  // query clears the highlights rather than searching for nothing, which would
+  // otherwise flash "No results" on every keystroke while the field is blank.
+  //
+  // For a non-empty query, `findResult` is cleared but `findPending` is set
+  // instead of also showing "No results": the previous query's count must not
+  // linger (a stale "3 of 5"), but flashing a confident zero on *every*
+  // keystroke of a page that has matches — while genuinely waiting on the
+  // reply — is a worse, more visible bug than the stale count it would replace.
+  useEffect(() => {
+    if (!findOpen) return;
+    if (findQuery === "") {
+      setFindResult(null);
+      setFindPending(false);
+      stopFind(id);
+      return;
+    }
+    setFindResult(null);
+    setFindPending(true);
+    startFind(id, findQuery);
+  }, [id, findOpen, findQuery]);
+
+  useEffect(() => {
+    if (findOpen) findInputRef.current?.focus();
+  }, [findOpen]);
+
+  // A stale match count surviving a navigation is a wrong answer, not a stale
+  // render — the query no longer describes the page underneath it, so closing
+  // the bar (rather than leaving "3 of 5" up for a page with none of them) is
+  // the only honest move. `findOpenRef` (not `findOpen` in the dependency
+  // array) is deliberate: opening the bar must not immediately close it.
+  //
+  // Keyed on `state.loading`'s rising edge, not on `state.url` directly — the
+  // permission prompt below draws the same lesson from the same trap
+  // (`promptOrigin`: "a fragment change cannot cross an origin"), just with a
+  // different fix for a different question. `state.url` is pushed on
+  // `did-navigate-in-page` too, which fires for a single-page app's own
+  // `history.pushState`/hash change with no real navigation underneath it, so
+  // closing the bar on every one of those would be firing on the wrong signal.
+  // Origin (that fix) is the wrong substitute here, though: a real same-origin
+  // navigation — an ordinary link to another page on the same site — must
+  // still close the bar, and origin-keying would miss exactly that. What
+  // actually distinguishes the two is whether a network load happened at all:
+  // `did-start-loading` — the one thing that flips `loading` to `true` — never
+  // fires for an in-page navigation, since there is nothing to load.
+  const findOpenRef = useRef(false);
+  findOpenRef.current = findOpen;
+  const wasLoadingRef = useRef(state.loading);
+  useEffect(() => {
+    const startedLoading = state.loading && !wasLoadingRef.current;
+    wasLoadingRef.current = state.loading;
+    if (!startedLoading || !findOpenRef.current) return;
+    stopFind(id);
+    setFindOpen(false);
+    setFindQuery("");
+    setFindResult(null);
+  }, [id, state.loading]);
+
   // Read by the unmount cleanup, which must not re-subscribe on every prompt.
   const promptRef = useRef<PermissionPrompt | null>(null);
   promptRef.current = prompt;
@@ -937,6 +1091,27 @@ export function BrowserPane(props: {
             {canStop ? <IconX size={14} /> : <IconRefresh size={14} />}
           </ActionIcon>
         </Tooltip>
+
+        {/* Find in page: Electron only, for the same reason the bar itself is —
+            an iframe cannot search cross-origin content it cannot read — and
+            also gated on `findSupported`, so an app shell older than this
+            feature (the two update independently) doesn't show a button that
+            opens a bar with no way to ever report a real count. Hidden rather
+            than disabled-with-tooltip, like the permission shield below: there
+            is nothing to explain past "this needs a newer desktop app". */}
+        {canFind && (
+          <Tooltip {...TIP} label="Find in page">
+            <ActionIcon
+              size="sm"
+              variant={findOpen ? "light" : "subtle"}
+              color={findOpen ? "blue" : "gray"}
+              aria-label="Find in page"
+              onClick={() => (findOpen ? closeFind() : setFindOpen(true))}
+            >
+              <IconSearch size={14} />
+            </ActionIcon>
+          </Tooltip>
+        )}
 
         {/* Site settings, where a browser puts them: at the head of the address
             bar, about the site the address bar is showing. Hidden in the browser
@@ -1933,6 +2108,77 @@ export function BrowserPane(props: {
           >
             Clear
           </Button>
+        </div>
+      )}
+
+      {/* Same row-in-flow trick as the two prompts above: it shrinks the slot
+          instead of painting over it, which is the only way a DOM element gets
+          to coexist with a native view that ignores z-index. */}
+      {findOpen && canFind && (
+        <div className="browser-find" role="search" aria-label="Find in page">
+          <IconSearch size={14} className="browser-find-icon" aria-hidden />
+          {/* A plain input, not Mantine's `TextInput`, to match the address bar two
+              rows up (`.browser-address`) — same pill height, monospace and focus
+              treatment. `TextInput`'s own wrapper and default sizing would need
+              overriding to match it anyway, and two different input styles this
+              close together would read as two toolbars, not one. */}
+          <input
+            ref={findInputRef}
+            className="browser-find-input"
+            value={findQuery}
+            spellCheck={false}
+            autoCapitalize="off"
+            autoCorrect="off"
+            placeholder="Find in page"
+            aria-label="Find in page"
+            onChange={(e) => setFindQuery(e.currentTarget.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                if (e.shiftKey) findPrevious(id, findQuery);
+                else findNext(id, findQuery);
+              } else if (e.key === "Escape") {
+                e.preventDefault();
+                closeFind();
+              }
+            }}
+          />
+          <span className="browser-find-count faint">
+            {findQuery === "" || findPending
+              ? ""
+              : findResult && findResult.matches > 0
+                ? `${findResult.activeMatchOrdinal} of ${findResult.matches}`
+                : "No results"}
+          </span>
+          <ActionIcon
+            size="sm"
+            variant="subtle"
+            color="gray"
+            aria-label="Previous match"
+            disabled={!findResult?.matches}
+            onClick={() => findPrevious(id, findQuery)}
+          >
+            <IconChevronUp size={14} />
+          </ActionIcon>
+          <ActionIcon
+            size="sm"
+            variant="subtle"
+            color="gray"
+            aria-label="Next match"
+            disabled={!findResult?.matches}
+            onClick={() => findNext(id, findQuery)}
+          >
+            <IconChevronDown size={14} />
+          </ActionIcon>
+          <ActionIcon
+            size="sm"
+            variant="subtle"
+            color="gray"
+            aria-label="Close find bar"
+            onClick={closeFind}
+          >
+            <IconX size={14} />
+          </ActionIcon>
         </div>
       )}
 

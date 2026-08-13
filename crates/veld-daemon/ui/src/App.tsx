@@ -2843,10 +2843,13 @@ function AppInner(props: {
 
   // A focused native view swallows every keystroke, so the shell forwards the
   // palette accelerator back to us (it also moves focus to the page, or the
-  // palette would open with the keyboard still pointed at the view).
+  // palette would open with the keyboard still pointed at the view). The
+  // per-pane "find" accelerator is not handled here — `BrowserPane` itself
+  // subscribes and filters on its own `viewId`, since only one pane's find bar
+  // should open.
   useEffect(
     () =>
-      onBrowserAccelerator((accelerator) => {
+      onBrowserAccelerator(({ accelerator }) => {
         if (accelerator === "palette") setDialog({ kind: "search" });
       }),
     [],
