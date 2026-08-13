@@ -184,8 +184,12 @@ async fn main() -> Result<()> {
     if is_system_socket(&config.socket_path) {
         // Reconcile first, and awaited rather than spawned: it must finish before
         // the accept loop can take a fresh lease, or a daemon renewing across our
-        // restart could have its brand-new hold cleared out from under it. With no
-        // ownership marker on disk this reads nothing and does nothing.
+        // restart could race the adoption. With no ownership marker on disk this
+        // reads nothing and does nothing. It *adopts* rather than reverts — a
+        // daemon that is still there renews inside the grace, which is what makes
+        // a helper crash (or the self-restart path below, which exits straight out
+        // of a spawned task and never runs the release at the tail) invisible to
+        // the user instead of a dropped hold.
         state.reconcile_sleep_on_startup().await;
 
         // Watchdog: hand the sleep setting back once its lease lapses. Its own

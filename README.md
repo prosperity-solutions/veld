@@ -72,7 +72,7 @@ This registers system services and binds ports 80/443, so your URLs are just
 sudo once; you won't be asked again.
 
 Alternatively, `veld setup unprivileged` does a no-sudo setup with HTTPS on port 18443.
-The two modes differ in three ways, all of them about what needs root. Unprivileged mode uses port 18443 in URLs; it only supports `.localhost` domains (RFC 6761), so custom apex domains (e.g. `{service}.mycompany.dev`) require `veld setup privileged` since they need `/etc/hosts` or dnsmasq management; and on **macOS** the keep-awake button covers a closed lid on mains power only — holding a MacBook awake with the lid shut *on battery* is `pmset` territory, which needs root (see [keep-awake](#the-worktree-inbox-what-happened-while-you-werent-looking)). Everything else is identical. Linux is unaffected by that last one: its sleep inhibitor covers battery without privileges.
+The two modes differ in three ways, all of them about what needs root. Unprivileged mode uses port 18443 in URLs; it only supports `.localhost` domains (RFC 6761), so custom apex domains (e.g. `{service}.mycompany.dev`) require `veld setup privileged` since they need `/etc/hosts` or dnsmasq management; and on **macOS** the keep-awake button covers a closed lid on mains power only — holding a MacBook awake with the lid shut *on battery* is `pmset` territory, which needs root (see the keep-awake paragraphs under *Management UI*). Everything else is identical. Linux is unaffected by that last one: its sleep inhibitor covers battery without privileges.
 
 To install a specific version: `VELD_VERSION=1.0.0 curl -fsSL https://veld.oss.life.li/get | bash`
 

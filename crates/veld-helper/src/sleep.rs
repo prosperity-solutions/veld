@@ -20,26 +20,48 @@
 //! a clamshell desk setup, or another tool. A helper that "cleaned up" on every
 //! start would silently switch that off, on every `veld update`, with nothing
 //! connecting the effect back to veld. So arming writes a **durable marker**
-//! recording that veld took the setting and what it was beforehand
+//! recording that veld took the setting and what it read beforehand
 //! ([`Marker`]); nothing here touches `pmset` unless that marker says veld owns
-//! the value. No marker, no write — including on the startup path, which is
-//! deliberately not a blanket "clear it".
+//! the value.
+//!
+//! **The marker, not the in-memory lease, is the ownership oracle.** That
+//! distinction is the whole correctness argument and it is easy to get backwards:
+//! deciding "am I taking this for the first time?" from the lease means a helper
+//! that restarted, or whose startup revert failed, sees no lease, reads the live
+//! value — `true`, *because it is veld's own hold* — and rewrites the marker to
+//! say somebody else owned it all along. From that moment every path takes the
+//! "leave it alone" branch and the machine is durably pinned awake by a record
+//! asserting veld must not touch it. Exactly the outcome this module exists to
+//! prevent, reached through the code meant to prevent it.
 //!
 //! **2. What veld set, veld gives back — on a lease.** [`SleepManager::hold`]
-//! arms a wall-clock deadline the daemon must keep renewing.
-//! [`SleepManager::watchdog_tick`] reverts once that deadline passes, so a daemon
-//! that is killed, wedged, updated or uninstalled loses the setting by itself.
-//! [`SleepManager::clear_on_startup`] hands back a marked setting left by a
-//! helper that died mid-lease, and the exit path reverts too, which is what
-//! covers `veld uninstall`. A revert that *fails* keeps the lease armed on a
-//! short deadline so the watchdog retries — clearing the lease first would strand
-//! the setting with nothing left to notice, which is the exact failure this
-//! module exists to prevent.
+//! arms a deadline the daemon must keep renewing.
+//! [`SleepManager::watchdog_tick`] reverts once it passes, so a daemon that is
+//! killed, wedged, updated or uninstalled loses the setting by itself. A revert
+//! that *fails* re-arms a short deadline so the watchdog retries; clearing the
+//! lease first would strand the setting with nothing left to notice.
 //!
-//! The lease deadline is **wall clock, not monotonic**, deliberately: `Instant`
-//! on macOS does not advance across a system sleep, and a machine that suspended
-//! anyway (because this was never armed, or came off) would otherwise resume with
-//! a lease that believes no time passed.
+//! [`SleepManager::reconcile_on_startup`] handles the helper that died *without*
+//! running its exit path (SIGKILL, panic, power loss). It does not revert on the
+//! spot — it **adopts** the marker onto a short grace lease and lets the ordinary
+//! watchdog decide. A daemon still holding the session renews inside the grace and
+//! nothing visibly happened; a daemon that is gone lets it lapse and the watchdog
+//! hands the setting back through the single revert path. One revert path, not
+//! two, and no boot-time `pmset` failure that nothing retries.
+//!
+//! **Every mutating path takes one lock for its whole duration.** `main.rs` spawns
+//! a task per accepted connection, so two commands genuinely race — and the
+//! damaging interleaving is cheap to reach: changing a session's duration issues a
+//! release and a hold back to back, and a `hold` already on the wire cannot be
+//! recalled by the daemon aborting its renewal task. Read-modify-write of
+//! (marker, `pmset`, lease) must be atomic or the marker can be rewritten from a
+//! value veld itself just set.
+//!
+//! Deadlines are held as **both** wall clock and monotonic, and expire on
+//! whichever comes first. `Instant` alone does not advance across a macOS suspend,
+//! so a suspended machine would resume believing no time had passed; `SystemTime`
+//! alone moves with an NTP correction or a hand-set clock, and a backwards step
+//! would push the only thing that reverts an unrenewed lease into the future.
 //!
 //! Note on `pmset -b`: **`disablesleep` is system-wide, not per power profile.**
 //! `pmset -g custom` lists it under neither "Battery Power" nor "AC Power";
@@ -51,8 +73,9 @@
 
 use std::future::Future;
 use std::path::PathBuf;
-use std::sync::Mutex;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
+
+use tokio::sync::Mutex;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -73,13 +96,24 @@ const PMSET: &str = "/usr/bin/pmset";
 ///
 /// An unlimited keep-awake is expressed as *renewing forever*, never as one long
 /// lease — a caller that could ask for a year would defeat the watchdog entirely.
-pub const MAX_LEASE_SECS: u64 = 600;
+///
+/// Defined in `veld-core` so the daemon that asks and the helper that grants read
+/// one number; the helper clamps silently, so a drift here is invisible.
+pub const MAX_LEASE_SECS: u64 = veld_core::helper::MAX_SLEEP_LEASE_SECS;
 
 /// How soon the watchdog retries after a revert that failed.
 ///
 /// Short, because until it succeeds the machine is held awake by a lease nobody
 /// is renewing — the state this module refuses to leave behind.
 const REVERT_RETRY: Duration = Duration::from_secs(15);
+
+/// How long an adopted marker is held before the watchdog hands it back.
+///
+/// Long enough that a daemon still holding the session renews inside it — the
+/// daemon renews every 30s — and short enough that a machine whose daemon is gone
+/// is not pinned awake for long after a helper crash. Deliberately the same order
+/// as the lease the daemon asks for, since it is standing in for one.
+const ADOPTION_GRACE: Duration = Duration::from_secs(90);
 
 /// Clamp a requested lease to [`MAX_LEASE_SECS`].
 ///
@@ -90,13 +124,41 @@ fn clamp_lease(secs: u64) -> u64 {
     secs.min(MAX_LEASE_SECS)
 }
 
+/// A lease deadline, kept on both clocks. See the module docs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Deadline {
+    wall: SystemTime,
+    mono: Instant,
+}
+
+impl Deadline {
+    fn in_secs(secs: u64) -> Self {
+        let d = Duration::from_secs(secs);
+        Self {
+            wall: SystemTime::now() + d,
+            mono: Instant::now() + d,
+        }
+    }
+
+    fn after(d: Duration) -> Self {
+        Self {
+            wall: SystemTime::now() + d,
+            mono: Instant::now() + d,
+        }
+    }
+}
+
 /// Whether a lease has lapsed and the setting must go back.
+///
+/// Expires on whichever clock says so **first**, which is the safe direction for
+/// both failure modes: a suspend freezes the monotonic clock, and a backwards
+/// wall-clock step pushes the wall deadline out.
 ///
 /// `None` is **not** expired: there is nothing to revert, and treating it as
 /// expired would have every watchdog tick on an idle machine try to hand back a
 /// setting that was never taken.
-fn is_expired(lease: Option<SystemTime>, now: SystemTime) -> bool {
-    lease.is_some_and(|deadline| now >= deadline)
+fn is_expired(lease: Option<Deadline>, wall_now: SystemTime, mono_now: Instant) -> bool {
+    lease.is_some_and(|d| wall_now >= d.wall || mono_now >= d.mono)
 }
 
 /// The durable record that **veld** armed `disablesleep`, and what it was before.
@@ -176,32 +238,29 @@ fn parse_sleep_disabled(text: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Where the ownership marker lives. Beside the helper's other durable state.
-fn default_marker_path() -> PathBuf {
-    veld_core::paths::lib_dir().join("sleep-lease.json")
-}
-
 /// Root's half of the keep-awake switch: `pmset disablesleep`, on a lease, and
 /// only ever over a value veld itself took.
 pub struct SleepManager<S: SleepSetter = Pmset> {
-    /// Wall-clock deadline of the current lease, or `None` when nothing is held.
-    ///
-    /// A plain `std::sync::Mutex` and never held across an `await` — every lock
-    /// below reads or writes the deadline and drops before touching `pmset`.
-    lease: Mutex<Option<SystemTime>>,
+    /// Guards the **whole** take/give-back critical section — marker read, the
+    /// `pmset` write, and the lease update — not merely the deadline field. A
+    /// task per connection means these genuinely race; see the module docs.
+    lease: Mutex<Option<Deadline>>,
     marker_path: PathBuf,
     setter: S,
 }
 
-impl Default for SleepManager<Pmset> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl SleepManager<Pmset> {
-    pub fn new() -> Self {
-        Self::with_parts(default_marker_path(), Pmset)
+    /// `marker_path` is supplied by the caller rather than resolved here.
+    ///
+    /// It must **not** come from `veld_core::paths::lib_dir()`. Under the root
+    /// LaunchDaemon `$HOME` is `/var/root`, so `lib_dir()` resolves away from the
+    /// tree the helper actually lives in — and it is existence-dependent, so a
+    /// `/usr/local/lib/veld` appearing later moves the path and orphans an armed
+    /// marker, leaving `disablesleep` set with nothing that will ever revert it.
+    /// The plist already passes `--caddy-bin` explicitly to escape exactly this
+    /// resolution; the marker rides the same override.
+    pub fn new(marker_path: PathBuf) -> Self {
+        Self::with_parts(marker_path, Pmset)
     }
 }
 
@@ -214,13 +273,15 @@ impl<S: SleepSetter> SleepManager<S> {
         }
     }
 
-    /// Whether a lease is currently armed (for `status`).
-    pub fn held(&self) -> bool {
-        self.lease.lock().map(|l| l.is_some()).unwrap_or(false)
-    }
-
-    fn set_lease(&self, deadline: Option<SystemTime>) {
-        *self.lease.lock().expect("sleep lease mutex poisoned") = deadline;
+    /// Whether veld is holding this machine's sleep setting, for `status`.
+    ///
+    /// Marker **or** live lease, not just the lease. The marker-without-lease
+    /// state is precisely the persistent one — a helper that crashed, or a revert
+    /// that failed — and it is the one somebody diagnoses hours later from a
+    /// support transcript with the IDE closed. Reporting only the in-memory lease
+    /// would hide the single case that survives long enough to be asked about.
+    pub async fn held(&self) -> bool {
+        self.lease.lock().await.is_some() || self.read_marker().is_some()
     }
 
     fn read_marker(&self) -> Option<Marker> {
@@ -241,12 +302,27 @@ impl<S: SleepSetter> SleepManager<S> {
         }
     }
 
+    /// Write the marker **atomically**: temp file, fsync, rename.
+    ///
+    /// The thing it guards is durable — `pmset disablesleep 1` survives the power
+    /// going out — so a marker lost in the writeback window leaves the setting on
+    /// with no record that veld owes it back, the module's stated worst case. A
+    /// *truncated* marker is survivable (`read_marker` treats an unparseable file
+    /// as veld's, the safe direction); total loss is not.
     fn write_marker(&self, marker: Marker) -> Result<()> {
         if let Some(parent) = self.marker_path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
+        let tmp = self.marker_path.with_extension("json.tmp");
         let body = serde_json::to_vec(&marker).expect("marker serialisation cannot fail");
-        std::fs::write(&self.marker_path, body)
+        {
+            use std::io::Write as _;
+            let mut f = std::fs::File::create(&tmp)
+                .with_context(|| format!("failed to create {}", tmp.display()))?;
+            f.write_all(&body)?;
+            f.sync_all()?;
+        }
+        std::fs::rename(&tmp, &self.marker_path)
             .with_context(|| format!("failed to write {}", self.marker_path.display()))
     }
 
@@ -273,8 +349,15 @@ impl<S: SleepSetter> SleepManager<S> {
             bail!("battery lid-closed sleep is a macOS-only concern");
         }
         let secs = clamp_lease(lease_secs);
-        let first = !self.held();
-        if first {
+        // Held across everything below: marker read, `pmset`, lease write.
+        let mut lease = self.lease.lock().await;
+
+        // **The marker decides, not the lease.** A restarted helper, or one whose
+        // startup revert failed, holds the marker with no lease — and reading the
+        // live value there returns veld's own `true`, which written back as
+        // `prior_disabled` would disown the setting permanently. See the module
+        // docs.
+        if self.read_marker().is_none() {
             // Refuse rather than guess. Without knowing the prior value there is
             // no safe answer at release time: assume `false` and veld may switch
             // off somebody else's setting, assume `true` and it strands its own.
@@ -286,12 +369,22 @@ impl<S: SleepSetter> SleepManager<S> {
             self.write_marker(Marker {
                 prior_disabled: prior,
             })?;
+            // The marker is written first (see [`Marker`]) — so if the write that
+            // follows fails, take it back. Otherwise a helper that cannot set the
+            // value at all (an unprivileged one: `pmset -g` reads fine as the
+            // user, `pmset disablesleep` does not) leaves a marker claiming veld
+            // holds a setting it never touched, which `status` and `veld doctor`
+            // would then report as a live hold.
+            if let Err(e) = self.setter.set(true).await {
+                self.delete_marker();
+                return Err(e);
+            }
+            *lease = Some(Deadline::in_secs(secs));
+            info!(lease_secs = secs, "sleep disabled (lease armed)");
+            return Ok(());
         }
         self.setter.set(true).await?;
-        self.set_lease(Some(SystemTime::now() + Duration::from_secs(secs)));
-        if first {
-            info!(lease_secs = secs, "sleep disabled (lease armed)");
-        }
+        *lease = Some(Deadline::in_secs(secs));
         Ok(())
     }
 
@@ -301,31 +394,37 @@ impl<S: SleepSetter> SleepManager<S> {
     /// cleared, so [`Self::watchdog_tick`] tries again. Clearing it would leave
     /// `disablesleep` set with nothing tracking it.
     pub async fn release(&self) -> Result<()> {
+        let mut lease = self.lease.lock().await;
+        self.release_locked(&mut lease).await
+    }
+
+    /// The body of [`Self::release`], for callers already holding the lock.
+    async fn release_locked(&self, lease: &mut Option<Deadline>) -> Result<()> {
         let Some(marker) = self.read_marker() else {
             // veld never took this setting, so veld does not give it back. This
             // is the branch that stops an exit or a restart from switching off a
             // keep-awake the machine's owner set for themselves.
-            self.set_lease(None);
+            *lease = None;
             return Ok(());
         };
         if !cfg!(target_os = "macos") {
-            self.set_lease(None);
+            *lease = None;
             return Ok(());
         }
         if marker.prior_disabled {
             // Somebody else already had it on when veld arrived. Drop the claim,
             // leave the value.
             self.delete_marker();
-            self.set_lease(None);
+            *lease = None;
             info!("dropped the keep-awake claim; sleep was already disabled before veld");
             return Ok(());
         }
         if let Err(e) = self.setter.set(false).await {
-            self.set_lease(Some(SystemTime::now() + REVERT_RETRY));
+            *lease = Some(Deadline::after(REVERT_RETRY));
             return Err(e.context("could not re-enable sleep; keeping the lease armed to retry"));
         }
         self.delete_marker();
-        self.set_lease(None);
+        *lease = None;
         info!("sleep re-enabled (lease released)");
         Ok(())
     }
@@ -334,33 +433,38 @@ impl<S: SleepSetter> SleepManager<S> {
     ///
     /// This is the path that runs when the daemon dies, hangs, or is replaced —
     /// nothing tells the helper that happened, so an elapsed deadline is the
-    /// signal.
+    /// signal. It is also the *only* place a revert is initiated on a timer, so
+    /// startup adoption and a failed revert both converge here.
     pub async fn watchdog_tick(&self) {
-        let expired = {
-            let lease = self.lease.lock().expect("sleep lease mutex poisoned");
-            is_expired(*lease, SystemTime::now())
-        };
-        if !expired {
+        let mut lease = self.lease.lock().await;
+        if !is_expired(*lease, SystemTime::now(), Instant::now()) {
             return;
         }
         warn!("keep-awake lease expired without renewal — re-enabling sleep");
-        if let Err(e) = self.release().await {
-            // `release` re-armed the lease, so this repeats next tick.
+        if let Err(e) = self.release_locked(&mut lease).await {
+            // `release_locked` re-armed the lease, so this repeats next tick.
             warn!(error = %format!("{e:#}"), "could not re-enable sleep after lease expiry");
         }
     }
 
-    /// Startup reconcile: hand back a setting a previous run left marked.
+    /// Startup reconcile: adopt a marker left by a helper that died without
+    /// running its exit path.
     ///
-    /// **Not** a blanket clear. With no marker this does nothing at all and reads
-    /// nothing — the machine's sleep setting is none of veld's business unless
-    /// veld took it. With a marker, the helper died mid-lease and there is no
-    /// live daemon claim to honour, so the value goes back before anything else
-    /// happens.
-    pub async fn clear_on_startup(&self) {
+    /// **Adopts rather than reverts.** Arming a short grace lease and letting the
+    /// ordinary watchdog decide is better than reverting here on all three counts
+    /// that matter: a daemon still holding the session renews inside the grace, so
+    /// a helper crash costs the user nothing visible; a daemon that is gone lets it
+    /// lapse and the setting goes back through the single revert path; and a
+    /// `pmset` that fails at boot is retried by the watchdog instead of being
+    /// logged once and abandoned with the machine pinned awake.
+    ///
+    /// With no marker this does nothing and reads nothing — the machine's sleep
+    /// setting is none of veld's business unless veld took it.
+    pub async fn reconcile_on_startup(&self) {
         if !cfg!(target_os = "macos") {
             return;
         }
+        let mut lease = self.lease.lock().await;
         let Some(marker) = self.read_marker() else {
             return;
         };
@@ -369,40 +473,46 @@ impl<S: SleepSetter> SleepManager<S> {
             info!("dropped a stale keep-awake claim; sleep was already disabled before veld");
             return;
         }
-        warn!("sleep was left disabled by a previous run — re-enabling it");
-        match self.setter.set(false).await {
-            Ok(()) => self.delete_marker(),
-            // Marker deliberately kept: it is the only record that veld owes this
-            // setting back, and the next start must try again.
-            Err(e) => {
-                warn!(error = %format!("{e:#}"), "could not clear a stale sleep disable")
-            }
-        }
+        *lease = Some(Deadline::after(ADOPTION_GRACE));
+        warn!(
+            grace_secs = ADOPTION_GRACE.as_secs(),
+            "adopted a keep-awake left by a previous run; \
+             re-enabling sleep unless the daemon renews it"
+        );
+    }
+}
+
+#[cfg(test)]
+impl<S: SleepSetter> SleepManager<S> {
+    /// Force the lease deadline, so a test can reach the expiry path without
+    /// sleeping for it.
+    async fn force_deadline(&self, deadline: Option<Deadline>) {
+        *self.lease.lock().await = deadline;
+    }
+
+    async fn lease_is_armed(&self) -> bool {
+        self.lease.lock().await.is_some()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
-    use std::time::{Duration, SystemTime};
+    use std::time::{Duration, Instant, SystemTime};
 
     use anyhow::{Result, bail};
 
     use super::{
-        MAX_LEASE_SECS, Marker, SleepManager, SleepSetter, clamp_lease, is_expired,
+        Deadline, MAX_LEASE_SECS, Marker, SleepManager, SleepSetter, clamp_lease, is_expired,
         parse_sleep_disabled,
     };
 
     /// Records what would have been written, and never touches the machine.
     #[derive(Clone, Default)]
     struct Fake {
-        /// The value `pmset` would report.
         value: Arc<Mutex<bool>>,
-        /// Every `set` in order.
         writes: Arc<Mutex<Vec<bool>>>,
-        /// When true, `set` fails — the failed-revert path.
         fail_set: Arc<Mutex<bool>>,
-        /// When true, `read` fails — the unknown-prior-value path.
         fail_read: Arc<Mutex<bool>>,
     }
 
@@ -436,26 +546,55 @@ mod tests {
         (mgr, fake, dir)
     }
 
+    fn past() -> Option<Deadline> {
+        Some(Deadline {
+            wall: SystemTime::now() - Duration::from_secs(1),
+            mono: Instant::now() - Duration::from_secs(1),
+        })
+    }
+
     #[test]
     fn an_over_long_lease_is_clamped_rather_than_honoured() {
         assert_eq!(clamp_lease(u64::MAX), MAX_LEASE_SECS);
         assert_eq!(clamp_lease(MAX_LEASE_SECS + 1), MAX_LEASE_SECS);
-        // Under the ceiling passes through untouched — a clamp that rounded every
-        // lease up would quietly extend the window a dead daemon keeps the
-        // machine awake for.
         assert_eq!(clamp_lease(90), 90);
     }
 
+    // No test that the daemon's ask fits under this ceiling: `caffeinate.rs`
+    // carries `const _: () = assert!(HELPER_LEASE_SECS <= MAX_SLEEP_LEASE_SECS)`,
+    // which fails the *build* rather than a test run. A runtime assertion over
+    // two constants is strictly weaker and clippy rightly calls it out.
+
+    /// Expiry takes whichever clock fires first, because each covers the other's
+    /// blind spot: monotonic stops across a macOS suspend, and wall clock can step
+    /// backwards under NTP.
     #[test]
-    fn a_lease_expires_at_its_deadline_and_no_lease_never_expires() {
-        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
-        assert!(is_expired(Some(now - Duration::from_secs(1)), now));
-        // Exactly at the deadline counts as expired: the alternative leaves a
-        // lease that only lapses on the *next* tick, silently adding the watchdog
-        // interval to every ceiling in this module.
-        assert!(is_expired(Some(now), now));
-        assert!(!is_expired(Some(now + Duration::from_secs(1)), now));
-        assert!(!is_expired(None, now));
+    fn a_lease_expires_on_whichever_clock_lapses_first() {
+        let wall = SystemTime::now();
+        let mono = Instant::now();
+        let ahead = Duration::from_secs(60);
+
+        let live = Deadline {
+            wall: wall + ahead,
+            mono: mono + ahead,
+        };
+        assert!(!is_expired(Some(live), wall, mono));
+
+        // Wall clock lapsed, monotonic frozen (the suspend case).
+        let wall_gone = Deadline {
+            wall: wall - Duration::from_secs(1),
+            mono: mono + ahead,
+        };
+        assert!(is_expired(Some(wall_gone), wall, mono));
+
+        // Monotonic lapsed, wall clock stepped backwards (the NTP case).
+        let mono_gone = Deadline {
+            wall: wall + Duration::from_secs(86_400),
+            mono: mono - Duration::from_secs(1),
+        };
+        assert!(is_expired(Some(mono_gone), wall, mono));
+
+        assert!(!is_expired(None, wall, mono));
     }
 
     #[test]
@@ -465,10 +604,7 @@ mod tests {
         assert!(!parse_sleep_disabled(
             &dump.replace("SleepDisabled        1", "SleepDisabled 0")
         ));
-        // Absent means not disabled — a `pmset` that stops printing the key must
-        // not be read as "the machine is pinned awake".
         assert!(!parse_sleep_disabled("standby 1\n"));
-        // A key that merely starts the same is a different setting.
         assert!(!parse_sleep_disabled(" SleepDisabledUntilCharge 1\n"));
     }
 
@@ -478,13 +614,9 @@ mod tests {
     async fn arming_records_what_it_took_over_from_and_renewing_re_asserts_it() {
         let (mgr, fake, _dir) = manager();
         mgr.hold(90).await.unwrap();
-        assert!(mgr.held());
+        assert!(mgr.held().await);
         assert_eq!(fake.writes(), vec![true]);
 
-        // A renewal re-asserts the value — that is what makes the hold
-        // self-healing against anything else resetting it — but must not rewrite
-        // the marker, or a renewal would record `prior_disabled: true` (the value
-        // veld itself just set) and veld would then never give the setting back.
         mgr.hold(90).await.unwrap();
         assert_eq!(fake.writes(), vec![true, true]);
         let raw = std::fs::read_to_string(&mgr.marker_path).unwrap();
@@ -497,27 +629,60 @@ mod tests {
         );
     }
 
+    /// **The marker, not the lease, decides whether this is a first take.**
+    ///
+    /// The regression this pins was introduced by a review fix and is the worst
+    /// state the module can reach. A helper that restarted holds the marker with
+    /// no lease; deriving "first" from the lease makes the next renewal read the
+    /// live value — `true`, because it is veld's own hold — and write it back as
+    /// `prior_disabled`. Every path then takes "somebody else owns it", and the
+    /// machine is durably pinned awake by a record telling veld to keep its hands
+    /// off.
+    #[tokio::test]
+    async fn a_renewal_after_the_lease_is_lost_does_not_disown_the_setting() {
+        let (mgr, fake, dir) = manager();
+        mgr.hold(90).await.unwrap();
+
+        // A restarted helper: same marker on disk, no in-memory lease.
+        let restarted = SleepManager::with_parts(dir.path().join("sleep-lease.json"), fake.clone());
+        assert!(!restarted.lease_is_armed().await);
+        restarted.hold(90).await.unwrap();
+
+        let raw = std::fs::read_to_string(&restarted.marker_path).unwrap();
+        let marker: Marker = serde_json::from_str(&raw).unwrap();
+        assert_eq!(
+            marker,
+            Marker {
+                prior_disabled: false
+            },
+            "the renewal rewrote the marker from veld's own value"
+        );
+
+        // And it can still be given back.
+        restarted.release().await.unwrap();
+        assert!(!*fake.value.lock().unwrap());
+        assert!(!restarted.marker_path.exists());
+    }
+
     #[tokio::test]
     async fn releasing_hands_the_setting_back_and_drops_the_marker() {
         let (mgr, fake, _dir) = manager();
         mgr.hold(90).await.unwrap();
         mgr.release().await.unwrap();
         assert_eq!(fake.writes(), vec![true, false]);
-        assert!(!mgr.held());
+        assert!(!mgr.held().await);
         assert!(!mgr.marker_path.exists());
     }
 
-    /// The finding that three review angles hit independently: veld must never
-    /// revert a setting it did not set.
+    /// The finding three review angles hit independently: veld must never revert
+    /// a setting it did not set.
     #[tokio::test]
     async fn a_setting_veld_never_took_is_never_written() {
         let (mgr, fake, _dir) = manager();
-        // Somebody else pinned the machine awake.
         *fake.value.lock().unwrap() = true;
 
-        // Every path that used to clear unconditionally.
         mgr.release().await.unwrap();
-        mgr.clear_on_startup().await;
+        mgr.reconcile_on_startup().await;
         mgr.watchdog_tick().await;
 
         assert!(
@@ -530,23 +695,17 @@ mod tests {
         );
     }
 
-    /// And the same when veld arrives while it is already on: veld may hold its
-    /// own lease over it, but must hand it back untouched.
     #[tokio::test]
     async fn a_lease_taken_over_an_existing_disable_leaves_that_value_alone() {
         let (mgr, fake, _dir) = manager();
         *fake.value.lock().unwrap() = true;
         mgr.hold(90).await.unwrap();
         mgr.release().await.unwrap();
-        // `hold` re-asserted `true`, which is a no-op against a value already
-        // `true`; what matters is that the release never wrote `false`.
         assert!(!fake.writes().contains(&false));
         assert!(*fake.value.lock().unwrap());
         assert!(!mgr.marker_path.exists());
     }
 
-    /// A revert that fails must keep the lease armed. Clearing it would strand
-    /// `disablesleep` with `is_expired(None) == false` — nothing would ever retry.
     #[tokio::test]
     async fn a_failed_revert_keeps_the_lease_so_the_watchdog_retries() {
         let (mgr, fake, _dir) = manager();
@@ -554,17 +713,19 @@ mod tests {
         *fake.fail_set.lock().unwrap() = true;
 
         assert!(mgr.release().await.is_err());
-        assert!(mgr.held(), "a failed revert dropped the lease");
+        assert!(
+            mgr.lease_is_armed().await,
+            "a failed revert dropped the lease"
+        );
         assert!(
             mgr.marker_path.exists(),
             "a failed revert dropped the ownership record"
         );
 
-        // The retry deadline is short, so the next tick picks it up.
         *fake.fail_set.lock().unwrap() = false;
-        mgr.set_lease(Some(SystemTime::now() - Duration::from_secs(1)));
+        mgr.force_deadline(past()).await;
         mgr.watchdog_tick().await;
-        assert!(!mgr.held());
+        assert!(!mgr.held().await);
         assert_eq!(fake.writes(), vec![true, false]);
     }
 
@@ -572,37 +733,82 @@ mod tests {
     async fn an_expired_lease_is_reverted_by_the_watchdog() {
         let (mgr, fake, _dir) = manager();
         mgr.hold(90).await.unwrap();
-        mgr.set_lease(Some(SystemTime::now() - Duration::from_secs(1)));
+        mgr.force_deadline(past()).await;
         mgr.watchdog_tick().await;
-        assert!(!mgr.held());
+        assert!(!mgr.held().await);
         assert_eq!(fake.writes(), vec![true, false]);
     }
 
-    /// A helper that died mid-lease left a marker; the next start hands it back.
+    /// **Startup adopts; it does not revert on the spot.**
+    ///
+    /// The helper's own self-restart path exits from a spawned task and never runs
+    /// the release at the tail, so a marker surviving a restart is routine rather
+    /// than exceptional. Reverting here would drop the hold of a daemon that is
+    /// still perfectly alive, and a `pmset` failure at boot would strand the
+    /// setting with no lease for the watchdog to act on.
     #[tokio::test]
-    async fn a_marker_left_by_a_dead_helper_is_honoured_on_startup() {
+    async fn startup_adopts_a_left_over_marker_instead_of_reverting_it() {
         let (mgr, fake, dir) = manager();
         mgr.hold(90).await.unwrap();
 
-        // A fresh manager over the same marker file is what a restart looks like.
         let restarted = SleepManager::with_parts(dir.path().join("sleep-lease.json"), fake.clone());
+        restarted.reconcile_on_startup().await;
+
+        // Nothing reverted, and a lease is armed for the watchdog to act on.
+        assert_eq!(fake.writes(), vec![true], "startup reverted a live hold");
+        assert!(restarted.lease_is_armed().await);
+
+        // A daemon still holding the session renews inside the grace.
+        restarted.hold(90).await.unwrap();
+        restarted.watchdog_tick().await;
         assert!(
-            !restarted.held(),
-            "a restart must not inherit the in-memory lease"
+            *fake.value.lock().unwrap(),
+            "a renewed hold was reverted anyway"
         );
-        restarted.clear_on_startup().await;
-        assert_eq!(fake.writes(), vec![true, false]);
+
+        // A daemon that is gone lets it lapse, and the single revert path runs.
+        restarted.force_deadline(past()).await;
+        restarted.watchdog_tick().await;
+        assert!(!*fake.value.lock().unwrap());
         assert!(!restarted.marker_path.exists());
     }
 
-    /// Without a readable prior value there is no safe release, so arming is
-    /// refused outright rather than guessing one.
+    /// `status` must report the persistent case, which is the one somebody
+    /// diagnoses hours later with the IDE closed.
+    #[tokio::test]
+    async fn a_marker_without_a_live_lease_still_reports_as_held() {
+        let (mgr, fake, dir) = manager();
+        mgr.hold(90).await.unwrap();
+        let restarted = SleepManager::with_parts(dir.path().join("sleep-lease.json"), fake.clone());
+        assert!(!restarted.lease_is_armed().await);
+        assert!(
+            restarted.held().await,
+            "the one state that survives to be asked about reported as not held"
+        );
+    }
+
+    /// A helper that can read but not write — the unprivileged one, where
+    /// `pmset -g` works as the user and `pmset disablesleep` does not — must not
+    /// leave a marker behind claiming a hold it never took. `status` and
+    /// `veld doctor` read that marker.
+    #[tokio::test]
+    async fn a_first_take_that_cannot_write_leaves_no_ownership_claim() {
+        let (mgr, fake, _dir) = manager();
+        *fake.fail_set.lock().unwrap() = true;
+        assert!(mgr.hold(90).await.is_err());
+        assert!(
+            !mgr.marker_path.exists(),
+            "a failed first take left a claim behind"
+        );
+        assert!(!mgr.held().await);
+    }
+
     #[tokio::test]
     async fn arming_is_refused_when_the_prior_value_cannot_be_read() {
         let (mgr, fake, _dir) = manager();
         *fake.fail_read.lock().unwrap() = true;
         assert!(mgr.hold(90).await.is_err());
-        assert!(!mgr.held());
+        assert!(!mgr.held().await);
         assert!(fake.writes().is_empty());
         assert!(!mgr.marker_path.exists());
     }

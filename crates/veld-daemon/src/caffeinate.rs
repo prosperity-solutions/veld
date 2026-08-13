@@ -54,7 +54,7 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use axum::{
     Json, Router,
@@ -103,6 +103,13 @@ const EXPIRY_TICK: Duration = Duration::from_secs(30);
 const HELPER_LEASE_SECS: u64 = 90;
 const HELPER_RENEW_EVERY: Duration = Duration::from_secs(30);
 
+/// The helper clamps a lease to its own ceiling and answers a bare `ok` carrying
+/// no granted duration — so asking for more than it will grant is shortened with
+/// no signal on either side. A compile error is the only thing that makes the two
+/// numbers impossible to drift apart.
+const _: () = assert!(HELPER_LEASE_SECS <= veld_core::helper::MAX_SLEEP_LEASE_SECS);
+const _: () = assert!(HELPER_RENEW_EVERY.as_secs() * 2 < HELPER_LEASE_SECS);
+
 /// How long a "is there a privileged helper" answer is reused.
 ///
 /// The probe is a real round trip with a 3s ceiling, and the idle status is
@@ -122,6 +129,13 @@ const PRIVILEGED_PROBE_TTL: Duration = Duration::from_secs(60);
 /// runs — so it is better to give up on the battery half quickly than to make
 /// the whole control feel broken. Losing the race just means the lease is not
 /// taken, or is released a lease-length later by the helper's own watchdog.
+///
+/// **It bounds one call, not the critical section.** A `start` that replaces a
+/// live session can spend this twice (the predecessor's release, then the new
+/// hold) plus two 3s connection probes plus the child reap — so the honest worst
+/// case under `ACTIVE` is on the order of fifteen seconds against a wedged
+/// helper, not five. Every number in that sum is bounded, which is the property
+/// that matters; do not read the constant as the total.
 const HELPER_CALL_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The live inhibition, if there is one. At most one per machine.
@@ -338,7 +352,10 @@ async fn renew_battery_lease(client: HelperClient, battery: Arc<AtomicBool>) {
     // routine example. So a failure retries; only the lease *actually lapsing*
     // ends the loop and drops the claim. (Giving up on the first error, which is
     // what this did before review, made the 90/30 ratio buy nothing.)
-    let mut last_ok = Instant::now();
+    // Wall clock, matching the helper's own deadline. `Instant` does not advance
+    // across a macOS suspend, so after a resume the daemon would under-count the
+    // gap and keep claiming coverage for a lease the helper already reverted.
+    let mut last_ok = SystemTime::now();
     loop {
         tokio::time::sleep(HELPER_RENEW_EVERY).await;
         // Checked before every renewal so a teardown that has already cleared
@@ -355,12 +372,15 @@ async fn renew_battery_lease(client: HelperClient, battery: Arc<AtomicBool>) {
         )
         .await
         {
-            Ok(Ok(_)) => last_ok = Instant::now(),
+            Ok(Ok(_)) => last_ok = SystemTime::now(),
             failed => {
                 // Still inside the granted window: the setting is genuinely still
                 // held, so the status must keep saying so rather than downgrading
                 // on a blip.
-                if last_ok.elapsed() < Duration::from_secs(HELPER_LEASE_SECS) {
+                let slack = last_ok
+                    .elapsed()
+                    .unwrap_or(Duration::from_secs(HELPER_LEASE_SECS));
+                if slack < Duration::from_secs(HELPER_LEASE_SECS) {
                     warn!(?failed, "battery sleep lease renewal failed; retrying");
                     continue;
                 }
@@ -646,6 +666,10 @@ async fn delete_stop(headers: HeaderMap) -> Result<Json<Value>, (StatusCode, Str
     // Idempotent: turning off something already off is a success, so two windows
     // clicking "off" don't produce an error toast in the slower one.
     take_and_stop(&mut guard).await;
+    // Released before the capability probe: the answer does not depend on the
+    // session, and holding the lock across a round trip would stall every status
+    // poll behind a stop. `get_state` avoids the same thing for the same reason.
+    drop(guard);
     Ok(Json(status_of(None, battery_capable().await)))
 }
 

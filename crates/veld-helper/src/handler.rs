@@ -24,12 +24,17 @@ impl State {
         caddy_bin: Option<std::path::PathBuf>,
         shutdown_tx: tokio::sync::watch::Sender<bool>,
     ) -> Self {
+        // Beside the helper's other durable state, and derived from the same
+        // `--caddy-bin` override the plist already passes — never from
+        // `lib_dir()`, which resolves against `$HOME` and lands a root daemon's
+        // marker in `/var/root`, divorced from the tree it runs out of.
+        let marker_path = crate::caddy::caddy_data_dir(&caddy_bin).join("sleep-lease.json");
         Self {
             dns: DnsManager::new(),
             caddy: CaddyManager::new(https_port, http_port, caddy_bin),
             https_port,
             http_port,
-            sleep: SleepManager::new(),
+            sleep: SleepManager::new(marker_path),
             shutdown_tx,
         }
     }
@@ -293,7 +298,7 @@ impl State {
             // support transcript can answer "why is this Mac not sleeping"
             // without anyone having to run `pmset -g` — including for a lease
             // taken straight on this socket, which the IDE never shows.
-            "sleep_disabled": self.sleep.held(),
+            "sleep_disabled": self.sleep.held().await,
         }))
     }
 
@@ -331,9 +336,9 @@ impl State {
     }
 
     /// Startup reconcile for the sleep lease — see
-    /// [`crate::sleep::SleepManager::clear_on_startup`].
+    /// [`crate::sleep::SleepManager::reconcile_on_startup`].
     pub async fn reconcile_sleep_on_startup(&self) {
-        self.sleep.clear_on_startup().await;
+        self.sleep.reconcile_on_startup().await;
     }
 
     /// Re-enable battery sleep on the way out.
@@ -414,9 +419,19 @@ mod tests {
         assert!(parse_proxy_arg(&args).is_empty());
     }
 
-    fn test_state() -> State {
+    /// A `State` whose sleep marker lives in a tempdir.
+    ///
+    /// Load-bearing, not tidiness. With the production path these tests would
+    /// read the **installed privileged helper's** real marker, and `release`
+    /// would then execute `/usr/bin/pmset disablesleep 0` for real — the exact
+    /// hazard `sleep.rs`'s `SleepSetter` seam exists to prevent, reintroduced one
+    /// layer up. A tempdir marker never exists, so `release` returns before it
+    /// reaches `pmset` at all.
+    fn test_state() -> (State, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
         let (tx, _rx) = tokio::sync::watch::channel(false);
-        State::new(443, 80, None, tx)
+        let caddy_bin = Some(dir.path().join("caddy"));
+        (State::new(443, 80, caddy_bin, tx), dir)
     }
 
     /// A lease request with no usable `lease_secs` is refused *before* anything
@@ -436,7 +451,7 @@ mod tests {
     /// leave a developer's Mac unable to sleep — the setting is durable.
     #[tokio::test]
     async fn a_lease_request_without_a_duration_is_refused_before_pmset_runs() {
-        let state = test_state();
+        let (state, _dir) = test_state();
         for args in [
             serde_json::json!({}),
             serde_json::json!({ "lease_secs": 0 }),
@@ -468,7 +483,7 @@ mod tests {
     /// toward being *able* to sleep, which is the direction that cannot hurt.
     #[tokio::test]
     async fn releasing_a_lease_that_was_never_taken_succeeds() {
-        let state = test_state();
+        let (state, _dir) = test_state();
         let line = serde_json::json!({
             "command": veld_core::helper::RELEASE_SLEEP_DISABLED,
             "args": {},
@@ -478,6 +493,6 @@ mod tests {
         // Idempotent: the daemon releases on every teardown without checking
         // whether it ever held one, and a stop must not surface an error for it.
         assert!(handled.response.ok, "{:?}", handled.response.error);
-        assert!(!state.sleep.held());
+        assert!(!state.sleep.held().await);
     }
 }

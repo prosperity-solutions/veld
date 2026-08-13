@@ -98,6 +98,14 @@ pub const RESTART: &str = "restart";
 /// never as a failure of the keep-awake itself.
 pub const HOLD_SLEEP_DISABLED: &str = "hold_sleep_disabled";
 
+/// Longest lease the helper will grant, in seconds.
+///
+/// Lives in the **shared** crate because both sides need the same number and the
+/// helper clamps silently: it answers a bare `ok` carrying no granted duration,
+/// so a daemon asking for more than this would be cut down with no signal
+/// anywhere. Whoever raises the daemon's ask must see this constant.
+pub const MAX_SLEEP_LEASE_SECS: u64 = 600;
+
 /// Re-enable battery sleep now rather than waiting out the lease. Same
 /// version-skew rule as [`HOLD_SLEEP_DISABLED`].
 pub const RELEASE_SLEEP_DISABLED: &str = "release_sleep_disabled";
