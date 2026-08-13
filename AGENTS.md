@@ -377,6 +377,24 @@ run, while a plain terminal in the same app works perfectly.
   for a symbol across the UI will report zero hits while the only production consumer
   sits in that file. Found when a review agent concluded a function had no callers.
   Use `rg -a` (or `grep -a`) for anything that greps the UI tree.
+- **Reach for a Mantine primitive before hand-rolling DOM+CSS for anything the
+  library already provides.** This UI is `React+Mantine`, and a hand-rolled
+  equivalent of `Tooltip`/`Button`/`Menu`/`Modal`/`ActionIcon` quietly forks the
+  app's interaction model from everything built with the real one. A resumable-pane
+  badge shipped wrong twice before landing on this: first a `title` handed straight
+  to the Tabler icon component, which renders as an inner SVG `<title>` that only
+  opens on the painted stroke — nearly un-hoverable on a 13px outline glyph — then
+  a `title` on the wrapping `<span>`, which worked but is the slow ~1s browser-chrome
+  tooltip nothing else in the app uses. `Extensions.tsx`'s own badges and
+  `theme.ts`'s global `Tooltip: { defaultProps: { openDelay: 400 } }` already say
+  "Mantine's `Tooltip`, not the browser's" — reachable the whole time, and correct
+  and fast on the first try. Same reasoning for any other interactive or visual
+  primitive Mantine already ships; hand-roll only when there's a concrete reason it
+  doesn't fit, and say what that reason is. When unsure whether Mantine already has
+  it, check **[llms.txt](https://mantine.dev/llms.txt)** — an index of every
+  component/hook/guide page as a fetchable Markdown file
+  (`https://mantine.dev/llms/core-tooltip.md`, `-button`, `-menu`, …) — before
+  reaching for raw HTML/CSS.
 - **Never let a dev build touch the production database — and use the dev-DB
   recipes.** The installed veld's state lives in one file per user
   (`<data_dir>/veld/veld.db`). A binary that opens it and applies a migration makes

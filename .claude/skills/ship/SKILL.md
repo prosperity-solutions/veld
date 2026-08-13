@@ -195,7 +195,11 @@ Three rules that make it worth the spend rather than theatre:
 
 - Match surrounding code: naming, comment density, error handling, idioms.
 - Honour the AGENTS.md key conventions (daemon `PATH`, brand on every HTML
-  surface, `{var}` vs `${var}`, `command` vs `start_server` semantics).
+  surface, `{var}` vs `${var}`, `command` vs `start_server` semantics, and —
+  for any `crates/veld-daemon/ui` change — reaching for a Mantine primitive
+  before hand-rolling DOM+CSS for anything the library already provides; check
+  [mantine.dev/llms.txt](https://mantine.dev/llms.txt) when unsure whether one
+  exists).
 - Build, then `rustup update stable` (CI uses floating stable — drift blocks it),
   `cargo clippy --workspace --all-targets`, `cargo fmt --all`, and run the tests
   as you go. For a JS/TS change, run the Biome `lint` + `typecheck`/`test` in the

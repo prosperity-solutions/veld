@@ -1939,6 +1939,20 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
   flex: none;
 }
 
+/* Teaches resumability without a second line of text: subdued for "offered as a
+   choice", tinted `--info` for "happens without a click" — the two are different
+   promises (Codex is resumable but never auto), so they get different glyphs
+   rather than one glyph and a qualifier. */
+.pane-resume-badge {
+  display: inline-flex;
+  flex: none;
+  color: var(--muted);
+}
+
+.pane-resume-badge.auto {
+  color: var(--info);
+}
+
 /* The description, on every card. Clamped rather than truncated to one line: two
    lines of "Claude Code in this worktree, in auto permission mode" is the sentence,
    and an ellipsis after four words tells you nothing. */
