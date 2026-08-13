@@ -368,7 +368,7 @@ mod tests {
         .expect("a present, well-formed argument parses");
         assert_eq!(agent::codex_state(&real), agent::State::Idle);
         // Pi's generated extension delivers its payload the same way, by choice.
-        let pi_real = payload_from_arg(Some(r#"{"event":"turn_end"}"#.to_owned()))
+        let pi_real = payload_from_arg(Some(r#"{"event":"agent_settled"}"#.to_owned()))
             .expect("a present, well-formed argument parses");
         assert_eq!(agent::pi_state(&pi_real), agent::State::Idle);
     }
