@@ -97,7 +97,8 @@ A `status` command writes **one JSON object to stdout**:
 
 Every field is optional. `tone` is `neutral` | `info` | `success` | `warning` |
 `danger`. `icon` takes the same allowlist and emoji rule as the declaration's and
-**overrides it**, which is how a glyph tracks state.
+**overrides it**, which is how a glyph tracks state. `display` (`text`, the
+default, or `icon`) does too — see below.
 
 ### Three tolerances you should exploit
 
@@ -141,6 +142,36 @@ somewhere else? Then `system`.
 Only `http`/`https` are accepted. `vscode://`, `file://` and friends are dropped
 (the badge stays) — a repo-controlled string handed to the OS would make a config
 file a launcher for whatever is registered.
+
+### `display` — the whole badge as a glyph
+
+`text` (the default) is today's badge: a label, with the glyph — if any — beside
+it. `icon` renders the glyph **alone** as the whole badge — no pill, just the icon,
+for a state that reads faster as a colour and a shape than as words (a red
+`alert-triangle` for a worktree that has drifted badly from `main`, say, rather
+than a widening "47 behind" that still has to be read).
+
+```jsonc
+{ "id": "stale", "slot": "topBar", "type": "status",
+  "display": "icon", "icon": "alert-triangle",
+  "argv": ["scripts/veld/stale-badge.sh"] }
+```
+
+**The label does not disappear — it becomes the accessible name and the
+tooltip's fallback.** A badge is a real button; one with no visible text still
+needs something a screen reader announces and something a sighted mouse user
+gets on hover, and `text` (or `label`, absent that) is it. Write your `tooltip`
+as normal — it still wins when present, `display: "icon"` only decides what
+*this* badge shows to a sighted glance.
+
+Falls back to `text` rather than an empty box if there is nothing to actually
+render as a glyph — no `icon` on this value, and none declared either. This is
+also per-value, the same as `open_in` and `icon`: a badge can be a small glyph
+while green and a number while red, or vice versa.
+
+Tooltip text this badge relies on more than a `text`-mode one is worth writing
+with line breaks (`tooltip` allows up to 400 characters and preserves `\n`) —
+see [config.md](config.md#ideextensions) for the field limits.
 
 ### `requires_bin` — and when not to use it
 

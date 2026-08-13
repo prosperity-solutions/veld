@@ -579,6 +579,15 @@
                 "default": "system",
                 "description": "Where the badge's `href` opens. `system` (the default) is your own browser, because a badge's link is normally a provider's page — a pull request, a CI run — where you are already signed in, and a Veld browser pane has its own separate cookie jar. Use `pane` for a link into something local. The badge's own output may override this per value."
               },
+              "display": {
+                "type": "string",
+                "enum": [
+                  "text",
+                  "icon"
+                ],
+                "default": "text",
+                "description": "How the badge renders. `text` (the default) is a label, with the glyph — if any — beside it. `icon` renders the glyph alone as the whole badge, with the label kept as the accessible name and the tooltip's fallback rather than shown. Falls back to `text` if there is no glyph to show — from this value's own `icon`, or the declared one. The badge's own output may override this per value, the same as `open_in`."
+              },
               "refresh_seconds": {
                 "type": "integer",
                 "minimum": 15,

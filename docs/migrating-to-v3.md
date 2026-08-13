@@ -457,6 +457,9 @@ runs in that worktree. Nothing existing changes — a config without the key beh
 exactly as before — and the entries follow the v3 command rules like `ide.panes[]`
 does. See
 [configuration.md](configuration.md#ideextensions-the-projects-own-badges-buttons-and-menus).
+A `status` badge also gained `display` (`text`, the default, or `icon`, which
+renders the glyph alone with the label kept as the accessible name) — additive
+the same way, and overridable per value the same way `open_in` is.
 
 It has its own page, because it is a menu rather than a migration:
 **[docs/adopting-long-running-and-ports.md](adopting-long-running-and-ports.md)**.

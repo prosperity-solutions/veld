@@ -357,18 +357,44 @@ body[data-fullscreen="true"] .topbar.electron {
   --button-color: color-mix(in oklab, var(--tone, var(--muted)) 75%, var(--text)) !important;
   --button-bg: var(--tone-bg, transparent) !important;
   --button-hover: color-mix(in oklab, var(--tone, var(--muted)) 18%, transparent) !important;
-  /* `MAX_TEXT_CHARS` bounds the badge's *characters*, which is not a width: 60 CJK
-     or emoji characters are roughly twice as wide as 60 Latin ones, and a badge
-     showing a commit subject can be long in any script. `.topbar` is a flex row with
-     no `overflow`, so without a width bound the badge either collapses its
-     shrinkable siblings or pushes the row past the window. */
+}
+/* `MAX_TEXT_CHARS` bounds a *label* badge's characters, which is not a width: 60
+   CJK or emoji characters are roughly twice as wide as 60 Latin ones, and a badge
+   showing a commit subject can be long in any script. `.topbar` is a flex row with
+   no `overflow`, so without a width bound the badge either collapses its
+   shrinkable siblings or pushes the row past the window. Excluded from an
+   icon-only badge, which has no long text to clip and wants to be square rather
+   than however wide 22ch of nothing renders as. */
+.topbar .ext-badge:not(.ext-badge-icon) {
   max-width: 22ch;
 }
-.topbar .ext-badge .mantine-Button-label {
+.topbar .ext-badge:not(.ext-badge-icon) .mantine-Button-label {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  display: block;
+  /* Not `display: block` — Mantine's own label is `display: flex; align-items:
+     center`, which is what vertically centres the text, and swapping it for
+     `block` silently traded that away (the text sank to the top of the box).
+     `min-width: 0` is the actual missing piece: a flex item defaults to
+     `min-width: auto`, which refuses to shrink below its content's width and
+     is why `overflow`/`text-overflow` above never had anything to clip. */
+  min-width: 0;
+}
+/* A glyph-only badge: square rather than pill-shaped, and its label span keeps
+   Mantine's own centring (`height: 100%`, flex, `align-items: center`)
+   undisturbed — the rule above only adds a clip, it no longer touches
+   `display`. */
+.topbar .ext-badge.ext-badge-icon {
+  padding-inline: 0;
+  width: var(--button-height-compact-sm);
+}
+/* A badge's tooltip is 400 characters, long enough for an author to structure
+   with line breaks — and worth the trouble once `display: icon` makes it the
+   *only* place that information lives. Mantine's own `multiline` mode already
+   wraps long lines but does not preserve the ones the author wrote in; existing
+   tooltips have none, so this changes nothing for them. */
+.ext-badge-tooltip {
+  white-space: pre-line;
 }
 .topbar .ext-badge.tone-success {
   --tone: var(--live);

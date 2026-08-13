@@ -5408,17 +5408,6 @@ function TopBar(props: {
                   can fire and `ui.hideDisabledActions` is on; shown greyed with a
                   reason when off. */}
               {props.nodeActions}
-              {/* The project's own badges and buttons, in the left cluster with
-                  everything else that belongs to this worktree. `align: "end"`
-                  moves an entry over to the app cluster instead — see the second
-                  instance at the end of the bar. */}
-              <TopBarExtensions
-                extensions={props.extensions}
-                align="start"
-                worktreeId={worktree?.id ?? null}
-                status={extensionStatus}
-                onOpenInPane={props.onOpenInPane}
-              />
               {run && (props.hideDisabled ? props.urls.length > 0 : true) && (
                 // Opens a browser pane on the run's URLs, not an overlay of its
                 // own: the URLs live in whichever pane is about to need them, and
@@ -5442,6 +5431,19 @@ function TopBar(props: {
                 </Tooltip>
               )}
               {props.sharing}
+              {/* The project's own badges and buttons, last in the left cluster —
+                  after every veld-owned control, sharing included, so a project
+                  cannot push veld's own tools out of their fixed order as more
+                  extensions are declared. `align: "end"` moves an entry over to
+                  the app cluster instead — see the second instance at the end of
+                  the bar. */}
+              <TopBarExtensions
+                extensions={props.extensions}
+                align="start"
+                worktreeId={worktree?.id ?? null}
+                status={extensionStatus}
+                onOpenInPane={props.onOpenInPane}
+              />
             </>
           )}
           {!canRun && (

@@ -1,10 +1,16 @@
 import { describe, expect, it } from "vitest";
-import type { ExtensionSpec } from "../api";
+import type { ExtensionSpec, ExtensionStatus } from "../api";
 // Imported as data, not read from disk — the same reason `paneIcons.test.ts`
 // does it: the UI's tsconfig has no Node types, and a schema that stops parsing
 // should be a build error rather than a runtime one.
 import schema from "../../../../../schema/v3/veld.schema.json";
-import { MIN_POLL_MS, pollInterval, resolveExtension } from "./Extensions";
+import {
+  MIN_POLL_MS,
+  badgeContent,
+  pollInterval,
+  resolveExtension,
+  specIconOnly,
+} from "./Extensions";
 
 function spec(over: Partial<ExtensionSpec> = {}): ExtensionSpec {
   return {
@@ -15,6 +21,19 @@ function spec(over: Partial<ExtensionSpec> = {}): ExtensionSpec {
     align: "start",
     available: true,
     when_missing: "hint",
+    ...over,
+  };
+}
+
+function status(over: Partial<ExtensionStatus> = {}): ExtensionStatus {
+  return {
+    id: "pr",
+    state: "ok",
+    display: "text",
+    tone: "neutral",
+    open_in: "system",
+    refresh_seconds: 60,
+    age_seconds: 0,
     ...over,
   };
 }
@@ -133,5 +152,93 @@ describe("resolving an unavailable extension", () => {
   it("does not claim to know what is missing when the daemon did not say", () => {
     const r = resolveExtension(spec({ available: false, missing: [] }));
     expect(r?.reason).toBe("Not available on this machine");
+  });
+});
+
+const gitBranch = { kind: "name" as const, value: "git-branch" };
+
+/**
+ * The two invariants this issue exists to pin: an icon-only badge still has an
+ * accessible name, and one with nothing to actually render as a glyph does not
+ * render as an empty box. `badgeContent` is where `ExtensionBadge` decides both,
+ * so this drives it directly rather than through a DOM render.
+ */
+describe("badge content", () => {
+  it("shows the label and needs no separate accessible name in text mode", () => {
+    const c = badgeContent(status(), spec());
+    expect(c.iconOnly).toBe(false);
+    expect(c.name).toBe("PR");
+    expect(c.ariaLabel).toBeUndefined();
+  });
+
+  it("renders the glyph alone, with the label kept as the accessible name", () => {
+    const c = badgeContent(status({ display: "icon", icon: gitBranch }), spec());
+    expect(c.iconOnly).toBe(true);
+    expect(c.glyph).toEqual(gitBranch);
+    expect(c.ariaLabel).toBe("PR");
+  });
+
+  it("falls back to text when display asks for icon but nothing resolves one", () => {
+    // Belt-and-braces: the daemon already downgrades this case to `"text"`
+    // (`StatusView::display`), so this only matters if this build's icon
+    // allowlist ever disagrees with the daemon's.
+    const c = badgeContent(status({ display: "icon" }), spec());
+    expect(c.iconOnly).toBe(false);
+    expect(c.ariaLabel).toBeUndefined();
+  });
+
+  it("takes the declared icon only when the run supplied none", () => {
+    const c = badgeContent(status({ display: "icon" }), spec({ icon: gitBranch }));
+    expect(c.iconOnly).toBe(true);
+    expect(c.glyph).toEqual(gitBranch);
+  });
+
+  it("falls back to the name as the tooltip once icon mode hides it from view", () => {
+    const c = badgeContent(status({ display: "icon", icon: gitBranch }), spec());
+    expect(c.tooltip).toBe("PR");
+  });
+
+  it("prefers the run's own tooltip over the name fallback", () => {
+    const c = badgeContent(
+      status({ display: "icon", icon: gitBranch, tooltip: "merged" }),
+      spec(),
+    );
+    expect(c.tooltip).toBe("merged");
+  });
+
+  it("carries no fallback tooltip in text mode, where the label is already visible", () => {
+    const c = badgeContent(status(), spec());
+    expect(c.tooltip).toBe("");
+  });
+
+  it("appends how stale the value is once that becomes worth mentioning", () => {
+    const c = badgeContent(status({ tooltip: "merged", age_seconds: 75 }), spec());
+    expect(c.tooltip).toBe("merged · 75s ago");
+  });
+});
+
+/**
+ * `specIconOnly` is what the disabled/loading placeholders — rendered before
+ * any value exists — use to match the width the first value will render at,
+ * so an icon-only badge does not start as a full-width label and narrow to a
+ * glyph the moment its first run answers.
+ */
+describe("declaration-only icon-only styling", () => {
+  it("is false for the default text declaration", () => {
+    expect(specIconOnly(spec())).toBe(false);
+  });
+
+  it("is true only once both the declared display and a declared icon agree", () => {
+    expect(specIconOnly(spec({ display: "icon", icon: gitBranch }))).toBe(true);
+  });
+
+  it("is false when display asks for icon but the declaration has none", () => {
+    // Same fallback `badgeContent` applies at the value layer — an empty box is
+    // worse than the label, even before a run has had the chance to supply one.
+    expect(specIconOnly(spec({ display: "icon" }))).toBe(false);
+  });
+
+  it("is false when an icon is declared but display was not asked for", () => {
+    expect(specIconOnly(spec({ icon: gitBranch }))).toBe(false);
   });
 });

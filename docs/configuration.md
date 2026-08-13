@@ -2793,8 +2793,9 @@ Veld runs the command in the worktree root and reads stdout:
 `tone` is one of `neutral`, `info`, `success`, `warning`, `danger`. `icon` takes
 the same names and emoji the declaration's `icon` does, and **overrides it** — a
 badge showing a merge mark once merged and a clock while CI runs is the point.
-Everything is optional, and three tolerances mean most commands need no adapter at
-all:
+`display` (`text`, the default, or `icon`) overrides the declaration the same
+way — see [below](#showing-only-the-glyph-display). Everything is optional,
+and three tolerances mean most commands need no adapter at all:
 
 - **Output that is not this contract** becomes the badge text, first line only. So
   `"argv": ["git", "rev-parse", "--short", "HEAD"]` is already a working badge.
@@ -2828,6 +2829,28 @@ agent doing it on a project's behalf):
 practice the field is only written in order to say `pane`. If you are unsure, ask
 whether the reader is already signed in to that site somewhere else — if they are,
 it is `system`.
+
+#### Showing only the glyph (`display`)
+
+`display` renders the badge as a label (`text`, the default — today's rendering)
+or as its glyph **alone** (`icon`) — no pill, just the icon, for a state that
+reads faster as a colour and a shape than as words:
+
+```jsonc
+{ "id": "stale", "slot": "topBar", "type": "status",
+  "display": "icon", "icon": "alert-triangle",
+  "argv": ["scripts/veld/stale-badge.sh"] }
+```
+
+**The label does not disappear** — it becomes the button's accessible name (a
+badge is a real `<button>`, and one with no visible text still needs a name a
+screen reader can announce) and the fallback for the tooltip. Write `tooltip` as
+normal; it still wins when present.
+
+Falls back to `text` rather than an empty box if there is nothing to actually
+render as a glyph — no `icon` on the value printed, and none declared either.
+Overridable per value the same way `open_in` and `icon` are: a badge can be a
+small glyph while green and a number while red.
 
 `refresh_seconds` defaults to 60 and is floored at 15. Veld only evaluates the
 worktree you are looking at, only while a window is open, and only once however

@@ -360,6 +360,11 @@ export interface ExtensionSpec {
   items?: string[];
   /** How often a `status` extension wants re-evaluating. */
   refresh_seconds?: number;
+  /** A `status` extension's declared `display` — lets a pre-first-value
+   *  placeholder (loading, disabled) match the width the value it is about to
+   *  replace will render at, rather than narrowing from a label to a glyph the
+   *  moment the first run answers. Absent for the other kinds. */
+  display?: "text" | "icon";
 }
 
 /** Mirrors `StatusView` in `crates/veld-daemon/src/extensions.rs`. */
@@ -374,6 +379,9 @@ export interface ExtensionStatus {
    */
   state: "ok" | "empty" | "failed" | "timeout" | "unavailable";
   text?: string;
+  /** Whether the badge renders `text` or `icon` alone. Resolved server-side —
+   *  already falls back to `"text"` when there is no icon to show. */
+  display: "text" | "icon";
   tone: "neutral" | "info" | "success" | "warning" | "danger";
   tooltip?: string;
   href?: string;
