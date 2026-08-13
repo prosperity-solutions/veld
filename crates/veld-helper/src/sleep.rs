@@ -302,16 +302,10 @@ pub struct SleepManager<S: SleepSetter = Pmset> {
 /// ~/.local/lib/veld` during a botched reinstall, or re-running `setup
 /// privileged` with a different Caddy location, orphans the marker.
 ///
-/// This file is the sole authority for whether root writes a durable
-/// system setting, so it lives where only root can write: `/var/db` is
-/// `root:wheel` on macOS and `/var/lib` likewise on Linux. `veld uninstall`
-/// sweeps it.
+/// The path itself comes from `veld-core` because `veld uninstall` has to sweep
+/// the same directory, and two literals would drift.
 pub fn marker_dir() -> PathBuf {
-    if cfg!(target_os = "macos") {
-        PathBuf::from("/var/db/veld")
-    } else {
-        PathBuf::from("/var/lib/veld")
-    }
+    veld_core::paths::sleep_marker_dir()
 }
 
 impl SleepManager<Pmset> {

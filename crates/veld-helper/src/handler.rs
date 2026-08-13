@@ -506,9 +506,17 @@ mod tests {
         }
     }
 
-    /// Releasing is safe to reach in a test — on a non-macOS builder it is a
-    /// no-op, and on macOS `pmset -b disablesleep 0` only ever moves the machine
-    /// toward being *able* to sleep, which is the direction that cannot hurt.
+    /// What this covers, precisely: the **unprivileged short-circuit**.
+    ///
+    /// The fixture holds no `SleepManager`, so the privileged arm is not reached
+    /// here — deliberately, since reaching it would mean a real `pmset` in a unit
+    /// test. That arm is a one-line delegation to `SleepManager::release`, which
+    /// `sleep.rs` covers directly against a fake setter, including the
+    /// nothing-was-ever-taken case this test's name describes.
+    ///
+    /// Idempotence is the property either way: the daemon releases on every
+    /// teardown without checking whether it ever held one, so a stop must not
+    /// surface an error for it.
     #[tokio::test]
     async fn releasing_a_lease_that_was_never_taken_succeeds() {
         let state = test_state();
@@ -518,8 +526,6 @@ mod tests {
         })
         .to_string();
         let handled = state.handle_request(&line).await;
-        // Idempotent: the daemon releases on every teardown without checking
-        // whether it ever held one, and a stop must not surface an error for it.
         assert!(handled.response.ok, "{:?}", handled.response.error);
         assert!(
             state.sleep.is_none(),

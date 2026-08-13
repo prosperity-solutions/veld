@@ -2441,11 +2441,7 @@ pub async fn uninstall() -> Result<(), anyhow::Error> {
     // out, and uninstall stops the helper before it gets here. What is left is the
     // helper that died without running that path, and leaving its marker behind
     // would strand a claim on a machine that no longer has a veld to honour it.
-    let sleep_marker_dir = if cfg!(target_os = "macos") {
-        PathBuf::from("/var/db/veld")
-    } else {
-        PathBuf::from("/var/lib/veld")
-    };
+    let sleep_marker_dir = crate::paths::sleep_marker_dir();
     if sleep_marker_dir.exists() {
         if let Err(e) = std::fs::remove_dir_all(&sleep_marker_dir) {
             tracing::warn!(

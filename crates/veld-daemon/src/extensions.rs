@@ -1618,8 +1618,6 @@ mod tests {
 
         use crate::feedback_server::desktop::routes;
 
-        use crate::feedback_server::DB_ENV_LOCK;
-
         /// Seeds a repo with exactly one worktree, `is_main: false` — the shape
         /// a bare primary clone produces (`parse_worktree_list` consumes
         /// `is_main` on a bare first block and then skips it), so `main` mode
