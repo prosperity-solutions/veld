@@ -2633,6 +2633,33 @@ branch named `` `curl …` `` runs at pane launch.
 `argv` interpolates per element after the array is fixed, so a value containing
 spaces, quotes or backticks can never change the argument count. Prefer it.
 
+Need the real, unslugified branch name (`feat/foo`, not `feat-foo`) — say for a
+`gh`/`glab` call that takes a ref? Use **`${veld.branch_raw}`**, but only in
+`argv`. `veld lint` refuses it in `shell`: `git check-ref-format --branch`
+accepts a branch named `foo$(id)` or `foo'bar`, so a `shell` string built from
+it is command execution on checkout of someone else's pull request, and no
+amount of quoting fixes it — `foo'bar` breaks out of a single-quoted
+substitution too. `argv` has no such hole for those characters, because the
+element count is already fixed when the value is substituted in.
+
+```jsonc
+"argv": ["gh", "pr", "view", "${veld.branch_raw}"]     // the actual ref
+"argv": ["gh", "pr", "view", "${veld.branch}"]          // wrong: "feat-foo", not "feat/foo"
+```
+
+A leading `-` is a separate hole `argv` does not close by itself — a branch
+named `-x` is ordinary text that `gh`'s own flag parser can read as an option,
+and (unlike a `git branch`-created name) a checked-out one really can start
+with `-` (`git switch -- -x` succeeds). veld closes that at the source
+instead: on such a branch, `${veld.branch_raw}` is not populated at all, so
+the pane or badge reports an unresolved-variable error rather than handing a
+flag to the command. `${veld.branch}` never has this problem — slugifying
+never leaves a leading `-`.
+
+On a detached worktree there is no branch to report, so `${veld.branch_raw}`
+resolves to the literal string `(detached)` rather than a ref — same as
+`${veld.branch}`, which slugifies that same placeholder to `detached`.
+
 #### Variables in a pane command
 
 A pane has no run, no node and no ports, so its scope is much smaller than a
@@ -2640,13 +2667,15 @@ node's — referencing anything else is a lint problem rather than a pane that
 dies on launch:
 
 `${veld.pane.id}` · `${veld.pane.label}` · `${veld.pane.token}` ·
-`${veld.worktree}` · `${veld.root}` · `${veld.branch}` · `${veld.project}` ·
-`${veld.username}`
+`${veld.worktree}` · `${veld.root}` · `${veld.branch}` · `${veld.branch_raw}`
+(`argv` only) · `${veld.project}` · `${veld.username}`
 
 They mean exactly what they mean everywhere else — in particular
 `${veld.worktree}` is the **slugified directory name**, not a path, and
-`${veld.branch}` is slugified too. **The path you almost always want is
-`${veld.root}`**, which for a pane is the worktree's own checkout.
+`${veld.branch}` is slugified too (see [Quote your
+interpolations](#quote-your-interpolations) for the unslugified
+`${veld.branch_raw}`, and why it's `argv`-only). **The path you almost always
+want is `${veld.root}`**, which for a pane is the worktree's own checkout.
 
 `VELD_PANE_ID` and `VELD_PANE_TOKEN` are also set in the command's environment,
 so a `shell` pane can use `$VELD_PANE_TOKEN` directly.
@@ -2766,9 +2795,9 @@ Every entry takes these:
 A `status` and an `action` additionally take **`argv` or `shell`**, exactly one,
 with the same meaning they have everywhere else in this file. Interpolation uses
 the [pane variables](#variables-in-a-pane-command) minus the `pane.*` family:
-`${veld.root}`, `${veld.branch}`, `${veld.worktree}`, `${veld.project}`,
-`${veld.username}`. Anything else is a `veld lint` finding rather than a badge
-that fails to run.
+`${veld.root}`, `${veld.branch}`, `${veld.branch_raw}` (`argv` only),
+`${veld.worktree}`, `${veld.project}`, `${veld.username}`. Anything else is a
+`veld lint` finding rather than a badge that fails to run.
 
 **`${veld.branch}` is slugified, so it is not a git ref.** `feat/foo` reaches the
 command as `feat-foo`, and `Fix.Thing` as `fix-thing`. That is deliberate — the same
@@ -2777,8 +2806,19 @@ opened the pull request you checked out, so a `shell` command interpolating it r
 would run their string — but it means the obvious
 `gh pr view "${veld.branch}"` is **not an error, it is a wrong answer**: on any
 branch with a `/`, a `.` or a capital it reports no pull request and offers to
-create a second one. Get the real ref inside the command
-(`git rev-parse --abbrev-ref HEAD`), which is what this repo's own adapter does.
+create a second one. Use **`${veld.branch_raw}`** instead, in `argv`:
+
+```jsonc
+"argv": ["gh", "pr", "view", "${veld.branch_raw}"]
+```
+
+`veld lint` refuses `${veld.branch_raw}` in `shell` — a branch name is legal git
+syntax even as `foo$(id)` or `foo'bar`, so a `shell` string built from it is
+command execution on checkout, and quoting cannot close that hole. `argv`
+substitutes it as one fixed argument, which closes that particular hole. A
+branch starting with `-` is a separate case veld closes at the source instead:
+`${veld.branch_raw}` is simply not populated for one, so the command reports an
+unresolved variable rather than handing the receiving program a flag.
 
 #### `type: "status"` — a badge
 

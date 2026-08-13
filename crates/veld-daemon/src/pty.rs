@@ -1571,6 +1571,27 @@ pub(crate) fn worktree_builtins(
     builtins.insert("root".to_owned(), worktree_path.display().to_string());
 
     builtins.insert("branch".to_owned(), veld_core::url::slugify(branch));
+    // Unslugified, and `veld lint` refuses it in `shell` for exactly that reason
+    // (`ide::SHELL_REFUSED_BUILTINS`) — this function has no notion of `argv`
+    // versus `shell`, so that refusal has to live at lint time, not here.
+    //
+    // **Omitted, not inserted, when `branch` starts with `-`.** `argv` is safe
+    // from shell metacharacters because the element count is fixed before
+    // interpolation, but a leading `-` is not a shell hazard — it is an
+    // *argument*-injection one: `git switch -- -foo` (or fetching and checking
+    // out a remote branch already named that way) is real, `git worktree
+    // list --porcelain` reports it verbatim, and `validate_branch` below only
+    // guards branch names this daemon creates, not ones it discovers already
+    // checked out. `["gh", "pr", "view", "${veld.branch_raw}"]` on such a
+    // worktree would hand `gh` a flag, not a ref. Slugified `branch` never has
+    // this problem — `url::slugify` never starts or ends with `-` — so this is
+    // the one place `branch_raw` and `branch` genuinely differ in safety.
+    // Omitting the key fails the same way any other reference to an
+    // unpopulated builtin does: `${veld.branch_raw}` resolves to "unknown
+    // built-in variable", and the pane/extension reports it instead of running.
+    if !branch.starts_with('-') {
+        builtins.insert("branch_raw".to_owned(), branch.to_owned());
+    }
     builtins.insert("project".to_owned(), config.name.clone());
     builtins.insert(
         "username".to_owned(),
@@ -3861,6 +3882,13 @@ mod tests {
     /// closed scope exists to prevent. A name in the second but not the first is
     /// unreachable. The comment on `pane_context` used to *claim* this was
     /// checked; nothing checked it.
+    ///
+    /// `branch_raw` is this test's one deliberate exception: it lints clean in
+    /// `argv` but is intentionally withheld by `worktree_builtins` for a branch
+    /// starting with `-` (argument-injection, not a scope bug), so *that one*
+    /// "lints clean, dies at spawn" case is the fix rather than the failure this
+    /// test exists to catch. This test still passes because it probes with a
+    /// branch (`"main"`) that does not start with `-`.
     #[test]
     fn pane_context_populates_every_lintable_name() {
         let pane = veld_core::ide::PaneDef {
@@ -3922,6 +3950,40 @@ mod tests {
             pane_only.iter().all(|n| n.starts_with("pane.")),
             "a pane builtin that is not `pane.*` should be available to an \
              extension too, but these are not: {pane_only:?}"
+        );
+    }
+
+    /// `veld lint` accepts `${veld.branch_raw}` in `argv` because git refuses a
+    /// leading `-` only in the `git branch` porcelain, not in the ref grammar —
+    /// `git switch -- -foo` really does produce a checked-out branch named
+    /// `-foo`, and it would read as a flag to whatever `argv` command uses it.
+    /// A lint-time allowlist cannot see the runtime branch name, so the guard
+    /// has to live here: a branch starting with `-` gets no `branch_raw` at
+    /// all, so referencing it fails closed (an unresolved-variable error) at
+    /// spawn time instead of resolving to something a receiving program's flag
+    /// parser can read as an option.
+    #[test]
+    fn branch_raw_is_withheld_for_a_leading_dash_branch() {
+        let cfg: veld_core::config::VeldConfig = serde_json::from_value(serde_json::json!({
+            "schemaVersion": "3",
+            "name": "probe",
+            "nodes": {},
+        }))
+        .expect("minimal config");
+
+        let builtins = worktree_builtins(FsPath::new("/tmp/wt"), "-foo", &cfg);
+        assert!(
+            !builtins.contains_key("branch_raw"),
+            "a branch starting with `-` must not populate branch_raw: {builtins:?}"
+        );
+        // The rest of the scope is unaffected — only this one key is withheld.
+        assert!(builtins.contains_key("branch"));
+        assert!(builtins.contains_key("root"));
+
+        let builtins = worktree_builtins(FsPath::new("/tmp/wt"), "feat/foo", &cfg);
+        assert_eq!(
+            builtins.get("branch_raw").map(String::as_str),
+            Some("feat/foo")
         );
     }
 

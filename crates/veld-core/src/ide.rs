@@ -230,6 +230,7 @@ pub const TERMINAL_PANE_KEYS: &[&str] = &[
 /// module accepts it — the closed-set rule holds per scope, not globally.
 pub const PANE_BUILTINS: &[&str] = &[
     "branch",
+    "branch_raw",
     "pane.id",
     "pane.label",
     "pane.token",
@@ -247,7 +248,39 @@ pub const PANE_BUILTINS: &[&str] = &[
 /// scope narrower — and the reason the check is worth having is that an
 /// unresolvable reference is not a soft failure, it is a badge that never renders
 /// with an error the author has to read backwards from.
-pub const EXTENSION_BUILTINS: &[&str] = &["branch", "project", "root", "username", "worktree"];
+pub const EXTENSION_BUILTINS: &[&str] = &[
+    "branch",
+    "branch_raw",
+    "project",
+    "root",
+    "username",
+    "worktree",
+];
+
+/// `${veld.*}` names permitted only in `argv`, refused in `shell`.
+///
+/// `branch_raw` is the checkout name **unslugified** — the value `branch`
+/// exists to avoid interpolating raw, because an outsider chooses it (you check
+/// out someone else's pull-request branch). `git check-ref-format --branch`
+/// accepts `foo$(id)`, `foo'bar` and `feat/foo` alike: the first two make a
+/// `shell` string built from it remote command execution on checkout, and
+/// quoting cannot fix it, since `foo'bar` breaks out of a single-quoted
+/// substitution too. `argv` has no such hole for those characters, because
+/// interpolation runs after the element count is fixed, so `$(...)`, `|` and
+/// `&&` are inert text in a single argument.
+///
+/// A leading `-` is a *different* hole — `argv` has no shell to protect
+/// against, but a value starting with `-` is still ordinary text the
+/// receiving program's own flag parser can read as an option, and (unlike a
+/// `git branch`-created name) a checked-out branch really can start with one:
+/// `git switch -- -foo` succeeds and `git worktree list --porcelain` reports
+/// it verbatim. That one is closed at the source instead — see
+/// `worktree_builtins` in `crates/veld-daemon/src/pty.rs`, which omits
+/// `branch_raw` entirely for such a branch, so a command referencing it fails
+/// closed with an unresolved-variable error rather than handing a flag to
+/// whatever it runs. `branch` never has this problem: `url::slugify` never
+/// starts or ends with `-`.
+const SHELL_REFUSED_BUILTINS: &[&str] = &["branch_raw"];
 
 /// Every named place an extension may contribute to, in sorted order.
 ///
@@ -1785,6 +1818,10 @@ fn parse_command_in_scope(
 /// spawn time — the pane simply never starts, with an error the author has to
 /// read backwards from. Catching it in `veld lint` is the whole point of the
 /// scope being closed.
+///
+/// A second, narrower check rides along: [`SHELL_REFUSED_BUILTINS`] names are in
+/// `allowed` (so an `argv` command may use them) but refused when `spec` is
+/// `Shell` — see that constant for why the asymmetry exists.
 fn check_command_variables(
     spec: &crate::config::CommandSpec,
     location: &str,
@@ -1792,25 +1829,48 @@ fn check_command_variables(
     allowed: &[&str],
     out: &mut IdeSection,
 ) -> Option<()> {
+    let is_shell = matches!(spec, crate::config::CommandSpec::Shell(_));
     let parts: Vec<String> = match spec {
         crate::config::CommandSpec::Argv(argv) => argv.clone(),
         crate::config::CommandSpec::Shell(s) => vec![s.clone()],
     };
+    let available: Vec<&str> = allowed
+        .iter()
+        .copied()
+        .filter(|n| !is_shell || !SHELL_REFUSED_BUILTINS.contains(n))
+        .collect();
+    let not_available = |shown: &str, out: &mut IdeSection| {
+        out.problems.push(IdeProblem {
+            location: location.to_owned(),
+            message: format!(
+                "`{shown}` is not available in a {scope} command. A {scope} may use: {}",
+                variable_list(&available)
+            ),
+        });
+    };
     for part in &parts {
         for reference in all_references(part) {
-            let shown = match reference.strip_prefix("veld.") {
-                Some(name) if allowed.contains(&name) => continue,
-                Some(name) => format!("${{veld.{name}}}"),
-                None => format!("${{{reference}}}"),
+            let Some(name) = reference.strip_prefix("veld.") else {
+                not_available(&format!("${{{reference}}}"), out);
+                return None;
             };
-            out.problems.push(IdeProblem {
-                location: location.to_owned(),
-                message: format!(
-                    "`{shown}` is not available in a {scope} command. A {scope} may use: {}",
-                    variable_list(allowed)
-                ),
-            });
-            return None;
+            if is_shell && SHELL_REFUSED_BUILTINS.contains(&name) {
+                out.problems.push(IdeProblem {
+                    location: location.to_owned(),
+                    message: format!(
+                        "`${{veld.{name}}}` is refused in `shell` — it is not slugified, and \
+                         git allows branch names like `foo$(id)` or `foo'bar` that make a shell \
+                         string built from it into command execution on checkout. Use `argv`, \
+                         which spawns it as a single fixed argument, or run \
+                         `git rev-parse --abbrev-ref HEAD` inside the command instead."
+                    ),
+                });
+                return None;
+            }
+            if !available.contains(&name) {
+                not_available(&format!("${{veld.{name}}}"), out);
+                return None;
+            }
         }
     }
     Some(())
@@ -3996,6 +4056,85 @@ mod tests {
             "resume": { "argv": ["claude", "-r", "${veld.pane.token}"] },
         }));
         assert!(ok.problems.is_empty(), "{:?}", ok.problems);
+    }
+
+    /// `SHELL_REFUSED_BUILTINS` only says anything if every name in it is one
+    /// `argv` actually accepts in both scopes — a typo'd entry here would make
+    /// `check_command_variables` tell an author "refused in `shell`, use
+    /// `argv`" for a name `argv` rejects too, which is advice that leads
+    /// nowhere.
+    #[test]
+    fn shell_refused_builtins_is_a_subset_of_both_argv_scopes() {
+        for name in SHELL_REFUSED_BUILTINS {
+            assert!(
+                PANE_BUILTINS.contains(name),
+                "{name} missing from PANE_BUILTINS"
+            );
+            assert!(
+                EXTENSION_BUILTINS.contains(name),
+                "{name} missing from EXTENSION_BUILTINS"
+            );
+        }
+    }
+
+    /// The whole point of the `argv`/`shell` split: deleting either half of
+    /// `check_command_variables`'s enforcement should fail this, not just the
+    /// two tests above that only look at the allowlists.
+    #[test]
+    fn branch_raw_is_argv_only_in_both_scopes() {
+        let shell_pane = one_pane(json!({
+            "id": "a", "type": "terminal", "shell": "gh pr view ${veld.branch_raw}",
+        }));
+        assert!(shell_pane.panes.is_empty(), "shell must refuse branch_raw");
+        assert!(
+            shell_pane.problems[0]
+                .message
+                .contains("refused in `shell`"),
+            "should get the specific refusal, not the generic one: {:?}",
+            shell_pane.problems
+        );
+        assert!(
+            !shell_pane.problems[0].message.contains("may use"),
+            "the specific refusal should not also suggest an allowed-variable list: {:?}",
+            shell_pane.problems
+        );
+
+        let argv_pane = one_pane(json!({
+            "id": "a", "type": "terminal", "argv": ["gh", "pr", "view", "${veld.branch_raw}"],
+        }));
+        assert!(argv_pane.problems.is_empty(), "{:?}", argv_pane.problems);
+
+        let shell_ext = one_extension(json!({
+            "id": "pr", "slot": "topBar", "type": "status",
+            "shell": "gh pr view ${veld.branch_raw}",
+        }));
+        assert!(
+            shell_ext.extensions.is_empty(),
+            "shell must refuse branch_raw"
+        );
+        assert!(
+            shell_ext.problems[0].message.contains("refused in `shell`"),
+            "{:?}",
+            shell_ext.problems
+        );
+
+        let argv_ext = one_extension(json!({
+            "id": "pr", "slot": "topBar", "type": "status",
+            "argv": ["gh", "pr", "view", "${veld.branch_raw}"],
+        }));
+        assert!(argv_ext.problems.is_empty(), "{:?}", argv_ext.problems);
+
+        // A `shell` command's generic "not available" message (for some other,
+        // entirely unknown name) must not dangle `branch_raw` as an option it
+        // cannot actually use.
+        let shell_unknown = one_pane(json!({
+            "id": "a", "type": "terminal", "shell": "echo ${veld.nonsense}",
+        }));
+        assert!(
+            !shell_unknown.problems[0].message.contains("branch_raw"),
+            "a shell command's suggestion list must not include an argv-only name: {}",
+            shell_unknown.problems[0].message
+        );
     }
 
     /// The same scope check has to reach inside `resume`, which is the command
