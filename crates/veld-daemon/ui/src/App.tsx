@@ -4,6 +4,7 @@ import {
   runRef,
   type EmojiHolder,
   type EnvironmentList,
+  type ExtensionSpec,
   type Lane,
   type Preset,
   type Repo,
@@ -216,6 +217,7 @@ import {
   startStorageKey,
 } from "./components/StartConfig";
 import { ConfigVarsDialog } from "./components/ConfigVars";
+import { TopBarExtensions, useExtensionStatus } from "./components/Extensions";
 import {
   ChangeMarkerDialog,
   ConfirmDeleteWorktreeDialog,
@@ -1799,6 +1801,16 @@ function AppInner(props: {
   // One object rather than six props threaded through PaneArea → DockView: the
   // `logs` and `nodes` panes read the *selected* worktree's run, so every pane
   // re-points on a worktree switch and none of them captures a run of its own.
+  //
+  // One owner for "land a URL in the focused dock". ⌘K, the URL launcher, a
+  // node's URL and an `ide.extensions` badge whose link asks for a pane all go
+  // through this, rather than each inventing a placement. Updater form for the
+  // reason `showBlankBrowser` uses one: a browser pane writes the layout on its
+  // own schedule, so a value computed from this render would drop a navigation
+  // that landed in the same commit.
+  const openUrlInPane = (url: string, title?: string) =>
+    setLayout((prev) => addTabToFocused(prev, browserTab({ url, ...(title ? { title } : {}) })));
+
   const runCtx: RunPaneContext = {
     ref: diagRef,
     run: diagRun,
@@ -1808,8 +1820,7 @@ function AppInner(props: {
     // A node's URL, opened beside the terminal instead of in another application.
     // The same action ⌘K and the URL launcher offer, so all three land a pane in
     // the focused dock rather than each inventing a placement.
-    onOpenPane: (name, url) =>
-      setLayout((prev) => addTabToFocused(prev, browserTab({ url, title: name }))),
+    onOpenPane: (name, url) => openUrlInPane(url, name),
     logsTz,
   };
 
@@ -4325,6 +4336,8 @@ function AppInner(props: {
         urls={urls}
         sharing={sharingSurface}
         onShowBlankBrowser={layout && showBlankBrowser}
+        extensions={worktree?.ide.extensions ?? []}
+        onOpenInPane={layout ? openUrlInPane : undefined}
         onSelectRepo={(root) => {
           setActiveRepoRoot(root);
           setActiveWtKey("");
@@ -5072,8 +5085,18 @@ function TopBar(props: {
   nodeActions: React.ReactNode;
   /** `ui.hideDisabledActions` — hide an inapplicable action, or show it greyed. */
   hideDisabled: boolean;
+  /** The project's `ide.extensions` declarations for this worktree, commands
+   *  already stripped by the daemon. */
+  extensions: ExtensionSpec[];
+  /** Open a URL in a browser pane — for a status badge whose link asks for
+   *  `open_in: "pane"`. Absent when there is no layout to open into. */
+  onOpenInPane: ((url: string) => void) | undefined;
 }) {
   const { worktree, run } = props;
+  // One poll for the whole slot, not one per cluster: this component renders
+  // `TopBarExtensions` twice (start and end) and the response covers every badge
+  // in the worktree either way. See `useExtensionStatus`.
+  const extensionStatus = useExtensionStatus(worktree?.id ?? null, props.extensions);
   const repoAvailable = props.repo?.available ?? false;
   const repoLabel = props.repo
     ? props.repo.available
@@ -5385,6 +5408,17 @@ function TopBar(props: {
                   can fire and `ui.hideDisabledActions` is on; shown greyed with a
                   reason when off. */}
               {props.nodeActions}
+              {/* The project's own badges and buttons, in the left cluster with
+                  everything else that belongs to this worktree. `align: "end"`
+                  moves an entry over to the app cluster instead — see the second
+                  instance at the end of the bar. */}
+              <TopBarExtensions
+                extensions={props.extensions}
+                align="start"
+                worktreeId={worktree?.id ?? null}
+                status={extensionStatus}
+                onOpenInPane={props.onOpenInPane}
+              />
               {run && (props.hideDisabled ? props.urls.length > 0 : true) && (
                 // Opens a browser pane on the run's URLs, not an overlay of its
                 // own: the URLs live in whichever pane is about to need them, and
@@ -5426,6 +5460,15 @@ function TopBar(props: {
         </>
       )}
       <div style={{ flex: 1 }} />
+      {worktree && (
+        <TopBarExtensions
+          extensions={props.extensions}
+          align="end"
+          worktreeId={worktree.id}
+          status={extensionStatus}
+          onOpenInPane={props.onOpenInPane}
+        />
+      )}
       <Tooltip label="Search (⌘K)">
         <ActionIcon size="md" variant="default" onClick={props.onSearch}>
           <IconSearch size={14} />

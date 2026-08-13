@@ -51,6 +51,17 @@ pub fn routes() -> Router {
         .route("/api/worktrees/{id}/start", post(start_worktree_run))
         .route("/api/worktrees/{id}/restore", post(restore_worktree))
         .route("/api/worktrees/{id}/status", get(worktree_status))
+        // Extension surfaces are worktree-scoped, so they live here and
+        // inherit `csrf_layer` — both of them execute a project-declared
+        // command, so neither may ever become a GET.
+        .route(
+            "/api/worktrees/{id}/extensions/status",
+            post(super::extensions::status),
+        )
+        .route(
+            "/api/worktrees/{id}/extensions/activate",
+            post(super::extensions::activate),
+        )
         .route("/api/worktrees/{id}/revert", post(revert_worktree))
         .route("/api/worktrees/{id}/delete", post(delete_trashed_worktree))
         .route("/api/trash", delete(empty_trash))
@@ -533,13 +544,13 @@ async fn open_worktree_storage_dir() -> Result<StatusCode, ApiError> {
 /// JSON error body: worktree/git failures carry real diagnostics ("branch
 /// already checked out at …") the UI must surface, unlike the bare status
 /// codes of the older management endpoints.
-type ApiError = (StatusCode, Json<serde_json::Value>);
+pub(crate) type ApiError = (StatusCode, Json<serde_json::Value>);
 
-fn err(code: StatusCode, msg: impl Into<String>) -> ApiError {
+pub(crate) fn err(code: StatusCode, msg: impl Into<String>) -> ApiError {
     (code, Json(serde_json::json!({ "error": msg.into() })))
 }
 
-fn db_err(e: impl std::fmt::Display) -> ApiError {
+pub(crate) fn db_err(e: impl std::fmt::Display) -> ApiError {
     warn!("desktop api database error: {e}");
     err(StatusCode::INTERNAL_SERVER_ERROR, "database error")
 }
@@ -611,7 +622,7 @@ fn write_err(e: veld_core::db::DbError) -> ApiError {
     }
 }
 
-fn open_desktop_db() -> Result<Db, ApiError> {
+pub(crate) fn open_desktop_db() -> Result<Db, ApiError> {
     open_db().map_err(|code| err(code, "failed to open the veld database"))
 }
 
@@ -1287,6 +1298,10 @@ struct IdeView {
     /// Pane types this project adds to the pane menu, with the commands
     /// stripped out.
     panes: Vec<PaneView>,
+    /// Badges, buttons and menus this project contributes to the IDE chrome,
+    /// with the commands stripped out for the same reason [`PaneView`] omits
+    /// them.
+    extensions: Vec<ExtensionView>,
     /// The project's staleness-sensitivity multiplier (default 1), so the UI
     /// colours the "update main" pill per the project's `ide` config rather than
     /// a global curve. Floored to `0.1` so a hand-written `0` cannot divide by
@@ -1345,6 +1360,75 @@ struct PaneView {
     close_on_exit: bool,
     /// Whether the pane's process may rename its tab with an OSC 0/2 title.
     allow_terminal_renaming: bool,
+}
+
+/// A config-declared extension as the UI needs to see it.
+///
+/// **The command is deliberately absent**, exactly as in [`PaneView`]: the client
+/// names an extension and the daemon resolves what that means from the project's
+/// own config, so nothing here is a command a client could edit and post back.
+#[derive(Serialize)]
+struct ExtensionView {
+    id: String,
+    label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    icon: Option<veld_core::ide::PaneIcon>,
+    /// `status`, `action` or `menu`.
+    kind: &'static str,
+    /// The slot this renders in, or `None` for one that is only referenced.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    slot: Option<String>,
+    align: &'static str,
+    /// False when something in `requires_bin` is not installed.
+    available: bool,
+    /// The required executables that were not found, so the UI can name them.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    missing: Vec<String>,
+    when_missing: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hint: Option<veld_core::ide::ExtensionHint>,
+    /// A menu's members, in order. Empty for the other kinds.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    items: Vec<String>,
+    /// How often a `status` extension wants re-evaluating. `None` for the kinds
+    /// that are not evaluated.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    refresh_seconds: Option<u64>,
+}
+
+fn extension_view(ext: &veld_core::ide::Extension) -> ExtensionView {
+    use veld_core::ide::{ExtensionAlign, ExtensionBody, WhenMissing};
+    let missing = super::pty::missing_pane_binaries(&ext.requires_bin);
+    ExtensionView {
+        id: ext.id.clone(),
+        label: ext.label.clone(),
+        description: ext.description.clone(),
+        icon: ext.icon.clone(),
+        kind: ext.kind(),
+        slot: ext.slot.clone(),
+        align: match ext.align {
+            ExtensionAlign::Start => "start",
+            ExtensionAlign::End => "end",
+        },
+        available: missing.is_empty(),
+        missing,
+        when_missing: match ext.when_missing {
+            WhenMissing::Hide => "hide",
+            WhenMissing::Disable => "disable",
+            WhenMissing::Hint => "hint",
+        },
+        hint: ext.hint.clone(),
+        items: match &ext.body {
+            ExtensionBody::Menu(menu) => menu.items.clone(),
+            _ => Vec::new(),
+        },
+        refresh_seconds: match &ext.body {
+            ExtensionBody::Status(status) => Some(status.refresh_seconds),
+            _ => None,
+        },
+    }
 }
 
 #[derive(Serialize)]
@@ -1451,6 +1535,7 @@ fn worktree_view(wt: WorktreeRecord) -> WorktreeView {
                     }
                 })
                 .collect();
+            let extensions = section.extensions.iter().map(extension_view).collect();
             // Read the floored scalar before the vec fields are moved below, so
             // the partial moves do not leave `section` half-borrowed.
             let staleness_sensitivity = section.staleness_sensitivity_safe();
@@ -1458,6 +1543,7 @@ fn worktree_view(wt: WorktreeRecord) -> WorktreeView {
                 quicklinks: section.quicklinks,
                 permissions: section.permissions,
                 panes,
+                extensions,
                 staleness_sensitivity,
                 news: section.news,
             }
@@ -3494,6 +3580,18 @@ mod tests {
                 ("DELETE", "/api/lanes/x?repo_root=/tmp", ""),
                 ("POST", "/api/pick-directory", ""),
                 ("POST", "/api/open-worktree-storage-dir", ""),
+                // Both of these execute a project-declared command, so a
+                // missing header must never reach them. Note that this proves
+                // nothing about the routes *existing* — `csrf_layer` wraps the
+                // whole router and answers before routing, so a misspelled path
+                // passes here too. `extension_routes_are_reachable` is the check
+                // for that half.
+                ("POST", "/api/worktrees/1/extensions/status", ""),
+                (
+                    "POST",
+                    "/api/worktrees/1/extensions/activate",
+                    r#"{"id":"pr"}"#,
+                ),
             ] {
                 let res = super::super::routes()
                     .oneshot(req(method, uri, false, body))
@@ -3572,6 +3670,39 @@ mod tests {
                     res.status(),
                     StatusCode::BAD_REQUEST,
                     "{method} {uri} must reject invalid input"
+                );
+            }
+        }
+
+        /// The extension endpoints are actually mounted.
+        ///
+        /// Needed as its own test because the CSRF enumeration above cannot see
+        /// it: that layer wraps the whole router and rejects before routing, so a
+        /// typo in a path is invisible there. Both an unrouted path and this
+        /// handler's own "worktree not found" answer 404, so the assertion is on
+        /// the **body** — axum's own 404 is empty, while anything that reached a
+        /// handler carries the JSON error shape.
+        #[tokio::test]
+        async fn extension_routes_are_reachable() {
+            for (uri, body) in [
+                ("/api/worktrees/999999/extensions/status", ""),
+                (
+                    "/api/worktrees/999999/extensions/activate",
+                    r#"{"id":"nope"}"#,
+                ),
+            ] {
+                let res = super::super::routes()
+                    .oneshot(req("POST", uri, true, body))
+                    .await
+                    .unwrap();
+                let status = res.status();
+                let bytes = axum::body::to_bytes(res.into_body(), 64 * 1024)
+                    .await
+                    .expect("body");
+                assert!(
+                    !bytes.is_empty(),
+                    "POST {uri} produced an empty {status} body, which is axum's \
+                     unrouted answer — the route is not mounted"
                 );
             }
         }

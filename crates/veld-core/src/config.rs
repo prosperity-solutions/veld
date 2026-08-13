@@ -3426,8 +3426,9 @@ fn check_reserved_namespaces(config: &VeldConfig, out: &mut Vec<Finding>) {
                 format!(
                     "`ide` declares {count} key(s) this version does not render ({names}); they \
                      are parsed and stored so the shape does not change when they are \
-                     implemented. `ide.quicklinks` and `ide.externalOrigins` are \
-                     rendered wherever `/ide` runs, and `ide.permissions` by Veld Desktop"
+                     implemented. `ide.quicklinks`, `ide.externalOrigins`, `ide.extensions`, \
+                     `ide.news` and `ide.git` are rendered wherever `/ide` runs, and \
+                     `ide.permissions` and `ide.panes` by Veld Desktop"
                 ),
             ));
         }

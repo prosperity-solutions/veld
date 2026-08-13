@@ -149,14 +149,14 @@ position named — which is a useful final check in its own right.
 
 - **`hooks` and `ide`.** Opaque to veld. A `command` key *inside* them is not
   veld's key and must not be touched — the loader deliberately does not look
-  there. (This is the rule the removed converter broke.) Five keys under `ide`
+  there. (This is the rule the removed converter broke.) Seven keys under `ide`
   are now interpreted — `quicklinks`, `permissions`, `externalOrigins`, `panes`,
-  `news` and the `git` subscope (`ide.git.stalenessSensitivity`), see
-  [configuration.md](configuration.md#ide-quicklinks-permissions-external-origins-panes-and-news) — but they are additions
+  `extensions`, `news` and the `git` subscope (`ide.git.stalenessSensitivity`), see
+  [configuration.md](configuration.md#ide-the-projects-own-ide-surfaces) — but they are additions
   rather than a migration: a config that has none of them is unaffected, and the
   rest of `ide` stays opaque, including the `command` exemption. Note that
-  `ide.panes[]` entries *do* use `argv`/`shell` and are read by veld, so unlike
-  the rest of `ide` they follow the v3 command rules.
+  `ide.panes[]` and `ide.extensions[]` entries *do* use `argv`/`shell` and are read
+  by veld, so unlike the rest of `ide` they follow the v3 command rules.
   A config still spelling the key `ui` gets an unknown-top-level-key error that
   names the rename — that is the whole migration.
 - **`sensitive_outputs`.** Still supported, unchanged, not deprecated.
@@ -450,6 +450,13 @@ fixed `label`. Veld's terminals also ring the bell (BEL), and the OSC 9 "notify"
 sequence raises a notification *and* rings the bell with it, naming the worktree
 and the pane's own name with a click that focuses the pane — terminal
 ergonomics, not a persisted inbox. All additive.
+
+`ide.extensions[]` is new and additive: badges, buttons and menus a project
+contributes to the IDE's top bar, each backed by an `argv`/`shell` command veld
+runs in that worktree. Nothing existing changes — a config without the key behaves
+exactly as before — and the entries follow the v3 command rules like `ide.panes[]`
+does. See
+[configuration.md](configuration.md#ideextensions-the-projects-own-badges-buttons-and-menus).
 
 It has its own page, because it is a menu rather than a migration:
 **[docs/adopting-long-running-and-ports.md](adopting-long-running-and-ports.md)**.

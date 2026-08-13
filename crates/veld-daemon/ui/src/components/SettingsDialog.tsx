@@ -79,6 +79,7 @@ import {
   showProjectNews,
   searchUrl,
   activityPrefs,
+  extensionsAutoRefresh,
   terminalAgentIntegration,
   terminalInterceptSystemOpen,
   terminalShellIntegration,
@@ -284,6 +285,7 @@ export function SettingsDialog(props: {
   const intercept = terminalInterceptSystemOpen(settings ?? {});
   const shellIntegration = terminalShellIntegration(settings ?? {});
   const agentIntegration = terminalAgentIntegration(settings ?? {});
+  const autoRefresh = extensionsAutoRefresh(settings ?? {});
   const activity = activityPrefs(settings ?? {});
   const logsTz = logsTimeZone(settings ?? {});
   const hideDisabled = hideDisabledActions(settings ?? {});
@@ -561,6 +563,19 @@ export function SettingsDialog(props: {
                   heading — because General is deliberately a flat list of the
                   settings that belong to no larger surface, so there is no heading
                   above a row to complete its sentence. */}
+              <Row
+                label="Let projects refresh their own status badges"
+                help="A project's veld.json can declare status badges for the top bar — a pull request's state, a deploy tag — each backed by a command Veld runs in that worktree and re-runs on the interval the project asked for. This is the only thing Veld runs from a repo's configuration without you clicking something, so it has a switch. Turning it off leaves the project's buttons and menus working (a click is you asking) and stops only the unattended half; badges then render nothing. Veld bounds these commands either way: no terminal is attached, so a tool that would ask for credentials fails instead of waiting; there is a hard timeout and an output limit; a minimum refresh interval and a cap on how many a project may declare; and every command is written to the daemon log with its full arguments."
+              >
+                <Checkbox
+                  size="xs"
+                  checked={autoRefresh}
+                  disabled={locked}
+                  onChange={(e) =>
+                    set({ "extensions.autoRefresh": e.currentTarget.checked })
+                  }
+                />
+              </Row>
               <Row
                 label="Worktree marker"
                 help="Both a colour and a glyph are stored for every worktree, so switching here never loses the other one. Pick either from a worktree's context menu → Change marker…"

@@ -40,6 +40,8 @@
   --warn-bg: rgba(230, 180, 60, 0.14);
   --danger: oklch(0.68 0.17 22);
   --danger-bg: rgba(224, 90, 80, 0.14);
+  --info: oklch(0.74 0.11 250);
+  --info-bg: rgba(90, 150, 240, 0.14);
   --accent: oklch(0.74 0.14 158);
   --shadow: 0 20px 50px -20px rgba(0, 0, 0, 0.6);
   --pop: 0 24px 60px -18px rgba(0, 0, 0, 0.7);
@@ -97,6 +99,8 @@ body[data-theme="light"] {
   --warn-bg: rgba(180, 130, 20, 0.12);
   --danger: oklch(0.56 0.16 25);
   --danger-bg: rgba(200, 60, 50, 0.1);
+  --info: oklch(0.52 0.14 255);
+  --info-bg: rgba(50, 110, 210, 0.12);
   --accent: oklch(0.58 0.13 158);
   --shadow: 0 18px 44px -22px rgba(30, 40, 50, 0.28);
   --pop: 0 22px 54px -20px rgba(30, 40, 50, 0.32);
@@ -324,6 +328,97 @@ body[data-fullscreen="true"] .topbar.electron {
 .topbar .mantine-Input-wrapper {
   --input-height: var(--topbar-control-h) !important;
 }
+/* `ide.extensions` status badges.
+ *
+ * **A Button, not a Badge.** These *are* controls — a click opens the pull
+ * request, a right-click opens a menu — so a real `<button>` is the honest
+ * element, and it is what a keyboard reaches. It also stops this block
+ * re-deriving what the bar already levels: height, font size, weight and the
+ * theme's `md` radius all arrive from the `.mantine-Button-root` rules above, so
+ * a badge is the same box as the buttons beside it instead of a 20px pill with
+ * its own corner radius. Mantine's `loading` prop then supplies the first-run
+ * spinner, centred, in place of the icon and without changing the width.
+ *
+ * What is left here is only the colour. */
+.topbar .ext-badge {
+  /* The product tone tokens, not Mantine's palette. Mantine's `light` variant
+     puts its own shade-6 text on a shade-0 fill, which measured 3.0:1 for
+     yellow — bright fill, unreadable label, and the first thing anyone
+     complained about.
+   *
+   * **The text is the tone mixed 75% with `--text`, and that mix is the fix.**
+     The bare tokens are tuned for icons, pills and borders, where a 3:1 ratio
+     is fine; as *text on a tinted fill* the light theme measured 3.29:1 for
+     `--warn` and 4.36:1 for `--danger`, both under 4.5:1. Mixing toward the
+     foreground clears it in both themes at once — 4.9:1 worst case — without
+     touching tokens other surfaces already depend on, and without a second set
+     of near-duplicate colors to keep in step. Do not "simplify" it back to the
+     bare token: the ratio is the accessibility property, not a style choice. */
+  --button-color: color-mix(in oklab, var(--tone, var(--muted)) 75%, var(--text)) !important;
+  --button-bg: var(--tone-bg, transparent) !important;
+  --button-hover: color-mix(in oklab, var(--tone, var(--muted)) 18%, transparent) !important;
+  /* `MAX_TEXT_CHARS` bounds the badge's *characters*, which is not a width: 60 CJK
+     or emoji characters are roughly twice as wide as 60 Latin ones, and a badge
+     showing a commit subject can be long in any script. `.topbar` is a flex row with
+     no `overflow`, so without a width bound the badge either collapses its
+     shrinkable siblings or pushes the row past the window. */
+  max-width: 22ch;
+}
+.topbar .ext-badge .mantine-Button-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: block;
+}
+.topbar .ext-badge.tone-success {
+  --tone: var(--live);
+  --tone-bg: var(--live-bg);
+}
+.topbar .ext-badge.tone-warning {
+  --tone: var(--warn);
+  --tone-bg: var(--warn-bg);
+}
+.topbar .ext-badge.tone-danger {
+  --tone: var(--danger);
+  --tone-bg: var(--danger-bg);
+}
+.topbar .ext-badge.tone-info {
+  --tone: var(--info);
+  --tone-bg: var(--info-bg);
+}
+.topbar .ext-badge.tone-neutral {
+  --tone: var(--muted);
+  --tone-bg: color-mix(in oklab, var(--muted) 12%, transparent);
+}
+/* An unavailable extension rendered as a hint: legible, but plainly not live
+   state. Dashed rather than dimmer, because a project's install instruction has
+   to survive being ignored twice. */
+.topbar .ext-badge-hint {
+  --button-bd: 1px dashed var(--border2) !important;
+  --tone-bg: transparent;
+}
+/* An unavailable action or menu that is still clickable, because it has an install
+   link to hand over. It must *read* as unavailable without being `disabled`, which
+   would take `pointer-events` with it and leave the newcomer path dead at its last
+   step. */
+.topbar .ext-unavailable {
+  opacity: 0.55;
+}
+/* A menu member is rendered in a portal, so it is not inside `.topbar` — the same
+   class needs an unscoped rule to reach it. Without this an unavailable member that
+   stays clickable for its install link looks like a working command. */
+.ext-unavailable {
+  opacity: 0.55;
+}
+
+/* The first evaluation, before there is a value. Deliberately still the label the
+   config declared: something in the bar is about to say something about this
+   worktree, and a placeholder that names it beats a grey rectangle. */
+.topbar .ext-badge-loading {
+  --tone: var(--faint);
+  --tone-bg: color-mix(in oklab, var(--muted) 8%, transparent);
+}
+
 /* One type size and one weight for the whole bar, matching the fields.
  *
  * Mantine's `compact-sm` button is 14px medium, its `xs` input 12px regular, and

@@ -327,10 +327,65 @@ export interface IdeSection {
    * nothing the client holds can change what gets run.
    */
   panes: PaneSpec[];
+  /**
+   * Badges, buttons and menus the project contributes to the IDE chrome.
+   *
+   * **No commands here either**, for the reason `panes` carries none. Optional
+   * in the type so an older daemon that omits it reads as "declares none".
+   */
+  extensions?: ExtensionSpec[];
   /** The project's staleness-sensitivity multiplier for the "update main"
    *  pill (`ide.git.stalenessSensitivity`, default 1). Optional in the type so
    *  a fixture or an older daemon that omits it falls back to the default. */
   staleness_sensitivity?: number;
+}
+
+/** Mirrors `ExtensionView` in `crates/veld-daemon/src/desktop.rs`. */
+export interface ExtensionSpec {
+  id: string;
+  label: string;
+  description?: string;
+  icon?: PaneIcon;
+  kind: "status" | "action" | "menu";
+  /** The slot it renders in. Absent means it is only reachable by reference —
+   *  from a menu's `items`, or from a status value's `actions`. */
+  slot?: string;
+  align: "start" | "end";
+  /** False when something in `requires_bin` is not installed. */
+  available: boolean;
+  missing?: string[];
+  when_missing: "hide" | "disable" | "hint";
+  hint?: { text: string; href?: string };
+  /** A menu's members, in order — ids of `action` extensions. */
+  items?: string[];
+  /** How often a `status` extension wants re-evaluating. */
+  refresh_seconds?: number;
+}
+
+/** Mirrors `StatusView` in `crates/veld-daemon/src/extensions.rs`. */
+export interface ExtensionStatus {
+  id: string;
+  /** A glyph the command's *output* asked for, from the same allowlist
+   *  `veld.json` uses — so a badge can change its glyph with its state. */
+  icon?: PaneIcon;
+  /**
+   * `empty` is not a failure — a command that exits 0 with no output is saying
+   * "nothing to show for this worktree", and the badge is simply not rendered.
+   */
+  state: "ok" | "empty" | "failed" | "timeout" | "unavailable";
+  text?: string;
+  tone: "neutral" | "info" | "success" | "warning" | "danger";
+  tooltip?: string;
+  href?: string;
+  /** Where `href` goes. `system` is the default because a badge's link is a
+   *  provider's authenticated page, not a localhost dev server. */
+  open_in: "system" | "pane";
+  /** Actions this value offers, **already resolved against the config** by the
+   *  daemon — the client may only ever activate one of these. */
+  actions?: { id: string; label: string }[];
+  refresh_seconds: number;
+  /** Age of the value. Non-zero when another window's recent run was reused. */
+  age_seconds: number;
 }
 
 /** Mirrors `PaneView` in `crates/veld-daemon/src/desktop.rs`. */
@@ -1295,6 +1350,51 @@ export const api = {
       method: "POST",
       body: JSON.stringify(node ? { action, node } : { action }),
     }),
+  /**
+   * Evaluate a worktree's `status` extensions and return what they printed.
+   *
+   * A POST because it **runs project-declared commands** — the same reason
+   * `runAction` is one. The daemon single-flights per extension, so several
+   * windows asking at once spend one child process; a call inside an
+   * extension's own `refresh_seconds` is answered from that run rather than
+   * starting another, with `age_seconds` saying so.
+   *
+   * Returns an empty list when the machine's `extensions.autoRefresh` setting
+   * is off, or when the worktree has no loadable veld config.
+   */
+  extensionStatus: (
+    worktreeId: number,
+    opts?: {
+      /** The user asked: ignore the declared interval and re-run. Bounded
+       *  server-side by a 3s floor, so click-spam cannot fork a process per
+       *  click. */
+      force?: boolean;
+      /** Force only this extension; the rest answer from what they had. */
+      id?: string;
+    },
+  ) => {
+    const q = new URLSearchParams();
+    if (opts?.force) q.set("force", "true");
+    if (opts?.id) q.set("id", opts.id);
+    const qs = q.size > 0 ? `?${q}` : "";
+    return request<{ items: ExtensionStatus[] }>(
+      `/api/worktrees/${worktreeId}/extensions/status${qs}`,
+      { method: "POST" },
+    );
+  },
+  /**
+   * Run an `action` extension the user clicked.
+   *
+   * Only ever sends the **id**; the daemon looks the command up in the
+   * project's config. Throws with the tool's own message when the binary is
+   * missing or the command fails within its grace window — an editor launcher
+   * that is still running when the window closes counts as success.
+   */
+  activateExtension: (worktreeId: number, id: string) =>
+    request<{ state: string }>(
+      `/api/worktrees/${worktreeId}/extensions/activate`,
+      { method: "POST", body: JSON.stringify({ id }) },
+    ),
   /** Launch the *operating system's* terminal app at a path. Unrelated to the
    *  in-app terminal panes below, which never leave the browser. */
   openTerminal: (path: string) =>

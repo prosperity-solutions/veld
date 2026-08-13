@@ -8,10 +8,18 @@ description: >
   the user wants to show their UI to a human for review, get visual feedback on
   changes, watch for comments, or run a feedback loop — even if they say
   "let me check," "show the user," "wait for feedback," or "let them review it."
+  Also use when they want to customize the Veld IDE for a project — add a status
+  badge (pull request state, CI, a deploy tag), a button that opens the worktree in
+  an editor, a menu of project actions, or tell the team something changed.
   Covers any `veld` CLI command.
 triggers:
   - veld
   - veld.json
+  - customize the veld ide
+  - ide.extensions
+  - status badge in the top bar
+  - show pr status in veld
+  - open worktree in editor
   - start the environment
   - show the user
   - get feedback
@@ -294,6 +302,12 @@ are the operator's domain setup.
 
 For the full config schema, variables, and node types, see [reference/config.md](reference/config.md) — **read its "Authoring principles" section first.**
 
+Two capabilities under `ide` are worth knowing you have before a user asks for
+something you think veld cannot do: [customizing the IDE's top
+bar](#customizing-the-ide-for-this-project-ideextensions) with the project's own
+badges, buttons and menus, and [telling the team something
+changed](#telling-this-projects-team-something-changed-idenews).
+
 The short version, because the wrong instinct here is expensive:
 
 - **Deduplicate values, never structure.** Which keys a node has stays written in
@@ -481,6 +495,102 @@ that is documentation, and the docs already have it.
 
 See [reference/config.md](reference/config.md) and
 [docs/promotions.md](docs/promotions.md).
+
+## Customizing the IDE for this project (`ide.extensions`)
+
+**A capability worth knowing you have.** A project can put its own badges, buttons
+and menus in the Veld IDE's top bar: the state of this branch's pull request, a
+button that opens the worktree in the user's editor, the deploy tag currently live.
+Each one is backed by a command veld runs in that worktree, and **veld never learns
+your code host's name** — the command prints a small contract and veld renders it,
+so the provider-specific half stays in the repo. A GitHub project ships a script
+calling `gh`; a GitLab project ships the same declaration with `glab` behind it.
+
+**Read this before writing one.** The bar already carries around sixteen controls,
+and a badge is *permanently* on screen — unlike a notification it never goes away,
+so one nobody reads is worse than none: it teaches people to ignore that row. Add a
+badge only when somebody looks the thing up several times a day, the answer is short
+enough to read without stopping, and it is about *this worktree* (a project-wide
+fact belongs in the README). An `action` is much cheaper — it costs nothing when
+idle — and inside a `menu` it costs almost nothing, so prefer actions and menus when
+in doubt. **Ask the user before adding extensions they did not request**: these are
+committed to a shared repo and show up in every teammate's IDE.
+
+Once that is settled:
+
+```jsonc
+// veld.json, or veld.d/*.jsonc — `ide` may be split across include files
+"ide": {
+  "extensions": [
+    // A badge. Its command prints one JSON object; veld renders it.
+    { "id": "pr", "slot": "topBar", "type": "status", "label": "PR",
+      "icon": "git-pull-request",
+      "argv": ["scripts/veld/pr-badge.sh"],
+      "refresh_seconds": 60,              // default 60, floored at 15
+      "requires_bin": ["gh"],             // names on PATH — never for a GUI app
+      "when_missing": "hint",             // hint (default) | disable | hide
+      "hint": { "text": "Install the GitHub CLI to see this branch's pull request.",
+                "href": "https://cli.github.com" } },
+
+    // One control instead of one button per editor. Group at three.
+    { "id": "open-in", "slot": "topBar", "type": "menu",
+      "label": "Open this worktree in", "icon": "external-link",
+      "items": ["vscode", "webstorm"] },
+
+    // No `slot`: declared to be *referenced* — by the menu above, or by a
+    // badge's own output. This is how three editors cost one control.
+    { "id": "vscode", "type": "action", "label": "VS Code",
+      "shell": "command -v code >/dev/null 2>&1 && exec code \"${veld.root}\" || exec open -a \"Visual Studio Code\" \"${veld.root}\"" }
+  ]
+}
+```
+
+The four things that decide whether it works:
+
+1. **The badge's stdout is the contract**, and its tolerances do most of the work:
+   non-contract output becomes the text (so `git rev-parse --short HEAD` needs no
+   adapter), **exit 0 with no output hides the badge** — use that for "not
+   applicable to this worktree" instead of printing `n/a` — and a non-zero exit
+   renders it red with your **last stderr line** as the tooltip, so write a real
+   message there.
+2. **`actions` in the output are ids of declared `action` entries, never commands.**
+   Veld resolves them against the config, so a command can *choose* among your
+   commands and never contribute one. This is what makes the empty state useful: no
+   pull request yet → `{"text":"No PR","actions":[{"id":"create-pr"}]}`.
+3. **`open_in` is a question about whose session the page belongs to.** Behind a
+   login the developer holds (code host, CI, cloud console, error tracker) →
+   `system`, the default, because a pane has its own cookie jar and lands them on a
+   sign-in page. Served by the run itself (localhost, staging on the same session, a
+   local report) → `pane`. In doubt: are they already signed in to it elsewhere?
+4. **`${veld.branch}` is slugified, so it is not a git ref.** `feat/foo` arrives as
+   `feat-foo`. `gh pr view "${veld.branch}"` is therefore not an error but a *wrong
+   answer* — on any branch with a `/`, a `.` or a capital it reports no pull request
+   and offers to create a second one. Read the real ref inside the command
+   (`git rev-parse --abbrev-ref HEAD`), which is what this repo's adapter does. The
+   slugging is deliberate: the branch name belongs to whoever opened the pull
+   request you checked out, so a `shell` command interpolating it raw would be
+   running their string. The scope is otherwise the pane one minus `pane.*`:
+   `${veld.root}`, `${veld.worktree}`, `${veld.project}`, `${veld.username}`.
+5. **`requires_bin` asks `PATH`, so never use it for a GUI application.** `code`,
+   `webstorm` and `idea` are launchers installed *separately* from the editor, so
+   the check hides the option on a machine where the app is right there. Leave it
+   off and let the command fall back to the bundle, as the `vscode` entry above
+   does.
+
+Then verify — `veld lint` is the **only** check that a declaration took, because
+everything under `ide` is lenient by design (a malformed entry is a warning and a
+dropped entry, never a load error):
+
+```sh
+veld lint                       # unknown key, dangling reference, bad variable, clamped interval
+./scripts/veld/pr-badge.sh      # run it yourself: is stdout one JSON object?
+```
+
+**Full authoring guide — worked adapters, the tone and icon vocabularies, grouping,
+and the bounds veld enforces (only the visible worktree, one child process across
+windows, 20s deadline, 24 extensions max, the `extensions.autoRefresh` switch) — is
+in [reference/extensions.md](reference/extensions.md).** Field table:
+[reference/config.md](reference/config.md#ideextensions).
 
 ## Feedback Loop
 
@@ -759,6 +869,7 @@ step's stdin is `/dev/null` — one that prompts fails on EOF instead of hanging
 - **`ide.permissions` origins need a `*.` wildcard for veld's own URLs.** They are `{service}.{run}.{project}.localhost`, so the **run name is in the hostname** and a pinned host matches exactly one run — write `https://*.veld.localhost:*` — the host wildcard matches any depth of subdomain, and the `:*` is needed because an unprivileged install serves on 18443 while an omitted port means 443. `*.com`-style wildcards over a single label are refused, `*.x` does not match `x` itself, and an omitted port means the scheme's *default* port, not any port. A user's own answer always beats the config, and malformed rules are dropped with a lint warning rather than failing the load — so `veld lint` is the check that a rule actually took. Full rules: `reference/config.md`
 - **`ide.panes` adds pane types to Veld Desktop's dock** — `{ id, type: "terminal", label, icon, requires_bin, argv|shell, resume, auto_resume, allow_terminal_renaming }`. `requires_bin` is executable *names* looked up on PATH (never paths, never a command veld runs to decide). `${veld.pane.token}` is a UUID veld mints per pane and remembers in its database — pass it to a tool's session flag (`claude --session-id`) and the pane's `resume` command (`claude --resume`) picks that conversation back up after a reboot. **The token never leaves the daemon.** A fresh launch always mints a new one, so "start fresh" really is a new conversation. A tool that will not accept an id needs no token: `codex` pairs `{"argv":["codex"]}` with `{"resume":{"argv":["codex","resume","--last"]}}`, trading per-pane identity (two such panes resume the same session) for the same Resume button. **A pane command runs inside your login+interactive shell** (`<shell> -l -i -c '<command>'`, where `<shell>` is the `terminal.shell` setting — default: your login shell) — the same shell a plain terminal opens — so it inherits everything `.zprofile`/`.zshrc` export (model tokens, tool paths), not just the injected `PATH`. The wrapper shell exits with the command's status, so `close_on_exit` is unaffected The pane chooser shows every declared pane as an **equal card in declaration order** beside veld's plain Terminal, each with its `description` under the label — so always write a `description`; it is what distinguishes four agent panes. Nothing is promoted, there is no `primary` flag, and an unavailable pane keeps its card with the missing binary named on that line
 - **`auto_resume` only fires when a pane comes into being** — app start with the shell already gone. Never while you are watching: an exit you saw always waits for a click, whatever the config says. It defaults to `false` because these commands launch coding agents, and a failed `resume` is never retried as a fresh launch. **`auto_resume` is trust in the repo, not in the command you clicked** — the `resume` command is re-read from `veld.json` at every restore, so a `git pull` changes what runs unattended; it is the only place a config command runs on app launch rather than on `veld start` or a click. In a `shell` pane, quote interpolations and prefer `argv`: `${veld.branch}` is attacker-choosable via a PR branch name. Pane commands see a *small* scope: `${veld.pane.id|label|token}`, `${veld.worktree}`, `${veld.root}`, `${veld.branch}`, `${veld.project}`, `${veld.username}` — anything else is a lint problem. There are no pane *variants*; two modes are two entries. `close_on_exit` (default **true**) closes a pane on a *clean* exit only — a non-zero exit always keeps it so the error is readable, and it only fires on an exit someone saw, so it never competes with `auto_resume`
+- **`ide.extensions` badges are a *contract*, not an integration — and three things about them surprise people.** A `status` command prints `{ text, tone, icon, tooltip, href, open_in, actions }` on stdout and veld renders it, so veld never learns a code host's name. (1) **Output that is not the contract becomes the badge text**, first line only, so `git rev-parse --short HEAD` is already a working badge; **exit 0 with no output hides the badge** ("not applicable here"); **a non-zero exit renders it red with your last stderr line as the tooltip** — so write a real message to stderr rather than swallowing errors. (2) A badge's `actions` are **ids of declared `action` entries, never commands**: veld resolves each against the on-disk config, so a running command chooses among declared commands and cannot introduce one. (3) **`open_in` defaults to `system`** — the *opposite* of `ide.quicklinks` — because a badge's link is normally behind a login the developer holds and a pane has its own cookie jar; only write it to say `pane`. Also: **never put `requires_bin` on something with a GUI** (`code`/`webstorm`/`idea` are launchers installed separately from the editor, so a PATH check hides the option on a machine that has the app). **Declarations come from the checked-out worktree**, like everything else veld runs — that is the rule, not a special case, and it is what makes an extension testable in a branch before it is merged (an extension keeps no persisted state). The flip side: checking out somebody else's branch runs their badge commands, and `extensions.autoRefresh` is the lever for reviewing untrusted ones. **`ide.news` is the deliberate exception** to the rule — main-only, because a card is published to teammates and recorded in their database against an id that can never be reused. Full authoring guide, worked adapters and the bounds veld enforces: [reference/extensions.md](reference/extensions.md)
 - **`ide.externalOrigins` is the exempt list for terminal URLs, not a block list.** A URL a Veld terminal produces (clicked in the output, or opened by a program in the shell via `$BROWSER`) becomes an embedded browser pane; an origin listed here goes to the user's real browser instead, because a pane has its own cookie jar and an SSO flow in one starts from scratch. Same origin grammar as `ide.permissions`, same lint treatment. It is **unioned** with the user's `browser.externalOrigins` setting — a project cannot remove a user's entry, and cannot turn the feature off (that is the user's `terminal.openUrlsInApp`)
 - **Every *other* unknown top-level key is an error** reported by `veld lint`/`veld start` — not a load failure, so a typo never blocks `veld stop`
 - **No default header stripping** — Veld no longer strips `Origin` by default (it used to, for dev-server WS HMR). `Origin` now passes through the local proxy and is rewritten coherently by the gateway. If a Next.js dev server rejects WS HMR, set `allowedDevOrigins` in `next.config.js`; the escape hatch is `"proxy": { "request": { "remove": ["Origin"] } }`. Proxy header rules never apply to direct peer shares (`veld share` without `--web`)

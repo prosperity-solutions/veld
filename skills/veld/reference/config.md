@@ -671,7 +671,7 @@ Reverse-proxy header rules applied by the **local Caddy proxy** (local dev) and 
 - `remove`: header names to strip. `set`: name → value map (replaces any existing value). Header names matched case-insensitively.
 - **Default change:** Veld no longer strips `Origin` by default (it used to, so dev-server WS HMR worked). `Origin` now passes through the local proxy; the gateway rewrites it *coherently* to the origin host on all requests (incl. WS upgrades) rather than dropping it. If a Next.js dev server rejects WS HMR on `Origin`, set `allowedDevOrigins` in `next.config.js` (recommended — https://nextjs.org/docs/app/api-reference/config/next-config-js/allowedDevOrigins). Escape hatch for frameworks with no allow-list: `"proxy": { "request": { "remove": ["Origin"] } }`.
 
-## `ide` — quicklinks, permissions, external origins, panes and news
+## `ide` — the project's own IDE surfaces
 
 Per-project settings for Veld's own IDE surfaces (Veld Desktop, and `/ide` in a
 browser). Absent from most configs, and never affects a run. Every key under `ide`
@@ -868,6 +868,83 @@ guessing which test script works". If the sentence would read as true to somebod
 who will never touch that part of the repo, it describes the change instead of
 their day. Ask the user before adding one unless they asked: it is a message
 published to their colleagues in their name.
+### `ide.extensions`
+
+> **Authoring guide: [extensions.md](extensions.md).** This is the field table; that
+> is how to decide what to write, with worked adapters. Read it before adding one —
+> the commonest mistake is a badge nobody needed, not a malformed entry.
+
+Badges, buttons and menus the project contributes to the IDE chrome. One flat
+array; **`slot` is a field, not a level of structure**, so a future slot costs a
+string. `type` discriminates the shape.
+
+| Field | Notes |
+|---|---|
+| `id` | Required. Unique among this project's extensions, `[A-Za-z0-9_-]`, ≤64. What a menu's `items` and a badge's `actions` name |
+| `type` | Required. `status` \| `action` \| `menu` |
+| `slot` | `topBar` today. **Omit on an `action`** for one that only exists to be referenced; required for `status`/`menu` |
+| `align` | `start` (default) \| `end` — left cluster is the project's, right is the app's |
+| `label` | Defaults to `id`. An `action` with no `icon` renders its label as text |
+| `description` | Tooltip |
+| `icon` | A pane-icon name (same allowlist as `ide.panes`) or an emoji |
+| `requires_bin` | Executable *names* on PATH, never paths |
+| `when_missing` | `hint` (default) \| `disable` \| `hide` |
+| `hint` | `{ text, href }` for `when_missing: "hint"`; `href` is http(s) only |
+| `argv` \| `shell` | `status`/`action` only, exactly one |
+| `refresh_seconds` | `status` only. Default 60, floored at 15 |
+| `open_in` | `status` only. `system` (default) \| `pane` — where `href` opens |
+| `items` | `menu` only. Ids of declared `action` extensions, ≥1 |
+
+A `status` command's stdout is the badge:
+`{ "text", "tone": neutral|info|success|warning|danger, "icon", "tooltip", "href", "open_in", "actions": [{ "id", "label" }] }`.
+`icon` takes the same allowlist/emoji the declaration's does and **overrides it**,
+so a badge can change its glyph with its state.
+Three tolerances carry most of the ergonomics: **non-contract output becomes the
+text** (first line only — so `git rev-parse --short HEAD` is a working badge with
+no adapter), **exit 0 with no output hides the badge** ("not applicable here"), and
+**a non-zero exit renders it red with the last stderr line as the tooltip**, so a
+broken extension is never silent.
+
+Gotchas worth knowing before writing one:
+
+- **`actions` are ids, never commands.** veld resolves each against the on-disk
+  config before offering it, so a badge's output *chooses* among declared actions
+  and cannot introduce one. An unresolvable id is dropped silently at runtime; a
+  `menu`'s bad `items` are dropped with a lint problem instead, because those are
+  visible at parse time.
+- **Variables are the pane set minus `pane.*`**: `${veld.root}`, `${veld.branch}`,
+  `${veld.worktree}`, `${veld.project}`, `${veld.username}`. Anything else is a
+  lint problem, not a runtime failure.
+- **`open_in` defaults to `system`**, the opposite of `ide.quicklinks` — a badge's
+  link is a provider page the user is signed in to, and a pane has its own cookie
+  jar. **The rule when writing one:** behind a login the developer holds (code
+  host, CI, cloud console, error tracker) → `system`; served by the run itself
+  (localhost, staging on the same session, a local report) → `pane`. In doubt, ask
+  whether they are already signed in to it elsewhere.
+- **Never put `requires_bin` on something with a GUI.** `code`, `webstorm` and
+  `idea` are launchers installed *separately* from the editor, so a PATH check
+  hides the option on a machine that has the app. Leave it off and let the command
+  fall back:
+  `command -v code >/dev/null 2>&1 && exec code "${veld.root}" || exec open -a "Visual Studio Code" "${veld.root}"`.
+- **An explicit `when_missing` beats the user's "hide disabled actions" setting**,
+  so a project's install hint cannot be silenced by a clutter preference.
+- **A `menu` whose `items` all resolve to nothing is dropped whole**, and one whose
+  members are merely *not installed* renders nothing — no empty popovers.
+- **Only the visible worktree is evaluated**, only while a window is open, and
+  several windows share one child process. A request inside `refresh_seconds` is
+  answered from the previous run (`age_seconds` says so).
+- **The command gets no tty and a closed stdin**, so an unauthenticated CLI fails
+  with its login hint rather than hanging. 20s deadline, process-group kill,
+  output capped, max **24** extensions per project, full argv logged.
+- **`extensions.autoRefresh`** (a user setting, default on) turns the unattended
+  half off machine-wide; actions and menus keep working, because a click is the
+  user asking. There is no consent prompt by design — see
+  `docs/extensions-vision.md`.
+- **A right-click on a badge re-runs it** (or all of them). A forced refresh
+  ignores `refresh_seconds`, bounded by a 3s floor instead, and surfaces its own
+  errors — unlike the background poll, which is deliberately silent. Running an
+  `action` also forces a re-read, since an action usually changes what a badge
+  says.
 
 ### `ide.panes`
 

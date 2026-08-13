@@ -2031,12 +2031,12 @@ already lost its leading zero, so it is refused rather than guessed at.
 
 ---
 
-## `ide`: quicklinks, permissions, external origins, panes and news
+## `ide`: the project's own IDE surfaces
 
 `ide` is where a project configures Veld's own IDE surfaces — Veld Desktop and
-the `/ide` view in a browser. Five keys under it are interpreted — `quicklinks`,
-`permissions`, `externalOrigins`, `news` and the `git` subscope; the rest of `ide`
-stays reserved and opaque (see
+the `/ide` view in a browser. Seven keys under it are interpreted — `quicklinks`,
+`permissions`, `externalOrigins`, `panes`, `extensions`, `news` and the `git`
+subscope; the rest of `ide` stays reserved and opaque (see
 [below](#reserved-hooks-and-the-rest-of-ide)), so a JSON-defined IDE extension is
 free to use whatever shape it likes.
 
@@ -2657,14 +2657,22 @@ every other daemon-spawned command follows.
 #### Pane icons
 
 `icon` takes either an emoji (any non-ASCII string, e.g. `"🤖"`) or one of these
-names, from [Tabler](https://tabler.io/icons), which is the set every built-in
-pane tab uses:
+names, from [Tabler](https://tabler.io/icons) — the set every built-in pane tab
+uses, and the same allowlist [`ide.extensions`](#ideextensions) draws on. The list
+below is checked against `veld_core::ide::PANE_ICON_NAMES` by a test, so it cannot
+drift out of date:
 
-`atom` · `bolt` · `book` · `brain` · `bug` · `bulb` · `chart-line` · `cloud` ·
-`code` · `compass` · `cpu` · `database` · `flask` · `git-branch` · `key` ·
-`map` · `message-chatbot` · `notebook` · `package` · `player-play` · `plug` ·
-`puzzle` · `refresh` · `robot` · `rocket` · `search` · `server` · `shield` ·
-`sparkles` · `terminal-2` · `tool` · `wand`
+`alert-triangle` · `app-window` · `atom` · `bolt` · `book` · `brain` ·
+`brand-github` · `brand-gitlab` · `brand-vscode` · `browser` · `bug` · `bulb`
+· `chart-line` · `check` · `circle-check` · `clock` · `cloud` · `cloud-upload`
+· `code` · `compass` · `cpu` · `database` · `device-desktop` · `download` ·
+`external-link` · `eye` · `file-code` · `flag` · `flask` · `folder` · `gauge`
+· `git-branch` · `git-commit` · `git-merge` · `git-pull-request` · `hourglass`
+· `key` · `link` · `list-check` · `lock` · `map` · `message-chatbot` ·
+`notebook` · `package` · `palette` · `player-play` · `plug` · `puzzle` ·
+`refresh` · `robot` · `rocket` · `search` · `server` · `shield` ·
+`shield-check` · `sparkles` · `star` · `tag` · `terminal-2` · `tool` ·
+`upload` · `wand` · `x`
 
 It is an allowlist rather than "any Tabler name" because the app has to bundle
 every icon that can be rendered. An ASCII string means "this is a name", so a
@@ -2688,13 +2696,241 @@ conversation am I resuming" from having an answer nobody can predict.
 
 ---
 
+### `ide.extensions`: the project's own badges, buttons and menus
+
+The top bar can carry things this project decides on: a badge showing the state of
+this branch's pull request, a menu that opens the worktree in your editor, a
+deploy tag, a coverage number. Each one is declared here and backed by a command
+veld runs in that worktree.
+
+**Veld never learns your code host's name.** A badge's command prints a small
+provider-agnostic contract and veld renders it; the provider-specific half is the
+command. That is the whole boundary — a GitHub project ships a script calling
+`gh`, a GitLab project ships the same declaration with a `glab` script behind it,
+and neither one is a veld feature.
+
+```jsonc
+{
+  "ide": {
+    "extensions": [
+      {
+        "id": "pr",
+        "slot": "topBar",
+        "type": "status",
+        "label": "PR",
+        "argv": ["scripts/veld/pr-badge.sh"],
+        "refresh_seconds": 60,
+        "requires_bin": ["gh"],
+        "when_missing": "hint",
+        "hint": {
+          "text": "Install the GitHub CLI to see this branch's pull request.",
+          "href": "https://cli.github.com"
+        }
+      },
+
+      // One control, not one button per editor.
+      { "id": "open-in", "slot": "topBar", "type": "menu", "label": "Open this worktree in",
+        "icon": "external-link", "items": ["vscode", "webstorm"] },
+
+      // No `slot`, so these never render on their own — the menu above is how they
+      // are reached, in the order it lists them.
+      //
+      // **And no `requires_bin`, deliberately** — see [when the tool is not
+      // installed](#when-the-tool-is-not-installed). `code` and `webstorm` are
+      // launchers installed *separately* from the editor, so a PATH check hides the
+      // option on a machine that has the application. The command finds it instead.
+      { "id": "vscode", "type": "action", "label": "VS Code",
+        "shell": "command -v code >/dev/null 2>&1 && exec code \"${veld.root}\" || exec open -a \"Visual Studio Code\" \"${veld.root}\"" },
+      { "id": "webstorm", "type": "action", "label": "WebStorm",
+        "shell": "command -v webstorm >/dev/null 2>&1 && exec webstorm \"${veld.root}\" || exec open -a WebStorm \"${veld.root}\"" }
+    ]
+  }
+}
+```
+
+Every entry takes these:
+
+| Field | Meaning |
+|---|---|
+| `id` | Required. Stable, unique among this project's extensions, `[A-Za-z0-9_-]`, ≤64 chars. What a menu's `items` and a badge's `actions` name. |
+| `type` | Required. `status`, `action` or `menu`. |
+| `slot` | Where it renders — `topBar` today. **Omit it on an `action`** to declare one that is only reachable by reference. Required for `status` and `menu`. |
+| `align` | `start` (default) or `end`. The bar's left cluster is what this project does and the right is what the app does, so a project's own things default left. |
+| `label` | The text or tooltip. Defaults to `id`. |
+| `description` | One line, used as the tooltip. |
+| `icon` | A [pane icon](#pane-icons) name or an emoji. An `action` with no icon renders its label as text instead. |
+| `requires_bin` | Executables that must be on your `PATH`, by name. |
+| `when_missing` | `hint` (default), `disable` or `hide` — see [below](#when-the-tool-is-not-installed). |
+| `hint` | `{ text, href }`, shown when `when_missing` is `hint`. `href` is `http(s)` only. |
+
+A `status` and an `action` additionally take **`argv` or `shell`**, exactly one,
+with the same meaning they have everywhere else in this file. Interpolation uses
+the [pane variables](#variables-in-a-pane-command) minus the `pane.*` family:
+`${veld.root}`, `${veld.branch}`, `${veld.worktree}`, `${veld.project}`,
+`${veld.username}`. Anything else is a `veld lint` finding rather than a badge
+that fails to run.
+
+**`${veld.branch}` is slugified, so it is not a git ref.** `feat/foo` reaches the
+command as `feat-foo`, and `Fix.Thing` as `fix-thing`. That is deliberate — the same
+value in a pane command is slugified because a branch name is chosen by whoever
+opened the pull request you checked out, so a `shell` command interpolating it raw
+would run their string — but it means the obvious
+`gh pr view "${veld.branch}"` is **not an error, it is a wrong answer**: on any
+branch with a `/`, a `.` or a capital it reports no pull request and offers to
+create a second one. Get the real ref inside the command
+(`git rev-parse --abbrev-ref HEAD`), which is what this repo's own adapter does.
+
+#### `type: "status"` — a badge
+
+Veld runs the command in the worktree root and reads stdout:
+
+```json
+{ "text": "PR #284 · checks green", "tone": "success", "icon": "git-pull-request",
+  "tooltip": "…", "href": "https://github.com/…/pull/284",
+  "actions": [{ "id": "create-pr" }] }
+```
+
+`tone` is one of `neutral`, `info`, `success`, `warning`, `danger`. `icon` takes
+the same names and emoji the declaration's `icon` does, and **overrides it** — a
+badge showing a merge mark once merged and a clock while CI runs is the point.
+Everything is optional, and three tolerances mean most commands need no adapter at
+all:
+
+- **Output that is not this contract** becomes the badge text, first line only. So
+  `"argv": ["git", "rev-parse", "--short", "HEAD"]` is already a working badge.
+- **Exit 0 with no output** means *nothing to show* — the badge is absent. That is
+  how one config serves worktrees where the badge does not apply.
+- **A non-zero exit** renders the badge in `danger` with the command's own last
+  stderr line as its tooltip. A broken extension is visible, never silent.
+
+`actions` name **declared `action` extensions by id**, never commands. Veld
+resolves each id against your config before offering it, so a badge's output
+chooses among the actions you declared and can never introduce one. An optional
+`label` per entry overrides the button text. Clicking a badge opens its `href` if
+that is all it has, runs the single action if that is all it has, and otherwise
+opens a small menu.
+
+`open_in` decides where `href` goes: **`system` (the default) is your own
+browser**, because a badge's link is normally a page you are already signed in to,
+and a Veld browser pane has its own cookie jar. `pane` opens it in a pane instead.
+A badge may override it per value by printing `"open_in"` itself.
+
+**Which one to pick is a question about whose session the page belongs to**, and it
+is the easiest field to get wrong when writing a config (including for a coding
+agent doing it on a project's behalf):
+
+| The link points at | Use | Because |
+|---|---|---|
+| A code host, CI, a cloud console, an error tracker — **anything behind a login you hold** | `system` | A pane has its own cookie jar, so it lands on a sign-in page; an SSO flow started there is a second login at best and a dead end at worst |
+| What the run itself serves — localhost, a staging URL on the same session the app uses, a report a local tool just wrote | `pane` | It belongs beside the code, and the pane is already the right browser for it |
+
+`system` is the default precisely because the first row is the common case, so in
+practice the field is only written in order to say `pane`. If you are unsure, ask
+whether the reader is already signed in to that site somewhere else — if they are,
+it is `system`.
+
+`refresh_seconds` defaults to 60 and is floored at 15. Veld only evaluates the
+worktree you are looking at, only while a window is open, and only once however
+many windows ask — see [how badges are run](#how-a-badge-is-run).
+
+**Right-click a badge to re-run it now**, or to re-run every badge in the bar. A
+refresh you asked for ignores `refresh_seconds` (bounded instead by a 3-second
+floor, so holding the button down cannot fork a process per click), and it reports
+its own failure rather than staying quiet the way a background poll does. Running
+an **action** also re-reads the badges immediately, because an action usually
+changes what one of them says — creating the pull request a badge just reported
+missing is the case that matters.
+
+#### `type: "action"` — a button
+
+A click runs the command. There is no output contract and no refresh; a failure
+inside the first few seconds is reported as a toast with the command's message,
+and something still running after that (an editor starting up) counts as success.
+
+#### `type: "menu"` — a group
+
+One control whose `items` are the ids of `action` extensions, shown in a popover.
+This is not cosmetic: the top bar already carries around sixteen controls, so a
+project with three editor buttons and two badges needs grouping to stay usable.
+
+`items` are ids rather than nested objects, which is what keeps a menu one level
+deep and makes each member a first-class declaration `veld lint` checks like any
+other. An id that names nothing, or names something that is not an `action`, is
+dropped with a lint problem; a menu left with no usable members is dropped whole
+rather than rendering an empty popover.
+
+#### When the tool is not installed
+
+`requires_bin` is checked against your login shell's `PATH`, and `when_missing`
+decides what you see:
+
+| `when_missing` | What it looks like |
+|---|---|
+| `hint` (default) | Greyed and dashed, with your `hint` text on hover; clicking opens the `hint.href`. This is the newcomer path — a fresh clone *tells* someone what the project expects them to install. |
+| `disable` | Greyed, with the missing tool named. |
+| `hide` | Not rendered. Right for optional tooling nobody should be nagged about, like which editor somebody uses. |
+
+**An explicit `when_missing` wins over the "hide disabled actions" setting.** That
+setting is about veld's own inapplicable actions; a project asking for `hint` is
+teaching, and a preference about clutter must not delete the lesson.
+
+**Do not put `requires_bin` on something with a GUI.** It asks your `PATH`, which
+is the right question for a CLI and the wrong one for an application: VS Code's
+`code` and JetBrains' `webstorm`/`idea` are launchers you have to install
+*separately* from the editor, so a `PATH` check hides the option on a machine where
+the editor is sitting in `/Applications`. Leave the predicate off and let the
+command find the app — this repo's own config does
+`command -v code >/dev/null 2>&1 && exec code "${veld.root}" || exec open -a "Visual Studio Code" "${veld.root}"`,
+so the launcher is used when it exists and the bundle otherwise, and a genuinely
+missing app fails with a message you can read. Inside a `menu` this costs a line in
+a popover rather than space in the bar, which is the trade worth making: hiding an
+option that would have worked is worse than offering one that explains itself.
+
+#### How a badge is run
+
+Worth knowing, because a status badge is **the only thing veld runs from your
+config without you clicking something**:
+
+- **The declarations come from the worktree you are looking at**, like everything
+  else veld runs — the graph, the services, the panes. So checking out a branch and
+  selecting it runs *that branch's* badge commands, which means reviewing someone
+  else's pull request by checking it out is an act of trust in its author, exactly as
+  `veld start` on that branch already is. This is deliberate: an extension is a thing
+  you write in a branch and test before merging, and it keeps no state, so resolving
+  it from anywhere else would make it untestable until after it shipped. If you
+  review branches you do not trust, turn off *Settings → General → Let projects
+  refresh their own status badges* — buttons and menus keep working, because a click
+  is you asking.
+
+- Only the worktree on screen is evaluated, and only while a window is open.
+  Registered worktrees you are not looking at cost nothing.
+- Several windows asking at once spend **one** child process; a request inside an
+  extension's own `refresh_seconds` is answered from that run rather than starting
+  another.
+- The command runs with **no terminal attached and stdin closed**, so a CLI that
+  would prompt for credentials fails with its login hint instead of waiting
+  forever. There is a 20-second deadline, enforced by killing the process group,
+  and a limit on how much output is kept.
+- A project may declare at most **24** extensions, and `refresh_seconds` is
+  floored at **15** — those bounds belong to veld, not to a file in a repo.
+- Every command is written to the daemon log with its full arguments.
+- The **`extensions.autoRefresh` setting** (Settings → General, on by default)
+  turns automatic evaluation off machine-wide. Buttons and menus keep working,
+  because a click is you asking; only the unattended half stops.
+
+There is deliberately **no consent prompt**. The command is declared in your own
+repo, which is the rule veld already holds for everything it runs; a prompt tied
+to the declared commands would have to re-ask on every `git pull` that touches
+`veld.json`, which teaches people to click through it. The bounds above are where
+that budget went instead.
+
 ## Reserved: `hooks` and the rest of `ide`
 
 Both are **reserved**: they parse, are stored, and are **not executed by this
 version**. `veld lint` says so, so a hook that does nothing is distinguishable
 from a config mistake. For `ide` the notice now names the specific keys that are
-inert, since `quicklinks`, `permissions`, `externalOrigins`, `panes` and
-`news` are not.
+inert, since `quicklinks`, `permissions`, `externalOrigins`, `panes`,
+`extensions`, `news` and `git` are not.
 
 ```jsonc
 // veld.d/hooks.jsonc

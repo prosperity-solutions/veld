@@ -36,6 +36,104 @@
         "allow": ["notifications", "display-capture"]
       }
     ],
+    // Dogfooding the extension system, and the worked example for it. Nothing
+    // here is known to veld: `gh`, `webstorm` and `code` are names in this file,
+    // the same way `claude` is in the panes below.
+    //
+    // Note the two shapes a declaration takes. An entry **with** a `slot`
+    // renders there; one **without** is declared to be referenced — by the
+    // menu's `items`, or by the `pr` badge's own output — which is what keeps
+    // three editor buttons out of a 42px bar.
+    "extensions": [
+      {
+        // The badge runs scripts/veld/pr-badge.sh, which is the whole
+        // provider-specific half: it knows `gh`, and veld only ever sees the
+        // small badge contract the script prints. Swap the script for one
+        // calling `glab` and this declaration does not change.
+        "id": "pr",
+        "slot": "topBar",
+        "type": "status",
+        "label": "PR",
+        // The declaration's glyph. A badge's output may override it per state
+        // (`"icon": "git-merge"` once merged), which is what makes a glyph track
+        // the thing it describes.
+        "icon": "git-pull-request",
+        // Explicit, though `system` is already the default: a pull request is
+        // behind a login the developer holds in their *own* browser, and a Veld
+        // browser pane has a separate cookie jar, so opening it in a pane is a
+        // second sign-in at best. Written out because this file is where someone
+        // copying the pattern will look for the choice.
+        "open_in": "system",
+        "argv": ["scripts/veld/pr-badge.sh"],
+        "refresh_seconds": 60,
+        // Both, because the adapter script pipes gh's JSON through python3. A
+        // predicate that named only `gh` left the badge red with a python error on
+        // a machine without it, instead of taking the `hint` path below.
+        "requires_bin": ["gh", "python3"],
+        // `hint` rather than `hide`: a fresh clone should *say* what this repo
+        // expects you to have, and the href opens the install page.
+        "when_missing": "hint",
+        "hint": {
+          "text": "Install the GitHub CLI to see this branch's pull request.",
+          "href": "https://cli.github.com"
+        }
+      },
+      {
+        // No `slot`: this exists to be named by the `pr` badge's output when the
+        // branch has no pull request yet. veld resolves that id against this
+        // file before offering it, so the badge chooses among declared actions
+        // and can never contribute one.
+        "id": "create-pr",
+        "type": "action",
+        "label": "Create a pull request",
+        "argv": ["gh", "pr", "create", "--web"],
+        "requires_bin": ["gh"]
+      },
+      {
+        "id": "open-in",
+        "slot": "topBar",
+        "type": "menu",
+        "label": "Open this worktree in",
+        // `external-link`, not `code`: the `</>` glyph reads as "source code"
+        // rather than "hand this to another application".
+        "icon": "external-link",
+        "items": ["vscode", "webstorm"]
+      },
+      // **No `requires_bin` on the editors, and that is the interesting part.**
+      // Every one of these ships a command-line launcher that is *not installed
+      // by default* — VS Code needs "Shell Command: Install 'code' command in
+      // PATH", JetBrains needs the Toolbox shell scripts — so a PATH check hides
+      // the option on a machine where the editor is sitting right there in
+      // /Applications. Hiding a working option is a worse failure than offering
+      // one that explains itself, and these live inside a menu, so an entry that
+      // might not work costs a line in a popover rather than space in the bar.
+      //
+      // So each tries the launcher first, then falls back to the application
+      // bundle — but **only on macOS**: `open` does not exist on Linux, or is
+      // `openvt` from the `kbd` package, which reads `-a` as "activate the virtual
+      // console" and needs root. A Linux contributor without the launcher on PATH
+      // gets a sentence naming what to install instead of an error about VTs.
+      // `open -a` exits non-zero when the app is genuinely absent, and veld turns
+      // that into a toast carrying the reason. `${veld.root}` is quoted because a
+      // checkout path can contain spaces.
+      //
+      // The general gap this works around is recorded in
+      // docs/extensions-vision.md: `requires_bin` cannot express "this GUI
+      // application is installed", which is a first-class case for the very
+      // feature it is being used for.
+      {
+        "id": "vscode",
+        "type": "action",
+        "label": "VS Code",
+        "shell": "command -v code >/dev/null 2>&1 && exec code \"${veld.root}\"; [ \"$(uname -s)\" = Darwin ] || { echo \"install the 'code' command (VS Code: Shell Command: Install 'code' command in PATH)\" >&2; exit 1; }; exec open -a \"Visual Studio Code\" \"${veld.root}\""
+      },
+      {
+        "id": "webstorm",
+        "type": "action",
+        "label": "WebStorm",
+        "shell": "command -v webstorm >/dev/null 2>&1 && exec webstorm \"${veld.root}\"; [ \"$(uname -s)\" = Darwin ] || { echo \"install the 'webstorm' launcher (JetBrains Toolbox \u2192 Settings \u2192 Shell scripts)\" >&2; exit 1; }; exec open -a WebStorm \"${veld.root}\""
+      }
+    ],
     // Dogfooding, and the worked examples: this is a repo whose contributors
     // run a coding agent in a terminal all day. Note that nothing about
     // `claude` or `codex` is known to veld — they are names in this file, the

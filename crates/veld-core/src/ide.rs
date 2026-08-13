@@ -72,7 +72,7 @@ pub const PERMISSION_IDS: &[&str] = &[
     "window-management",
 ];
 
-/// Every icon name a pane may name, in sorted order.
+/// Every icon name a pane or an `ide.extensions` entry may name, in sorted order.
 ///
 /// These are [Tabler](https://tabler.io/icons) names, the icon set every other
 /// pane tab already uses, so a config-declared pane sits beside the built-in
@@ -84,25 +84,51 @@ pub const PERMISSION_IDS: &[&str] = &[
 /// needs no entry here. The two forms are told apart by ASCII-ness, so this list
 /// can only ever grow with ASCII names.
 pub const PANE_ICON_NAMES: &[&str] = &[
+    "alert-triangle",
+    "app-window",
     "atom",
     "bolt",
     "book",
     "brain",
+    "brand-github",
+    "brand-gitlab",
+    "brand-vscode",
+    "browser",
     "bug",
     "bulb",
     "chart-line",
+    "check",
+    "circle-check",
+    "clock",
     "cloud",
+    "cloud-upload",
     "code",
     "compass",
     "cpu",
     "database",
+    "device-desktop",
+    "download",
+    "external-link",
+    "eye",
+    "file-code",
+    "flag",
     "flask",
+    "folder",
+    "gauge",
     "git-branch",
+    "git-commit",
+    "git-merge",
+    "git-pull-request",
+    "hourglass",
     "key",
+    "link",
+    "list-check",
+    "lock",
     "map",
     "message-chatbot",
     "notebook",
     "package",
+    "palette",
     "player-play",
     "plug",
     "puzzle",
@@ -112,10 +138,15 @@ pub const PANE_ICON_NAMES: &[&str] = &[
     "search",
     "server",
     "shield",
+    "shield-check",
     "sparkles",
+    "star",
+    "tag",
     "terminal-2",
     "tool",
+    "upload",
     "wand",
+    "x",
 ];
 
 /// Every illustration a news item may name, in sorted order.
@@ -208,6 +239,70 @@ pub const PANE_BUILTINS: &[&str] = &[
     "worktree",
 ];
 
+/// The `${veld.*}` names an extension command may reference, in sorted order.
+///
+/// [`PANE_BUILTINS`] minus the `pane.*` family, which exists only while a pane is
+/// being launched: an extension command runs against a *worktree*, so
+/// `${veld.pane.token}` there would resolve to nothing. Same closed-set rule, one
+/// scope narrower — and the reason the check is worth having is that an
+/// unresolvable reference is not a soft failure, it is a badge that never renders
+/// with an error the author has to read backwards from.
+pub const EXTENSION_BUILTINS: &[&str] = &["branch", "project", "root", "username", "worktree"];
+
+/// Every named place an extension may contribute to, in sorted order.
+///
+/// The slot set is a *contract*: it is what `ide.extensions` entries are
+/// validated against, and what the UI implements. One entry today — adding the
+/// next one is a string here plus a render site, which is the whole reason
+/// `slot` is a field on the item instead of a level of config structure.
+pub const EXTENSION_SLOTS: &[&str] = &["topBar"];
+
+/// Which side of a slot an extension sits on.
+pub const EXTENSION_ALIGNS: &[&str] = &["end", "start"];
+
+/// What an extension looks like when its `requires_bin` is not installed.
+pub const EXTENSION_WHEN_MISSING: &[&str] = &["disable", "hide", "hint"];
+
+/// Where a status extension's `href` opens.
+pub const EXTENSION_OPEN_IN: &[&str] = &["pane", "system"];
+
+/// Keys every extension may declare, whatever its type, in sorted order.
+pub const EXTENSION_COMMON_KEYS: &[&str] = &[
+    "align",
+    "description",
+    "hint",
+    "icon",
+    "id",
+    "label",
+    "requires_bin",
+    "slot",
+    "type",
+    "when_missing",
+];
+
+/// Extra keys a `status` extension may declare, in sorted order.
+pub const STATUS_EXTENSION_KEYS: &[&str] = &["argv", "open_in", "refresh_seconds", "shell"];
+
+/// Extra keys an `action` extension may declare, in sorted order.
+pub const ACTION_EXTENSION_KEYS: &[&str] = &["argv", "shell"];
+
+/// Extra keys a `menu` extension may declare, in sorted order.
+pub const MENU_EXTENSION_KEYS: &[&str] = &["items"];
+
+/// How many extensions one project may declare.
+///
+/// A cost bound owned by veld rather than by a file in somebody's repo — the
+/// same reasoning as `PRESETS_EXPANDED_PER_LISTING`. Every `status` extension
+/// is a child process the daemon runs on a timer, so without a cap the load a
+/// worktree puts on the machine is set by whoever last edited its config.
+pub const MAX_EXTENSIONS_PER_PROJECT: usize = 24;
+
+/// The floor on `refresh_seconds`, for the same reason as the count cap.
+pub const MIN_EXTENSION_REFRESH_SECONDS: u64 = 15;
+
+/// What a `status` extension refreshes at when it does not say.
+pub const DEFAULT_EXTENSION_REFRESH_SECONDS: u64 = 60;
+
 /// The interpreted `ide` section, plus whatever could not be interpreted.
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
 pub struct IdeSection {
@@ -234,6 +329,10 @@ pub struct IdeSection {
     /// headline ran long.
     #[serde(default)]
     pub news: Vec<NewsItem>,
+    /// Badges, buttons and menus this project contributes to named places in the
+    /// IDE chrome. See [`Extension`].
+    #[serde(default)]
+    pub extensions: Vec<Extension>,
     /// Origins that must open in the **system** browser rather than in a Veld
     /// browser pane — the project's half of the exempt list (the other half is the
     /// `browser.externalOrigins` setting, and the two are unioned).
@@ -276,6 +375,7 @@ impl IdeSection {
             && self.external_origins.is_empty()
             && self.panes.is_empty()
             && self.news.is_empty()
+            && self.extensions.is_empty()
     }
 
     /// The staleness-sensitivity multiplier, floored at `0.1`. Always at least
@@ -291,6 +391,199 @@ impl IdeSection {
     pub fn pane(&self, id: &str) -> Option<&PaneDef> {
         self.panes.iter().find(|p| p.id == id)
     }
+
+    /// The extension this id names, if the project declares one.
+    ///
+    /// The one lookup every execution path goes through: the client names an
+    /// extension and this is what turns that name into the command the *config*
+    /// declares. Nothing may execute a command that arrived from anywhere else —
+    /// see [`Extension`].
+    #[must_use]
+    pub fn extension(&self, id: &str) -> Option<&Extension> {
+        self.extensions.iter().find(|e| e.id == id)
+    }
+
+    /// The extensions rendered in `slot`, in declaration order.
+    ///
+    /// Skips the ones with no slot: those are declared to be *referenced* (from a
+    /// menu, or from a status extension's output) and rendering them as well would
+    /// put an "Open in WebStorm" button beside the "Open in" menu that contains it.
+    #[must_use]
+    pub fn extensions_in_slot(&self, slot: &str) -> Vec<&Extension> {
+        self.extensions
+            .iter()
+            .filter(|e| e.slot.as_deref() == Some(slot))
+            .collect()
+    }
+}
+
+/// One badge, button or menu a project contributes to the IDE chrome.
+///
+/// The fields here are the ones every extension type needs whatever it renders —
+/// an identity, where it goes, how to label it, and whether the machine can run it
+/// at all. What the extension *does* lives in [`Extension::body`], keyed by the
+/// `type` discriminator, exactly as [`PaneDef`] splits from [`PaneBody`].
+///
+/// **The command is only ever read from here.** A client — and, for a status
+/// extension, the *output of a previous run* — names an extension by id; the
+/// daemon looks that id up in the project's on-disk config and runs what the
+/// config declares. This is the boundary `run_action` and `resolve_pane` already
+/// hold, extended one step: a runtime value may choose *which* declared extension
+/// is offered, and may never contribute one. Relax that and a badge's stdout
+/// becomes a command-injection surface with nothing to validate it against,
+/// because there is no declaration to compare it to.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Extension {
+    /// Stable id, unique within the project's extensions. Names the extension on
+    /// the wire, in a menu's `items`, and in a status extension's `actions`.
+    pub id: String,
+    /// The text or tooltip the user sees. Defaults to `id`.
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<PaneIcon>,
+    /// The named place this renders in, one of [`EXTENSION_SLOTS`].
+    ///
+    /// `None` means **declared but not rendered**: the extension exists only to be
+    /// referenced by a `menu`'s `items` or by a status extension's `actions`. That
+    /// is what lets a project declare five editor actions without putting five
+    /// buttons in a 42px bar.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slot: Option<String>,
+    /// Which side of the slot it sits on.
+    #[serde(default)]
+    pub align: ExtensionAlign,
+    /// Executables that must be on `PATH`. Empty means "always available".
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requires_bin: Vec<String>,
+    /// What an unavailable extension looks like.
+    #[serde(default)]
+    pub when_missing: WhenMissing,
+    /// What to tell the user when [`Self::when_missing`] is [`WhenMissing::Hint`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hint: Option<ExtensionHint>,
+    pub body: ExtensionBody,
+}
+
+impl Extension {
+    /// The command this extension runs, or `None` for a type that runs nothing.
+    #[must_use]
+    pub fn command(&self) -> Option<&crate::config::CommandSpec> {
+        match &self.body {
+            ExtensionBody::Status(s) => Some(&s.command),
+            ExtensionBody::Action(a) => Some(&a.command),
+            ExtensionBody::Menu(_) => None,
+        }
+    }
+
+    /// The `type` string this extension was declared with.
+    #[must_use]
+    pub fn kind(&self) -> &'static str {
+        match &self.body {
+            ExtensionBody::Status(_) => "status",
+            ExtensionBody::Action(_) => "action",
+            ExtensionBody::Menu(_) => "menu",
+        }
+    }
+}
+
+/// What an extension is. The discriminator carries the whole shape difference, so
+/// a future `link` or `script` type is additive rather than a reshape.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ExtensionBody {
+    Status(StatusExtension),
+    Action(ActionExtension),
+    Menu(MenuExtension),
+}
+
+/// A badge: a command whose stdout is rendered, re-run on a timer.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct StatusExtension {
+    pub command: crate::config::CommandSpec,
+    /// How often the badge is re-evaluated, floored at
+    /// [`MIN_EXTENSION_REFRESH_SECONDS`].
+    #[serde(default = "default_refresh_seconds")]
+    pub refresh_seconds: u64,
+    /// Where the badge's `href` opens.
+    #[serde(default)]
+    pub open_in: OpenIn,
+}
+
+/// A button: a command run on a click, with no output contract.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ActionExtension {
+    pub command: crate::config::CommandSpec,
+}
+
+/// A group: one control in the slot whose members appear in a popover.
+///
+/// `items` are ids of declared `action` extensions, not nested objects. Nesting is
+/// one level deep on purpose — two levels of popover in a 42px bar is worse than a
+/// second menu — and referencing rather than nesting means a menu member is a
+/// first-class declaration that `veld lint` checks for a duplicate id like any
+/// other.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MenuExtension {
+    pub items: Vec<String>,
+}
+
+/// Which side of a slot an extension sits on.
+///
+/// `Start` by default because the top bar's own convention is *left is what this
+/// project does, right is what the app does*, and an extension is the project's.
+#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtensionAlign {
+    #[default]
+    Start,
+    End,
+}
+
+/// What an extension whose `requires_bin` is missing looks like.
+///
+/// `Hint` is the default because an extension is the project telling a newcomer
+/// what it expects them to have installed, and silence teaches nothing. An
+/// explicit value here also **beats the global `ui.hideDisabledActions`
+/// setting**: that preference is about hiding inapplicable *core* actions, and it
+/// must not delete a project's setup instructions.
+#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WhenMissing {
+    Hide,
+    Disable,
+    #[default]
+    Hint,
+}
+
+/// Where a status extension's `href` opens.
+///
+/// `System` by default, which is the opposite of how [`Quicklink`] behaves, and
+/// deliberately: a quicklink points at localhost or staging, while an extension's
+/// href points at a *provider's* authenticated surface — a pull request, a CI run,
+/// a dashboard — where the user is already signed in and a browser pane's separate
+/// partition is a second login at best.
+#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenIn {
+    #[default]
+    System,
+    Pane,
+}
+
+/// What to show for an extension whose tool is not installed.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExtensionHint {
+    pub text: String,
+    /// Where to send someone who wants to fix it — an install page. `http(s)` only,
+    /// for the reason [`Quicklink`] is restricted the same way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub href: Option<String>,
+}
+
+fn default_refresh_seconds() -> u64 {
+    DEFAULT_EXTENSION_REFRESH_SECONDS
 }
 
 /// A pane type a project adds to the desktop app's pane menu.
@@ -589,6 +882,7 @@ pub fn parse(value: Option<&serde_json::Value>) -> IdeSection {
             "quicklinks" => parse_quicklinks(child, &mut section),
             "permissions" => parse_permissions(child, &mut section),
             "panes" => parse_panes(child, &mut section),
+            "extensions" => parse_extensions(child, &mut section),
             "externalOrigins" => parse_external_origins(child, &mut section),
             "git" => parse_git(child, &mut section),
             other => section.uninterpreted.push(other.to_owned()),
@@ -622,6 +916,547 @@ fn parse_panes(value: &serde_json::Value, out: &mut IdeSection) {
             out.panes.push(pane);
         }
     }
+}
+
+fn parse_extensions(value: &serde_json::Value, out: &mut IdeSection) {
+    let Some(items) = value.as_array() else {
+        out.problems.push(IdeProblem {
+            location: "ide.extensions".to_owned(),
+            message: "must be an array of extension objects; it was ignored".to_owned(),
+        });
+        return;
+    };
+    for (index, item) in items.iter().enumerate() {
+        let at = format!("ide.extensions[{index}]");
+        // The cap is applied to *accepted* entries, and before parsing the next
+        // one, so a config with 30 declarations still gets its first 24 rather
+        // than none. Reported once, not 6 times.
+        if out.extensions.len() >= MAX_EXTENSIONS_PER_PROJECT {
+            out.problems.push(IdeProblem {
+                location: "ide.extensions".to_owned(),
+                message: format!(
+                    "declares more than {MAX_EXTENSIONS_PER_PROJECT} extensions; the ones after \
+                     the first {MAX_EXTENSIONS_PER_PROJECT} were dropped"
+                ),
+            });
+            return;
+        }
+        if let Some(ext) = parse_extension(item, &at, out) {
+            if out.extensions.iter().any(|e| e.id == ext.id) {
+                out.problems.push(IdeProblem {
+                    location: format!("{at}.id"),
+                    message: format!(
+                        "duplicate extension id {:?} — the first one wins and this entry was \
+                         dropped",
+                        ext.id
+                    ),
+                });
+                continue;
+            }
+            out.extensions.push(ext);
+        }
+    }
+    check_extension_references(out);
+}
+
+/// Resolve every `menu` member against the declarations, after all of them exist.
+///
+/// A cross-item check, so it cannot run inside [`parse_extension`] — a menu is
+/// allowed to reference a member declared below it. Fail closed: an unresolvable
+/// member is dropped from the menu rather than rendered as a control that does
+/// nothing when clicked. A menu left with no members at all is dropped entirely,
+/// because an empty popover is worse than an absent one.
+fn check_extension_references(out: &mut IdeSection) {
+    let declared: Vec<(String, &'static str)> = out
+        .extensions
+        .iter()
+        .map(|e| (e.id.clone(), e.kind()))
+        .collect();
+
+    let mut problems = Vec::new();
+    let mut drop_ids = Vec::new();
+    for ext in &mut out.extensions {
+        let ExtensionBody::Menu(menu) = &mut ext.body else {
+            continue;
+        };
+        let at = format!("ide.extensions[{}]", ext.id);
+        menu.items.retain(|item| {
+            match declared.iter().find(|(id, _)| id == item) {
+                None => {
+                    problems.push(IdeProblem {
+                        location: format!("{at}.items"),
+                        message: format!(
+                            "references {item:?}, which no extension in this project declares; \
+                             the entry was dropped"
+                        ),
+                    });
+                    false
+                }
+                // A menu of menus is the two-levels-of-popover shape this type
+                // refuses, and a menu member that is a badge has no click to run.
+                Some((_, kind)) if *kind != "action" => {
+                    problems.push(IdeProblem {
+                        location: format!("{at}.items"),
+                        message: format!(
+                            "references {item:?}, which is a {kind:?} extension — a menu's items \
+                             must be `action` extensions; the entry was dropped"
+                        ),
+                    });
+                    false
+                }
+                Some(_) => true,
+            }
+        });
+        if menu.items.is_empty() {
+            problems.push(IdeProblem {
+                location: at,
+                message: "is a menu with no usable items, so it was dropped".to_owned(),
+            });
+            drop_ids.push(ext.id.clone());
+        }
+    }
+    out.extensions.retain(|e| !drop_ids.contains(&e.id));
+    out.problems.extend(problems);
+}
+
+fn parse_extension(item: &serde_json::Value, at: &str, out: &mut IdeSection) -> Option<Extension> {
+    let entry = item.as_object().or_else(|| {
+        out.problems.push(IdeProblem {
+            location: at.to_owned(),
+            message: "must be an object with an `id` and a `type`".to_owned(),
+        });
+        None
+    })?;
+
+    // `id` and `type` first, for the reason `parse_pane` reads them first: a typo
+    // in one is reported against the entry rather than as a pile of downstream
+    // problems about fields whose meaning depends on the type.
+    let Some(id) = entry
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+    else {
+        out.problems.push(IdeProblem {
+            location: format!("{at}.id"),
+            message: "is required and must be a string".to_owned(),
+        });
+        return None;
+    };
+    if !valid_pane_id(id) {
+        out.problems.push(IdeProblem {
+            location: format!("{at}.id"),
+            message: format!("must be 1-64 characters of letters, digits, `-` or `_` (got {id:?})"),
+        });
+        return None;
+    }
+    let Some(kind) = entry.get("type").and_then(serde_json::Value::as_str) else {
+        out.problems.push(IdeProblem {
+            location: format!("{at}.type"),
+            message: "is required — this version renders: status, action, menu".to_owned(),
+        });
+        return None;
+    };
+
+    let label = match entry.get("label") {
+        None => id.to_owned(),
+        Some(v) => match v.as_str().map(str::trim) {
+            Some(text) if !text.is_empty() => text.to_owned(),
+            _ => {
+                out.problems.push(IdeProblem {
+                    location: format!("{at}.label"),
+                    message: "must be a non-empty string".to_owned(),
+                });
+                return None;
+            }
+        },
+    };
+    let description = match entry.get("description") {
+        None => None,
+        Some(v) => match v.as_str().map(str::trim) {
+            Some(text) if !text.is_empty() => Some(text.to_owned()),
+            _ => {
+                out.problems.push(IdeProblem {
+                    location: format!("{at}.description"),
+                    message: "must be a non-empty string".to_owned(),
+                });
+                return None;
+            }
+        },
+    };
+    let icon = match entry.get("icon") {
+        None => None,
+        Some(v) => Some(parse_pane_icon(v, at, out)?),
+    };
+    let requires_bin = parse_requires_bin(entry.get("requires_bin"), at, out)?;
+
+    let slot = match entry.get("slot") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(v) => {
+            let Some(text) = v.as_str().map(str::trim).filter(|t| !t.is_empty()) else {
+                out.problems.push(IdeProblem {
+                    location: format!("{at}.slot"),
+                    message: format!(
+                        "must be one of: {}, or absent for an extension that is only referenced \
+                         from a menu or a status output",
+                        EXTENSION_SLOTS.join(", ")
+                    ),
+                });
+                return None;
+            };
+            if !EXTENSION_SLOTS.contains(&text) {
+                // Not a typo report: a project may legitimately be written for a
+                // newer veld with more slots. Naming the ones this version has is
+                // the useful half.
+                out.problems.push(IdeProblem {
+                    location: format!("{at}.slot"),
+                    message: format!(
+                        "slot {text:?} is not one this version of veld renders (it knows: {}). \
+                         The extension was skipped; the rest of `ide.extensions` still applies",
+                        EXTENSION_SLOTS.join(", ")
+                    ),
+                });
+                return None;
+            }
+            Some(text.to_owned())
+        }
+    };
+
+    let align = match entry.get("align") {
+        None => ExtensionAlign::Start,
+        Some(v) => match v.as_str().map(str::trim) {
+            Some("start") => ExtensionAlign::Start,
+            Some("end") => ExtensionAlign::End,
+            _ => {
+                out.problems.push(IdeProblem {
+                    location: format!("{at}.align"),
+                    message: format!("must be one of: {}", EXTENSION_ALIGNS.join(", ")),
+                });
+                return None;
+            }
+        },
+    };
+
+    let when_missing = match entry.get("when_missing") {
+        None => WhenMissing::default(),
+        Some(v) => match v.as_str().map(str::trim) {
+            Some("hide") => WhenMissing::Hide,
+            Some("disable") => WhenMissing::Disable,
+            Some("hint") => WhenMissing::Hint,
+            _ => {
+                out.problems.push(IdeProblem {
+                    location: format!("{at}.when_missing"),
+                    message: format!("must be one of: {}", EXTENSION_WHEN_MISSING.join(", ")),
+                });
+                return None;
+            }
+        },
+    };
+    let hint = parse_extension_hint(entry.get("hint"), at, out)?;
+
+    let body = match kind {
+        "status" => ExtensionBody::Status(parse_status_extension(entry, at, out)?),
+        "action" => ExtensionBody::Action(ActionExtension {
+            command: parse_extension_command(entry, at, out)?,
+        }),
+        "menu" => ExtensionBody::Menu(parse_menu_extension(entry, at, out)?),
+        other => {
+            out.problems.push(IdeProblem {
+                location: format!("{at}.type"),
+                message: format!(
+                    "extension type {other:?} is not one this version of veld renders (it knows: \
+                     status, action, menu). The extension was skipped; the rest of \
+                     `ide.extensions` still applies"
+                ),
+            });
+            return None;
+        }
+    };
+
+    // Only an `action` can be referenced, so anything else without a slot would be
+    // declared and unreachable — silently, which is the shape worth reporting.
+    if slot.is_none() && !matches!(body, ExtensionBody::Action(_)) {
+        out.problems.push(IdeProblem {
+            location: format!("{at}.slot"),
+            message: format!(
+                "is required for a {kind:?} extension — only an `action` may omit it, to be \
+                 referenced from a menu or a status output"
+            ),
+        });
+        return None;
+    }
+
+    // After the body, so an extension being dropped for a real reason does not
+    // also collect a pile of key complaints.
+    let allowed = extension_keys(kind);
+    let mut unknown: Vec<&str> = entry
+        .keys()
+        .map(String::as_str)
+        .filter(|k| !allowed.contains(k))
+        .collect();
+    if !unknown.is_empty() {
+        unknown.sort_unstable();
+        out.problems.push(IdeProblem {
+            location: at.to_owned(),
+            message: format!(
+                "unknown key(s) {} for a {kind:?} extension. It may declare: {}",
+                unknown
+                    .iter()
+                    .map(|k| format!("{k:?}"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                allowed.join(", ")
+            ),
+        });
+    }
+
+    Some(Extension {
+        id: id.to_owned(),
+        label,
+        description,
+        icon,
+        slot,
+        align,
+        requires_bin,
+        when_missing,
+        hint,
+        body,
+    })
+}
+
+fn parse_extension_command(
+    entry: &serde_json::Map<String, serde_json::Value>,
+    location: &str,
+    out: &mut IdeSection,
+) -> Option<crate::config::CommandSpec> {
+    parse_command_in_scope(entry, location, "extension", EXTENSION_BUILTINS, out)
+}
+
+/// Every key this extension type may declare, sorted — the union of the common set
+/// and the type's own. Built rather than listed per type so a new common key cannot
+/// be added to one type's list and forgotten in the others.
+fn extension_keys(kind: &str) -> Vec<&'static str> {
+    let extra = match kind {
+        "status" => STATUS_EXTENSION_KEYS,
+        "action" => ACTION_EXTENSION_KEYS,
+        "menu" => MENU_EXTENSION_KEYS,
+        _ => &[],
+    };
+    let mut keys: Vec<&'static str> = EXTENSION_COMMON_KEYS
+        .iter()
+        .chain(extra.iter())
+        .copied()
+        .collect();
+    keys.sort_unstable();
+    keys
+}
+
+fn parse_status_extension(
+    entry: &serde_json::Map<String, serde_json::Value>,
+    at: &str,
+    out: &mut IdeSection,
+) -> Option<StatusExtension> {
+    let command = parse_extension_command(entry, at, out)?;
+
+    let refresh_seconds = match entry.get("refresh_seconds") {
+        None => DEFAULT_EXTENSION_REFRESH_SECONDS,
+        Some(v) => {
+            let Some(n) = v.as_u64() else {
+                out.problems.push(IdeProblem {
+                    location: format!("{at}.refresh_seconds"),
+                    message: format!(
+                        "must be a whole number of seconds, at least \
+                         {MIN_EXTENSION_REFRESH_SECONDS}"
+                    ),
+                });
+                return None;
+            };
+            // Clamped rather than refused: the author's intent ("refresh often") is
+            // clear and honouring it as far as veld allows is more useful than
+            // dropping the badge. Reported so the effective value is never a
+            // surprise.
+            if n < MIN_EXTENSION_REFRESH_SECONDS {
+                out.problems.push(IdeProblem {
+                    location: format!("{at}.refresh_seconds"),
+                    message: format!(
+                        "{n} is below the minimum of {MIN_EXTENSION_REFRESH_SECONDS}s, which is \
+                         what was used"
+                    ),
+                });
+                MIN_EXTENSION_REFRESH_SECONDS
+            } else {
+                n
+            }
+        }
+    };
+
+    let open_in = match entry.get("open_in") {
+        None => OpenIn::default(),
+        Some(v) => match v.as_str().map(str::trim) {
+            Some("system") => OpenIn::System,
+            Some("pane") => OpenIn::Pane,
+            _ => {
+                out.problems.push(IdeProblem {
+                    location: format!("{at}.open_in"),
+                    message: format!("must be one of: {}", EXTENSION_OPEN_IN.join(", ")),
+                });
+                return None;
+            }
+        },
+    };
+
+    Some(StatusExtension {
+        command,
+        refresh_seconds,
+        open_in,
+    })
+}
+
+fn parse_menu_extension(
+    entry: &serde_json::Map<String, serde_json::Value>,
+    at: &str,
+    out: &mut IdeSection,
+) -> Option<MenuExtension> {
+    let Some(items) = entry.get("items").and_then(serde_json::Value::as_array) else {
+        out.problems.push(IdeProblem {
+            location: format!("{at}.items"),
+            message: "is required and must be an array of extension ids".to_owned(),
+        });
+        return None;
+    };
+    let mut ids = Vec::with_capacity(items.len());
+    for item in items {
+        let Some(text) = item.as_str().map(str::trim).filter(|t| !t.is_empty()) else {
+            out.problems.push(IdeProblem {
+                location: format!("{at}.items"),
+                message: "every entry must be the id of a declared `action` extension".to_owned(),
+            });
+            return None;
+        };
+        if !ids.iter().any(|existing: &String| existing == text) {
+            ids.push(text.to_owned());
+        }
+    }
+    if ids.is_empty() {
+        out.problems.push(IdeProblem {
+            location: format!("{at}.items"),
+            message: "must name at least one `action` extension".to_owned(),
+        });
+        return None;
+    }
+    Some(MenuExtension { items: ids })
+}
+
+fn parse_extension_hint(
+    value: Option<&serde_json::Value>,
+    at: &str,
+    out: &mut IdeSection,
+) -> Option<Option<ExtensionHint>> {
+    let Some(value) = value else {
+        return Some(None);
+    };
+    let Some(map) = value.as_object() else {
+        out.problems.push(IdeProblem {
+            location: format!("{at}.hint"),
+            message: "must be an object with `text` and an optional `href`".to_owned(),
+        });
+        return None;
+    };
+    let Some(text) = map
+        .get("text")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+    else {
+        out.problems.push(IdeProblem {
+            location: format!("{at}.hint.text"),
+            message: "is required and must be a non-empty string".to_owned(),
+        });
+        return None;
+    };
+    let href = match map.get("href") {
+        None => None,
+        Some(v) => {
+            let Some(url) = v.as_str().map(str::trim).filter(|u| !u.is_empty()) else {
+                out.problems.push(IdeProblem {
+                    location: format!("{at}.hint.href"),
+                    message: "must be an http:// or https:// URL".to_owned(),
+                });
+                return None;
+            };
+            if !is_web_url(url) {
+                out.problems.push(IdeProblem {
+                    location: format!("{at}.hint.href"),
+                    message: format!("must be an http:// or https:// URL (got {url:?})"),
+                });
+                return None;
+            }
+            Some(url.to_owned())
+        }
+    };
+    let mut unknown: Vec<&str> = map
+        .keys()
+        .map(String::as_str)
+        .filter(|k| *k != "text" && *k != "href")
+        .collect();
+    if !unknown.is_empty() {
+        unknown.sort_unstable();
+        out.problems.push(IdeProblem {
+            location: format!("{at}.hint"),
+            message: format!(
+                "unknown key(s) {}. A hint may declare: href, text",
+                unknown
+                    .iter()
+                    .map(|k| format!("{k:?}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        });
+    }
+    Some(Some(ExtensionHint {
+        text: text.to_owned(),
+        href,
+    }))
+}
+
+/// `http(s)` only, the one restriction every repo-controlled URL in this module
+/// carries — a click hands it to the OS, so `vscode://` or `file://` would turn a
+/// config file into a launcher for whatever the machine has registered.
+#[must_use]
+pub fn is_web_url(url: &str) -> bool {
+    url.starts_with("http://") || url.starts_with("https://")
+}
+
+/// How many characters an emoji icon may be.
+///
+/// A glyph, not a string. Bounded because this parses a *runtime* value — a status
+/// extension's stdout — and it is rendered as text into a 42px bar, so an unbounded
+/// one destroys the bar for that worktree. Two rather than one because a single
+/// user-perceived emoji is routinely several `char`s (a variation selector, a skin
+/// tone, a ZWJ sequence), and the alternative — counting graphemes — would mean a
+/// segmentation dependency in `veld-core` for one field. Anything longer is not a
+/// glyph and is refused rather than truncated, since half a ZWJ sequence renders as
+/// something the author did not write.
+const MAX_EMOJI_CHARS: usize = 8;
+
+/// Read an icon out of a string, or `None` if it names nothing.
+///
+/// The same rule [`parse_pane_icon`] applies, without a problem to report: a
+/// *status extension's output* may name an icon too, and there the answer arrives
+/// at runtime rather than at lint time, so an unknown name has nobody to tell and
+/// simply renders no glyph. Sharing the allowlist is the point — a name that works
+/// in `veld.json` works in a badge's output and vice versa.
+#[must_use]
+pub fn parse_icon_name(text: &str) -> Option<PaneIcon> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    if !text.is_ascii() {
+        return (text.chars().count() <= MAX_EMOJI_CHARS).then(|| PaneIcon::Emoji(text.to_owned()));
+    }
+    PANE_ICON_NAMES
+        .contains(&text)
+        .then(|| PaneIcon::Name(text.to_owned()))
 }
 
 fn parse_pane(item: &serde_json::Value, at: &str, out: &mut IdeSection) -> Option<PaneDef> {
@@ -834,6 +1669,16 @@ fn parse_command(
     location: &str,
     out: &mut IdeSection,
 ) -> Option<crate::config::CommandSpec> {
+    parse_command_in_scope(entry, location, "pane", PANE_BUILTINS, out)
+}
+
+fn parse_command_in_scope(
+    entry: &serde_json::Map<String, serde_json::Value>,
+    location: &str,
+    scope: &str,
+    allowed: &[&str],
+    out: &mut IdeSection,
+) -> Option<crate::config::CommandSpec> {
     let has_argv = entry.contains_key("argv");
     let has_shell = entry.contains_key("shell");
     if has_argv && has_shell {
@@ -887,7 +1732,7 @@ fn parse_command(
         });
         return None;
     }
-    check_pane_variables(&spec, location, out)?;
+    check_command_variables(&spec, location, scope, allowed, out)?;
     Some(spec)
 }
 
@@ -898,9 +1743,11 @@ fn parse_command(
 /// spawn time — the pane simply never starts, with an error the author has to
 /// read backwards from. Catching it in `veld lint` is the whole point of the
 /// scope being closed.
-fn check_pane_variables(
+fn check_command_variables(
     spec: &crate::config::CommandSpec,
     location: &str,
+    scope: &str,
+    allowed: &[&str],
     out: &mut IdeSection,
 ) -> Option<()> {
     let parts: Vec<String> = match spec {
@@ -909,33 +1756,26 @@ fn check_pane_variables(
     };
     for part in &parts {
         for reference in all_references(part) {
-            let Some(name) = reference.strip_prefix("veld.") else {
-                out.problems.push(IdeProblem {
-                    location: location.to_owned(),
-                    message: format!(
-                        "`${{{reference}}}` is not available in a pane command. A pane may use: {}",
-                        pane_variable_list()
-                    ),
-                });
-                return None;
+            let shown = match reference.strip_prefix("veld.") {
+                Some(name) if allowed.contains(&name) => continue,
+                Some(name) => format!("${{veld.{name}}}"),
+                None => format!("${{{reference}}}"),
             };
-            if !PANE_BUILTINS.contains(&name) {
-                out.problems.push(IdeProblem {
-                    location: location.to_owned(),
-                    message: format!(
-                        "`${{veld.{name}}}` is not available in a pane command. A pane may use: {}",
-                        pane_variable_list()
-                    ),
-                });
-                return None;
-            }
+            out.problems.push(IdeProblem {
+                location: location.to_owned(),
+                message: format!(
+                    "`{shown}` is not available in a {scope} command. A {scope} may use: {}",
+                    variable_list(allowed)
+                ),
+            });
+            return None;
         }
     }
     Some(())
 }
 
-fn pane_variable_list() -> String {
-    PANE_BUILTINS
+fn variable_list(allowed: &[&str]) -> String {
+    allowed
         .iter()
         .map(|n| format!("${{veld.{n}}}"))
         .collect::<Vec<_>>()
@@ -2551,6 +3391,404 @@ mod tests {
         section(json!({ "panes": [value] }))
     }
 
+    fn extensions(value: serde_json::Value) -> IdeSection {
+        section(json!({ "extensions": value }))
+    }
+
+    fn one_extension(value: serde_json::Value) -> IdeSection {
+        extensions(json!([value]))
+    }
+
+    fn status_badge() -> serde_json::Value {
+        json!({ "id": "pr", "slot": "topBar", "type": "status", "argv": ["gh", "pr", "view"] })
+    }
+
+    fn problem_at(parsed: &IdeSection, suffix: &str) -> bool {
+        parsed.problems.iter().any(|p| p.location.ends_with(suffix))
+    }
+
+    #[test]
+    fn a_status_extension_parses_with_its_defaults() {
+        let parsed = one_extension(status_badge());
+        assert!(parsed.problems.is_empty(), "{:?}", parsed.problems);
+        let ext = &parsed.extensions[0];
+        // An omitted label is the id, matching a pane.
+        assert_eq!(ext.label, "pr");
+        assert_eq!(ext.slot.as_deref(), Some("topBar"));
+        assert_eq!(
+            ext.align,
+            ExtensionAlign::Start,
+            "the project's own cluster"
+        );
+        assert_eq!(
+            ext.when_missing,
+            WhenMissing::Hint,
+            "an extension teaches by default; silence teaches nothing"
+        );
+        let ExtensionBody::Status(status) = &ext.body else {
+            panic!("expected a status body, got {:?}", ext.body);
+        };
+        assert_eq!(status.refresh_seconds, DEFAULT_EXTENSION_REFRESH_SECONDS);
+        assert_eq!(
+            status.open_in,
+            OpenIn::System,
+            "a badge's link is a provider page the user is already signed into"
+        );
+    }
+
+    #[test]
+    fn an_extension_declaring_everything_round_trips() {
+        let parsed = one_extension(json!({
+            "id": "pr",
+            "slot": "topBar",
+            "align": "end",
+            "type": "status",
+            "label": "PR",
+            "description": "This branch's pull request",
+            "icon": "git-branch",
+            "requires_bin": ["gh", "gh"],
+            "shell": "gh pr view --json state",
+            "refresh_seconds": 120,
+            "open_in": "pane",
+            "when_missing": "disable",
+            "hint": { "text": "install gh", "href": "https://cli.github.com" },
+        }));
+        assert!(parsed.problems.is_empty(), "{:?}", parsed.problems);
+        let ext = &parsed.extensions[0];
+        assert_eq!(ext.label, "PR");
+        assert_eq!(ext.align, ExtensionAlign::End);
+        assert_eq!(ext.when_missing, WhenMissing::Disable);
+        // Deduplicated, like a pane's.
+        assert_eq!(ext.requires_bin, vec!["gh".to_owned()]);
+        assert_eq!(ext.hint.as_ref().unwrap().text, "install gh");
+        let ExtensionBody::Status(status) = &ext.body else {
+            panic!("expected a status body");
+        };
+        assert_eq!(status.refresh_seconds, 120);
+        assert_eq!(status.open_in, OpenIn::Pane);
+        assert_eq!(
+            ext.command(),
+            Some(&crate::config::CommandSpec::Shell(
+                "gh pr view --json state".to_owned()
+            )),
+            "`shell` is accepted here exactly as it is everywhere else"
+        );
+    }
+
+    #[test]
+    fn an_extension_must_name_exactly_one_command() {
+        for entry in [
+            json!({ "id": "pr", "slot": "topBar", "type": "status" }),
+            json!({ "id": "pr", "slot": "topBar", "type": "status", "argv": ["gh"], "shell": "gh" }),
+            json!({ "id": "pr", "slot": "topBar", "type": "status", "argv": [] }),
+        ] {
+            let parsed = one_extension(entry.clone());
+            assert!(parsed.extensions.is_empty(), "accepted {entry}");
+            assert!(!parsed.problems.is_empty(), "silent about {entry}");
+        }
+    }
+
+    #[test]
+    fn a_variable_an_extension_will_not_have_is_refused() {
+        // `pane.*` exists only while a pane launches. An extension runs against a
+        // worktree, so this would resolve to nothing at spawn time.
+        let parsed = one_extension(json!({
+            "id": "pr", "slot": "topBar", "type": "status",
+            "argv": ["gh", "--token", "${veld.pane.token}"],
+        }));
+        assert!(parsed.extensions.is_empty());
+        assert!(
+            parsed.problems[0].message.contains("extension command"),
+            "{:?}",
+            parsed.problems
+        );
+
+        // The ones it does have are accepted.
+        let parsed = one_extension(json!({
+            "id": "open", "type": "action", "argv": ["webstorm", "${veld.root}"],
+        }));
+        assert!(parsed.problems.is_empty(), "{:?}", parsed.problems);
+    }
+
+    #[test]
+    fn only_an_action_may_omit_its_slot() {
+        // An action with no slot is the referenced-only shape the menu depends on.
+        let parsed =
+            one_extension(json!({ "id": "code", "type": "action", "argv": ["code", "."] }));
+        assert!(parsed.problems.is_empty(), "{:?}", parsed.problems);
+        assert!(parsed.extensions[0].slot.is_none());
+        assert!(
+            parsed.extensions_in_slot("topBar").is_empty(),
+            "a slotless extension must not render on its own"
+        );
+
+        // A badge with no slot could never be reached at all, so it is reported
+        // rather than parked in the config doing nothing.
+        let parsed =
+            one_extension(json!({ "id": "pr", "type": "status", "argv": ["gh", "pr", "view"] }));
+        assert!(parsed.extensions.is_empty());
+        assert!(problem_at(&parsed, ".slot"), "{:?}", parsed.problems);
+    }
+
+    #[test]
+    fn a_menu_resolves_its_items_against_the_declarations() {
+        let parsed = extensions(json!([
+            // The menu references a member declared *below* it, which is why the
+            // check cannot live inside the per-entry parse.
+            { "id": "open-in", "slot": "topBar", "type": "menu", "items": ["code", "code"] },
+            { "id": "code", "type": "action", "argv": ["code", "${veld.root}"] },
+        ]));
+        assert!(parsed.problems.is_empty(), "{:?}", parsed.problems);
+        let ExtensionBody::Menu(menu) = &parsed.extension("open-in").unwrap().body else {
+            panic!("expected a menu");
+        };
+        assert_eq!(menu.items, vec!["code".to_owned()], "deduplicated");
+    }
+
+    #[test]
+    fn a_menu_item_that_is_not_a_declared_action_is_dropped() {
+        // Three ways to be wrong: absent, the wrong type, and a menu of menus.
+        let parsed = extensions(json!([
+            { "id": "menu-a", "slot": "topBar", "type": "menu", "items": ["ghost", "code"] },
+            { "id": "menu-b", "slot": "topBar", "type": "menu", "items": ["pr"] },
+            { "id": "menu-c", "slot": "topBar", "type": "menu", "items": ["menu-a"] },
+            { "id": "code", "type": "action", "argv": ["code", "${veld.root}"] },
+            status_badge(),
+        ]));
+        let ExtensionBody::Menu(menu) = &parsed.extension("menu-a").unwrap().body else {
+            panic!("expected a menu");
+        };
+        assert_eq!(menu.items, vec!["code".to_owned()], "the ghost is gone");
+        // A menu left with nothing usable is dropped whole — an empty popover is
+        // worse than an absent control.
+        assert!(
+            parsed.extension("menu-b").is_none(),
+            "a badge is not clickable"
+        );
+        assert!(
+            parsed.extension("menu-c").is_none(),
+            "no menus inside menus"
+        );
+        assert_eq!(
+            parsed.problems.len(),
+            5,
+            "each drop is reported: {:?}",
+            parsed.problems
+        );
+    }
+
+    #[test]
+    fn a_refresh_below_the_floor_is_clamped_and_reported() {
+        let parsed = one_extension(json!({
+            "id": "pr", "slot": "topBar", "type": "status", "argv": ["gh"], "refresh_seconds": 1,
+        }));
+        let ExtensionBody::Status(status) = &parsed.extensions[0].body else {
+            panic!("expected a status body");
+        };
+        assert_eq!(status.refresh_seconds, MIN_EXTENSION_REFRESH_SECONDS);
+        assert!(
+            problem_at(&parsed, ".refresh_seconds"),
+            "an effective value that is not what was written must be said out loud"
+        );
+    }
+
+    #[test]
+    fn more_extensions_than_the_cap_keeps_the_first_and_reports_once() {
+        let many: Vec<serde_json::Value> = (0..MAX_EXTENSIONS_PER_PROJECT + 6)
+            .map(|i| json!({ "id": format!("e{i}"), "type": "action", "argv": ["true"] }))
+            .collect();
+        let parsed = extensions(json!(many));
+        assert_eq!(parsed.extensions.len(), MAX_EXTENSIONS_PER_PROJECT);
+        assert_eq!(parsed.extensions[0].id, "e0", "the first ones win");
+        assert_eq!(
+            parsed.problems.len(),
+            1,
+            "reported once, not once per dropped entry: {:?}",
+            parsed.problems
+        );
+    }
+
+    #[test]
+    fn a_duplicate_extension_id_keeps_the_first_and_reports_the_second() {
+        let parsed = extensions(json!([
+            { "id": "code", "type": "action", "label": "first", "argv": ["code"] },
+            { "id": "code", "type": "action", "label": "second", "argv": ["code"] },
+        ]));
+        assert_eq!(parsed.extensions.len(), 1);
+        assert_eq!(parsed.extensions[0].label, "first");
+        assert!(problem_at(&parsed, "code\".id") || problem_at(&parsed, "[1].id"));
+    }
+
+    #[test]
+    fn an_unknown_slot_or_type_is_skipped_and_the_rest_still_applies() {
+        // A project written for a newer veld: the entry it does not understand is
+        // skipped with a message naming what this version knows, and the entries
+        // it does understand still work.
+        let parsed = extensions(json!([
+            { "id": "later", "slot": "sidebar", "type": "status", "argv": ["true"] },
+            { "id": "newer", "slot": "topBar", "type": "sparkline", "argv": ["true"] },
+            status_badge(),
+        ]));
+        assert_eq!(parsed.extensions.len(), 1);
+        assert_eq!(parsed.extensions[0].id, "pr");
+        assert_eq!(parsed.problems.len(), 2, "{:?}", parsed.problems);
+        assert!(
+            parsed
+                .problems
+                .iter()
+                .all(|p| p.message.contains("this version")),
+            "an author must be able to tell 'too new' from 'typo': {:?}",
+            parsed.problems
+        );
+    }
+
+    #[test]
+    fn an_unknown_key_is_reported_against_the_type_that_may_not_have_it() {
+        // `refresh_seconds` is real — on a badge. On an action it is a mistake
+        // worth naming, which is why the allowlist is per type.
+        let parsed = one_extension(json!({
+            "id": "code", "type": "action", "argv": ["code"], "refresh_seconds": 60,
+        }));
+        assert!(
+            parsed.problems[0].message.contains("refresh_seconds"),
+            "{:?}",
+            parsed.problems
+        );
+        // Still accepted: an unknown key is a warning, never a dropped entry —
+        // the same leniency panes have.
+        assert_eq!(parsed.extensions.len(), 1);
+    }
+
+    #[test]
+    fn an_icon_from_a_runtime_value_is_bounded() {
+        // A badge's stdout may name an icon, and an emoji is unbounded by nature —
+        // but it is rendered as text into a 42px bar, so a 20KB "emoji" would
+        // destroy the bar. Refused rather than truncated: half a ZWJ sequence is a
+        // different glyph.
+        assert_eq!(
+            parse_icon_name("🦊"),
+            Some(PaneIcon::Emoji("🦊".to_owned()))
+        );
+        // A flag is two scalars plus a joiner; a family is more. These must pass.
+        for ok in ["🏳️\u{200d}🌈", "👩\u{200d}💻"] {
+            assert!(parse_icon_name(ok).is_some(), "{ok:?} is one glyph");
+        }
+        assert_eq!(parse_icon_name(&"好".repeat(200)), None);
+        assert_eq!(parse_icon_name("not-an-icon-name"), None);
+        assert_eq!(
+            parse_icon_name("code"),
+            Some(PaneIcon::Name("code".to_owned()))
+        );
+    }
+
+    #[test]
+    fn a_hint_href_may_only_be_a_web_url() {
+        let parsed = one_extension(json!({
+            "id": "pr", "slot": "topBar", "type": "status", "argv": ["gh"],
+            "hint": { "text": "install it", "href": "vscode://install" },
+        }));
+        assert!(parsed.extensions.is_empty());
+        assert!(problem_at(&parsed, ".hint.href"), "{:?}", parsed.problems);
+    }
+
+    #[test]
+    fn a_wrong_typed_extensions_key_is_ignored_whole_and_reported() {
+        let parsed = extensions(json!({ "pr": {} }));
+        assert!(parsed.extensions.is_empty());
+        assert!(problem_at(&parsed, "ide.extensions"));
+    }
+
+    /// The extension key lists, slot set and type set are hand-maintained in two
+    /// places — here and the JSON schema — and nothing but this ties them
+    /// together. A drifted schema red-squiggles a key `veld lint` accepts, or
+    /// accepts one the parser will report, and both failures are silent.
+    #[test]
+    fn the_schema_extension_branches_match_the_parser() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .expect("workspace root")
+            .join("schema/v3/veld.schema.json");
+        let schema: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("schema is readable"))
+                .expect("schema is valid JSON");
+        let def = &schema["$defs"]["extension"];
+
+        for (index, kind) in ["status", "action", "menu"].iter().enumerate() {
+            let arm = &def["allOf"][index];
+            assert_eq!(
+                arm["if"]["properties"]["type"]["const"],
+                json!(kind),
+                "the branches must stay in this order for the indexing below"
+            );
+            let branch = &arm["then"];
+            assert_eq!(
+                branch["additionalProperties"],
+                json!(false),
+                "the key check below only means anything while the branch is closed"
+            );
+            let mut keys: Vec<&str> = branch["properties"]
+                .as_object()
+                .unwrap_or_else(|| panic!("$defs.extension {kind} branch must list properties"))
+                .keys()
+                .map(String::as_str)
+                .collect();
+            keys.sort_unstable();
+            assert_eq!(keys, extension_keys(kind), "{kind} branch keys");
+        }
+
+        // The three enums the parser rejects values outside of.
+        let props = &def["allOf"][0]["then"]["properties"];
+        for (field, expected) in [
+            ("slot", EXTENSION_SLOTS),
+            ("align", EXTENSION_ALIGNS),
+            ("when_missing", EXTENSION_WHEN_MISSING),
+            ("open_in", EXTENSION_OPEN_IN),
+        ] {
+            let mut values: Vec<&str> = props[field]["enum"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{field} must be an enum in the schema"))
+                .iter()
+                .map(|v| v.as_str().expect("enum values are strings"))
+                .collect();
+            values.sort_unstable();
+            assert_eq!(values, expected.to_vec(), "{field} enum");
+        }
+        let mut types: Vec<&str> = props["type"]["enum"]
+            .as_array()
+            .expect("type must be an enum")
+            .iter()
+            .map(|v| v.as_str().expect("enum values are strings"))
+            .collect();
+        types.sort_unstable();
+        assert_eq!(types, vec!["action", "menu", "status"]);
+
+        // The two numeric bounds veld owns rather than the repo.
+        assert_eq!(
+            props["refresh_seconds"]["minimum"],
+            json!(MIN_EXTENSION_REFRESH_SECONDS)
+        );
+        assert_eq!(
+            props["refresh_seconds"]["default"],
+            json!(DEFAULT_EXTENSION_REFRESH_SECONDS)
+        );
+        assert_eq!(
+            schema["properties"]["ide"]["properties"]["extensions"]["maxItems"],
+            json!(MAX_EXTENSIONS_PER_PROJECT)
+        );
+    }
+
+    #[test]
+    fn extensions_is_no_longer_reported_as_uninterpreted() {
+        let parsed = one_extension(status_badge());
+        assert!(
+            parsed.uninterpreted.is_empty(),
+            "F8 must stop naming a key this version renders: {:?}",
+            parsed.uninterpreted
+        );
+        assert!(!parsed.is_empty(), "a section with extensions is not empty");
+    }
+
     #[test]
     fn a_terminal_pane_parses_with_its_defaults() {
         let parsed = one_pane(json!({
@@ -2805,6 +4043,49 @@ mod tests {
             parsed.problems[0].message.contains("\"requiresBin\""),
             "{:?}",
             parsed.problems
+        );
+    }
+
+    /// The documented icon list is the fourth copy of this set, and was the only one
+    /// with nothing checking it.
+    ///
+    /// It went stale immediately: the list stayed at the original 32 names while the
+    /// allowlist grew to 63, and `docs/configuration.md` points `ide.extensions`'
+    /// own `icon` field at that section — so its worked examples used
+    /// `external-link` and `git-pull-request`, neither of which the list it cites
+    /// contained. A reader checking the example against the allowlist in the same
+    /// document found a contradiction, and nothing failed.
+    #[test]
+    fn the_documented_icon_list_matches_the_allowlist() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .expect("workspace root")
+            .join("docs/configuration.md");
+        let doc = std::fs::read_to_string(&path).expect("configuration.md is readable");
+        let marker = "the same allowlist [`ide.extensions`](#ideextensions) draws on";
+        let start = doc
+            .find(marker)
+            .unwrap_or_else(|| panic!("the pane-icon paragraph moved; update this test"));
+        // The `·`-separated run that follows, up to the next blank line.
+        let list_start = doc[start..]
+            .find("\n\n`")
+            .map(|o| start + o + 2)
+            .expect("a list follows the paragraph");
+        let list_end = doc[list_start..]
+            .find("\n\n")
+            .map(|o| list_start + o)
+            .expect("the list ends");
+        let mut documented: Vec<&str> = doc[list_start..list_end]
+            .split('·')
+            .map(|n| n.trim().trim_matches('`'))
+            .filter(|n| !n.is_empty())
+            .collect();
+        documented.sort_unstable();
+        assert_eq!(
+            documented,
+            PANE_ICON_NAMES.to_vec(),
+            "docs/configuration.md's icon list has drifted from PANE_ICON_NAMES"
         );
     }
 

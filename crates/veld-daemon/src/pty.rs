@@ -1526,10 +1526,28 @@ fn pane_context(
     branch: &str,
     config: &veld_core::config::VeldConfig,
 ) -> veld_core::variables::VariableContext {
-    let mut builtins = HashMap::new();
+    let mut builtins = worktree_builtins(worktree_path, branch, config);
     builtins.insert("pane.id".to_owned(), pane.id.clone());
     builtins.insert("pane.label".to_owned(), pane.label.clone());
     builtins.insert("pane.token".to_owned(), token.to_owned());
+    veld_core::variables::VariableContext {
+        builtins,
+        ..Default::default()
+    }
+}
+
+/// The `${veld.*}` names any command scoped to a *worktree* resolves against.
+///
+/// One owner for these meanings, shared by pane commands and by `ide.extensions`
+/// commands. A second copy is the bug this shape prevents: the names below are
+/// each a deliberate choice, and a module that rebuilt them from scratch would get
+/// one of them subtly different.
+pub(crate) fn worktree_builtins(
+    worktree_path: &FsPath,
+    branch: &str,
+    config: &veld_core::config::VeldConfig,
+) -> HashMap<String, String> {
+    let mut builtins = HashMap::new();
     // **The same meanings these names have everywhere else.** `${veld.worktree}`
     // is the slugified directory *name* and `${veld.branch}` is slugified too
     // (`orchestrator.rs`'s `BuiltinScope::apply`, and the reference table in
@@ -1558,10 +1576,7 @@ fn pane_context(
         "username".to_owned(),
         veld_core::orchestrator::whoami_username(),
     );
-    veld_core::variables::VariableContext {
-        builtins,
-        ..Default::default()
-    }
+    builtins
 }
 
 /// How long a `requires_bin` answer is reused before the filesystem is asked
@@ -3872,6 +3887,42 @@ mod tests {
         let mut names: Vec<&str> = ctx.builtins.keys().map(String::as_str).collect();
         names.sort_unstable();
         assert_eq!(names, veld_core::ide::PANE_BUILTINS.to_vec());
+    }
+
+    /// The same gate for `ide.extensions`, whose scope is one name-family narrower.
+    ///
+    /// `worktree_builtins` is what *resolves* and `EXTENSION_BUILTINS` is what
+    /// `veld lint` *accepts*, and they are a second hand-maintained pair. Drift
+    /// either way is silent and confusing in opposite directions: a name in
+    /// `worktree_builtins` but not the allowlist is a lint error for a variable
+    /// that would have resolved fine, and the reverse is a badge that lints clean
+    /// and then fails at spawn with "could not resolve the command".
+    #[test]
+    fn extension_commands_resolve_exactly_the_names_lint_accepts() {
+        let cfg: veld_core::config::VeldConfig = serde_json::from_value(serde_json::json!({
+            "schemaVersion": "3",
+            "name": "probe",
+            "nodes": {},
+        }))
+        .expect("minimal config");
+        let builtins = worktree_builtins(FsPath::new("/tmp/wt"), "main", &cfg);
+        let mut names: Vec<&str> = builtins.keys().map(String::as_str).collect();
+        names.sort_unstable();
+        assert_eq!(names, veld_core::ide::EXTENSION_BUILTINS.to_vec());
+
+        // And the relationship to the pane scope is the one documented on
+        // `EXTENSION_BUILTINS`: identical apart from the `pane.*` family, which
+        // exists only while a pane is launching.
+        let pane_only: Vec<&str> = veld_core::ide::PANE_BUILTINS
+            .iter()
+            .filter(|n| !veld_core::ide::EXTENSION_BUILTINS.contains(n))
+            .copied()
+            .collect();
+        assert!(
+            pane_only.iter().all(|n| n.starts_with("pane.")),
+            "a pane builtin that is not `pane.*` should be available to an \
+             extension too, but these are not: {pane_only:?}"
+        );
     }
 
     /// A holder speaking a version this build does not know must be refused —
