@@ -501,30 +501,62 @@ body[data-fullscreen="true"] .topbar.electron {
 }
 
 /* The project selector shrinks to its value instead of always occupying its
-   170px cap — a short project name should not leave a hole in the densest row
-   of the app. The width is computed in `TopBar` by measuring the hidden mirror
-   span (so the font is whatever the input renders, not a guess); `max-width`
-   here is the backstop and the input's ellipsis keeps an over-long name from
-   stretching the bar. */
-.project-select {
-  display: inline-flex;
-  min-width: 0;
-  max-width: 170px;
-}
-.project-select-measure {
-  position: absolute;
-  visibility: hidden;
-  white-space: nowrap;
-  font-size: 12px;
-  font-family: inherit;
-}
-.project-select-control {
+   cap — a short project name should not leave a hole in the densest row of the
+   app. */
+/* The selector is a `Menu` target now, so it sizes to its label intrinsically —
+   no mirror span to measure. `overflow: visible` for the same reason
+   `.project-actions` needs it: the "another project has news" dot sits on the
+   button's corner and a Mantine Button clips its content by default. */
+.project-select-btn {
+  position: relative;
+  overflow: visible;
+  max-width: 190px;
   min-width: 0;
 }
-.project-select-control .mantine-Input-input {
+.project-select-name {
+  display: block;
+  min-width: 0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* A project row: name on the left, "open in <where>" pushed to the right. */
+.project-menu-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.project-menu-name {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* Where a project (or a worktree) already is. Dim and secondary: it explains
+   what a click will do, it is not the row's subject. `margin-left: auto` is what
+   right-aligns it against the name's `min-width: 0`. */
+.project-menu-away {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+/* The project this window is in. Weight rather than colour — the accent is the
+   activity glyph's, and two greens in one row read as one signal. */
+.project-menu-current {
+  font-weight: 600;
+}
+/* The ⌘N a project row answers to. Same slot and same weight as the away note it
+   yields to, because they are the same kind of aside: dim, right-aligned, never
+   the subject of the row. Tabular figures so a column of them lines up. */
+.project-menu-key {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 /* The machine-vars `{}` button: a small badge marks that this machine has
@@ -4283,4 +4315,211 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
   border-radius: 50%;
   background: var(--accent);
   border: 2px solid var(--panel2);
+}
+
+/* ---------------------------------------------------------------------------
+   The project column (`ProjectColumn`)
+
+   One square per project, beside the worktree rail. Off by default
+   (`ui.showProjectColumn`), so nothing here applies to a single-project install
+   that never turns it on.
+
+   **Greyscale on purpose.** An earlier version filled each square with a hue
+   derived from the repo path. It was louder than anything else on screen and it
+   competed with the worktree markers in the rail two pixels to its right — the one
+   place in this UI where colour already means something specific. Selection is
+   carried by fill-vs-outline, exactly as a rail row carries it, and the only colour
+   left in the column is the activity badge, which is the same four colours the rail
+   uses for the same four states.
+   --------------------------------------------------------------------------- */
+
+.project-col {
+  flex: none;
+  /* 44px around a 26px square: 9px either side, so the column reads as its own
+     region rather than as squares crammed against the rail. */
+  width: 44px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  padding: 7px 0;
+  background: var(--panel2);
+  border-right: 1px solid var(--border);
+  /* Scrolls on its own rather than pushing the rail: a machine with twenty
+     projects must not make the worktree list unreachable. `min-height: 0` for the
+     same reason `.workspace` carries it. */
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: none;
+}
+.project-col::-webkit-scrollbar {
+  display: none;
+}
+
+.project-sq {
+  position: relative;
+  flex: none;
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  border: 1px solid var(--border2);
+  border-radius: 7px;
+  cursor: pointer;
+  background: none;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+  user-select: none;
+  transition: background 90ms ease, color 90ms ease, border-color 90ms ease;
+}
+.project-sq:hover {
+  background: var(--elev);
+  color: var(--text);
+}
+/* The selected project. **The two themes need different amounts of help**, which
+   is why this is two rules rather than one token.
+
+   Dark: `--border2` (#363b43), used as a surface rather than as an edge because it
+   is the top of this stylesheet's neutral ramp — `--elev` (#22262c) is only two
+   steps above the `--panel2` column behind it and read as barely selected. The
+   border matches the fill, so the square is one solid chip.
+
+   Light: white. `--elev` there is `#eceef0`, byte-identical to `--bg`, so the
+   selected square was literally painting the app's own background colour; the
+   border is what separates white from the `#f5f6f7` column.
+
+   No shadow: at 26px it read as grime around the square rather than as lift, and
+   the fill already carries the whole signal. */
+.project-sq.active {
+  background: var(--border2);
+  border-color: var(--border2);
+  color: var(--text);
+}
+body[data-theme="light"] .project-sq.active {
+  background: var(--tab-active);
+  border-color: var(--border2);
+}
+.project-sq:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+/* A repo whose directory is not on disk right now. Drained rather than hidden:
+   it is still a project you can select, and its rail explains why it is empty. */
+.project-sq.unavailable {
+  opacity: 0.5;
+}
+/* The square being dragged. Where it will land is the caret's job, not a ring's —
+   a ring around the square under the pointer cannot say which side of it you are
+   about to drop on. */
+.project-sq.dragging {
+  opacity: 0.4;
+}
+
+/* The drop indicator, between squares. Deliberately `.rail-caret`'s bar, glow and
+   accent — a drag in this column and a drag in the rail beside it are the same
+   gesture and must not be two visual languages. Only the geometry differs: the
+   squares are 26px and centred in a 44px column, so the bar is inset to them
+   rather than to the rail's row padding, and it sits in the 5px gap `.project-col`
+   puts between squares. */
+.project-caret {
+  position: relative;
+  height: 0;
+  margin-top: -2px;
+}
+.project-caret::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  width: 26px;
+  transform: translateX(-50%);
+  top: -1px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--accent);
+  /* The glow does the standing out, and a box-shadow contributes nothing to
+     layout — the same reasoning, and the same values, as `.rail-caret`. */
+  box-shadow:
+    0 0 0 1px color-mix(in oklab, var(--accent) 40%, transparent),
+    0 0 9px 1px color-mix(in oklab, var(--accent) 75%, transparent);
+}
+.project-sq-initials {
+  pointer-events: none;
+}
+
+/* "Import repository…" — the column's own affordance, so a second project can be
+   added without going through the project menu. Dashed, so it does not read as a
+   project that happens to be called `+`. */
+.project-sq-add {
+  border-style: dashed;
+  color: var(--faint);
+}
+.project-sq-add:hover {
+  color: var(--text);
+}
+
+/* The activity badge — the same four states, and the same colours, the rail puts
+   on a worktree row (`.wt-inbox`). A dot rather than the glyph itself: at 26px an
+   outline icon in the corner is unreadable, and the square only has to say *that*
+   this project has news of a given kind. Which pane, and which worktree, is the
+   rail's answer. This is the one place colour survives in the column. */
+.project-sq-badge {
+  position: absolute;
+  top: -3px;
+  right: -3px;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  /* The column's own background, so the badge reads as sitting on top of the
+     square rather than inside it — matching `.project-actions-dot`. */
+  border: 2px solid var(--panel2);
+  background: var(--muted);
+}
+.project-sq-badge.attention {
+  background: var(--warn);
+  animation: pulse 1.6s infinite;
+}
+.project-sq-badge.failed {
+  background: var(--danger);
+  animation: pulse 1.6s infinite;
+}
+.project-sq-badge.finished {
+  background: var(--accent);
+}
+.project-sq-badge.working {
+  background: var(--muted);
+  opacity: 0.65;
+}
+
+/* Some other client is showing one of this project's worktrees. Bottom-left, so
+   it never collides with the activity badge — the two are independent facts and a
+   project routinely has both. */
+.project-sq-away {
+  position: absolute;
+  bottom: -2px;
+  left: -2px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  border: 2px solid var(--panel2);
+  background: var(--muted);
+}
+
+/* An accessible name for a control whose visible content is decorative — here the
+   project's real name behind its initials. The clip-rect idiom rather than
+   `display: none`, which removes it from the accessibility tree as well. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
 }

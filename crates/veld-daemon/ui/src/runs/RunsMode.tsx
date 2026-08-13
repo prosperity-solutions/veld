@@ -29,8 +29,10 @@ import type { ReactNode } from "react";
  * logs, stats, and sharing. Polls: envs+shares 3s, stats 5s (stats live in
  * separate state so their churn re-renders only the stat cells).
  */
-export function RunsMode(props: { modeSwitch: ReactNode; themeButton: ReactNode;
-  settingsButton: ReactNode;
+export function RunsMode(props: { modeSwitch: ReactNode;
+  /** Theme, what's new and settings, as one menu — built by the app and shared
+   *  with the IDE bar so the two modes cannot drift. */
+  overflowMenu: ReactNode;
   /**
    * The `runs.historyDays` horizon, or 0 for "show everything".
    *
@@ -191,8 +193,7 @@ export function RunsMode(props: { modeSwitch: ReactNode; themeButton: ReactNode;
         <Text size="xs" c="dimmed">
           {meta}
         </Text>
-        {props.settingsButton}
-        {props.themeButton}
+        {props.overflowMenu}
       </div>
 
       <div className="runs-container" style={{ flex: "none" }}>

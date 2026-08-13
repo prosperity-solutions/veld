@@ -462,7 +462,7 @@ function appUrl({ kind, repoRoot, worktreeId, settings }) {
   // Only set when `⌘,` had no window to send to and one is being opened for it:
   // an IPC `send` would race the page load. Grants nothing (settings are a
   // daemon-side document either way), so a forged `?settings=1` in a browser tab
-  // opens a dialog the user could have opened from the gear.
+  // opens a dialog the user could have opened from the top bar's ⋯ menu.
   if (settings) params.set("settings", "1");
   return `${deps.baseUrl}/ide?${params.toString()}`;
 }

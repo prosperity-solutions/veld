@@ -389,8 +389,11 @@ mod tests {
         // *stored*, so a clamp is visible instead of a control sitting at a value
         // the daemon refused. Uses an isolated database — these tests would
         // otherwise write the developer's dev DB.
+        // Held for the whole test: `VELD_DB_PATH` is process-wide, and `extensions`
+        // has its own tests that set and clear it. See `lock_db_env`.
+        let _env = crate::feedback_server::lock_db_env();
         let dir = tempfile::TempDir::new().unwrap();
-        // SAFETY: single-threaded test process; the daemon reads this per request.
+        // SAFETY: the lock above is what makes this the only writer of the variable.
         unsafe { std::env::set_var("VELD_DB_PATH", dir.path().join("t.db")) };
 
         let res = routes()

@@ -435,6 +435,7 @@ pub enum SettingKey {
     BrowserSearchUrl,
     UiHideDisabledActions,
     UiShowProjectNews,
+    UiShowProjectColumn,
     GitCreateFrom,
     WorktreeStorageMode,
     WorktreeStorageDir,
@@ -492,6 +493,7 @@ impl SettingKey {
         Self::BrowserSearchUrl,
         Self::UiHideDisabledActions,
         Self::UiShowProjectNews,
+        Self::UiShowProjectColumn,
         Self::GitCreateFrom,
         Self::WorktreeStorageMode,
         Self::WorktreeStorageDir,
@@ -538,6 +540,7 @@ impl SettingKey {
             Self::BrowserSearchUrl => "browser.searchUrl",
             Self::UiHideDisabledActions => "ui.hideDisabledActions",
             Self::UiShowProjectNews => "ui.showProjectNews",
+            Self::UiShowProjectColumn => "ui.showProjectColumn",
             Self::GitCreateFrom => "git.createFrom",
             Self::WorktreeStorageMode => "worktree.storageMode",
             Self::WorktreeStorageDir => "worktree.storageDir",
@@ -586,6 +589,7 @@ impl SettingKey {
             "browser.searchUrl" => Self::BrowserSearchUrl,
             "ui.hideDisabledActions" => Self::UiHideDisabledActions,
             "ui.showProjectNews" => Self::UiShowProjectNews,
+            "ui.showProjectColumn" => Self::UiShowProjectColumn,
             "git.createFrom" => Self::GitCreateFrom,
             "worktree.storageMode" => Self::WorktreeStorageMode,
             "worktree.storageDir" => Self::WorktreeStorageDir,
@@ -680,6 +684,7 @@ impl SettingKey {
             | Self::BrowserQuickSwitchColorScheme
             | Self::UiHideDisabledActions
             | Self::UiShowProjectNews
+            | Self::UiShowProjectColumn
             | Self::FocusModeEnabled
             | Self::FocusModeSuppressBell
             | Self::FocusModeSuppressToasts
@@ -1272,6 +1277,12 @@ pub fn defaults() -> BTreeMap<String, Value> {
         // a standing posture — an install that silently suppressed its own bell
         // and banners from the first run would look like a notification bug, not
         // a feature nobody asked for yet.
+        // Off. The project column is the multi-project surface, and most installs
+        // have one project — for them a 44px column of a single square is cost with
+        // no answer in it. It is also the reason the toggle sits in the top bar
+        // rather than only in Settings: a control nobody can find is the same thing
+        // as a feature nobody has.
+        (SettingKey::UiShowProjectColumn, Value::from(false)),
         (SettingKey::FocusModeEnabled, Value::from(false)),
         // All three suppression rows default on: the point of turning focus mode
         // on at all is "stop interrupting me", so a master switch whose sub-rows

@@ -49,6 +49,32 @@ mod config_vars;
 #[path = "promotions.rs"]
 mod promotions;
 
+/// Serialises the tests that point `VELD_DB_PATH` at a temp database.
+///
+/// **Pre-existing flake, fixed here because it reddens CI at random.** Two modules
+/// under this one — `settings` and `extensions` — each set and then remove that
+/// process-wide variable around an HTTP-layer test, and each carries a SAFETY note
+/// asserting the process is single-threaded. It is not: `cargo test` runs them on a
+/// thread pool, so `settings`' `remove_var` lands inside `extensions`' request and
+/// the handler opens a different database than the one the test seeded. The symptom
+/// is a 404 where the test expects 200, on a file neither author touched. Measured
+/// at roughly one full-suite run in four on `origin/main`.
+///
+/// **Take it exactly once per test, and bind it.** The mutex is not reentrant, so a
+/// second `lock()` in the same test deadlocks — and `let _ = ...` drops the guard
+/// immediately (releasing it before the body runs) where `let _guard = ...` holds it
+/// to the end of scope. Both mistakes have been made in this repo before.
+///
+/// Poisoning is ignored: a panicking test has already failed, and refusing the lock
+/// afterwards would convert one failure into every later test failing too.
+#[cfg(test)]
+pub(crate) static DB_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+pub(crate) fn lock_db_env() -> std::sync::MutexGuard<'static, ()> {
+    DB_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Note the terminal sessions being left running.
 ///
 /// Re-exported for the daemon's shutdown path. It no longer *ends* anything: a

@@ -1626,11 +1626,21 @@ mod tests {
         ///
         /// Returns the worktree's id and keeps both temp dirs alive for the
         /// caller's duration.
-        fn seed_worktree_with_no_main() -> (i64, tempfile::TempDir, tempfile::TempDir) {
+        fn seed_worktree_with_no_main() -> (
+            i64,
+            tempfile::TempDir,
+            tempfile::TempDir,
+            std::sync::MutexGuard<'static, ()>,
+        ) {
+            // Acquired here and returned to the caller, so it is held for the whole
+            // test rather than only for the seeding. `VELD_DB_PATH` is process-wide
+            // and `crate::settings`' router tests clear it; before this lock existed,
+            // that `remove_var` landing mid-request made the handler open a different
+            // database and answer 404. Exactly one acquire per test — the mutex is
+            // not reentrant.
+            let env = crate::feedback_server::lock_db_env();
             let db_dir = tempfile::TempDir::new().expect("tempdir");
-            // SAFETY: `cargo test` in this crate runs these HTTP-layer tests
-            // single-threaded against a shared env var — see the identical
-            // pattern and caveat in `crate::settings`'s own router tests.
+            // SAFETY: the guard above is what makes this the only writer.
             unsafe { std::env::set_var("VELD_DB_PATH", db_dir.path().join("t.db")) };
             let db = veld_core::db::Db::open_at(&db_dir.path().join("t.db")).expect("open");
 
@@ -1661,12 +1671,12 @@ mod tests {
                 .expect("the only row");
             assert!(!wt.is_main, "test setup: this repo must have no main row");
 
-            (wt.id, db_dir, repo_dir)
+            (wt.id, db_dir, repo_dir, env)
         }
 
         #[tokio::test]
         async fn status_answers_no_badges_rather_than_the_worktrees_own() {
-            let (id, _db_dir, _repo_dir) = seed_worktree_with_no_main();
+            let (id, _db_dir, _repo_dir, _env) = seed_worktree_with_no_main();
 
             let res = routes()
                 .oneshot(
@@ -1695,7 +1705,7 @@ mod tests {
 
         #[tokio::test]
         async fn activate_refuses_rather_than_running_the_worktrees_own() {
-            let (id, _db_dir, _repo_dir) = seed_worktree_with_no_main();
+            let (id, _db_dir, _repo_dir, _env) = seed_worktree_with_no_main();
 
             let res = routes()
                 .oneshot(

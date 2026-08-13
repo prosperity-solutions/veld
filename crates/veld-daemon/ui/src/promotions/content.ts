@@ -120,4 +120,19 @@ export const PROMOTIONS: Promotion[] = [
     body: "One click in the top bar and the bell, the toasts, and the OS banners stop. The worktree rail still shows what happened while you were quiet.",
     glyph: "inbox",
   },
+  {
+    // Two things nobody would find on their own, which is what earns the card. A
+    // notification that crosses projects only shows itself when it happens — and
+    // until now it arrived titled "Veld" and did nothing when clicked. The project
+    // column ships **off**, so without a mention it is a surface that exists for
+    // nobody. The selector's own changes are discoverable on the first click and
+    // are not why this is here. `inbox`, like the two other cards about being told
+    // something.
+    id: "multi-project-parallelism",
+    since: "2026-08-13",
+    eyebrow: "New",
+    headline: "Handle multiple projects better in parallel",
+    body: "An agent waiting in a project you are not looking at says so, and clicking through takes you there. Turn on the project column for ⌘1…⌘9.",
+    glyph: "inbox",
+  },
 ];

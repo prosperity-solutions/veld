@@ -76,11 +76,19 @@ export interface TabTransfer {
 export interface DesktopWindowApi {
   kind: "main" | "detached";
   seed: string | null;
-  /** Another full window. Omit the payload for "another one like this"; pass a
-   *  worktree to open pointed at it. */
+  /**
+   * Another full window. Omit the payload for "another one like this"; pass a
+   * worktree to open pointed at it.
+   *
+   * `worktreeId` is optional *within* a payload that names a repo: that is "open
+   * this project", and the new window runs its own acquire hunt to land on
+   * whichever of its worktrees is free. The shell already builds the URL that way
+   * (`appUrl` in `desktop/src/windows.js` sets `?repo=` and `?wt=` independently);
+   * this type was the only thing insisting on both.
+   */
   newWindow(payload?: {
     repoRoot: string;
-    worktreeId: number;
+    worktreeId?: number;
   }): Promise<{ opened: boolean; reason?: string | null }>;
   /**
    * Which worktree this window is displaying.
@@ -231,7 +239,7 @@ export const desktopApp: DesktopAppApi | null =
  * Set by the shell only when `⌘,` had no window to send to and opened one for it —
  * an IPC `send` would race the page load. Read from the URL because it grants
  * nothing: settings are a daemon-side document either way, so a forged
- * `?settings=1` opens a dialog the gear already opens.
+ * `?settings=1` opens a dialog the ⋯ menu already opens.
  */
 export const openSettingsOnBoot: boolean =
   new URLSearchParams(window.location.search).get("settings") === "1";

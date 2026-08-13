@@ -76,6 +76,7 @@ import {
   gitCreateFrom,
   hideDisabledActions,
   logsTimeZone,
+  showProjectColumn,
   showProjectNews,
   searchUrl,
   activityPrefs,
@@ -322,6 +323,7 @@ export function SettingsDialog(props: {
   const logsTz = logsTimeZone(settings ?? {});
   const hideDisabled = hideDisabledActions(settings ?? {});
   const projectNews = showProjectNews(settings ?? {});
+  const projectColumn = showProjectColumn(settings ?? {});
 
   // Not persisted, and deliberately so: the dialog is remounted on every open, so
   // it always opens on General rather than wherever a previous visit ended up.
@@ -762,6 +764,17 @@ export function SettingsDialog(props: {
                   onChange={(e) =>
                     set({ "ui.hideDisabledActions": e.currentTarget.checked })
                   }
+                />
+              </Row>
+              <Row
+                label="Show the project column"
+                help="A column of projects down the left edge, beside the worktree rail — each one carrying what its checkouts have to say, so another project's waiting agent is on screen without a click. ⌘1…⌘9 go straight to a project and squares are dragged to reorder. Off by default because most installs have one project. ⌘B, or the stacked-layers button in the top bar, is the same switch."
+              >
+                <Checkbox
+                  size="xs"
+                  checked={projectColumn}
+                  disabled={locked}
+                  onChange={(e) => set({ "ui.showProjectColumn": e.currentTarget.checked })}
                 />
               </Row>
               <Row

@@ -31,6 +31,7 @@ import {
   terminalPrefs,
   activityPrefs,
   focusPrefs,
+  showProjectColumn as showProjectColumnPref,
   focusSuppresses,
   FOCUS_SUPPRESS_BELL,
   FOCUS_SUPPRESS_TOASTS,
@@ -96,7 +97,6 @@ import {
   Loader,
   MantineProvider,
   Menu,
-  Select,
   Tooltip,
   TextInput,
 } from "@mantine/core";
@@ -106,8 +106,11 @@ import {
   IconArrowsExchange,
   IconBell,
   IconBellOff,
+  IconCheck,
+  IconChevronDown,
   IconChevronLeft,
   IconChevronRight,
+  IconChevronUp,
   IconDots,
   IconDotsVertical,
   IconFolderPlus,
@@ -122,6 +125,7 @@ import {
   IconSearch,
   IconSettings,
   IconSparkles,
+  IconStack2,
   IconBuildingBroadcastTower,
   IconShare,
   IconTrash,
@@ -186,6 +190,19 @@ import {
 import { acquireWorktree } from "./ide/acquire";
 import { channel, type ClaimResult, type ClientInfo } from "./ide/channel";
 import { awayNote, openableWorktrees, worktreeSetKey } from "./ide/ownership";
+import {
+  MAX_PROJECT_SHORTCUTS,
+  isProjectNews,
+  otherProjectWorktreeIds,
+  dropTargetIndex,
+  projectForShortcut,
+  projectHolder,
+  projectShortcutDigit,
+  projectInitials,
+  projectWorktreeIds,
+  reorderedRoots,
+  toggleTarget,
+} from "./shared/projects";
 import {
   adoptLegacyLayouts,
   cancelPendingWrite,
@@ -362,6 +379,33 @@ const PENDING_TTL_MS = 60_000;
  * then quietly refuses to open a worktree or attach a terminal.
  */
 const CHANNEL_DOWN_NOTICE_MS = 4000;
+
+/**
+ * Whether a keystroke landed in something the user is typing into.
+ *
+ * For the one shortcut that is a plain letter. `contentEditable` as well as the two
+ * input elements, because the rename fields and the ⌘K box are not the only places a
+ * caret can be.
+ */
+function isEditableTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  const tag = target.tagName;
+  return tag === "INPUT" || tag === "TEXTAREA" || target.isContentEditable;
+}
+
+/**
+ * The three theme values, named.
+ *
+ * A list rather than a cycle, because the bar's overflow menu shows all three at
+ * once — "system" especially is a value you have to be able to *ask* for, and a
+ * three-step cycle only ever let you arrive at it. `auto` is the stored value's
+ * name and stays that way; "System" is what it is called on screen.
+ */
+const THEME_CHOICES = [
+  { value: "auto", label: "System", icon: IconDeviceDesktop },
+  { value: "light", label: "Light", icon: IconSun },
+  { value: "dark", label: "Dark", icon: IconMoon },
+] as const;
 
 /**
  * A worktree's marker, in whichever face the `worktree.markerStyle` setting asks
@@ -653,7 +697,12 @@ export function App() {
             controls and the Sharing surface sit in, so a failure appears next to
             what was clicked. */}
         <Notifications position="top-right" limit={4} />
-        <AppInner theme={theme} themePref={themePref} onCycleTheme={cycleTheme} />
+        <AppInner
+          theme={theme}
+          themePref={themePref}
+          onCycleTheme={cycleTheme}
+          onSetTheme={setThemePref}
+        />
       </ContextMenuProvider>
     </MantineProvider>
   );
@@ -663,8 +712,11 @@ function AppInner(props: {
   theme: string;
   themePref: string;
   onCycleTheme: () => void;
+  /** Set the theme outright. The overflow menu names all three values, where the
+   *  cycle only ever stepped through them. */
+  onSetTheme: (value: string) => void;
 }) {
-  const { theme, themePref, onCycleTheme } = props;
+  const { theme, themePref, onCycleTheme, onSetTheme } = props;
 
   // Daemon-owned preferences, shared with every other window and with a plain
   // browser tab against the same daemon. `settings` is null until the first read
@@ -1430,6 +1482,26 @@ function AppInner(props: {
     () => repos.flatMap((r) => r.worktrees),
     [repos],
   );
+  /**
+   * The same list through a ref, for the notification path.
+   *
+   * Mirrored during render for the reason `worktreesRef` is, and read by
+   * `focusPane` and the inbox's `onEvent` subscriber — both of which must resolve a
+   * worktree in **any** project. `worktreesRef` is the selected project's list, and
+   * looking an event's worktree up there is what made a notification from another
+   * project a no-op on click: the lookup missed, the toast's heading fell back to
+   * "Veld", and clicking it did nothing at all.
+   */
+  const allWorktreesRef = useRef(allWorktrees);
+  allWorktreesRef.current = allWorktrees;
+  /** Projects through a ref, so the notification path can name the one an event
+   *  came from without being keyed on the 5s poll. */
+  const reposRef = useRef(repos);
+  reposRef.current = repos;
+  /** The selected project's root, likewise — the notification heading names a
+   *  project only when the event came from a different one. */
+  const activeRepoRootRef = useRef(activeRepoRoot);
+  activeRepoRootRef.current = repo?.root ?? activeRepoRoot;
   useEffect(() => {
     setPending((cur) =>
       prunePending(cur, Date.now(), (key) => {
@@ -1966,13 +2038,10 @@ function AppInner(props: {
    * window would open on whatever was last selected app-wide, which is exactly
    * the worktree you did not right-click.
    */
-  const openWorktreeWindow = async (w: Worktree) => {
+  const openNewWindow = async (payload: { repoRoot: string; worktreeId?: number }) => {
     if (!desktopWindow) return;
     try {
-      const result = await desktopWindow.newWindow({
-        repoRoot: w.repo_root,
-        worktreeId: w.id,
-      });
+      const result = await desktopWindow.newWindow(payload);
       if (!result?.opened) {
         notifyError(
           "Couldn't open a new window",
@@ -1984,6 +2053,190 @@ function AppInner(props: {
     } catch (err) {
       notifyError("Couldn't open a new window", err);
     }
+  };
+
+  const openWorktreeWindow = async (w: Worktree) => {
+    await openNewWindow({ repoRoot: w.repo_root, worktreeId: w.id });
+  };
+
+  /**
+   * Open a second full window on a *project*, with no worktree named.
+   *
+   * The window then runs its own acquire hunt and lands on whichever of that
+   * project's worktrees is free — which is the right answer for "give me another
+   * project to work in" and the reason this is not `openWorktreeWindow` with the
+   * worktree left out by the caller: naming one would take it from whoever has it,
+   * or be refused, for a request that never cared which.
+   *
+   * `desktop/src/windows.js`'s `appUrl` already builds `?repo=` without `?wt=`, so
+   * the shell needs nothing new for this.
+   */
+  const openProjectWindow = async (repoRoot: string) => {
+    if (desktopWindow) {
+      await openNewWindow({ repoRoot });
+      return;
+    }
+    // **A browser gets a second tab, not nothing.** A tab takes part in the
+    // daemon's ownership arbitration exactly like a window does (that is why the
+    // registry moved to the daemon at all), so this is a real second view of
+    // another project and not a lesser imitation of one. Built from this page's own
+    // URL so it works behind the gateway, on a dev server, and on any base path —
+    // and `view` is carried because the new tab should open in the mode this one is
+    // in rather than snapping back to the default.
+    const url = new URL(window.location.href);
+    url.search = "";
+    url.searchParams.set("repo", repoRoot);
+    const mode = new URLSearchParams(window.location.search).get("view");
+    if (mode) url.searchParams.set("view", mode);
+    const opened = window.open(url.toString(), "_blank");
+    if (!opened) {
+      notifyError(
+        "Couldn't open a new tab",
+        "Your browser blocked the pop-up — allow pop-ups for this site and try again.",
+      );
+      return;
+    }
+    // Same origin, so this is hygiene rather than a boundary: nothing in the new
+    // tab needs a handle back to this one.
+    opened.opener = null;
+  };
+
+  /**
+   * Whether a second view of a project can be opened at all, and what to call it.
+   *
+   * Two environments, one action: Veld Desktop opens a window, a browser opens a
+   * tab. Naming them differently is the point — "window" in a browser tab is a
+   * promise about chrome the page cannot keep.
+   */
+  const canOpenSecondView = !!desktopWindow || typeof window.open === "function";
+  const secondViewLabel = desktopWindow
+    ? "Open in a new window"
+    : "Open in a new tab";
+
+  /**
+   * Move a project to a new position, and tell the daemon.
+   *
+   * Optimistic on purpose: the column re-renders from `repos`, which is the poll's
+   * list, so without this the square springs back to where it was and stays there
+   * until the next 5s tick. `refresh()` afterwards is what makes the daemon's answer
+   * the one that survives — including the entries this client did not know about,
+   * which `reorder_repos` places for us.
+   */
+  const reorderProjectsTo = (from: number, to: number) => {
+    const order = reorderedRoots(
+      reposRef.current.map((r) => r.root),
+      from,
+      to,
+    );
+    setRepoList((cur) => {
+      if (!cur) return cur;
+      const listed = order
+        .map((root) => cur.repos.find((r) => r.root === root))
+        .filter((r): r is Repo => !!r);
+      // **Anything the order did not name keeps its place at the end**, which is the
+      // client-side mirror of what `reorder_repos` does server-side. Without it, a
+      // project imported by another window and picked up by a poll this render has
+      // not seen yet would vanish from the column and the menu until the next
+      // refresh landed — dropped by a drag that had no idea it existed.
+      const seen = new Set(listed.map((r) => r.root));
+      const rest = cur.repos.filter((r) => !seen.has(r.root));
+      return { ...cur, repos: [...listed, ...rest] };
+    });
+    void api
+      .reorderProjects(order)
+      .then(() => refresh())
+      .catch((e) => {
+        notifyError("Could not reorder projects", e);
+        void refresh();
+      });
+  };
+
+  /**
+   * The project this window came *from*, for ⌘`.
+   *
+   * Two refs rather than one: `lastRepoRootRef` is what is on screen now, and the
+   * previous value is only promoted when the selection actually moves. Written in
+   * an effect keyed on the resolved project, so a *fallback* selection (a stale
+   * `?repo=` that did not resolve) is recorded as the place you would go back to —
+   * which is where you actually are.
+   */
+  /** The column toggle, for the key handler registered once at boot. */
+  const toggleProjectColumnRef = useRef<() => void>(() => {});
+
+  const previousRepoRootRef = useRef<string | null>(null);
+  const lastRepoRootRef = useRef<string | null>(null);
+  useEffect(() => {
+    const root = repo?.root ?? null;
+    if (!root) return;
+    if (lastRepoRootRef.current && lastRepoRootRef.current !== root) {
+      previousRepoRootRef.current = lastRepoRootRef.current;
+    }
+    lastRepoRootRef.current = root;
+  }, [repo?.root]);
+
+  /**
+   * Go to the project at a keyboard position, or back to the previous one.
+   *
+   * Both read the list through `reposRef`, which is the *daemon's* order — the same
+   * order the column renders — so ⌘2 means the same project in every window. Held
+   * in refs because the key handler is registered once at boot; see the effect that
+   * registers it.
+   *
+   * Selecting a project, not a worktree: `setActiveWtKey("")` lets the fallback pick
+   * the main checkout, and the acquire hunt takes it from there. A chord that took a
+   * specific worktree would fight whichever window already has it, for a gesture
+   * that never named one.
+   */
+  const goToProject = (digit: number) => {
+    const target = projectForShortcut(reposRef.current, digit);
+    if (!target || target.root === lastRepoRootRef.current) return;
+    setActiveRepoRoot(target.root);
+    setActiveWtKey("");
+  };
+  const goToPreviousProject = () => {
+    const target = toggleTarget(
+      reposRef.current,
+      lastRepoRootRef.current,
+      previousRepoRootRef.current,
+    );
+    if (!target) return;
+    setActiveRepoRoot(target.root);
+    setActiveWtKey("");
+  };
+
+  /** The project column's right-click menu. The same actions the selector offers,
+   *  where the pointer already is. */
+  const projectMenu = (r: Repo) => (e: React.MouseEvent) => {
+    e.preventDefault();
+    showContextMenu([
+      {
+        key: "switch",
+        title: `Switch to ${r.name}`,
+        icon: <IconArrowsExchange size={14} />,
+        onClick: () => {
+          setActiveRepoRoot(r.root);
+          setActiveWtKey("");
+        },
+      },
+      ...(canOpenSecondView
+        ? [
+            {
+              key: "new-window",
+              title: secondViewLabel,
+              icon: <IconExternalLink size={14} />,
+              onClick: () => void openProjectWindow(r.root),
+            },
+          ]
+        : []),
+      { key: "divider" },
+      {
+        key: "remove",
+        title: `Remove project ${r.name}…`,
+        icon: <IconTrash size={14} />,
+        color: "red",
+        onClick: () => setDialog({ kind: "remove-repo", repo: r }),
+      },
+    ])(e);
   };
 
   const worktreeMenu = (w: Worktree) => {
@@ -2304,6 +2557,53 @@ function AppInner(props: {
       if (mod && !e.shiftKey && !e.altKey && e.key === ",") {
         e.preventDefault();
         setDialog({ kind: "settings" });
+      }
+      // ⌘1…⌘9 / ⌘` — go to a project by position, or back to the last one.
+      //
+      // **`e.code`, not `e.key`.** On AZERTY and several other layouts the
+      // unshifted digit row is punctuation, so ⌘2 arrives with `key === "é"`; the
+      // chord people mean is the key with 2 printed on it. `key` stays as the
+      // fallback for anything that reports no `code`.
+      //
+      // Bound here so a plain browser tab has them too — though only ⌘` survives
+      // there, since Chrome and Safari reserve ⌘1-9 for their own tabs and a page
+      // cannot intercept them. In Veld Desktop both work, and `browserViews.js`
+      // forwards them back when a native browser pane has the keyboard.
+      if (mod && !e.shiftKey && !e.altKey) {
+        const digit = projectShortcutDigit(e.code, e.key);
+        if (digit) {
+          e.preventDefault();
+          goToProject(Number(digit));
+          return;
+        }
+        if (e.key === "`" || e.code === "Backquote") {
+          e.preventDefault();
+          goToPreviousProject();
+          return;
+        }
+        // ⌘B — show/hide the project column. The near-universal "toggle the
+        // sidebar" chord (VS Code, Slack), and free here. **Deliberately not
+        // forwarded from a focused browser pane** the way ⌘K and ⌘1…⌘9 are: ⌘B is
+        // bold in every rich-text editor, and taking it from a previewed page to
+        // reach a toggle you can also click is a worse trade than ⌘F's was.
+        // `e.key`, and **deliberately not `e.code`** — the opposite of the digits
+        // above, which is why this is not the same test. `code` names the physical
+        // key, which is right for a digit (⌘2 means the key with 2 printed on it)
+        // and wrong for a letter: on Dvorak the key at QWERTY's `KeyB` prints `x`,
+        // so matching `code` here would swallow ⌘X — cut — in every text field.
+        if (e.key === "b" || e.key === "B") {
+          // **Not while the caret is in a text field.** `mod` is `meta || ctrl`, so
+          // this binds Ctrl+B as well — which is what Linux and Windows users will
+          // press, and also the Cocoa emacs binding for "back one character" that
+          // macOS honours in every editable field. Without the guard, Ctrl+B in the
+          // new-worktree name box moved the project column instead of the caret.
+          // Terminals are already safe: xterm consumes the key before this listener
+          // ever runs (see the note above).
+          if (isEditableTarget(e.target)) return;
+          e.preventDefault();
+          toggleProjectColumnRef.current();
+          return;
+        }
       }
       if (e.key === "Escape" && dialogRef.current.kind !== "none") closeDialog();
     };
@@ -2863,6 +3163,13 @@ function AppInner(props: {
     () =>
       onBrowserAccelerator(({ accelerator }) => {
         if (accelerator === "palette") setDialog({ kind: "search" });
+        // A focused native browser pane swallows every keystroke, so these arrive
+        // here instead of through the window's own key handler. Same two chords,
+        // same meaning — see `browserViews.js`.
+        else if (accelerator === "project:toggle") goToPreviousProject();
+        else if (accelerator.startsWith("project:")) {
+          goToProject(Number(accelerator.slice("project:".length)));
+        }
       }),
     [],
   );
@@ -2902,16 +3209,95 @@ function AppInner(props: {
   // Focus a terminal pane: select its worktree (which raises the window in the
   // desktop app) and activate its tab. Shared by the toast, the browser banner,
   // and the native-notification click below.
-  const focusPane = (wtId: number, sessionId: string) => {
-    const worktree = worktreesRef.current.find((w) => w.id === wtId);
-    if (worktree) void selectWorktree(worktree);
-    setLayouts((prev) => {
-      const cur = prev[wtId];
-      if (!cur) return prev;
-      const next = activateTab(cur, sessionId);
-      return next === cur ? prev : { ...prev, [wtId]: next };
-    });
+  const focusPane = async (wtId: number, sessionId: string) => {
+    // **Every project's worktrees, not the selected project's.** An agent hook is
+    // relayed to every client whatever it is showing, so the pane a notification
+    // names is routinely in a project this window does not have selected — and
+    // `selectWorktree` already moves the selection to `w.repo_root`, so switching
+    // project falls out of finding the row. Looking it up in the selected project's
+    // list is what made a cross-project notification click do nothing.
+    const worktree = allWorktreesRef.current.find((w) => w.id === wtId);
+    // **Nothing to claim when this window already holds it.** `channel.claim`
+    // answers `{ok: false, reason: "offline"}` while the socket is down — for *any*
+    // worktree, including the one on screen — so routing an already-granted pane
+    // through a claim turned a notification click into a "not connected" notice and
+    // no tab change. The pane is local; focusing it needs no round trip.
+    //
+    // Otherwise: **awaited, and a refusal stops here.** A refused claim means the
+    // holder's window has been raised and this one is not showing that worktree, so
+    // arming the pane request below would queue it against a selection this client
+    // never gets, to fire on some later visit.
+    // **Granted AND selected**, not just granted. `shownId` is the daemon's answer
+    // and the selection is this window's; they diverge for as long as an acquire is
+    // in flight, and after a ⌘1…⌘9 switch (which moves the selection with no claim
+    // of its own) `shownId` still names the *previous* project's worktree. Testing
+    // only `shownRef` therefore skipped the claim for a worktree this window had
+    // already moved away from, found its stale layout still in `layoutsRef`, and
+    // activated a tab nobody could see — the very symptom the skip was added to
+    // remove, arriving from the other direction.
+    const alreadyHere = shownRef.current === wtId && worktreeRef.current?.id === wtId;
+    if (worktree && !alreadyHere && !(await selectWorktree(worktree))) {
+      return;
+    }
+    // The layout is normally already here — the worktree was on screen, or its
+    // panes were fetched on an earlier visit — and then this is the whole of it.
+    if (layoutsRef.current[wtId]) {
+      setLayouts((prev) => {
+        const cur = prev[wtId];
+        if (!cur) return prev;
+        const next = activateTab(cur, sessionId);
+        return next === cur ? prev : { ...prev, [wtId]: next };
+      });
+      return;
+    }
+    // **It is not, whenever the worktree was not already being shown here**, which
+    // is now the ordinary case rather than an edge: a worktree in another project
+    // has never had its panes read by this window, and they are fetched from the
+    // daemon only once the claim is granted (see the seeding effect keyed on
+    // `shownId`). The `setLayouts` above ran against an absent layout and dropped
+    // the tab activation on the floor, so a notification click landed on the
+    // worktree and then on whichever pane happened to be active.
+    //
+    // Recorded as a *value* rather than fixed by ordering: nothing here can wait
+    // for a fetch that has not been issued, and the request stays true until it is
+    // either satisfied or provably unsatisfiable. Same shape as `diagnoseFor`.
+    setPendingFocusPane({ worktreeId: wtId, sessionId });
   };
+
+  /**
+   * A pane to activate as soon as its worktree's panes arrive.
+   *
+   * Set by `focusPane` when the layout is not here yet; cleared by the effect below
+   * on the first render that can act on it — or that can prove it never will.
+   */
+  const [pendingFocusPane, setPendingFocusPane] = useState<{
+    worktreeId: number;
+    sessionId: string;
+  } | null>(null);
+  useEffect(() => {
+    const req = pendingFocusPane;
+    if (!req) return;
+    // **Keyed on the granted claim, not the selection** — the same distinction the
+    // seeding effect makes, and for the same reason: the selection can point at a
+    // worktree this client has been refused, and a layout would then never arrive.
+    // A yield between the click and the fetch lands here too.
+    if (shownId !== req.worktreeId) {
+      setPendingFocusPane(null);
+      return;
+    }
+    const l = layouts[req.worktreeId];
+    // Still being fetched. Not cleared: this effect re-runs when it lands.
+    if (!l) return;
+    setPendingFocusPane(null);
+    const next = activateTab(l, req.sessionId);
+    // The pane may have gone (closed in the window that had it) between the
+    // notification and the layout arriving; `activateTab` then returns the layout
+    // unchanged and there is nothing to focus.
+    if (next === l) return;
+    setLayouts((prev) =>
+      prev[req.worktreeId] === l ? { ...prev, [req.worktreeId]: next } : prev,
+    );
+  }, [pendingFocusPane, shownId, layouts]);
 
   // ---------------------------------------------------------------------------
   // The worktree inbox: read-on-focus
@@ -2921,6 +3307,8 @@ function AppInner(props: {
   useInbox();
   const activity = activityPrefs(settings ?? {});
   const focus = focusPrefs(settings ?? {});
+  // The project column's visibility. Off by default — see the setting's docstring.
+  const showProjectColumn = showProjectColumnPref(settings ?? {});
 
   /**
    * Turn an unseen event into a system notification.
@@ -2956,8 +3344,24 @@ function AppInner(props: {
     () =>
       inbox.onEvent(({ sessionId, worktreeId, unseen }) => {
         if (!notifyPrefsRef.current[notifyKey(unseen)]) return;
-        const wt = worktreesRef.current.find((w) => w.id === worktreeId);
-        const label = wt ? worktreeLabel(wt) : "Veld";
+        // Every project's, for the reason `focusPane` reads the same list.
+        const wt = allWorktreesRef.current.find((w) => w.id === worktreeId);
+        // **The project's name too, when the event is not from the one on screen.**
+        // Worktree markers and branch names repeat across repos by design — the
+        // assigner probes per repo (`markers_may_repeat_across_repos`) and two
+        // projects both checked out on `main` is the default case — so "main —
+        // waiting for you" names nothing a reader can act on once more than one
+        // project is in play. Omitted for the selected project, where it would be on
+        // every banner and say nothing.
+        const project =
+          wt && wt.repo_root !== activeRepoRootRef.current
+            ? (reposRef.current.find((r) => r.root === wt.repo_root)?.name ?? "")
+            : "";
+        const label = wt
+          ? project
+            ? `${project} · ${worktreeLabel(wt)}`
+            : worktreeLabel(wt)
+          : "Veld";
         // The pane's name, when this window has that worktree's layout. It may not:
         // an agent hook is relayed to every client, including ones showing something
         // else, so the worktree alone has to be enough on its own.
@@ -2973,7 +3377,10 @@ function AppInner(props: {
           tab && layout
             ? `${label} · ${paneTabBaseLabel(layout, tab)}`
             : label;
-        const click = () => focusPane(worktreeId, sessionId);
+        // `void`: focusing a pane is awaited internally (the claim, then the panes
+        // arriving) and nothing here has anything to do with the outcome — a
+        // refusal has already raised the window that does have the worktree.
+        const click = () => void focusPane(worktreeId, sessionId);
         // **One channel, chosen by where the user is.** A focused window gets the toast
         // — right weight for something you can already see — and an unfocused one gets
         // the OS banner, which is the only thing that reaches across windows and apps.
@@ -3055,7 +3462,10 @@ function AppInner(props: {
   // shell focused its window; focus the pane it names. Optional: an older shell
   // has no such channel.
   useEffect(
-    () => desktopApp?.onNotifyClick?.(({ worktreeId, sessionId }) => focusPane(worktreeId, sessionId)) ?? (() => {}),
+    () =>
+      desktopApp?.onNotifyClick?.(({ worktreeId, sessionId }) => {
+        void focusPane(worktreeId, sessionId);
+      }) ?? (() => {}),
     [],
   );
 
@@ -3814,6 +4224,17 @@ function AppInner(props: {
       }
     }
 
+    // **Every other project's worktrees are reachable from here.** The "Worktrees"
+    // group above is the selected project's, which is the whole of what ⌘K could
+    // reach before — so the one surface built for "go somewhere" could not go to the
+    // other half of a two-project day, and the only route was switching project
+    // first and searching again. They sit in "Projects" rather than in "Worktrees"
+    // because `PaletteGroup` is a closed set whose order sorts the idle list: a group
+    // per project would have to open that set, and the sorted idle list is what makes
+    // an unfiltered ⌘K predictable.
+    //
+    // Each project's own "Switch to" entry leads its worktrees, so the idle list
+    // reads as one block per project rather than as two interleaved lists.
     for (const r of repos) {
       if (r.root === repo?.root) continue;
       items.push({
@@ -3827,6 +4248,42 @@ function AppInner(props: {
           setActiveWtKey("");
         },
       });
+      for (const w of r.worktrees) {
+        // Same omission as the "Worktrees" group: there is nowhere to go in a
+        // checkout that is being deleted.
+        if (w.trashed_at) continue;
+        items.push({
+          id: `wt:${w.id}`,
+          group: "Projects",
+          // Project-qualified, because that is the whole difference from the group
+          // above: markers and branch names repeat across repos by design, so
+          // "main" on its own names two rows in the same list.
+          label: `${r.name} · ${worktreeLabel(w)}`,
+          hint: w.branch,
+          // The project name is already in the label; the branch and alias join it
+          // as haystacks for the same reason they do above.
+          alt: [w.branch, w.alias, r.name],
+          mark: { emoji: w.emoji, marker_color: w.marker_color },
+          // Cross-project selection needs nothing special: `selectWorktree` claims
+          // the row and then moves the selection to `w.repo_root`.
+          run: () => void selectWorktree(w),
+        });
+      }
+    }
+    // One entry per project, the selected one included: opening a second window is
+    // how two projects are worked at once, and it is the action with no keyboard
+    // route otherwise (the menu is the only other way in). Desktop only — a browser
+    // tab has no shell to open a window with.
+    if (desktopWindow) {
+      for (const r of repos) {
+        items.push({
+          id: `repo:window:${r.root}`,
+          group: "Projects",
+          label: `Open ${r.name} in a new window`,
+          alt: [r.root],
+          run: () => void openProjectWindow(r.root),
+        });
+      }
     }
     items.push({
       id: "repo:import",
@@ -3956,32 +4413,17 @@ function AppInner(props: {
   };
 
   // ---- render -------------------------------------------------------------
-  // Beside the theme button, so both top bars get it — runs mode has no rail and
-  // no palette, and would otherwise have no door to settings at all in a browser
-  // tab, which has no application menu either.
-  const settingsButton = (
-    <Tooltip label="Settings (⌘,)">
-      <ActionIcon
-        size="md"
-        variant="default"
-        aria-label="Settings"
-        onClick={() => setDialog({ kind: "settings" })}
-      >
-        <IconSettings size={14} />
-      </ActionIcon>
-    </Tooltip>
-  );
 
   /**
-   * Focus mode: a standing "stop interrupting me" toggle, between search and
-   * settings.
+   * Focus mode: a standing "stop interrupting me" toggle, between search and the
+   * overflow menu.
    *
-   * **IDE-mode top bar only** — unlike `settingsButton`/`themeButton`, this is
-   * not threaded into `RunsMode`'s props: that bar has no search icon to sit
+   * **IDE-mode top bar only** — unlike `overflowMenu`, this is not threaded into
+   * `RunsMode`'s props: that bar has no search icon to sit
    * beside either, and Runs mode has no rail to be the thing this silences.
    * The setting itself is still global and still in force there (the master
    * switch also has a row in Settings → Activity → Focus mode, reachable from
-   * either mode's gear icon) — only the one-click top-bar shortcut is IDE-only.
+   * either mode's ⋯ menu) — only the one-click top-bar shortcut is IDE-only.
    *
    * The three sub-toggles it acts on (bell, in-app toasts, OS notifications)
    * live beside that master row, mirroring the notify table above them; this
@@ -4002,14 +4444,65 @@ function AppInner(props: {
     </Tooltip>
   );
 
+  /** One owner for "flip the project column", shared by the top-bar button and
+   *  ⌘B — two call sites writing the same setting is how they end up disagreeing
+   *  about which way is on. Read through a ref by the key handler, which is
+   *  registered once at boot. */
+  const toggleProjectColumn = () => {
+    void saveSettings({ "ui.showProjectColumn": !showProjectColumnRef.current });
+  };
+  const showProjectColumnRef = useRef(showProjectColumn);
+  showProjectColumnRef.current = showProjectColumn;
+  toggleProjectColumnRef.current = toggleProjectColumn;
+
+  /**
+   * Show or hide the project column.
+   *
+   * **In the bar, not only in Settings**, and that placement is the whole reason
+   * the column can ship off by default: a surface nobody can find is the same
+   * thing as a surface that does not exist. It sits between the mode switch and
+   * the project selector because that is where the column it governs is — left
+   * of everything, next to the thing it appears beside.
+   *
+   * `IconStack2`/`IconStack` rather than one glyph in two colours: a single icon
+   * reused for both states of a toggle is indistinguishable at 14px, which is the
+   * mistake `focus.enabled` shipped once and now avoids with its own pair.
+   */
+  const projectColumnButton = (
+    <Tooltip
+      label={
+        showProjectColumn ? "Hide the project column (⌘B)" : "Show the project column (⌘B)"
+      }
+    >
+      <ActionIcon
+        size="md"
+        // **Flat in both states, deliberately.** A filled/green "on" would be the
+        // bar's loudest control reporting something the user can see for
+        // themselves — the column is either beside them or it is not. `aria-pressed`
+        // still carries the state, because a screen reader cannot look.
+        variant="default"
+        aria-label="Project column"
+        aria-pressed={showProjectColumn}
+        onClick={toggleProjectColumn}
+      >
+        {/* `IconStack2` in both states, at the maintainer's pick. The pair-of-glyphs
+            rule this repo learned from `IconFocus2` is about a toggle whose two
+            states are otherwise *indistinguishable*; here the filled/outline
+            variant and `aria-pressed` carry the state, and swapping the glyph as
+            well made the button look like two different controls. */}
+        <IconStack2 size={14} />
+      </ActionIcon>
+    </Tooltip>
+  );
+
   /**
    * The project's machine-overridable vars.
    *
-   * Deliberately **not** folded into the settings gear beside it. That dialog is
+   * Deliberately **not** folded into the ⋯ menu beside it. That dialog is
    * veld's own preferences — global, yours, the same whatever you have open.
    * These are values *this project declared* and this machine answers, so they
    * change with the selected worktree and are meaningless without one. The
-   * sliders icon rather than another gear for the same reason: two gears would
+   * sliders icon rather than a second settings glyph for the same reason: two would
    * read as two ways into one thing.
    *
    * **Disabled, not hidden, when the project asks for nothing.** A control that
@@ -4063,27 +4556,113 @@ function AppInner(props: {
       </Tooltip>
     );
 
-  const themeButton = (
-    <Tooltip
-      label={`Theme: ${themePref === "auto" ? `system (${theme})` : themePref} — click to change`}
-    >
-      <ActionIcon size="md" variant="default" onClick={onCycleTheme}>
-        {themePref === "auto" ? (
-          <IconDeviceDesktop size={14} />
-        ) : themePref === "light" ? (
-          <IconSun size={14} />
-        ) : (
-          <IconMoon size={14} />
+  /**
+   * The bar's overflow menu — the last control in both top bars.
+   *
+   * Everything here belongs to **Veld** rather than to a project or a run: the
+   * theme, what's new, and settings. That split is the point of the restructure —
+   * project actions moved into the project menu at the start of the bar, and these
+   * three stopped being three separate icons competing with them for the same row.
+   *
+   * The unread-news dot moved here with the entry it belongs to. It is the only
+   * reason this button ever asks for attention, and a menu nobody opens is a
+   * channel nobody reads — which is why the dot is on the button and not only on
+   * the item inside.
+   *
+   * Theme is a **submenu with the three states named**, replacing a one-button
+   * cycle. A cycle makes you press a control up to three times to reach a value it
+   * never showed you, and "system" in particular is impossible to *ask* for — you
+   * arrive at it. This dropdown has no `max-height`, which is what lets that
+   * submenu position itself; see `ProjectMenu` for the failure that rule comes from.
+   */
+  // No unread dot while the start screen is up. Zero projects means the whole window
+  // is one instruction — "import something" — and a second thing on the bar asking to
+  // be clicked is the only competition it has. The news keeps; the menu still carries
+  // it the moment there is a project. (This gate lived on `TopBar`'s own `unreadNews`
+  // before the bar was restructured, and moved here with the dot.)
+  const unreadNews = repos.length === 0 ? 0 : promotions.unread;
+  const overflowMenu = (
+    <Menu position="bottom-end" width={220}>
+      <Menu.Target>
+        <ActionIcon
+          size="md"
+          variant="default"
+          className="project-actions"
+          aria-label={unreadNews > 0 ? `More – ${unreadNews} unread` : "More"}
+          title={unreadNews > 0 ? `More – ${unreadNews} unread` : "More"}
+        >
+          <IconDots size={14} />
+          {unreadNews > 0 && <span className="project-actions-dot" aria-hidden="true" />}
+        </ActionIcon>
+      </Menu.Target>
+      <Menu.Dropdown>
+        <Menu.Sub>
+          <Menu.Sub.Target>
+            <Menu.Sub.Item
+              leftSection={
+                themePref === "auto" ? (
+                  <IconDeviceDesktop size={14} />
+                ) : themePref === "light" ? (
+                  <IconSun size={14} />
+                ) : (
+                  <IconMoon size={14} />
+                )
+              }
+            >
+              <span className="project-menu-row">
+                <span className="project-menu-name">Theme</span>
+                <span className="project-menu-away">
+                  {themePref === "auto" ? `system (${theme})` : themePref}
+                </span>
+              </span>
+            </Menu.Sub.Item>
+          </Menu.Sub.Target>
+          <Menu.Sub.Dropdown>
+            {THEME_CHOICES.map((choice) => (
+              <Menu.Item
+                key={choice.value}
+                leftSection={<choice.icon size={14} />}
+                // The chosen one is marked rather than disabled: a disabled row in a
+                // list of three reads as unavailable, not as current.
+                rightSection={themePref === choice.value ? <IconCheck size={13} /> : undefined}
+                onClick={() => onSetTheme(choice.value)}
+              >
+                {choice.label}
+              </Menu.Item>
+            ))}
+          </Menu.Sub.Dropdown>
+        </Menu.Sub>
+        {promotions.any && (
+          <Menu.Item
+            leftSection={<IconSparkles size={14} />}
+            rightSection={
+              unreadNews > 0 ? (
+                <Badge size="xs" circle variant="filled">
+                  {unreadNews}
+                </Badge>
+              ) : undefined
+            }
+            onClick={promotions.browse}
+          >
+            What's new…
+          </Menu.Item>
         )}
-      </ActionIcon>
-    </Tooltip>
+        <Menu.Divider />
+        <Menu.Item
+          leftSection={<IconSettings size={14} />}
+          onClick={() => setDialog({ kind: "settings" })}
+        >
+          Settings
+        </Menu.Item>
+      </Menu.Dropdown>
+    </Menu>
   );
 
   /**
    * Settings, as an element rather than inline in the dialog list.
    *
    * Both modes render it. Runs mode returns early below — before the dialog list —
-   * so an inline `dialog.kind === "settings"` there was unreachable: the gear and
+   * so an inline `dialog.kind === "settings"` there was unreachable: the ⋯ menu and
    * ⌘, both set the state and nothing appeared. Every other dialog in the list
    * belongs to worktree mode's own surfaces; this is the one that is reachable from
    * both, so this is the one that has to be hoisted.
@@ -4138,8 +4717,7 @@ function AppInner(props: {
       <div className="frame">
         <RunsMode
           modeSwitch={modeSwitch}
-          themeButton={themeButton}
-          settingsButton={settingsButton}
+          overflowMenu={overflowMenu}
           historyDays={historyDays}
           logsTz={logsTz}
         />
@@ -4397,15 +4975,19 @@ function AppInner(props: {
         onShowBlankBrowser={layout && showBlankBrowser}
         extensions={worktree?.ide.extensions ?? []}
         onOpenInPane={layout ? openUrlInPane : undefined}
+        showWorking={activity.showWorking}
+        elsewhere={elsewhere}
+        canOpenWindow={canOpenSecondView}
+        secondViewLabel={secondViewLabel}
+        projectColumnButton={projectColumnButton}
         onSelectRepo={(root) => {
           setActiveRepoRoot(root);
           setActiveWtKey("");
         }}
+        onOpenProjectWindow={(root) => void openProjectWindow(root)}
         onImport={() => setDialog({ kind: "import" })}
-        onRemoveRepo={() => repo && setDialog({ kind: "remove-repo", repo })}
-        onWhatsNew={promotions.browse}
-        hasNews={promotions.any}
-        unreadNews={promotions.unread}
+        onRemoveRepo={(r) => setDialog({ kind: "remove-repo", repo: r })}
+        onMoveProject={reorderProjectsTo}
         // The bound run, named explicitly: the top bar is the run-level surface,
         // and ■ here must end the run whose name the selector is showing — never
         // whichever one `activeRun` would have picked.
@@ -4424,8 +5006,7 @@ function AppInner(props: {
         onRestart={() => worktree && restartWorktree(worktree, run)}
         onSearch={() => setDialog({ kind: "search" })}
         focusModeButton={focusModeButton}
-        themeButton={themeButton}
-        settingsButton={settingsButton}
+        overflowMenu={overflowMenu}
         configVarsButton={configVarsButton}
         nodeActions={nodeActionsButton}
         hideDisabled={hideDisabled}
@@ -4488,6 +5069,21 @@ function AppInner(props: {
         <StartScreen onImport={() => setDialog({ kind: "import" })} />
       ) : (
         <div className="workspace">
+          {showProjectColumn && (
+            <ProjectColumn
+              repos={repos}
+              activeRoot={repo?.root ?? null}
+              showWorking={activity.showWorking}
+              elsewhere={elsewhere}
+              onSelect={(root) => {
+                setActiveRepoRoot(root);
+                setActiveWtKey("");
+              }}
+              onReorder={reorderProjectsTo}
+              onMenu={(e, r) => projectMenu(r)(e)}
+              onImport={() => setDialog({ kind: "import" })}
+            />
+          )}
           <Rail
             worktrees={worktrees}
             lanes={lanes}
@@ -4666,9 +5262,19 @@ function AppInner(props: {
           repo={dialog.repo}
           onClose={closeDialog}
           onRemove={async () => {
-            await api.removeRepo(dialog.repo.root);
-            setActiveRepoRoot("");
-            setActiveWtKey("");
+            const removed = dialog.repo.root;
+            await api.removeRepo(removed);
+            // **Only when the removed project is the one on screen.** This used to
+            // be unconditional and correct, because the sole entry point was a menu
+            // bound to the *selected* repo. Removal is now reachable for any project
+            // (the column's context menu, ⌘K, the project submenu), and clearing
+            // regardless threw the window off a project the user was working in —
+            // dropping the worktree key and starting a fresh acquire hunt — because
+            // they removed some other one.
+            if (removed === activeRepoRootRef.current) {
+              setActiveRepoRoot("");
+              setActiveWtKey("");
+            }
             await refresh();
             closeDialog();
           }}
@@ -5087,6 +5693,189 @@ function NodeActionsButton(props: {
   );
 }
 
+/**
+ * The project menu: which project this window is in, what the others have to say,
+ * and every action that belongs to a project.
+ *
+ * # Shape
+ *
+ * *Import* on top, then one row per project. A project row is a `Menu.Sub` whose
+ * submenu holds that project's actions — open, open in a second view, move up,
+ * move down, remove. That is the whole project surface in one control; the old
+ * separate `⋯` menu beside it is gone, its *Import* moved here, its *Remove* moved
+ * into the per-project submenu, and its *What's new* moved to the bar's own
+ * overflow menu, which is where things that belong to Veld rather than to a
+ * project now live.
+ *
+ * **Move up / move down are the keyboard's reorder**, and the column's drag is the
+ * mouse's. Both write the same daemon-held order (`repos.sort_position`), which is
+ * what ⌘1…⌘9 address — so a reorder from either one moves the shortcuts too, in
+ * every window. The rail's lane menu carries the identical pair for the identical
+ * reason.
+ *
+ * # `Menu.Sub` and the scroll cap cannot coexist here
+ *
+ * This dropdown deliberately has **no** `max-height`/`overflow`. A submenu is
+ * positioned and clipped by its scrolling ancestor, so an earlier version of this
+ * menu rendered every submenu on top of its own parent with a scrollbar on each.
+ * The cost is that a machine with a great many projects gets a tall menu; the
+ * column, ⌘1…⌘9 and ⌘K all scale past that, and a broken submenu does not.
+ *
+ * A project row does not itself switch projects, because `Menu.Sub.Item` has no
+ * `onClick` — Mantine's, clicking it opens the submenu. *Open* is the first entry
+ * inside, where it reads as one action among the project's others.
+ */
+function ProjectMenu(props: {
+  repos: Repo[];
+  repo: Repo | null;
+  /** `activity.showWorking` — the rail's setting, honoured here so one glyph
+   *  vocabulary means one thing in both places. */
+  showWorking: boolean;
+  /** The daemon's claims table, minus this client's own rows. */
+  elsewhere: ReadonlyMap<number, ClientInfo>;
+  /** Whether a second view can be opened at all. */
+  canOpenWindow: boolean;
+  /** "Open in a new window" (Veld Desktop) or "Open in a new tab" (a browser). */
+  secondViewLabel: string;
+  onSelectRepo: (root: string) => void;
+  onOpenProjectWindow: (root: string) => void;
+  onMoveProject: (from: number, to: number) => void;
+  onRemoveRepo: (repo: Repo) => void;
+  onImport: () => void;
+}) {
+  const { repo } = props;
+  const label = repo
+    ? repo.available
+      ? repo.name
+      : `${repo.name} (unavailable)`
+    : "Switch project";
+  /**
+   * News in a project that is not the one on screen.
+   *
+   * The bar's answer to "how would I know my other project needs me" when the
+   * column is off — which is the default. `isProjectNews` is what keeps it from
+   * being lit permanently; see its docstring for why `working` does not count here
+   * while it does on the rows inside.
+   */
+  const elsewhereNews = isProjectNews(
+    inbox.groupState(
+      otherProjectWorktreeIds(props.repos, repo?.root ?? null),
+      props.showWorking,
+    ).state,
+  );
+  return (
+    <Menu position="bottom-start" width={250} trigger="click">
+      <Menu.Target>
+        <Button
+          size="xs"
+          variant="default"
+          className="project-select-btn"
+          rightSection={<IconChevronDown size={13} />}
+          title={
+            elsewhereNews ? `${label} – another project has news` : label || "Switch project"
+          }
+        >
+          <span className="project-select-name">{label}</span>
+          {elsewhereNews && <span className="project-actions-dot" aria-hidden="true" />}
+        </Button>
+      </Menu.Target>
+      <Menu.Dropdown>
+        <Menu.Item leftSection={<IconFolderPlus size={14} />} onClick={props.onImport}>
+          Import repository…
+        </Menu.Item>
+        <Menu.Divider />
+        {props.repos.map((r, index) => {
+          const summary = inbox.groupState(projectWorktreeIds(r), props.showWorking);
+          const holder = projectHolder(r, props.elsewhere);
+          const digit = index < MAX_PROJECT_SHORTCUTS ? index + 1 : null;
+          return (
+            <Menu.Sub key={r.root}>
+              <Menu.Sub.Target>
+                <Menu.Sub.Item
+                  className={r.root === repo?.root ? "project-menu-current" : undefined}
+                  // Which project this window is in, for a screen reader. Font weight
+                  // is the visual signal and carries nothing to assistive tech; the
+                  // `Select` this replaced got `aria-selected` from its options for
+                  // free. `aria-current`, not `aria-selected`: the row is not part of
+                  // a selection widget, and this is "the one you are on".
+                  aria-current={r.root === repo?.root ? true : undefined}
+                  // **`undefined`, not an element that renders null.** Mantine
+                  // gates the section on `leftSection &&` (MenuItem.mjs:93), and a
+                  // React element is truthy even when the component returns null —
+                  // so passing `<InboxIcon/>` unconditionally rendered an empty
+                  // gutter div with its own margin on every quiet row.
+                  leftSection={
+                    summary.state ? <InboxIcon summary={summary} label={r.name} /> : undefined
+                  }
+                >
+                  <span className="project-menu-row">
+                    <span className="project-menu-name">
+                      {r.available ? r.name : `${r.name} (unavailable)`}
+                    </span>
+                    {/* Where the project already is, or which key goes there. The
+                        away note wins: it changes what the click will do, where the
+                        digit only says there is a faster way to do it. */}
+                    {holder ? (
+                      <span className="project-menu-away">{awayNote(holder)}</span>
+                    ) : (
+                      digit && <span className="project-menu-key">⌘{digit}</span>
+                    )}
+                  </span>
+                </Menu.Sub.Item>
+              </Menu.Sub.Target>
+              <Menu.Sub.Dropdown>
+                <Menu.Item
+                  leftSection={<IconArrowsExchange size={14} />}
+                  onClick={() => props.onSelectRepo(r.root)}
+                >
+                  Open
+                </Menu.Item>
+                {props.canOpenWindow && (
+                  <Menu.Item
+                    // The same glyph the rail's own "Open in a new window" uses —
+                    // one action, one icon, wherever it is offered from.
+                    leftSection={<IconExternalLink size={14} />}
+                    onClick={() => props.onOpenProjectWindow(r.root)}
+                  >
+                    {props.secondViewLabel}
+                  </Menu.Item>
+                )}
+                <Menu.Divider />
+                {/* Disabled at the ends rather than hidden, so the pair keeps the
+                    same two positions in every project's submenu — a menu whose
+                    items move depending on which row you opened is one you have to
+                    read every time. */}
+                <Menu.Item
+                  leftSection={<IconChevronUp size={14} />}
+                  disabled={index === 0}
+                  onClick={() => props.onMoveProject(index, index - 1)}
+                >
+                  Move up
+                </Menu.Item>
+                <Menu.Item
+                  leftSection={<IconChevronDown size={14} />}
+                  disabled={index === props.repos.length - 1}
+                  onClick={() => props.onMoveProject(index, index + 1)}
+                >
+                  Move down
+                </Menu.Item>
+                <Menu.Divider />
+                <Menu.Item
+                  color="red"
+                  leftSection={<IconTrash size={14} />}
+                  onClick={() => props.onRemoveRepo(r)}
+                >
+                  Remove project…
+                </Menu.Item>
+              </Menu.Sub.Dropdown>
+            </Menu.Sub>
+          );
+        })}
+      </Menu.Dropdown>
+    </Menu>
+  );
+}
+
 function TopBar(props: {
   modeSwitch: React.ReactNode;
   repos: Repo[];
@@ -5124,23 +5913,33 @@ function TopBar(props: {
   sharing: React.ReactNode;
   /** Open a pane on the run's URLs. Absent when there is no layout to open into. */
   onShowBlankBrowser: (() => void) | undefined;
+  /** `activity.showWorking`, passed through to the selector's activity glyphs. */
+  showWorking: boolean;
+  /** The daemon's claims table minus this client's rows — what the selector says
+   *  about a project some other window already has a checkout of. */
+  elsewhere: ReadonlyMap<number, ClientInfo>;
+  /** Whether a second view of a project can be opened — a window in Veld Desktop,
+   *  a tab in a browser. */
+  canOpenWindow: boolean;
+  /** What to call that second view, since the two environments differ. */
+  secondViewLabel: string;
+  /** The show/hide toggle for the project column, built by the app (it owns the
+   *  settings write). Rendered between the mode switch and the selector. */
+  projectColumnButton: React.ReactNode;
   onSelectRepo: (root: string) => void;
+  onOpenProjectWindow: (root: string) => void;
+  /** Move a project one place in the daemon-held order — the keyboard's half of
+   *  the column's drag. */
+  onMoveProject: (from: number, to: number) => void;
+  onRemoveRepo: (repo: Repo) => void;
   onImport: () => void;
-  onRemoveRepo: () => void;
-  onWhatsNew: () => void;
-  /** Whether this build ships any promotions at all. Retiring one is deleting it
-   *  (see docs/promotions.md), so the last deletion must not leave a menu entry
-   *  that opens an empty dialog. */
-  hasNews: boolean;
-  /** Unread *and* dismissed promotions — dismissing is not reading. */
-  unreadNews: number;
   onStart: () => void;
   onStop: () => void;
   onRestart: () => void;
   onSearch: () => void;
   focusModeButton: React.ReactNode;
-  themeButton: React.ReactNode;
-  settingsButton: React.ReactNode;
+  /** Theme, what's new and settings, as one menu at the end of the bar. */
+  overflowMenu: React.ReactNode;
   configVarsButton: React.ReactNode;
   /** Node actions for the currently-running run, or `null` when none can fire. */
   nodeActions: React.ReactNode;
@@ -5159,41 +5958,26 @@ function TopBar(props: {
   // in the worktree either way. See `useExtensionStatus`.
   const extensionStatus = useExtensionStatus(worktree?.id ?? null, props.extensions);
   const repoAvailable = props.repo?.available ?? false;
-  const repoLabel = props.repo
-    ? props.repo.available
-      ? props.repo.name
-      : `${props.repo.name} (unavailable)`
-    : "";
   // Whether the play/stop control can *abort* a start it is in the middle of —
   // see the button below. Hover-owned so a fresh mount does not replay the
   // transition, the same reason the mode switch owns its own hover state.
   const [startHover, setStartHover] = useState(false);
   // A start in flight: the play/stop button spins red and offers a stop on hover.
   const starting = props.spinner === "start";
-  // The project selector shrinks to its current name instead of always occupying
-  // its 170px cap. A hidden mirror span is measured rather than a font guess, so
-  // the width tracks the real rendered label; capped at 170 with ellipsis, floored
-  // so a one-char name does not collapse the cell below a usable target.
-  const [projectWidth, setProjectWidth] = useState(170);
-  const projectMeasureRef = useRef<HTMLSpanElement>(null);
-  useEffect(() => {
-    const el = projectMeasureRef.current;
-    if (!el) return;
-    setProjectWidth(
-      Math.min(170, Math.max(64, Math.ceil(el.getBoundingClientRect().width) + 40)),
-    );
-  }, [repoLabel]);
+  // The project selector shrinks to its current name rather than occupying a fixed
+  // cap. It is a `Button` now (see `ProjectMenu`), so that is the intrinsic width
+  // with a `max-width` backstop in CSS — the hidden mirror span this used to
+  // measure went with the `Select` it was sizing.
   // No run controls for a repo we can't see on disk — git/veld actions would
   // only fail later with a worse error.
   const canRun = !!worktree?.has_veld_config && repoAvailable;
-  // No unread dot while the start screen is up. Zero projects means the whole
-  // window is one instruction — "import something" — and a second thing on the
-  // bar asking to be clicked is the only competition it has. The news keeps;
-  // the menu still carries it the moment there is a project.
-  const unreadNews = props.repos.length === 0 ? 0 : props.unreadNews;
   return (
     <div className={topbarClass}>
       {props.modeSwitch}
+      {/* Only with something to show. At zero projects the bar is one instruction
+          ("import something") and a toggle for an empty column is a second thing
+          asking to be understood. */}
+      {props.repos.length > 0 && props.projectColumnButton}
       {props.repos.length === 0 ? (
         // Nothing to select between, so the bar offers the only move there is.
         // The selector is *absent* at zero projects rather than empty, which left
@@ -5212,90 +5996,20 @@ function TopBar(props: {
           Import first project
         </Button>
       ) : (
-        <div className="project-select" title={props.repo ? repoLabel : "Switch project"}>
-          {/* Hidden mirror for `projectWidth` above — measuring it is how the
-              select shrinks to its value rather than always filling 170px. */}
-          <span ref={projectMeasureRef} className="project-select-measure" aria-hidden="true">
-            {props.repo ? repoLabel : ""}
-          </span>
-          <Select
-            title="Switch project"
-            size="xs"
-            w={projectWidth}
-            className="project-select-control"
-            allowDeselect={false}
-            value={props.repo?.root ?? null}
-            onChange={(v) => v && props.onSelectRepo(v)}
-            data={props.repos.map((r) => ({
-              value: r.root,
-              label: r.available ? r.name : `${r.name} (unavailable)`,
-            }))}
-            comboboxProps={{ width: 240, position: "bottom-start" }}
-            /* Not monospace, unlike the start preset beside it: a project's name
-               is a name, where the preset carries a `node:variant` path whose
-               punctuation is worth fixed-width. The dropdown options lost the
-               mono override with the field, so the closed and open states cannot
-               disagree. */
-          />
-        </div>
+        <ProjectMenu
+          repos={props.repos}
+          repo={props.repo}
+          showWorking={props.showWorking}
+          elsewhere={props.elsewhere}
+          canOpenWindow={props.canOpenWindow}
+          secondViewLabel={props.secondViewLabel}
+          onSelectRepo={props.onSelectRepo}
+          onOpenProjectWindow={props.onOpenProjectWindow}
+          onMoveProject={props.onMoveProject}
+          onRemoveRepo={props.onRemoveRepo}
+          onImport={props.onImport}
+        />
       )}
-      <Menu position="bottom-start" width={200}>
-        <Menu.Target>
-          {/* The dot is the only hint that unread news exists — the entry is a
-              menu item, and a menu nobody opens is a channel nobody reads.
-
-              A positioned span rather than Mantine's `Indicator`: `Menu.Target`
-              clones its child to attach the ref and the click handler, so an
-              `Indicator` wrapper would take both and the button would lose the
-              menu's aria wiring. */}
-          <ActionIcon
-            size="md"
-            variant="default"
-            className="project-actions"
-            title={unreadNews > 0 ? `Project actions — ${unreadNews} unread` : "Project actions"}
-          >
-            <IconDots size={14} />
-            {unreadNews > 0 && <span className="project-actions-dot" aria-hidden="true" />}
-          </ActionIcon>
-        </Menu.Target>
-        <Menu.Dropdown>
-          <Menu.Item
-            leftSection={<IconFolderPlus size={14} />}
-            onClick={props.onImport}
-          >
-            Import repository…
-          </Menu.Item>
-          <Menu.Item
-            color="red"
-            leftSection={<IconTrash size={14} />}
-            disabled={!props.repo}
-            onClick={props.onRemoveRepo}
-          >
-            Remove project…
-          </Menu.Item>
-          {props.hasNews && (
-            <>
-              <Menu.Divider />
-              {/* On demand, showing everything this build ships whatever its
-                  state — the only way to revisit a promotion, and to catch up on
-                  news that predates you. */}
-              <Menu.Item
-                leftSection={<IconSparkles size={14} />}
-                rightSection={
-                  unreadNews > 0 ? (
-                    <Badge size="xs" circle variant="filled">
-                      {unreadNews}
-                    </Badge>
-                  ) : undefined
-                }
-                onClick={props.onWhatsNew}
-              >
-                What's new…
-              </Menu.Item>
-            </>
-          )}
-        </Menu.Dropdown>
-      </Menu>
       {worktree && (
         <>
           <div className="sep" />
@@ -5461,7 +6175,7 @@ function TopBar(props: {
                   what the *app* does on the right — and a machine var is squarely
                   the first: it belongs to the selected worktree and changes what
                   ▶ will actually run. Parked on the right it read as a second
-                  settings gear, which is the exact confusion the `{}` glyph was
+                  settings entry, which is the exact confusion the `{}` glyph was
                   chosen to avoid. */}
               {props.configVarsButton}
               {/* The running run's node actions, one click from the surface that
@@ -5538,8 +6252,10 @@ function TopBar(props: {
         </ActionIcon>
       </Tooltip>
       {props.focusModeButton}
-      {props.settingsButton}
-      {props.themeButton}
+      {/* Last, and the only thing after focus mode: everything Veld-level (theme,
+          what's new, settings) is inside it. Project actions live in the project
+          menu at the *start* of the bar, which is what this split bought. */}
+      {props.overflowMenu}
     </div>
   );
 }
@@ -5688,6 +6404,214 @@ function below(e: React.DragEvent): boolean {
  */
 function RailCaret() {
   return <div className="rail-caret" aria-hidden />;
+}
+
+/** The rail's drop indicator, sized for the project column's squares. Same
+ *  accent bar and same glow — one drag vocabulary for both columns. */
+function ProjectCaret() {
+  return <div className="project-caret" aria-hidden />;
+}
+
+/**
+ * The project column: every project as one square, beside the worktree rail.
+ *
+ * # Why a column and not more menu
+ *
+ * A menu answers a question you already knew to ask. The thing this feature exists
+ * for is the question you *didn't* — an agent waiting in the project you are not
+ * looking at — and that only works if the answer is on screen without a click. So
+ * the activity glyph the rail puts on a worktree is aggregated here per project and
+ * rendered permanently, and switching costs one click instead of two.
+ *
+ * **Off by default** (`ui.showProjectColumn`), because most installs have one
+ * project and a column of one square answers nothing. The top-bar toggle is the
+ * discovery path that costs us; see the setting's own docstring.
+ *
+ * # Identity without a migration
+ *
+ * Projects have no marker of their own and are not getting one: the square is
+ * `projectInitials(name)` and nothing else, so an import needs no picker and there is
+ * no per-project marker column to add, migrate, or keep in step with a rename.
+ *
+ * **Greyscale, deliberately.** An earlier version filled each square with a hue
+ * derived from the repo root. It was louder than anything else on screen and it
+ * competed with the worktree markers two pixels to its right — the one place in this
+ * UI where colour already carries a specific meaning. Selection is fill-vs-outline,
+ * the same signal a rail row uses, and the only colour left in the column is the
+ * activity badge. See the matching note in `styles.css`.
+ *
+ * # Order
+ *
+ * Dragging a square rewrites the order for **every** window, because it is the
+ * daemon's (`repos.sort_position`, schema v16) rather than this page's. That is not
+ * incidental: ⌘1…⌘9 address a *position*, so a per-window order would make one chord
+ * mean two projects. The drag mirrors the rail's own lane drag — same dataTransfer
+ * discipline, same "drop on a row, land at its index" gesture.
+ */
+function ProjectColumn(props: {
+  repos: Repo[];
+  activeRoot: string | null;
+  showWorking: boolean;
+  elsewhere: ReadonlyMap<number, ClientInfo>;
+  onSelect: (root: string) => void;
+  onReorder: (from: number, to: number) => void;
+  onMenu: (e: React.MouseEvent, repo: Repo) => void;
+  onImport: () => void;
+}) {
+  // Which square is being dragged, and where the caret is. Both are this
+  // component's alone — the rail's two drags are keyed on their own state for the
+  // reason its `onDragStart` explains, and a third one must not join that
+  // arrangement by sharing any of it.
+  //
+  // `dropAt` is a caret position (`0…length`, "insert before this index"), not the
+  // index of a square — see `dropTargetIndex` for why the two are not the same
+  // number.
+  const [dragRoot, setDragRoot] = useState<string | null>(null);
+  const [dropAt, setDropAt] = useState<number | null>(null);
+  const roots = props.repos.map((r) => r.root);
+  const endDrag = () => {
+    setDragRoot(null);
+    setDropAt(null);
+  };
+  /** Commit whatever the caret is pointing at. Shared by every square's `onDrop`
+   *  and the column's own, so a release in the padding below the last square lands
+   *  the same way a release on a square does. */
+  const commitDrop = () => {
+    const from = roots.indexOf(dragRoot ?? "");
+    const at = dropAt;
+    endDrag();
+    if (from === -1 || at === null) return;
+    const to = dropTargetIndex(from, at);
+    if (to === null) return;
+    props.onReorder(from, to);
+  };
+  return (
+    <div
+      className="project-col"
+      role="tablist"
+      aria-label="Projects"
+      aria-orientation="vertical"
+      // The column itself accepts the drop, so a release in the padding under the
+      // last square is a drop at the end rather than a cancelled drag. Without it
+      // the only way to reach the last position is to hit the bottom half of the
+      // final square exactly.
+      onDragOver={(e) => {
+        if (!dragRoot) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "move";
+      }}
+      onDrop={(e) => {
+        if (!dragRoot) return;
+        e.preventDefault();
+        commitDrop();
+      }}
+    >
+      {props.repos.map((r, index) => {
+        const summary = inbox.groupState(projectWorktreeIds(r), props.showWorking);
+        const holder = projectHolder(r, props.elsewhere);
+        const active = r.root === props.activeRoot;
+        // Only the first nine are addressable; the tooltip must not promise a chord
+        // that does nothing. See `MAX_PROJECT_SHORTCUTS`.
+        const digit = index < MAX_PROJECT_SHORTCUTS ? index + 1 : null;
+        const note = [
+          r.available ? null : "unavailable",
+          holder ? awayNote(holder) : null,
+          digit ? `⌘${digit}` : null,
+        ]
+          .filter(Boolean)
+          .join(" · ");
+        return (
+          <Fragment key={r.root}>
+            {dropAt === index && <ProjectCaret />}
+            <Tooltip
+              label={note ? `${r.name} – ${note}` : r.name}
+              position="right"
+              withArrow
+            >
+            {/* A div with role=tab, not a <button>, and the reason is the drag: a
+                native button consumes the mousedown for its own activation
+                behaviour, so `draggable` on one never starts a drag in Chromium.
+                The rail's own rows are divs for a related reason (nested controls)
+                — see the note there. `onKeyDown` restores the Enter/Space a real
+                button would have had. */}
+            <div
+              role="tab"
+              tabIndex={0}
+              aria-selected={active}
+              className={`project-sq${active ? " active" : ""}${
+                r.available ? "" : " unavailable"
+              }${dragRoot === r.root ? " dragging" : ""}`}
+              onKeyDown={(e) => {
+                if (e.key !== "Enter" && e.key !== " ") return;
+                e.preventDefault();
+                props.onSelect(r.root);
+              }}
+              draggable
+              onDragStart={(e) => {
+                setDragRoot(r.root);
+                e.dataTransfer.effectAllowed = "move";
+                // Firefox ignores a drag with no payload. Prefixed like the rail's
+                // lane drag, so anything outside this column that reads the plain
+                // text can tell what it is being offered.
+                e.dataTransfer.setData("text/plain", `project:${r.root}`);
+              }}
+              onDragOver={(e) => {
+                if (!dragRoot) return;
+                // Only for a drag this column started. Without the guard a worktree
+                // or a lane dragged out of the rail would paint a drop indicator on
+                // a target that cannot accept it.
+                e.preventDefault();
+                e.dataTransfer.dropEffect = "move";
+                // Above the midpoint inserts before this square, below it after —
+                // the gesture the rail already uses, and the reason the indicator
+                // is a caret between squares rather than a ring around one: a ring
+                // cannot say which side of the target you are about to land on.
+                const box = e.currentTarget.getBoundingClientRect();
+                setDropAt(e.clientY < box.top + box.height / 2 ? index : index + 1);
+              }}
+              onDrop={(e) => {
+                e.preventDefault();
+                // The column below also accepts drops (so a release in the padding
+                // lands at the end), and without this the event bubbled into it
+                // with the pre-`endDrag` closure still live — every drop on a square
+                // fired `commitDrop` twice, i.e. two identical POSTs and two polls
+                // per drag.
+                e.stopPropagation();
+                commitDrop();
+              }}
+              onDragEnd={endDrag}
+              onClick={() => props.onSelect(r.root)}
+              onContextMenu={(e) => props.onMenu(e, r)}
+            >
+              <span className="project-sq-initials" aria-hidden="true">
+                {projectInitials(r.name)}
+              </span>
+              {/* The accessible name, since the initials are decorative and the
+                  tooltip is not read out. */}
+              <span className="visually-hidden">{r.name}</span>
+              {summary.state && (
+                <span className={`project-sq-badge ${summary.state}`} aria-hidden="true" />
+              )}
+              {holder && <span className="project-sq-away" aria-hidden="true" />}
+            </div>
+            </Tooltip>
+          </Fragment>
+        );
+      })}
+      {/* The caret past the last square — "drop at the end". */}
+      {dropAt === props.repos.length && <ProjectCaret />}
+      <Tooltip label="Import repository…" position="right" withArrow>
+        <button
+          type="button"
+          className="project-sq project-sq-add"
+          onClick={props.onImport}
+          aria-label="Import repository"
+        >
+          <IconPlus size={14} />
+        </button>
+      </Tooltip>
+    </div>
+  );
 }
 
 function Rail(props: {

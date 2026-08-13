@@ -634,11 +634,47 @@ class WorktreeInbox {
    * worktree of a monorepo.
    */
   rowState(worktreeId: number, showWorking: boolean): RowSummary {
+    return this.summarize((id) => id === worktreeId, showWorking);
+  }
+
+  /**
+   * The same answer for a *set* of worktrees — what a whole project has to say.
+   *
+   * Worst-state-wins across the set, exactly as it is across the panes of one
+   * worktree, so the project selector and the rail speak one language: a project row
+   * showing the question mark means the same thing as a rail row showing it.
+   *
+   * A separate entry point rather than the caller merging N `rowState` results,
+   * because merging them cannot reproduce this: `entries` has to be sorted newest-
+   * first *across* the whole set (a per-worktree merge concatenates already-sorted
+   * runs and interleaves them wrong), and `PRECEDENCE` has to be applied once to the
+   * union of kinds rather than per worktree and then again to the winners.
+   *
+   * Callers pass the ids they want counted, which is where the policy lives: a
+   * trashed worktree is excluded by the caller, not here — the inbox has no opinion
+   * about which worktrees still exist.
+   */
+  groupState(worktreeIds: ReadonlySet<number>, showWorking: boolean): RowSummary {
+    if (worktreeIds.size === 0) return NOTHING;
+    return this.summarize((id) => worktreeIds.has(id), showWorking);
+  }
+
+  /**
+   * One pass over the sessions, filtered by whichever worktrees the caller wants.
+   *
+   * The predicate is a closure per call, which is a cheaper allocation than the
+   * loop it guards and keeps `rowState` — the hot one, run per rail row per
+   * render — a single pass with no intermediate arrays.
+   */
+  private summarize(
+    match: (worktreeId: number) => boolean,
+    showWorking: boolean,
+  ): RowSummary {
     const entries: { sessionId: string; unseen: Unseen }[] = [];
     let runningPanes = 0;
     const kinds = new Set<UnseenKind>();
     for (const [sessionId, session] of this.sessions) {
-      if (session.worktreeId !== worktreeId) continue;
+      if (!match(session.worktreeId)) continue;
       if (running(session)) runningPanes += 1;
       if (!session.unseen) continue;
       entries.push({ sessionId, unseen: session.unseen });

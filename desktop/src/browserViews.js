@@ -552,6 +552,52 @@ function attachListeners(window, viewId, entry) {
       send(window, "veld:browser:accelerator", { viewId, accelerator: "find" });
       return;
     }
+    // Project switching: `Ctrl/⌘+1`…`9` and `Ctrl/⌘+\``. Forwarded rather than made
+    // menu accelerators because the main process does not know the project list —
+    // a menu would have to carry nine items labelled "Project 3" or be fed the
+    // names over a channel of their own, for a binding the page can act on
+    // directly. Unlike `F` above this takes nothing from the previewed page: a
+    // `Ctrl/⌘`+digit is a browser-level binding everywhere (tab switching), so no
+    // page has it to lose.
+    //
+    // `input.code`, not `input.key`: on AZERTY and several other layouts the
+    // unshifted digit row is punctuation, and ⌘2 means the key with 2 printed on
+    // it. `key` is kept as the fallback for a layout with no `code`.
+    //
+    // `1-9` here is a **coarse pre-filter, not the authority** — the renderer bounds
+    // the digit against `MAX_PROJECT_SHORTCUTS` (`shared/projects.ts`) before it
+    // addresses anything, so erring wide on this side costs a forwarded message that
+    // resolves to nothing. Keep it wide rather than mirroring a constant this process
+    // cannot import.
+    if ((input.control || input.meta) && !input.shift && !input.alt) {
+      const digit = /^Digit([1-9])$/.exec(input.code || "")?.[1] ?? null;
+      const isDigit = digit ?? (/^[1-9]$/.test(input.key) ? input.key : null);
+      // **The keyboard moves to the page, as it does for ⌘F above and ⌘⇧P below.**
+      // A switch replaces what is on screen — the pane the user was typing in
+      // belongs to the worktree they are leaving — so leaving the keyboard in a
+      // native view that is about to be hidden means typing into nothing.
+      //
+      // The accepted cost, stated because it was briefly "fixed" the wrong way: a
+      // chord that resolves to *no* switch (one project, or a digit past the last)
+      // still takes focus out of the pane. The main process cannot tell the two
+      // apart — it does not know the project list — and losing the keyboard on a
+      // real switch is the worse of the two, being also the common one.
+      if (isDigit) {
+        event.preventDefault();
+        window.webContents.focus();
+        send(window, "veld:browser:accelerator", {
+          viewId,
+          accelerator: `project:${isDigit}`,
+        });
+        return;
+      }
+      if (input.key === "`" || input.code === "Backquote") {
+        event.preventDefault();
+        window.webContents.focus();
+        send(window, "veld:browser:accelerator", { viewId, accelerator: "project:toggle" });
+        return;
+      }
+    }
     if (!input.shift) return;
     if (!(input.control || input.meta)) return;
     if (input.key.toLowerCase() !== "p") return;

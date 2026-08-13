@@ -552,6 +552,18 @@ export interface Repo {
   root: string;
   name: string;
   created_at: string;
+  /**
+   * Manual position in the project column, or `null` for "not placed by hand".
+   *
+   * **The list is already in this order** — the daemon sorts placed projects
+   * first and the rest by name — so nothing has to sort by it; it is here so the
+   * column can tell a deliberate order from the alphabetical default.
+   *
+   * Optional because it can genuinely be absent: a daemon older than schema v16
+   * has no such column and sends no such key, and `just dev-ui` proxies `/api` to
+   * whatever daemon is *installed*. Same reason `display_name` carries a `?`.
+   */
+  sort_position?: number | null;
   /** False when the repo can't be listed on disk right now (moved/deleted). */
   available: boolean;
   worktrees: Worktree[];
@@ -1218,6 +1230,19 @@ export const api = {
     request<void>("/api/worktree-order", {
       method: "POST",
       body: JSON.stringify({ repo_root, order }),
+    }),
+  /**
+   * Rewrite the manual project order.
+   *
+   * Send the **full order being displayed**, as repo roots. Roots the daemon does
+   * not recognise are ignored and roots omitted keep their relative order after
+   * the listed ones — so a client that polled before a project was imported cannot
+   * unplace it, and the answer is always a total order.
+   */
+  reorderProjects: (order: string[]) =>
+    request<void>("/api/repo-order", {
+      method: "POST",
+      body: JSON.stringify({ order }),
     }),
   createLane: (repo_root: string, name: string) =>
     request<{ lane: Lane }>("/api/lanes", {
