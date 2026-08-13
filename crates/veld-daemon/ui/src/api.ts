@@ -1051,6 +1051,42 @@ export interface SetConfigVarBody {
   worktree?: boolean;
 }
 
+/**
+ * Whether this machine is being held awake, and whether it *can* be.
+ *
+ * `supported: false` is a fact about the machine, not a failure — a Linux box
+ * without `systemd-inhibit` has no way to ask — so `unsupported_reason` carries
+ * a sentence the UI can show instead of a control that would fail on click.
+ */
+export interface CaffeinateState {
+  supported: boolean;
+  unsupported_reason?: string | null;
+  active: boolean;
+  started_at?: string;
+  /** RFC3339, or `null` for "until I turn it off". Absent when not active. */
+  expires_at?: string | null;
+  /** Seconds left at the moment the daemon answered. `null` when unlimited. */
+  remaining_secs?: number | null;
+  /**
+   * Which OS the daemon is on. The UI composes its own copy from this rather
+   * than being handed a sentence, so "on mains power only" can never be shown to
+   * a Linux user, whose lid-closed sleep is already covered unprivileged.
+   */
+  platform: "macos" | "linux" | "other";
+  /**
+   * Whether the battery/lid-closed half is *possible* here — macOS with a
+   * privileged helper. Always false on Linux, where there is nothing to add.
+   */
+  battery_capable: boolean;
+  /**
+   * Whether that half is *in force* right now. Distinct from `battery_capable`
+   * on purpose: a lease whose renewals start failing sets this back to false
+   * while the machine stays capable, and the difference is exactly what the user
+   * needs to know before shutting the lid.
+   */
+  covers_battery: boolean;
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const mutating = init?.method && init.method !== "GET";
   const res = await fetch(path, {
@@ -1272,6 +1308,31 @@ export const api = {
    * TypeScript is a default that drifts from the Rust one.
    */
   settings: () => request<{ settings: SettingsDoc }>("/api/settings"),
+  /**
+   * Whether this machine is currently being kept awake.
+   *
+   * Machine-wide, not per-run or per-client: the thing being held awake is the
+   * laptop, so every window sees the same answer and turning it off in one
+   * turns it off everywhere.
+   */
+  caffeinate: () => request<CaffeinateState>("/api/caffeinate"),
+  /**
+   * Keep this machine awake for `durationSecs`, or indefinitely when `null`.
+   *
+   * Replaces a running session rather than erroring, so picking a different
+   * duration is one click and never leaves a gap in which the machine could
+   * suspend. Returns the new state — the countdown shown comes from the daemon,
+   * never from a locally-computed deadline.
+   */
+  startCaffeinate: (durationSecs: number | null) =>
+    request<CaffeinateState>("/api/caffeinate", {
+      method: "POST",
+      body: JSON.stringify({ duration_secs: durationSecs }),
+    }),
+  /** Let this machine sleep again. Idempotent — turning off what is already off
+   *  succeeds, so two windows clicking it don't produce an error in the slower. */
+  stopCaffeinate: () =>
+    request<CaffeinateState>("/api/caffeinate", { method: "DELETE" }),
   /**
    * Write only the keys given. A patch rather than a replacement, so two windows
    * with the settings surface open cannot revert each other's unrelated edits.

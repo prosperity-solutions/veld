@@ -86,6 +86,40 @@ pub enum HelperError {
 /// new ones should follow this shape.
 pub const RESTART: &str = "restart";
 
+/// Disable battery sleep, or renew an existing hold, for `lease_secs`.
+///
+/// The lease is the safety property, not a detail: `pmset -b disablesleep` is a
+/// *durable* setting rather than an assertion, so a caller that dies without
+/// renewing must lose it. See `veld-helper`'s `sleep` module.
+///
+/// Helpers older than the release that added this answer
+/// `unknown command: hold_sleep_disabled`; callers must treat that as "this
+/// machine has no battery coverage" and carry on with the unprivileged hold,
+/// never as a failure of the keep-awake itself.
+pub const HOLD_SLEEP_DISABLED: &str = "hold_sleep_disabled";
+
+/// Longest lease the helper will grant, in seconds.
+///
+/// Lives in the **shared** crate because both sides need the same number and the
+/// helper clamps silently: it answers a bare `ok` carrying no granted duration,
+/// so a daemon asking for more than this would be cut down with no signal
+/// anywhere. Whoever raises the daemon's ask must see this constant.
+pub const MAX_SLEEP_LEASE_SECS: u64 = 600;
+
+/// How long the helper holds an *adopted* keep-awake before its watchdog hands it
+/// back, in seconds — the window a daemon has to resume renewing after the helper
+/// restarted under it.
+///
+/// Shared for the same reason as the ceiling above, and this pairing is the more
+/// dangerous of the two: raise the daemon's renewal interval past this and every
+/// helper restart silently drops a live hold, with nothing failing anywhere.
+/// `veld-daemon` asserts the relation at compile time.
+pub const SLEEP_ADOPTION_GRACE_SECS: u64 = 90;
+
+/// Re-enable battery sleep now rather than waiting out the lease. Same
+/// version-skew rule as [`HOLD_SLEEP_DISABLED`].
+pub const RELEASE_SLEEP_DISABLED: &str = "release_sleep_disabled";
+
 /// Wire format: `{"command": "<name>", "args": {…}}`.
 ///
 /// We implement [`Serialize`] manually so that the enum serialises into the
@@ -123,6 +157,13 @@ pub enum HelperCommand {
     /// Helpers older than 16.14 answer `unknown command: restart`; callers must
     /// treat that as "fall back to the binary watcher", not as a failure.
     Restart,
+    /// Hold battery lid-closed sleep off for `lease_secs`, renewable by
+    /// re-issuing. See [`HOLD_SLEEP_DISABLED`] for why there is a lease at all.
+    HoldSleepDisabled {
+        lease_secs: u64,
+    },
+    /// Drop the hold above immediately. See [`RELEASE_SLEEP_DISABLED`].
+    ReleaseSleepDisabled,
 }
 
 impl Serialize for HelperCommand {
@@ -157,12 +198,48 @@ impl Serialize for HelperCommand {
             HelperCommand::Status => ("status", serde_json::Value::Object(Default::default())),
             HelperCommand::Shutdown => ("shutdown", serde_json::Value::Object(Default::default())),
             HelperCommand::Restart => (RESTART, serde_json::Value::Object(Default::default())),
+            HelperCommand::HoldSleepDisabled { lease_secs } => (
+                HOLD_SLEEP_DISABLED,
+                serde_json::json!({ "lease_secs": lease_secs }),
+            ),
+            HelperCommand::ReleaseSleepDisabled => (
+                RELEASE_SLEEP_DISABLED,
+                serde_json::Value::Object(Default::default()),
+            ),
         };
 
         let mut map = serializer.serialize_map(Some(2))?;
         map.serialize_entry("command", command)?;
         map.serialize_entry("args", &args)?;
         map.end()
+    }
+}
+
+#[cfg(test)]
+mod command_wire_tests {
+    use super::{HOLD_SLEEP_DISABLED, HelperCommand, RELEASE_SLEEP_DISABLED};
+
+    /// The command *name* is the whole contract, and getting it wrong fails
+    /// silently in the worst possible direction: the helper answers
+    /// `unknown command`, which callers are required to treat as "this machine
+    /// has no battery coverage" and carry on — so a typo here ships as a feature
+    /// that is quietly off for everyone, with nothing red anywhere.
+    #[test]
+    fn the_sleep_commands_serialise_to_the_names_the_helper_dispatches_on() {
+        let hold = serde_json::to_value(HelperCommand::HoldSleepDisabled { lease_secs: 90 })
+            .expect("serialisation cannot fail");
+        assert_eq!(hold["command"], serde_json::json!(HOLD_SLEEP_DISABLED));
+        // The lease has to arrive as a *number*: the helper reads it with
+        // `as_u64`, so a stringified value would be refused as missing.
+        assert_eq!(hold["args"]["lease_secs"], serde_json::json!(90));
+
+        let release = serde_json::to_value(HelperCommand::ReleaseSleepDisabled)
+            .expect("serialisation cannot fail");
+        assert_eq!(
+            release["command"],
+            serde_json::json!(RELEASE_SLEEP_DISABLED)
+        );
+        assert_eq!(release["args"], serde_json::json!({}));
     }
 }
 
@@ -314,6 +391,39 @@ impl HelperClient {
     /// than a failure.
     pub async fn restart(&self) -> Result<HelperResponse, HelperError> {
         self.send(&HelperCommand::Restart).await
+    }
+
+    /// Hold battery lid-closed sleep off for `lease_secs`, or renew the hold.
+    ///
+    /// Only meaningful against a **privileged** helper — the unprivileged one
+    /// runs as the user and `pmset` will refuse it. Callers reach this through
+    /// [`Self::connect_privileged`] rather than [`Self::connect`] for that
+    /// reason.
+    pub async fn hold_sleep_disabled(
+        &self,
+        lease_secs: u64,
+    ) -> Result<HelperResponse, HelperError> {
+        self.send(&HelperCommand::HoldSleepDisabled { lease_secs })
+            .await
+    }
+
+    /// Drop the hold above. Idempotent, and best-effort at every call site: the
+    /// lease expiring is the guarantee, and this is only the fast path.
+    pub async fn release_sleep_disabled(&self) -> Result<HelperResponse, HelperError> {
+        self.send(&HelperCommand::ReleaseSleepDisabled).await
+    }
+
+    /// Connect **only** to a privileged helper, never falling back to the user
+    /// socket.
+    ///
+    /// [`Self::connect`] deliberately degrades to an unprivileged helper, which
+    /// is right for routes and hosts — those work either way. It is wrong for
+    /// anything that needs root: a user-socket helper would accept the request
+    /// and fail inside `pmset`, turning "this machine cannot do that" into an
+    /// error that reads like a bug. Asking on the system socket answers the
+    /// capability question directly, since only a root-owned helper binds it.
+    pub async fn connect_privileged() -> Result<Self, HelperError> {
+        Self::try_connect(&system_socket_path()).await
     }
 
     /// Connect to the helper, trying system socket first, then user socket.

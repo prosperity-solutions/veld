@@ -155,6 +155,27 @@ pub fn caddy_data_dir() -> PathBuf {
     lib_dir().join("caddy-data")
 }
 
+/// Where the privileged helper records that **veld** took the machine's sleep
+/// setting (`veld-helper`'s `sleep` module).
+///
+/// Deliberately **not** under [`lib_dir`]. That tree is user-owned, and this file
+/// is the sole authority for whether root writes a durable system setting — a
+/// forged or deleted marker makes root refuse to ever revert, which is a pin that
+/// survives a reboot. `/var/db` and `/var/lib` are `root:wheel`.
+///
+/// Lives here rather than in `veld-helper` because **two** crates need it: the
+/// helper writes it, and `veld uninstall` (in this crate) sweeps it. A second
+/// literal in the uninstall path is the drift this repo already names for the
+/// lease constants — change one, and the other silently stops matching, leaving a
+/// stranded claim on a machine with no veld left to honour it.
+pub fn sleep_marker_dir() -> PathBuf {
+    if cfg!(target_os = "macos") {
+        PathBuf::from("/var/db/veld")
+    } else {
+        PathBuf::from("/var/lib/veld")
+    }
+}
+
 pub fn dnsmasq_conf_dir() -> PathBuf {
     lib_dir().join("dnsmasq.d")
 }

@@ -487,7 +487,7 @@ struct RouteSnapshot {
 /// Caddy's data directory — where we persist the route store and pid file.
 /// Derived from the caddy binary's parent (a sibling `caddy-data`) so it shares
 /// the same (helper-writable) location across privileged/user modes.
-fn caddy_data_dir(caddy_bin_override: &Option<PathBuf>) -> PathBuf {
+pub(crate) fn caddy_data_dir(caddy_bin_override: &Option<PathBuf>) -> PathBuf {
     caddy_bin_override
         .as_ref()
         .and_then(|p| p.parent())

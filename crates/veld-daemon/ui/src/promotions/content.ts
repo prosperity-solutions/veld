@@ -113,6 +113,18 @@ export const PROMOTIONS: Promotion[] = [
     glyph: "panes",
   },
   {
+    // The button is visible in the top bar; what it *covers* is not. Nobody
+    // guesses that it holds through a closed lid, and — the reason this card
+    // exists at all — nobody would connect a dead overnight run on a MacBook to
+    // `veld setup privileged`. That is the half a reader cannot find alone.
+    id: "keep-awake",
+    since: "2026-08-13",
+    eyebrow: "New",
+    headline: "Close the lid, agent keeps running",
+    body: "Hold this machine awake from the cup beside search — 30 minutes, a few hours, or no limit. On a Mac on battery a shut lid also needs veld setup privileged.",
+    glyph: "device",
+  },
+  {
     id: "focus-mode",
     since: "2026-08-13",
     eyebrow: "New",

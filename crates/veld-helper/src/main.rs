@@ -2,6 +2,7 @@ mod caddy;
 mod dns;
 mod handler;
 mod protocol;
+mod sleep;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -161,6 +162,7 @@ async fn main() -> Result<()> {
         config.http_port,
         config.caddy_bin,
         shutdown_tx,
+        is_system_socket(&config.socket_path),
     ));
 
     // Startup reconcile: if a Caddy is already running (orphaned across our own
@@ -171,6 +173,38 @@ async fn main() -> Result<()> {
         let startup_state = Arc::clone(&state);
         tokio::spawn(async move {
             startup_state.reconcile_caddy_on_startup().await;
+        });
+    }
+
+    // Keep-awake, both halves — privileged helper only. `pmset` refuses a
+    // non-root caller, so the unprivileged LaunchAgent and the ephemeral
+    // auto-bootstrap helper can never hold a lease; running these there would
+    // cost an exec at every start and, worse, warn on every exit about a setting
+    // that helper never touched — in exactly the log a support transcript reads.
+    // Same predicate the binary-watcher below uses.
+    {
+        // Reconcile first, and awaited rather than spawned: it must finish before
+        // the accept loop can take a fresh lease, or a daemon renewing across our
+        // restart could race the adoption. With no ownership marker on disk this
+        // reads nothing and does nothing. It *adopts* rather than reverts — a
+        // daemon that is still there renews inside the grace, which is what makes
+        // a helper crash (or the self-restart path below, which exits straight out
+        // of a spawned task and never runs the release at the tail) invisible to
+        // the user instead of a dropped hold.
+        state.reconcile_sleep_on_startup().await;
+
+        // Watchdog: hand the sleep setting back once its lease lapses. Its own
+        // task rather than a second call in the Caddy tick below, because a Caddy
+        // recovery can take seconds and this deadline must not slip behind
+        // something unrelated.
+        let sleep_state = Arc::clone(&state);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(WATCHDOG_INTERVAL);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                sleep_state.sleep_watchdog_tick().await;
+            }
         });
     }
 
@@ -236,6 +270,14 @@ async fn main() -> Result<()> {
             }
         }
     }
+
+    // Caddy is left running on purpose; a sleep setting veld took is not. Caddy
+    // serving URLs across a helper restart is the desired behaviour, whereas a
+    // durable `disablesleep` with nothing left watching its lease is the exact
+    // failure this mechanism is built to avoid — including on the exit path that
+    // has no relaunch after it, which is what `veld uninstall` produces. A
+    // setting veld did not take is left alone; that is `release`'s own rule.
+    state.release_sleep_on_exit().await;
 
     Ok(())
 }
