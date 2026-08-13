@@ -429,7 +429,8 @@ impl<S: SleepSetter> SleepManager<S> {
         // live value there returns veld's own `true`, which written back as
         // `prior_disabled` would disown the setting permanently. See the module
         // docs.
-        if self.read_marker().is_none() {
+        let existing = self.read_marker();
+        if existing.is_none() {
             // Refuse rather than guess. Without knowing the prior value there is
             // no safe answer at release time: assume `false` and veld may switch
             // off somebody else's setting, assume `true` and it strands its own.
@@ -457,7 +458,7 @@ impl<S: SleepSetter> SleepManager<S> {
             return Ok(());
         }
 
-        let mut marker = self.read_marker().expect("checked just above");
+        let mut marker = existing.expect("checked just above");
         if marker.prior_disabled {
             // Somebody else owned this setting when veld arrived, so veld has
             // recorded that it will never revert it. **Then veld must not write
@@ -602,8 +603,23 @@ impl<S: SleepSetter> SleepManager<S> {
             }
         };
 
-        let elapsed = Duration::from_secs(now.saturating_sub(adopted_at));
-        let remaining = ADOPTION_GRACE.saturating_sub(elapsed);
+        // A wall clock reading *behind* the stamp is not "no time has passed" —
+        // `saturating_sub` would say zero elapsed and hand out a fresh full window
+        // on every restart for as long as the skew lasts, which is the very
+        // defect the stamp exists to prevent, reached by NTP or a VM resume
+        // instead of by a crash loop. Treat it as exhausted: the machine has
+        // already been held without a daemon for an unknown length of time, and
+        // the safe reading of "unknown" is "long enough".
+        let remaining = match now.checked_sub(adopted_at) {
+            Some(elapsed) => ADOPTION_GRACE.saturating_sub(Duration::from_secs(elapsed)),
+            None => {
+                warn!(
+                    "the clock moved behind the keep-awake adoption stamp; \
+                     treating the grace as spent"
+                );
+                Duration::ZERO
+            }
+        };
         *lease = Some(Deadline::after(remaining));
         warn!(
             grace_secs = remaining.as_secs(),
@@ -1018,6 +1034,39 @@ mod tests {
         assert!(
             !*fake.value.lock().unwrap(),
             "a restart minted a fresh grace"
+        );
+        assert!(!path.exists());
+    }
+
+    /// A clock that reads behind the stamp must not hand out a fresh window.
+    ///
+    /// `saturating_sub` reports zero elapsed for a backward step, which would
+    /// grant the full grace on every restart for as long as the skew lasted —
+    /// the same unbounded-adoption defect the stamp exists to prevent, reached
+    /// by NTP instead of by a crash loop.
+    #[tokio::test]
+    async fn a_clock_behind_the_adoption_stamp_spends_the_grace_rather_than_renewing_it() {
+        let (mgr, fake, dir) = manager();
+        mgr.hold(90).await.unwrap();
+        let path = dir.path().join("sleep-lease.json");
+
+        // A stamp from the future is what a backward clock step looks like.
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&Marker {
+                prior_disabled: false,
+                adopted_at: Some(super::unix_now() + 3_600),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let restarted = SleepManager::with_parts(path.clone(), fake.clone());
+        restarted.reconcile_on_startup().await;
+        restarted.watchdog_tick().await;
+        assert!(
+            !*fake.value.lock().unwrap(),
+            "a clock behind the stamp minted a fresh grace"
         );
         assert!(!path.exists());
     }

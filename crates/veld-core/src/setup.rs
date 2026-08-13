@@ -2432,6 +2432,29 @@ pub async fn uninstall() -> Result<(), anyhow::Error> {
         }
     }
 
+    // Remove the privileged helper's keep-awake ownership marker.
+    //
+    // Root-owned and outside `lib_dir` on purpose (it authorises a root write, so
+    // it may not live in a user-writable tree — see `veld-helper`'s `sleep`
+    // module), which is exactly why the sweep above does not reach it. Normally
+    // already gone: the helper hands the setting back and deletes this on its way
+    // out, and uninstall stops the helper before it gets here. What is left is the
+    // helper that died without running that path, and leaving its marker behind
+    // would strand a claim on a machine that no longer has a veld to honour it.
+    let sleep_marker_dir = if cfg!(target_os = "macos") {
+        PathBuf::from("/var/db/veld")
+    } else {
+        PathBuf::from("/var/lib/veld")
+    };
+    if sleep_marker_dir.exists() {
+        if let Err(e) = std::fs::remove_dir_all(&sleep_marker_dir) {
+            tracing::warn!(
+                path = %sleep_marker_dir.display(), error = %e,
+                "failed to remove the keep-awake marker dir"
+            );
+        }
+    }
+
     // Remove helper sockets (both system and user).
     let socket = helper::system_socket_path();
     if socket.exists() {

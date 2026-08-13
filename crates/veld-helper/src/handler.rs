@@ -317,14 +317,20 @@ impl State {
     /// some silently-chosen window. An old daemon never sends this command at
     /// all, so there is no compatibility case to default for.
     async fn handle_hold_sleep_disabled(&self, args: &Value) -> Response {
+        // Arguments first, capability second. The check is cheap and independent,
+        // and "missing 'lease_secs'" is the more useful answer to a malformed
+        // request whether or not this helper could have served a good one. It
+        // also lets the tests below run against an *unprivileged* fixture that
+        // holds no `SleepManager` at all, so nothing in this module can reach
+        // `pmset` by construction rather than by every test happening not to.
+        let lease_secs = match args.get("lease_secs").and_then(Value::as_u64) {
+            Some(s) if s > 0 => s,
+            _ => return Response::err("missing or invalid 'lease_secs' in args"),
+        };
         let Some(sleep) = &self.sleep else {
             return Response::err(
                 "this helper is not privileged; it cannot hold the machine's sleep setting",
             );
-        };
-        let lease_secs = match args.get("lease_secs").and_then(Value::as_u64) {
-            Some(s) if s > 0 => s,
-            _ => return Response::err("missing or invalid 'lease_secs' in args"),
         };
         match sleep.hold(lease_secs).await {
             Ok(()) => Response::ok(),
@@ -442,28 +448,18 @@ mod tests {
         assert!(parse_proxy_arg(&args).is_empty());
     }
 
-    /// A privileged `State` whose sleep marker lives in a tempdir.
+    /// An **unprivileged** `State`: it holds no `SleepManager` at all.
     ///
-    /// Load-bearing, not tidiness. With the production path these tests would
-    /// read the **installed privileged helper's** real marker, and `release`
-    /// would then execute `/usr/bin/pmset disablesleep 0` for real — the exact
-    /// hazard `sleep.rs`'s `SleepSetter` seam exists to prevent, reintroduced one
-    /// layer up. A tempdir marker never exists, so `release` returns before it
-    /// reaches `pmset` at all.
-    fn test_state() -> (State, tempfile::TempDir) {
-        let dir = tempfile::tempdir().unwrap();
+    /// Load-bearing, not tidiness. A fixture carrying the real `Pmset` setter
+    /// would leave this module one plausible future test — a valid `hold` — away
+    /// from executing `/usr/bin/pmset` for real and durably disabling a
+    /// developer's sleep. Relying on both current tests happening not to send a
+    /// valid lease is not a guarantee; having nothing to call is. Argument
+    /// validation runs ahead of the capability check, so the refusal these tests
+    /// assert on is still the argument one.
+    fn test_state() -> State {
         let (tx, _rx) = tokio::sync::watch::channel(false);
-        let caddy_bin = Some(dir.path().join("caddy"));
-        let mut state = State::new(443, 80, caddy_bin, tx, true);
-        // Privileged, so the sleep commands are actually dispatched — but pointed
-        // at a tempdir marker instead of the real root-only one. With no marker
-        // there, `release` returns before it reaches `pmset` and `hold` is
-        // rejected on its arguments first, so no test here can execute `pmset`.
-        state.sleep = Some(crate::sleep::SleepManager::with_parts(
-            dir.path().join("sleep-lease.json"),
-            crate::sleep::Pmset,
-        ));
-        (state, dir)
+        State::new(443, 80, None, tx, false)
     }
 
     /// A lease request with no usable `lease_secs` is refused *before* anything
@@ -483,7 +479,7 @@ mod tests {
     /// leave a developer's Mac unable to sleep — the setting is durable.
     #[tokio::test]
     async fn a_lease_request_without_a_duration_is_refused_before_pmset_runs() {
-        let (state, _dir) = test_state();
+        let state = test_state();
         for args in [
             serde_json::json!({}),
             serde_json::json!({ "lease_secs": 0 }),
@@ -515,7 +511,7 @@ mod tests {
     /// toward being *able* to sleep, which is the direction that cannot hurt.
     #[tokio::test]
     async fn releasing_a_lease_that_was_never_taken_succeeds() {
-        let (state, _dir) = test_state();
+        let state = test_state();
         let line = serde_json::json!({
             "command": veld_core::helper::RELEASE_SLEEP_DISABLED,
             "args": {},
@@ -525,6 +521,9 @@ mod tests {
         // Idempotent: the daemon releases on every teardown without checking
         // whether it ever held one, and a stop must not surface an error for it.
         assert!(handled.response.ok, "{:?}", handled.response.error);
-        assert!(!state.sleep.as_ref().unwrap().held().await);
+        assert!(
+            state.sleep.is_none(),
+            "the fixture must hold nothing to release"
+        );
     }
 }
