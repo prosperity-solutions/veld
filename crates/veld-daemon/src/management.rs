@@ -15,7 +15,7 @@ use tracing::warn;
 use veld_core::config;
 use veld_core::db::{Db, LogFilter, LogStream};
 use veld_core::state::{GlobalRegistry, NodeState, NodeStatus, RunStatus, StartOrigin};
-use veld_core::user_path::cached_user_path;
+use veld_core::user_path::cached_user_path_for;
 
 const DASHBOARD_HTML: &str = include_str!("../assets/management-ui.html");
 
@@ -1561,11 +1561,18 @@ pub(super) async fn spawn_veld(project_root: &std::path::Path, args: &[String]) 
     // Dropping the shell also drops the shell-escaping of a client-supplied
     // run name; arguments now reach the binary as argv.
     //
-    // Cached (60s) rather than resolved per call: this runs inside the
-    // stop/restart/action/start handlers, whose UI `fetch` calls carry no
-    // timeout, and a stalled rc file would otherwise hang the click for the
-    // full 10s resolution budget.
-    let path_env = cached_user_path().await;
+    // Resolved *in the project's own directory*, not the process-wide
+    // `cached_user_path()`: a config's declared commands need whatever Node
+    // (etc.) version this specific project's `.zshrc`/`.nvmrc` would select,
+    // which is exactly what a terminal pane gets by sitting in that directory
+    // and a directory-agnostic global PATH cannot represent — one project
+    // starting with another's Node version, or the daemon's own bare
+    // launchd-cwd PATH, was the top-bar/terminal-pane divergence this
+    // resolves. Still cached (`PATH_WARM_INTERVAL`, keyed per directory) so a
+    // stalled rc file doesn't hang the click for the full 10s resolution
+    // budget on every one of the stop/restart/action/start handlers this
+    // backs.
+    let path_env = cached_user_path_for(project_root).await;
     spawn_veld_in(&veld_bin, &path_env, project_root, args)
 }
 

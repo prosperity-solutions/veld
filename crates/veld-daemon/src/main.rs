@@ -268,6 +268,33 @@ async fn main() -> Result<()> {
     // Desktop's start, share start — must never pay that on a click.
     let user_path_handle = tokio::spawn(veld_core::user_path::warm_user_path_cache());
 
+    // Same reasoning, for the directory-scoped sibling: prime every already-
+    // registered project's entry so the FIRST top-bar start/stop/restart/
+    // action click after this boot (including every `veld update`, which
+    // restarts the daemon) doesn't pay a synchronous login-shell resolution
+    // on a UI `fetch` with no timeout. A project registered after this runs
+    // still pays that cost once on its own first use — the same one-time
+    // shape `cached_user_path`'s first call already has. Resolved
+    // concurrently, not sequentially: one project's slow `.zshrc` must not
+    // delay every other project's warm-up.
+    // `join_all` inside this one task, not a `Vec` of separately spawned
+    // ones: aborting `project_path_warm_handle` at shutdown must actually
+    // stop every in-flight login shell it started, and dropping a
+    // `JoinHandle` detaches rather than cancels — a `Vec<JoinHandle<_>>`
+    // would leave every still-running resolution to finish on its own.
+    let project_path_warm_handle = tokio::spawn(async move {
+        let Ok(db) = veld_core::db::Db::open() else {
+            return;
+        };
+        let Ok(registry) = db.registry() else {
+            return;
+        };
+        let warms = registry.projects.into_values().map(|entry| async move {
+            veld_core::user_path::cached_user_path_for(&entry.project_root).await;
+        });
+        futures_util::future::join_all(warms).await;
+    });
+
     // Which ports the dashboard is actually served on, learned from the helper and
     // kept current, because the `Origin` gate on the terminal and IDE-channel
     // upgrades is synchronous and cannot ask — and the setup mode file it would
@@ -318,6 +345,7 @@ async fn main() -> Result<()> {
     stats_handle.abort();
     dashboard_ports_handle.abort();
     user_path_handle.abort();
+    project_path_warm_handle.abort();
     accept_handle.abort();
     feedback_handle.abort();
 

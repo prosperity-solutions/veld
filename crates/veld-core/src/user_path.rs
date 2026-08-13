@@ -7,17 +7,25 @@
 //! executes a user-supplied command string on a daemon must therefore inherit
 //! the user's login-shell `PATH`.
 //!
-//! Two entry points. [`cached_user_path`] is the one anything running **inside
-//! a daemon** wants — request handlers (`spawn_veld`, the desktop picker and
-//! git plumbing, `SecretSource::Command` token resolution reached from
-//! `POST /api/shares`), the health monitor's liveness probes, and any future
-//! daemon-side command-execution surface — because resolution spawns a login
+//! Three entry points. [`cached_user_path`] is the one anything running
+//! **inside a daemon** wants when the answer is directory-independent —
+//! `SecretSource::Command` token resolution reached from `POST /api/shares`,
+//! the desktop picker and git plumbing — because resolution spawns a login
 //! shell and a stalled rc file must cost one resolution, not one per call.
-//! [`resolve_user_path`] is the uncached primitive, for a one-shot context that
-//! resolves once and exits — today only a CLI run's lazy var sources
-//! (`values.rs`), since `endpoint::resolve_secret` is shared with the daemon.
-//! (Commands spawned by the `veld` CLI itself — orchestrator steps, actions —
-//! already inherit the terminal's `PATH` and need neither.)
+//! [`cached_user_path_for`] is the project-directory-scoped sibling, and the
+//! default for anything spawning *a project's own declared command*:
+//! `spawn_veld` (the start/stop/restart/action handlers), the health
+//! monitor's `command`/`bash` liveness probes and recovery restarts, an
+//! `ide.extensions` command, a pane's `requires_bin` preflight. These need
+//! the `PATH` a login shell would have *in that project's directory*,
+//! because a version manager's directory-based Node switch (an `.nvmrc` +
+//! `.zshrc` block keyed on `$PWD`) answers differently per project — a
+//! single process-wide cache structurally cannot represent that, however
+//! fresh. [`resolve_user_path`] is the uncached primitive, for a one-shot
+//! context that resolves once and exits — today only a CLI run's lazy var
+//! sources (`values.rs`), since `endpoint::resolve_secret` is shared with
+//! the daemon. (Commands spawned by the `veld` CLI itself — orchestrator
+//! steps, actions — already inherit the terminal's `PATH` and need neither.)
 //!
 //! Only `PATH` is inherited — not the rest of the login shell's environment
 //! (exported variables, aliases, functions). On a headless host with no user
@@ -59,7 +67,7 @@ const PATH_RESOLVE_TIMEOUT: Duration = Duration::from_secs(10);
 /// rather than one per call. Note that a caller shared between the two, like
 /// `endpoint::resolve_secret`, counts as daemon-side and uses the cache.
 pub async fn resolve_user_path() -> String {
-    if let Some(path) = resolve_with_fallback().await {
+    if let Some(path) = resolve_with_fallback(None).await {
         info!(path = %path, "resolved user PATH from login shell");
         return path;
     }
@@ -80,9 +88,14 @@ pub async fn resolve_user_path() -> String {
 ///
 /// The extra spawn happens only on the failing path, so the common case still
 /// costs exactly one shell.
-async fn resolve_with_fallback() -> Option<String> {
+///
+/// `cwd` is forwarded to both attempts: `None` for the directory-independent
+/// callers ([`resolve_user_path`], [`cached_user_path`]'s warm loop), `Some`
+/// for a project-scoped resolution ([`cached_user_path_for`]) so a directory-
+/// keyed version-manager hook in the rc file sees the right `$PWD`.
+async fn resolve_with_fallback(cwd: Option<&std::path::Path>) -> Option<String> {
     let preferred = resolution_shell();
-    if let Some(path) = login_shell_path(&preferred).await {
+    if let Some(path) = login_shell_path(&preferred, cwd).await {
         return Some(path);
     }
     let login = crate::shell::auto_shell();
@@ -94,7 +107,7 @@ async fn resolve_with_fallback() -> Option<String> {
         falling_back_to = %login,
         "the preferred shell answered no PATH — asking the login shell"
     );
-    login_shell_path(&login).await
+    login_shell_path(&login, cwd).await
 }
 
 /// The user's chosen shell, published by whoever knows about it.
@@ -207,14 +220,19 @@ pub fn published_user_path() -> Option<String> {
 }
 
 /// The user's login-shell `PATH`, read from the cache — the entry point for
-/// anything running inside a daemon.
+/// anything running inside a daemon whose PATH need is directory-independent
+/// (the desktop picker, git plumbing, `SecretSource::Command`). A caller
+/// spawning a specific project's own declared command wants
+/// [`cached_user_path_for`] instead — that includes the management UI's
+/// stop/restart/action/start buttons and Veld Desktop's start button, which
+/// used to read this cache and no longer do.
 ///
 /// Resolution spawns an interactive login shell: sub-second normally, but up to
 /// [`PATH_RESOLVE_TIMEOUT`] when an rc file stalls, and the machines with the
 /// slowest `.zshrc` are exactly the ones (nvm, rbenv, `brew shellenv`) that need
 /// the resolved PATH in the first place. Doing that per request would put it on
-/// every click of the management UI's stop/restart/action buttons and Veld
-/// Desktop's start button, whose `fetch` calls carry no timeout.
+/// every click of a `fetch` with no timeout — the same reasoning
+/// [`cached_user_path_for`] extends per directory.
 ///
 /// So this only ever reads the published value. It resolves inline in exactly
 /// one case: nothing has been published yet, which on a daemon means the warm
@@ -236,9 +254,177 @@ pub async fn cached_user_path() -> String {
         .unwrap_or_else(process_path_fallback)
 }
 
+/// Directory-scoped sibling of [`cached_user_path`], for a caller that needs
+/// the `PATH` a login shell would have *in a specific project directory* —
+/// today `spawn_veld`, which runs a config's declared commands and must
+/// resolve the same Node/Ruby/etc. version a directory-based version-manager
+/// hook (`.nvmrc` + `.zshrc`, fnm's directory hook) would pick in a real
+/// terminal sitting in that project.
+///
+/// Cached per directory for [`PATH_WARM_INTERVAL`], with no per-directory
+/// timer: the set of project directories a daemon serves is every worktree it
+/// knows about, and proactively refreshing all of them on a schedule would
+/// multiply the login-shell spawns the cache exists to bound. Instead, a
+/// **stale hit is served immediately and refreshed in the background** —
+/// only a directory with *no* entry yet blocks its caller on a resolution,
+/// the same one-time cost [`cached_user_path`] pays on its very first call
+/// (and, per the daemon's own boot sequence, one it pays only for a project
+/// created since the daemon last started — `main.rs` warms every registered
+/// project's entry at boot). Serving a stale value inline (rather than
+/// resolving inline, as an earlier version of this function did) is
+/// load-bearing, not an optimization: a version-managed rc file is slow
+/// precisely on the machines that need this cache, and `spawn_veld`'s callers
+/// are UI `fetch`es with no timeout — the exact click-hang [`cached_user_path`]'s
+/// own warm task exists to prevent.
+///
+/// At most one background refresh runs per directory at a time — a stale
+/// directory's [`DirEntry::refreshing`] flag is set before the lock is
+/// released, so a flood of stale hits for the same directory (several nodes'
+/// liveness checks in one scan tick, concurrent HTTP calls) piggyback on the
+/// one in flight rather than each spawning their own login shell.
+pub async fn cached_user_path_for(project_root: &std::path::Path) -> String {
+    // Normalized so distinct spellings of the same physical directory
+    // (`./x` vs `x`, a trailing slash, a symlink) don't fragment the cache
+    // into separate entries that each pay their own login-shell cost. Falls
+    // back to the given path if it can't be resolved (e.g. gone since the
+    // caller looked it up) — the resolution below will then simply fail to
+    // spawn in it, same as any other bad cwd.
+    let key = project_root
+        .canonicalize()
+        .unwrap_or_else(|_| project_root.to_owned());
+    let now = std::time::Instant::now();
+
+    // What to do about the current entry, decided entirely inside this block
+    // — `guard`'s lexical scope ends at the closing brace, before any
+    // `.await` runs, because a `MutexGuard` held across an await is a
+    // deadlock waiting to happen (a `drop(guard)` at the same nesting level
+    // as the binding does not reliably satisfy clippy's `await_holding_lock`
+    // — the block boundary does).
+    enum Decision {
+        UseCachedValue(String),
+        StartBackgroundRefresh(String, tokio::runtime::Handle),
+        ResolveColdInline,
+        LockPoisoned,
+    }
+
+    let decision = 'block: {
+        let Ok(mut guard) = dir_cell().lock() else {
+            break 'block Decision::LockPoisoned;
+        };
+        match guard
+            .get(&key)
+            .map(|e| (e.value.clone(), e.at, e.refreshing))
+        {
+            None => Decision::ResolveColdInline,
+            Some((value, at, _)) if now.duration_since(at) < PATH_WARM_INTERVAL => {
+                Decision::UseCachedValue(value)
+            }
+            // Already being refreshed by another caller — serve the stale
+            // value rather than piling on a second concurrent login shell.
+            Some((value, _, true)) => Decision::UseCachedValue(value),
+            Some((value, _, false)) => match tokio::runtime::Handle::try_current() {
+                Ok(handle) => {
+                    if let Some(e) = guard.get_mut(&key) {
+                        e.refreshing = true;
+                    }
+                    Decision::StartBackgroundRefresh(value, handle)
+                }
+                // No runtime to spawn a background refresh into (unreachable
+                // from any daemon call site today — this fn is only ever
+                // `.await`ed from inside one — but this module is linked
+                // into the CLI and gateway too). Serve the stale value; the
+                // next call tries again.
+                Err(_) => Decision::UseCachedValue(value),
+            },
+        }
+    };
+
+    match decision {
+        Decision::LockPoisoned => {
+            return resolve_with_fallback(Some(&key))
+                .await
+                .unwrap_or_else(process_path_fallback);
+        }
+        Decision::UseCachedValue(value) => value,
+        Decision::StartBackgroundRefresh(value, handle) => {
+            let dir = key.clone();
+            handle.spawn(async move {
+                refresh_dir_cache(&dir).await;
+            });
+            value
+        }
+        Decision::ResolveColdInline => refresh_dir_cache(&key).await,
+    }
+}
+
+/// Re-resolve `project_root`'s entry and publish per [`publish_value`] — the
+/// per-directory analogue of [`refresh_user_path_cache`], sharing its central
+/// rule (**a resolution that learned nothing never displaces one that did**)
+/// and its unhelpful-resolution log line. Always finishes by clearing
+/// [`DirEntry::refreshing`], whether or not this call set it — a cold call
+/// (no prior entry) has nothing to clear, and that's fine. Returns the value
+/// now published (the fresh resolution, or the preserved existing one).
+async fn refresh_dir_cache(project_root: &std::path::Path) -> String {
+    let resolved = resolve_with_fallback(Some(project_root)).await;
+    if let Some(path) = &resolved {
+        info!(path = %path, dir = %project_root.display(), "resolved project-directory user PATH from login shell");
+    }
+    let Ok(mut guard) = dir_cell().lock() else {
+        return resolved.unwrap_or_else(process_path_fallback);
+    };
+    let current = guard.get(project_root).map(|e| e.value.clone());
+    let decided = publish_value(current.as_deref(), resolved);
+    // Warn only when the entry is *left* holding an unhelpful value, same
+    // condition `refresh_user_path_cache` uses for the global cache — this
+    // directory-scoped cache must not go silent on the exact bug class it
+    // exists to catch just because most callers moved off the global one.
+    let unhelpful = current
+        .as_deref()
+        .is_none_or(|p| p == process_path_fallback())
+        && decided
+            .as_deref()
+            .is_none_or(|p| p == process_path_fallback());
+    if unhelpful {
+        warn_unhelpful_path();
+    }
+    let value = decided.unwrap_or_else(|| current.unwrap_or_else(process_path_fallback));
+    guard.insert(
+        project_root.to_owned(),
+        DirEntry {
+            value: value.clone(),
+            at: std::time::Instant::now(),
+            refreshing: false,
+        },
+    );
+    value
+}
+
+/// One directory's published `PATH`, on the same "never overwrite a real
+/// answer with an unhelpful one" invariant as [`cell`] — see [`publish_value`].
+struct DirEntry {
+    value: String,
+    at: std::time::Instant,
+    /// Set while a background refresh for this directory is in flight, so a
+    /// second stale hit serves the current value instead of spawning a
+    /// second login shell for the same directory. Cleared unconditionally
+    /// when [`refresh_dir_cache`] republishes.
+    refreshing: bool,
+}
+
+/// One published `PATH` per project directory. Unbounded, like the set of
+/// worktrees a daemon serves: realistically dozens of short strings for the
+/// life of a daemon process, not a growth path worth an eviction policy.
+fn dir_cell() -> &'static std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, DirEntry>>
+{
+    static CELL: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, DirEntry>>,
+    > = std::sync::OnceLock::new();
+    CELL.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
 /// Re-resolve and publish per [`publish_value`].
 async fn refresh_user_path_cache() {
-    let resolved = resolve_with_fallback().await;
+    let resolved = resolve_with_fallback(None).await;
     if let Some(path) = &resolved {
         info!(path = %path, "resolved user PATH from login shell");
     }
@@ -317,12 +503,18 @@ pub async fn warm_user_path_cache() {
 /// exit, or output without a usable `PATH=` line. `command env` (not bare
 /// `env`) so an `env` alias or shell function defined in an interactive rc
 /// file can't shadow the real binary.
-async fn login_shell_path(shell: &str) -> Option<String> {
+///
+/// `cwd`, when given, becomes the shell's working directory before its rc
+/// files run — the same lever [`cached_user_path_for`] uses to reach a
+/// directory-keyed version-manager hook. `None` leaves it wherever the
+/// daemon process itself started.
+async fn login_shell_path(shell: &str, cwd: Option<&std::path::Path>) -> Option<String> {
     let mut cmd = tokio::process::Command::new(shell);
-    cmd.arg("-l")
-        .arg("-i")
-        .arg("-c")
-        .arg("command env")
+    cmd.arg("-l").arg("-i").arg("-c").arg("command env");
+    if let Some(dir) = cwd {
+        cmd.current_dir(dir);
+    }
+    cmd
         // No terminal on any fd — PATH extraction only needs stdout.
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -408,7 +600,7 @@ mod tests {
             dir.path(),
             "Welcome to nvm!\nHOME=/Users/dev\nPATH=/opt/secrets/bin:/usr/bin\nTERM=dumb",
         );
-        let path = login_shell_path(shell.to_str().unwrap()).await;
+        let path = login_shell_path(shell.to_str().unwrap(), None).await;
         assert_eq!(path.as_deref(), Some("/opt/secrets/bin:/usr/bin"));
     }
 
@@ -417,14 +609,20 @@ mod tests {
     async fn missing_path_line_yields_none() {
         let dir = tempfile::tempdir().unwrap();
         let shell = stub_shell(dir.path(), "HOME=/Users/dev");
-        assert_eq!(login_shell_path(shell.to_str().unwrap()).await, None);
+        assert_eq!(login_shell_path(shell.to_str().unwrap(), None).await, None);
     }
 
     // Whatever the environment (CI without a login shell, unset SHELL, a shell
     // that fails to start), the public helper must produce a non-empty PATH so
     // callers can unconditionally `.env("PATH", …)` with the result.
+    //
+    // Locked: `resolve_user_path` reads the process-wide `preferred_shell`
+    // global via `resolution_shell()`, which a sibling test can be mid-way
+    // through pointing at its own stub shell file — an unserialized read here
+    // could exec that stub while a sibling is rewriting it in place.
     #[tokio::test]
     async fn resolves_to_a_non_empty_path() {
+        let _serialised = cache_test_lock().lock().await;
         let path = resolve_user_path().await;
         assert!(!path.is_empty());
     }
@@ -489,5 +687,117 @@ mod tests {
         let _serialised = cache_test_lock().lock().await;
         *cell().lock().expect("cell mutex") = Some("/published/only".to_owned());
         assert_eq!(cached_user_path().await, "/published/only");
+    }
+
+    // The bug this module exists to fix: a directory-based version-manager
+    // hook must see the PROJECT's directory, not wherever the daemon process
+    // happens to be — and two projects must not share one answer.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cached_user_path_for_is_scoped_per_directory() {
+        let _serialised = cache_test_lock().lock().await;
+        let root = tempfile::tempdir().unwrap();
+        // Canonicalized: on macOS `$TMPDIR` is a symlink into `/private`, and
+        // plain `pwd` in the stub shell below prints the resolved physical
+        // path — comparing against the pre-canonicalization path would fail
+        // on an irrelevant symlink mismatch, not the thing under test.
+        let root_path = root.path().canonicalize().unwrap();
+        let project_a = root_path.join("project-a");
+        let project_b = root_path.join("project-b");
+        std::fs::create_dir_all(&project_a).unwrap();
+        std::fs::create_dir_all(&project_b).unwrap();
+        // Emits a PATH derived from the shell's actual working directory, the
+        // way an `.nvmrc`-driven rc file would emit a different Node bin dir
+        // per project.
+        use std::os::unix::fs::PermissionsExt;
+        let shell = root_path.join("stub-shell");
+        std::fs::write(&shell, "#!/bin/sh\necho \"PATH=$(pwd)/bin:/usr/bin\"\n").unwrap();
+        std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).unwrap();
+        set_preferred_shell(Some(shell.to_str().unwrap().to_owned()));
+
+        let path_a = cached_user_path_for(&project_a).await;
+        let path_b = cached_user_path_for(&project_b).await;
+
+        set_preferred_shell(None);
+
+        assert_eq!(path_a, format!("{}/bin:/usr/bin", project_a.display()));
+        assert_eq!(path_b, format!("{}/bin:/usr/bin", project_b.display()));
+        assert_ne!(path_a, path_b);
+    }
+
+    // The bug a review round caught in the first version of this function: a
+    // stale directory entry must be served immediately (never blocking the
+    // caller on a fresh login shell — that reintroduces the click-hang
+    // `cached_user_path`'s warm task exists to prevent), and a resolution
+    // that stalls or learns nothing must never downgrade the cache to the
+    // bare fallback — it must keep serving the last real answer.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_stale_directory_entry_is_served_immediately_and_refreshed_in_background() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _serialised = cache_test_lock().lock().await;
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().canonicalize().unwrap();
+        let shell = dir.join("stub-shell");
+        let write_shell = |stdout: &str| {
+            std::fs::write(&shell, format!("#!/bin/sh\necho 'PATH={stdout}'\n")).unwrap();
+            std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+
+        write_shell("/old/bin");
+        set_preferred_shell(Some(shell.to_str().unwrap().to_owned()));
+
+        let first = cached_user_path_for(&dir).await;
+        assert_eq!(first, "/old/bin");
+
+        // Force the entry stale (simulating `PATH_WARM_INTERVAL` elapsing)
+        // and change what the shell would now answer.
+        {
+            let mut guard = dir_cell().lock().unwrap();
+            let entry = guard.get_mut(&dir).expect("seeded above");
+            // `checked_sub`, not bare subtraction: `Instant` is monotonic
+            // from an arbitrary (often boot-relative) origin, so on a host
+            // with under ~21s of uptime a plain `now - 21s` panics on
+            // arithmetic overflow instead of the property this test means to
+            // check.
+            entry.at = std::time::Instant::now()
+                .checked_sub(PATH_WARM_INTERVAL + Duration::from_secs(1))
+                .expect(
+                    "host uptime under ~21s — this test needs an `Instant` further in the past \
+                     than the monotonic clock's origin allows",
+                );
+        }
+        write_shell("/new/bin");
+
+        // A stale hit returns the OLD value with no wait — the whole point.
+        let second = cached_user_path_for(&dir).await;
+        assert_eq!(second, "/old/bin");
+
+        // The background refresh it triggered eventually publishes the new
+        // answer, without ever having served the bare fallback in between.
+        let mut refreshed = None;
+        for _ in 0..50 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            let path = published_dir_path(&dir);
+            assert_ne!(
+                path.as_deref(),
+                Some(process_path_fallback().as_str()),
+                "must never downgrade to the fallback while a real answer is known"
+            );
+            if path.as_deref() == Some("/new/bin") {
+                refreshed = Some(path);
+                break;
+            }
+        }
+        set_preferred_shell(None);
+        assert_eq!(refreshed.flatten(), Some("/new/bin".to_owned()));
+    }
+
+    fn published_dir_path(dir: &std::path::Path) -> Option<String> {
+        dir_cell()
+            .lock()
+            .ok()
+            .and_then(|g| g.get(dir).map(|e| e.value.clone()))
     }
 }

@@ -812,8 +812,13 @@ async fn spawn_command(
     // maintainer asks debugging this: whose `veld.json` decided this ran at all.
     tracing::info!(worktree = %root, declared_in = %declare_root, command = %spec.display(), "running ide extension command");
 
+    // Directory-scoped, not the process-wide cache: an extension command runs
+    // this specific worktree's own tooling (build/lint/version-check
+    // scripts), and a directory-based version-manager hook only fires
+    // resolving inside `root` — see `cached_user_path_for`'s doc comment.
+    let path_env = veld_core::user_path::cached_user_path_for(std::path::Path::new(root)).await;
     cmd.current_dir(root)
-        .env("PATH", veld_core::user_path::cached_user_path().await)
+        .env("PATH", path_env)
         .env("NO_COLOR", "1")
         .env("TERM", "dumb")
         .stdin(std::process::Stdio::null())
