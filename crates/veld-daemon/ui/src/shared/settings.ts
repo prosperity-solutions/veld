@@ -154,6 +154,16 @@ const FALLBACK = {
   // this side interprets the value: it names a shell the *daemon* spawns, and the
   // picker is the only reader.
   terminalShell: "auto",
+  // Off, matching the Rust default and the previous release's behaviour, which
+  // agree here for the obvious reason: there was no focus mode before this key.
+  focusModeEnabled: false,
+  // Shipped default for a new control, by the file's `quickSwitch*` exception:
+  // all three suppression rows default on, so turning the master switch on does
+  // something without a second decision. An older daemon must not report "not
+  // suppressed" for a channel this build's checkbox already shows as checked.
+  focusModeSuppressBell: true,
+  focusModeSuppressToasts: true,
+  focusModeSuppressOsNotifications: true,
 } as const;
 
 function strings(doc: SettingsDoc, key: string): string[] {
@@ -520,6 +530,62 @@ export function activityPrefs(doc: SettingsDoc): ActivityPrefs {
       ),
     },
   };
+}
+
+/**
+ * Focus mode: a standing "stop interrupting me" switch, and which of the three
+ * notification channels it silences while it's on.
+ *
+ * `suppress` is a `Record` keyed by setting name rather than three named fields,
+ * mirroring [`ActivityPrefs.notify`] above — the top bar and the settings dialog
+ * both look a channel up by its key rather than needing a second vocabulary.
+ * Scoped to the *background-activity* channel only (`notifyTerminal`, the OS
+ * banner, and the terminal bell): a toast reporting something you just clicked
+ * yourself (a failed action, a copy confirmation) is not an interruption from
+ * elsewhere, so it is never gated by this.
+ */
+export interface FocusPrefs {
+  enabled: boolean;
+  suppress: Record<string, boolean>;
+}
+
+export const FOCUS_SUPPRESS_BELL = "focus.suppressBell";
+export const FOCUS_SUPPRESS_TOASTS = "focus.suppressToasts";
+export const FOCUS_SUPPRESS_OS_NOTIFICATIONS = "focus.suppressOsNotifications";
+
+export function focusPrefs(doc: SettingsDoc): FocusPrefs {
+  return {
+    enabled: bool(doc, "focus.enabled", FALLBACK.focusModeEnabled),
+    suppress: {
+      [FOCUS_SUPPRESS_BELL]: bool(
+        doc,
+        FOCUS_SUPPRESS_BELL,
+        FALLBACK.focusModeSuppressBell,
+      ),
+      [FOCUS_SUPPRESS_TOASTS]: bool(
+        doc,
+        FOCUS_SUPPRESS_TOASTS,
+        FALLBACK.focusModeSuppressToasts,
+      ),
+      [FOCUS_SUPPRESS_OS_NOTIFICATIONS]: bool(
+        doc,
+        FOCUS_SUPPRESS_OS_NOTIFICATIONS,
+        FALLBACK.focusModeSuppressOsNotifications,
+      ),
+    },
+  };
+}
+
+/**
+ * Whether focus mode is currently silencing one specific channel — the master
+ * switch and that channel's own row both have to agree. One function rather
+ * than `fp.enabled && fp.suppress[key]` inlined at each of the three call
+ * sites (the toast branch and the OS-banner branch in `App.tsx`, the bell
+ * publish in `terminalHost.ts`), so the three checks stay provably identical
+ * and a unit test can pin the boolean logic without mounting a component.
+ */
+export function focusSuppresses(fp: FocusPrefs, channel: string): boolean {
+  return fp.enabled && (fp.suppress[channel] ?? false);
 }
 
 /**

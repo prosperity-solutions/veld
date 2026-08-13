@@ -385,10 +385,23 @@ export function setPaneCloseHandler(
 // short 800 Hz tone is the classic terminal bell; Web Audio needs no asset.
 let bellCtx: AudioContext | null = null;
 
+/** Whether focus mode is currently silencing the bell — published the same
+ *  way as `currentPrefs`, since `playBell` is reached from module-level event
+ *  handlers with no access to the settings document. */
+let bellSuppressed = false;
+
+/** Called alongside `applyTerminalPrefs` whenever the settings document
+ *  changes, so `playBell` always reads the latest focus-mode state. */
+export function setBellSuppressed(next: boolean): void {
+  bellSuppressed = next;
+}
+
 /** Ring the terminal bell as a short tone. Best-effort: a browser that
  *  autoplay-policies audio into silence loses the sound, never the terminal.
- *  Volume is the user's `terminal.bellVolume` percentage (0–100). */
+ *  Volume is the user's `terminal.bellVolume` percentage (0–100). Silenced
+ *  entirely while focus mode is suppressing the bell. */
 function playBell(): void {
+  if (bellSuppressed) return;
   try {
     bellCtx ??= new AudioContext();
     const ctx = bellCtx;

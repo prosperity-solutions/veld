@@ -230,6 +230,14 @@ export function notifyTerminal(opts: TerminalNotifyOptions): void {
       notifications.hide(id);
       opts.onClick();
     },
+    // Mantine's own close (X) button is a DOM descendant of the same root this
+    // `onClick` is on, and a native click bubbles from it up into that handler
+    // regardless of which element defined which — so without this, dismissing
+    // the toast also focused the pane it was about. `closeButtonProps.onClick`
+    // runs before Mantine's own `onClose` (see the composed handler in
+    // `@mantine/core`'s `Notification.tsx`), so `stopPropagation` here reaches
+    // the DOM before the bubble does, while the close button still closes.
+    closeButtonProps: { onClick: (event) => event.stopPropagation() },
     autoClose: 8000,
   });
 }

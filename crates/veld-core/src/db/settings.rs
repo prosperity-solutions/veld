@@ -359,6 +359,10 @@ pub enum SettingKey {
     GitCreateFrom,
     WorktreeStorageMode,
     WorktreeStorageDir,
+    FocusModeEnabled,
+    FocusModeSuppressBell,
+    FocusModeSuppressToasts,
+    FocusModeSuppressOsNotifications,
     Unknown(String),
 }
 
@@ -410,6 +414,10 @@ impl SettingKey {
         Self::GitCreateFrom,
         Self::WorktreeStorageMode,
         Self::WorktreeStorageDir,
+        Self::FocusModeEnabled,
+        Self::FocusModeSuppressBell,
+        Self::FocusModeSuppressToasts,
+        Self::FocusModeSuppressOsNotifications,
     ];
 
     pub fn as_str(&self) -> &str {
@@ -450,6 +458,10 @@ impl SettingKey {
             Self::GitCreateFrom => "git.createFrom",
             Self::WorktreeStorageMode => "worktree.storageMode",
             Self::WorktreeStorageDir => "worktree.storageDir",
+            Self::FocusModeEnabled => "focus.enabled",
+            Self::FocusModeSuppressBell => "focus.suppressBell",
+            Self::FocusModeSuppressToasts => "focus.suppressToasts",
+            Self::FocusModeSuppressOsNotifications => "focus.suppressOsNotifications",
             Self::Unknown(k) => k,
         }
     }
@@ -492,6 +504,10 @@ impl SettingKey {
             "git.createFrom" => Self::GitCreateFrom,
             "worktree.storageMode" => Self::WorktreeStorageMode,
             "worktree.storageDir" => Self::WorktreeStorageDir,
+            "focus.enabled" => Self::FocusModeEnabled,
+            "focus.suppressBell" => Self::FocusModeSuppressBell,
+            "focus.suppressToasts" => Self::FocusModeSuppressToasts,
+            "focus.suppressOsNotifications" => Self::FocusModeSuppressOsNotifications,
             other => Self::Unknown(other.to_string()),
         }
     }
@@ -578,7 +594,13 @@ impl SettingKey {
             | Self::BrowserQuickSwitchResponsive
             | Self::BrowserQuickSwitchColorScheme
             | Self::UiHideDisabledActions
-            | Self::UiShowProjectNews => Value::from(value.as_bool().ok_or_else(bad)?),
+            | Self::UiShowProjectNews
+            | Self::FocusModeEnabled
+            | Self::FocusModeSuppressBell
+            | Self::FocusModeSuppressToasts
+            | Self::FocusModeSuppressOsNotifications => {
+                Value::from(value.as_bool().ok_or_else(bad)?)
+            }
             // The one list-valued setting, and the one whose entries are checked
             // by a parser that lives elsewhere: `veld_core::ide::parse_origin` is
             // what `ide.externalOrigins` in a project config goes through, and the
@@ -1143,6 +1165,22 @@ pub fn defaults() -> BTreeMap<String, Value> {
         // Empty: meaningless in `sibling` mode, and in `custom` mode it is "chosen
         // custom but no folder yet" — see `WorktreeStorageDir`'s validator.
         (SettingKey::WorktreeStorageDir, Value::from("")),
+        // Off. Focus mode is something a user turns on for a stretch of work, not
+        // a standing posture — an install that silently suppressed its own bell
+        // and banners from the first run would look like a notification bug, not
+        // a feature nobody asked for yet.
+        (SettingKey::FocusModeEnabled, Value::from(false)),
+        // All three suppression rows default on: the point of turning focus mode
+        // on at all is "stop interrupting me", so a master switch whose sub-rows
+        // default off would need a second decision before it did anything. Each
+        // is independent so a user who only wants the OS banner gone, say, can
+        // turn the other two back on without losing that.
+        (SettingKey::FocusModeSuppressBell, Value::from(true)),
+        (SettingKey::FocusModeSuppressToasts, Value::from(true)),
+        (
+            SettingKey::FocusModeSuppressOsNotifications,
+            Value::from(true),
+        ),
     ]
     .into_iter()
     .map(|(k, v)| (k.as_str().to_string(), v))

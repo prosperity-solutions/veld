@@ -112,4 +112,12 @@ export const PROMOTIONS: Promotion[] = [
     body: "A browser pane now searches its own live page: type to search, see how many matches turned up, and step between them with Enter or the arrows.",
     glyph: "panes",
   },
+  {
+    id: "focus-mode",
+    since: "2026-08-13",
+    eyebrow: "New",
+    headline: "Go quiet for a while, miss nothing",
+    body: "One click in the top bar and the bell, the toasts, and the OS banners stop. The worktree rail still shows what happened while you were quiet.",
+    glyph: "inbox",
+  },
 ];
