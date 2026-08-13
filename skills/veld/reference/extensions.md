@@ -275,6 +275,15 @@ looks like a bug:
 
 - **Only the worktree on screen is evaluated**, and only while a window is open.
   Registered worktrees nobody is looking at cost nothing.
+- **The declarations come from that worktree's own config**, like everything else
+  veld runs. So a badge can be written and tested in a branch — which is the point,
+  since an extension keeps no state and is merged once it works — and equally,
+  checking out somebody else's branch runs *their* badge commands. The user's
+  `extensions.autoRefresh` setting is the lever for anyone who reviews untrusted
+  branches. **This is the rule, not a special case** — `ide.news` is the deliberate
+  *exception*: it is taken from the repo's main checkout, because a card is published
+  to teammates and recorded in their database against an id that can never be
+  reused, so a draft must not reach anybody before it lands.
 - **Several windows share one child process.** A request inside an extension's
   `refresh_seconds` is answered from that run, with its age reported.
 - **`refresh_seconds` is floored at 15**, defaults to 60. **Max 24 extensions per

@@ -2891,6 +2891,17 @@ option that would have worked is worse than offering one that explains itself.
 Worth knowing, because a status badge is **the only thing veld runs from your
 config without you clicking something**:
 
+- **The declarations come from the worktree you are looking at**, like everything
+  else veld runs — the graph, the services, the panes. So checking out a branch and
+  selecting it runs *that branch's* badge commands, which means reviewing someone
+  else's pull request by checking it out is an act of trust in its author, exactly as
+  `veld start` on that branch already is. This is deliberate: an extension is a thing
+  you write in a branch and test before merging, and it keeps no state, so resolving
+  it from anywhere else would make it untestable until after it shipped. If you
+  review branches you do not trust, turn off *Settings → General → Let projects
+  refresh their own status badges* — buttons and menus keep working, because a click
+  is you asking.
+
 - Only the worktree on screen is evaluated, and only while a window is open.
   Registered worktrees you are not looking at cost nothing.
 - Several windows asking at once spend **one** child process; a request inside an

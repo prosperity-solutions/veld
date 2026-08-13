@@ -348,6 +348,15 @@ config, which is exactly what AGENTS.md requires. What is new is that execution 
 unattended, repeated, and its output is squeezed into a dozen rendered characters.
 So the budget goes on bounding and exposing execution rather than on asking:
 
+**Say the consequence out loud, because it is not obvious:** the declarations come
+from the **checked-out** worktree, so checking out a branch and selecting it in the
+IDE runs that branch's badge commands. Reviewing a fork pull request by checking it
+out is therefore an act of trust in its author, the same way `veld start` on that
+branch already is. That placement is deliberate and argued in the
+[Decision log](#decision-log); the lever for somebody who reviews branches they do
+not trust is `extensions.autoRefresh`, which stops the unattended half machine-wide
+and leaves clicks working.
+
 - **`stdin` is closed and no tty is attached**, so a CLI that would prompt for
   credentials fails instead of hanging forever.
 - **A hard timeout**, enforced by killing the **process group**, not the pid — and
@@ -660,6 +669,50 @@ Two details in the implementation that are easy to get wrong the other way:
 - **A *failed* action invalidates nothing.** It changed nothing worth re-reading,
   so the badge keeps saying what it last truthfully said rather than being reset
   by an action that did not happen.
+
+### 2026-08-13 — Extensions are worktree-based, and `ide.news` is not the precedent
+
+The threat-model angle of the review raised this as a critical finding and it went
+to the maintainer, because it sets the trust model for the whole system rather than
+one feature. **Decision: a worktree's own `veld.json` drives its extensions.**
+
+The finding was that automatic evaluation reads the *checked-out* config, so a
+branch someone else authored — a fork pull request checked out for review — has its
+badge commands run without a click, and that `ide.news` had already been given the
+opposite rule (taken from the **main** checkout, because "a card being drafted in a
+worktree must not prompt a teammate").
+
+**Worktree-based is the rule; `ide.news` is the exception that had to earn its way
+out.** Getting that direction right matters, because it decides which of the two
+needs a justification. Veld's core model — since the first version, before any of
+this — is that the checked-out worktree's `veld.json` decides what runs: the
+dependency graph, the services, the panes, the actions. Extensions are that same
+kind of thing and inherit it by default. News is the one surface that does *not*,
+and the reason is worth keeping, because the two differ in kind on two properties
+rather than in degree:
+
+- **News is published *to other people*, and it mutates their durable state.** A
+  card is delivered to every teammate and recorded per id in their database
+  forever — which is exactly why its ids can never be renamed or reused. So "must
+  not reach a teammate before it has landed on main" is a rule about *publication*.
+- **An extension has no persisted state and no audience.** It renders in the top bar
+  of whoever checked that branch out, for as long as they are looking at it, and
+  nothing survives. There is nobody else for a draft to reach.
+
+And the positive argument, which is the load-bearing one: **veld's core model is
+already that the checked-out worktree's `veld.json` decides what runs** — the
+dependency graph, the services, the panes, the actions. An extension being the one
+thing resolved from somewhere else would be the anomaly, and it would break the loop
+the feature is for: check out a branch, write the extension, *test it*, then merge the
+PR (with a news card if the change is worth telling the team about). Main-only
+declarations make an extension untestable until after it has shipped.
+
+So the trust boundary stays where the rest of veld already puts it: **checking a
+worktree out and opening it is the act of trust.** What that costs is stated plainly
+in [Security posture](#security-posture) rather than left implicit, together with the
+one lever for somebody who reviews untrusted branches — the machine-global
+`extensions.autoRefresh` switch, which stops the unattended half while leaving
+clicks working.
 
 ## The extension backlog
 
