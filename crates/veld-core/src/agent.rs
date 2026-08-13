@@ -247,6 +247,19 @@ impl AgentTool {
             // (documented `pi -p "prompt"`, also reads piped stdin) — nobody is
             // waiting on it, so there is nothing to badge and no reason to add `-e`
             // to its argv.
+            //
+            // **Known, accepted gap**: `--mode json`/`--mode rpc` are equally
+            // non-interactive (they replace the TUI with a scripted event stream) and
+            // arguably deserve the same exclusion `-p`/`--print` gets, but are not
+            // listed here. A `case` pattern against one argv token at a time cannot
+            // tell `--mode json` (two tokens) from `--mode` followed by an unrelated
+            // positional, and pi's own docs show the space-separated form as the
+            // primary spelling — so only a glued `--mode=json`/`--mode=rpc` could ever
+            // be matched this way, covering a spelling nobody's docs recommend. Same
+            // shape as Codex's `-c` value-parsing limitation above: a real parser is
+            // the only way to close this, and it is not worth hand-rolling one in
+            // shell for an edge case (running `pi --mode rpc` inside a Veld terminal
+            // pane at all) this narrow.
             Self::Pi => "-p* | --print | -e* | --extension | --extension=*",
         }
     }
@@ -613,6 +626,11 @@ pub fn codex_state(payload: &HookPayload) -> State {
 /// `Idle`, `Done`, or `Unknown`, the same shape [`codex_state`] settled on for the
 /// same reason: a narrower badge over inventing a signal that is not really there.
 ///
+/// There is also no [`claude_state`]-style sub-agent carve-out to get wrong here:
+/// Pi's own docs say it has no sub-agent concept at all ("intentionally does not
+/// include built-in MCP, sub-agents, …"), so there is no second lifecycle a future
+/// event could conflate with the session's own turn.
+///
 /// # `turn_start`/`turn_end`, not `before_agent_start`/`agent_settled`
 ///
 /// Pi fires both pairs. `turn_start`/`turn_end` are documented fire-and-forget and
@@ -866,14 +884,16 @@ pub const HOOK_REQUEST_TIMEOUT_MS: u64 = 1_000;
 /// [`Injection::SettingsFile`] file is JS/TS source Pi's loader (`jiti`) resolves by
 /// extension — a `.json` file handed to `pi -e` would not load as an extension at
 /// all. Never called for [`AgentTool::Codex`], whose [`Injection`] is
-/// [`Injection::ConfigOverride`] and has no file; its arm exists only so this match
-/// stays exhaustive when a fourth tool arrives.
+/// [`Injection::ConfigOverride`] and has no file — panics rather than returning a
+/// plausible-looking `.json` path nothing would ever read, the same "loud failure
+/// beats a silent wrong answer" choice [`codex_notify_config`]'s own `unreachable!`
+/// makes for the same invariant.
 #[must_use]
 pub fn settings_path(shim_dir: &Path, tool: AgentTool, session_id: &str) -> PathBuf {
     let ext = match tool {
         AgentTool::Claude => "json",
         AgentTool::Pi => "ts",
-        AgentTool::Codex => "json",
+        AgentTool::Codex => unreachable!("Codex is ConfigOverride and has no settings file"),
     };
     shim_dir
         .join("agent")
