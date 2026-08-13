@@ -77,7 +77,10 @@
 //! 3. A `<tool>_settings_doc`/`<tool>_notify_config` beside [`claude_settings_doc`]/
 //!    [`codex_notify_config`], depending on [`Injection`] — see below. `prepare_in` in
 //!    `veld-daemon/src/pty/shims.rs` already generates one wrapper per `AgentTool::ALL`,
-//!    so the script itself comes for free either way.
+//!    so the script itself comes for free either way. A new [`Injection::SettingsFile`]
+//!    tool also needs an arm in [`settings_path`]'s extension match (the compiler
+//!    refuses to build without one, since the match is exhaustive over
+//!    [`AgentTool`]) — easy to miss since it lives well below [`Injection`] itself.
 //! 4. Whatever [`HookPayload`] is missing for the new tool's schema — every field is
 //!    optional and unknown fields are ignored, so adding one cannot break an existing tool.
 //! 5. Docs: the two settings rows, README, `skills/veld/SKILL.md`, `llms-full.txt`.
