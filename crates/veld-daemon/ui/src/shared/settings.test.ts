@@ -21,6 +21,7 @@ import {
   terminalShellIntegration,
   terminalShell,
   hideDisabledActions,
+  showProjectColumn,
   showProjectNews,
   extensionsSource,
   newsSource,
@@ -275,6 +276,31 @@ describe("showProjectNews", () => {
   it("falls back rather than trusting a non-boolean", () => {
     for (const bad of [null, 0, "false", []]) {
       expect(showProjectNews({ "ui.showProjectNews": bad as unknown as boolean })).toBe(true);
+    }
+  });
+});
+
+describe("showProjectColumn", () => {
+  /**
+   * Off, matching the Rust default — and the same answer for the reason the
+   * `quickSwitch*` exception gives: a key that decides whether a *control appears*
+   * takes the shipped default, so a daemon too old to know it keeps rendering what
+   * it always did rather than growing a column nobody asked for.
+   */
+  it("defaults off, so an older daemon renders what it always did", () => {
+    expect(showProjectColumn({})).toBe(false);
+  });
+
+  it("reads the stored value", () => {
+    expect(showProjectColumn({ "ui.showProjectColumn": true })).toBe(true);
+    expect(showProjectColumn({ "ui.showProjectColumn": false })).toBe(false);
+  });
+
+  it("falls back rather than trusting a non-boolean", () => {
+    for (const bad of [null, 1, "true", []]) {
+      expect(showProjectColumn({ "ui.showProjectColumn": bad as unknown as boolean })).toBe(
+        false,
+      );
     }
   });
 });

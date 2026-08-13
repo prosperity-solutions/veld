@@ -2977,7 +2977,12 @@ struct RepoOrderBody {
 
 async fn reorder_repos(Json(body): Json<RepoOrderBody>) -> Result<StatusCode, ApiError> {
     let db = open_desktop_db()?;
-    db.reorder_repos(&body.order).map_err(db_err)?;
+    // `write_err`, not `db_err`: an over-long order is a *client* error, and its two
+    // siblings already answer 400 with the limit in the message. Under `db_err` the
+    // caller was told "database error" with a 500 — the UI's toast would then blame
+    // the daemon for a request it had itself made too large. `write_err`'s other arms
+    // are inert on this path; only the `OrderTooLong` one can fire.
+    db.reorder_repos(&body.order).map_err(write_err)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -4022,6 +4027,7 @@ mod tests {
                     "/api/worktree-order",
                     r#"{"repo_root":"/tmp","order":[]}"#,
                 ),
+                ("POST", "/api/repo-order", r#"{"order":[]}"#),
                 ("POST", "/api/lanes", r#"{"repo_root":"/tmp","name":"x"}"#),
                 (
                     "POST",

@@ -501,11 +501,8 @@ body[data-fullscreen="true"] .topbar.electron {
 }
 
 /* The project selector shrinks to its value instead of always occupying its
-   170px cap — a short project name should not leave a hole in the densest row
-   of the app. The width is computed in `TopBar` by measuring the hidden mirror
-   span (so the font is whatever the input renders, not a guess); `max-width`
-   here is the backstop and the input's ellipsis keeps an over-long name from
-   stretching the bar. */
+   cap — a short project name should not leave a hole in the densest row of the
+   app. */
 /* The selector is a `Menu` target now, so it sizes to its label intrinsically —
    no mirror span to measure. `overflow: visible` for the same reason
    `.project-actions` needs it: the "another project has news" dot sits on the
@@ -522,20 +519,6 @@ body[data-fullscreen="true"] .topbar.electron {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-}
-
-/* The project list is capped and scrollable: with a dozen projects it lists each
-   one twice (switch to, open in a new window) and would otherwise run taller than
-   the screen with its last entries unreachable.
-
-   **Nothing inside it may float out of it.** This container is what clips and
-   positions a descendant popover, so a `Menu.Sub` here rendered *over* its own
-   parent with a scrollbar on each — the scroll cap and a submenu cannot both live
-   on this element. See `ProjectMenu`. */
-.project-menu-dropdown {
-  max-height: 60vh;
-  overflow-y: auto;
-  overflow-x: hidden;
 }
 
 /* A project row: name on the left, "open in <where>" pushed to the right. */

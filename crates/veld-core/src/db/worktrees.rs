@@ -318,11 +318,17 @@ impl Db {
 
     /// Rewrite manual project order from a full ordered list of repo **roots**.
     ///
-    /// The lane/worktree contract, one level up (see [`Db::reorder_lanes`]): every
-    /// listed root is numbered from 0 in the order given, and anything the caller
-    /// did not mention keeps its own relative order after them. That second half is
-    /// what stops a stale client — one that polled before a project was imported —
+    /// The **lane** contract, one level up (see [`Db::reorder_lanes`]): every listed
+    /// root is numbered from 0 in the order given, and anything the caller did not
+    /// mention keeps its own relative order after them. That second half is what
+    /// stops a stale client — one that polled before a project was imported —
     /// silently unplacing it.
+    ///
+    /// Deliberately **not** [`Db::reorder_worktrees`]'s contract, which resets an
+    /// omitted path to `NULL`. That is right for worktrees, where the client always
+    /// holds the repo's whole list, and wrong here: a project can be imported by a
+    /// *different window* between this client's last poll and its drag, and
+    /// unplacing it would silently renumber ⌘1…⌘9 for everyone.
     ///
     /// Roots are matched **byte-exact against the stored key** — `root_key` is a
     /// plain `to_string_lossy`, so it normalises nothing and `/x` and `/x/` are two

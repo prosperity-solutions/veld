@@ -2568,7 +2568,12 @@ function AppInner(props: {
         // forwarded from a focused browser pane** the way ⌘K and ⌘1…⌘9 are: ⌘B is
         // bold in every rich-text editor, and taking it from a previewed page to
         // reach a toggle you can also click is a worse trade than ⌘F's was.
-        if (e.key === "b" || e.key === "B" || e.code === "KeyB") {
+        // `e.key`, and **deliberately not `e.code`** — the opposite of the digits
+        // above, which is why this is not the same test. `code` names the physical
+        // key, which is right for a digit (⌘2 means the key with 2 printed on it)
+        // and wrong for a letter: on Dvorak the key at QWERTY's `KeyB` prints `x`,
+        // so matching `code` here would swallow ⌘X — cut — in every text field.
+        if (e.key === "b" || e.key === "B") {
           e.preventDefault();
           toggleProjectColumnRef.current();
           return;
@@ -4527,6 +4532,12 @@ function AppInner(props: {
    * arrive at it. This dropdown has no `max-height`, which is what lets that
    * submenu position itself; see `ProjectMenu` for the failure that rule comes from.
    */
+  // No unread dot while the start screen is up. Zero projects means the whole window
+  // is one instruction — "import something" — and a second thing on the bar asking to
+  // be clicked is the only competition it has. The news keeps; the menu still carries
+  // it the moment there is a project. (This gate lived on `TopBar`'s own `unreadNews`
+  // before the bar was restructured, and moved here with the dot.)
+  const unreadNews = repos.length === 0 ? 0 : promotions.unread;
   const overflowMenu = (
     <Menu position="bottom-end" width={220}>
       <Menu.Target>
@@ -4534,13 +4545,11 @@ function AppInner(props: {
           size="md"
           variant="default"
           className="project-actions"
-          aria-label={promotions.unread > 0 ? `More – ${promotions.unread} unread` : "More"}
-          title={promotions.unread > 0 ? `More – ${promotions.unread} unread` : "More"}
+          aria-label={unreadNews > 0 ? `More – ${unreadNews} unread` : "More"}
+          title={unreadNews > 0 ? `More – ${unreadNews} unread` : "More"}
         >
           <IconDots size={14} />
-          {promotions.unread > 0 && (
-            <span className="project-actions-dot" aria-hidden="true" />
-          )}
+          {unreadNews > 0 && <span className="project-actions-dot" aria-hidden="true" />}
         </ActionIcon>
       </Menu.Target>
       <Menu.Dropdown>
@@ -4584,9 +4593,9 @@ function AppInner(props: {
           <Menu.Item
             leftSection={<IconSparkles size={14} />}
             rightSection={
-              promotions.unread > 0 ? (
+              unreadNews > 0 ? (
                 <Badge size="xs" circle variant="filled">
-                  {promotions.unread}
+                  {unreadNews}
                 </Badge>
               ) : undefined
             }
@@ -6357,12 +6366,16 @@ function ProjectCaret() {
  *
  * # Identity without a migration
  *
- * Projects have no marker of their own and are not getting one: the square shows
- * `projectInitials(name)` on a hue derived from the repo root, so a rename keeps the
- * colour (the root is the primary key), an import needs no picker, and there is no
- * per-project marker column to add or keep in step. Hue collisions are expected and
- * harmless — the initials and the tooltip identify the square, exactly as the
- * worktree marker is a scanning aid rather than the only way to tell two rows apart.
+ * Projects have no marker of their own and are not getting one: the square is
+ * `projectInitials(name)` and nothing else, so an import needs no picker and there is
+ * no per-project marker column to add, migrate, or keep in step with a rename.
+ *
+ * **Greyscale, deliberately.** An earlier version filled each square with a hue
+ * derived from the repo root. It was louder than anything else on screen and it
+ * competed with the worktree markers two pixels to its right — the one place in this
+ * UI where colour already carries a specific meaning. Selection is fill-vs-outline,
+ * the same signal a rail row uses, and the only colour left in the column is the
+ * activity badge. See the matching note in `styles.css`.
  *
  * # Order
  *
