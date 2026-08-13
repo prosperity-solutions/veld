@@ -49,12 +49,14 @@
  * (`PlaceList.tsx`).
  */
 
-import { ActionIcon, Button, Menu, Modal, Text } from "@mantine/core";
+import { ActionIcon, Button, Menu, Modal, Text, Tooltip } from "@mantine/core";
 import {
   IconActivityHeartbeat,
   IconArrowsExchange,
+  IconBolt,
   IconBookmark,
   IconExternalLink,
+  IconHistory,
   IconLayoutColumns,
   IconLogs,
   IconPlus,
@@ -1643,6 +1645,49 @@ function PaneButton(props: { spec: PaneSpec; onPick: (spec: PaneSpec) => void })
     >
       <span className="pane-card-main">
         {paneIcon(spec.icon, 15)} {spec.label}
+        {/* This is what teaches a contributor that a pane is worth keeping open:
+            `resume`/`auto_resume` are config fields most people would never open
+            `veld.json` to discover otherwise. Auto gets its own glyph rather than
+            sharing one with a qualifier, because the two are genuinely different
+            promises — the Codex pane below is resumable but never auto, and the
+            distinction is exactly what a glance at the chooser should surface. */}
+        {spec.auto_resume ? (
+          <Tooltip
+            label="Resumes its last session automatically — no click needed"
+            withArrow
+            openDelay={200}
+          >
+            {/* `title=""` blocks inheritance of the card button's own `title` —
+                without it, hovering the badge fires the fast Mantine tooltip
+                *and*, after the browser's native delay, the button's title
+                (the pane's description), stacked over the same spot. `tabIndex`
+                makes the badge focusable, which is what lets Mantine's Tooltip
+                show it on keyboard focus too, not only on mouse hover. */}
+            <span
+              className="pane-resume-badge auto"
+              title=""
+              tabIndex={0}
+              aria-label="Resumes its last session automatically — no click needed"
+            >
+              <IconBolt size={13} />
+            </span>
+          </Tooltip>
+        ) : spec.can_resume ? (
+          <Tooltip
+            label="Can resume its last session — offered as a choice, not automatic"
+            withArrow
+            openDelay={200}
+          >
+            <span
+              className="pane-resume-badge"
+              title=""
+              tabIndex={0}
+              aria-label="Can resume its last session — offered as a choice, not automatic"
+            >
+              <IconHistory size={13} />
+            </span>
+          </Tooltip>
+        ) : null}
       </span>
       {/* Every card carries its second line, not only a chosen one: the description
           is what tells four agent panes apart, and giving it to one of them is how
