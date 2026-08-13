@@ -737,6 +737,26 @@ struct Output {
     timed_out: bool,
 }
 
+/// Resolve an `argv[0]` against the checkout that *declared* it, so a relative
+/// script (`"argv": ["scripts/veld/pr-badge.sh"]`, the documented pattern) is
+/// found even when the command runs in a different checkout — a worktree
+/// cloned before that script existed, with `extensions.source = main`.
+///
+/// A bare name (`"gh"`, no path separator) is left alone: it is meant to be
+/// found on `PATH`, and `PATH` search is unaffected by cwd. An absolute path is
+/// also left alone. Only a *relative* path containing a separator — a script
+/// checked into the repo — is rewritten, by joining it onto `declare_root`
+/// rather than leaving it to resolve against `root` (the spawned process's
+/// cwd, set below), which is the worktree being viewed and may simply not have
+/// the file yet.
+fn resolve_program(program: &str, declare_root: &str) -> std::path::PathBuf {
+    let path = FsPath::new(program);
+    if path.is_absolute() || !program.contains('/') {
+        return path.to_owned();
+    }
+    FsPath::new(declare_root).join(path)
+}
+
 /// Spawn one extension command in a worktree and collect a bounded amount of its
 /// output.
 ///
@@ -751,7 +771,9 @@ struct Output {
 /// - the child gets its **own process group**, so the deadline can kill a `shell`
 ///   command's whole tree rather than just the shell, and the kill cannot reach the
 ///   daemon's own group;
-/// - output is capped.
+/// - output is capped;
+/// - a relative `argv[0]` is resolved against `declare_root`, not `root` — see
+///   [`resolve_program`].
 async fn spawn_command(
     spec: &veld_core::config::CommandSpec,
     root: &str,
@@ -772,7 +794,7 @@ async fn spawn_command(
             let (program, args) = argv
                 .split_first()
                 .ok_or_else(|| "the command runs nothing".to_owned())?;
-            let mut c = tokio::process::Command::new(program);
+            let mut c = tokio::process::Command::new(resolve_program(program, declare_root));
             c.args(args);
             c
         }
@@ -1235,6 +1257,47 @@ mod tests {
             .expect("spawned");
             let expected = std::fs::canonicalize(dir.path()).expect("canonical");
             assert_eq!(out.stdout.trim(), expected.to_string_lossy());
+        }
+
+        /// The regression this pins: an old worktree that predates a script the
+        /// project's `veld.json` declares, viewed with `extensions.source = main`.
+        /// The declaration's relative `argv[0]` names a file that only exists in
+        /// the main checkout, and must still be found there — while the script
+        /// itself sees the worktree, not main, as its cwd.
+        #[tokio::test]
+        async fn a_relative_argv_program_is_found_in_the_declaring_checkout() {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            let declaring = tempfile::tempdir().expect("tempdir");
+            let old_worktree = tempfile::tempdir().expect("tempdir");
+            let script_dir = declaring.path().join("scripts/veld");
+            std::fs::create_dir_all(&script_dir).expect("mkdir");
+            let script_path = script_dir.join("pr-badge.sh");
+            std::fs::write(&script_path, "#!/bin/sh\npwd -P\n").expect("write script");
+            std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod");
+
+            let out = spawn_command(
+                &veld_core::config::CommandSpec::Argv(vec!["scripts/veld/pr-badge.sh".into()]),
+                &old_worktree.path().to_string_lossy(),
+                &declaring.path().to_string_lossy(),
+                &HashMap::new(),
+                Duration::from_secs(5),
+            )
+            .await
+            .expect("spawned");
+
+            assert!(
+                out.success,
+                "script found in declare_root must run: {}",
+                out.stderr
+            );
+            let expected_cwd = std::fs::canonicalize(old_worktree.path()).expect("canonical");
+            assert_eq!(
+                out.stdout.trim(),
+                expected_cwd.to_string_lossy(),
+                "the script must see the worktree as its cwd, not the checkout it was found in"
+            );
         }
     }
 
