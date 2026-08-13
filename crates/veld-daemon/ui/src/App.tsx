@@ -381,14 +381,6 @@ const PENDING_TTL_MS = 60_000;
 const CHANNEL_DOWN_NOTICE_MS = 4000;
 
 /**
- * The three theme values, named.
- *
- * A list rather than a cycle, because the bar's overflow menu shows all three at
- * once — "system" especially is a value you have to be able to *ask* for, and a
- * three-step cycle only ever let you arrive at it. `auto` is the stored value's
- * name and stays that way; "System" is what it is called on screen.
- */
-/**
  * Whether a keystroke landed in something the user is typing into.
  *
  * For the one shortcut that is a plain letter. `contentEditable` as well as the two
@@ -401,6 +393,14 @@ function isEditableTarget(target: EventTarget | null): boolean {
   return tag === "INPUT" || tag === "TEXTAREA" || target.isContentEditable;
 }
 
+/**
+ * The three theme values, named.
+ *
+ * A list rather than a cycle, because the bar's overflow menu shows all three at
+ * once — "system" especially is a value you have to be able to *ask* for, and a
+ * three-step cycle only ever let you arrive at it. `auto` is the stored value's
+ * name and stays that way; "System" is what it is called on screen.
+ */
 const THEME_CHOICES = [
   { value: "auto", label: "System", icon: IconDeviceDesktop },
   { value: "light", label: "Light", icon: IconSun },
@@ -3227,7 +3227,16 @@ function AppInner(props: {
     // holder's window has been raised and this one is not showing that worktree, so
     // arming the pane request below would queue it against a selection this client
     // never gets, to fire on some later visit.
-    if (worktree && shownRef.current !== wtId && !(await selectWorktree(worktree))) {
+    // **Granted AND selected**, not just granted. `shownId` is the daemon's answer
+    // and the selection is this window's; they diverge for as long as an acquire is
+    // in flight, and after a ⌘1…⌘9 switch (which moves the selection with no claim
+    // of its own) `shownId` still names the *previous* project's worktree. Testing
+    // only `shownRef` therefore skipped the claim for a worktree this window had
+    // already moved away from, found its stale layout still in `layoutsRef`, and
+    // activated a tab nobody could see — the very symptom the skip was added to
+    // remove, arriving from the other direction.
+    const alreadyHere = shownRef.current === wtId && worktreeRef.current?.id === wtId;
+    if (worktree && !alreadyHere && !(await selectWorktree(worktree))) {
       return;
     }
     // The layout is normally already here — the worktree was on screen, or its

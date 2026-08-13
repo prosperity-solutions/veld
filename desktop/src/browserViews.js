@@ -572,14 +572,19 @@ function attachListeners(window, viewId, entry) {
     if ((input.control || input.meta) && !input.shift && !input.alt) {
       const digit = /^Digit([1-9])$/.exec(input.code || "")?.[1] ?? null;
       const isDigit = digit ?? (/^[1-9]$/.test(input.key) ? input.key : null);
-      // **No `webContents.focus()` here, unlike the two below.** ⌘F and ⌘⇧P open an
-      // input, so the keyboard has to move to the page or the caret lands nowhere.
-      // A project switch opens nothing — and it can legitimately resolve to nothing
-      // at all (one project, or a digit past the last one), which would have taken
-      // the keyboard out of the pane the user was typing in and given back no
-      // switch. The renderer moves focus itself if the selection actually changes.
+      // **The keyboard moves to the page, as it does for ⌘F above and ⌘⇧P below.**
+      // A switch replaces what is on screen — the pane the user was typing in
+      // belongs to the worktree they are leaving — so leaving the keyboard in a
+      // native view that is about to be hidden means typing into nothing.
+      //
+      // The accepted cost, stated because it was briefly "fixed" the wrong way: a
+      // chord that resolves to *no* switch (one project, or a digit past the last)
+      // still takes focus out of the pane. The main process cannot tell the two
+      // apart — it does not know the project list — and losing the keyboard on a
+      // real switch is the worse of the two, being also the common one.
       if (isDigit) {
         event.preventDefault();
+        window.webContents.focus();
         send(window, "veld:browser:accelerator", {
           viewId,
           accelerator: `project:${isDigit}`,
@@ -588,6 +593,7 @@ function attachListeners(window, viewId, entry) {
       }
       if (input.key === "`" || input.code === "Backquote") {
         event.preventDefault();
+        window.webContents.focus();
         send(window, "veld:browser:accelerator", { viewId, accelerator: "project:toggle" });
         return;
       }
