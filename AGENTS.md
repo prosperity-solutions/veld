@@ -395,6 +395,16 @@ run, while a plain terminal in the same app works perfectly.
   component/hook/guide page as a fetchable Markdown file
   (`https://mantine.dev/llms/core-tooltip.md`, `-button`, `-menu`, …) — before
   reaching for raw HTML/CSS.
+- **Never pick a Tabler icon glyph without asking the human.** Icon choice reads
+  as a small implementation detail but is a taste/semantic call — the wrong glyph
+  (or the same glyph reused for two states) ships quietly and nobody notices until
+  a user squints at the toolbar. `IconFocus2` used unchanged for both focus-mode
+  on *and* off was one such case: technically fine, visually indistinguishable.
+  Before adding or changing an icon: propose 2-4 candidate Tabler names per state
+  (checked against what's already imported in the touched file so a near-duplicate
+  isn't reinvented), ask via `AskUserQuestion`, and print the browse-and-search URL
+  **https://tabler.io/icons** as plain text so the human can click it themselves —
+  never fetch or auto-open it.
 - **Never let a dev build touch the production database — and use the dev-DB
   recipes.** The installed veld's state lives in one file per user
   (`<data_dir>/veld/veld.db`). A binary that opens it and applies a migration makes
