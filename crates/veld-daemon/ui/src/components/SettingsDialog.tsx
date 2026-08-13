@@ -1294,7 +1294,7 @@ export function SettingsDialog(props: {
               </Row>
               <Row
                 label="Notice when a coding agent is waiting for you"
-                help="Works with Claude Code, Codex CLI and Pi — none say on their own whether they're thinking or waiting, so Veld hands each a throwaway hook or extension config, never merging into or replacing your own ~/.claude, ~/.codex or ~/.pi config. Codex and Pi can't report waiting for you at all (Codex by design, Pi has no permission prompts) — only working and finished. A non-interactive launch (`claude -p`, `codex exec`, `pi install`, etc.) or your own settings/config/extension flag is left alone. Takes effect for new terminals."
+                help="Works with Claude Code, Codex CLI and Pi. Tells Veld when one is working, waiting for you, or finished, without touching any of your own agent config. Takes effect for new terminals."
               >
                 <Checkbox
                   size="xs"
@@ -1307,7 +1307,7 @@ export function SettingsDialog(props: {
               </Row>
               <Row
                 label="Show what is working"
-                help="A spinner for any worktree with something running. Off by default — accurate for shell commands, Claude and Pi (each reports a real start-of-turn signal), but Codex only reports launch and finish, so its spinner stays blank while genuinely working. Loses to every unseen event in the rail, so a worktree waiting for you still reads as waiting."
+                help="A spinner for any worktree with something running. Off by default — accuracy varies by agent. Loses to every unseen event in the rail, so a worktree waiting for you still reads as waiting."
               >
                 <Checkbox
                   size="xs"
