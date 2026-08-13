@@ -51,6 +51,7 @@ import { InboxIcon, inboxDescription } from "./inbox/InboxIcon";
 import { inbox, notifyKey } from "./inbox/inbox";
 import { useInbox } from "./inbox/useInbox";
 import { useSettings } from "./shared/useSettings";
+import { KeepAwakeButton } from "./components/KeepAwakeButton";
 import {
   activeRun,
   bestFuzzyMatch,
@@ -6251,6 +6252,11 @@ function TopBar(props: {
           <IconSearch size={14} />
         </ActionIcon>
       </Tooltip>
+      {/* Machine-wide, so it owns its own state rather than being threaded from
+          the app like the buttons below it. IDE-mode only, for the same reason
+          `focusModeButton` is: Runs mode's bar has no search icon to sit beside,
+          and the switch itself stays in force there either way. */}
+      <KeepAwakeButton hideDisabled={props.hideDisabled} />
       {props.focusModeButton}
       {/* Last, and the only thing after focus mode: everything Veld-level (theme,
           what's new, settings) is inside it. Project actions live in the project

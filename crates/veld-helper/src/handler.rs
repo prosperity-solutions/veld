@@ -4,6 +4,7 @@ use tracing::{info, warn};
 use crate::caddy::CaddyManager;
 use crate::dns::{self, DnsManager};
 use crate::protocol::{Handled, Request, Response};
+use crate::sleep::SleepManager;
 
 /// Shared state for all connection handlers.
 pub struct State {
@@ -11,6 +12,8 @@ pub struct State {
     caddy: CaddyManager,
     https_port: u16,
     http_port: u16,
+    /// Root's half of the keep-awake switch. See [`crate::sleep`].
+    sleep: SleepManager,
     shutdown_tx: tokio::sync::watch::Sender<bool>,
 }
 
@@ -26,6 +29,7 @@ impl State {
             caddy: CaddyManager::new(https_port, http_port, caddy_bin),
             https_port,
             http_port,
+            sleep: SleepManager::new(),
             shutdown_tx,
         }
     }
@@ -86,6 +90,10 @@ impl State {
             "caddy_stop" => self.handle_caddy_stop().await,
             "caddy_reload" => self.handle_caddy_reload().await,
             "status" => self.handle_status().await,
+            veld_core::helper::HOLD_SLEEP_DISABLED => {
+                self.handle_hold_sleep_disabled(&request.args).await
+            }
+            veld_core::helper::RELEASE_SLEEP_DISABLED => self.handle_release_sleep_disabled().await,
             other => {
                 warn!(command = other, "unknown command");
                 Response::err(format!("unknown command: {other}"))
@@ -280,7 +288,64 @@ impl State {
             "helper_pid": helper_pid,
             "version": env!("CARGO_PKG_VERSION"),
             "stored_routes": self.caddy.stored_route_count().await,
+            // Whether a keep-awake lease is armed right now. Reported so
+            // `veld doctor` and a support transcript can answer "why is this
+            // Mac not sleeping" without anyone having to read `pmset -g`.
+            "sleep_disabled": self.sleep.held(),
         }))
+    }
+
+    /// Disable battery sleep, or renew an existing hold. See [`crate::sleep`].
+    ///
+    /// `lease_secs` is required rather than defaulted: the lease is the entire
+    /// safety property, and a caller that forgot the field would otherwise get
+    /// some silently-chosen window. An old daemon never sends this command at
+    /// all, so there is no compatibility case to default for.
+    async fn handle_hold_sleep_disabled(&self, args: &Value) -> Response {
+        let lease_secs = match args.get("lease_secs").and_then(Value::as_u64) {
+            Some(s) if s > 0 => s,
+            _ => return Response::err("missing or invalid 'lease_secs' in args"),
+        };
+        match self.sleep.hold(lease_secs).await {
+            Ok(()) => Response::ok(),
+            Err(e) => Response::err(format!("{e:#}")),
+        }
+    }
+
+    /// Re-enable battery sleep now, rather than waiting out the lease.
+    async fn handle_release_sleep_disabled(&self) -> Response {
+        match self.sleep.release().await {
+            Ok(()) => Response::ok(),
+            Err(e) => Response::err(format!("{e:#}")),
+        }
+    }
+
+    /// One watchdog iteration for the sleep lease. Separate from
+    /// [`Self::caddy_watchdog_tick`] and driven by its own task: a Caddy
+    /// recovery can take seconds, and the lease must not be held past its
+    /// deadline because something unrelated was slow.
+    pub async fn sleep_watchdog_tick(&self) {
+        self.sleep.watchdog_tick().await;
+    }
+
+    /// Startup reconcile for the sleep lease — see
+    /// [`crate::sleep::SleepManager::clear_on_startup`].
+    pub async fn reconcile_sleep_on_startup(&self) {
+        self.sleep.clear_on_startup().await;
+    }
+
+    /// Re-enable battery sleep on the way out.
+    ///
+    /// Unlike Caddy — deliberately left running so URLs survive a restart — this
+    /// is always reverted. A helper that exits is a helper that has stopped
+    /// watching the lease, and an unwatched `disablesleep` is the failure this
+    /// whole mechanism exists to prevent. It also covers the case with no other
+    /// answer: `veld uninstall` stops the service, and nothing would ever come
+    /// back to clear the setting.
+    pub async fn release_sleep_on_exit(&self) {
+        if let Err(e) = self.sleep.release().await {
+            warn!(error = %format!("{e:#}"), "could not re-enable battery sleep while exiting");
+        }
     }
 
     /// Stop Caddy and exit. Unlike [`Self::handle_restart`] this takes the URLs
@@ -345,5 +410,72 @@ mod tests {
         // Wrong shape (a string where an object is expected) → default, no panic.
         let args = serde_json::json!({ "proxy": "not-an-object" });
         assert!(parse_proxy_arg(&args).is_empty());
+    }
+
+    fn test_state() -> State {
+        let (tx, _rx) = tokio::sync::watch::channel(false);
+        State::new(443, 80, None, tx)
+    }
+
+    /// A lease request with no usable `lease_secs` is refused *before* anything
+    /// touches `pmset`.
+    ///
+    /// Two things at once, and both matter. The refusal is the safety property:
+    /// the lease is the only thing that ever gives the setting back, so a
+    /// request that does not state one must not be honoured with some default.
+    /// And reaching a refusal at all proves the command is wired into the
+    /// dispatch table — a name that did not match would answer
+    /// `unknown command`, which the daemon is required to treat as "no battery
+    /// coverage here" and carry on, so the whole feature would be silently off
+    /// with every other test still green.
+    ///
+    /// Note what this deliberately does not do: send a *valid* lease. That would
+    /// execute `pmset -b disablesleep 1` for real, and run as root it would
+    /// leave a developer's Mac unable to sleep — the setting is durable.
+    #[tokio::test]
+    async fn a_lease_request_without_a_duration_is_refused_before_pmset_runs() {
+        let state = test_state();
+        for args in [
+            serde_json::json!({}),
+            serde_json::json!({ "lease_secs": 0 }),
+            serde_json::json!({ "lease_secs": "600" }),
+            serde_json::json!({ "lease_secs": -1 }),
+        ] {
+            let line = serde_json::json!({
+                "command": veld_core::helper::HOLD_SLEEP_DISABLED,
+                "args": args,
+            })
+            .to_string();
+            let handled = state.handle_request(&line).await;
+            assert!(!handled.response.ok, "{args} should be refused");
+            assert!(
+                handled
+                    .response
+                    .error
+                    .as_deref()
+                    .is_some_and(|e| e.contains("lease_secs")),
+                "the refusal must name the field, not read as `unknown command`: {:?}",
+                handled.response.error
+            );
+            assert!(!handled.exit_after_reply);
+        }
+    }
+
+    /// Releasing is safe to reach in a test — on a non-macOS builder it is a
+    /// no-op, and on macOS `pmset -b disablesleep 0` only ever moves the machine
+    /// toward being *able* to sleep, which is the direction that cannot hurt.
+    #[tokio::test]
+    async fn releasing_a_lease_that_was_never_taken_succeeds() {
+        let state = test_state();
+        let line = serde_json::json!({
+            "command": veld_core::helper::RELEASE_SLEEP_DISABLED,
+            "args": {},
+        })
+        .to_string();
+        let handled = state.handle_request(&line).await;
+        // Idempotent: the daemon releases on every teardown without checking
+        // whether it ever held one, and a stop must not surface an error for it.
+        assert!(handled.response.ok, "{:?}", handled.response.error);
+        assert!(!state.sleep.held());
     }
 }

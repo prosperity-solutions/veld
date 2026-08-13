@@ -2,6 +2,7 @@ mod caddy;
 mod dns;
 mod handler;
 mod protocol;
+mod sleep;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -174,6 +175,26 @@ async fn main() -> Result<()> {
         });
     }
 
+    // Keep-awake reconcile: clear any `pmset -b disablesleep` left behind by a
+    // previous run. Unconditional, and not a `spawn` — it must complete before
+    // the accept loop can take a fresh lease, or a daemon renewing across our
+    // restart could have its brand-new hold cleared out from under it.
+    state.reconcile_sleep_on_startup().await;
+
+    // Keep-awake watchdog: revert the battery sleep setting once its lease
+    // lapses. Its own task rather than a second call in the Caddy tick below,
+    // because a Caddy recovery can take seconds and this deadline must not slip
+    // behind something unrelated.
+    let sleep_state = Arc::clone(&state);
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(WATCHDOG_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            sleep_state.sleep_watchdog_tick().await;
+        }
+    });
+
     // Caddy watchdog: keep Caddy alive and every persisted route served across
     // crashes, macOS sleep/wake, and reboots. launchd's KeepAlive only restarts
     // the *helper* on exit — it cannot detect a dead/wedged child Caddy, so we
@@ -236,6 +257,13 @@ async fn main() -> Result<()> {
             }
         }
     }
+
+    // Caddy is left running on purpose; the sleep setting is not. Caddy serving
+    // URLs across a helper restart is the desired behaviour, whereas a durable
+    // `disablesleep` with nothing left watching its lease is the exact failure
+    // this mechanism is built to avoid — including on the exit path that has no
+    // relaunch after it, which is what `veld uninstall` produces.
+    state.release_sleep_on_exit().await;
 
     Ok(())
 }

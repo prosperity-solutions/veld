@@ -75,6 +75,9 @@ pub(crate) fn lock_db_env() -> std::sync::MutexGuard<'static, ()> {
     DB_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+#[path = "caffeinate.rs"]
+mod caffeinate;
+
 /// Note the terminal sessions being left running.
 ///
 /// Re-exported for the daemon's shutdown path. It no longer *ends* anything: a
@@ -179,6 +182,10 @@ pub async fn run_feedback_server(share_manager: Arc<crate::share::manager::Share
         // and its handlers call `check_csrf` themselves rather than relying on
         // that router's blanket layer.
         .merge(promotions::routes())
+        // Keep-awake. Same reasoning as settings — machine-wide rather than
+        // desktop-specific, and its mutating handlers call `check_csrf`
+        // themselves rather than relying on that router's blanket layer.
+        .merge(caffeinate::routes())
         // Terminal sockets. Kept out of desktop::routes() because that
         // router's CSRF layer cannot gate a WebSocket upgrade — see pty.rs.
         .merge(pty::routes())
