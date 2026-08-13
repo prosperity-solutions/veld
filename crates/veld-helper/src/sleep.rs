@@ -407,10 +407,9 @@ impl<S: SleepSetter> SleepManager<S> {
             *lease = None;
             return Ok(());
         };
-        if !cfg!(target_os = "macos") {
-            *lease = None;
-            return Ok(());
-        }
+        // No non-macOS guard below: `hold` refuses outright there, so a marker
+        // cannot exist for this to have taken, and the branch above already
+        // returned. A guard here would be a branch that can never fire.
         if marker.prior_disabled {
             // Somebody else already had it on when veld arrived. Drop the claim,
             // leave the value.

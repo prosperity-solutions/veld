@@ -52,7 +52,10 @@ const DURATIONS: Array<{ label: string; secs: number }> = [
  * is the actual question somebody opens this menu with.
  *
  * Nothing at all on Linux, where the inhibitor already covers battery, and
- * nothing on macOS while idle-but-capable, where turning it on will cover it.
+ * nothing on macOS while idle-but-capable — there is no caveat to give somebody
+ * who has not switched it on yet. Deliberately not a promise that turning it on
+ * *will* cover the lid: the `active && !covers_battery` branch below exists
+ * precisely for the take that does not land.
  */
 function LidNote(props: { state: CaffeinateState | null; active: boolean }) {
   const { state, active } = props;

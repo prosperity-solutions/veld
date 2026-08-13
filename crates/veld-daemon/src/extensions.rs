@@ -1618,6 +1618,27 @@ mod tests {
 
         use crate::feedback_server::desktop::routes;
 
+        /// Serialises the two tests below, which both point the process-global
+        /// `VELD_DB_PATH` at a temp DB and remove it again.
+        ///
+        /// They previously relied on a comment asserting `cargo test` runs them
+        /// single-threaded. It does not — the harness is multi-threaded by
+        /// default — so whichever finished first removed the variable out from
+        /// under the other, whose `open_db()` then fell back to a different
+        /// database and answered `404` for a worktree id that was genuinely
+        /// there. It reproduced roughly one run in two once unrelated work
+        /// changed the scheduling; on `origin/main` it did not fire at all in
+        /// three consecutive runs, which is exactly what makes this class of bug
+        /// read as somebody else's regression.
+        ///
+        /// Same convention as `veld_core::update_lock` and `veld_core::console`,
+        /// but async-aware: these are `#[tokio::test]`s and the guard is held
+        /// across their `await`s, which a `std::sync::MutexGuard` may not be.
+        /// The guard is returned from the seed helper and must be *bound* by the
+        /// caller (`let (.., _env) = ...`) so it lives for the whole test; the
+        /// lock is not reentrant, so acquire it exactly once per test.
+        static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
         /// Seeds a repo with exactly one worktree, `is_main: false` — the shape
         /// a bare primary clone produces (`parse_worktree_list` consumes
         /// `is_main` on a bare first block and then skips it), so `main` mode

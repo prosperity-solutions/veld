@@ -42,9 +42,12 @@
 //! failure to get a lease (no privileged helper, an older helper that does not
 //! know the command, a `pmset` that refuses) downgrades the coverage reported to
 //! the UI rather than failing the request. `covers_battery` in the status is
-//! read from the flag the renewal task owns, so it stops claiming coverage the
-//! moment renewals start failing — a status that lies in the optimistic
-//! direction is worse than no status, because the user planned around it.
+//! read from the flag the renewal task owns, so it stops claiming coverage once
+//! the lease has actually lapsed — renewal blips *inside* the granted window are
+//! tolerated, because the setting is genuinely still held through them. A status
+//! that lies in the optimistic direction is worse than no status, because the
+//! user planned around it; one that panics on the first hiccup is worse than
+//! useless for the same reason.
 //!
 //! The lease itself is the helper's safety property, not this module's; see
 //! `veld-helper`'s `sleep` module for why a durable `pmset` setting may only be
@@ -675,7 +678,7 @@ async fn delete_stop(headers: HeaderMap) -> Result<Json<Value>, (StatusCode, Str
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_DURATION_SECS, MIN_DURATION_SECS, inhibitor_argv, routes, status_of};
+    use super::{ACTIVE, MAX_DURATION_SECS, MIN_DURATION_SECS, inhibitor_argv, routes, status_of};
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
@@ -719,11 +722,12 @@ mod tests {
                 .unwrap();
             assert_eq!(res.status(), StatusCode::BAD_REQUEST, "{secs}s");
         }
-        // And nothing was started by any of those.
-        let res = routes().oneshot(req("GET", false, "")).await.unwrap();
-        let body = axum::body::to_bytes(res.into_body(), 4096).await.unwrap();
-        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(v["active"], serde_json::json!(false));
+        // And nothing was started by any of those. Asserted against the session
+        // directly rather than through `GET /api/caffeinate`: that path probes for
+        // a privileged helper, so in a unit test it would open a connection to
+        // this machine's real **root** helper socket — slow, dependent on what is
+        // installed, and nothing to do with what this test is about.
+        assert!(ACTIVE.lock().await.is_none());
     }
 
     /// `null` is the wire form of "no time limit" and must survive the round
