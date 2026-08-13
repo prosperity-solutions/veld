@@ -572,9 +572,14 @@ function attachListeners(window, viewId, entry) {
     if ((input.control || input.meta) && !input.shift && !input.alt) {
       const digit = /^Digit([1-9])$/.exec(input.code || "")?.[1] ?? null;
       const isDigit = digit ?? (/^[1-9]$/.test(input.key) ? input.key : null);
+      // **No `webContents.focus()` here, unlike the two below.** ⌘F and ⌘⇧P open an
+      // input, so the keyboard has to move to the page or the caret lands nowhere.
+      // A project switch opens nothing — and it can legitimately resolve to nothing
+      // at all (one project, or a digit past the last one), which would have taken
+      // the keyboard out of the pane the user was typing in and given back no
+      // switch. The renderer moves focus itself if the selection actually changes.
       if (isDigit) {
         event.preventDefault();
-        window.webContents.focus();
         send(window, "veld:browser:accelerator", {
           viewId,
           accelerator: `project:${isDigit}`,
@@ -583,7 +588,6 @@ function attachListeners(window, viewId, entry) {
       }
       if (input.key === "`" || input.code === "Backquote") {
         event.preventDefault();
-        window.webContents.focus();
         send(window, "veld:browser:accelerator", { viewId, accelerator: "project:toggle" });
         return;
       }

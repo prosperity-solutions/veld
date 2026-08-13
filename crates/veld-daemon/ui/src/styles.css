@@ -4423,7 +4423,7 @@ body[data-theme="light"] .project-sq.active {
 /* The drop indicator, between squares. Deliberately `.rail-caret`'s bar, glow and
    accent — a drag in this column and a drag in the rail beside it are the same
    gesture and must not be two visual languages. Only the geometry differs: the
-   squares are 26px and centred in a 40px column, so the bar is inset to them
+   squares are 26px and centred in a 44px column, so the bar is inset to them
    rather than to the rail's row padding, and it sits in the 5px gap `.project-col`
    puts between squares. */
 .project-caret {

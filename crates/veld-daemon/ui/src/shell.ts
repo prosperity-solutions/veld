@@ -239,7 +239,7 @@ export const desktopApp: DesktopAppApi | null =
  * Set by the shell only when `⌘,` had no window to send to and opened one for it —
  * an IPC `send` would race the page load. Read from the URL because it grants
  * nothing: settings are a daemon-side document either way, so a forged
- * `?settings=1` opens a dialog the gear already opens.
+ * `?settings=1` opens a dialog the ⋯ menu already opens.
  */
 export const openSettingsOnBoot: boolean =
   new URLSearchParams(window.location.search).get("settings") === "1";

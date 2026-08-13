@@ -2128,16 +2128,20 @@ function AppInner(props: {
       from,
       to,
     );
-    setRepoList((cur) =>
-      cur
-        ? {
-            ...cur,
-            repos: order
-              .map((root) => cur.repos.find((r) => r.root === root))
-              .filter((r): r is Repo => !!r),
-          }
-        : cur,
-    );
+    setRepoList((cur) => {
+      if (!cur) return cur;
+      const listed = order
+        .map((root) => cur.repos.find((r) => r.root === root))
+        .filter((r): r is Repo => !!r);
+      // **Anything the order did not name keeps its place at the end**, which is the
+      // client-side mirror of what `reorder_repos` does server-side. Without it, a
+      // project imported by another window and picked up by a poll this render has
+      // not seen yet would vanish from the column and the menu until the next
+      // refresh landed — dropped by a drag that had no idea it existed.
+      const seen = new Set(listed.map((r) => r.root));
+      const rest = cur.repos.filter((r) => !seen.has(r.root));
+      return { ...cur, repos: [...listed, ...rest] };
+    });
     void api
       .reorderProjects(order)
       .then(() => refresh())
@@ -3213,11 +3217,19 @@ function AppInner(props: {
     // project falls out of finding the row. Looking it up in the selected project's
     // list is what made a cross-project notification click do nothing.
     const worktree = allWorktreesRef.current.find((w) => w.id === wtId);
-    // **Awaited, and a refusal stops here.** The claim can be refused, and then the
-    // holder's window has been raised and this one is not showing that worktree —
-    // arming the pane request below would leave it queued against a selection this
-    // client never gets, to fire on some later visit.
-    if (worktree && !(await selectWorktree(worktree))) return;
+    // **Nothing to claim when this window already holds it.** `channel.claim`
+    // answers `{ok: false, reason: "offline"}` while the socket is down — for *any*
+    // worktree, including the one on screen — so routing an already-granted pane
+    // through a claim turned a notification click into a "not connected" notice and
+    // no tab change. The pane is local; focusing it needs no round trip.
+    //
+    // Otherwise: **awaited, and a refusal stops here.** A refused claim means the
+    // holder's window has been raised and this one is not showing that worktree, so
+    // arming the pane request below would queue it against a selection this client
+    // never gets, to fire on some later visit.
+    if (worktree && shownRef.current !== wtId && !(await selectWorktree(worktree))) {
+      return;
+    }
     // The layout is normally already here — the worktree was on screen, or its
     // panes were fetched on an earlier visit — and then this is the whole of it.
     if (layoutsRef.current[wtId]) {
@@ -4402,7 +4414,7 @@ function AppInner(props: {
    * beside either, and Runs mode has no rail to be the thing this silences.
    * The setting itself is still global and still in force there (the master
    * switch also has a row in Settings → Activity → Focus mode, reachable from
-   * either mode's gear icon) — only the one-click top-bar shortcut is IDE-only.
+   * either mode's ⋯ menu) — only the one-click top-bar shortcut is IDE-only.
    *
    * The three sub-toggles it acts on (bell, in-app toasts, OS notifications)
    * live beside that master row, mirroring the notify table above them; this
@@ -4477,11 +4489,11 @@ function AppInner(props: {
   /**
    * The project's machine-overridable vars.
    *
-   * Deliberately **not** folded into the settings gear beside it. That dialog is
+   * Deliberately **not** folded into the ⋯ menu beside it. That dialog is
    * veld's own preferences — global, yours, the same whatever you have open.
    * These are values *this project declared* and this machine answers, so they
    * change with the selected worktree and are meaningless without one. The
-   * sliders icon rather than another gear for the same reason: two gears would
+   * sliders icon rather than a second settings glyph for the same reason: two would
    * read as two ways into one thing.
    *
    * **Disabled, not hidden, when the project asks for nothing.** A control that
@@ -4641,7 +4653,7 @@ function AppInner(props: {
    * Settings, as an element rather than inline in the dialog list.
    *
    * Both modes render it. Runs mode returns early below — before the dialog list —
-   * so an inline `dialog.kind === "settings"` there was unreachable: the gear and
+   * so an inline `dialog.kind === "settings"` there was unreachable: the ⋯ menu and
    * ⌘, both set the state and nothing appeared. Every other dialog in the list
    * belongs to worktree mode's own surfaces; this is the one that is reachable from
    * both, so this is the one that has to be hoisted.
@@ -5772,10 +5784,20 @@ function ProjectMenu(props: {
               <Menu.Sub.Target>
                 <Menu.Sub.Item
                   className={r.root === repo?.root ? "project-menu-current" : undefined}
-                  // `null` when the project has nothing to say, which is the common
-                  // case — the row then has no left section at all rather than a
-                  // reserved empty column, so a quiet list stays quiet.
-                  leftSection={<InboxIcon summary={summary} label={r.name} />}
+                  // Which project this window is in, for a screen reader. Font weight
+                  // is the visual signal and carries nothing to assistive tech; the
+                  // `Select` this replaced got `aria-selected` from its options for
+                  // free. `aria-current`, not `aria-selected`: the row is not part of
+                  // a selection widget, and this is "the one you are on".
+                  aria-current={r.root === repo?.root ? true : undefined}
+                  // **`undefined`, not an element that renders null.** Mantine
+                  // gates the section on `leftSection &&` (MenuItem.mjs:93), and a
+                  // React element is truthy even when the component returns null —
+                  // so passing `<InboxIcon/>` unconditionally rendered an empty
+                  // gutter div with its own margin on every quiet row.
+                  leftSection={
+                    summary.state ? <InboxIcon summary={summary} label={r.name} /> : undefined
+                  }
                 >
                   <span className="project-menu-row">
                     <span className="project-menu-name">
@@ -6144,7 +6166,7 @@ function TopBar(props: {
                   what the *app* does on the right — and a machine var is squarely
                   the first: it belongs to the selected worktree and changes what
                   ▶ will actually run. Parked on the right it read as a second
-                  settings gear, which is the exact confusion the `{}` glyph was
+                  settings entry, which is the exact confusion the `{}` glyph was
                   chosen to avoid. */}
               {props.configVarsButton}
               {/* The running run's node actions, one click from the surface that
