@@ -2294,6 +2294,51 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
   font-weight: 600;
 }
 
+/* ---- Find in page (panes/BrowserPane.tsx) --------------------------------- */
+
+/* Same shape as `.permission-prompt`: an in-flow row between the chrome and the
+   slot, not an overlay — a native view paints over DOM regardless of z-index,
+   so shrinking the slot is the only way this coexists with the live page. */
+.browser-find {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 9px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel2);
+}
+
+.browser-find-icon {
+  color: var(--muted);
+  flex: none;
+}
+
+.browser-find-input {
+  flex: 1;
+  min-width: 64px;
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg);
+  color: var(--text);
+  font-family: "JetBrains Mono Variable", ui-monospace, monospace;
+  font-size: 11px;
+  outline: none;
+}
+
+.browser-find-input:focus {
+  border-color: var(--accent);
+}
+
+.browser-find-count {
+  flex: none;
+  min-width: 64px;
+  font-size: 11px;
+  text-align: right;
+}
+
 /* The box a live view occupies. Under Electron the content is a native
    WebContentsView positioned over this element — it is NOT a child, and it
    ignores z-index — so nothing may be layered on top of it. `position:

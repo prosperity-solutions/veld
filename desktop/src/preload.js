@@ -288,6 +288,13 @@ contextBridge.exposeInMainWorld("veldDesktop", {
     onOpenRequest: (fn) => on("veld:browser:open-request", fn),
     /** An app accelerator a focused view would otherwise have swallowed. */
     onAccelerator: (fn) => on("veld:browser:accelerator", fn),
+    /** Find-in-page. "start" begins a fresh search, "next"/"previous" step
+     *  through the same one, "stop" clears the highlights. Always the live page,
+     *  never whatever still is currently painted over a suspended view. */
+    find: (viewId, action, text) =>
+      ipcRenderer.invoke("veld:browser:find", { viewId, action, text }),
+    /** Match count and which one is active, pushed after every `find` call. */
+    onFindResult: (fn) => on("veld:browser:find-result", fn),
 
     /** The selected worktree's `ide.permissions`, plus the origins veld serves for
      *  its run — the policy every pane in this window is answered against. Pushed

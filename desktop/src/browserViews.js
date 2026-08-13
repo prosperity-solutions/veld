@@ -476,6 +476,28 @@ function attachListeners(window, viewId, entry) {
     push({ kind: "crash", code: null, text: String(details.reason), url: "" });
   });
 
+  // Chromium's own answer to `findInPage`/`stopFindInPage` below — the match
+  // count and which one is active. This always reflects the live page: a
+  // suspended pane's frozen still is only ever a paint substitute (`applyVisibility`
+  // in the renderer), never a substitute source for what gets searched.
+  //
+  // One request can raise several of these as Chromium scopes a long page, and
+  // only the one with `finalUpdate` is the authoritative tally — an earlier one
+  // can under-report (a fresh search reporting 0 matches before it has scanned
+  // far enough), which the pane would otherwise show as "No results" for a
+  // query that has some, for a moment. Forwarding only the final one is what a
+  // real production find-bar implementation does (electron-in-page-search
+  // gates on the same field before emitting).
+  wc.on("found-in-page", (_e, result) => {
+    if (!result.finalUpdate) return;
+    send(window, "veld:browser:find-result", {
+      viewId,
+      requestId: result.requestId,
+      matches: result.matches,
+      activeMatchOrdinal: result.activeMatchOrdinal,
+    });
+  });
+
   // A `target=_blank` (or `window.open`) inside a pane becomes another browser
   // *tab in the same dock*, carrying the same profile — so the popup keeps the
   // session it was opened from. The renderer decides where the tab goes; if it
@@ -503,17 +525,37 @@ function attachListeners(window, viewId, entry) {
 
   // While a native view has keyboard focus the renderer sees no keys at all, so
   // the app's own accelerators are dead the moment you click into a preview.
-  // Only the command palette's binding is intercepted and forwarded:
-  // `Ctrl/⌘+Shift+P` is the app's documented one, and unlike `⌘K` it is not
-  // something the previewed page is likely to want for itself.
+  // Two bindings are intercepted and forwarded: `Ctrl/⌘+Shift+P` for the command
+  // palette, and `Ctrl/⌘+F` for the pane's own find bar — both are the app's
+  // documented shortcuts. `⇧P` is safely outside anything a previewed page
+  // wants for itself; `F` is a real, accepted trade-off rather than a free
+  // one — a dev-server preview with its own find (a docs site, an embedded
+  // Monaco/CodeMirror editor) loses that binding entirely, since this fires
+  // ahead of the page's own key handlers and there is no escape hatch. This is
+  // the same trade a real browser tab already makes: Chrome's own find bar
+  // owns `Ctrl/⌘+F` unconditionally too, so a page cannot claim it there
+  // either — this pane behaving the same way is consistent with that, not a
+  // new risk this diff introduces.
   wc.on("before-input-event", (event, input) => {
-    if (input.type !== "keyDown" || !input.shift) return;
+    if (input.type !== "keyDown") return;
+    if (
+      (input.control || input.meta) &&
+      !input.shift &&
+      !input.alt &&
+      input.key.toLowerCase() === "f"
+    ) {
+      event.preventDefault();
+      // Move the keyboard back to the page first: forwarding the accelerator
+      // alone would open the bar while every keystroke still went to the view,
+      // so the input would be there and unusable.
+      window.webContents.focus();
+      send(window, "veld:browser:accelerator", { viewId, accelerator: "find" });
+      return;
+    }
+    if (!input.shift) return;
     if (!(input.control || input.meta)) return;
     if (input.key.toLowerCase() !== "p") return;
     event.preventDefault();
-    // Move the keyboard back to the page first: forwarding the accelerator
-    // alone would open the palette while every keystroke still went to the
-    // view, so the input would be there and unusable.
     window.webContents.focus();
     send(window, "veld:browser:accelerator", { viewId, accelerator: "palette" });
   });
@@ -1558,6 +1600,54 @@ function registerBrowserViewIpc(resolveWindow, opts = {}) {
       default:
         break;
     }
+  });
+
+  /**
+   * Find-in-page, driven by the pane's own find bar.
+   *
+   * `action` is "start" (a fresh search — the page's own current text, not
+   * whatever a previous query matched), "next"/"previous" (step to another match
+   * of the same text) or "stop" (clear the highlights). This always calls
+   * through to the real `WebContents` — there is no "frozen" mode for a pane's
+   * page content, only a paint substitute the renderer shows while a view is
+   * hidden, so a search issued against a suspended pane still finds the page's
+   * actual, current text and the highlights are there the moment it is shown
+   * again.
+   */
+  ipcMain.handle("veld:browser:find", (event, args) => {
+    const found = lookup(event, args?.viewId);
+    if (!found) return;
+    const wc = found.entry.view.webContents;
+    if (wc.isDestroyed()) return;
+    if (args?.action === "stop") {
+      wc.stopFindInPage("clearSelection");
+      return;
+    }
+    const text = typeof args?.text === "string" ? args.text : "";
+    if (!text) {
+      wc.stopFindInPage("clearSelection");
+      return;
+    }
+    // One options object per branch rather than a bare call for "start": a
+    // field added later (a match-case toggle, say) then has three explicit
+    // places to land instead of one bare call that's easy to miss. An
+    // unrecognized action is a safe no-op, matching `command`'s own
+    // explicit-whitelist switch above rather than guessing at what "start" means.
+    let options;
+    switch (args?.action) {
+      case "start":
+        options = {};
+        break;
+      case "next":
+        options = { forward: true, findNext: true };
+        break;
+      case "previous":
+        options = { forward: false, findNext: true };
+        break;
+      default:
+        return;
+    }
+    wc.findInPage(text, options);
   });
 
   /**
