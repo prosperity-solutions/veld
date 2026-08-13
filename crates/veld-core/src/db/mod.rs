@@ -509,6 +509,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "pane-layouts",
         apply: migrate_v15_pane_layouts,
     },
+    Migration {
+        version: 16,
+        name: "repo-sort-position",
+        apply: migrate_v16_repo_sort_position,
+    },
 ];
 
 fn migrate_v1_initial(conn: &Connection) -> rusqlite::Result<()> {
@@ -1219,6 +1224,22 @@ fn migrate_v15_pane_layouts(conn: &Connection) -> rusqlite::Result<()> {
         );
         "#,
     )
+}
+
+/// v16: manual project order, for the IDE's project column.
+///
+/// The same shape v10 gave worktrees and lanes, one level up: **`NULL` means the
+/// user has not placed this project**, and an unplaced row sorts to a
+/// name-ordered tail rather than to position 0. A `NOT NULL DEFAULT 0` would have
+/// declared every existing project deliberately placed at the front, in an order
+/// nobody chose, and there would be no way to tell that from a real choice
+/// afterwards.
+///
+/// Nullable is also what makes the migration a no-op for existing users: every
+/// row keeps sorting by name until somebody drags something, which is exactly
+/// what they saw before this column existed.
+fn migrate_v16_repo_sort_position(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch("ALTER TABLE repos ADD COLUMN sort_position INTEGER;")
 }
 
 // ---------------------------------------------------------------------------

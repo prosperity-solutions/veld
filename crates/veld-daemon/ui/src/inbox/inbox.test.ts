@@ -1135,6 +1135,76 @@ describe("defects found in review", () => {
   });
 });
 
+/**
+ * The same answer for a set of worktrees, which is what a project is.
+ *
+ * The project selector shows one glyph per project, and it has to mean what the rail's
+ * means or the user learns two languages for one vocabulary.
+ */
+describe("a whole project's glyph", () => {
+  const THIRD_WT = 11;
+
+  it("shows the worst state across every worktree in the set", () => {
+    const box = createInbox();
+    const project = new Set([WT, OTHER_WT]);
+    box.report("p1", WT, { type: "osc133", mark: "C", exit: null }, NOW);
+    expect(box.groupState(project, true).state).toBe("working");
+    // A finished build in the *other* worktree still beats working in this one.
+    for (const signal of command(0)) box.report("p2", OTHER_WT, signal, NOW);
+    expect(box.groupState(project, true).state).toBe("finished");
+    // …and a blocked agent anywhere in the set beats everything.
+    box.report("p3", WT, agent("blocked"), NOW);
+    expect(box.groupState(project, true).state).toBe("attention");
+  });
+
+  /** The point of taking a set: a worktree outside it contributes nothing, which is
+   *  what keeps one project's news off another project's row. */
+  it("ignores worktrees outside the set", () => {
+    const box = createInbox();
+    box.report("p1", THIRD_WT, agent("blocked"), NOW);
+    expect(box.groupState(new Set([WT, OTHER_WT]), true).state).toBe(null);
+    expect(box.groupState(new Set([THIRD_WT]), true).state).toBe("attention");
+  });
+
+  /**
+   * Newest-first **across** the set, not per worktree.
+   *
+   * This is why merging N `rowState` results in the caller is not the same thing: each
+   * of those is sorted on its own, and concatenating already-sorted runs interleaves
+   * them wrong — here that would put the older event of worktree A ahead of the newer
+   * event of worktree B.
+   */
+  it("orders the whole set's events newest first", () => {
+    const box = createInbox();
+    box.report("a-old", WT, agent("idle"), NOW);
+    box.report("b-new", OTHER_WT, agent("blocked"), NOW + 2000);
+    box.report("a-mid", THIRD_WT, agent("done"), NOW + 1000);
+    expect(
+      box
+        .groupState(new Set([WT, OTHER_WT, THIRD_WT]), false)
+        .entries.map((e) => e.sessionId),
+    ).toEqual(["b-new", "a-mid", "a-old"]);
+  });
+
+  it("counts running panes across the set", () => {
+    const box = createInbox();
+    box.report("p1", WT, { type: "osc133", mark: "C", exit: null }, NOW);
+    box.report("p2", OTHER_WT, { type: "osc133", mark: "C", exit: null }, NOW);
+    expect(box.groupState(new Set([WT, OTHER_WT]), true).running).toBe(2);
+    // `showWorking` gates the glyph, never the count — same rule as a rail row.
+    expect(box.groupState(new Set([WT, OTHER_WT]), false).state).toBe(null);
+  });
+
+  /** A project with no countable worktrees — every one of them trashed, or a repo
+   *  whose rows have not loaded — has nothing to say rather than everything. */
+  it("says nothing for an empty set", () => {
+    const box = createInbox();
+    box.report("p1", WT, agent("blocked"), NOW);
+    expect(box.groupState(new Set(), true).state).toBe(null);
+    expect(box.groupState(new Set(), true).entries).toEqual([]);
+  });
+});
+
 describe("bookkeeping", () => {
   it("orders a worktree's events newest first", () => {
     const box = createInbox();

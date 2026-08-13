@@ -552,6 +552,36 @@ function attachListeners(window, viewId, entry) {
       send(window, "veld:browser:accelerator", { viewId, accelerator: "find" });
       return;
     }
+    // Project switching: `Ctrl/⌘+1`…`9` and `Ctrl/⌘+\``. Forwarded rather than made
+    // menu accelerators because the main process does not know the project list —
+    // a menu would have to carry nine items labelled "Project 3" or be fed the
+    // names over a channel of their own, for a binding the page can act on
+    // directly. Unlike `F` above this takes nothing from the previewed page: a
+    // `Ctrl/⌘`+digit is a browser-level binding everywhere (tab switching), so no
+    // page has it to lose.
+    //
+    // `input.code`, not `input.key`: on AZERTY and several other layouts the
+    // unshifted digit row is punctuation, and ⌘2 means the key with 2 printed on
+    // it. `key` is kept as the fallback for a layout with no `code`.
+    if ((input.control || input.meta) && !input.shift && !input.alt) {
+      const digit = /^Digit([1-9])$/.exec(input.code || "")?.[1] ?? null;
+      const isDigit = digit ?? (/^[1-9]$/.test(input.key) ? input.key : null);
+      if (isDigit) {
+        event.preventDefault();
+        window.webContents.focus();
+        send(window, "veld:browser:accelerator", {
+          viewId,
+          accelerator: `project:${isDigit}`,
+        });
+        return;
+      }
+      if (input.key === "`" || input.code === "Backquote") {
+        event.preventDefault();
+        window.webContents.focus();
+        send(window, "veld:browser:accelerator", { viewId, accelerator: "project:toggle" });
+        return;
+      }
+    }
     if (!input.shift) return;
     if (!(input.control || input.meta)) return;
     if (input.key.toLowerCase() !== "p") return;

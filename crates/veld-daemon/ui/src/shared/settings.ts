@@ -146,6 +146,11 @@ const FALLBACK = {
   // defaulting to silence would mean a project's news reaching nobody with no
   // way for either side to tell — the exact failure the channel cannot survive.
   showProjectNews: true,
+  // Off, matching the Rust default. The `quickSwitch*` exception (a new key that
+  // decides whether controls appear takes the *shipped* default) points the same
+  // way here: before this key there was no project column, so an older daemon that
+  // cannot know it must keep rendering what it always did.
+  showProjectColumn: false,
   // The shipped default for a new control, by the file's `quickSwitch*`
   // exception: the create dialog renders "based on the latest origin" unless an
   // older daemon says otherwise, which is the behaviour this setting ships with.
@@ -684,6 +689,23 @@ export function hideDisabledActions(doc: SettingsDoc): boolean {
  */
 export function showProjectNews(doc: SettingsDoc): boolean {
   return bool(doc, "ui.showProjectNews", FALLBACK.showProjectNews);
+}
+
+/**
+ * Whether the IDE shows the project column beside the worktree rail. **Off.**
+ *
+ * Off because most installs have one project, and for them the column is 44px
+ * spent on a single square that answers nothing. It is a *persisted* answer rather
+ * than a derived one ("show it once there are two projects") on purpose: a column
+ * that appears on its own the first time somebody imports a second repo moves the
+ * whole workspace sideways at a moment they were doing something else, and there
+ * is no way to tell that from a bug.
+ *
+ * The top-bar toggle is the discovery path that off-by-default costs us, which is
+ * why it is in the bar and not only in Settings.
+ */
+export function showProjectColumn(doc: SettingsDoc): boolean {
+  return bool(doc, "ui.showProjectColumn", FALLBACK.showProjectColumn);
 }
 
 /**

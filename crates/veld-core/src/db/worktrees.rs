@@ -20,6 +20,15 @@ pub struct RepoRecord {
     pub root: String,
     pub name: String,
     pub created_at: String,
+    /// Manual position in the IDE's project column, or `None` for "the user has
+    /// not placed this one" — which sorts to a name-ordered tail rather than to
+    /// position 0, the same rule [`WorktreeRecord::sort_position`] follows.
+    ///
+    /// Serialised so the client can tell a placed project from an unplaced one;
+    /// it does **not** have to sort by it, because [`Db::list_repos`] already
+    /// returns them in this order.
+    #[serde(default)]
+    pub sort_position: Option<i64>,
 }
 
 /// One checkout of a repo — either the main checkout (`is_main`) or a
@@ -261,17 +270,28 @@ impl Db {
         Ok(())
     }
 
-    /// All imported repos, name-sorted.
+    /// All imported repos, in the order the IDE shows them.
+    ///
+    /// Manually placed projects first, in the order the user dragged them into,
+    /// then everything unplaced by name — the same "placed rows lead, the rest stay
+    /// alphabetical underneath" rule the rail applies to worktrees and lanes. The
+    /// order is **total and stable**: `root` is the primary key, so the final tie-
+    /// break can never leave two rows undecided, which is what a
+    /// keyboard shortcut bound to position N needs (⌘2 must not address a different
+    /// project on the next poll).
     pub fn list_repos(&self) -> Result<Vec<RepoRecord>, DbError> {
         let conn = self.lock();
         let mut stmt = conn.prepare_cached(
-            "SELECT root, name, created_at FROM repos ORDER BY name COLLATE NOCASE",
+            "SELECT root, name, created_at, sort_position FROM repos
+             ORDER BY sort_position IS NULL, sort_position,
+                      name COLLATE NOCASE, root",
         )?;
         let rows = stmt.query_map([], |row| {
             Ok(RepoRecord {
                 root: row.get(0)?,
                 name: row.get(1)?,
                 created_at: row.get(2)?,
+                sort_position: row.get(3)?,
             })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
@@ -282,17 +302,82 @@ impl Db {
         let conn = self.lock();
         Ok(conn
             .query_row(
-                "SELECT root, name, created_at FROM repos WHERE root = ?1",
+                "SELECT root, name, created_at, sort_position FROM repos WHERE root = ?1",
                 params![root_key(root)],
                 |row| {
                     Ok(RepoRecord {
                         root: row.get(0)?,
                         name: row.get(1)?,
                         created_at: row.get(2)?,
+                        sort_position: row.get(3)?,
                     })
                 },
             )
             .optional()?)
+    }
+
+    /// Rewrite manual project order from a full ordered list of repo **roots**.
+    ///
+    /// The lane/worktree contract, one level up (see [`Db::reorder_lanes`]): every
+    /// listed root is numbered from 0 in the order given, and anything the caller
+    /// did not mention keeps its own relative order after them. That second half is
+    /// what stops a stale client — one that polled before a project was imported —
+    /// silently unplacing it.
+    ///
+    /// Roots are matched **byte-exact against the stored key** — `root_key` is a
+    /// plain `to_string_lossy`, so it normalises nothing and `/x` and `/x/` are two
+    /// different projects to this query. That is the same contract
+    /// [`Db::reorder_lanes`] has for names and [`Db::reorder_worktrees`] has for
+    /// paths, and it is sound for the one caller that exists because the client
+    /// echoes back the roots it was served. A root that matches nothing is
+    /// **ignored**, not an error: it consumes no position, and the real row it was
+    /// meant to name is picked up by the unmentioned pass below, so a garbled entry
+    /// costs that project its intended place and never a total order.
+    ///
+    /// Bounded before the write lock is taken, for the reason spelled out on
+    /// [`Db::reorder_worktrees`]: each element costs one UPDATE inside an IMMEDIATE
+    /// transaction, and an oversized list would stall every other writer in the
+    /// daemon for as long as it runs.
+    pub fn reorder_repos(&self, order: &[String]) -> Result<(), DbError> {
+        if order.len() > MAX_ORDER_LEN {
+            return Err(DbError::OrderTooLong(order.len()));
+        }
+        let roots: Vec<String> = order.iter().map(|r| root_key(Path::new(r))).collect();
+        let mut conn = self.lock();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let mut next = 0i64;
+        for root in &roots {
+            let n = tx.execute(
+                "UPDATE repos SET sort_position = ?1 WHERE root = ?2",
+                params![next, root],
+            )?;
+            if n > 0 {
+                next += 1;
+            }
+        }
+        // Anything the caller did not mention lands after the listed projects,
+        // keeping its own relative order — an unplaced one stays unplaced only in
+        // the sense that it sorts last; it gets a real position here so the column
+        // never has to break a tie the user did not decide.
+        let rest: Vec<String> = tx
+            .prepare(
+                "SELECT root FROM repos WHERE root NOT IN (SELECT value FROM json_each(?1))
+                 ORDER BY sort_position IS NULL, sort_position, name COLLATE NOCASE, root",
+            )?
+            .query_map(
+                params![serde_json::to_string(&roots).unwrap_or_default()],
+                |r| r.get(0),
+            )?
+            .collect::<rusqlite::Result<_>>()?;
+        for root in rest {
+            tx.execute(
+                "UPDATE repos SET sort_position = ?1 WHERE root = ?2",
+                params![next, root],
+            )?;
+            next += 1;
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     /// Unregister a repo. Worktree rows cascade-delete; the filesystem is
@@ -2418,6 +2503,104 @@ mod tests {
                 .sort_position,
             None
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Project order (the IDE's project column)
+    // -----------------------------------------------------------------------
+
+    fn repo_roots(db: &Db) -> Vec<String> {
+        db.list_repos()
+            .unwrap()
+            .into_iter()
+            .map(|r| r.name)
+            .collect()
+    }
+
+    /// Every existing user meets this column on the day they upgrade, and what
+    /// they must see is exactly what they saw before it existed.
+    #[test]
+    fn projects_are_name_ordered_until_one_is_placed() {
+        let (_dir, db) = test_db();
+        db.upsert_repo(Path::new("/tmp/p-zed"), "zed").unwrap();
+        db.upsert_repo(Path::new("/tmp/p-alpha"), "alpha").unwrap();
+        db.upsert_repo(Path::new("/tmp/p-mid"), "mid").unwrap();
+        assert_eq!(repo_roots(&db), vec!["alpha", "mid", "zed"]);
+        for r in db.list_repos().unwrap() {
+            assert_eq!(r.sort_position, None, "{} was placed by nobody", r.name);
+        }
+    }
+
+    #[test]
+    fn reorder_repos_appends_unmentioned_projects() {
+        let (_dir, db) = test_db();
+        for (root, name) in [("/tmp/p-a", "a"), ("/tmp/p-b", "b"), ("/tmp/p-c", "c")] {
+            db.upsert_repo(Path::new(root), name).unwrap();
+        }
+        db.reorder_repos(&["/tmp/p-c".into(), "/tmp/p-a".into()])
+            .unwrap();
+        assert_eq!(repo_roots(&db), vec!["c", "a", "b"]);
+    }
+
+    /// A project imported after the client last polled must not be unplaced by a
+    /// drag that could not have known about it — it lands after the listed ones and
+    /// keeps a real position, so nothing later has to break a tie the user did not
+    /// decide. This is the half a naive "reset everything, then number the list"
+    /// implementation gets wrong.
+    #[test]
+    fn a_project_missing_from_a_stale_order_keeps_its_place() {
+        let (_dir, db) = test_db();
+        for (root, name) in [("/tmp/p-a", "a"), ("/tmp/p-b", "b")] {
+            db.upsert_repo(Path::new(root), name).unwrap();
+        }
+        db.reorder_repos(&["/tmp/p-b".into(), "/tmp/p-a".into()])
+            .unwrap();
+        db.upsert_repo(Path::new("/tmp/p-new"), "new").unwrap();
+        // The stale client still believes there are two projects.
+        db.reorder_repos(&["/tmp/p-a".into(), "/tmp/p-b".into()])
+            .unwrap();
+        assert_eq!(repo_roots(&db), vec!["a", "b", "new"]);
+        for r in db.list_repos().unwrap() {
+            assert!(r.sort_position.is_some(), "{} lost its position", r.name);
+        }
+    }
+
+    /// **Roots match byte-exact, and an unmatched one is ignored rather than
+    /// rejected.** Written after asserting the opposite: `root_key` is a plain
+    /// `to_string_lossy` and normalises nothing, so `/tmp/p-b/` names no project at
+    /// all. The contract that matters is the consequence — a root nothing matches
+    /// costs that project its intended position and still leaves a total order,
+    /// because the unmentioned pass places it.
+    #[test]
+    fn an_unmatched_root_is_ignored_and_still_leaves_a_total_order() {
+        let (_dir, db) = test_db();
+        for (root, name) in [("/tmp/p-a", "a"), ("/tmp/p-b", "b")] {
+            db.upsert_repo(Path::new(root), name).unwrap();
+        }
+        // The trailing slash matches nothing, so only `/tmp/p-a` is placed; `b` is
+        // appended by the unmentioned pass rather than dropped or left unplaced.
+        db.reorder_repos(&["/tmp/p-b/".into(), "/tmp/p-a".into()])
+            .unwrap();
+        assert_eq!(repo_roots(&db), vec!["a", "b"]);
+        for r in db.list_repos().unwrap() {
+            assert!(r.sort_position.is_some(), "{} lost its position", r.name);
+        }
+    }
+
+    /// Bounded before the write lock, like the other two orders: the body is
+    /// caller-supplied and each element is an UPDATE inside an IMMEDIATE
+    /// transaction.
+    #[test]
+    fn reorder_repos_refuses_an_oversized_order() {
+        let (_dir, db) = test_db();
+        db.upsert_repo(Path::new("/tmp/p-a"), "a").unwrap();
+        let huge: Vec<String> = (0..MAX_ORDER_LEN + 1)
+            .map(|i| format!("/tmp/{i}"))
+            .collect();
+        assert!(matches!(
+            db.reorder_repos(&huge),
+            Err(DbError::OrderTooLong(_))
+        ));
     }
 
     #[test]

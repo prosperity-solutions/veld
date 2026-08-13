@@ -79,6 +79,11 @@ pub fn routes() -> Router {
         // because the next reader should not have to work out which of the two was
         // safe by accident.
         .route("/api/worktree-order", post(reorder_worktrees))
+        // `/api/repo-order`, not `/api/repos/order`: a repo is addressed by its
+        // root *path*, so an order endpoint hanging off `/api/repos/` would sit in
+        // the same namespace as a path segment. Same reasoning as the two orders
+        // below it.
+        .route("/api/repo-order", post(reorder_repos))
         .route("/api/worktree-emoji", get(worktree_emoji))
         .route("/api/lanes", get(list_lanes).post(create_lane))
         .route("/api/lane-order", post(reorder_lanes))
@@ -2959,6 +2964,20 @@ async fn delete_lane(
     if !existed {
         return Err(err(StatusCode::NOT_FOUND, "lane not found"));
     }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+struct RepoOrderBody {
+    /// The full project order the client is displaying, as repo **roots**. Roots
+    /// the caller omits keep their relative order after the ones it lists, so a
+    /// client that polled before a project was imported cannot unplace it.
+    order: Vec<String>,
+}
+
+async fn reorder_repos(Json(body): Json<RepoOrderBody>) -> Result<StatusCode, ApiError> {
+    let db = open_desktop_db()?;
+    db.reorder_repos(&body.order).map_err(db_err)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
