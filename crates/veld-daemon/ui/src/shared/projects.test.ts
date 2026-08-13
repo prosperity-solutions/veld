@@ -7,6 +7,7 @@ import {
   projectForShortcut,
   projectHolder,
   projectInitials,
+  projectShortcutDigit,
   projectWorktreeIds,
   reorderedRoots,
   toggleTarget,
@@ -297,5 +298,44 @@ describe("turning a caret position into a destination index", () => {
   it("handles the trailing caret", () => {
     expect(dropTargetIndex(0, 3)).toBe(2);
     expect(dropTargetIndex(2, 3)).toBe(null);
+  });
+});
+
+describe("which digit a keystroke means", () => {
+  /** `code` names the physical key, which is what ⌘2 means to a person — on AZERTY
+   *  the unshifted digit row is punctuation. */
+  it("prefers the physical key over the character it prints", () => {
+    expect(projectShortcutDigit("Digit2", "é")).toBe("2");
+    expect(projectShortcutDigit("Digit9", "ç")).toBe("9");
+  });
+
+  it("falls back to the character when there is no code", () => {
+    expect(projectShortcutDigit("", "3")).toBe("3");
+  });
+
+  /** The bound lives here and nowhere else — this is what makes
+   *  MAX_PROJECT_SHORTCUTS authoritative rather than decorative. */
+  it("refuses a digit outside the addressable range", () => {
+    expect(projectShortcutDigit("Digit0", "0")).toBe(null);
+    expect(projectShortcutDigit("", "0")).toBe(null);
+  });
+
+  it("refuses anything that is not a digit", () => {
+    expect(projectShortcutDigit("KeyB", "b")).toBe(null);
+    expect(projectShortcutDigit("Backquote", "`")).toBe(null);
+    expect(projectShortcutDigit("", "")).toBe(null);
+  });
+});
+
+describe("initials that case-expand", () => {
+  /**
+   * `ß`.toUpperCase() is `SS` and the `ﬁ` ligature is `FI`, so slicing first and
+   * upper-casing after produced three glyphs in a 26px square. Cutting after the
+   * expansion is what keeps "up to two characters" true.
+   */
+  it("still yields at most two characters", () => {
+    expect(projectInitials("ßeta")).toBe("SS");
+    expect(projectInitials("ﬁnance")).toBe("FI");
+    expect([...projectInitials("ßeta gamma")].length).toBe(2);
   });
 });

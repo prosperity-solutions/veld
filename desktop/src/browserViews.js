@@ -563,6 +563,12 @@ function attachListeners(window, viewId, entry) {
     // `input.code`, not `input.key`: on AZERTY and several other layouts the
     // unshifted digit row is punctuation, and ⌘2 means the key with 2 printed on
     // it. `key` is kept as the fallback for a layout with no `code`.
+    //
+    // `1-9` here is a **coarse pre-filter, not the authority** — the renderer bounds
+    // the digit against `MAX_PROJECT_SHORTCUTS` (`shared/projects.ts`) before it
+    // addresses anything, so erring wide on this side costs a forwarded message that
+    // resolves to nothing. Keep it wide rather than mirroring a constant this process
+    // cannot import.
     if ((input.control || input.meta) && !input.shift && !input.alt) {
       const digit = /^Digit([1-9])$/.exec(input.code || "")?.[1] ?? null;
       const isDigit = digit ?? (/^[1-9]$/.test(input.key) ? input.key : null);

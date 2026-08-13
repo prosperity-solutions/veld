@@ -128,6 +128,26 @@ export function projectHolder<C>(
 export const MAX_PROJECT_SHORTCUTS = 9;
 
 /**
+ * The digit a keystroke means, or `null` — the one place the addressable range is
+ * written as a pattern.
+ *
+ * **`code` first, `key` as the fallback.** `code` names the physical key, which is
+ * what ⌘2 means to a person: on AZERTY the unshifted digit row is punctuation, so
+ * `key` would be `"é"`. `key` covers a layout that reports no `code`.
+ *
+ * It exists so `MAX_PROJECT_SHORTCUTS` is actually authoritative. The bound used to
+ * be a `[1-9]` literal inlined at each call site, which made the constant look like
+ * the source of truth while changing it moved nothing.
+ */
+export function projectShortcutDigit(code: string, key: string): string | null {
+  const fromCode = /^Digit([0-9])$/.exec(code)?.[1];
+  const digit = fromCode ?? (/^[0-9]$/.test(key) ? key : null);
+  if (digit === null) return null;
+  const n = Number(digit);
+  return n >= 1 && n <= MAX_PROJECT_SHORTCUTS ? digit : null;
+}
+
+/**
  * The project a number key addresses, or `null`.
  *
  * **Position in the displayed list, not an id**, which is the whole reason the
@@ -187,13 +207,25 @@ export function toggleTarget<R extends { root: string }>(
 export function projectInitials(name: string): string {
   const trimmed = name.trim();
   const words = trimmed.split(/[\s._\-/\\]+/u).filter(Boolean);
-  if (words.length >= 2) return (firstChar(words[0]) + firstChar(words[1])).toUpperCase();
-  const one = words[0] ?? trimmed;
-  return [...one].slice(0, 2).join("").toUpperCase();
+  if (words.length >= 2) return firstChar(words[0]) + firstChar(words[1]);
+  return take(words[0] ?? trimmed, 2);
 }
 
 function firstChar(word: string): string {
-  return [...word].slice(0, 1).join("");
+  return take(word, 1);
+}
+
+/**
+ * The first `n` code points of a word, upper-cased.
+ *
+ * **Upper-case first, then cut.** A one-to-many case mapping expands on
+ * `toUpperCase` — `ß` → `SS`, the `ﬁ` ligature → `FI` — so slicing first and
+ * upper-casing after produced three glyphs in a 26px square (`"ßeta"` → `"SSE"`).
+ * Cutting after the expansion keeps the documented "up to two characters" true for
+ * every input.
+ */
+function take(word: string, n: number): string {
+  return [...word.toUpperCase()].slice(0, n).join("");
 }
 
 /**

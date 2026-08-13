@@ -197,6 +197,7 @@ import {
   dropTargetIndex,
   projectForShortcut,
   projectHolder,
+  projectShortcutDigit,
   projectInitials,
   projectWorktreeIds,
   reorderedRoots,
@@ -387,6 +388,19 @@ const CHANNEL_DOWN_NOTICE_MS = 4000;
  * three-step cycle only ever let you arrive at it. `auto` is the stored value's
  * name and stays that way; "System" is what it is called on screen.
  */
+/**
+ * Whether a keystroke landed in something the user is typing into.
+ *
+ * For the one shortcut that is a plain letter. `contentEditable` as well as the two
+ * input elements, because the rename fields and the ⌘K box are not the only places a
+ * caret can be.
+ */
+function isEditableTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  const tag = target.tagName;
+  return tag === "INPUT" || tag === "TEXTAREA" || target.isContentEditable;
+}
+
 const THEME_CHOICES = [
   { value: "auto", label: "System", icon: IconDeviceDesktop },
   { value: "light", label: "Light", icon: IconSun },
@@ -2552,7 +2566,7 @@ function AppInner(props: {
       // cannot intercept them. In Veld Desktop both work, and `browserViews.js`
       // forwards them back when a native browser pane has the keyboard.
       if (mod && !e.shiftKey && !e.altKey) {
-        const digit = /^Digit([1-9])$/.exec(e.code)?.[1] ?? (/^[1-9]$/.test(e.key) ? e.key : null);
+        const digit = projectShortcutDigit(e.code, e.key);
         if (digit) {
           e.preventDefault();
           goToProject(Number(digit));
@@ -2574,6 +2588,14 @@ function AppInner(props: {
         // and wrong for a letter: on Dvorak the key at QWERTY's `KeyB` prints `x`,
         // so matching `code` here would swallow ⌘X — cut — in every text field.
         if (e.key === "b" || e.key === "B") {
+          // **Not while the caret is in a text field.** `mod` is `meta || ctrl`, so
+          // this binds Ctrl+B as well — which is what Linux and Windows users will
+          // press, and also the Cocoa emacs binding for "back one character" that
+          // macOS honours in every editable field. Without the guard, Ctrl+B in the
+          // new-worktree name box moved the project column instead of the caret.
+          // Terminals are already safe: xterm consumes the key before this listener
+          // ever runs (see the note above).
+          if (isEditableTarget(e.target)) return;
           e.preventDefault();
           toggleProjectColumnRef.current();
           return;
@@ -5219,9 +5241,19 @@ function AppInner(props: {
           repo={dialog.repo}
           onClose={closeDialog}
           onRemove={async () => {
-            await api.removeRepo(dialog.repo.root);
-            setActiveRepoRoot("");
-            setActiveWtKey("");
+            const removed = dialog.repo.root;
+            await api.removeRepo(removed);
+            // **Only when the removed project is the one on screen.** This used to
+            // be unconditional and correct, because the sole entry point was a menu
+            // bound to the *selected* repo. Removal is now reachable for any project
+            // (the column's context menu, ⌘K, the project submenu), and clearing
+            // regardless threw the window off a project the user was working in —
+            // dropping the worktree key and starting a fresh acquire hunt — because
+            // they removed some other one.
+            if (removed === activeRepoRootRef.current) {
+              setActiveRepoRoot("");
+              setActiveWtKey("");
+            }
             await refresh();
             closeDialog();
           }}
@@ -6508,6 +6540,12 @@ function ProjectColumn(props: {
               }}
               onDrop={(e) => {
                 e.preventDefault();
+                // The column below also accepts drops (so a release in the padding
+                // lands at the end), and without this the event bubbled into it
+                // with the pre-`endDrag` closure still live — every drop on a square
+                // fired `commitDrop` twice, i.e. two identical POSTs and two polls
+                // per drag.
+                e.stopPropagation();
                 commitDrop();
               }}
               onDragEnd={endDrag}
