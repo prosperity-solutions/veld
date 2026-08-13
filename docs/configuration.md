@@ -2378,16 +2378,24 @@ how a channel turns into a tip-of-the-day nobody reads. Put standing practice in
 your `CONTRIBUTING.md` and point at it with `ide.quicklinks`; "we *changed* how we
 work here" is news like anything else.
 
-**Only your main checkout counts.** Veld reads `ide.news` from the repo's **main
-checkout** — the primary clone — and ignores every other worktree's copy, so a card
-you are still drafting *in a worktree* cannot prompt anybody. The flip side: it
-stays silent until somebody pulls on main, which the top bar's "update main"
-control drives.
+**Only your main checkout counts, by default.** Veld reads `ide.news` from the
+repo's **main checkout** — the primary clone — and ignores every other worktree's
+copy, so a card you are still drafting *in a worktree* cannot prompt anybody. The
+flip side: it stays silent until somebody pulls on main, which the top bar's
+"update main" control drives.
 
 It is the main *checkout*, though, not the default *branch*: Veld reads that
 directory's working tree at whatever it has checked out. Draft a card on a branch in
 the primary clone and you will see your own card — which is a fine way to preview
 one, as long as you know it is what is happening.
+
+The **`news.source` setting** (Settings → General → *Read project news from*,
+`main` by default) makes that behaviour switchable rather than fixed: set it to
+*Every worktree* to preview a card on any branch you have checked out, in any
+worktree, before it merges — the same testing trade-off `extensions.source`
+offers, and off by default for the same reason: it trades away the guarantee
+that a draft cannot reach a teammate, which is exactly what the `main` default
+exists to hold.
 
 **Five live items, and retiring one is deleting it.** Over the cap it is the
 entries with the **oldest `since`** that go, named in the warning — so an ordinary
@@ -2955,16 +2963,31 @@ option that would have worked is worse than offering one that explains itself.
 Worth knowing, because a status badge is **the only thing veld runs from your
 config without you clicking something**:
 
-- **The declarations come from the worktree you are looking at**, like everything
-  else veld runs — the graph, the services, the panes. So checking out a branch and
-  selecting it runs *that branch's* badge commands, which means reviewing someone
-  else's pull request by checking it out is an act of trust in its author, exactly as
-  `veld start` on that branch already is. This is deliberate: an extension is a thing
-  you write in a branch and test before merging, and it keeps no state, so resolving
-  it from anywhere else would make it untestable until after it shipped. If you
-  review branches you do not trust, turn off *Settings → General → Let projects
-  refresh their own status badges* — buttons and menus keep working, because a click
-  is you asking.
+- **The declarations come from your project's main checkout by default** — the
+  **`extensions.source`** setting (Settings → General → *Read a project's
+  extensions from*, `main` by default). Every worktree of a project sees whatever
+  extensions have reached `main`, regardless of when that worktree was created —
+  so a worktree cloned before a project's `veld.json` gained `ide.extensions`
+  still sees them, rather than staying blank until it is re-cloned. Commands still
+  run in the worktree you're looking at, using its own branch and root; only which
+  config's declarations are consulted moves. Switch it to *This worktree* to test
+  a new or edited declaration before merging it, the way `ide.news` has always
+  worked — the trade-off is the one the `main` default exists to avoid: an
+  untrusted branch's own badge commands do not run just because you checked it
+  out, which is a real improvement in the `main` default over reviewing a pull
+  request by checking it out. If you use *This worktree* to develop an extension
+  and also review branches you do not trust, turn off *Settings → General → Let
+  projects refresh their own status badges* — buttons and menus keep working,
+  because a click is you asking.
+
+  Two things worth knowing about the `main` default rather than assuming them:
+  it means the main **checkout**, not the default **branch** — if your primary
+  clone is itself sitting on an untrusted branch, that branch's declarations are
+  what runs — and the command still executes with the worktree you're looking
+  at as its working directory, so a main-declared badge that shells out to a
+  repo-relative script (this page's own `scripts/veld/pr-badge.sh` example)
+  still runs whatever that path resolves to in the worktree you're viewing, not
+  in main's.
 
 - Only the worktree on screen is evaluated, and only while a window is open.
   Registered worktrees you are not looking at cost nothing.

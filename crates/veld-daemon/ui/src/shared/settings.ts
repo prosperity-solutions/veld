@@ -36,6 +36,10 @@ export type WorktreeStorageMode = "sibling" | "custom";
  * `LogTimeZone` in `veld-core/src/db/settings.rs`; `veld logs` reads the same key.
  */
 export type LogTimeZone = "local" | "utc";
+/** Which checkout's `veld.json` a project-declared surface reads its
+ *  declarations from. Mirrors the Rust `ConfigSource` (`extensions.source`,
+ *  `news.source`); a value the daemon acts on. */
+export type ConfigSourcePref = "main" | "worktree";
 
 /**
  * Last-resort values for a daemon that predates a key.
@@ -105,6 +109,15 @@ const FALLBACK = {
   terminalShellIntegration: true,
   terminalAgentIntegration: true,
   extensionsAutoRefresh: true,
+  // `worktree` — the previous release's *only* behaviour (hardcoded, not a
+  // setting), unlike every `showProjectNews`-style exception above: an old
+  // daemon that has never heard of this key still resolves declarations from
+  // the checked-out worktree, so a client reporting anything else here would
+  // describe a daemon that isn't running.
+  extensionsSource: "worktree" as ConfigSourcePref,
+  // `main` — also the previous release's only behaviour, and unchanged by
+  // this key's addition. See `newsSource` below.
+  newsSource: "main" as ConfigSourcePref,
   // **Off**, matching the Rust default — and here the file's "shipped default" exception
   // and the "previous release's behaviour" rule agree, because the honest reason is the
   // signal's own unevenness: exact for a shell command, absent for a supported agent, and
@@ -473,6 +486,40 @@ export function terminalAgentIntegration(doc: SettingsDoc): boolean {
  */
 export function extensionsAutoRefresh(doc: SettingsDoc): boolean {
   return bool(doc, "extensions.autoRefresh", FALLBACK.extensionsAutoRefresh);
+}
+
+/**
+ * Which checkout's `veld.json` `ide.extensions` are declared in. **Defaults to
+ * `main`** — a reversal of the original "extensions are worktree-based"
+ * decision (see `docs/extensions-vision.md`, 2026-08-13 entry): a worktree
+ * cloned before a project's config gained `ide.extensions` showed nothing
+ * until re-cloned. `worktree` restores the original behaviour, for testing a
+ * declaration before it merges — commands still execute in the worktree being
+ * viewed either way; only which config's declarations are consulted changes.
+ */
+export function extensionsSource(doc: SettingsDoc): ConfigSourcePref {
+  return oneOf(
+    doc,
+    "extensions.source",
+    ["main", "worktree"] as const,
+    FALLBACK.extensionsSource,
+  );
+}
+
+/**
+ * Which checkout(s) `ide.news` is read from. **Defaults to `main`**,
+ * unchanged from the hardcoded behaviour before this setting existed.
+ * `worktree` unions every checkout's own declared news instead — a testing
+ * posture, since it trades away the guarantee the default exists for (a card
+ * drafted on a branch cannot reach a teammate before it merges).
+ */
+export function newsSource(doc: SettingsDoc): ConfigSourcePref {
+  return oneOf(
+    doc,
+    "news.source",
+    ["main", "worktree"] as const,
+    FALLBACK.newsSource,
+  );
 }
 
 /** What the rail shows about unseen activity, and what is allowed to interrupt you. */

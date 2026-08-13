@@ -22,6 +22,8 @@ import {
   terminalShell,
   hideDisabledActions,
   showProjectNews,
+  extensionsSource,
+  newsSource,
   gitCreateFrom,
   worktreeStorageMode,
   worktreeStorageDir,
@@ -273,6 +275,46 @@ describe("showProjectNews", () => {
   it("falls back rather than trusting a non-boolean", () => {
     for (const bad of [null, 0, "false", []]) {
       expect(showProjectNews({ "ui.showProjectNews": bad as unknown as boolean })).toBe(true);
+    }
+  });
+});
+
+describe("extensionsSource", () => {
+  it("falls back to worktree — the previous release's only, hardcoded behaviour — when the daemon has never heard of the key", () => {
+    expect(extensionsSource({})).toBe("worktree");
+  });
+
+  it("reads the stored value, including the daemon's new main default", () => {
+    expect(extensionsSource({ "extensions.source": "main" })).toBe("main");
+    expect(extensionsSource({ "extensions.source": "worktree" })).toBe(
+      "worktree",
+    );
+  });
+
+  it("degrades to the worktree fallback for anything that is not a real value", () => {
+    for (const bad of ["Main", "", 0, null, "origin"]) {
+      expect(
+        extensionsSource({ "extensions.source": bad as unknown as string }),
+      ).toBe("worktree");
+    }
+  });
+});
+
+describe("newsSource", () => {
+  it("defaults to main, unchanged from the hardcoded behaviour before this key", () => {
+    expect(newsSource({})).toBe("main");
+  });
+
+  it("reads the stored value", () => {
+    expect(newsSource({ "news.source": "worktree" })).toBe("worktree");
+    expect(newsSource({ "news.source": "main" })).toBe("main");
+  });
+
+  it("degrades to main for anything that is not a real value", () => {
+    for (const bad of ["Worktree", "", 0, null]) {
+      expect(newsSource({ "news.source": bad as unknown as string })).toBe(
+        "main",
+      );
     }
   });
 });

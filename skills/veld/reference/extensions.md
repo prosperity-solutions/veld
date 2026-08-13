@@ -324,15 +324,18 @@ looks like a bug:
 
 - **Only the worktree on screen is evaluated**, and only while a window is open.
   Registered worktrees nobody is looking at cost nothing.
-- **The declarations come from that worktree's own config**, like everything else
-  veld runs. So a badge can be written and tested in a branch — which is the point,
-  since an extension keeps no state and is merged once it works — and equally,
-  checking out somebody else's branch runs *their* badge commands. The user's
-  `extensions.autoRefresh` setting is the lever for anyone who reviews untrusted
-  branches. **This is the rule, not a special case** — `ide.news` is the deliberate
-  *exception*: it is taken from the repo's main checkout, because a card is published
-  to teammates and recorded in their database against an id that can never be
-  reused, so a draft must not reach anybody before it lands.
+- **The declarations come from the project's main checkout by default** — the
+  **`extensions.source`** setting (Settings → General, `main` by default).
+  Every worktree of a project sees whatever has reached main, regardless of
+  when that worktree was cloned; commands still execute in the worktree
+  you're looking at, using its own branch and root. Set it to `worktree` to
+  write and test a badge in the branch that's declaring it before merging —
+  the original behaviour, where checking out somebody else's branch ran
+  *their* badge commands too. `ide.news` follows the same `main`-by-default
+  shape through its own `news.source` setting, for the same underlying
+  reason: a card or a badge that predates a worktree's own clone must still
+  reach it. The user's `extensions.autoRefresh` setting is the lever for
+  turning the unattended half off entirely, regardless of source.
 - **Several windows share one child process.** A request inside an extension's
   `refresh_seconds` is answered from that run, with its age reported.
 - **`refresh_seconds` is floored at 15**, defaults to 60. **Max 24 extensions per

@@ -35,6 +35,7 @@ use axum::extract::Path;
 use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use veld_core::db::ConfigSource;
 use veld_core::ide::{BadgeDisplay, Extension, ExtensionBody, IdeSection, OpenIn, PaneIcon};
 
 use crate::feedback_server::desktop::{ApiError, db_err, err, open_desktop_db};
@@ -106,6 +107,9 @@ const MAX_TRACKED: usize = 256;
 /// is the stampede a TTL cache produces at the moment it expires.
 type Cell = Arc<tokio::sync::Mutex<Option<(Instant, StatusView)>>>;
 
+/// `(worktree, declare_root, extension id)` — see [`RESULTS`] for why all three.
+type ResultKey = (String, String, String);
+
 /// Both maps are keyed on the worktree's **path**, never on its database id.
 ///
 /// `worktrees.id` is an `INTEGER PRIMARY KEY` with no `AUTOINCREMENT` and rows are
@@ -114,7 +118,13 @@ type Cell = Arc<tokio::sync::Mutex<Option<(Instant, StatusView)>>>;
 /// deleted one's value — and because every project copying the documented example
 /// names its badge `pr`, that puts one repo's pull request number, link and offered
 /// actions in another repo's top bar.
-static RESULTS: LazyLock<Mutex<HashMap<(String, String), Cell>>> =
+///
+/// `RESULTS` additionally keys on the *declaring* root (see
+/// `resolve_declare_root`): flipping `extensions.source` between `main` and
+/// `worktree` for one worktree changes which config's command produced the
+/// memoized value, and a key of `(worktree, ext.id)` alone would keep serving
+/// the other source's output for up to `refresh_seconds` after the flip.
+static RESULTS: LazyLock<Mutex<HashMap<ResultKey, Cell>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 static INVALIDATED: LazyLock<Mutex<HashMap<String, Instant>>> =
@@ -173,7 +183,7 @@ fn invalidate(worktree: &str) {
     stamps.insert(worktree.to_owned(), Instant::now());
 }
 
-fn cell(worktree: &str, id: &str) -> Cell {
+fn cell(worktree: &str, declare_root: &str, id: &str) -> Cell {
     let mut map = RESULTS.lock().expect("extension results poisoned");
     if map.len() > MAX_TRACKED {
         // `try_lock` is the "nobody is using this" test — see MAX_TRACKED. An
@@ -181,7 +191,10 @@ fn cell(worktree: &str, id: &str) -> Cell {
         // can be waiting on. Anything smarter (true LRU) buys nothing at this size.
         map.retain(|_, cell| Arc::strong_count(cell) > 1 || cell.try_lock().is_err());
     }
-    Arc::clone(map.entry((worktree.to_owned(), id.to_owned())).or_default())
+    Arc::clone(
+        map.entry((worktree.to_owned(), declare_root.to_owned(), id.to_owned()))
+            .or_default(),
+    )
 }
 
 /// What a status extension produced, as the UI consumes it.
@@ -257,7 +270,7 @@ pub(crate) async fn status(
     Path(id): Path<i64>,
     axum::extract::Query(query): axum::extract::Query<StatusQuery>,
 ) -> Result<Json<StatusResponse>, ApiError> {
-    let (root, branch, auto_refresh) = worktree_target(id)?;
+    let (root, branch, auto_refresh, declare_root) = worktree_target(id)?;
     // The machine-global off switch. An empty list rather than an error, because
     // the user turned it off and a control reporting that back at them is noise —
     // the badges simply do not render. The declarations still travel on the
@@ -266,7 +279,13 @@ pub(crate) async fn status(
     if !auto_refresh {
         return Ok(Json(StatusResponse { items: Vec::new() }));
     }
-    let Some((config, section)) = load_section(&root) else {
+    // `None` — `extensions.source = main` with no resolvable main checkout —
+    // fails closed the same way an unloadable config already does: no
+    // declarations, no badges, never a fallback to this worktree's own.
+    let Some(declare_root) = declare_root else {
+        return Ok(Json(StatusResponse { items: Vec::new() }));
+    };
+    let Some((config, section)) = load_section(&declare_root) else {
         return Ok(Json(StatusResponse { items: Vec::new() }));
     };
 
@@ -284,6 +303,7 @@ pub(crate) async fn status(
             ext.clone(),
             Arc::clone(&section),
             root.clone(),
+            declare_root.clone(),
             ctx.clone(),
             forced,
         ));
@@ -297,13 +317,14 @@ async fn evaluate(
     ext: Extension,
     section: Arc<IdeSection>,
     root: String,
+    declare_root: String,
     builtins: HashMap<String, String>,
     forced: bool,
 ) -> StatusView {
     let ExtensionBody::Status(status) = &ext.body else {
         unreachable!("callers filter to status extensions");
     };
-    let cell = cell(&root, &ext.id);
+    let cell = cell(&root, &declare_root, &ext.id);
     // Held across the run on purpose: a second window arriving mid-run waits here
     // and then finds the fresh value below, instead of starting a parallel `gh`.
     let mut guard = cell.lock().await;
@@ -338,7 +359,7 @@ async fn evaluate(
     let started = Instant::now();
     let missing = missing_pane_binaries(&ext.requires_bin);
     let view = if missing.is_empty() {
-        run_status(&ext, status, &section, &root, &builtins).await
+        run_status(&ext, status, &section, &root, &declare_root, &builtins).await
     } else {
         // Not an error state: the UI already knows the extension is unavailable
         // from the worktree listing and renders the hint. Saying so here keeps the
@@ -370,6 +391,7 @@ async fn run_status(
     status: &veld_core::ide::StatusExtension,
     section: &IdeSection,
     root: &str,
+    declare_root: &str,
     builtins: &HashMap<String, String>,
 ) -> StatusView {
     let base = |state: &'static str, tone: &'static str| StatusView {
@@ -391,7 +413,14 @@ async fn run_status(
         age_seconds: 0,
     };
 
-    let outcome = spawn_command(&status.command, root, builtins, STATUS_TIMEOUT).await;
+    let outcome = spawn_command(
+        &status.command,
+        root,
+        declare_root,
+        builtins,
+        STATUS_TIMEOUT,
+    )
+    .await;
     let out = match outcome {
         Err(message) => {
             return StatusView {
@@ -615,11 +644,22 @@ pub(crate) async fn activate(
     Path(id): Path<i64>,
     Json(body): Json<ActivateBody>,
 ) -> Result<Json<ActivateResponse>, ApiError> {
-    let (root, branch, _) = worktree_target(id)?;
-    let (config, section) = load_section(&root).ok_or_else(|| {
+    let (root, branch, _, declare_root) = worktree_target(id)?;
+    // `None` — `extensions.source = main` with no resolvable main checkout —
+    // fails closed: no declarations to resolve `body.id` against, same as an
+    // unloadable config. Never falls back to this worktree's own, which
+    // would let a runtime click execute a declaration nothing in `main` mode
+    // authorized.
+    let declare_root = declare_root.ok_or_else(|| {
         err(
             StatusCode::NOT_FOUND,
-            "this worktree has no veld config to declare extensions",
+            "this project's extensions could not be resolved (its main checkout is missing or unregistered)",
+        )
+    })?;
+    let (config, section) = load_section(&declare_root).ok_or_else(|| {
+        err(
+            StatusCode::NOT_FOUND,
+            "this project declares no extensions to run",
         )
     })?;
 
@@ -650,9 +690,15 @@ pub(crate) async fn activate(
     }
 
     let builtins = worktree_builtins(FsPath::new(&root), &branch, &config);
-    let out = spawn_command(&action.command, &root, &builtins, ACTIVATE_GRACE)
-        .await
-        .map_err(|message| err(StatusCode::UNPROCESSABLE_ENTITY, message))?;
+    let out = spawn_command(
+        &action.command,
+        &root,
+        &declare_root,
+        &builtins,
+        ACTIVATE_GRACE,
+    )
+    .await
+    .map_err(|message| err(StatusCode::UNPROCESSABLE_ENTITY, message))?;
     // Invalidate whatever the exit status. A non-zero exit does **not** mean
     // nothing happened: `gh pr create && notify-something` can create the pull
     // request and then fail, and a badge left on its pre-action value for a full
@@ -709,6 +755,7 @@ struct Output {
 async fn spawn_command(
     spec: &veld_core::config::CommandSpec,
     root: &str,
+    declare_root: &str,
     builtins: &HashMap<String, String>,
     timeout: Duration,
 ) -> Result<Output, String> {
@@ -737,8 +784,11 @@ async fn spawn_command(
     };
 
     // Logged before the spawn, with the full argv, because "what did veld run"
-    // must be answerable for a command the user never clicked.
-    tracing::info!(worktree = %root, command = %spec.display(), "running ide extension command");
+    // must be answerable for a command the user never clicked — and, since
+    // `extensions.source` can point declarations at a different checkout than
+    // the one the command runs in, `declared_in` answers the other question a
+    // maintainer asks debugging this: whose `veld.json` decided this ran at all.
+    tracing::info!(worktree = %root, declared_in = %declare_root, command = %spec.display(), "running ide extension command");
 
     cmd.current_dir(root)
         .env("PATH", veld_core::user_path::cached_user_path().await)
@@ -883,21 +933,71 @@ impl Drop for GroupKill {
     }
 }
 
-/// Resolve a worktree id to its path and branch, plus the machine's auto-refresh
-/// switch.
+/// The root whose `veld.json` a worktree's extensions are *declared* in, per
+/// `extensions.source` — shared by this module's `status`/`activate` and by
+/// `desktop::worktree_view`'s listing, so a badge's label always comes from
+/// the same config its command does.
 ///
-/// One database open for all three: the switch is read from the handle that is
-/// already being opened to resolve the worktree, because putting a second
-/// `Db::open()` on a request path is a design decision and not a detail
-/// (AGENTS.md).
-fn worktree_target(id: i64) -> Result<(String, String, bool), ApiError> {
+/// `Some(wt.path)` when `extensions.source` is `worktree` (this worktree
+/// decides its own extensions — the original, still-available behaviour) or
+/// when this worktree *is* the main checkout (nothing to redirect to).
+/// Otherwise, with the `main` default, it is the repo's main checkout — see
+/// [`ConfigSource`] for why: a worktree cloned before the project's
+/// `veld.json` gained `ide.extensions` must still see them.
+///
+/// **`None` — fail closed, not fail open — when `main` mode cannot find a
+/// main checkout for this repo.** An earlier version fell back to `wt.path`
+/// here, which silently re-opened the exact threat `main` mode exists to
+/// close: an untrusted worktree's own declarations running unattended.
+///
+/// The case this branch guards is currently **defensive rather than live**:
+/// `parse_worktree_list` consumes `is_main` on a **bare** first `git worktree
+/// list --porcelain` block and then skips it (this file's sibling
+/// `desktop.rs`), so a repo whose primary clone is itself bare never gets an
+/// `is_main` row — but `import_repo` already refuses to register a repo with
+/// no usable checkout ("repository has no usable checkout (bare repo?)",
+/// `desktop.rs`) before this setting ever mattered, so every *registered*
+/// repo has one today. Kept fail-closed anyway: a registry row can still go
+/// missing (a repo removed mid-request, a corrupt sync), and "no declarations"
+/// is the only answer that does not depend on that staying true forever.
+pub(crate) fn resolve_declare_root(
+    db: &veld_core::db::Db,
+    wt: &veld_core::db::WorktreeRecord,
+    source: ConfigSource,
+) -> Option<String> {
+    match source {
+        ConfigSource::Worktree => Some(wt.path.clone()),
+        ConfigSource::Main if wt.is_main => Some(wt.path.clone()),
+        ConfigSource::Main => db
+            .list_worktrees(FsPath::new(&wt.repo_root))
+            .ok()
+            .and_then(|wts| wts.into_iter().find(|w| w.is_main))
+            .map(|w| w.path),
+    }
+}
+
+/// Resolve a worktree id to its path and branch, the machine's auto-refresh
+/// switch, and the root whose `veld.json` its extensions are *declared* in
+/// (`None` when `main` mode cannot find a declaring root — see
+/// [`resolve_declare_root`]).
+///
+/// Only the *declarations* move with `declare_root`; commands still run in
+/// `root` with this worktree's own `branch`, so a badge's `${veld.branch}`
+/// still names the worktree being looked at, not main's.
+///
+/// One database open for all of it: the switch and the source are read from
+/// the handle that is already being opened to resolve the worktree, because
+/// putting a second `Db::open()` on a request path is a design decision and
+/// not a detail (AGENTS.md).
+fn worktree_target(id: i64) -> Result<(String, String, bool, Option<String>), ApiError> {
     let db = open_desktop_db()?;
     let wt = db
         .get_worktree(id)
         .map_err(db_err)?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "worktree not found"))?;
     let auto_refresh = db.extensions_auto_refresh();
-    Ok((wt.path, wt.branch, auto_refresh))
+    let declare_root = resolve_declare_root(&db, &wt, db.extensions_source());
+    Ok((wt.path, wt.branch, auto_refresh, declare_root))
 }
 
 /// The project's config and its parsed `ide` section, or `None` when the worktree
@@ -1029,7 +1129,7 @@ mod tests {
         }
 
         async fn run(script: &str, timeout: Duration) -> Output {
-            spawn_command(&shell(script), "/tmp", &HashMap::new(), timeout)
+            spawn_command(&shell(script), "/tmp", "/tmp", &HashMap::new(), timeout)
                 .await
                 .expect("spawned")
         }
@@ -1127,6 +1227,7 @@ mod tests {
             let out = spawn_command(
                 &shell("pwd -P"),
                 &dir.path().to_string_lossy(),
+                &dir.path().to_string_lossy(),
                 &HashMap::new(),
                 Duration::from_secs(5),
             )
@@ -1216,6 +1317,7 @@ mod tests {
             ext.clone(),
             Arc::clone(&section),
             root.clone(),
+            root.clone(),
             HashMap::new(),
             false,
         ));
@@ -1227,7 +1329,15 @@ mod tests {
 
         // `refresh_seconds` is an hour and this is *not* forced, so the only thing
         // that can make this re-run is the invalidation.
-        let after = evaluate(ext, section, root.clone(), HashMap::new(), false).await;
+        let after = evaluate(
+            ext,
+            section,
+            root.clone(),
+            root.clone(),
+            HashMap::new(),
+            false,
+        )
+        .await;
         assert_eq!(
             count(),
             2,
@@ -1238,7 +1348,7 @@ mod tests {
         RESULTS
             .lock()
             .expect("extension results poisoned")
-            .retain(|(wt, _), _| wt != &root);
+            .retain(|(wt, _, _), _| wt != &root);
         INVALIDATED
             .lock()
             .expect("extension invalidations poisoned")
@@ -1253,18 +1363,19 @@ mod tests {
     #[tokio::test]
     async fn eviction_spares_cells_with_a_run_in_flight() {
         let busy = "/tmp/wt-busy";
-        let held = cell(busy, "in-flight");
+        let held = cell(busy, busy, "in-flight");
         let guard = held.lock().await;
 
         // Push the map over the threshold with idle cells.
         for i in 0..=MAX_TRACKED {
-            let _ = cell(&format!("/tmp/wt-idle-{i}"), "idle");
+            let idle = format!("/tmp/wt-idle-{i}");
+            let _ = cell(&idle, &idle, "idle");
         }
 
         {
             let map = RESULTS.lock().expect("extension results poisoned");
             assert!(
-                map.contains_key(&(busy.to_owned(), "in-flight".to_owned())),
+                map.contains_key(&(busy.to_owned(), busy.to_owned(), "in-flight".to_owned())),
                 "a locked cell must survive eviction"
             );
         }
@@ -1272,7 +1383,7 @@ mod tests {
         RESULTS
             .lock()
             .expect("extension results poisoned")
-            .retain(|(wt, _), _| wt != busy && !wt.starts_with("/tmp/wt-idle-"));
+            .retain(|(wt, _, _), _| wt != busy && !wt.starts_with("/tmp/wt-idle-"));
     }
 
     #[test]
@@ -1420,5 +1531,124 @@ mod tests {
         let view = badge(&format!(r#"{{"text":"{}"}}"#, "🦊".repeat(200)));
         let text = view.text.expect("text");
         assert_eq!(text.chars().count(), MAX_TEXT_CHARS);
+    }
+
+    // -- Fail-closed at the HTTP layer (`extensions.source = main`, no main) --
+    //
+    // The review that added `declare_root` caught the listing endpoint
+    // (`worktree_view` in `desktop.rs`) falling back to a worktree's own
+    // config when no main checkout could be found — reopening the exact
+    // threat `main` mode exists to close. These two pin the same property at
+    // `status`/`activate` themselves: a future "simplification" of either's
+    // `declare_root.ok_or_else(...)`/`if let Some(declare_root)` into an
+    // `unwrap_or_else(|| root.clone())` must fail a test, not just a review.
+    mod fails_closed_at_the_http_layer {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use serde_json::Value;
+        use tower::ServiceExt;
+
+        use crate::feedback_server::desktop::routes;
+
+        /// Seeds a repo with exactly one worktree, `is_main: false` — the shape
+        /// a bare primary clone produces (`parse_worktree_list` consumes
+        /// `is_main` on a bare first block and then skips it), so `main` mode
+        /// cannot resolve a declaring root for it. Points `VELD_DB_PATH` at a
+        /// fresh temp DB so this never touches a developer's real one.
+        ///
+        /// Returns the worktree's id and keeps both temp dirs alive for the
+        /// caller's duration.
+        fn seed_worktree_with_no_main() -> (i64, tempfile::TempDir, tempfile::TempDir) {
+            let db_dir = tempfile::TempDir::new().expect("tempdir");
+            // SAFETY: `cargo test` in this crate runs these HTTP-layer tests
+            // single-threaded against a shared env var — see the identical
+            // pattern and caveat in `crate::settings`'s own router tests.
+            unsafe { std::env::set_var("VELD_DB_PATH", db_dir.path().join("t.db")) };
+            let db = veld_core::db::Db::open_at(&db_dir.path().join("t.db")).expect("open");
+
+            let repo_dir = tempfile::TempDir::new().expect("tempdir");
+            let only_path = repo_dir.path().join("only-worktree");
+            std::fs::create_dir_all(&only_path).unwrap();
+            std::fs::write(
+                only_path.join("veld.json"), // root-config-gate-ok
+                r#"{"schemaVersion": "3", "name": "t", "nodes": {}}"#,
+            )
+            .unwrap();
+
+            db.upsert_repo(repo_dir.path(), "repo").unwrap();
+            db.sync_worktrees(
+                repo_dir.path(),
+                &[veld_core::db::DiscoveredWorktree {
+                    path: only_path.to_string_lossy().into_owned(),
+                    branch: "feat".to_owned(),
+                    is_main: false,
+                }],
+            )
+            .unwrap();
+            let wt = db
+                .list_worktrees(repo_dir.path())
+                .unwrap()
+                .into_iter()
+                .next()
+                .expect("the only row");
+            assert!(!wt.is_main, "test setup: this repo must have no main row");
+
+            (wt.id, db_dir, repo_dir)
+        }
+
+        #[tokio::test]
+        async fn status_answers_no_badges_rather_than_the_worktrees_own() {
+            let (id, _db_dir, _repo_dir) = seed_worktree_with_no_main();
+
+            let res = routes()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/api/worktrees/{id}/extensions/status"))
+                        .header("x-veld-request", "1")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(res.into_body(), 64 * 1024)
+                .await
+                .unwrap();
+            let doc: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(
+                doc["items"],
+                serde_json::json!([]),
+                "no resolvable main checkout must answer no badges, not this worktree's own"
+            );
+
+            unsafe { std::env::remove_var("VELD_DB_PATH") };
+        }
+
+        #[tokio::test]
+        async fn activate_refuses_rather_than_running_the_worktrees_own() {
+            let (id, _db_dir, _repo_dir) = seed_worktree_with_no_main();
+
+            let res = routes()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/api/worktrees/{id}/extensions/activate"))
+                        .header("x-veld-request", "1")
+                        .header("content-type", "application/json")
+                        .body(Body::from(r#"{"id":"anything"}"#))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                res.status(),
+                StatusCode::NOT_FOUND,
+                "no resolvable main checkout must refuse to run anything, never fall \
+                 back to resolving `id` against this worktree's own declarations"
+            );
+
+            unsafe { std::env::remove_var("VELD_DB_PATH") };
+        }
     }
 }

@@ -258,12 +258,23 @@ the implementation is the most available thing in their head.
 
 Four of those are load-bearing enough to say why.
 
-**Only the main checkout's news counts.** The daemon reads `ide.news` from the
-repo's *main* worktree — the primary clone — and discards every other checkout's
-copy. So a card being drafted **in a worktree** cannot prompt anybody until it
-lands, and a repo with five worktrees cannot put the same card in front of somebody
-five times. The cost is that news is silent until main is pulled, which the top
-bar's "update main" control already drives.
+**Only the main checkout's news counts, by default.** The daemon reads `ide.news`
+from the repo's *main* worktree — the primary clone — and discards every other
+checkout's copy. So a card being drafted **in a worktree** cannot prompt anybody
+until it lands, and a repo with five worktrees cannot put the same card in front
+of somebody five times. The cost is that news is silent until main is pulled,
+which the top bar's "update main" control already drives. This is a setting,
+`news.source` (`main` by default; see `veld_core::db::ConfigSource`), rather than
+hardcoded — `worktree` unions every checked-out worktree's own `ide.news` instead,
+which is a deliberate testing posture for previewing a card before it merges, not
+the production behaviour this section otherwise describes.
+
+**Previewing a card is not free, because the id is real.** A draft's id is the
+same one the merged card will carry — namespaced per project, not per worktree
+— so reading or dismissing a preview marks that id read in the same durable
+per-user state a real card would. Previewing a card and then merging it means
+the merged version never prompts on that machine either; this is a cost of
+testing through the real channel, not a bug in it.
 
 Note what this is keyed on, because the shorter version of the sentence is wrong:
 it is the main **checkout**, whatever that checkout currently has *checked out* —

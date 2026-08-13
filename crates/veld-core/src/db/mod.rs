@@ -32,7 +32,7 @@ pub use layouts::{LayoutRejected, LayoutWrite, MAX_LAYOUT_BYTES, PaneLayout};
 pub use logs::{LogFilter, LogRow, LogStream, stream_is_per_node};
 pub use panes::{PaneSession, mint_pane_token};
 pub use settings::{
-    DEFAULT_DETACH_GRACE_MINUTES, GitCreateSource, LogTimeZone, MAX_RUN_HISTORY_DAYS,
+    ConfigSource, DEFAULT_DETACH_GRACE_MINUTES, GitCreateSource, LogTimeZone, MAX_RUN_HISTORY_DAYS,
 };
 pub use var_overrides::{OverrideScope, VarOverride};
 pub use worktrees::{

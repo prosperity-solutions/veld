@@ -53,6 +53,83 @@ pub enum GitCreateSource {
     Local,
 }
 
+/// Which checkout's `veld.json` a project-declared surface reads its
+/// declarations from — `extensions.source` and `news.source`.
+///
+/// **`Main` is the default for both**, which is a reversal for extensions: see
+/// the 2026-08-13 "Extensions are worktree-based" entry in
+/// `docs/extensions-vision.md`. That decision shipped the same day it was made
+/// and was itself reversed once its cost showed up in practice — a new user
+/// onboarding onto Veld's IDE sees the "extensions" news card, but their
+/// pre-existing worktrees were cloned before the project's `veld.json` gained
+/// an `ide.extensions` block, so nothing renders until they create a fresh
+/// worktree. Reading from the **main** checkout instead means every worktree
+/// of a project sees whatever the project has merged, regardless of when that
+/// worktree was created — matching how `ide.news` already worked, and for the
+/// same underlying reason: a card or a badge that predates a worktree's own
+/// clone must still reach it.
+///
+/// **`Worktree` exists for testing an extension (or a news card) before it
+/// merges** — the workflow the original worktree-based decision was written to
+/// protect (`docs/extensions-vision.md`, same entry): check out a branch, add
+/// or edit the declaration, see it render in that same worktree, then merge.
+/// Flipping this setting to `Worktree` restores exactly that loop; the
+/// trade-off is the one the reversed decision accepted — an untrusted branch's
+/// own badge commands do not run automatically in `Main` mode (its
+/// declarations are ignored until merged), which is a net security
+/// improvement over the worktree-based default, not a regression: reviewing a
+/// fork pull request no longer means trusting its `veld.json` to run
+/// unattended.
+///
+/// Three things worth stating plainly rather than leaving implicit:
+///
+/// - **"Main" means the main *checkout*, not the default *branch*** — the same
+///   distinction `ide.news` already draws (`docs/configuration.md`). If the
+///   primary clone is itself sitting on an untrusted branch (a `gh pr
+///   checkout` run there, or main simply left on a feature branch), `Main`
+///   mode resolves declarations from *that* checkout's config — the safety
+///   property holds only as long as the main checkout is actually on the
+///   project's default branch.
+/// - **The command still executes with the *viewed* worktree as its working
+///   directory**, even when its declaration came from main. A main-declared
+///   badge that shells out to a repo-relative script (this project's own
+///   `scripts/veld/pr-badge.sh` example) still runs whatever that path
+///   resolves to in the untrusted checkout, not in main's.
+/// - **This setting is machine-global, not per-repo.** Flipping it to
+///   `Worktree` to test one project's extension puts every other open
+///   repo's worktrees back on worktree-sourced declarations too, for as long
+///   as it is left that way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigSource {
+    Main,
+    Worktree,
+}
+
+impl ConfigSource {
+    /// Every source this binary understands. Mirrors [`LogTimeZone::ALL`]:
+    /// the validator's allow-list and the daemon's readers both derive from
+    /// this, so a third variant cannot validate on write and then be
+    /// silently read back as `Main` by a hand-written `== Some("worktree")`
+    /// check that never learned about it.
+    pub const ALL: &'static [ConfigSource] = &[Self::Main, Self::Worktree];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Main => "main",
+            Self::Worktree => "worktree",
+        }
+    }
+
+    /// The inverse of [`Self::as_str`], exhaustive by construction over
+    /// [`Self::ALL`].
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|source| source.as_str() == s)
+    }
+}
+
 /// Terminal sessions are reaped this long after their last client detaches.
 ///
 /// Quoted in `README.md` and `website/llms-full.txt`. Those copies are pinned by
@@ -340,6 +417,8 @@ pub enum SettingKey {
     TerminalShellIntegration,
     TerminalAgentIntegration,
     ExtensionsAutoRefresh,
+    ExtensionsSource,
+    NewsSource,
     ActivityShowWorking,
     ActivityNotifyCommandFinished,
     ActivityNotifyCommandFailed,
@@ -395,6 +474,8 @@ impl SettingKey {
         Self::TerminalShellIntegration,
         Self::TerminalAgentIntegration,
         Self::ExtensionsAutoRefresh,
+        Self::ExtensionsSource,
+        Self::NewsSource,
         Self::ActivityShowWorking,
         Self::ActivityNotifyCommandFinished,
         Self::ActivityNotifyCommandFailed,
@@ -439,6 +520,8 @@ impl SettingKey {
             Self::TerminalShellIntegration => "terminal.shellIntegration",
             Self::TerminalAgentIntegration => "terminal.agentIntegration",
             Self::ExtensionsAutoRefresh => "extensions.autoRefresh",
+            Self::ExtensionsSource => "extensions.source",
+            Self::NewsSource => "news.source",
             Self::ActivityShowWorking => "activity.showWorking",
             Self::ActivityNotifyCommandFinished => "activity.notifyCommandFinished",
             Self::ActivityNotifyCommandFailed => "activity.notifyCommandFailed",
@@ -485,6 +568,8 @@ impl SettingKey {
             "terminal.shellIntegration" => Self::TerminalShellIntegration,
             "terminal.agentIntegration" => Self::TerminalAgentIntegration,
             "extensions.autoRefresh" => Self::ExtensionsAutoRefresh,
+            "extensions.source" => Self::ExtensionsSource,
+            "news.source" => Self::NewsSource,
             "activity.showWorking" => Self::ActivityShowWorking,
             "activity.notifyCommandFinished" => Self::ActivityNotifyCommandFinished,
             "activity.notifyCommandFailed" => Self::ActivityNotifyCommandFailed,
@@ -664,6 +749,14 @@ impl SettingKey {
             // directly in `create_worktree`, so a stored value neither surface
             // honours would silently change where branches come from.
             Self::GitCreateFrom => one_of(value, &["origin", "local"]).ok_or_else(bad)?,
+            // Which checkout's `veld.json` `ide.extensions`/`ide.news` declarations
+            // are read from. Rejected rather than coerced, same reason as every
+            // other enum here: the daemon acts on this directly (`worktree_target`
+            // in `veld-daemon/src/extensions.rs`, `repo_view` in `desktop.rs`).
+            Self::ExtensionsSource | Self::NewsSource => {
+                let s = value.as_str().ok_or_else(bad)?;
+                Value::from(ConfigSource::parse(s).ok_or_else(bad)?.as_str())
+            }
             // Where a *new* worktree's checkout lands. Rejected rather than
             // coerced, same reason as `GitCreateFrom` just above: the daemon acts
             // on this directly in `create_worktree`.
@@ -1037,6 +1130,16 @@ pub fn defaults() -> BTreeMap<String, Value> {
         // switch exists for the machine that wants none rather than as a gate
         // everybody steps through. See `Db::extensions_auto_refresh`.
         (SettingKey::ExtensionsAutoRefresh, Value::from(true)),
+        // `main` — see `ConfigSource`. Reverses the "extensions are worktree-based"
+        // decision (`docs/extensions-vision.md`, 2026-08-13): a worktree cloned
+        // before a project's `veld.json` gained `ide.extensions` showed nothing
+        // until re-cloned. `worktree` restores the old default, for testing a
+        // declaration before it merges.
+        (SettingKey::ExtensionsSource, Value::from("main")),
+        // `main` — the behaviour `ide.news` already had (`repo_view` in
+        // `desktop.rs`), now a setting rather than hardcoded, so it can be flipped
+        // to `worktree` to preview a card before merging it.
+        (SettingKey::NewsSource, Value::from("main")),
         // **Off**, reversing an earlier default-on decision on evidence from real use.
         //
         // The signal is only as good as its producers, and today they are uneven. A plain
@@ -1393,6 +1496,36 @@ impl Db {
             .flatten()
             .and_then(|v| v.as_bool())
             .unwrap_or(true)
+    }
+
+    /// Which checkout's `veld.json` `ide.extensions` are read from
+    /// (`extensions.source`). See [`ConfigSource`].
+    ///
+    /// Read by the daemon's `worktree_target` (`veld-daemon/src/extensions.rs`),
+    /// so — like [`Self::git_create_from`] — it goes through the "anything not a
+    /// real value is the default" path rather than trusting the stored bytes. A
+    /// value that is not `"worktree"` here is `"main"` (the default).
+    pub fn extensions_source(&self) -> ConfigSource {
+        self.setting(&SettingKey::ExtensionsSource)
+            .ok()
+            .flatten()
+            .and_then(|v| v.as_str().and_then(ConfigSource::parse))
+            .unwrap_or(ConfigSource::Main)
+    }
+
+    /// Which checkout's `veld.json` `ide.news` is read from (`news.source`). See
+    /// [`ConfigSource`].
+    ///
+    /// Read by the daemon's `repo_view` (`veld-daemon/src/desktop.rs`), with the
+    /// same "anything not a real value is the default" fallback as
+    /// [`Self::extensions_source`]. Defaults to `"main"`, unchanged from the
+    /// behaviour before this setting existed.
+    pub fn news_source(&self) -> ConfigSource {
+        self.setting(&SettingKey::NewsSource)
+            .ok()
+            .flatten()
+            .and_then(|v| v.as_str().and_then(ConfigSource::parse))
+            .unwrap_or(ConfigSource::Main)
     }
 
     /// Where a new worktree's branch is cut from (`git.createFrom`).
@@ -2312,5 +2445,67 @@ mod tests {
             )]))
             .unwrap_err();
         assert!(matches!(e, DbError::InvalidSetting { .. }), "{e}");
+    }
+
+    #[test]
+    fn extensions_source_defaults_to_main_and_reads_the_stored_value() {
+        // The gap review found: `extensions_source`/`news_source` hand-compare a
+        // string independently of `ConfigSource::parse`, so a typo'd or inverted
+        // reader would pin every install to `Main` forever with every other test
+        // in the suite still green. This pins the accessor itself, not just the
+        // validator or `select_news`.
+        let (_dir, db) = test_db();
+        assert_eq!(db.extensions_source(), ConfigSource::Main);
+
+        db.patch_settings(&patch(&[("extensions.source", Value::from("worktree"))]))
+            .unwrap();
+        assert_eq!(db.extensions_source(), ConfigSource::Worktree);
+
+        db.patch_settings(&patch(&[("extensions.source", Value::from("main"))]))
+            .unwrap();
+        assert_eq!(db.extensions_source(), ConfigSource::Main);
+    }
+
+    #[test]
+    fn extensions_source_rejects_garbage_rather_than_storing_it() {
+        let (_dir, db) = test_db();
+        let e = db
+            .patch_settings(&patch(&[("extensions.source", Value::from("origin"))]))
+            .unwrap_err();
+        assert!(matches!(e, DbError::InvalidSetting { .. }), "{e}");
+        // The rejected write must not have clobbered the default.
+        assert_eq!(db.extensions_source(), ConfigSource::Main);
+    }
+
+    #[test]
+    fn news_source_defaults_to_main_and_reads_the_stored_value() {
+        let (_dir, db) = test_db();
+        assert_eq!(db.news_source(), ConfigSource::Main);
+
+        db.patch_settings(&patch(&[("news.source", Value::from("worktree"))]))
+            .unwrap();
+        assert_eq!(db.news_source(), ConfigSource::Worktree);
+
+        db.patch_settings(&patch(&[("news.source", Value::from("main"))]))
+            .unwrap();
+        assert_eq!(db.news_source(), ConfigSource::Main);
+    }
+
+    #[test]
+    fn news_source_rejects_garbage_rather_than_storing_it() {
+        let (_dir, db) = test_db();
+        let e = db
+            .patch_settings(&patch(&[("news.source", Value::from("branch"))]))
+            .unwrap_err();
+        assert!(matches!(e, DbError::InvalidSetting { .. }), "{e}");
+        assert_eq!(db.news_source(), ConfigSource::Main);
+    }
+
+    #[test]
+    fn config_source_parse_is_exhaustive_over_all() {
+        for source in ConfigSource::ALL {
+            assert_eq!(ConfigSource::parse(source.as_str()), Some(*source));
+        }
+        assert_eq!(ConfigSource::parse("bogus"), None);
     }
 }

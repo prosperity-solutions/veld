@@ -19,7 +19,8 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 use veld_core::db::{
-    Db, DiscoveredWorktree, GitCreateSource, RepoRecord, WorktreeRecord, default_alias,
+    ConfigSource, Db, DiscoveredWorktree, GitCreateSource, RepoRecord, WorktreeRecord,
+    default_alias,
 };
 use veld_core::user_path::cached_user_path;
 
@@ -1132,12 +1133,13 @@ struct RepoView {
     /// router must not spawn subprocesses, and git status is computed only by
     /// the CSRF-gated POST paths.
     git: Option<RepoGitStatus>,
-    /// `ide.news` from this repo's **main** checkout — the cards the project shows
-    /// its own team.
+    /// `ide.news` from this repo's **main** checkout by default — the cards the
+    /// project shows its own team. See `news.source` / [`veld_core::db::ConfigSource`]
+    /// for the (non-default) `worktree` alternative.
     ///
     /// On the repo rather than on each worktree because news belongs to the
-    /// project, and because only what has reached main counts: a card being
-    /// drafted in a worktree must not prompt a teammate, and a repo with
+    /// project, and because only what has reached main counts by default: a card
+    /// being drafted in a worktree must not prompt a teammate, and a repo with
     /// five worktrees must not put the same card in front of somebody five times.
     /// [`repo_view`] takes it from the main worktree and discards the rest.
     ///
@@ -1307,17 +1309,21 @@ struct IdeView {
     /// a global curve. Floored to `0.1` so a hand-written `0` cannot divide by
     /// zero or invert the curve.
     staleness_sensitivity: f64,
-    /// This checkout's `ide.news`, **deliberately never serialized** — it is moved
-    /// up to [`RepoView::news`] from the *main* worktree by [`repo_view`], and
-    /// every other checkout's copy is discarded there.
+    /// This checkout's `ide.news`, **deliberately never serialized** — it is
+    /// consumed by [`select_news`] inside [`repo_view`] and moved up to
+    /// [`RepoView::news`] instead, per `news.source`: by default only from the
+    /// *main* worktree, with every other checkout's copy discarded; opted into
+    /// `worktree` mode, unioned across every checkout instead.
     ///
     /// It rides here rather than being parsed a second time because
     /// [`worktree_view`] already has the config open, and it is `skip`ped rather
     /// than merely ignored by the client because the rule it enforces is a
-    /// promise about what a card can do: news counts only once it has reached
-    /// main, so a card being drafted in another worktree must not be able to
-    /// prompt a teammate. A client-side filter would make that promise
-    /// re-breakable by the next person to touch the renderer.
+    /// promise about what a card can do: by default, news counts only once it
+    /// has reached main, so a card being drafted in another worktree must not
+    /// be able to prompt a teammate. A client-side filter would make that
+    /// promise re-breakable by the next person to touch the renderer — and
+    /// `news.source = worktree` is the one place that promise is deliberately
+    /// traded away, in [`select_news`] itself, not here.
     #[serde(skip)]
     news: Vec<veld_core::ide::NewsItem>,
 }
@@ -1452,12 +1458,53 @@ struct NodeOptionView {
     default_variant: Option<String>,
 }
 
-fn worktree_view(wt: WorktreeRecord) -> WorktreeView {
+/// The `ide.extensions` list a worktree's view should carry, resolved from
+/// `declare_root` rather than assumed to be this worktree's own — see
+/// `extensions::resolve_declare_root`. Independent of whether `own_cfg`
+/// (this worktree's own config) parsed at all: a worktree with no `veld.json`
+/// of its own must still see main's badges when `extensions.source = main`,
+/// which is the entire point of the reversal this setting exists for.
+fn extensions_view_for(
+    own_cfg: Option<&veld_core::config::VeldConfig>,
+    own_root: &str,
+    declare_root: Option<&str>,
+) -> Vec<ExtensionView> {
+    match declare_root {
+        // `extensions.source = main` with no resolvable main checkout — fail
+        // closed, exactly as `extensions::worktree_target` does for the
+        // status/activate endpoints, so the listing and the endpoints that
+        // act on it never disagree about what exists.
+        None => Vec::new(),
+        Some(root) if root == own_root => own_cfg
+            .map(|c| {
+                c.ide_section()
+                    .extensions
+                    .iter()
+                    .map(extension_view)
+                    .collect()
+            })
+            .unwrap_or_default(),
+        Some(other_root) => veld_core::config::root_config_in(FsPath::new(other_root))
+            .and_then(|p| veld_core::config::parse_config(&p).ok())
+            .map(|c| {
+                c.ide_section()
+                    .extensions
+                    .iter()
+                    .map(extension_view)
+                    .collect()
+            })
+            .unwrap_or_default(),
+    }
+}
+
+fn worktree_view(db: &Db, wt: WorktreeRecord) -> WorktreeView {
     let config_path = veld_core::config::root_config_in(FsPath::new(&wt.path));
     let has_veld_config = config_path.is_some();
     let cfg = config_path
         .as_deref()
         .and_then(|p| veld_core::config::parse_config(p).ok());
+    let declare_root = super::extensions::resolve_declare_root(db, &wt, db.extensions_source());
+    let extensions_view = extensions_view_for(cfg.as_ref(), &wt.path, declare_root.as_deref());
     // Display order comes from the resolver, not a sort here — the UI list and
     // the CLI picker must agree, or the key printed next to a preset in one
     // surface means something else in the other.
@@ -1521,7 +1568,7 @@ fn worktree_view(wt: WorktreeRecord) -> WorktreeView {
         })
         .unwrap_or_default();
     nodes.sort_by(|a, b| a.name.cmp(&b.name));
-    let ide = cfg
+    let mut ide = cfg
         .as_ref()
         .map(|c| {
             let section = c.ide_section();
@@ -1549,7 +1596,6 @@ fn worktree_view(wt: WorktreeRecord) -> WorktreeView {
                     }
                 })
                 .collect();
-            let extensions = section.extensions.iter().map(extension_view).collect();
             // Read the floored scalar before the vec fields are moved below, so
             // the partial moves do not leave `section` half-borrowed.
             let staleness_sensitivity = section.staleness_sensitivity_safe();
@@ -1557,12 +1603,19 @@ fn worktree_view(wt: WorktreeRecord) -> WorktreeView {
                 quicklinks: section.quicklinks,
                 permissions: section.permissions,
                 panes,
-                extensions,
+                // Set below, from `declare_root` rather than this worktree's own
+                // section — a worktree whose own config fails to parse still
+                // needs a value here, which is why it isn't read from `section`.
+                extensions: Vec::new(),
                 staleness_sensitivity,
                 news: section.news,
             }
         })
         .unwrap_or_default();
+    // Independent of whether `cfg` parsed at all: a worktree with no `veld.json`
+    // of its own (or a broken one) still gets `declare_root`'s extensions when
+    // `extensions.source = main` — see `extensions_view_for`.
+    ide.extensions = extensions_view;
     // `wt` is moved into the view below, so the guard read happens here — before
     // the move — rather than in the literal, where `wt.id` would not resolve.
     let deleting = super::worktree_trash::now_deleting(wt.id);
@@ -1584,6 +1637,117 @@ fn worktree_view(wt: WorktreeRecord) -> WorktreeView {
     }
 }
 
+/// Pick `RepoView.news` out of every checkout's own `ide.news`, per
+/// `news.source` — see [`ConfigSource`].
+///
+/// News belongs to the *project*, and by default only what has landed on main
+/// counts. Taking it here — rather than letting each checkout carry its own —
+/// is what makes "a card being drafted in a worktree cannot prompt anybody"
+/// true by construction. It also keeps the payload one copy per repo on an
+/// endpoint every IDE window polls, instead of one per worktree.
+///
+/// Every other checkout's list is dropped with the `WorktreeView` it rode in
+/// on: `IdeView::news` is `#[serde(skip)]`, so nothing but this function can
+/// move a card onto the wire.
+fn select_news(
+    worktrees: &mut [WorktreeView],
+    source: ConfigSource,
+) -> Vec<veld_core::ide::NewsItem> {
+    match source {
+        ConfigSource::Main => worktrees
+            .iter_mut()
+            .find(|w| w.worktree.is_main)
+            .map(|w| std::mem::take(&mut w.ide.news))
+            .unwrap_or_default(),
+        // `news.source = worktree`: preview a card before it merges. There is no
+        // single "current" worktree at this layer (`repo_view` answers for every
+        // worktree at once, for every window's poll), so this unions every
+        // checkout's own declared news instead of picking one — deliberately a
+        // testing posture, not a production one: it is exactly the guarantee the
+        // `main` default exists for ("a draft cannot reach a teammate") traded
+        // away on purpose, same as `extensions.source = worktree`.
+        ConfigSource::Worktree => {
+            // Main is folded in first, and a later worktree **overrides** an id
+            // already seen rather than being dropped by it — two properties that
+            // matter for different reasons:
+            //
+            // - Main first means main's own cards hold their slots before
+            //   anything else is considered, so a same-day flood of distinct
+            //   ids from other worktrees cannot crowd them out on a tie — see
+            //   the reversed tie-break below. It does **not** protect a main
+            //   card against a genuinely older `since`: the cap always drops
+            //   the oldest card it has, insertion order notwithstanding, and
+            //   main's own cards are not exempt from that rule.
+            // - Override, not skip, means editing an *already-merged* card on a
+            //   branch previews the edit — the literal use case this mode
+            //   exists for — instead of always losing to main's stale copy of
+            //   the same id.
+            //
+            // A trashed worktree is skipped entirely: it is being removed, not
+            // being worked in, and its draft cards should not spend cap slots
+            // or reach anybody.
+            //
+            // The non-main fold-in order is otherwise `list_worktrees`'s own
+            // `WT_ORDER` (lane, then its position, then name) — user-mutable by
+            // dragging a lane or renaming a worktree. Two non-main worktrees
+            // declaring the same id in this mode means which one previews can
+            // change when a lane is reordered; this mode already carries the
+            // "for testing, not daily use" label for a reason, and this is one
+            // of them. `sort_by_key` below relies on a **stable** sort to keep
+            // that order deterministic among non-main worktrees; do not change
+            // it to `sort_unstable_by_key`.
+            let mut order: Vec<usize> = (0..worktrees.len())
+                .filter(|&i| worktrees[i].worktree.trashed_at.is_empty())
+                .collect();
+            order.sort_by_key(|&i| !worktrees[i].worktree.is_main);
+
+            let mut index_by_id: std::collections::HashMap<String, usize> =
+                std::collections::HashMap::new();
+            let mut merged: Vec<veld_core::ide::NewsItem> = Vec::new();
+            for i in order {
+                for item in std::mem::take(&mut worktrees[i].ide.news) {
+                    match index_by_id.get(&item.id) {
+                        Some(&pos) => merged[pos] = item,
+                        None => {
+                            index_by_id.insert(item.id.clone(), merged.len());
+                            merged.push(item);
+                        }
+                    }
+                }
+            }
+            // Over the cap, drop the **oldest `since`** first, the same
+            // principle as the project's own per-config cap (`parse_news` in
+            // `veld_core::ide`). The tie-break is deliberately the mirror image
+            // of that function's, though: `parse_news` breaks a same-day tie by
+            // ascending array position because *there* position is a finer-
+            // grained proxy for authored order (one project, one author,
+            // appended over time). Here position instead just records which
+            // worktree the card rode in on — main always first — so breaking a
+            // same-day tie the same way would silently drop main's own cards
+            // first on every tie, which is precisely the crowding-out this
+            // function's main-first ordering exists to prevent. So ties favour
+            // the **lower** index (main, and whichever worktree was folded in
+            // earliest) surviving instead.
+            if merged.len() > veld_core::ide::MAX_NEWS_ITEMS {
+                let mut by_age: Vec<usize> = (0..merged.len()).collect();
+                by_age.sort_by(|&a, &b| merged[a].since.cmp(&merged[b].since).then(b.cmp(&a)));
+                let doomed: std::collections::HashSet<usize> = by_age
+                    .into_iter()
+                    .take(merged.len() - veld_core::ide::MAX_NEWS_ITEMS)
+                    .collect();
+                let mut kept = Vec::with_capacity(veld_core::ide::MAX_NEWS_ITEMS);
+                for (i, item) in merged.into_iter().enumerate() {
+                    if !doomed.contains(&i) {
+                        kept.push(item);
+                    }
+                }
+                merged = kept;
+            }
+            merged
+        }
+    }
+}
+
 async fn repo_view(
     db: &Db,
     repo: RepoRecord,
@@ -1594,23 +1758,9 @@ async fn repo_view(
         .list_worktrees(FsPath::new(&repo.root))
         .map_err(db_err)?
         .into_iter()
-        .map(worktree_view)
+        .map(|wt| worktree_view(db, wt))
         .collect();
-    // News belongs to the *project*, and only what has landed on main counts.
-    //
-    // Taking it here — rather than letting each checkout carry its own — is what
-    // makes "a card being drafted in a worktree cannot prompt anybody" true
-    // by construction. It also keeps the payload one copy per repo on an endpoint
-    // every IDE window polls, instead of one per worktree.
-    //
-    // Every other checkout's list is dropped with the `WorktreeView` it rode in
-    // on: `IdeView::news` is `#[serde(skip)]`, so nothing but this line can move
-    // a card onto the wire.
-    let news = worktrees
-        .iter_mut()
-        .find(|w| w.worktree.is_main)
-        .map(|w| std::mem::take(&mut w.ide.news))
-        .unwrap_or_default();
+    let news = select_news(&mut worktrees, db.news_source());
     let lanes = db.list_lanes(FsPath::new(&repo.root)).map_err(db_err)?;
     Ok(RepoView {
         repo,
@@ -2373,7 +2523,7 @@ async fn create_worktree(
         }
         _ => created,
     };
-    Ok(Json(worktree_view(created)))
+    Ok(Json(worktree_view(&db, created)))
 }
 
 /// Partial update. Both fields are optional so the alias-only callers that
@@ -2482,7 +2632,7 @@ async fn patch_worktree(
         .get_worktree(id)
         .map_err(db_err)?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "worktree not found"))?;
-    Ok(Json(worktree_view(wt)))
+    Ok(Json(worktree_view(&db, wt)))
 }
 
 #[derive(Deserialize)]
@@ -2682,7 +2832,7 @@ async fn restore_worktree(Path(id): Path<i64>) -> Result<Json<WorktreeView>, Api
         .get_worktree(id)
         .map_err(db_err)?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "worktree already removed"))?;
-    Ok(Json(worktree_view(wt)))
+    Ok(Json(worktree_view(&db, wt)))
 }
 
 /// Delete a trashed worktree now, without waiting for its retention to expire.
@@ -2980,6 +3130,279 @@ async fn start_worktree_run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- `select_news` (`news.source`) ---------------------------------------
+
+    fn wt_record(id: i64, is_main: bool) -> WorktreeRecord {
+        WorktreeRecord {
+            id,
+            repo_root: "/repo".to_owned(),
+            path: format!("/repo/wt{id}"),
+            branch: "main".to_owned(),
+            alias: format!("wt{id}"),
+            display_name: String::new(),
+            emoji: String::new(),
+            marker_color: String::new(),
+            is_main,
+            created_at: String::new(),
+            lane: String::new(),
+            sort_position: None,
+            trashed_at: String::new(),
+            trash_error: String::new(),
+        }
+    }
+
+    fn wt_view(id: i64, is_main: bool, news: Vec<veld_core::ide::NewsItem>) -> WorktreeView {
+        WorktreeView {
+            worktree: wt_record(id, is_main),
+            deleting: false,
+            has_veld_config: true,
+            presets: None,
+            nodes: Vec::new(),
+            machine_vars: None,
+            ide: IdeView {
+                news,
+                ..Default::default()
+            },
+        }
+    }
+
+    fn news_item(id: &str) -> veld_core::ide::NewsItem {
+        veld_core::ide::NewsItem {
+            id: id.to_owned(),
+            since: "2026-01-01".to_owned(),
+            eyebrow: "Eyebrow".to_owned(),
+            headline: "Headline".to_owned(),
+            body: "One sentence.".to_owned(),
+            glyph: "inbox".to_owned(),
+        }
+    }
+
+    #[test]
+    fn select_news_main_takes_only_the_main_checkouts_cards() {
+        let mut worktrees = vec![
+            wt_view(1, true, vec![news_item("a")]),
+            wt_view(2, false, vec![news_item("b")]),
+        ];
+        let selected = select_news(&mut worktrees, ConfigSource::Main);
+        assert_eq!(
+            selected.iter().map(|n| n.id.as_str()).collect::<Vec<_>>(),
+            vec!["a"],
+            "a non-main worktree's own news must never reach the wire in the default mode"
+        );
+    }
+
+    #[test]
+    fn select_news_worktree_unions_ids_declared_only_on_one_checkout() {
+        let mut worktrees = vec![
+            wt_view(1, true, vec![news_item("a")]),
+            wt_view(2, false, vec![news_item("a"), news_item("b")]),
+        ];
+        let selected = select_news(&mut worktrees, ConfigSource::Worktree);
+        assert_eq!(
+            selected.iter().map(|n| n.id.as_str()).collect::<Vec<_>>(),
+            vec!["a", "b"],
+        );
+    }
+
+    #[test]
+    fn select_news_worktree_previews_an_edit_to_an_already_merged_card() {
+        // The literal use case `news.source = worktree` exists for: a card with
+        // id "a" already merged on main, and a branch editing its wording before
+        // merging that edit. The worktree's version must win — otherwise nothing
+        // ever previews and the setting does not do what it says.
+        let mut main_copy = news_item("a");
+        main_copy.body = "old wording, already on main".to_owned();
+        let mut draft = news_item("a");
+        draft.body = "new wording, being edited on this branch".to_owned();
+
+        let mut worktrees = vec![
+            wt_view(1, true, vec![main_copy]),
+            wt_view(2, false, vec![draft]),
+        ];
+        let selected = select_news(&mut worktrees, ConfigSource::Worktree);
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].body, "new wording, being edited on this branch");
+    }
+
+    #[test]
+    fn select_news_worktree_main_survives_a_same_day_flood_from_other_worktrees() {
+        // Main declares one card; enough other worktrees each declare one
+        // distinct, same-`since` card to exceed the cap on their own. Main's
+        // card must still survive — main-first insertion plus the reversed
+        // tie-break both have to hold for this, not just one of them.
+        let mut worktrees = vec![wt_view(1, true, vec![news_item("main-card")])];
+        for i in 0..veld_core::ide::MAX_NEWS_ITEMS {
+            worktrees.push(wt_view(
+                2 + i as i64,
+                false,
+                vec![news_item(&format!("flood-{i}"))],
+            ));
+        }
+        let selected = select_news(&mut worktrees, ConfigSource::Worktree);
+        assert_eq!(selected.len(), veld_core::ide::MAX_NEWS_ITEMS);
+        assert!(
+            selected.iter().any(|n| n.id == "main-card"),
+            "main's own card must not be the one a same-day flood from other worktrees drops"
+        );
+    }
+
+    #[test]
+    fn select_news_worktree_skips_trashed_checkouts() {
+        let mut draft = news_item("a");
+        let mut trashed = wt_view(2, false, vec![news_item("gone")]);
+        trashed.worktree.trashed_at = "2026-08-13T00:00:00Z".to_owned();
+        draft.id = "kept".to_owned();
+        let mut worktrees = vec![
+            wt_view(1, true, vec![]),
+            wt_view(3, false, vec![draft]),
+            trashed,
+        ];
+        let selected = select_news(&mut worktrees, ConfigSource::Worktree);
+        assert_eq!(
+            selected.iter().map(|n| n.id.as_str()).collect::<Vec<_>>(),
+            vec!["kept"],
+            "a trashed worktree's draft cards must not reach the wire"
+        );
+    }
+
+    #[test]
+    fn select_news_worktree_still_respects_the_project_wide_cap() {
+        let mut worktrees: Vec<WorktreeView> = (0..(veld_core::ide::MAX_NEWS_ITEMS + 3))
+            .map(|i| wt_view(i as i64, i == 0, vec![news_item(&format!("n{i}"))]))
+            .collect();
+        let selected = select_news(&mut worktrees, ConfigSource::Worktree);
+        assert_eq!(
+            selected.len(),
+            veld_core::ide::MAX_NEWS_ITEMS,
+            "unioning every worktree's news must not bypass the endpoint's own cap"
+        );
+    }
+
+    // -- `worktree_view` extensions (`extensions.source`) --------------------
+
+    fn open_test_db() -> (tempfile::TempDir, Db) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = Db::open_at(&dir.path().join("veld.db")).unwrap();
+        (dir, db)
+    }
+
+    /// The critical case this setting exists for, end to end: a worktree with
+    /// **no `veld.json` of its own** — the onboarding gap, not a hypothetical —
+    /// must still see main's `ide.extensions` under the default, and must not
+    /// borrow them when opted into `worktree` mode. An earlier version of this
+    /// change wired the setting into the `status`/`activate` endpoints but left
+    /// this exact listing sourced from the viewed worktree unconditionally, so
+    /// the onboarding fix did not actually reach the UI — caught in review, not
+    /// after.
+    #[test]
+    fn worktree_view_extensions_come_from_main_when_this_worktree_predates_them() {
+        let (_db_dir, db) = open_test_db();
+        let repo_dir = tempfile::TempDir::new().expect("tempdir");
+        let main_path = repo_dir.path().join("main");
+        let old_path = repo_dir.path().join("old-worktree");
+        std::fs::create_dir_all(&main_path).unwrap();
+        std::fs::create_dir_all(&old_path).unwrap();
+        std::fs::write(
+            main_path.join("veld.json"), // root-config-gate-ok
+            r#"{"schemaVersion": "3", "name": "t", "nodes": {}, "ide": {"extensions": [
+                {"id": "pr", "slot": "topBar", "type": "action", "label": "PR", "argv": ["true"]}
+            ]}}"#,
+        )
+        .unwrap();
+        // `old_path` deliberately has no `veld.json` at all.
+
+        let discovered = vec![
+            DiscoveredWorktree {
+                path: main_path.to_string_lossy().into_owned(),
+                branch: "main".to_owned(),
+                is_main: true,
+            },
+            DiscoveredWorktree {
+                path: old_path.to_string_lossy().into_owned(),
+                branch: "old".to_owned(),
+                is_main: false,
+            },
+        ];
+        db.upsert_repo(repo_dir.path(), "repo").unwrap();
+        db.sync_worktrees(repo_dir.path(), &discovered).unwrap();
+        let old_wt = db
+            .list_worktrees(repo_dir.path())
+            .unwrap()
+            .into_iter()
+            .find(|w| !w.is_main)
+            .expect("the non-main row");
+
+        // Default (`main`): the old worktree renders main's extension.
+        let view = worktree_view(&db, old_wt.clone());
+        assert_eq!(
+            view.ide.extensions.len(),
+            1,
+            "a worktree with no veld.json of its own must still see main's extensions by default"
+        );
+        assert_eq!(view.ide.extensions[0].id, "pr");
+
+        // `worktree` mode: the old worktree has nothing of its own to show.
+        db.patch_settings(
+            &[(
+                "extensions.source".to_owned(),
+                serde_json::Value::from("worktree"),
+            )]
+            .into_iter()
+            .collect(),
+        )
+        .unwrap();
+        let view = worktree_view(&db, old_wt);
+        assert!(
+            view.ide.extensions.is_empty(),
+            "worktree mode must not borrow main's declarations"
+        );
+    }
+
+    /// The fail-closed case: `main` mode with no `is_main` row at all for this
+    /// repo (a bare primary clone — see `extensions::resolve_declare_root`'s
+    /// doc comment) must show no extensions, never silently fall back to the
+    /// requested worktree's own — which would reopen the exact threat `main`
+    /// mode exists to close.
+    #[test]
+    fn worktree_view_extensions_fail_closed_when_no_main_checkout_can_be_found() {
+        let (_db_dir, db) = open_test_db();
+        let repo_dir = tempfile::TempDir::new().expect("tempdir");
+        let only_path = repo_dir.path().join("only-worktree");
+        std::fs::create_dir_all(&only_path).unwrap();
+        std::fs::write(
+            only_path.join("veld.json"), // root-config-gate-ok
+            r#"{"schemaVersion": "3", "name": "t", "nodes": {}, "ide": {"extensions": [
+                {"id": "own", "slot": "topBar", "type": "action", "label": "Own", "argv": ["true"]}
+            ]}}"#,
+        )
+        .unwrap();
+
+        // `is_main: false` on the only worktree — the shape `parse_worktree_list`
+        // produces for a bare primary clone, where `is_main` is consumed and then
+        // the block is skipped, leaving no `is_main` row for the repo at all.
+        let discovered = vec![DiscoveredWorktree {
+            path: only_path.to_string_lossy().into_owned(),
+            branch: "feat".to_owned(),
+            is_main: false,
+        }];
+        db.upsert_repo(repo_dir.path(), "repo").unwrap();
+        db.sync_worktrees(repo_dir.path(), &discovered).unwrap();
+        let wt = db
+            .list_worktrees(repo_dir.path())
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("the only row");
+        assert!(!wt.is_main, "test setup: this repo must have no main row");
+
+        let view = worktree_view(&db, wt);
+        assert!(
+            view.ide.extensions.is_empty(),
+            "no resolvable main checkout must fail closed, not fall back to this \
+             worktree's own (and clearly-untrusted-by-construction) declarations"
+        );
+    }
 
     // -- Process-global guards ----------------------------------------------
 
