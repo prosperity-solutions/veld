@@ -432,7 +432,7 @@ pub struct HookPayload {
     /// Pi's discriminator. Unlike Claude's and Codex's fields, this is not somebody
     /// else's schema — [`pi_extension_doc`] is the only thing that ever writes this
     /// wire shape, so `event` is whichever `pi.on(...)` name veld's own generated
-    /// extension chose to forward: `"turn_start"`, `"turn_end"`, `"session_shutdown"`.
+    /// extension chose to forward: `"agent_start"`, `"agent_settled"`, `"session_shutdown"`.
     #[serde(default)]
     pub event: Option<String>,
     /// `session_shutdown`'s reason (`"quit" | "reload" | "new" | "resume" | "fork"`),
@@ -634,14 +634,27 @@ pub fn codex_state(payload: &HookPayload) -> State {
 /// include built-in MCP, sub-agents, …"), so there is no second lifecycle a future
 /// event could conflate with the session's own turn.
 ///
-/// # `turn_start`/`turn_end`, not `before_agent_start`/`agent_settled`
+/// # `agent_start`/`agent_settled`, not `turn_start`/`turn_end`
 ///
-/// Pi fires both pairs. `turn_start`/`turn_end` are documented fire-and-forget and
-/// once per **turn**, the same shape as Claude's blocking `UserPromptSubmit`/`Stop` —
-/// except Pi's are not on a blocking path at all, so there is no ceiling to bound.
-/// `agent_start`/`agent_end`/`agent_settled` track a lower-level *agent run* inside a
-/// turn (retries, sub-runs) rather than the turn itself, which is one layer more than
-/// this pane's badge needs.
+/// Pi's lifecycle has two nested levels. A **turn** is one LLM response plus the
+/// tool calls it made (`turn_start` … `turn_end`); an **agent run** is the whole
+/// processing of one user prompt (`agent_start` … `agent_end` … `agent_settled`), and
+/// it contains as many turns as the run needs while it calls tools. `turn_start`/
+/// `turn_end` therefore fire **once per step**, not once per prompt — which is exactly
+/// the per-step "finished" spam this badge must not reproduce (a run that calls ten
+/// tools filed ten "agent finished" events). The run-level pair is the right
+/// granularity: `agent_start` is when the agent starts working, and `agent_settled` is
+/// the documented signal that the run is "fully settled; no automatic retry, compaction
+/// retry, or queued follow-up messages remain" — the one event that means the agent is
+/// genuinely idle waiting for the next prompt, the same shape as Claude's
+/// `UserPromptSubmit`/`Stop`. `agent_end` is deliberately not used for the same reason
+/// `turn_end` is not: Pi may still auto-retry, auto-compact and retry, or continue with
+/// queued follow-up messages after it, so it is not "done" either.
+///
+/// Neither event is on a blocking path veld has to bound: the generated extension
+/// spawns its reporter and returns without awaiting it ([`pi_extension_doc`]), so a
+/// hung `veld` binary cannot hold Pi's run open regardless of whether Pi itself
+/// awaits the handler.
 ///
 /// # `session_shutdown` only reports `Done` for `"quit"`
 ///
@@ -655,12 +668,12 @@ pub fn codex_state(payload: &HookPayload) -> State {
 /// boundary at all.
 ///
 /// Measured at **pi-coding-agent 0.84.1** — the version to recheck this against if
-/// `turn_start`/`turn_end`/`session_shutdown` are ever renamed or regrouped.
+/// `agent_start`/`agent_settled`/`session_shutdown` are ever renamed or regrouped.
 #[must_use]
 pub fn pi_state(payload: &HookPayload) -> State {
     match payload.event.as_deref() {
-        Some("turn_start") => State::Working,
-        Some("turn_end") => State::Idle,
+        Some("agent_start") => State::Working,
+        Some("agent_settled") => State::Idle,
         Some("session_shutdown") => match payload.reason.as_deref() {
             Some("quit") => State::Done,
             _ => State::Unknown,
@@ -804,15 +817,16 @@ pub fn codex_notify_config(cli: &Path, session_id: &str) -> String {
 ///
 /// # Why the reporting call is never awaited
 ///
-/// `turn_start`/`turn_end` are fire-and-forget events already; `session_shutdown` is
-/// not — Pi awaits its handler before actually shutting down. The generated handler
-/// calls `child_process.execFile` and returns without awaiting the callback, so the
-/// handler's own promise resolves immediately regardless of how long (or whether) the
-/// spawned `veld agent-state` finishes — the same trade [`codex_notify_config`] takes
-/// for the same reason, just enforced in JS rather than by Codex's own `spawn()`
-/// never being awaited. [`HOOK_TIMEOUT_SECS`] still bounds the child process itself
-/// (`execFile`'s own `timeout`), so a hung `veld` binary cannot hold Pi's shutdown
-/// open either.
+/// The generated handler calls `child_process.execFile` and returns without awaiting
+/// the callback, so the handler's own promise resolves immediately regardless of how
+/// long (or whether) the spawned `veld agent-state` finishes — the same trade
+/// [`codex_notify_config`] takes for the same reason, just enforced in JS rather than
+/// by Codex's own `spawn()` never being awaited. That holds for every event here:
+/// `agent_start`/`agent_settled` are run lifecycle events, and `session_shutdown` is
+/// one Pi *does* await before actually shutting down — which is why the handler must
+/// not await anything itself. [`HOOK_TIMEOUT_SECS`] still bounds the child process
+/// itself (`execFile`'s own `timeout`), so a hung `veld` binary cannot hold Pi's
+/// shutdown open either.
 ///
 /// # Why the payload rides on `argv`, not `stdin`
 ///
@@ -835,7 +849,7 @@ pub fn pi_extension_doc(cli: &Path, session_id: &str) -> String {
         serde_json::to_string(session_id).expect("a String serializes to JSON infallibly");
     format!(
         r#"// pi-veld-activity-reporter — generated by veld, rewritten on every launch.
-// Reports this session's turn/shutdown lifecycle to Veld's activity badge. Never edit by hand.
+// Reports this session's run/shutdown lifecycle to Veld's activity badge. Never edit by hand.
 import {{ execFile }} from "node:child_process";
 
 const CLI = {cli_js};
@@ -852,8 +866,8 @@ function report(event, reason) {{
 }}
 
 export default function (pi) {{
-  pi.on("turn_start", async () => {{ report("turn_start"); }});
-  pi.on("turn_end", async () => {{ report("turn_end"); }});
+  pi.on("agent_start", async () => {{ report("agent_start"); }});
+  pi.on("agent_settled", async () => {{ report("agent_settled"); }});
   pi.on("session_shutdown", async (event) => {{ report("session_shutdown", event.reason); }});
 }}
 "#,
@@ -1202,16 +1216,16 @@ mod tests {
         );
     }
 
-    /// A turn starting and ending, and only `"quit"` ending the session.
+    /// A run starting and settling, and only `"quit"` ending the session.
     #[test]
-    fn pi_reports_turns_and_only_a_real_quit_as_done() {
+    fn pi_reports_agent_runs_and_only_a_real_quit_as_done() {
         let event = |name: &str, reason: Option<&str>| HookPayload {
             event: Some(name.to_owned()),
             reason: reason.map(str::to_owned),
             ..Default::default()
         };
-        assert_eq!(pi_state(&event("turn_start", None)), State::Working);
-        assert_eq!(pi_state(&event("turn_end", None)), State::Idle);
+        assert_eq!(pi_state(&event("agent_start", None)), State::Working);
+        assert_eq!(pi_state(&event("agent_settled", None)), State::Idle);
         assert_eq!(
             pi_state(&event("session_shutdown", Some("quit"))),
             State::Done
@@ -1226,6 +1240,29 @@ mod tests {
             );
         }
         assert_eq!(pi_state(&event("session_shutdown", None)), State::Unknown);
+    }
+
+    /// A turn ending is not a run settling: a run that calls tools fires `turn_end`
+    /// after **every** step, long before the agent is done. Mapping it to `Idle` is
+    /// what filed an "agent finished" notification for each step of a run that was
+    /// still working — the bug this pair was switched away from. The run-level
+    /// `agent_settled` is the only end-of-run signal ("no retry, compaction retry, or
+    /// queued follow-up remains"), and `agent_end` is not done either for the same
+    /// reason.
+    #[test]
+    fn a_turn_end_is_not_a_finished_agent() {
+        let event = |name: &str| HookPayload {
+            event: Some(name.to_owned()),
+            ..Default::default()
+        };
+        // The per-step events this integration deliberately does not listen to report
+        // nothing rather than a premature "finished".
+        assert_eq!(pi_state(&event("turn_start")), State::Unknown);
+        assert_eq!(pi_state(&event("turn_end")), State::Unknown);
+        assert_eq!(pi_state(&event("agent_end")), State::Unknown);
+        // And the real pair still works.
+        assert_eq!(pi_state(&event("agent_start")), State::Working);
+        assert_eq!(pi_state(&event("agent_settled")), State::Idle);
     }
 
     /// Nothing Pi has not been told to send is a guess.
@@ -1250,10 +1287,17 @@ mod tests {
             "{doc}"
         );
         assert!(doc.contains(r#"const SESSION = "pane-7";"#), "{doc}");
-        for event in ["turn_start", "turn_end", "session_shutdown"] {
+        for event in ["agent_start", "agent_settled", "session_shutdown"] {
             assert!(
                 doc.contains(&format!(r#"pi.on("{event}""#)),
                 "{event} missing: {doc}"
+            );
+        }
+        // The per-step events this integration does not listen to must not be wired.
+        for event in ["turn_start", "turn_end", "agent_end"] {
+            assert!(
+                !doc.contains(&format!(r#"pi.on("{event}""#)),
+                "{event} must not be subscribed: {doc}"
             );
         }
         assert!(
