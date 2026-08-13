@@ -254,14 +254,33 @@ async fn battery_capable() -> bool {
     if !cfg!(target_os = "macos") {
         return false;
     }
-    if let Some((learned, answer)) = *PRIVILEGED.lock().await {
+    // **Single-flighted: the lock is held across the probe**, not just around the
+    // cache read. `get_state` is a `GET` with no CSRF gate, so a cross-origin page
+    // can drive it (it cannot read the reply, but the side effect still runs) —
+    // and the side effect here is opening a connection to the *root* helper
+    // socket. `settings.rs:62-77` writes the rule down for this exact shape and
+    // fixes it the same way: a hundred concurrent callers produce one probe and
+    // ninety-nine clones of its answer.
+    let mut cache = PRIVILEGED.lock().await;
+    if let Some((learned, answer)) = *cache {
         if learned.elapsed() < PRIVILEGED_PROBE_TTL {
             return answer;
         }
     }
     let answer = HelperClient::connect_privileged().await.is_ok();
-    *PRIVILEGED.lock().await = Some((Instant::now(), answer));
+    *cache = Some((Instant::now(), answer));
     answer
+}
+
+/// Force the capability cache to "no privileged half".
+///
+/// Called when the helper answers `unknown command`: the socket is reachable, so
+/// the probe says capable, but this helper predates the feature and never will
+/// take a lease. Without this the menu shows "the privileged helper didn't take
+/// the lease" — a fault with no user action — instead of the actionable line
+/// naming `veld setup privileged`.
+async fn mark_not_battery_capable() {
+    *PRIVILEGED.lock().await = Some((Instant::now(), false));
 }
 
 /// Take the first lease, returning the helper to renew it on.
@@ -289,7 +308,18 @@ async fn acquire_battery_lease() -> Option<HelperClient> {
         // answers `unknown command`, which is exactly "no battery coverage
         // here" and not a reason to fail the keep-awake.
         Ok(Err(e)) => {
-            warn!(error = %e, "could not hold battery sleep; keeping the machine awake on mains power only");
+            // An `unknown command` reply is a *capability* answer, not a fault:
+            // this helper predates the feature. Record it so the menu offers the
+            // actionable line instead of reporting a failure the user cannot act
+            // on. Matched on the helper's own wording (`handler.rs`'s fallback
+            // arm); a miss only costs the better message, never correctness.
+            let message = e.to_string();
+            if message.contains("unknown command") {
+                mark_not_battery_capable().await;
+                info!("this helper predates the keep-awake lease; mains power only");
+            } else {
+                warn!(error = %message, "could not hold battery sleep; keeping the machine awake on mains power only");
+            }
             None
         }
         Err(_) => {
@@ -303,6 +333,12 @@ async fn acquire_battery_lease() -> Option<HelperClient> {
 
 /// Renew the lease until the session ends or the helper stops answering.
 async fn renew_battery_lease(client: HelperClient, battery: Arc<AtomicBool>) {
+    // The whole point of asking for 90s and renewing at 30s is that renewals may
+    // fail and the hold survives — `veld update` restarting the helper is the
+    // routine example. So a failure retries; only the lease *actually lapsing*
+    // ends the loop and drops the claim. (Giving up on the first error, which is
+    // what this did before review, made the 90/30 ratio buy nothing.)
+    let mut last_ok = Instant::now();
     loop {
         tokio::time::sleep(HELPER_RENEW_EVERY).await;
         // Checked before every renewal so a teardown that has already cleared
@@ -310,13 +346,28 @@ async fn renew_battery_lease(client: HelperClient, battery: Arc<AtomicBool>) {
         if !battery.load(Ordering::Relaxed) {
             return;
         }
-        if let Err(e) = client.hold_sleep_disabled(HELPER_LEASE_SECS).await {
-            // One failure is not fatal — the lease outlives three renewals — but
-            // the status must stop claiming coverage, because the next thing
-            // that happens if this keeps failing is the helper reverting.
-            warn!(error = %e, "battery sleep lease renewal failed");
-            battery.store(false, Ordering::Relaxed);
-            return;
+        // Bounded like the other two helper calls: the default 15s send timeout
+        // is longer than the renewal interval, so a wedged helper would stack
+        // renewals on top of each other.
+        match tokio::time::timeout(
+            HELPER_CALL_TIMEOUT,
+            client.hold_sleep_disabled(HELPER_LEASE_SECS),
+        )
+        .await
+        {
+            Ok(Ok(_)) => last_ok = Instant::now(),
+            failed => {
+                // Still inside the granted window: the setting is genuinely still
+                // held, so the status must keep saying so rather than downgrading
+                // on a blip.
+                if last_ok.elapsed() < Duration::from_secs(HELPER_LEASE_SECS) {
+                    warn!(?failed, "battery sleep lease renewal failed; retrying");
+                    continue;
+                }
+                warn!("battery sleep lease lapsed; the machine is held awake on mains power only");
+                battery.store(false, Ordering::Relaxed);
+                return;
+            }
         }
     }
 }
@@ -372,6 +423,39 @@ async fn stop_session(mut session: Session) {
     }
 }
 
+/// Drop a session whose inhibitor process has already exited by itself.
+///
+/// Nothing else notices that: `active` and `covers_battery` are derived from the
+/// session existing, so an inhibitor that dies a millisecond after spawn — polkit
+/// refusing a `handle-lid-switch` inhibitor to a daemon with no active login
+/// session, D-Bus unavailable — would leave the UI reporting "keeping this
+/// machine awake" forever with nothing held. This module's own docs call that the
+/// worst outcome available ("a status that lies in the optimistic direction is
+/// worse than no status"), so the status path checks before answering.
+async fn reap_if_dead(guard: &mut Option<Session>) {
+    let dead = match guard.as_mut() {
+        Some(session) => match session.child.try_wait() {
+            Ok(Some(status)) => {
+                // The one log line that explains a keep-awake which silently did
+                // nothing. `stderr` is `Stdio::null()`, so the exit status is all
+                // there is — enough to tell "refused immediately" from "never
+                // started".
+                warn!(%status, "the keep-awake process exited on its own; nothing is being held");
+                true
+            }
+            Ok(None) => false,
+            Err(e) => {
+                warn!(error = %e, "could not check whether the keep-awake process is alive");
+                false
+            }
+        },
+        None => false,
+    };
+    if dead {
+        take_and_stop(guard).await;
+    }
+}
+
 /// Stop whatever is in `guard`, aborting its expiry task. For the callers that
 /// are *not* the expiry task.
 async fn take_and_stop(guard: &mut Option<Session>) {
@@ -388,10 +472,6 @@ async fn start(duration_secs: Option<u64>) -> Result<Value, (StatusCode, String)
     let argv = inhibitor_argv().map_err(|e| (StatusCode::NOT_IMPLEMENTED, e))?;
 
     let mut guard = ACTIVE.lock().await;
-    // Replace rather than refuse. Changing the answer is the menu's whole job,
-    // and an off-then-on round trip would leave a window in which the machine
-    // could suspend between the two requests.
-    take_and_stop(&mut guard).await;
 
     let mut cmd = Command::new(&argv[0]);
     cmd.args(&argv[1..])
@@ -420,6 +500,15 @@ async fn start(duration_secs: Option<u64>) -> Result<Value, (StatusCode, String)
             "could not open a pipe to the keep-awake process".to_owned(),
         ));
     }
+
+    // The predecessor is torn down only now that its replacement is running.
+    // Replace rather than refuse, because changing the answer is the menu's whole
+    // job — but the *order* matters twice over: stopping first left the machine
+    // unheld for as long as the teardown took (a helper release plus a process
+    // reap, seconds in the bad case), and a spawn that then failed would have
+    // destroyed a running session while reporting only "couldn't start". The two
+    // inhibitors overlap for an instant instead, which costs nothing.
+    take_and_stop(&mut guard).await;
 
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     let started_at = Utc::now();
@@ -521,7 +610,8 @@ async fn get_state() -> Json<Value> {
     // wedged helper, and holding the session lock for that would stall a
     // concurrent start or stop behind a read.
     let capable = battery_capable().await;
-    let guard = ACTIVE.lock().await;
+    let mut guard = ACTIVE.lock().await;
+    reap_if_dead(&mut guard).await;
     Json(status_of(guard.as_ref(), capable))
 }
 

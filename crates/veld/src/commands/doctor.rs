@@ -232,7 +232,27 @@ impl Diagnostics {
                     .map(|p| format!("pid {p}"))
                     .unwrap_or_default();
 
-                let parts: Vec<&str> = [helper_pid.as_str(), port_info.as_str()]
+                // Whether the helper is holding the machine's sleep setting.
+                //
+                // Worth a line here specifically because it is the one thing veld
+                // does that outlives the process doing it: `pmset disablesleep` is
+                // durable, so "why won't this Mac sleep" is a question somebody
+                // asks hours later, from a support transcript, with the IDE
+                // closed. The keep-awake menu answers it only while a window is
+                // open, and only for a lease *this daemon* took — a lease taken
+                // straight on the helper socket appears nowhere else at all.
+                let holding_sleep = status_data
+                    .as_ref()
+                    .and_then(|d| d.get("sleep_disabled"))
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let sleep_hold = if holding_sleep {
+                    "holding sleep off"
+                } else {
+                    ""
+                };
+
+                let parts: Vec<&str> = [helper_pid.as_str(), port_info.as_str(), sleep_hold]
                     .iter()
                     .filter(|s| !s.is_empty())
                     .copied()

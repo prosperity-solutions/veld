@@ -36,16 +36,22 @@ export interface UseCaffeinate {
 
 export function useCaffeinate(): UseCaffeinate {
   const [state, setState] = useState<CaffeinateState | null>(null);
-  // What the last poll saw, so an expiry can be told from a plain "off": only
-  // the transition from a *timed* session to idle is worth a toast, and only
-  // when this window was the one watching it happen.
+  // What the last poll saw, so an ending nobody asked for can be told from one
+  // the user clicked. `stop()` writes through without going via `apply`, which is
+  // what suppresses the toast for a deliberate switch-off.
   const previous = useRef<CaffeinateState | null>(null);
 
   const apply = useCallback((next: CaffeinateState) => {
     const prev = previous.current;
     previous.current = next;
     setState(next);
-    if (prev?.active && !next.active && prev.expires_at) {
+    // **Any** unrequested `active → inactive`, not only a timed expiry. Gating on
+    // `expires_at` excluded the "until I turn it off" session — the overnight one,
+    // whose ending (a daemon restart from `veld update`, a crash, an inhibitor
+    // that died) is both the least expected and the most expensive to miss. The
+    // timed case, whose deadline the user already knows, was the only one being
+    // announced.
+    if (prev?.active && !next.active) {
       notifyDone("Keep-awake ended — this machine can sleep again");
     }
   }, []);
@@ -89,11 +95,9 @@ export function useCaffeinate(): UseCaffeinate {
 
   const stop = useCallback(async () => {
     try {
-      // Skips the expiry toast by design — the user just clicked "off", so
-      // telling them it is off is noise. `apply` only fires on a *timed*
-      // session's transition, and the daemon reports `expires_at` as absent
-      // once idle, so the previous state is what would trigger it; suppress it
-      // by writing the result straight through.
+      // Deliberately bypasses `apply`: the user just clicked "off", so telling
+      // them it is off is noise. This is the only path that suppresses the
+      // toast, which is why `apply` can now fire on every other ending.
       const next = await api.stopCaffeinate();
       previous.current = next;
       setState(next);

@@ -288,9 +288,11 @@ impl State {
             "helper_pid": helper_pid,
             "version": env!("CARGO_PKG_VERSION"),
             "stored_routes": self.caddy.stored_route_count().await,
-            // Whether a keep-awake lease is armed right now. Reported so
-            // `veld doctor` and a support transcript can answer "why is this
-            // Mac not sleeping" without anyone having to read `pmset -g`.
+            // Whether a keep-awake lease is armed right now. Read by `veld
+            // doctor` (`crates/veld/src/commands/doctor.rs`, the helper row), so a
+            // support transcript can answer "why is this Mac not sleeping"
+            // without anyone having to run `pmset -g` — including for a lease
+            // taken straight on this socket, which the IDE never shows.
             "sleep_disabled": self.sleep.held(),
         }))
     }
