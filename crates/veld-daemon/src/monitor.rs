@@ -9,7 +9,12 @@ use veld_core::logging::LogWriter;
 use veld_core::state::{NodeStatus, RunStatus};
 // Shared login-shell PATH helper — see `veld_core::user_path` for why (bare
 // launchd/systemd service PATH) and the timeout/fallback semantics.
-use veld_core::user_path::cached_user_path;
+// Directory-scoped, not the process-wide `cached_user_path`: a probe command
+// or a recovery restart runs a specific project's own tooling, and a
+// directory-based version-manager hook (`.nvmrc` + `.zshrc`) only fires
+// correctly when resolution happens in that project's own directory — see
+// `cached_user_path_for`'s doc comment.
+use veld_core::user_path::cached_user_path_for;
 
 /// Interval between health-check scans (seconds).
 const SCAN_INTERVAL_SECS: u64 = 5;
@@ -33,15 +38,7 @@ pub async fn run_health_monitor(broadcaster: Broadcaster) {
         interval.tick().await;
         debug!("running health-check scan");
 
-        // The user's full PATH, so probe commands find tools like pg_isready
-        // even when the daemon starts at boot. Read from the shared cache, which
-        // `warm_user_path_cache` keeps fresh — this loop used to own a 60s timer
-        // for it, but its own cadence is not something to hang a TTL on: a
-        // liveness probe blocks for up to 30s and a recovery restart for up to
-        // 300s.
-        let user_path = cached_user_path().await;
-
-        match scan_and_update(&broadcaster, &mut last_checks, &user_path).await {
+        match scan_and_update(&broadcaster, &mut last_checks).await {
             Ok(changes) => {
                 if changes > 0 {
                     info!("health scan detected {changes} status change(s)");
@@ -59,7 +56,6 @@ pub async fn run_health_monitor(broadcaster: Broadcaster) {
 async fn scan_and_update(
     broadcaster: &Broadcaster,
     last_checks: &mut LastCheckMap,
-    user_path: &str,
 ) -> anyhow::Result<usize> {
     // Open per scan so the daemon self-heals across CLI upgrades that migrate
     // the schema (a long-lived handle would keep working, but a fresh open
@@ -187,7 +183,6 @@ async fn scan_and_update(
                 broadcaster,
                 last_checks,
                 Some(&internal_log),
-                user_path,
             )
             .await;
         }
@@ -207,7 +202,6 @@ async fn run_liveness_checks(
     broadcaster: &Broadcaster,
     last_checks: &mut LastCheckMap,
     internal_log: Option<&LogWriter>,
-    user_path: &str,
 ) -> usize {
     // Reload state fresh for liveness checks.
     let mut run_owned = match db.get_run(project_root, run_name) {
@@ -284,7 +278,6 @@ async fn run_liveness_checks(
             project_root,
             project_name,
             run_name,
-            user_path,
         )
         .await;
 
@@ -466,7 +459,7 @@ async fn run_liveness_checks(
 
                         // Run the restart. This stops+starts the entire environment,
                         // creating fresh node state with recovery_count: 0.
-                        run_veld_restart(project_root, run_name, internal_log, user_path).await;
+                        run_veld_restart(project_root, run_name, internal_log).await;
 
                         // Restore recovery_count on the fresh state so it accumulates
                         // across restarts and eventually hits max_recoveries.
@@ -531,7 +524,6 @@ async fn run_single_liveness_check(
     project_root: &Path,
     project_name: &str,
     run_name: &str,
-    user_path: &str,
 ) -> Result<(), LivenessFailure> {
     let node_state = match run.nodes.get(node_key) {
         Some(ns) => ns,
@@ -550,11 +542,23 @@ async fn run_single_liveness_check(
                     ));
                 };
                 let result = tokio::time::timeout(Duration::from_secs(30), async {
+                    // Resolved in `working_dir`, not the process-wide cache:
+                    // a probe like `pg_isready` from a project-local
+                    // nvm/asdf shim needs the PATH a login shell would have
+                    // sitting in this node's own directory, which is what
+                    // `working_dir` (already `node`/`variant`-`cwd`-resolved
+                    // above) represents. Inside this timeout, not before it:
+                    // a cold resolution (first-ever check for this exact
+                    // directory) then costs at most this probe's own 30s
+                    // budget instead of stacking an unbounded PATH-resolution
+                    // wait in front of it — a stale hit still returns
+                    // instantly, so this only matters the first time.
+                    let user_path = cached_user_path_for(working_dir).await;
                     command
                         .current_dir(working_dir)
                         .stdout(std::process::Stdio::null())
                         .stderr(std::process::Stdio::piped())
-                        .env("PATH", user_path)
+                        .env("PATH", &user_path)
                         // The veld-owned vars — VELD_RUN, VELD_ROOT, the
                         // port/url/host family — from the shared builder.
                         .envs(veld_core::orchestrator::veld_owned_env(
@@ -730,13 +734,12 @@ fn find_veld_binary() -> std::path::PathBuf {
 /// lands it in `recovery_exhausted` having never restarted anything. The check
 /// lives at the caller because what it must do is **skip** the cycle rather than
 /// record a failed attempt, which is a decision this function cannot make for it.
-async fn run_veld_restart(
-    project_root: &Path,
-    run_name: &str,
-    internal_log: Option<&LogWriter>,
-    user_path: &str,
-) {
+async fn run_veld_restart(project_root: &Path, run_name: &str, internal_log: Option<&LogWriter>) {
     let veld_bin = find_veld_binary();
+    // Resolved in `project_root`: this execs `veld restart`, which itself
+    // spawns the project's declared commands — same directory-scoped-PATH
+    // need as `spawn_veld`.
+    let user_path = cached_user_path_for(project_root).await;
 
     info!(
         run = run_name,
@@ -893,7 +896,6 @@ mod tests {
                 &dir,
                 "proj",
                 "dev",
-                "",
             )
             .await
             .expect_err("a port-shaped probe with no port cannot pass");
@@ -906,18 +908,10 @@ mod tests {
 
         // A type veld does not implement: also unrunnable, not "unhealthy".
         let run = run_with_node(Some(3000));
-        let err = run_single_liveness_check(
-            &probe("htpp"),
-            &dir,
-            &run,
-            "web:local",
-            &dir,
-            "proj",
-            "dev",
-            "",
-        )
-        .await
-        .expect_err("an unknown probe type cannot pass");
+        let err =
+            run_single_liveness_check(&probe("htpp"), &dir, &run, "web:local", &dir, "proj", "dev")
+                .await
+                .expect_err("an unknown probe type cannot pass");
         assert!(
             matches!(err, LivenessFailure::Unrunnable(_)),
             "{}",
@@ -927,18 +921,10 @@ mod tests {
         // A real check against a port nothing is listening on DID run, and
         // failed — that one counts, because a restart can fix it.
         let run = run_with_node(Some(1));
-        let err = run_single_liveness_check(
-            &probe("port"),
-            &dir,
-            &run,
-            "web:local",
-            &dir,
-            "proj",
-            "dev",
-            "",
-        )
-        .await
-        .expect_err("nothing is listening on port 1");
+        let err =
+            run_single_liveness_check(&probe("port"), &dir, &run, "web:local", &dir, "proj", "dev")
+                .await
+                .expect_err("nothing is listening on port 1");
         assert!(
             matches!(err, LivenessFailure::Failed(_)),
             "{}",

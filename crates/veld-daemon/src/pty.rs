@@ -1284,7 +1284,14 @@ async fn resolve_pane(
         )
     })?;
 
-    let path = veld_core::user_path::cached_user_path().await;
+    // Directory-scoped, not the process-wide cache: a `requires_bin` tool can
+    // be reachable only via this worktree's own directory-based
+    // version-manager hook (`.nvmrc` + `.zshrc`), which the launched pane's
+    // real login shell would find (it starts inside `worktree_path`) but the
+    // global cache — resolved wherever the daemon itself happens to sit —
+    // structurally cannot see. Getting this gate wrong reads as "not
+    // installed" for a tool that is.
+    let path = veld_core::user_path::cached_user_path_for(worktree_path).await;
     // Re-checked here and not only in the menu: the config can change, or a tool
     // can be uninstalled, between the pane being offered and being clicked.
     if let Some(missing) = pane

@@ -602,6 +602,21 @@ pub async fn resolve_secret(source: &SecretSource) -> Result<String> {
             // (`POST /api/shares` → `start_web_share` → `GatewayClient::resolve`)
             // as well as from a gateway boot, and a login shell that stalls
             // would otherwise add its own 10s to the share-start round trip.
+            //
+            // Global, not project-directory-scoped (`cached_user_path_for`):
+            // `resolve_secret`'s own signature carries only a `SecretSource`,
+            // not a project directory — and a standalone gateway boot really
+            // has no worktree to scope by. From a daemon (`POST /api/shares`
+            // → `start_web_share`), the project root a directory-scoped
+            // resolution would want is one call frame away
+            // (`share/api.rs`'s `start` handler resolves it before calling
+            // in) but is not threaded through `GatewayClient::resolve` /
+            // `resolve_secret`. Fine for the documented use case (a
+            // secret-manager CLI like `op`/`vault`, installed globally), but
+            // a `SecretSource::Command` that shells out to a project-local,
+            // version-managed script would hit the same directory-scoping gap
+            // `spawn_veld` used to. Known, unresolved: see AGENTS.md's PATH
+            // convention.
             let user_path = veld_core::user_path::cached_user_path().await;
             run_token_command(&spec, &user_path).await?
         }
