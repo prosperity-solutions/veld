@@ -5,6 +5,11 @@ import {
   markerFace,
   detachGraceMinutes,
   externalOrigins,
+  focusPrefs,
+  focusSuppresses,
+  FOCUS_SUPPRESS_BELL,
+  FOCUS_SUPPRESS_TOASTS,
+  FOCUS_SUPPRESS_OS_NOTIFICATIONS,
   logsTimeZone,
   markerStyle,
   quickSwitchPrefs,
@@ -174,6 +179,63 @@ describe("quickSwitchPrefs", () => {
         "browser.quickSwitch.colorScheme": 0 as unknown as boolean,
       }).colorScheme,
     ).toBe(true);
+  });
+});
+
+describe("focusPrefs", () => {
+  it("reads the master switch and all three channels", () => {
+    expect(
+      focusPrefs({
+        "focus.enabled": true,
+        [FOCUS_SUPPRESS_BELL]: false,
+        [FOCUS_SUPPRESS_TOASTS]: true,
+        [FOCUS_SUPPRESS_OS_NOTIFICATIONS]: false,
+      }),
+    ).toEqual({
+      enabled: true,
+      suppress: {
+        [FOCUS_SUPPRESS_BELL]: false,
+        [FOCUS_SUPPRESS_TOASTS]: true,
+        [FOCUS_SUPPRESS_OS_NOTIFICATIONS]: false,
+      },
+    });
+  });
+
+  it("defaults off, with all three channels suppressed once turned on", () => {
+    // A daemon that predates the keys: the master switch takes the previous
+    // release's behaviour (there was no focus mode), but the three channels
+    // take the shipped default — see the `quickSwitch*` exception in FALLBACK's
+    // docblock. Turning the master on must silence something immediately.
+    expect(focusPrefs({})).toEqual({
+      enabled: false,
+      suppress: {
+        [FOCUS_SUPPRESS_BELL]: true,
+        [FOCUS_SUPPRESS_TOASTS]: true,
+        [FOCUS_SUPPRESS_OS_NOTIFICATIONS]: true,
+      },
+    });
+  });
+});
+
+describe("focusSuppresses", () => {
+  it("requires both the master switch and the channel's own row", () => {
+    const on = (channel: string) =>
+      focusSuppresses({ enabled: true, suppress: { [channel]: true } }, channel);
+    const off = (channel: string) =>
+      focusSuppresses({ enabled: true, suppress: { [channel]: false } }, channel);
+    expect(on(FOCUS_SUPPRESS_BELL)).toBe(true);
+    expect(off(FOCUS_SUPPRESS_BELL)).toBe(false);
+    // Master off silences nothing, whatever the row says — the row is only a
+    // preview of what turning the master on would do.
+    expect(
+      focusSuppresses({ enabled: false, suppress: { [FOCUS_SUPPRESS_TOASTS]: true } },
+        FOCUS_SUPPRESS_TOASTS),
+    ).toBe(false);
+    // A channel absent from `suppress` (an older daemon's document) reads as
+    // not-suppressed rather than throwing.
+    expect(
+      focusSuppresses({ enabled: true, suppress: {} }, FOCUS_SUPPRESS_OS_NOTIFICATIONS),
+    ).toBe(false);
   });
 });
 

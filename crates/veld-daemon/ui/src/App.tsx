@@ -30,9 +30,18 @@ import {
   searchUrl,
   terminalPrefs,
   activityPrefs,
+  focusPrefs,
+  focusSuppresses,
+  FOCUS_SUPPRESS_BELL,
+  FOCUS_SUPPRESS_TOASTS,
+  FOCUS_SUPPRESS_OS_NOTIFICATIONS,
 } from "./shared/settings";
 import { pruneRunHistory } from "./shared/runHistory";
-import { applyTerminalPrefs, setPaneCloseHandler } from "./panes/terminalHost";
+import {
+  applyTerminalPrefs,
+  setBellSuppressed,
+  setPaneCloseHandler,
+} from "./panes/terminalHost";
 import { StartScreen } from "./promotions/StartScreen";
 import { usePromotions } from "./promotions/usePromotions";
 import { WhatsNewDialog } from "./promotions/WhatsNew";
@@ -99,6 +108,7 @@ import {
   IconChevronRight,
   IconDots,
   IconDotsVertical,
+  IconFocus2,
   IconFolderPlus,
   IconHistory,
   IconMoon,
@@ -683,6 +693,7 @@ function AppInner(props: {
   useEffect(() => {
     if (!settings) return;
     applyTerminalPrefs(terminalPrefs(settings));
+    setBellSuppressed(focusSuppresses(focusPrefs(settings), FOCUS_SUPPRESS_BELL));
   }, [settings]);
 
   // How much run history the pickers offer. Read here and applied to the polled
@@ -2908,6 +2919,7 @@ function AppInner(props: {
   // Re-render the rail when an unseen event lands or is read.
   useInbox();
   const activity = activityPrefs(settings ?? {});
+  const focus = focusPrefs(settings ?? {});
 
   /**
    * Turn an unseen event into a system notification.
@@ -2933,6 +2945,12 @@ function AppInner(props: {
    */
   const notifyPrefsRef = useRef(activity.notify);
   notifyPrefsRef.current = activity.notify;
+  // Read through the same ref pattern as `notifyPrefsRef`, and for the same
+  // reason. Focus mode only ever gates *this* channel — the toast/banner pair
+  // below — never `notifyError`/`notifyDone`/`notifyRedirect`, which are
+  // feedback for something the user just clicked themselves.
+  const focusPrefsRef = useRef(focus);
+  focusPrefsRef.current = focus;
   useEffect(
     () =>
       inbox.onEvent(({ sessionId, worktreeId, unseen }) => {
@@ -2960,10 +2978,17 @@ function AppInner(props: {
         // the OS banner, which is the only thing that reaches across windows and apps.
         // Never both: the OSC 9 path used to fire a toast unconditionally *and* a banner
         // when away, so being elsewhere meant two notifications for one event.
+        const fp = focusPrefsRef.current;
         if (document.hasFocus()) {
+          // Discarded, not queued: collecting these for a summary popup was
+          // considered and dropped — the rail's own glyph is already the
+          // record of "something happened here", and a second one on top is
+          // more likely to be ignored than read.
+          if (focusSuppresses(fp, FOCUS_SUPPRESS_TOASTS)) return;
           notifyTerminal({ title: heading, message: unseen.detail, onClick: click });
           return;
         }
+        if (focusSuppresses(fp, FOCUS_SUPPRESS_OS_NOTIFICATIONS)) return;
         showSystemNotification({
           // The worktree first: with several open, "Command failed" alone does not say
           // where, and the banner is read out of the context that would have told you.
@@ -3947,6 +3972,36 @@ function AppInner(props: {
   );
 
   /**
+   * Focus mode: a standing "stop interrupting me" toggle, between search and
+   * settings.
+   *
+   * **IDE-mode top bar only** — unlike `settingsButton`/`themeButton`, this is
+   * not threaded into `RunsMode`'s props: that bar has no search icon to sit
+   * beside either, and Runs mode has no rail to be the thing this silences.
+   * The setting itself is still global and still in force there (the master
+   * switch also has a row in Settings → Activity → Focus mode, reachable from
+   * either mode's gear icon) — only the one-click top-bar shortcut is IDE-only.
+   *
+   * The three sub-toggles it acts on (bell, in-app toasts, OS notifications)
+   * live beside that master row, mirroring the notify table above them; this
+   * button is a one-click on/off, not a picker of its own.
+   */
+  const focusModeButton = (
+    <Tooltip label={focus.enabled ? "Focus mode: on — click to turn off" : "Focus mode: off — click to turn on"}>
+      <ActionIcon
+        size="md"
+        variant={focus.enabled ? "filled" : "default"}
+        color={focus.enabled ? "teal" : undefined}
+        aria-label="Focus mode"
+        aria-pressed={focus.enabled}
+        onClick={() => void saveSettings({ "focus.enabled": !focus.enabled })}
+      >
+        <IconFocus2 size={14} />
+      </ActionIcon>
+    </Tooltip>
+  );
+
+  /**
    * The project's machine-overridable vars.
    *
    * Deliberately **not** folded into the settings gear beside it. That dialog is
@@ -4367,6 +4422,7 @@ function AppInner(props: {
         onStop={() => worktree && stopWorktree(worktree, run)}
         onRestart={() => worktree && restartWorktree(worktree, run)}
         onSearch={() => setDialog({ kind: "search" })}
+        focusModeButton={focusModeButton}
         themeButton={themeButton}
         settingsButton={settingsButton}
         configVarsButton={configVarsButton}
@@ -5081,6 +5137,7 @@ function TopBar(props: {
   onStop: () => void;
   onRestart: () => void;
   onSearch: () => void;
+  focusModeButton: React.ReactNode;
   themeButton: React.ReactNode;
   settingsButton: React.ReactNode;
   configVarsButton: React.ReactNode;
@@ -5479,6 +5536,7 @@ function TopBar(props: {
           <IconSearch size={14} />
         </ActionIcon>
       </Tooltip>
+      {props.focusModeButton}
       {props.settingsButton}
       {props.themeButton}
     </div>

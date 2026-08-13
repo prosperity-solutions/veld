@@ -79,6 +79,10 @@ import {
   showProjectNews,
   searchUrl,
   activityPrefs,
+  focusPrefs,
+  FOCUS_SUPPRESS_BELL,
+  FOCUS_SUPPRESS_TOASTS,
+  FOCUS_SUPPRESS_OS_NOTIFICATIONS,
   extensionsAutoRefresh,
   terminalAgentIntegration,
   terminalInterceptSystemOpen,
@@ -155,6 +159,28 @@ function SectionTitle(props: { children: ReactNode }) {
  * them is a key and two strings — and because the keys have to match
  * `inbox.notifyKey(unseen)` exactly. One list is one place for that to be true.
  */
+/**
+ * The three channels the focus-mode toggle can silence, in the order they read
+ * top to bottom in the top bar's own tooltip.
+ */
+const FOCUS_ROWS: { key: string; label: string; help: string }[] = [
+  {
+    key: FOCUS_SUPPRESS_BELL,
+    label: "The terminal bell",
+    help: "The audible BEL a shell or program rings — separate from the notification table below, which is about a banner or toast, not a sound.",
+  },
+  {
+    key: FOCUS_SUPPRESS_TOASTS,
+    label: "In-app toasts",
+    help: "The 'a pane finished while you weren't looking' toast (notifyTerminal). Feedback for something you clicked yourself — a failed action, a copy confirmation — is never gated by focus mode; only the background-activity channel is.",
+  },
+  {
+    key: FOCUS_SUPPRESS_OS_NOTIFICATIONS,
+    label: "OS-level notifications",
+    help: "The native banner Veld's own notification path raises (Veld Desktop, or a browser tab's Web Notification). This is not a system-wide Do Not Disturb — nothing else on the machine is muted.",
+  },
+];
+
 const NOTIFY_ROWS: { key: string; label: string; help: string }[] = [
   {
     key: "activity.notifyCommandFinished",
@@ -287,6 +313,7 @@ export function SettingsDialog(props: {
   const agentIntegration = terminalAgentIntegration(settings ?? {});
   const autoRefresh = extensionsAutoRefresh(settings ?? {});
   const activity = activityPrefs(settings ?? {});
+  const focus = focusPrefs(settings ?? {});
   const logsTz = logsTimeZone(settings ?? {});
   const hideDisabled = hideDisabledActions(settings ?? {});
   const projectNews = showProjectNews(settings ?? {});
@@ -1335,6 +1362,39 @@ export function SettingsDialog(props: {
                     size="xs"
                     checked={activity.notify[row.key] ?? false}
                     disabled={locked}
+                    onChange={(e) => set({ [row.key]: e.currentTarget.checked })}
+                  />
+                </Row>
+              ))}
+
+              <SectionTitle>Focus mode</SectionTitle>
+              <Text size="xs" c="dimmed">
+                The top-bar toggle between search and settings. On, it silences
+                whichever of these three channels are checked below — for the
+                background-activity channel only, never for feedback on
+                something you just clicked yourself.
+              </Text>
+              {/* Master on with all three rows below unchecked is a reachable, accepted
+                  state: the top-bar icon shows "on" while silencing nothing. Not worth a
+                  warning of its own — it's the same shape as any other switch with no
+                  sub-option ticked, and the three rows are one scroll away. */}
+              <Row
+                label="Focus mode"
+                help="Master switch. The three rows below decide what it silences while it's on; none of them do anything while it's off."
+              >
+                <Checkbox
+                  size="xs"
+                  checked={focus.enabled}
+                  disabled={locked}
+                  onChange={(e) => set({ "focus.enabled": e.currentTarget.checked })}
+                />
+              </Row>
+              {FOCUS_ROWS.map((row) => (
+                <Row key={row.key} label={row.label} help={row.help}>
+                  <Checkbox
+                    size="xs"
+                    checked={focus.suppress[row.key] ?? false}
+                    disabled={locked || !focus.enabled}
                     onChange={(e) => set({ [row.key]: e.currentTarget.checked })}
                   />
                 </Row>

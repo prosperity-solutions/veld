@@ -2115,8 +2115,9 @@ finishes*) makes a terminal report when a command started and how it ended, whic
 is what marks a worktree in the rail; `terminal.agentIntegration`
 (*…Notice when a coding agent is waiting for you*) wraps `claude`/`codex`/`pi` so
 their lifecycle hooks report the same way. Both live under *Activity* alongside
-`activity.showWorking` and the four `activity.notify*` rows that decide which of
-those events raise a system notification. **All of these switches are independent** —
+`activity.showWorking`, the four `activity.notify*` rows that decide which of
+those events raise a system notification, and the *Focus mode* block that can
+silence that notification (plus the terminal bell) on demand. **All of these switches are independent** —
 they share one generated file and gate their halves of it on separate
 environment variables, so turning off `terminal.interceptSystemOpen` does not
 turn off the unread badge. Nothing of the user's is edited by any of them.

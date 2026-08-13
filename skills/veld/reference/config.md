@@ -735,9 +735,10 @@ terminal reports when a command started and how it ended, which marks a
 worktree in the rail) and `terminal.agentIntegration` (an agent wrapper —
 `claude`, `codex` — installs lifecycle hooks so an agent waiting on the user
 reaches the same glyph). Both sit under *Settings → Activity* with
-`activity.showWorking` and the
-four `activity.notify*` rows. All of these switches are independent of one
-another.
+`activity.showWorking`, the
+four `activity.notify*` rows, and the *Focus mode* block that can silence
+that notification (plus the terminal bell) on demand. All of these switches
+are independent of one another.
 
 ### `ide.quicklinks`
 
