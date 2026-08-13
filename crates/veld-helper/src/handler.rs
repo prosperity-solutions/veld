@@ -39,7 +39,11 @@ impl State {
             caddy: CaddyManager::new(https_port, http_port, caddy_bin),
             https_port,
             http_port,
-            sleep: privileged.then(SleepManager::new),
+            // The one place the platform is decided. `pmset disablesleep` is the
+            // only lever for a closed lid on battery and it exists on macOS
+            // alone; Linux's unprivileged `handle-lid-switch` inhibitor already
+            // covers that case, so there is nothing for this to add there.
+            sleep: (privileged && cfg!(target_os = "macos")).then(SleepManager::new),
             shutdown_tx,
         }
     }

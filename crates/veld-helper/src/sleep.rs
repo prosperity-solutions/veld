@@ -282,6 +282,15 @@ fn parse_sleep_disabled(text: &str) -> bool {
 
 /// Root's half of the keep-awake switch: `pmset disablesleep`, on a lease, and
 /// only ever over a value veld itself took.
+///
+/// **Platform-agnostic by construction.** Nothing in here asks what OS it is on:
+/// the lever is macOS-only, so the *caller* decides whether to build one at all
+/// (`handler::State::new`), and `Pmset` is simply never constructed elsewhere.
+/// Guards inside these methods would be the same rule expressed three times, and
+/// they had a second cost that is easy to miss — they made the entire lease state
+/// machine untestable off macOS, which is where CI runs `cargo test`. Thirteen
+/// tests passed locally and failed there, on a platform check rather than on
+/// anything they were written to pin.
 pub struct SleepManager<S: SleepSetter = Pmset> {
     /// Guards the **whole** take/give-back critical section — marker read, the
     /// `pmset` write, and the lease update — not merely the deadline field. A
@@ -408,12 +417,6 @@ impl<S: SleepSetter> SleepManager<S> {
     /// self-healing: anything else that resets the setting while veld holds it is
     /// undone at the next renewal instead of silently ending the guarantee.
     pub async fn hold(&self, lease_secs: u64) -> Result<()> {
-        if !cfg!(target_os = "macos") {
-            // Not a failure the caller should paper over — on Linux the
-            // unprivileged `handle-lid-switch` inhibitor already covers battery,
-            // so a caller reaching here has the wrong idea about the platform.
-            bail!("battery lid-closed sleep is a macOS-only concern");
-        }
         let secs = clamp_lease(lease_secs);
         // Held across everything below: marker read, `pmset`, lease write.
         let mut lease = self.lease.lock().await;
@@ -561,9 +564,6 @@ impl<S: SleepSetter> SleepManager<S> {
     /// With no marker this does nothing and reads nothing — the machine's sleep
     /// setting is none of veld's business unless veld took it.
     pub async fn reconcile_on_startup(&self) {
-        if !cfg!(target_os = "macos") {
-            return;
-        }
         let mut lease = self.lease.lock().await;
         let Some(marker) = self.read_marker() else {
             return;
