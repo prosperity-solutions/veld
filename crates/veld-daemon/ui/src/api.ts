@@ -1126,6 +1126,14 @@ export interface CaffeinateState {
    * reassurance for a machine that is not holding anything.
    */
   hold_failed: boolean;
+  /**
+   * When `reason` is `"sharing"` (or `"both"`), whether the countdown is the
+   * share's own expiry rather than the "For at most" cap. A share's own default
+   * life (2h peer, 1h web) is shorter than any cap somebody would actually set,
+   * so this is `true` more often than the setting's name suggests — copy that
+   * attributes the countdown to the cap is wrong whenever it is.
+   */
+  sharing_bound_by_share: boolean;
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {

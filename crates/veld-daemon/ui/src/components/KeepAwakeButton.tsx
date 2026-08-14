@@ -163,6 +163,12 @@ export function KeepAwakeButton(props: {
   // Whether a human asked for any of this. `"sharing"` alone means nobody did,
   // which changes what every string below should say.
   const automatic = state?.reason === "sharing";
+  // The countdown above is the share's own life ending, not the "For at most"
+  // cap somebody configured. True far more often than that setting's name
+  // suggests — a share's own default life (2h peer, 1h web) is shorter than any
+  // cap a person would actually set — so this has to be said, or the cup claims
+  // a number it did not compute.
+  const boundByShare = automatic && (state?.sharing_bound_by_share ?? false);
   // Sharing is live and the automatic hold has had its allowance for this share.
   // Worth its own line: the cup going out mid-share is otherwise something the
   // user has to notice rather than be told.
@@ -181,8 +187,8 @@ export function KeepAwakeButton(props: {
         : "This machine may sleep — click to keep it awake"
     : automatic
       ? lidCaveat
-        ? `Keeping this machine awake while you're sharing — ${left}. A shut lid still sleeps it.`
-        : `Keeping this machine awake while you're sharing — ${left}`
+        ? `Keeping this machine awake while you're sharing — ${left}${boundByShare ? " (the share itself ending, not your keep-awake setting)" : ""}. A shut lid still sleeps it.`
+        : `Keeping this machine awake while you're sharing — ${left}${boundByShare ? " (the share itself ending, not your keep-awake setting)" : ""}`
       : lidCaveat
         ? `Keeping this machine awake — ${left}. A shut lid still sleeps it.`
         : `Keeping this machine awake — ${left}`;
@@ -213,6 +219,19 @@ export function KeepAwakeButton(props: {
             <Menu.Label>
               {automatic ? `On while you're sharing — ${left}` : `On — ${left}`}
             </Menu.Label>
+            {boundByShare && (
+              // Wrapped like `LidNote`'s: a `Menu.Label` is single-line by
+              // default and this is a sentence.
+              //
+              // It names the setting that *does* govern this number, because the
+              // whole defect was that the countdown looked like it came from the
+              // keep-awake cap: somebody who set "at most 4 hours" and read
+              // "1h 59m left" had no way to find out which control to reach for.
+              // Now there is one, so the note points at it.
+              <Menu.Label style={{ whiteSpace: "normal" }}>
+                That's the share expiring, not this limit — see Sharing in Settings.
+              </Menu.Label>
+            )}
             <Menu.Item
               color="red"
               leftSection={<IconCoffeeOff size={14} />}

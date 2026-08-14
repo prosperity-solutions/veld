@@ -359,6 +359,13 @@
   // else at set time. `website_reload_delay` is **open** — any number of
   // milliseconds — so today nothing validates it beyond being a string, which is
   // the gap tracked in #227.
+  // Public relays, opted into explicitly — required for `veld share`/`--web` to
+  // work at all. No self-hosted relay or gateway needed for this repo: the
+  // website node below is the only thing exposed, and n0's public set is enough
+  // to try peer/web sharing (e.g. mobile-testing the marketing site) locally.
+  "sharing": {
+    "relays": "public"
+  },
   "vars": {
     "website_log_level": {
       "machine": {
@@ -414,6 +421,9 @@
   "nodes": {
     "website": {
       "default_variant": "local",
+      // Peer and web sharing, opted in — lets `veld share --web` put the local
+      // site on a real URL, which is the easy way to check it on a phone.
+      "share": { "expose": ["peer", "web"] },
       "variants": {
         "local": {
           "type": "long_running",

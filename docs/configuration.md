@@ -92,7 +92,7 @@ The same applies to anything else that reads the file as strict JSON — `veld c
 | `proxy`             | object | No       | Reverse-proxy header rules (see [Proxy](#proxy))   |
 | `env`               | object | No       | Global environment variables inherited by all nodes |
 | `vars`              | object | No       | One definition point per value, referenced as `${vars.<name>}` (see [`vars`](#vars)). A var may declare itself [machine-overridable](#machine-overridable-vars) |
-| `sharing`           | object | No       | Sharing policy: relays and public gateway (see [Sharing](#sharing)) |
+| `sharing`           | object | No       | Sharing policy: relays, public gateway, share-link lifetimes (see [Sharing](#sharing)) |
 | `setup`             | array  | No       | Lifecycle steps that run before the graph (see [Setup & Teardown]) |
 | `teardown`          | array  | No       | Lifecycle steps that run after all nodes stop (see [Setup & Teardown]) |
 | `nodes`             | object | Yes      | The dependency graph nodes                        |
@@ -1169,6 +1169,32 @@ There is no `veld.json` path for a joiner's relay token.
 This ships the relay secret **inside every share link** — Slack, email, browser history, anywhere a `veld.localhost/join#…` URL travels. That defeats the token's purpose (keeping the relay from being an open one) for any **shared or long-lived** relay secret. Enable it **only** for a **disposable, per-project token you rotate freely** — never a shared org relay secret. When off (the default), a joiner supplies the token via the env vars above.
 
 Because a token declaration is part of a relay's endpoint identity, changing the *declaration* (e.g. switching the `env` var name) is picked up on the next share, but rotating the *underlying* secret behind an unchanged declaration takes effect only when the daemon next binds that relay — in practice, on daemon restart, since a bound endpoint is cached for the daemon's life.
+
+### `sharing.peer_ttl_minutes` / `sharing.web_ttl_minutes`
+
+How long this project's share **links** live, per audience, in minutes — `5`–`480`, clamped rather than refused. Defaults are **120** for a peer share and **60** for `--web`, web being shorter for the reason it always was: its audience is the open internet, so an idle share should die sooner.
+
+```json
+{
+  "sharing": {
+    "relays": "public",
+    "peer_ttl_minutes": 240,
+    "web_ttl_minutes": 30
+  }
+}
+```
+
+**This is normally the deadline that actually ends a share** — and therefore what ends the automatic keep-awake with it. The two are easy to confuse, and the confusion is the reason these fields exist: `keepAwake.sharingOnPowerMinutes` / `…OnBatteryMinutes` are a **ceiling** over the share's own life, not a second countdown, because the hold's deadline is `min(cap, latest share expiry)`. So "keep this machine awake while sharing, for at most 4 hours" under a default 2-hour peer link counts down from **2 hours**, and the cap never binds. The coffee menu now says so when that is what is happening.
+
+Three places can answer "how long", most specific first:
+
+| Where | Scope | Bounded? |
+|-------|-------|----------|
+| `veld share --ttl <seconds>` | one share | no — a deliberate number for one link |
+| these config fields | the project, committed for the team | yes, 5–480 min |
+| `sharing.peerTtlMinutes` / `sharing.webTtlMinutes` (`veld settings`) | this machine; carries the default | yes, 5–480 min |
+
+A project that says nothing falls through to the machine setting rather than pinning the default, which is what keeps a team's answer and a personal one from silently shadowing each other.
 
 ### `sharing.gateway`
 
@@ -3959,9 +3985,20 @@ cannot describe a setting differently — and the values a dialog offers are the
 same literal the daemon's validator accepts.
 
 A consequence worth knowing when reading the CLI's output: what a surface
-**offers** is not always everything it **accepts**. `keepAwake.*Minutes` offer six
-durations and accept anything in range; `terminal.shell` offers the shells found
-on this machine and accepts any absolute path. `describe` shows both.
+**offers** is not always everything it **accepts**. `keepAwake.*Minutes` and
+`sharing.*TtlMinutes` offer six durations and accept anything in range;
+`terminal.shell` offers the shells found on this machine and accepts any absolute
+path. `describe` shows both.
+
+### One setting a project can override
+
+`sharing.peerTtlMinutes` and `sharing.webTtlMinutes` — how long a share link lives
+— are the machine's *default* answer, and a project's `veld.json` overrides them
+via [`sharing.peer_ttl_minutes` / `sharing.web_ttl_minutes`](#sharingpeer_ttl_minutes--sharingweb_ttl_minutes);
+`veld share --ttl` overrides both for one share. That is deliberate rather than an
+exception to the table below: a share's useful life is a property of *what is being
+shared*, so the repo describing the environment is the right place to bound it, and
+a fresh checkout gets the team's answer without configuring a machine.
 
 ### `veld settings` vs `veld config`
 

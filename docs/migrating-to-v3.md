@@ -440,6 +440,18 @@ additive — a config without it is unaffected — and see
 [configuration.md](configuration.md#idenews-telling-your-own-team-something-changed)
 for the fields and [promotions.md](promotions.md) for how the channel behaves.
 
+### How long a share link lives
+
+`sharing` gained `peer_ttl_minutes` and `web_ttl_minutes` (5–480, clamped), the
+project's answer to how long its share links last. Additive: a config without them
+falls through to each machine's `sharing.peerTtlMinutes` / `sharing.webTtlMinutes`
+setting, which carries the previous constants as its defaults — 120 peer, 60 web —
+so nothing about an existing share changes. `veld share --ttl` still overrides both
+for one share. See
+[configuration.md](configuration.md#sharingpeer_ttl_minutes--sharingweb_ttl_minutes),
+which also explains why this is the deadline that usually ends a share and how it
+relates to the keep-awake ceiling above it.
+
 ### Terminal ergonomics
 
 `ide.panes[]` gained `allow_terminal_renaming` (default `false`), which lets the

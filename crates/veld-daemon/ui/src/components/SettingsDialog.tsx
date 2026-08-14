@@ -90,6 +90,7 @@ import {
   IconCoffee,
   IconGitBranch,
   IconLink,
+  IconShare,
   IconTerminal2,
 } from "@tabler/icons-react";
 
@@ -1104,6 +1105,7 @@ const GROUP_ICONS: Record<string, ReactNode> = {
   terminal: <IconTerminal2 size={15} />,
   activity: <IconActivity size={15} />,
   keepAwake: <IconCoffee size={15} />,
+  sharing: <IconShare size={15} />,
   links: <IconLink size={15} />,
   browser: <IconAppWindow size={15} />,
 };
@@ -1124,6 +1126,8 @@ const SECTION_BLURBS: Record<string, string> = {
     "The top-bar toggle between search and settings. On, it silences whichever of these three channels are checked below — for the background-activity channel only, never for feedback on something you just clicked yourself.",
   "While you're sharing":
     "A share is only useful while this machine is up, so Veld holds it awake for you and lets go when the share ends. Asked twice because the answer differs: on mains nothing is being spent, and on battery it is your charge. Neither one ever keeps the machine awake with the lid shut on battery — that is the durable setting Veld only ever touches when you ask it to yourself.",
+  "Share links expire after":
+    "How long a link keeps working, counted from when you started sharing. This is usually what ends a share — and so what ends the keep-awake above, which is a ceiling over this rather than a second countdown. A project can override both in its veld.json, and veld share --ttl overrides everything for one share.",
 };
 
 /** What this machine is, as far as this dialog needs to know. */

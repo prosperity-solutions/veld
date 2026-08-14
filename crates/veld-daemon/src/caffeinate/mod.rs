@@ -1082,6 +1082,14 @@ fn status_of(
         // The inhibitor could not be started at all. Distinct from a spent cap
         // because the remedy is different and the reassurance is wrong.
         "hold_failed": machine.state.spawn_failed,
+        // Whether the countdown, when it is the automatic one, is the share's own
+        // expiry rather than the "For at most" setting. A share's own default
+        // life (2h peer, 1h web) is shorter than any cap somebody would actually
+        // configure, so this is `true` more often than the setting's name
+        // suggests — the UI needs it to avoid saying "kept awake for the length
+        // you set" about a number that is actually "until the share you started
+        // happens to end".
+        "sharing_bound_by_share": machine.state.sharing_bound_by_share,
     });
     if let Some(s) = session {
         let expires_at = reasons.expires_at();

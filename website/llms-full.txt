@@ -345,13 +345,13 @@ Traffic is end-to-end encrypted between the two velds; a relay only forwards sea
 - **Fail-closed** — shares are held in the daemon's memory; if the daemon stops, shares stop
 - **Auto-teardown** — stopping the run (`veld stop`) auto-unshares its shares, and so do `veld restart` and a `veld start` that replaces a live same-named environment (each mints a new run, so the old share would point at torn-down ports); a share whose run ended some other way (a crash) is listed as a "share without a run" in the dashboard with an Unshare button; a consumer's join self-tears-down when the tunnel closes
 - **Optional ids** — `veld unshare` and `veld leave` take the id optionally, resolving the sole active share/join when omitted
-- **TTL** — shares expire after `--ttl` seconds (default 7200)
+- **TTL** — shares expire after `--ttl` seconds. The default is a setting, not a constant: `sharing.peerTtlMinutes` (120) and `sharing.webTtlMinutes` (60), both 5–480 and settable with `veld settings`; a project overrides them with `sharing.peer_ttl_minutes` / `sharing.web_ttl_minutes` in `veld.json`, and `--ttl` overrides both for one share. **This is usually what ends a share, and therefore what ends the automatic keep-awake with it** — `keepAwake.sharing*Minutes` is a ceiling over the share's own life (`min(cap, share expiry)`), so a 4-hour cap under a default 2-hour peer link counts down from 2h; the coffee menu says so when that is the case
 
 ### CLI Commands
 
 | Command | Description |
 |---------|-------------|
-| `veld share [RUN] [--node <n>]... [--ttl <secs>] [--approve <first\|manual\|auto>] [--web] [--access <password\|link>] [--password <pw>] [--json]` | Start sharing a running env; prints a join URL (and `veld join` command). `--web`: publish the `web`-opted services via the configured gateway and print public URLs (password-protected by default) |
+| `veld share [RUN] [--node <n>]... [--ttl <secs>] [--approve <first\|manual\|auto>] [--web] [--access <password\|link>] [--password <pw>] [--json]` | Start sharing a running env; prints a join URL (and `veld join` command). `--ttl` overrides the link lifetime for this share (default from `sharing.peerTtlMinutes`/`.webTtlMinutes`, or the project's `veld.json`). `--web`: publish the `web`-opted services via the configured gateway and print public URLs (password-protected by default) |
 | `veld join <TICKET> [--label <n>] [--no-remember] [--json]` | Join a shared env by ticket (blocks until approved). `--no-remember`: don't cache a prompted relay auth token |
 | `veld shares [--json]` | List active shares, joins, and pending join requests; each live tunnel shows its transport (`direct`, or `relayed via <relay>` + RTT) |
 | `veld approve <REQ_ID> [--json]` / `veld deny <REQ_ID> [--json]` | Resolve a pending join request |

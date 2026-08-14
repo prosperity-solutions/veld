@@ -741,8 +741,13 @@ function KeepAwakeNote() {
     : state.reason === "sharing" || state.reason === "both"
       ? typeof state.remaining_secs === "number"
         ? `This machine will stay awake for another ${formatRemaining(state.remaining_secs)}${
-            state.covers_lid ? "." : ", unless you shut the lid."
-          }`
+            // Whose deadline that is, when it is not the keep-awake setting's.
+            // Said here as well as on the cup because this panel is where
+            // somebody reads it as a promise about *the share*, and the number
+            // being the share's own expiry is the thing that makes "for at most
+            // 4 hours" look broken when it is not.
+            state.sharing_bound_by_share ? " — when the share itself expires" : ""
+          }${state.covers_lid ? "." : ", unless you shut the lid."}`
         : "This machine is being kept awake."
       : null;
   if (!note) return null;

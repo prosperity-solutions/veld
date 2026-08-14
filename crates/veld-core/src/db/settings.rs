@@ -376,6 +376,34 @@ pub const MAX_KEEP_AWAKE_MINUTES: i64 = 8 * 60;
 pub const DEFAULT_KEEP_AWAKE_SHARING_ON_POWER_MINUTES: i64 = 120;
 pub const DEFAULT_KEEP_AWAKE_SHARING_ON_BATTERY_MINUTES: i64 = 30;
 
+/// How long a share link lives, by default, per sharing mode.
+///
+/// **These are the numbers that actually end a default share**, and until they
+/// were settings they were two `const`s inside the daemon's share API with no
+/// surface at all. That mattered more than it looked: the keep-awake cap above is
+/// `min(cap, latest share expiry)`, and a share's own life is *shorter* than any
+/// cap somebody would set — so "keep this machine awake while sharing, for at
+/// most 4 hours" counted down from 2h, and the cap the user configured was never
+/// the thing binding. Making the other half of that `min` configurable is what
+/// lets the two be reasoned about together.
+///
+/// Web is the shorter one for the reason it always was (§6.1): its audience is
+/// the open internet, so an idle share should die sooner.
+pub const DEFAULT_SHARING_PEER_TTL_MINUTES: i64 = 120;
+pub const DEFAULT_SHARING_WEB_TTL_MINUTES: i64 = 60;
+
+/// Bounds on a **stored default** share TTL.
+///
+/// Numerically equal to the keep-awake pair today and deliberately *not* the same
+/// constants: these bound how long a share link lives, that pair bounds how long
+/// a machine is held awake, and a future change to one must not silently move the
+/// other. The floor is five minutes because a share nobody can finish opening is
+/// not a share; the ceiling is a working day because this is the value applied to
+/// **every** share without anybody typing it, and `veld share --ttl` is still
+/// unbounded for the deliberate exception.
+pub const MIN_SHARE_TTL_MINUTES: i64 = 5;
+pub const MAX_SHARE_TTL_MINUTES: i64 = 8 * 60;
+
 /// The five keep-awake settings as one value. See [`Db::keep_awake`].
 ///
 /// The two `sharing_*` pairs govern a hold **nobody asked for**; `manual_on_battery`
@@ -539,6 +567,8 @@ pub enum SettingKey {
     KeepAwakeSharingOnBattery,
     KeepAwakeSharingOnBatteryMinutes,
     KeepAwakeManualOnBattery,
+    SharingPeerTtlMinutes,
+    SharingWebTtlMinutes,
     ExtensionsAutoRefresh,
     ExtensionsSource,
     NewsSource,
@@ -647,6 +677,11 @@ impl SettingKey {
         Self::KeepAwakeSharingOnBatteryMinutes,
         // ── Keep awake › When you ask ────────────────────────────────────────
         Self::KeepAwakeManualOnBattery,
+        // ── Sharing ──────────────────────────────────────────────────────────
+        // Directly after keep-awake, because the pair above is capped by
+        // `min(cap, share expiry)` and these two are the other half of that min.
+        Self::SharingPeerTtlMinutes,
+        Self::SharingWebTtlMinutes,
         // ── Links ────────────────────────────────────────────────────────────
         Self::TerminalOpenUrlsInApp,
         Self::TerminalInterceptSystemOpen,
@@ -707,6 +742,8 @@ impl SettingKey {
             Self::KeepAwakeSharingOnBattery => "keepAwake.sharingOnBattery",
             Self::KeepAwakeSharingOnBatteryMinutes => "keepAwake.sharingOnBatteryMinutes",
             Self::KeepAwakeManualOnBattery => "keepAwake.manualOnBattery",
+            Self::SharingPeerTtlMinutes => "sharing.peerTtlMinutes",
+            Self::SharingWebTtlMinutes => "sharing.webTtlMinutes",
             Self::Unknown(k) => k,
         }
     }
@@ -761,6 +798,8 @@ impl SettingKey {
             "keepAwake.sharingOnBattery" => Self::KeepAwakeSharingOnBattery,
             "keepAwake.sharingOnBatteryMinutes" => Self::KeepAwakeSharingOnBatteryMinutes,
             "keepAwake.manualOnBattery" => Self::KeepAwakeManualOnBattery,
+            "sharing.peerTtlMinutes" => Self::SharingPeerTtlMinutes,
+            "sharing.webTtlMinutes" => Self::SharingWebTtlMinutes,
             other => Self::Unknown(other.to_string()),
         }
     }
@@ -879,6 +918,13 @@ impl SettingKey {
                         .ok_or_else(bad)?,
                 )
             }
+            // Clamped like the pair above, and against their own bounds — see
+            // `MIN_SHARE_TTL_MINUTES`. `veld share --ttl` is a separate, unbounded
+            // path on purpose: this is the number applied to every share with
+            // nobody typing it.
+            Self::SharingPeerTtlMinutes | Self::SharingWebTtlMinutes => Value::from(
+                clamp_i64(value, MIN_SHARE_TTL_MINUTES, MAX_SHARE_TTL_MINUTES).ok_or_else(bad)?,
+            ),
             // The one list-valued setting, and the one whose entries are checked
             // by a parser that lives elsewhere: `veld_core::ide::parse_origin` is
             // what `ide.externalOrigins` in a project config goes through, and the
@@ -1556,6 +1602,19 @@ pub fn defaults() -> BTreeMap<String, Value> {
         // then never writes `pmset disablesleep` on this machine, on any path,
         // even the one where a human pressed the button and asked for it.
         (SettingKey::KeepAwakeManualOnBattery, Value::from(true)),
+        // The share lifetimes that were two daemon-private constants until now.
+        // Unchanged numbers, so nothing about a default share moves; what changes
+        // is that they are answerable and settable. See
+        // `DEFAULT_SHARING_PEER_TTL_MINUTES` for why they belong beside the caps
+        // above rather than in the share API.
+        (
+            SettingKey::SharingPeerTtlMinutes,
+            Value::from(DEFAULT_SHARING_PEER_TTL_MINUTES),
+        ),
+        (
+            SettingKey::SharingWebTtlMinutes,
+            Value::from(DEFAULT_SHARING_WEB_TTL_MINUTES),
+        ),
     ]
     .into_iter()
     .map(|(k, v)| (k.as_str().to_string(), v))
@@ -1852,6 +1911,37 @@ impl Db {
         }
     }
 
+    /// How long a share of this `mode` should live, in **seconds**, when neither
+    /// `veld share --ttl` nor the project's `veld.json` said.
+    ///
+    /// Seconds because that is the unit every consumer of a TTL already speaks
+    /// (the wire, the manifest's `expires_at`, `--ttl`); minutes are the unit a
+    /// *person* sets one in, which is why the stored setting is minutes and the
+    /// conversion lives here rather than at the call site.
+    ///
+    /// Clamped on read like [`Self::keep_awake`]'s minutes, and for the same
+    /// reason: a value written by an older or hand-edited database must not widen
+    /// the bound the validator enforces on the way in.
+    pub fn share_ttl_secs(&self, mode: crate::config::ExposeMode) -> i64 {
+        let (key, fallback) = match mode {
+            crate::config::ExposeMode::Peer => (
+                SettingKey::SharingPeerTtlMinutes,
+                DEFAULT_SHARING_PEER_TTL_MINUTES,
+            ),
+            crate::config::ExposeMode::Web => (
+                SettingKey::SharingWebTtlMinutes,
+                DEFAULT_SHARING_WEB_TTL_MINUTES,
+            ),
+        };
+        self.setting(&key)
+            .ok()
+            .flatten()
+            .and_then(|v| v.as_i64())
+            .unwrap_or(fallback)
+            .clamp(MIN_SHARE_TTL_MINUTES, MAX_SHARE_TTL_MINUTES)
+            * 60
+    }
+
     /// Which checkout's `veld.json` `ide.extensions` are read from
     /// (`extensions.source`). See [`ConfigSource`].
     ///
@@ -2047,6 +2137,65 @@ mod tests {
         // Counted against the variant list rather than against `defaults()` itself,
         // which would compare a value with itself.
         assert_eq!(s.len(), SettingKey::ALL.len());
+    }
+
+    #[test]
+    fn share_ttl_reads_as_seconds_per_mode() {
+        // Minutes are what a person sets; seconds are what every consumer of a
+        // TTL already speaks, so the conversion belongs in the reader.
+        let (_dir, db) = test_db();
+        assert_eq!(
+            db.share_ttl_secs(crate::config::ExposeMode::Peer),
+            DEFAULT_SHARING_PEER_TTL_MINUTES * 60
+        );
+        assert_eq!(
+            db.share_ttl_secs(crate::config::ExposeMode::Web),
+            DEFAULT_SHARING_WEB_TTL_MINUTES * 60
+        );
+        // The two modes are genuinely different values, which is the whole reason
+        // there are two keys — a test that passed with one reader wired to both
+        // would not notice.
+        assert_ne!(
+            db.share_ttl_secs(crate::config::ExposeMode::Peer),
+            db.share_ttl_secs(crate::config::ExposeMode::Web)
+        );
+    }
+
+    #[test]
+    fn a_share_ttl_outside_the_bounds_is_clamped_on_the_way_in() {
+        // The validator's half: `veld settings set` and the dialog both go through
+        // it, so an out-of-range value is stored already narrowed rather than
+        // refused (see `validate`).
+        let (_dir, db) = test_db();
+        db.patch_settings(&patch(&[("sharing.peerTtlMinutes", Value::from(999_999))]))
+            .unwrap();
+        assert_eq!(
+            db.setting(&SettingKey::SharingPeerTtlMinutes).unwrap(),
+            Some(Value::from(MAX_SHARE_TTL_MINUTES))
+        );
+    }
+
+    #[test]
+    fn a_stored_share_ttl_outside_the_bounds_is_clamped_on_read_too() {
+        // The *reader's* half, which the test above cannot reach: the validator
+        // would have narrowed anything written through it, so the only way to
+        // exercise this is the shape a newer build with a wider range — or a
+        // hand-edited database — leaves behind. Same pattern as
+        // `detach_grace_is_clamped_even_when_stored_out_of_range`.
+        let (_dir, db) = test_db();
+        {
+            let conn = db.lock();
+            conn.execute(
+                "INSERT INTO settings (scope, key, value, updated_at)
+                 VALUES ('global', 'sharing.peerTtlMinutes', '999999', '2026-01-01T00:00:00.000000Z')",
+                [],
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            db.share_ttl_secs(crate::config::ExposeMode::Peer),
+            MAX_SHARE_TTL_MINUTES * 60
+        );
     }
 
     #[test]

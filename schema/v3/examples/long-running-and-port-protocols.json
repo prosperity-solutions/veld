@@ -4,6 +4,21 @@
   "name": "long-running-and-port-protocols",
   "url_template": "{service}.{run}.demo.localhost",
 
+  // Environment-wide sharing policy. Relays must be opted into explicitly —
+  // including public — so nothing is routed over a public relay by accident.
+  //
+  // The two TTLs are how long a share LINK lives, per audience, in minutes. They
+  // are the deadline that usually ends a share, and therefore what ends the
+  // automatic keep-awake with it — `keepAwake.sharing*Minutes` is a ceiling over
+  // this, not a second countdown. Set here, a project's answer overrides each
+  // machine's `sharing.peerTtlMinutes` / `sharing.webTtlMinutes` setting, and
+  // `veld share --ttl` overrides both for one share.
+  "sharing": {
+    "relays": "public",
+    "peer_ttl_minutes": 240,
+    "web_ttl_minutes": 30
+  },
+
   "nodes": {
     // The default shape, unchanged: no `ports` key means one auto-allocated
     // http port, reachable at web.<run>.demo.localhost.

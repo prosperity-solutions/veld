@@ -101,10 +101,10 @@ use serde_json::Value;
 use super::settings::{
     ConfigSource, MAX_BELL_VOLUME, MAX_DETACH_GRACE_MINUTES, MAX_FONT_SIZE, MAX_KEEP_AWAKE_MINUTES,
     MAX_RECONNECT_BACKOFF_SECONDS, MAX_RECONNECT_FIRST_DELAY_SECONDS, MAX_RECONNECT_TRIES,
-    MAX_RUN_HISTORY_DAYS, MAX_SCROLLBACK, MAX_TRASH_RETENTION_DAYS, MIN_BELL_VOLUME,
-    MIN_DETACH_GRACE_MINUTES, MIN_FONT_SIZE, MIN_KEEP_AWAKE_MINUTES, MIN_RECONNECT_BACKOFF_SECONDS,
-    MIN_RECONNECT_FIRST_DELAY_SECONDS, MIN_RECONNECT_TRIES, MIN_RUN_HISTORY_DAYS, MIN_SCROLLBACK,
-    SettingKey, defaults,
+    MAX_RUN_HISTORY_DAYS, MAX_SCROLLBACK, MAX_SHARE_TTL_MINUTES, MAX_TRASH_RETENTION_DAYS,
+    MIN_BELL_VOLUME, MIN_DETACH_GRACE_MINUTES, MIN_FONT_SIZE, MIN_KEEP_AWAKE_MINUTES,
+    MIN_RECONNECT_BACKOFF_SECONDS, MIN_RECONNECT_FIRST_DELAY_SECONDS, MIN_RECONNECT_TRIES,
+    MIN_RUN_HISTORY_DAYS, MIN_SCROLLBACK, MIN_SHARE_TTL_MINUTES, SettingKey, defaults,
 };
 
 /// Which part of the product a setting is about.
@@ -123,6 +123,7 @@ pub enum SettingGroup {
     Terminal,
     Activity,
     KeepAwake,
+    Sharing,
     Links,
     Browser,
 }
@@ -135,6 +136,10 @@ impl SettingGroup {
         Self::Terminal,
         Self::Activity,
         Self::KeepAwake,
+        // Beside keep-awake, because the question a reader arrives with — "why
+        // did my machine stay awake for two hours when I said four" — is answered
+        // by one setting from each group.
+        Self::Sharing,
         Self::Links,
         Self::Browser,
     ];
@@ -147,6 +152,7 @@ impl SettingGroup {
             Self::Terminal => "terminal",
             Self::Activity => "activity",
             Self::KeepAwake => "keepAwake",
+            Self::Sharing => "sharing",
             Self::Links => "links",
             Self::Browser => "browser",
         }
@@ -160,6 +166,7 @@ impl SettingGroup {
             Self::Terminal => "Terminal",
             Self::Activity => "Activity",
             Self::KeepAwake => "Keep awake",
+            Self::Sharing => "Sharing",
             Self::Links => "Links",
             Self::Browser => "Browser panes",
         }
@@ -435,6 +442,23 @@ const KEEP_AWAKE_PRESETS: &[Choice] = &[
     choice("480", "8 hours"),
 ];
 
+/// The share lifetimes the settings dialog offers. Accepted values are the whole
+/// `[MIN_SHARE_TTL_MINUTES, MAX_SHARE_TTL_MINUTES]` range — see *Offered is not
+/// accepted*.
+///
+/// Deliberately **not** [`KEEP_AWAKE_PRESETS`], despite today's two lists being
+/// identical: one offers how long a machine stays awake, the other how long a
+/// link works, and a preset added to one is not automatically right for the
+/// other.
+const SHARE_TTL_PRESETS: &[Choice] = &[
+    choice("15", "15 minutes"),
+    choice("30", "30 minutes"),
+    choice("60", "1 hour"),
+    choice("120", "2 hours"),
+    choice("240", "4 hours"),
+    choice("480", "8 hours"),
+];
+
 // ---------------------------------------------------------------------------
 // Section headings
 //
@@ -452,6 +476,7 @@ const NOTIFYING: Option<&str> = Some("Notifying");
 const FOCUS_MODE: Option<&str> = Some("Focus mode");
 const WHILE_SHARING: Option<&str> = Some("While you're sharing");
 const WHEN_YOU_ASK: Option<&str> = Some("When you ask");
+const SHARE_LINKS_EXPIRE: Option<&str> = Some("Share links expire after");
 
 /// A plain on/off setting in a group with no headings — the commonest shape, and
 /// the one worth not repeating forty times.
@@ -1053,6 +1078,44 @@ impl SettingKey {
                 KeepAwake,
                 WHEN_YOU_ASK,
             ),
+
+            // ── Sharing ──────────────────────────────────────────────────────
+            Self::SharingPeerTtlMinutes => Spec {
+                title: "A share with another Veld user",
+                // No "above"/"below" in a spec's help: the catalog feeds `veld
+                // settings describe` as well as the dialog, and a positional
+                // reference is a lie on a terminal.
+                help: "How long a peer share link keeps working. This is what usually ends a \
+                       share — and so what ends the automatic keep-awake with it, since the \
+                       keepAwake.sharing* caps are a ceiling over this rather than a second \
+                       countdown. A project's veld.json can override it, and veld share --ttl \
+                       overrides both for one share.",
+                group: Sharing,
+                section: SHARE_LINKS_EXPIRE,
+                shape: ValueShape::Int,
+                choices: Choices::Presets {
+                    offered: SHARE_TTL_PRESETS,
+                    min: MIN_SHARE_TTL_MINUTES,
+                    max: MAX_SHARE_TTL_MINUTES,
+                    unit: Some("min"),
+                },
+                requires: None,
+            },
+            Self::SharingWebTtlMinutes => Spec {
+                title: "A share on the public web",
+                help: "Shorter than a peer share by default, and for a reason worth keeping: \
+                       the audience is the open internet, so an idle share should die sooner.",
+                group: Sharing,
+                section: SHARE_LINKS_EXPIRE,
+                shape: ValueShape::Int,
+                choices: Choices::Presets {
+                    offered: SHARE_TTL_PRESETS,
+                    min: MIN_SHARE_TTL_MINUTES,
+                    max: MAX_SHARE_TTL_MINUTES,
+                    unit: Some("min"),
+                },
+                requires: None,
+            },
 
             // ── Links ────────────────────────────────────────────────────────
             Self::TerminalOpenUrlsInApp => toggle(

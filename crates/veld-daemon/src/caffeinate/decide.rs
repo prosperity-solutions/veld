@@ -164,6 +164,18 @@ pub struct State {
     /// Consecutive inhibitors that exited on their own straight after spawning.
     /// See `reap_if_dead`.
     pub deaths: u32,
+    /// Whether the *automatic* deadline just computed is the share's own expiry
+    /// rather than the configured cap.
+    ///
+    /// `min(cap, latest share expiry)` picks a number without recording which
+    /// side of it won, and a share's own default life (2h peer, 1h web) is
+    /// shorter than any cap a person would set — so in the common case this is
+    /// `true`: the cap somebody configured is not what is counting down, the
+    /// share dying is. Nothing upstream of `recompute` could tell the two apart
+    /// from `Reasons::expires_at()` alone, and the UI needs to: the copy that
+    /// says "kept awake for the length you set" is a different, false claim from
+    /// "kept awake until the share you started happens to end."
+    pub sharing_bound_by_share: bool,
 }
 
 /// How wide a hold is.
@@ -231,6 +243,7 @@ impl State {
     /// button look broken.
     pub fn manual_stop(&mut self, shares: ShareFacts) {
         self.reasons = Reasons::default();
+        self.sharing_bound_by_share = false;
         if shares.count > 0 {
             self.opted_out = Some(OptOut::UserSaidNo);
         }
@@ -261,6 +274,7 @@ impl State {
             self.spawn_failed = false;
             self.deaths = 0;
             self.reasons.sharing = None;
+            self.sharing_bound_by_share = false;
             return;
         }
 
@@ -304,6 +318,7 @@ impl State {
 
         if !enabled || self.opted_out.is_some() || self.spawn_failed {
             self.reasons.sharing = None;
+            self.sharing_bound_by_share = false;
             // The episode's clock is forgotten while the switch is off so that
             // turning it back on — or plugging in, when only the other source is
             // enabled — starts a fresh allowance rather than resuming a clock that
@@ -334,6 +349,10 @@ impl State {
             Some(share_deadline) => cap_deadline.min(share_deadline),
             None => cap_deadline,
         };
+        // A share's own default life (2h peer, 1h web) is shorter than any cap a
+        // person would set, so this is `true` far more often than the "For at
+        // most" setting's name suggests — see the field doc.
+        self.sharing_bound_by_share = deadline < cap_deadline;
 
         if now >= deadline {
             self.reasons.sharing = None;
@@ -525,10 +544,14 @@ mod tests {
         let mut state = State::default();
         state.recompute(t(0), &prefs(), mains(), sharing(1));
         assert_eq!(state.reasons.sharing, Some(t(120)));
+        // The cap is what ends this hold, not the share — `sharing(1)` puts the
+        // share's own expiry far out on purpose.
+        assert!(!state.sharing_bound_by_share);
 
         let mut state = State::default();
         state.recompute(t(0), &prefs(), battery(), sharing(1));
         assert_eq!(state.reasons.sharing, Some(t(30)));
+        assert!(!state.sharing_bound_by_share);
     }
 
     #[test]
@@ -542,6 +565,36 @@ mod tests {
         };
         state.recompute(t(0), &prefs(), mains(), shares);
         assert_eq!(state.reasons.sharing, Some(t(45)));
+    }
+
+    #[test]
+    fn a_share_shorter_than_the_cap_is_reported_as_the_binding_deadline() {
+        // The bug `sharing_bound_by_share` exists for: a share's own default life
+        // (2h peer, 1h web) is shorter than any cap a person would actually set,
+        // so "For at most" is not what is ending the hold here — the UI needs to
+        // know that, or it claims the wrong thing.
+        let mut state = State::default();
+        let shares = ShareFacts {
+            count: 1,
+            latest_expiry: Some(t(45)),
+        };
+        state.recompute(t(0), &prefs(), mains(), shares);
+        assert_eq!(state.reasons.sharing, Some(t(45)));
+        assert!(state.sharing_bound_by_share);
+    }
+
+    #[test]
+    fn the_last_share_ending_clears_the_binding_flag_too() {
+        let mut state = State::default();
+        let shares = ShareFacts {
+            count: 1,
+            latest_expiry: Some(t(45)),
+        };
+        state.recompute(t(0), &prefs(), mains(), shares);
+        assert!(state.sharing_bound_by_share);
+
+        state.recompute(t(5), &prefs(), mains(), none());
+        assert!(!state.sharing_bound_by_share);
     }
 
     #[test]

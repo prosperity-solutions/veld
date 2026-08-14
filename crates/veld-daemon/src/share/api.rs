@@ -26,10 +26,12 @@ use super::endpoint::RelayChoice;
 use super::gateway::GatewayClient;
 use super::manager::ShareManager;
 
-const DEFAULT_TTL_SECS: i64 = 2 * 60 * 60;
-/// Web shares default to a shorter life than peer shares (§6.1): the audience
-/// is the open internet, so an idle share should die sooner.
-const WEB_DEFAULT_TTL_SECS: i64 = 60 * 60;
+// The two default TTLs used to live here as `const`s with no surface at all.
+// They are now `sharing.peerTtlMinutes` / `sharing.webTtlMinutes` — settable per
+// machine, overridable per project in `veld.json`, and still overridable per
+// share with `--ttl`. See `veld_core::db::DEFAULT_SHARING_PEER_TTL_MINUTES` for
+// why that mattered: this number is the one that actually ends a default share,
+// and the keep-awake cap is only a ceiling above it.
 
 /// Share routes with the manager baked in as state, ready to `.merge()`.
 pub fn routes(manager: Arc<ShareManager>) -> Router {
@@ -546,6 +548,41 @@ struct ResolvedShare {
     web_access: Vec<(String, Option<WebAccessMode>)>,
 }
 
+/// How long a share should live, in seconds: the three answers to "how long",
+/// most specific first.
+///
+/// 1. `--ttl` on this invocation — one share, deliberate, and **unbounded**: a
+///    human typing a number for one link is the exception the bounds below exist
+///    to leave room for.
+/// 2. the project's `veld.json` (`sharing.peer_ttl_minutes` / `web_ttl_minutes`),
+///    because a share's useful life is a property of what is being shared, and a
+///    checkout should get the team's answer without configuring a machine;
+/// 3. this machine's `sharing.*TtlMinutes` setting, which carries the default —
+///    so there is no fourth fallback, and the two numbers that used to be
+///    `const`s in this file now have exactly one home in `settings::defaults()`.
+///
+/// Pure, and separate from the handler that calls it, because it is the whole of
+/// the behaviour worth asserting and `build_manifest` around it needs a database,
+/// a registry and a parsed config to reach. The `veld.json` half is **clamped**
+/// here to the same bounds the setting's validator applies on the way in: a
+/// config file is hand-written and reaches this point unvalidated, so without
+/// this a project could pin a share open for a year — exactly what bounding the
+/// setting was supposed to prevent.
+fn effective_ttl_secs(
+    flag_secs: Option<i64>,
+    config_minutes: Option<i64>,
+    setting_secs: i64,
+) -> i64 {
+    flag_secs
+        .or(config_minutes.map(|m| {
+            m.clamp(
+                veld_core::db::MIN_SHARE_TTL_MINUTES,
+                veld_core::db::MAX_SHARE_TTL_MINUTES,
+            ) * 60
+        }))
+        .unwrap_or(setting_secs)
+}
+
 /// Resolve a run to a shareable manifest by reading persisted state and the
 /// project's config. Only services whose active variant opts into the
 /// requested `mode` (`share.expose` contains it) are included; this is the
@@ -823,6 +860,12 @@ fn build_manifest(
         .as_ref()
         .map(|s| s.dangerously_embed_relay_tokens_in_ticket)
         .unwrap_or(false);
+    // Read before `relays` moves `sharing` below, and in minutes — the unit the
+    // config and the setting are both written in.
+    let config_ttl_minutes = sharing.as_ref().and_then(|s| match mode {
+        ExposeMode::Peer => s.peer_ttl_minutes,
+        ExposeMode::Web => s.web_ttl_minutes,
+    });
     let gateway = sharing.as_ref().and_then(|s| s.gateway.clone());
     let relay_policy = sharing.and_then(|s| s.relays);
     let relay = RelayChoice::resolve(relay_policy.as_ref()).ok_or((
@@ -842,10 +885,7 @@ fn build_manifest(
     }
 
     let now = Utc::now().timestamp();
-    let ttl = ttl_secs.unwrap_or(match mode {
-        ExposeMode::Peer => DEFAULT_TTL_SECS,
-        ExposeMode::Web => WEB_DEFAULT_TTL_SECS,
-    });
+    let ttl = effective_ttl_secs(ttl_secs, config_ttl_minutes, db.share_ttl_secs(mode));
     Ok(ResolvedShare {
         manifest: ShareManifest {
             run_id: run_state.run_id,
@@ -1651,6 +1691,55 @@ mod tests {
         assert!(
             !msg.contains("matching the requested nodes"),
             "must not blame a --node filter: {msg}"
+        );
+    }
+
+    // ── Share lifetime precedence ───────────────────────────────────────────
+
+    use super::effective_ttl_secs;
+    use veld_core::db::{MAX_SHARE_TTL_MINUTES, MIN_SHARE_TTL_MINUTES};
+
+    #[test]
+    fn the_setting_answers_when_nothing_more_specific_does() {
+        // The default path, and the one the bug was about: this number is what
+        // actually ends a default share.
+        assert_eq!(effective_ttl_secs(None, None, 7200), 7200);
+    }
+
+    #[test]
+    fn the_project_config_beats_the_machine_setting() {
+        // A share's useful life belongs to what is being shared, so a checkout
+        // gets the team's answer without anybody configuring a machine.
+        assert_eq!(effective_ttl_secs(None, Some(30), 7200), 30 * 60);
+    }
+
+    #[test]
+    fn the_flag_beats_everything_and_is_deliberately_unbounded() {
+        // `--ttl` is one human typing one number for one link — the exception the
+        // bounds exist to leave room for, so it is NOT clamped.
+        assert_eq!(effective_ttl_secs(Some(99), Some(30), 7200), 99);
+        let a_year = 365 * 24 * 60 * 60;
+        assert_eq!(effective_ttl_secs(Some(a_year), None, 7200), a_year);
+    }
+
+    #[test]
+    fn a_hand_written_config_cannot_escape_the_bounds() {
+        // A veld.json reaches this point unvalidated. Without the clamp a project
+        // could pin a share open for a year, which is what bounding the setting
+        // was supposed to prevent — so the clamp is the guard, not the comment.
+        assert_eq!(
+            effective_ttl_secs(None, Some(999_999), 7200),
+            MAX_SHARE_TTL_MINUTES * 60
+        );
+        assert_eq!(
+            effective_ttl_secs(None, Some(0), 7200),
+            MIN_SHARE_TTL_MINUTES * 60
+        );
+        // Negative is the same class of nonsense and must not produce a share
+        // that expired before it was minted.
+        assert_eq!(
+            effective_ttl_secs(None, Some(-5), 7200),
+            MIN_SHARE_TTL_MINUTES * 60
         );
     }
 }

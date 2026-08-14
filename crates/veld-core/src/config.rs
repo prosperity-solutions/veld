@@ -1594,6 +1594,27 @@ pub struct SharingConfig {
         skip_serializing_if = "is_false"
     )]
     pub dangerously_embed_relay_tokens_in_ticket: bool,
+
+    /// How long this project's share links live, per mode, in **minutes**.
+    ///
+    /// The project's answer to the same question the `sharing.peerTtlMinutes` /
+    /// `sharing.webTtlMinutes` settings answer per machine, and it **wins** over
+    /// them: a share's lifetime is a property of what is being shared — a demo
+    /// environment somebody hands round for an afternoon versus a database port —
+    /// so the repo that describes the environment is the right place to bound it,
+    /// and a checkout gets the team's answer without anybody configuring a
+    /// machine. `veld share --ttl` still overrides both, for one share.
+    ///
+    /// Absent means "unset" rather than a number, which is what keeps the
+    /// precedence honest: a project that says nothing must fall through to the
+    /// setting rather than pin the default and shadow it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_ttl_minutes: Option<i64>,
+
+    /// See [`Self::peer_ttl_minutes`]. Shorter by default, because the audience
+    /// is the open internet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_ttl_minutes: Option<i64>,
 }
 
 /// `skip_serializing_if` predicate: omit a `bool` field when it is `false`.
@@ -9951,6 +9972,8 @@ mod tests {
             relays: Some(RelayPolicy::Public),
             gateway: None,
             dangerously_embed_relay_tokens_in_ticket: false,
+            peer_ttl_minutes: None,
+            web_ttl_minutes: None,
         };
         assert!(
             !serde_json::to_string(&off)
