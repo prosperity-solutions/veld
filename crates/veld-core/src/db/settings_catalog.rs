@@ -1088,8 +1088,10 @@ impl SettingKey {
                 help: "How long a peer share link keeps working. This is what usually ends a \
                        share — and so what ends the automatic keep-awake with it, since the \
                        keepAwake.sharing* caps are a ceiling over this rather than a second \
-                       countdown. A project's veld.json can override it, and veld share --ttl \
-                       overrides both for one share.",
+                       countdown. This machine only: to change it for everyone who checks a \
+                       project out, set sharing.peer_ttl_minutes in its veld.json, which wins \
+                       over this. veld share --ttl wins over both, for one share. Applies to \
+                       the next share, not one already running.",
                 group: Sharing,
                 section: SHARE_LINKS_EXPIRE,
                 shape: ValueShape::Int,
@@ -1104,7 +1106,10 @@ impl SettingKey {
             Self::SharingWebTtlMinutes => Spec {
                 title: "A share on the public web",
                 help: "Shorter than a peer share by default, and for a reason worth keeping: \
-                       the audience is the open internet, so an idle share should die sooner.",
+                       the audience is the open internet, so an idle share should die sooner. \
+                       This machine only, like the peer setting: a project's \
+                       sharing.web_ttl_minutes wins over it, and veld share --ttl over both. \
+                       Applies to the next share, not one already running.",
                 group: Sharing,
                 section: SHARE_LINKS_EXPIRE,
                 shape: ValueShape::Int,

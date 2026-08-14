@@ -1331,7 +1331,7 @@ async fn check_keep_awake() -> String {
         // `"sharing"` only, never `"both"`: `remaining_secs` is the later of the
         // two deadlines, so under a manual hold this number is not the share's.
         Some(secs) if reason_is_sharing && state.sharing_bound_by_share => {
-            format!(", {} left — the share's own expiry", humanize_secs(secs))
+            format!(", {} left — your shares' own expiry", humanize_secs(secs))
         }
         Some(secs) => format!(", {} left", humanize_secs(secs)),
         None => ", no time limit".to_owned(),
@@ -1349,8 +1349,15 @@ async fn check_keep_awake() -> String {
     let how = if reason_is_sharing && state.sharing_bound_by_share {
         // The cap is not what is holding this machine, so sending the reader to
         // *Keep awake* alone would be advice for the wrong control — the number
-        // above comes from the share's lifetime.
-        " — stop sharing, shorten it in Settings → Sharing, or turn the hold off in Settings → Keep awake"
+        // above comes from the shares' lifetime.
+        //
+        // And deliberately NOT "shorten it in Settings → Sharing": a share's
+        // `expires_at` is stamped when it is minted, so no setting shortens the
+        // hold this row is printed beside. The only thing that ends it now is
+        // ending the sharing; the setting is the default for the *next* share, and
+        // `--ttl` outranks it anyway. Naming a control that cannot affect the
+        // number next to it is the failure this whole change is about.
+        " — stop sharing (veld unshare), or turn the hold off in Settings → Keep awake. Future shares: veld share --ttl, or Settings → Sharing"
     } else if reason_is_sharing {
         " — stop sharing, or turn it off in Settings → Keep awake"
     } else {

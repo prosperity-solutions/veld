@@ -756,7 +756,7 @@ function KeepAwakeNote() {
             // would be a fresh instance of exactly the mis-attribution this
             // field was added to remove.
             state.reason === "sharing" && state.sharing_bound_by_share
-              ? " — when the share itself expires"
+              ? " — when the last of your shares expires"
               : ""
           }${state.covers_lid ? "." : ", unless you shut the lid."}`
         : "This machine is being kept awake."

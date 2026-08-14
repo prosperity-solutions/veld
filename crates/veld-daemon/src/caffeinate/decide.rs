@@ -352,7 +352,18 @@ impl State {
         // A share's own default life (2h peer, 1h web) is shorter than any cap a
         // person would set, so this is `true` far more often than the "For at
         // most" setting's name suggests — see the field doc.
-        self.sharing_bound_by_share = deadline < cap_deadline;
+        //
+        // **A material gap, not any gap.** `cap_deadline` counts from
+        // `clock_started_at`, which is set on the first tick *after* a share is
+        // minted, so a cap and a share TTL set to the same number leave the share
+        // deadline earlier by the reconcile latency alone — a second or two. That
+        // is now two clicks to arrange rather than a coincidence: the settings
+        // dialog offers 120/240/480 for both, from separate preset lists that
+        // happen to be identical. Reporting "that's your sharing ending, not this
+        // limit" about two limits the user deliberately set to the same value is
+        // technically true and useless, so a difference under a minute does not
+        // count as one deadline binding over the other.
+        self.sharing_bound_by_share = deadline + Duration::seconds(60) < cap_deadline;
 
         if now >= deadline {
             self.reasons.sharing = None;
@@ -588,6 +599,37 @@ mod tests {
         };
         state.recompute(t(0), &prefs(), mains(), shares);
         assert_eq!(state.reasons.sharing, Some(t(45)));
+        assert!(state.sharing_bound_by_share);
+    }
+
+    #[test]
+    fn a_cap_and_a_share_set_to_the_same_length_is_not_a_bound_share() {
+        // Two clicks in one dialog: the keep-awake cap and the share TTL both
+        // offer 120/240/480. The episode clock starts on the tick *after* the
+        // share is minted, so the share deadline is a moment earlier and a bare
+        // `<` would announce the share as the binding one — true to the second,
+        // and useless to somebody who set both to two hours on purpose.
+        let mut state = State::default();
+        let shares = ShareFacts {
+            count: 1,
+            // The mains cap is 120 from `prefs()`; the episode clock starts at
+            // t(0) here, so this is the same deadline two seconds early.
+            latest_expiry: Some(t(120) - Duration::seconds(2)),
+        };
+        state.recompute(t(0), &prefs(), mains(), shares);
+        assert!(state.reasons.sharing.is_some());
+        assert!(
+            !state.sharing_bound_by_share,
+            "a sub-minute difference is reconcile latency, not a deadline winning"
+        );
+
+        // A real gap still reports.
+        let shares = ShareFacts {
+            count: 1,
+            latest_expiry: Some(t(45)),
+        };
+        let mut state = State::default();
+        state.recompute(t(0), &prefs(), mains(), shares);
         assert!(state.sharing_bound_by_share);
     }
 

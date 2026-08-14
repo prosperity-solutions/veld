@@ -1082,14 +1082,24 @@ fn status_of(
         // The inhibitor could not be started at all. Distinct from a spent cap
         // because the remedy is different and the reassurance is wrong.
         "hold_failed": machine.state.spawn_failed,
-        // Whether the countdown, when it is the automatic one, is the share's own
+        // Whether the countdown, when it is the automatic one, is the shares' own
         // expiry rather than the "For at most" setting. A share's own default
         // life (2h peer, 1h web) is shorter than any cap somebody would actually
         // configure, so this is `true` more often than the setting's name
         // suggests — the UI needs it to avoid saying "kept awake for the length
         // you set" about a number that is actually "until the share you started
         // happens to end".
-        "sharing_bound_by_share": machine.state.sharing_bound_by_share,
+        //
+        // **`AND`ed with a live sharing reason here, not trusted from the state.**
+        // `recompute` resets the flag beside every place *it* clears
+        // `reasons.sharing`, but it is not the only writer: `reap_if_dead` clears
+        // every reason after repeated inhibitor deaths (and `current_status` calls
+        // it with no `recompute` after, so a single GET can reach that state), and
+        // `reconcile`'s failure path clears the sharing reason directly. Chasing
+        // those call sites is how this field goes stale again the next time one is
+        // added; deriving it at the one point of emission cannot.
+        "sharing_bound_by_share": machine.state.sharing_bound_by_share
+            && reasons.sharing.is_some(),
     });
     if let Some(s) = session {
         let expires_at = reasons.expires_at();
@@ -1218,6 +1228,44 @@ mod tests {
 
     fn idle_status(battery_capable: bool) -> serde_json::Value {
         status_of(&Machine::default(), battery_capable, mains(), &prefs())
+    }
+
+    /// The wire field cannot be true without a live sharing reason, whoever
+    /// cleared it.
+    ///
+    /// The state deliberately carries a *stale* flag here, which is exactly the
+    /// shape `reap_if_dead` leaves behind after repeated inhibitor deaths — and
+    /// `current_status` calls that with no `recompute` afterwards, so one `GET`
+    /// reaches it. Asserting on `status_of` rather than on `State` is the point:
+    /// the guard has to live where the value is emitted, because `recompute` is
+    /// not the only writer of `reasons.sharing`.
+    #[test]
+    fn a_stale_binding_flag_never_reaches_the_wire() {
+        let mut machine = Machine::default();
+        machine.state.sharing_bound_by_share = true;
+        // No reasons at all — every one was cleared after the flag was set.
+        assert_eq!(
+            status_of(&machine, true, mains(), &prefs())["sharing_bound_by_share"],
+            serde_json::json!(false),
+            "a cleared sharing reason must not leave an attribution on the wire"
+        );
+
+        // A manual-only hold is the other half: the flag describes the automatic
+        // deadline, so it must not be reported for a hold nobody automatic holds.
+        machine
+            .state
+            .manual_start(Some(chrono::Utc::now() + chrono::Duration::hours(4)));
+        assert_eq!(
+            status_of(&machine, true, mains(), &prefs())["sharing_bound_by_share"],
+            serde_json::json!(false)
+        );
+
+        // And with the sharing reason actually live, it is reported.
+        machine.state.reasons.sharing = Some(chrono::Utc::now() + chrono::Duration::minutes(20));
+        assert_eq!(
+            status_of(&machine, true, mains(), &prefs())["sharing_bound_by_share"],
+            serde_json::json!(true)
+        );
     }
 
     fn req(method: &str, csrf: bool, body: &str) -> Request<Body> {

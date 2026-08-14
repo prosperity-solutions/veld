@@ -5787,12 +5787,15 @@ fn check_depends_on_literal(config: &VeldConfig, out: &mut Vec<Finding>) {
 /// committed is not the value in force.
 fn check_share_ttls(config: &VeldConfig, out: &mut Vec<Finding>) {
     const RULE: &str = "share-ttl-range";
-    // Named locally rather than imported from `db`: `veld-core::config` must keep
-    // loading a config on a machine with no database, and the bound is also stated
-    // in schema/v3 (hand-maintained — see the module docs). Three statements of
-    // one range is the cost of that separation; the schema gate keeps them honest.
-    const MIN: i64 = 5;
-    const MAX: i64 = 8 * 60;
+    // The same constants the daemon clamps with, not a local copy. An earlier
+    // version of this function declared its own pair and justified them with "the
+    // schema gate keeps them honest" — which was simply false: nothing compares
+    // the schema's `minimum`/`maximum` to anything, so bumping the real bound
+    // would have left this rule reporting a limit the daemon no longer applies.
+    // `crate::db` is an ungated module of this same crate, so there was never a
+    // dependency reason either. What keeps the *third* statement (schema/v3,
+    // hand-maintained) honest is `share_ttl_bounds_match_the_schema` below.
+    use crate::db::{MAX_SHARE_TTL_MINUTES as MAX, MIN_SHARE_TTL_MINUTES as MIN};
 
     let Some(sharing) = &config.sharing else {
         return;
@@ -6089,6 +6092,48 @@ mod tests {
                 .iter()
                 .any(|f| f.rule == "proxy-header-syntax")
         );
+    }
+
+    /// The bound is stated twice — once in Rust, once in the hand-maintained
+    /// JSON Schema — and nothing else compares them.
+    ///
+    /// This test is the whole of "the schema keeps them honest". Two review angles
+    /// independently caught a comment here asserting that a gate like this already
+    /// existed when it did not; `tests/validate-schema.sh` only checks that
+    /// examples *satisfy* the schema, never that the schema's literals match the
+    /// constants the daemon enforces. Without this, widening
+    /// `MAX_SHARE_TTL_MINUTES` leaves an editor red-squiggling a value the daemon
+    /// accepts — a schema confidently reporting the wrong thing, which the
+    /// documentation checklist calls out as the specific hazard of a hand-written
+    /// schema.
+    #[test]
+    fn share_ttl_bounds_match_the_schema() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../schema/v3/veld.schema.json"
+        );
+        let schema: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).expect("the v3 schema"))
+                .expect("valid JSON");
+        let props = &schema["$defs"]["sharing"]["properties"];
+        for field in ["peer_ttl_minutes", "web_ttl_minutes"] {
+            let spec = &props[field];
+            assert!(
+                spec.is_object(),
+                "schema/v3 has no sharing.{field} — the field would be rejected by \
+                 `additionalProperties: false`"
+            );
+            assert_eq!(
+                spec["minimum"].as_i64(),
+                Some(crate::db::MIN_SHARE_TTL_MINUTES),
+                "sharing.{field} minimum disagrees with MIN_SHARE_TTL_MINUTES"
+            );
+            assert_eq!(
+                spec["maximum"].as_i64(),
+                Some(crate::db::MAX_SHARE_TTL_MINUTES),
+                "sharing.{field} maximum disagrees with MAX_SHARE_TTL_MINUTES"
+            );
+        }
     }
 
     #[test]

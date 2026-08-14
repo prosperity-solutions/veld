@@ -187,8 +187,8 @@ export function KeepAwakeButton(props: {
         : "This machine may sleep — click to keep it awake"
     : automatic
       ? lidCaveat
-        ? `Keeping this machine awake while you're sharing — ${left}${boundByShare ? " (the share itself ending, not your keep-awake setting)" : ""}. A shut lid still sleeps it.`
-        : `Keeping this machine awake while you're sharing — ${left}${boundByShare ? " (the share itself ending, not your keep-awake setting)" : ""}`
+        ? `Keeping this machine awake while you're sharing — ${left}${boundByShare ? " (your sharing ending, not your keep-awake setting)" : ""}. A shut lid still sleeps it.`
+        : `Keeping this machine awake while you're sharing — ${left}${boundByShare ? " (your sharing ending, not your keep-awake setting)" : ""}`
       : lidCaveat
         ? `Keeping this machine awake — ${left}. A shut lid still sleeps it.`
         : `Keeping this machine awake — ${left}`;
@@ -223,13 +223,16 @@ export function KeepAwakeButton(props: {
               // Wrapped like `LidNote`'s: a `Menu.Label` is single-line by
               // default and this is a sentence.
               //
-              // It names the setting that *does* govern this number, because the
-              // whole defect was that the countdown looked like it came from the
-              // keep-awake cap: somebody who set "at most 4 hours" and read
-              // "1h 59m left" had no way to find out which control to reach for.
-              // Now there is one, so the note points at it.
+              // Says which deadline the number above is, and stops there. It
+              // deliberately does NOT point at *Settings → Sharing*: a share's
+              // expiry is stamped when it is minted, so nothing in that dialog
+              // shortens or extends the hold this label sits under — naming it
+              // here would send somebody to a control that cannot move the number
+              // they are reading, which is a new version of the same defect.
+              // Changing the durations below, or ending the sharing, are the two
+              // things that do act on it.
               <Menu.Label style={{ whiteSpace: "normal" }}>
-                That's the share expiring, not this limit — see Sharing in Settings.
+                That's your sharing ending, not this limit.
               </Menu.Label>
             )}
             <Menu.Item
