@@ -1194,7 +1194,12 @@ Three places can answer "how long", most specific first:
 | these config fields | the project, committed for the team | yes, 5–480 min |
 | `sharing.peerTtlMinutes` / `sharing.webTtlMinutes` (`veld settings`) | this machine; carries the default | yes, 5–480 min |
 
-A project that says nothing falls through to the machine setting rather than pinning the default, which is what keeps a team's answer and a personal one from silently shadowing each other.
+A project that says nothing falls through to the machine setting rather than pinning the default, which is what keeps a team's answer and a personal one from silently shadowing each other. Each answer **replaces** the next rather than being `min`-ed with it, in both directions: a project asking for 480 minutes overrides a machine set to 5. The limit that bounds this is the 5–480 clamp, which applies to the project's number as much as the machine's — `min(config, setting)` was rejected because it turns a personal choice into a ceiling on every project you check out, with nothing saying why the repo's declared lifetime is not in force.
+
+Two things worth knowing before you rely on a committed value:
+
+- **Out of range is clamped, not refused.** `peer_ttl_minutes: 10000` loads and yields 480. `veld lint` warns (`share-ttl-range`) and names the value that will actually apply, which is the only surface that tells you — the daemon clamps silently at share time.
+- **A misspelled key is ignored, and fails *long*.** `sharing` has no `deny_unknown_fields`, so `web_ttl_mins` is dropped and that share falls through to the machine setting — 60 minutes rather than the shorter number you meant. `veld lint` cannot catch this one; check `veld share --json`'s `expires_at` if the value matters.
 
 ### `sharing.gateway`
 

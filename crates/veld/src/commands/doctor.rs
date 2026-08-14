@@ -1323,6 +1323,16 @@ async fn check_keep_awake() -> String {
         _ => "you asked",
     };
     let left = match state.remaining_secs {
+        // Whose deadline the number is, when it is the share's own. This row is
+        // the one a terminal-only user reads hours later to find out why a Mac
+        // will not sleep, so a countdown that looks like it came from the
+        // keep-awake cap — and does not — is worth one clause.
+        //
+        // `"sharing"` only, never `"both"`: `remaining_secs` is the later of the
+        // two deadlines, so under a manual hold this number is not the share's.
+        Some(secs) if reason_is_sharing && state.sharing_bound_by_share => {
+            format!(", {} left — the share's own expiry", humanize_secs(secs))
+        }
         Some(secs) => format!(", {} left", humanize_secs(secs)),
         None => ", no time limit".to_owned(),
     };
@@ -1336,7 +1346,12 @@ async fn check_keep_awake() -> String {
     // terminal-only user reaches while trying to *stop* the hold. There is
     // deliberately no keep-awake subcommand to name (see `veld_core::agent`'s
     // reasoning about config-declared behaviour), so it names the surface.
-    let how = if reason_is_sharing {
+    let how = if reason_is_sharing && state.sharing_bound_by_share {
+        // The cap is not what is holding this machine, so sending the reader to
+        // *Keep awake* alone would be advice for the wrong control — the number
+        // above comes from the share's lifetime.
+        " — stop sharing, shorten it in Settings → Sharing, or turn the hold off in Settings → Keep awake"
+    } else if reason_is_sharing {
         " — stop sharing, or turn it off in Settings → Keep awake"
     } else {
         " — turn it off from the cup in the top bar"

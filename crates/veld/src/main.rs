@@ -606,7 +606,11 @@ enum Command {
         /// Limit to specific nodes (default: all URL-bearing nodes).
         #[arg(long, value_name = "NODE")]
         node: Vec<String>,
-        /// Share lifetime in seconds (default 7200; 3600 for --web).
+        /// Share lifetime in seconds, overriding the default for this one share.
+        /// The default comes from `sharing.peerTtlMinutes` /
+        /// `sharing.webTtlMinutes` (`veld settings`, 120/60 minutes out of the
+        /// box), or the project's `sharing.peer_ttl_minutes` /
+        /// `web_ttl_minutes` in veld.json.
         #[arg(long)]
         ttl: Option<i64>,
         /// Approval mode: first | manual | auto (default: manual, or first

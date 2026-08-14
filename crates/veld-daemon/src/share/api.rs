@@ -14,7 +14,8 @@ use axum::{Json, response::IntoResponse};
 use chrono::Utc;
 use uuid::Uuid;
 use veld_core::config::{
-    ExposeMode, GatewayRef, SharePolicy, VeldConfig, WebAccessMode, parse_config, resolve_proxy,
+    ExposeMode, GatewayRef, SharePolicy, SharingConfig, VeldConfig, WebAccessMode, parse_config,
+    resolve_proxy,
 };
 use veld_core::share::{
     ApprovalMode, Capability, GatewayAccessPolicy, JoinRequest, JoinResponse, ShareManifest,
@@ -548,12 +549,31 @@ struct ResolvedShare {
     web_access: Vec<(String, Option<WebAccessMode>)>,
 }
 
+/// Which of the project's two TTL fields this share's audience reads, in minutes.
+///
+/// Two lines, extracted for one reason: swapping the arms is invisible to every
+/// other test in this file — `effective_ttl_secs` takes an already-resolved
+/// `Option<i64>` — and the failure is asymmetric. A **web** share silently taking
+/// the peer field means the open-internet audience gets the longer of the two
+/// numbers, which is the one direction of this feature that matters for exposure.
+fn config_ttl_minutes(sharing: Option<&SharingConfig>, mode: ExposeMode) -> Option<i64> {
+    sharing.and_then(|s| match mode {
+        ExposeMode::Peer => s.peer_ttl_minutes,
+        ExposeMode::Web => s.web_ttl_minutes,
+    })
+}
+
 /// How long a share should live, in seconds: the three answers to "how long",
 /// most specific first.
 ///
-/// 1. `--ttl` on this invocation — one share, deliberate, and **unbounded**: a
-///    human typing a number for one link is the exception the bounds below exist
-///    to leave room for.
+/// 1. `--ttl` on this invocation — one share, deliberate, and **unbounded above**:
+///    a human typing a number for one link is the exception the bounds below exist
+///    to leave room for. Bounded *below* at one minute, though, which is not a
+///    limit but the same invariant the config branch is clamped for — a share
+///    whose `expires_at` is already in the past is minted, printed with a join
+///    link, and reaped on the next tick. `--ttl 0` and `--ttl -5` were already
+///    able to do that before this function existed; stating the precedence is
+///    what made leaving them the only branch that can a visible inconsistency.
 /// 2. the project's `veld.json` (`sharing.peer_ttl_minutes` / `web_ttl_minutes`),
 ///    because a share's useful life is a property of what is being shared, and a
 ///    checkout should get the team's answer without configuring a machine;
@@ -568,12 +588,27 @@ struct ResolvedShare {
 /// config file is hand-written and reaches this point unvalidated, so without
 /// this a project could pin a share open for a year — exactly what bounding the
 /// setting was supposed to prevent.
+///
+/// **Each answer replaces the next, rather than `min`-ing with it — including
+/// upwards.** So a project asking for 480 minutes overrides a machine whose owner
+/// set 5, and that direction is the one worth being deliberate about, since `web`
+/// shares face the open internet. `min(config, setting)` — "a project may only
+/// shorten" — was considered and rejected: it makes the *machine* setting a
+/// ceiling nobody set as one, so a developer who once picked 30 minutes for a
+/// laptop-on-a-train silently caps every project they check out afterwards, with
+/// no surface saying why a repo's declared lifetime is not in force. The bound
+/// that actually limits this is the 5–480 clamp, which applies to the project's
+/// number as much as the machine's; a repo that can land a `veld.json` can already
+/// run arbitrary commands through one, so the clamp — not the precedence — is
+/// where the exposure question is answered. `veld lint` warns when it bites
+/// (`share-ttl-range`).
 fn effective_ttl_secs(
     flag_secs: Option<i64>,
     config_minutes: Option<i64>,
     setting_secs: i64,
 ) -> i64 {
     flag_secs
+        .map(|secs| secs.max(60))
         .or(config_minutes.map(|m| {
             m.clamp(
                 veld_core::db::MIN_SHARE_TTL_MINUTES,
@@ -862,10 +897,7 @@ fn build_manifest(
         .unwrap_or(false);
     // Read before `relays` moves `sharing` below, and in minutes — the unit the
     // config and the setting are both written in.
-    let config_ttl_minutes = sharing.as_ref().and_then(|s| match mode {
-        ExposeMode::Peer => s.peer_ttl_minutes,
-        ExposeMode::Web => s.web_ttl_minutes,
-    });
+    let config_ttl_minutes = config_ttl_minutes(sharing.as_ref(), mode);
     let gateway = sharing.as_ref().and_then(|s| s.gateway.clone());
     let relay_policy = sharing.and_then(|s| s.relays);
     let relay = RelayChoice::resolve(relay_policy.as_ref()).ok_or((
@@ -893,7 +925,12 @@ fn build_manifest(
             project: run_state.project.clone(),
             nodes,
             created_at: now,
-            expires_at: now + ttl,
+            // `saturating_add`, because `--ttl` is unbounded above by design and
+            // `i64::MAX` is a thing a person can type: plain `+` wraps to a
+            // negative timestamp in release (the workspace sets no `[profile]`,
+            // so overflow checks are off) and panics in the handler in debug.
+            // Saturating gives the "absurdly far future" the caller asked for.
+            expires_at: now.saturating_add(ttl),
         },
         relay,
         embed_relay_tokens,
@@ -1696,8 +1733,46 @@ mod tests {
 
     // ── Share lifetime precedence ───────────────────────────────────────────
 
-    use super::effective_ttl_secs;
+    use super::{config_ttl_minutes, effective_ttl_secs};
+    use veld_core::config::SharingConfig;
     use veld_core::db::{MAX_SHARE_TTL_MINUTES, MIN_SHARE_TTL_MINUTES};
+
+    #[test]
+    fn each_audience_reads_its_own_config_field() {
+        // Asserts the two arms are not swapped, which nothing else here can: the
+        // failure is asymmetric, since a web share taking the peer field hands the
+        // open-internet audience the longer of the two numbers.
+        let sharing = SharingConfig {
+            relays: None,
+            gateway: None,
+            dangerously_embed_relay_tokens_in_ticket: false,
+            peer_ttl_minutes: Some(240),
+            web_ttl_minutes: Some(30),
+        };
+        assert_eq!(
+            config_ttl_minutes(Some(&sharing), ExposeMode::Peer),
+            Some(240)
+        );
+        assert_eq!(
+            config_ttl_minutes(Some(&sharing), ExposeMode::Web),
+            Some(30)
+        );
+    }
+
+    #[test]
+    fn a_config_silent_on_this_audience_falls_through() {
+        // Per-field, not per-object: a project that bounds only its web shares must
+        // not thereby pin its peer shares to anything.
+        let web_only = SharingConfig {
+            relays: None,
+            gateway: None,
+            dangerously_embed_relay_tokens_in_ticket: false,
+            peer_ttl_minutes: None,
+            web_ttl_minutes: Some(30),
+        };
+        assert_eq!(config_ttl_minutes(Some(&web_only), ExposeMode::Peer), None);
+        assert_eq!(config_ttl_minutes(None, ExposeMode::Web), None);
+    }
 
     #[test]
     fn the_setting_answers_when_nothing_more_specific_does() {
@@ -1714,12 +1789,31 @@ mod tests {
     }
 
     #[test]
-    fn the_flag_beats_everything_and_is_deliberately_unbounded() {
+    fn the_flag_beats_everything_and_is_unbounded_above() {
         // `--ttl` is one human typing one number for one link — the exception the
-        // bounds exist to leave room for, so it is NOT clamped.
+        // bounds exist to leave room for, so it is NOT capped from above.
         assert_eq!(effective_ttl_secs(Some(99), Some(30), 7200), 99);
         let a_year = 365 * 24 * 60 * 60;
         assert_eq!(effective_ttl_secs(Some(a_year), None, 7200), a_year);
+    }
+
+    #[test]
+    fn no_branch_can_mint_a_share_that_is_already_dead() {
+        // The invariant the config branch was clamped for, stated for all three:
+        // an `expires_at` in the past means a share minted, printed with a join
+        // link, and reaped on the next tick — the least useful possible outcome.
+        // `--ttl` stays unbounded *above* and is floored at one minute here.
+        for flag in [Some(0), Some(-5), Some(i64::MIN)] {
+            assert_eq!(
+                effective_ttl_secs(flag, None, 7200),
+                60,
+                "flag {flag:?} must not produce a non-positive lifetime"
+            );
+        }
+        assert_eq!(
+            effective_ttl_secs(None, Some(0), 7200),
+            MIN_SHARE_TTL_MINUTES * 60
+        );
     }
 
     #[test]

@@ -56,6 +56,18 @@ async fn keep_awake_line(client: &DaemonClient) -> Option<String> {
         let armed = state.active && (state.reason == "sharing" || state.reason == "both");
         if armed {
             let until = match state.remaining_secs {
+                // Naming *which* deadline this is, when it is the share's own —
+                // this receipt is the surface that reaches the person who just
+                // shared, so "stays awake for 1h 59m" under a 4-hour setting is
+                // read here first and misread here first.
+                //
+                // `"sharing"` only, never `"both"`: `remaining_secs` is the later
+                // of the two deadlines, so under a manual hold the number is not
+                // the share's and attributing it would be the same false claim in
+                // a new place.
+                Some(secs) if state.reason == "sharing" && state.sharing_bound_by_share => {
+                    format!("for {} — until the share expires", humanize(secs))
+                }
                 Some(secs) => format!("for {}", humanize(secs)),
                 None => "until you turn it off".to_owned(),
             };

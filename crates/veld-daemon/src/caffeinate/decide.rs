@@ -356,6 +356,14 @@ impl State {
 
         if now >= deadline {
             self.reasons.sharing = None;
+            // Reset beside this clear like the three above it, and for a reason
+            // this path makes sharper than they do: the share side is what
+            // usually wins the `min`, so without this the flag stays `true` from
+            // the moment a share expires until the reaper drops it — reported
+            // next to `reason: "none"`. Every consumer happens to gate on
+            // `reason` today, and relying on that is what let a stale flag
+            // become a false sentence in the sharing panel once already.
+            self.sharing_bound_by_share = false;
             // Only the *cap* opts the episode out. Reaching the shares' own expiry
             // means they are about to be reaped, which will end the episode and
             // clear everything anyway — recording an opt-out for it would be
@@ -581,6 +589,31 @@ mod tests {
         state.recompute(t(0), &prefs(), mains(), shares);
         assert_eq!(state.reasons.sharing, Some(t(45)));
         assert!(state.sharing_bound_by_share);
+    }
+
+    #[test]
+    fn a_share_expiring_under_a_live_cap_clears_the_binding_flag() {
+        // The fourth clearing path, and the one a consumer would meet most often:
+        // between a share's own expiry and the reaper dropping it, `shares.count`
+        // is still non-zero and the cap has NOT been reached — so this returns
+        // early with `reasons.sharing` cleared, and the flag has to go with it or
+        // the API reports `sharing_bound_by_share: true` beside `reason: "none"`.
+        let mut state = State::default();
+        let shares = ShareFacts {
+            count: 1,
+            latest_expiry: Some(t(45)),
+        };
+        state.recompute(t(0), &prefs(), mains(), shares);
+        assert!(state.sharing_bound_by_share);
+
+        // t(45) is the share's expiry; the mains cap (120) is still well ahead.
+        state.recompute(t(45), &prefs(), mains(), shares);
+        assert_eq!(state.reasons.sharing, None);
+        assert!(state.opted_out.is_none(), "the share expired, not the cap");
+        assert!(
+            !state.sharing_bound_by_share,
+            "a cleared sharing reason must not leave a deadline attribution behind"
+        );
     }
 
     #[test]

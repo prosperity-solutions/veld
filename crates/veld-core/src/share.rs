@@ -624,6 +624,16 @@ pub struct CaffeinateState {
     /// Whether a shut lid keeps the machine awake right now.
     #[serde(default)]
     pub covers_lid: bool,
+    /// Whether the countdown above is the **share's own expiry** rather than the
+    /// configured keep-awake cap. Only meaningful while `reason == "sharing"`,
+    /// because `remaining_secs` is the *later* of the two deadlines once a manual
+    /// hold is also in force.
+    ///
+    /// `#[serde(default)]` like its neighbours, so an older daemon that does not
+    /// send it reads as `false` — the pre-existing wording, which attributes
+    /// nothing.
+    #[serde(default)]
+    pub sharing_bound_by_share: bool,
 }
 
 /// Thin HTTP client for the daemon's `/api/shares` control API.

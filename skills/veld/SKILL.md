@@ -285,8 +285,9 @@ Opt a service out with `"web": { "access": "link" }` in its `share` block (or
 the flag) — then the unguessable slug is the only gate, treat the link as a
 secret. Multi-service caveat: the session cookie is per public host, so a
 password-protected API called cross-origin from the shared frontend gets 401s
-— give API nodes `"web": { "access": "link" }`. Web shares default to a 3600s
-TTL (peer: 7200s). Web and peer are separate shares with separate
+— give API nodes `"web": { "access": "link" }`. Web shares default to a 60-minute
+TTL and peer shares to 120 (`sharing.webTtlMinutes` / `sharing.peerTtlMinutes`, or the
+project's `sharing.web_ttl_minutes` / `peer_ttl_minutes`; `--ttl` overrides both). Web and peer are separate shares with separate
 capabilities: `veld unshare` on one never affects the other. The toolbar arc
 menu has a top-level **Sharing** item (dot when the page is web-shared) whose
 submenu covers **Start/Stop sharing** (toggle a web share for the page's run
