@@ -2700,17 +2700,20 @@ uses, and the same allowlist [`ide.extensions`](#ideextensions) draws on. The li
 below is checked against `veld_core::ide::PANE_ICON_NAMES` by a test, so it cannot
 drift out of date:
 
-`alert-triangle` · `app-window` · `atom` · `bolt` · `book` · `brain` ·
-`brand-github` · `brand-gitlab` · `brand-vscode` · `browser` · `bug` · `bulb`
-· `chart-line` · `check` · `circle-check` · `clock` · `cloud` · `cloud-upload`
-· `code` · `compass` · `cpu` · `database` · `device-desktop` · `download` ·
-`external-link` · `eye` · `file-code` · `flag` · `flask` · `folder` · `gauge`
-· `git-branch` · `git-commit` · `git-merge` · `git-pull-request` · `hourglass`
-· `key` · `link` · `list-check` · `lock` · `map` · `message-chatbot` ·
-`notebook` · `package` · `palette` · `player-play` · `plug` · `puzzle` ·
-`refresh` · `robot` · `rocket` · `search` · `server` · `shield` ·
-`shield-check` · `sparkles` · `star` · `tag` · `terminal-2` · `tool` ·
-`upload` · `wand` · `x`
+`alert-triangle` · `app-window` · `atom` · `ban` · `bolt` · `book` · `brain` ·
+`brand-docker` · `brand-github` · `brand-gitlab` · `brand-slack` ·
+`brand-vscode` · `browser` · `bug` · `bulb` · `chart-line` · `check` ·
+`circle-check` · `circle-dashed` · `circle-x` · `clock` · `cloud` ·
+`cloud-upload` · `code` · `coin` · `compass` · `cpu` · `database` ·
+`device-desktop` · `download` · `external-link` · `eye` · `file-code` ·
+`flag` · `flask` · `folder` · `gauge` · `git-branch` · `git-commit` ·
+`git-merge` · `git-pull-request` · `help-circle` · `history` · `hourglass` ·
+`info-circle` · `key` · `link` · `list-check` · `lock` · `lock-open` ·
+`mail` · `map` · `message-chatbot` · `notebook` · `package` · `palette` ·
+`player-pause` · `player-play` · `plug` · `puzzle` · `refresh` · `robot` ·
+`rocket` · `search` · `server` · `shield` · `shield-check` · `sparkles` ·
+`star` · `tag` · `terminal` · `terminal-2` · `tool` · `trending-down` ·
+`trending-up` · `upload` · `user` · `users` · `wand` · `x`
 
 It is an allowlist rather than "any Tabler name" because the app has to bundle
 every icon that can be rendered. An ASCII string means "this is a name", so a
