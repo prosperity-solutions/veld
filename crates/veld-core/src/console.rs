@@ -343,15 +343,52 @@ pub fn quote(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, MutexGuard};
+    use std::sync::MutexGuard;
 
-    /// `script_path` resolves through `HOME`, which is process-wide.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    /// A tempdir published as `HOME` for the life of one test, restored on drop.
+    ///
+    /// Two properties, and both were missing when this was a module-local
+    /// `ENV_LOCK` plus a bare `set_var`:
+    ///
+    /// - **The lock is the crate-wide one.** `HOME` is not this module's
+    ///   variable: `instance::pty_dir`, `db::cargo_target_db` and
+    ///   `paths::lib_dir` all resolve through it too, so the tests that read
+    ///   those take [`crate::test_support::process_state_guard`] — two
+    ///   different mutexes over one variable is no exclusion at all. Any test
+    ///   added later that asserts on a `HOME`-derived path takes the same
+    ///   guard; the sweep to confirm every existing one does has not been run.
+    /// - **It is restored.** A `set_var` with no counterpart left every later
+    ///   test in the binary resolving `HOME` to a tempdir that had since been
+    ///   deleted — the same shape as issue #310's stub shell, where one test's
+    ///   process-wide publish decided what an unrelated one resolved.
+    struct HomeGuard {
+        // Held for the whole guard, so the restore below happens under it too.
+        _lock: MutexGuard<'static, ()>,
+        previous: Option<std::ffi::OsString>,
+    }
 
-    fn with_home(dir: &Path) -> MutexGuard<'static, ()> {
-        let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            // SAFETY: `_lock` is still alive — fields drop after this runs —
+            // so no other test is reading `HOME` concurrently.
+            unsafe {
+                match &self.previous {
+                    Some(previous) => std::env::set_var("HOME", previous),
+                    None => std::env::remove_var("HOME"),
+                }
+            }
+        }
+    }
+
+    fn with_home(dir: &Path) -> HomeGuard {
+        let lock = crate::test_support::process_state_guard();
+        let previous = std::env::var_os("HOME");
+        // SAFETY: serialised by the crate-wide process-state lock above.
         unsafe { std::env::set_var("HOME", dir) };
-        guard
+        HomeGuard {
+            _lock: lock,
+            previous,
+        }
     }
 
     /// Run the generated script the way a terminal window would, and report what
