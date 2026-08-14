@@ -32,7 +32,7 @@ import { IconCoffee, IconCoffeeOff } from "@tabler/icons-react";
 
 import type { CaffeinateState, SettingsDoc } from "../api";
 import { autoWhileSharingKey } from "../shared/settings";
-import { formatRemaining, useCaffeinate } from "../shared/useCaffeinate";
+import { attributesToShares, formatRemaining, useCaffeinate } from "../shared/useCaffeinate";
 
 /**
  * The offered limits.
@@ -163,12 +163,16 @@ export function KeepAwakeButton(props: {
   // Whether a human asked for any of this. `"sharing"` alone means nobody did,
   // which changes what every string below should say.
   const automatic = state?.reason === "sharing";
-  // The countdown above is the share's own life ending, not the "For at most"
+  // The countdown above is the shares' own life ending, not the "For at most"
   // cap somebody configured. True far more often than that setting's name
   // suggests — a share's own default life (2h peer, 1h web) is shorter than any
   // cap a person would actually set — so this has to be said, or the cup claims
   // a number it did not compute.
-  const boundByShare = automatic && (state?.sharing_bound_by_share ?? false);
+  //
+  // The shared predicate rather than the condition written out again: the other
+  // consumer wrote it out and got the `"both"` case wrong. See
+  // `attributesToShares`.
+  const boundByShare = attributesToShares(state);
   // Sharing is live and the automatic hold has had its allowance for this share.
   // Worth its own line: the cup going out mid-share is otherwise something the
   // user has to notice rather than be told.

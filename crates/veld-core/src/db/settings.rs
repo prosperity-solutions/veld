@@ -399,8 +399,9 @@ pub const DEFAULT_SHARING_WEB_TTL_MINUTES: i64 = 60;
 /// a machine is held awake, and a future change to one must not silently move the
 /// other. The floor is five minutes because a share nobody can finish opening is
 /// not a share; the ceiling is a working day because this is the value applied to
-/// **every** share without anybody typing it, and `veld share --ttl` is still
-/// unbounded for the deliberate exception.
+/// **every** share without anybody typing it. `veld share --ttl` keeps the
+/// deliberate exception: no upper bound at all, floored only at 60 seconds so it
+/// cannot mint a share that expired before its link could be opened.
 pub const MIN_SHARE_TTL_MINUTES: i64 = 5;
 pub const MAX_SHARE_TTL_MINUTES: i64 = 8 * 60;
 
@@ -919,9 +920,10 @@ impl SettingKey {
                 )
             }
             // Clamped like the pair above, and against their own bounds — see
-            // `MIN_SHARE_TTL_MINUTES`. `veld share --ttl` is a separate, unbounded
-            // path on purpose: this is the number applied to every share with
-            // nobody typing it.
+            // `MIN_SHARE_TTL_MINUTES`. `veld share --ttl` is a separate path on
+            // purpose, with no upper bound (only a 60s floor): this is the number
+            // applied to every share with nobody typing it, and that one is a
+            // number somebody typed.
             Self::SharingPeerTtlMinutes | Self::SharingWebTtlMinutes => Value::from(
                 clamp_i64(value, MIN_SHARE_TTL_MINUTES, MAX_SHARE_TTL_MINUTES).ok_or_else(bad)?,
             ),

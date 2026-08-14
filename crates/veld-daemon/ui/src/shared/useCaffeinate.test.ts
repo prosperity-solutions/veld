@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { CaffeinateState } from "../api";
-import { announcesEnding, formatRemaining } from "./useCaffeinate";
+import { announcesEnding, attributesToShares, formatRemaining } from "./useCaffeinate";
 
 describe("formatRemaining", () => {
   it("reads the way a person says it", () => {
@@ -30,6 +30,48 @@ describe("formatRemaining", () => {
  * Both are transition logic, which is exactly what a component test would not
  * have caught either.
  */
+/**
+ * Which deadline the countdown may be attributed to.
+ *
+ * Pinned because the `"both"` case shipped wrong: the sharing panel appended
+ * "when the share expires" to a number that was the *manual* hold's, since
+ * `remaining_secs` is the later of the two deadlines. Two consumers each wrote
+ * the condition out and one of them got it wrong, which is why the rule is one
+ * exported function now and why this asserts the exclusion rather than the
+ * happy path alone.
+ */
+describe("attributesToShares", () => {
+  const state = (
+    reason: CaffeinateState["reason"],
+    sharing_bound_by_share: boolean,
+  ) => ({ reason, sharing_bound_by_share }) as CaffeinateState;
+
+  it("attributes the countdown to sharing when sharing is the only reason", () => {
+    expect(attributesToShares(state("sharing", true))).toBe(true);
+  });
+
+  it("never attributes it under `both`, where the number is the later deadline", () => {
+    // The defect this exists to prevent. `remaining_secs` is
+    // `max(manual, sharing)`, so a manual 4h hold taken during a 2h share shows
+    // the manual number — and blaming the share for it is the exact
+    // mis-attribution the whole field was added to remove.
+    expect(attributesToShares(state("both", true))).toBe(false);
+  });
+
+  it("says nothing for a hold the share is not bounding", () => {
+    expect(attributesToShares(state("sharing", false))).toBe(false);
+    expect(attributesToShares(state("manual", true))).toBe(false);
+    expect(attributesToShares(state("none", true))).toBe(false);
+  });
+
+  it("treats an older daemon's silence as no attribution", () => {
+    // The field is absent on a daemon that predates it; the nullish fallback
+    // must read as "do not attribute" rather than throwing or claiming.
+    expect(attributesToShares({ reason: "sharing" } as CaffeinateState)).toBe(false);
+    expect(attributesToShares(null)).toBe(false);
+  });
+});
+
 describe("the shared store's transitions", () => {
   // The real predicate, not a restatement of it: a test that re-implements the
   // rule it is checking passes happily while the implementation drifts away

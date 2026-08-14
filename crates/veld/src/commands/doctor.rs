@@ -1299,7 +1299,6 @@ fn read_mode(path: &Path) -> String {
         .to_string()
 }
 
-/// Check daemon status via launchctl (macOS) or socket existence.
 /// What is holding this machine awake, as one phrase.
 ///
 /// Read from the daemon rather than by looking for a `caffeinate` process: the

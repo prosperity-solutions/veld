@@ -624,10 +624,19 @@ pub struct CaffeinateState {
     /// Whether a shut lid keeps the machine awake right now.
     #[serde(default)]
     pub covers_lid: bool,
-    /// Whether the countdown above is the **share's own expiry** rather than the
-    /// configured keep-awake cap. Only meaningful while `reason == "sharing"`,
-    /// because `remaining_secs` is the *later* of the two deadlines once a manual
-    /// hold is also in force.
+    /// Whether the countdown above is the **shares' own expiry** rather than the
+    /// configured keep-awake cap.
+    ///
+    /// Two constraints on using it, both of which shipped as bugs once:
+    ///
+    /// - **Only meaningful while `reason == "sharing"`.** The daemon also sends
+    ///   `true` under `"both"`, but `remaining_secs` there is the *later* of the
+    ///   manual and automatic deadlines — usually the manual hold's — so
+    ///   attributing that number to sharing is wrong. Gate on `reason`, not on
+    ///   this alone.
+    /// - **Plural.** It is derived from the latest expiry across *every* live
+    ///   hosted share, both modes and all runs, so copy must not name one share.
+    ///   Say "your shares" / "your sharing".
     ///
     /// `#[serde(default)]` like its neighbours, so an older daemon that does not
     /// send it reads as `false` — the pre-existing wording, which attributes

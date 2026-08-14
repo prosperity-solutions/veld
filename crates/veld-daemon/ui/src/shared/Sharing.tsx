@@ -28,7 +28,7 @@ import { useCopyFlash } from "./copy";
 import { QrCode } from "./QrCode";
 import { copyLinkWithQr, copyQrImage } from "./qrClipboard";
 import { notifyDone, notifyError } from "./notify";
-import { formatRemaining, useCaffeinate } from "./useCaffeinate";
+import { attributesToShares, formatRemaining, useCaffeinate } from "./useCaffeinate";
 
 /**
  * This run's shares: the peer share (at most one) and any public web shares.
@@ -747,17 +747,10 @@ function KeepAwakeNote() {
             // being the share's own expiry is the thing that makes "for at most
             // 4 hours" look broken when it is not.
             //
-            // **`"sharing"` only, never `"both"`** — and that exclusion is the
-            // whole correctness of this line. `remaining_secs` is
-            // `Reasons::expires_at()`, the *later* of the two deadlines
-            // (`m.max(s)`), while `sharing_bound_by_share` describes only the
-            // automatic one. So under `"both"` a manual 4h hold taken during a
-            // 2h share shows the manual number, and attributing it to the share
-            // would be a fresh instance of exactly the mis-attribution this
-            // field was added to remove.
-            state.reason === "sharing" && state.sharing_bound_by_share
-              ? " — when the last of your shares expires"
-              : ""
+            // `attributesToShares` rather than the condition written out here:
+            // this line is where the `"both"` exclusion was got wrong once, and
+            // the rule now lives in one tested place. See its doc.
+            attributesToShares(state) ? " — when the last of your shares expires" : ""
           }${state.covers_lid ? "." : ", unless you shut the lid."}`
         : "This machine is being kept awake."
       : null;

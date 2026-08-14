@@ -73,6 +73,26 @@ export function announcesEnding(
 }
 
 /**
+ * May the countdown be attributed to the sharing rather than to the keep-awake
+ * setting?
+ *
+ * One rule, one place, exported for the test — the same reasoning as
+ * `announcesEnding` above, and here it is load-bearing rather than tidy: the
+ * `reason === "sharing"` half is not a detail. `remaining_secs` is the *later* of
+ * the manual and automatic deadlines, so under `"both"` the number on screen is
+ * usually the manual hold's, and `sharing_bound_by_share` still describes the
+ * automatic one. Saying "that's your sharing ending" there is a false
+ * attribution — and it shipped exactly once, in the sharing panel, because the
+ * two consumers each wrote the condition out and only one of them got it right.
+ *
+ * Both consumers now call this instead. A test asserting the `"both"` case is
+ * what makes deleting the guard fail rather than merely look different.
+ */
+export function attributesToShares(state: CaffeinateState | null): boolean {
+  return state?.reason === "sharing" && (state.sharing_bound_by_share ?? false);
+}
+
+/**
  * Publish a new state, announcing an ending nobody asked for.
  *
  * `stop()` writes through `publish` with `requested` set, which is what
