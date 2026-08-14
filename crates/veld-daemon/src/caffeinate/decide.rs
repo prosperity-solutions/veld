@@ -1,0 +1,617 @@
+//! The keep-awake state machine, with no I/O in it.
+//!
+//! Everything in this module is a pure function over values. That is not tidiness:
+//! the side-effecting half of keep-awake spawns a process, talks to a privileged
+//! helper over a socket and can spend fifteen seconds doing it, so a state machine
+//! entangled with it can only be tested by holding a real machine awake. The
+//! sibling module `veld-helper`'s `sleep` reached the same conclusion from the
+//! other direction — a `SleepSetter` trait, because a test that ran `pmset` for
+//! real would durably disable a developer's sleep.
+//!
+//! # Two reasons, not one flag
+//!
+//! The machine can be held awake because **a human asked** and because **a share
+//! is live**, at the same time, and the two are not interchangeable:
+//!
+//! - they expire independently, so the hold lasts until the later of them is done;
+//! - they may hold *different* things — an automatic hold never asks the
+//!   privileged helper for anything, on either power source, because
+//!   `pmset disablesleep` is a durable system setting and there is no press behind
+//!   an automatic hold to justify writing one;
+//! - "off" means off for both, but only a human can say it.
+//!
+//! Collapsing them into one flag looks smaller and is wrong in a specific,
+//! measurable way: a user who set a short manual hold and *then* started sharing
+//! would end up with less coverage than one who did nothing at all, because the
+//! share could not extend a hold that already existed.
+//!
+//! # The automatic half is capped per *episode*, not per share
+//!
+//! A sharing **episode** starts when the hosted-share count goes from zero to
+//! non-zero and ends when it returns to zero. Its clock also restarts when the
+//! power source changes under it, because the cap that applies is the one for the
+//! source you are actually on — otherwise starting a share on mains and then
+//! unplugging would buy the mains allowance on battery, which is the one thing the
+//! split settings exist to prevent.
+//!
+//! Within an episode the deadline is
+//! `min(clock_started_at + cap_for_this_source, latest live share expiry)`. Binding
+//! it to the shares is what stops this being a second, independent timer racing the
+//! share reaper: shares already expire on their own (peer 2h, web 1h by default),
+//! so the cap is a **ceiling** that normally never binds rather than a countdown
+//! that usually fires first.
+//!
+//! Reaching the cap **opts the episode out**. Without that the hold would re-arm on
+//! the next tick and the cap would be a lie; with it, "at most N minutes while
+//! sharing" is literally what happens. The opt-out clears when the episode ends —
+//! when sharing actually stops — and at no other time, which is also what makes
+//! *"Let this machine sleep"* work: a human switching the hold off while a share is
+//! live must not have it come straight back.
+
+use chrono::{DateTime, Duration, Utc};
+use veld_core::db::KeepAwakePrefs;
+
+use super::power::{Power, PowerSource};
+
+/// Why the machine is being held awake. Both may hold at once; neither holding is
+/// how a session ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Reasons {
+    /// A human asked. The inner `None` is "until I turn it off".
+    pub manual: Option<Option<DateTime<Utc>>>,
+    /// A share is live. Always bounded — see the module docs.
+    pub sharing: Option<DateTime<Utc>>,
+}
+
+impl Reasons {
+    pub fn is_empty(self) -> bool {
+        self.manual.is_none() && self.sharing.is_none()
+    }
+
+    /// When the hold ends, or `None` for "until I turn it off".
+    ///
+    /// The *later* of the two, because each reason is independently sufficient.
+    pub fn expires_at(self) -> Option<DateTime<Utc>> {
+        match (self.manual, self.sharing) {
+            // An unlimited manual hold swallows any sharing deadline.
+            (Some(None), _) => None,
+            (Some(Some(m)), Some(s)) => Some(m.max(s)),
+            (Some(Some(m)), None) => Some(m),
+            (None, s) => s,
+        }
+    }
+
+    /// Drop whichever reasons have run out. Returns whether the *cap* of an
+    /// automatic hold was what expired, which is the case that opts the episode out.
+    fn prune(&mut self, now: DateTime<Utc>) {
+        if let Some(Some(deadline)) = self.manual {
+            if now >= deadline {
+                self.manual = None;
+            }
+        }
+        if let Some(deadline) = self.sharing {
+            if now >= deadline {
+                self.sharing = None;
+            }
+        }
+    }
+
+    pub fn wire(self) -> &'static str {
+        match (self.manual.is_some(), self.sharing.is_some()) {
+            (true, true) => "both",
+            (true, false) => "manual",
+            (false, true) => "sharing",
+            (false, false) => "none",
+        }
+    }
+}
+
+/// The live sharing episode's clock. See the module docs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Episode {
+    pub clock_started_at: DateTime<Utc>,
+    /// The power source this clock was started for. A change restarts it.
+    pub power: PowerSource,
+}
+
+/// What the daemon knows about hosted shares right now.
+///
+/// `count` is **hosted** shares only. A share you *joined* runs on somebody else's
+/// machine and is not a reason to hold yours awake.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ShareFacts {
+    pub count: usize,
+    /// The latest expiry among live hosted shares.
+    pub latest_expiry: Option<DateTime<Utc>>,
+}
+
+/// Everything the machine remembers between events.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct State {
+    pub reasons: Reasons,
+    pub episode: Option<Episode>,
+    /// This episode has had its automatic hold and will not get another. Set by
+    /// the cap running out, and by a human switching the hold off while sharing.
+    pub opted_out: bool,
+}
+
+/// How wide a hold is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Coverage {
+    /// Idle sleep only. A shut lid still sleeps the machine.
+    IdleOnly,
+    /// Idle sleep and a shut lid.
+    LidToo,
+}
+
+/// Why a shut lid is *not* covered, when it is not.
+///
+/// Four genuinely different answers, and the reason this is an enum rather than a
+/// bool: the existing UI note for the fourth one tells the user to run
+/// `veld setup privileged`, which is right when veld asked and could not get it and
+/// actively wrong when veld never asked. Reporting a fault for something never
+/// attempted is the failure this prevents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LidGap {
+    /// Nobody pressed anything: an automatic hold never widens itself to the lid
+    /// on battery. One click on a duration does.
+    Automatic,
+    /// `keepAwake.manualOnBattery` is off, so veld was told not to.
+    Setting,
+    /// veld asked and there is no privileged helper to ask, or it refused.
+    NoHelper,
+}
+
+/// What the side-effecting half should be holding, given the state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Plan {
+    pub coverage: Coverage,
+    /// Whether to hold the privileged `pmset disablesleep` lease. Only ever true
+    /// for a hold a human asked for, on battery, on macOS, with the setting on.
+    pub want_lease: bool,
+    /// `None` when the lid is covered; otherwise why it is not.
+    pub lid_gap: Option<LidGap>,
+}
+
+impl State {
+    /// Apply "a human asked for a hold".
+    ///
+    /// Deliberately does not touch the sharing reason or the opt-out: picking a
+    /// duration is a statement about the manual hold, not a way to buy back an
+    /// automatic one that has already been spent.
+    pub fn manual_start(&mut self, expires_at: Option<DateTime<Utc>>) {
+        self.reasons.manual = Some(expires_at);
+    }
+
+    /// Apply "a human said let this machine sleep".
+    ///
+    /// Off means off: both reasons go, and while a share is live the episode is
+    /// opted out so the automatic half cannot re-arm on the next tick and make the
+    /// button look broken.
+    pub fn manual_stop(&mut self, shares: ShareFacts) {
+        self.reasons = Reasons::default();
+        if shares.count > 0 {
+            self.opted_out = true;
+        }
+    }
+
+    /// Bring the automatic half up to date. The whole state machine lives here.
+    ///
+    /// Idempotent by construction — it reads the current facts rather than a
+    /// remembered edge — which is what lets it be called from a detached task
+    /// without an epoch or a sequence number to order concurrent runs.
+    pub fn recompute(
+        &mut self,
+        now: DateTime<Utc>,
+        prefs: &KeepAwakePrefs,
+        power: Power,
+        shares: ShareFacts,
+    ) {
+        self.reasons.prune(now);
+
+        if shares.count == 0 {
+            // The episode is over. This is the only place the opt-out clears, and
+            // it is why "let this machine sleep" survives for exactly as long as
+            // the sharing it was said during.
+            self.episode = None;
+            self.opted_out = false;
+            self.reasons.sharing = None;
+            return;
+        }
+
+        let (enabled, cap_minutes) = match power.source {
+            PowerSource::Mains => (prefs.sharing_on_power, prefs.sharing_on_power_minutes),
+            PowerSource::Battery => (prefs.sharing_on_battery, prefs.sharing_on_battery_minutes),
+        };
+
+        if !enabled || self.opted_out {
+            self.reasons.sharing = None;
+            // The episode's clock is forgotten while the switch is off so that
+            // turning it back on — or plugging in, when only the other source is
+            // enabled — starts a fresh allowance rather than resuming a clock that
+            // ran while nothing was being held.
+            if !enabled {
+                self.episode = None;
+            }
+            return;
+        }
+
+        // Start the clock, or restart it because the power source changed. A
+        // change is a deliberate act by the person holding the laptop, and the cap
+        // that applies afterwards is the one for the source they moved to.
+        let episode = match self.episode {
+            Some(existing) if existing.power == power.source => existing,
+            _ => Episode {
+                clock_started_at: now,
+                power: power.source,
+            },
+        };
+        self.episode = Some(episode);
+
+        let cap_deadline = episode.clock_started_at + Duration::minutes(cap_minutes);
+        let deadline = match shares.latest_expiry {
+            Some(share_deadline) => cap_deadline.min(share_deadline),
+            None => cap_deadline,
+        };
+
+        if now >= deadline {
+            self.reasons.sharing = None;
+            // Only the *cap* opts the episode out. Reaching the shares' own expiry
+            // means they are about to be reaped, which will end the episode and
+            // clear everything anyway — recording an opt-out for it would be
+            // recording a decision nobody made.
+            if now >= cap_deadline {
+                self.opted_out = true;
+            }
+            return;
+        }
+
+        self.reasons.sharing = Some(deadline);
+    }
+
+    /// What to hold, given the reasons and where the power is coming from.
+    pub fn plan(&self, prefs: &KeepAwakePrefs, power: Power) -> Option<Plan> {
+        if self.reasons.is_empty() {
+            return None;
+        }
+        let manual = self.reasons.manual.is_some();
+
+        // On mains the widest hold is free: `caffeinate -s` is valid on AC power
+        // only, needs no privileged helper and writes nothing durable, and Linux's
+        // lid inhibitor is unprivileged on either source. So there is nothing to
+        // withhold and nothing to decide.
+        if power.source == PowerSource::Mains {
+            return Some(Plan {
+                coverage: Coverage::LidToo,
+                want_lease: false,
+                lid_gap: None,
+            });
+        }
+
+        // On battery, covering a shut lid is the one thing that costs something —
+        // a durable macOS setting, or a real inhibitor holding a discharging
+        // laptop open. Only a human can buy it.
+        if !manual {
+            return Some(Plan {
+                coverage: Coverage::IdleOnly,
+                want_lease: false,
+                lid_gap: Some(LidGap::Automatic),
+            });
+        }
+        if !prefs.manual_on_battery {
+            return Some(Plan {
+                coverage: Coverage::IdleOnly,
+                want_lease: false,
+                lid_gap: Some(LidGap::Setting),
+            });
+        }
+        Some(Plan {
+            coverage: Coverage::LidToo,
+            // macOS is the only platform with a privileged half; Linux's
+            // `handle-lid-switch` inhibitor already holds on battery unprivileged.
+            // Whether the lease was actually granted is the caller's to report.
+            want_lease: cfg!(target_os = "macos"),
+            lid_gap: None,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::{DateTime, Duration, TimeZone as _, Utc};
+    use veld_core::db::KeepAwakePrefs;
+
+    use super::super::power::{Power, PowerSource};
+    use super::{Coverage, LidGap, ShareFacts, State};
+
+    fn t(minute: i64) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 8, 14, 12, 0, 0).unwrap() + Duration::minutes(minute)
+    }
+
+    fn prefs() -> KeepAwakePrefs {
+        KeepAwakePrefs {
+            sharing_on_power: true,
+            sharing_on_power_minutes: 120,
+            sharing_on_battery: true,
+            sharing_on_battery_minutes: 30,
+            manual_on_battery: true,
+        }
+    }
+
+    fn mains() -> Power {
+        Power {
+            source: PowerSource::Mains,
+            has_battery: true,
+        }
+    }
+
+    fn battery() -> Power {
+        Power {
+            source: PowerSource::Battery,
+            has_battery: true,
+        }
+    }
+
+    fn sharing(count: usize) -> ShareFacts {
+        ShareFacts {
+            count,
+            // Far enough out that the cap is what binds, unless a test says otherwise.
+            latest_expiry: Some(t(10_000)),
+        }
+    }
+
+    fn none() -> ShareFacts {
+        ShareFacts::default()
+    }
+
+    #[test]
+    fn a_share_arms_the_hold_and_the_cap_is_the_one_for_this_power_source() {
+        let mut state = State::default();
+        state.recompute(t(0), &prefs(), mains(), sharing(1));
+        assert_eq!(state.reasons.sharing, Some(t(120)));
+
+        let mut state = State::default();
+        state.recompute(t(0), &prefs(), battery(), sharing(1));
+        assert_eq!(state.reasons.sharing, Some(t(30)));
+    }
+
+    #[test]
+    fn the_deadline_never_outlives_the_shares_that_justify_it() {
+        // The point of binding to the shares: the cap is a ceiling, not a second
+        // timer racing the share reaper.
+        let mut state = State::default();
+        let shares = ShareFacts {
+            count: 1,
+            latest_expiry: Some(t(45)),
+        };
+        state.recompute(t(0), &prefs(), mains(), shares);
+        assert_eq!(state.reasons.sharing, Some(t(45)));
+    }
+
+    #[test]
+    fn the_last_share_ending_drops_the_automatic_hold_and_clears_the_opt_out() {
+        let mut state = State::default();
+        state.recompute(t(0), &prefs(), mains(), sharing(1));
+        state.opted_out = true;
+
+        state.recompute(t(5), &prefs(), mains(), none());
+        assert_eq!(state.reasons.sharing, None);
+        assert!(state.episode.is_none());
+        assert!(!state.opted_out);
+    }
+
+    #[test]
+    fn reaching_the_cap_opts_the_episode_out_so_the_hold_cannot_re_arm() {
+        // Without the opt-out the next tick re-arms and "at most 30 minutes" is a
+        // lie. This is the test that pins the cap being real.
+        let mut state = State::default();
+        state.recompute(t(0), &prefs(), battery(), sharing(1));
+        assert!(state.reasons.sharing.is_some());
+
+        state.recompute(t(30), &prefs(), battery(), sharing(1));
+        assert_eq!(state.reasons.sharing, None);
+        assert!(state.opted_out);
+
+        state.recompute(t(31), &prefs(), battery(), sharing(1));
+        assert_eq!(state.reasons.sharing, None);
+    }
+
+    #[test]
+    fn a_share_expiring_is_not_an_opt_out() {
+        // The distinction the cap arm depends on: the shares' own expiry ends the
+        // episode a moment later anyway, so recording a decision nobody made would
+        // suppress the *next* episode for no reason.
+        let mut state = State::default();
+        let shares = ShareFacts {
+            count: 1,
+            latest_expiry: Some(t(20)),
+        };
+        state.recompute(t(0), &prefs(), mains(), shares);
+        state.recompute(t(20), &prefs(), mains(), shares);
+        assert_eq!(state.reasons.sharing, None);
+        assert!(!state.opted_out);
+    }
+
+    #[test]
+    fn a_second_share_extends_the_hold_but_never_past_the_episode_cap() {
+        let mut state = State::default();
+        state.recompute(t(0), &prefs(), battery(), sharing(1));
+        // A second share arrives 20 minutes in. The episode clock still started at
+        // t(0), so the cap is still t(30) — not t(50).
+        state.recompute(t(20), &prefs(), battery(), sharing(2));
+        assert_eq!(state.reasons.sharing, Some(t(30)));
+    }
+
+    #[test]
+    fn unplugging_narrows_the_cap_and_restarts_the_clock() {
+        // The maintainer's chosen rule, and the reason the battery cap cannot be
+        // bypassed by starting a share on mains: the clock restarts, so you get a
+        // fresh battery-length window rather than either the mains allowance or an
+        // instant drop.
+        let mut state = State::default();
+        state.recompute(t(0), &prefs(), mains(), sharing(1));
+        assert_eq!(state.reasons.sharing, Some(t(120)));
+
+        state.recompute(t(45), &prefs(), battery(), sharing(1));
+        assert_eq!(state.reasons.sharing, Some(t(75)));
+    }
+
+    #[test]
+    fn plugging_in_widens_the_cap_and_restarts_the_clock() {
+        let mut state = State::default();
+        state.recompute(t(0), &prefs(), battery(), sharing(1));
+        state.recompute(t(10), &prefs(), mains(), sharing(1));
+        assert_eq!(state.reasons.sharing, Some(t(130)));
+    }
+
+    #[test]
+    fn switching_the_source_off_drops_the_hold_and_the_other_source_still_works() {
+        let mut prefs = prefs();
+        prefs.sharing_on_battery = false;
+        let mut state = State::default();
+
+        state.recompute(t(0), &prefs, battery(), sharing(1));
+        assert_eq!(state.reasons.sharing, None);
+
+        // Plugging in must give the full mains allowance from that moment, not the
+        // remainder of a clock that ran while nothing was held.
+        state.recompute(t(40), &prefs, mains(), sharing(1));
+        assert_eq!(state.reasons.sharing, Some(t(160)));
+    }
+
+    #[test]
+    fn off_means_off_for_as_long_as_the_sharing_it_was_said_during() {
+        let mut state = State::default();
+        state.recompute(t(0), &prefs(), mains(), sharing(1));
+
+        state.manual_stop(sharing(1));
+        assert!(state.reasons.is_empty());
+
+        // The next tick must not bring it straight back — that is a button that
+        // does not work.
+        state.recompute(t(1), &prefs(), mains(), sharing(1));
+        assert_eq!(state.reasons.sharing, None);
+
+        // …and it comes back for the *next* share.
+        state.recompute(t(2), &prefs(), mains(), none());
+        state.recompute(t(3), &prefs(), mains(), sharing(1));
+        assert_eq!(state.reasons.sharing, Some(t(123)));
+    }
+
+    #[test]
+    fn switching_off_when_nothing_is_shared_does_not_opt_anything_out() {
+        let mut state = State::default();
+        state.manual_start(Some(t(60)));
+        state.manual_stop(none());
+        assert!(!state.opted_out);
+    }
+
+    #[test]
+    fn a_manual_hold_and_a_share_hold_together_and_the_later_one_wins() {
+        // The case a single flag gets wrong: a short manual hold must not stop the
+        // share extending the machine's wakefulness past it.
+        let mut state = State::default();
+        state.manual_start(Some(t(10)));
+        state.recompute(t(0), &prefs(), mains(), sharing(1));
+        assert_eq!(state.reasons.expires_at(), Some(t(120)));
+
+        // The manual reason running out leaves the sharing one holding.
+        state.recompute(t(10), &prefs(), mains(), sharing(1));
+        assert_eq!(state.reasons.manual, None);
+        assert_eq!(state.reasons.sharing, Some(t(120)));
+        assert!(!state.reasons.is_empty());
+    }
+
+    #[test]
+    fn an_unlimited_manual_hold_outlives_every_share() {
+        let mut state = State::default();
+        state.manual_start(None);
+        state.recompute(t(0), &prefs(), mains(), sharing(1));
+        assert_eq!(state.reasons.expires_at(), None);
+
+        state.recompute(t(500), &prefs(), mains(), none());
+        assert_eq!(state.reasons.sharing, None);
+        assert!(!state.reasons.is_empty());
+    }
+
+    #[test]
+    fn an_automatic_hold_never_asks_for_the_privileged_lease() {
+        // The load-bearing rule of the whole feature. `pmset disablesleep` is
+        // durable, and there is no press behind an automatic hold to justify one.
+        let mut state = State::default();
+        state.recompute(t(0), &prefs(), battery(), sharing(1));
+        let plan = state.plan(&prefs(), battery()).expect("a hold");
+        assert!(!plan.want_lease);
+        assert_eq!(plan.coverage, Coverage::IdleOnly);
+        assert_eq!(plan.lid_gap, Some(LidGap::Automatic));
+    }
+
+    #[test]
+    fn on_mains_even_an_automatic_hold_covers_a_shut_lid() {
+        // Free there: `caffeinate -s` is valid on AC power only, so it needs no
+        // privileged helper and writes nothing durable.
+        let mut state = State::default();
+        state.recompute(t(0), &prefs(), mains(), sharing(1));
+        let plan = state.plan(&prefs(), mains()).expect("a hold");
+        assert_eq!(plan.coverage, Coverage::LidToo);
+        assert!(!plan.want_lease);
+        assert_eq!(plan.lid_gap, None);
+    }
+
+    #[test]
+    fn a_manual_hold_on_battery_asks_for_the_lease_unless_told_not_to() {
+        let mut state = State::default();
+        state.manual_start(Some(t(60)));
+
+        let plan = state.plan(&prefs(), battery()).expect("a hold");
+        assert_eq!(plan.coverage, Coverage::LidToo);
+        assert_eq!(plan.want_lease, cfg!(target_os = "macos"));
+        assert_eq!(plan.lid_gap, None);
+
+        let mut off = prefs();
+        off.manual_on_battery = false;
+        let plan = state.plan(&off, battery()).expect("a hold");
+        assert_eq!(plan.coverage, Coverage::IdleOnly);
+        assert!(!plan.want_lease);
+        // Not `NoHelper`: veld was told not to ask, so telling the user to install
+        // a privileged helper would be advice for a problem they do not have.
+        assert_eq!(plan.lid_gap, Some(LidGap::Setting));
+    }
+
+    #[test]
+    fn a_manual_reason_widens_a_hold_that_sharing_armed() {
+        // One click on a duration is how the automatic hold's lid gap is bought,
+        // so the plan has to change the moment the manual reason exists.
+        let mut state = State::default();
+        state.recompute(t(0), &prefs(), battery(), sharing(1));
+        assert_eq!(
+            state.plan(&prefs(), battery()).expect("a hold").coverage,
+            Coverage::IdleOnly
+        );
+
+        state.manual_start(Some(t(60)));
+        assert_eq!(
+            state.plan(&prefs(), battery()).expect("a hold").coverage,
+            Coverage::LidToo
+        );
+    }
+
+    #[test]
+    fn no_reasons_is_no_plan() {
+        assert!(State::default().plan(&prefs(), mains()).is_none());
+    }
+
+    #[test]
+    fn recompute_is_idempotent_so_concurrent_callers_converge() {
+        // The property that lets the daemon fire this from a detached task with no
+        // epoch or sequence number: it reads the facts rather than an edge.
+        let mut once = State::default();
+        once.recompute(t(0), &prefs(), mains(), sharing(1));
+
+        let mut thrice = State::default();
+        for _ in 0..3 {
+            thrice.recompute(t(0), &prefs(), mains(), sharing(1));
+        }
+        assert_eq!(once, thrice);
+    }
+}

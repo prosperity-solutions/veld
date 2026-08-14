@@ -147,4 +147,27 @@ export const PROMOTIONS: Promotion[] = [
     body: "An agent waiting in a project you are not looking at says so, and clicking through takes you there. Turn on the project column for ⌘1…⌘9.",
     glyph: "inbox",
   },
+  {
+    // A **default that flipped**, which is the category this channel exists for:
+    // it happens *to* the reader, with no action of theirs, and there is no
+    // moment in the product where they would otherwise discover it. Sharing from
+    // the CLI or the in-page overlay never opens a Veld window at all, so for
+    // those users this card is the only thing that will ever mention it.
+    //
+    // A second card about keep-awake two days after `keep-awake` is real budget
+    // spent, and it is spent knowingly: default-on *and* silent is the one
+    // combination that cannot be defended. It also reaches two cohorts the
+    // earlier card never did — anyone who installed on or after its `since` (the
+    // date gate auto-reads it) and anyone who dismissed rather than read it.
+    //
+    // Framed from what the reader can now stop doing. Not "Veld now arms
+    // keep-awake while sharing", which is the mechanism, and not a scene about
+    // a demo dying mid-call, which is a beat of drama in place of a capability.
+    id: "keep-awake-while-sharing",
+    since: "2026-08-14",
+    eyebrow: "New",
+    headline: "Share a link and walk away",
+    body: "This machine stays awake while you're sharing, and lets go when the share ends. Two hours on mains, half an hour on battery — both in Settings → Keep awake.",
+    glyph: "device",
+  },
 ];

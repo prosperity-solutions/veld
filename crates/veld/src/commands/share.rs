@@ -6,6 +6,75 @@ use crate::output;
 use veld_core::config::WebAccessMode;
 use veld_core::share::{ApprovalMode, DaemonClient, JoinRequest, StartShareRequest};
 
+/// `"3h 12m"` / `"12m"` / `"under a minute"` — a countdown as a human reads it.
+///
+/// Mirrors the dashboard's `formatRemaining`. Duplicated rather than shared
+/// because the two live in different languages for different surfaces, and the
+/// shape is small enough that a crate boundary would cost more than it saves —
+/// but keep them saying the same thing.
+fn humanize(seconds: i64) -> String {
+    if seconds < 60 {
+        return "under a minute".to_owned();
+    }
+    let hours = seconds / 3600;
+    let minutes = (seconds % 3600) / 60;
+    match (hours, minutes) {
+        (0, m) => format!("{m}m"),
+        (h, 0) => format!("{h}h"),
+        (h, m) => format!("{h}h {m}m"),
+    }
+}
+
+/// One line saying whether this machine will still be up to serve the link that
+/// was just printed.
+///
+/// The share is only half the answer: a laptop that suspends drops it, and the
+/// automatic keep-awake that prevents that is a *setting* — so the person who
+/// just ran `veld share` is exactly the person who needs to know which way it is
+/// set, and this is the only surface that reaches them. There is still no
+/// keep-awake subcommand; this reports state, it does not change any.
+///
+/// **Polled, because arming is asynchronous.** The daemon reconciles the hold on
+/// a detached task after the share is inserted — deliberately, so a share start
+/// never waits on a process spawn and a privileged-helper round trip. So the
+/// first read usually lands before the hold exists. A second is bounded hard:
+/// this is a receipt line, and a `veld share` made slower to print it would be a
+/// bad trade every time.
+async fn keep_awake_line(client: &DaemonClient) -> Option<String> {
+    for attempt in 0..5 {
+        if attempt > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+        // A daemon that cannot answer is not worth a line, and not worth a
+        // retry either — `veld share` has already succeeded by this point.
+        let state = client.caffeinate().await.ok()?;
+        if !state.supported {
+            // Nothing can keep this machine awake and nothing the reader could
+            // do about it. Silence beats a caveat with no action in it.
+            return None;
+        }
+        let armed = state.active && (state.reason == "sharing" || state.reason == "both");
+        if armed {
+            let until = match state.remaining_secs {
+                Some(secs) => format!("for {}", humanize(secs)),
+                None => "until you turn it off".to_owned(),
+            };
+            let lid = if state.covers_lid {
+                ""
+            } else {
+                ", unless you shut the lid"
+            };
+            return Some(format!("this machine stays awake {until}{lid}"));
+        }
+        // A hold somebody asked for themselves already covers the share, and
+        // saying "off" under it would be wrong.
+        if state.active {
+            return None;
+        }
+    }
+    Some("off — this machine may sleep and drop the share".to_owned())
+}
+
 /// `veld share [run] [--node ...] [--ttl secs] [--approve MODE] [--web]
 /// [--access MODE] [--password PW] [--json]`
 #[allow(clippy::too_many_arguments)]
@@ -84,7 +153,8 @@ pub async fn share(
         web_password: password,
     };
 
-    match DaemonClient::new().start_share(&req).await {
+    let client = DaemonClient::new();
+    match client.start_share(&req).await {
         Ok(resp) => {
             if json {
                 println!(
@@ -147,6 +217,9 @@ pub async fn share(
                     "  Stop:  {}",
                     output::dim(&format!("veld unshare {}", resp.share_id))
                 );
+                if let Some(note) = keep_awake_line(&client).await {
+                    println!("  Awake: {}", output::dim(&note));
+                }
                 if resp
                     .public_urls
                     .iter()
@@ -184,6 +257,9 @@ pub async fn share(
                     "  Stop:     {}",
                     output::dim(&format!("veld unshare {}", resp.share_id))
                 );
+                if let Some(note) = keep_awake_line(&client).await {
+                    println!("  Awake:    {}", output::dim(&note));
+                }
                 println!();
                 println!(
                     "  {}",

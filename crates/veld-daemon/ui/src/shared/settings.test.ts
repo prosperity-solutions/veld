@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  autoWhileSharingKey,
+  keepAwakePrefs,
+  KEEP_AWAKE_SHARING_ON_BATTERY,
+  KEEP_AWAKE_SHARING_ON_POWER,
   hasMarkerColor,
   markerFace,
   detachGraceMinutes,
@@ -586,5 +590,64 @@ describe("searchUrl", () => {
     expect(searchUrl({ "browser.searchUrl": "  https://d.example/?q=%s " })).toBe(
       "https://d.example/?q=%s",
     );
+  });
+});
+
+describe("keepAwakePrefs", () => {
+  it("defaults both automatic halves on, with the shorter allowance on battery", () => {
+    // Mirrors the Rust defaults in `veld-core/src/db/settings.rs`. Nothing ties
+    // the two sets of numbers together, so this is the drift alarm — and the
+    // *asymmetry* is the part worth pinning: equal caps would mean the split
+    // settings bought nothing, since the whole reason there are two is that a
+    // hold on mains spends nothing and a hold on battery spends somebody's charge.
+    const prefs = keepAwakePrefs({});
+    expect(prefs.sharingOnPower).toBe(true);
+    expect(prefs.sharingOnBattery).toBe(true);
+    expect(prefs.sharingOnPowerMinutes).toBe(120);
+    expect(prefs.sharingOnBatteryMinutes).toBe(30);
+    expect(prefs.sharingOnBatteryMinutes).toBeLessThan(prefs.sharingOnPowerMinutes);
+  });
+
+  it("defaults the manual battery reach on, because that is what it already did", () => {
+    // This one is an off switch for existing behaviour, not a new default. If it
+    // ever fell back to `false`, upgrading would silently take away the lid
+    // coverage somebody had been relying on with no message anywhere.
+    expect(keepAwakePrefs({}).manualOnBattery).toBe(true);
+  });
+
+  it("reads what the daemon actually stored", () => {
+    const prefs = keepAwakePrefs({
+      [KEEP_AWAKE_SHARING_ON_POWER]: false,
+      "keepAwake.sharingOnPowerMinutes": 240,
+      [KEEP_AWAKE_SHARING_ON_BATTERY]: false,
+      "keepAwake.sharingOnBatteryMinutes": 15,
+      "keepAwake.manualOnBattery": false,
+    });
+    expect(prefs).toEqual({
+      sharingOnPower: false,
+      sharingOnPowerMinutes: 240,
+      sharingOnBattery: false,
+      sharingOnBatteryMinutes: 15,
+      manualOnBattery: false,
+    });
+  });
+
+  it("ignores a value of the wrong shape rather than rendering it", () => {
+    const prefs = keepAwakePrefs({
+      [KEEP_AWAKE_SHARING_ON_POWER]: "yes" as unknown as boolean,
+      "keepAwake.sharingOnPowerMinutes": Number.NaN,
+    });
+    expect(prefs.sharingOnPower).toBe(true);
+    expect(prefs.sharingOnPowerMinutes).toBe(120);
+  });
+});
+
+describe("autoWhileSharingKey", () => {
+  it("picks the switch for the power source in force", () => {
+    // The cup's menu shows one switch, and flipping it must write the one that
+    // applies right now — writing the mains key while running on battery would
+    // be a control that visibly does nothing.
+    expect(autoWhileSharingKey("battery")).toBe(KEEP_AWAKE_SHARING_ON_BATTERY);
+    expect(autoWhileSharingKey("mains")).toBe(KEEP_AWAKE_SHARING_ON_POWER);
   });
 });

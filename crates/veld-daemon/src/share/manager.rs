@@ -170,6 +170,27 @@ struct JoinEntry {
 }
 
 /// Owns the iroh endpoints and all live shares/joins.
+/// Tell keep-awake what this machine is hosting, so a live share can hold it
+/// awake (`veld-daemon/src/caffeinate`).
+///
+/// **Called with the `shares` map still locked**, which is the point: publishing
+/// after releasing the lock would let two mutations read the map in one order and
+/// write their counts in the other, leaving a stale count behind — and a stale
+/// non-zero count is a machine that never sleeps again. Publishing the map's
+/// *length* rather than a delta is the other half of the same rule.
+///
+/// Cheap enough to do under the lock: a length, a `max` over a handful of unix
+/// timestamps, and a store. The reconcile it triggers is detached, because that
+/// one can spend seconds against a wedged privileged helper and a share start
+/// must never wait on it.
+fn publish_share_facts(shares: &HashMap<String, ShareEntry>) {
+    let latest = shares.values().map(|entry| entry.expires_at).max();
+    crate::feedback_server::caffeinate::shares_changed(
+        shares.len(),
+        latest.and_then(|secs| chrono::DateTime::from_timestamp(secs, 0)),
+    );
+}
+
 pub struct ShareManager {
     secret_key: SecretKey,
     /// One iroh endpoint per relay policy, bound on demand. The daemon can host
@@ -499,19 +520,23 @@ impl ShareManager {
 
         let id = gen_id("shr");
         let expires_at = manifest.expires_at;
-        self.shares.lock().await.insert(
-            id.clone(),
-            ShareEntry {
-                id: id.clone(),
-                manifest,
-                host_share,
-                approve_mode,
-                ticket: token,
-                expires_at,
-                relay: choice,
-                web: None,
-            },
-        );
+        {
+            let mut shares = self.shares.lock().await;
+            shares.insert(
+                id.clone(),
+                ShareEntry {
+                    id: id.clone(),
+                    manifest,
+                    host_share,
+                    approve_mode,
+                    ticket: token,
+                    expires_at,
+                    relay: choice,
+                    web: None,
+                },
+            );
+            publish_share_facts(&shares);
+        }
         info!(share_id = %id, ?approve_mode, "share started");
         Ok((id, ticket))
     }
@@ -1143,8 +1168,17 @@ impl ShareManager {
     /// Stop hosting a share. In-flight connections end when their peers
     /// disconnect; no new connection will match the removed capability.
     pub async fn unshare(&self, id: &str) -> Result<()> {
-        let Some(entry) = self.shares.lock().await.remove(id) else {
-            bail!("no such share: {id}");
+        let entry = {
+            let mut shares = self.shares.lock().await;
+            let Some(entry) = shares.remove(id) else {
+                // Note what must *not* happen on this path: a keep-awake count
+                // maintained as a decrement rather than as the map's length would
+                // underflow right here, on a `DELETE` for an id that is already
+                // gone, and the machine would never be allowed to sleep again.
+                bail!("no such share: {id}");
+            };
+            publish_share_facts(&shares);
+            entry
         };
         // Web share: stop heartbeating and unregister from the gateway so its
         // public URLs die now, not at lease expiry. Best-effort — a lost

@@ -53,6 +53,7 @@ import {
   IconActivity,
   IconAdjustments,
   IconAppWindow,
+  IconCoffee,
   IconGitBranch,
   IconLink,
   IconTerminal2,
@@ -75,6 +76,12 @@ import {
   externalOrigins,
   gitCreateFrom,
   hideDisabledActions,
+  KEEP_AWAKE_MANUAL_ON_BATTERY,
+  KEEP_AWAKE_SHARING_ON_BATTERY,
+  KEEP_AWAKE_SHARING_ON_BATTERY_MINUTES,
+  KEEP_AWAKE_SHARING_ON_POWER,
+  KEEP_AWAKE_SHARING_ON_POWER_MINUTES,
+  keepAwakePrefs,
   logsTimeZone,
   showProjectColumn,
   showProjectNews,
@@ -105,6 +112,7 @@ import {
   type MarkerStyle,
   type WorktreeStorageMode,
 } from "../shared/settings";
+import { useCaffeinate } from "../shared/useCaffeinate";
 
 /** A labelled row with its explanation under it, used for every control. */
 function Row(props: {
@@ -139,6 +147,25 @@ function Row(props: {
  * note about `App.tsx`).
  */
 const CUSTOM_SHELL = "\u0000custom-shell";
+
+/**
+ * The offered caps for an automatic keep-awake, shortest first.
+ *
+ * A `Select` of preset lengths rather than a free number input: the daemon
+ * clamps anything between five minutes and eight hours, so a spinner would let
+ * somebody type a value and watch it change under them. The list runs shorter at
+ * the bottom than the coffee menu's does because this governs a hold nobody
+ * pressed a button for, and fifteen minutes is a sensible answer for that where
+ * it is a pointless one for a hold you asked for.
+ */
+const KEEP_AWAKE_MINUTES = [
+  { value: "15", label: "15 minutes" },
+  { value: "30", label: "30 minutes" },
+  { value: "60", label: "1 hour" },
+  { value: "120", label: "2 hours" },
+  { value: "240", label: "4 hours" },
+  { value: "480", label: "8 hours" },
+];
 
 /** Sentinel for the "Custom…" option; not a font stack. */
 const CUSTOM_FONT = "\u0000custom";
@@ -241,7 +268,14 @@ function worktreeStorageDirError(path: string): string | null {
   return null;
 }
 
-type GroupId = "general" | "git" | "terminal" | "activity" | "links" | "browser";
+type GroupId =
+  | "general"
+  | "git"
+  | "terminal"
+  | "activity"
+  | "keepAwake"
+  | "links"
+  | "browser";
 
 /**
  * The groups, in sidebar order. `general` is first and is the one the dialog opens
@@ -271,6 +305,7 @@ const GROUPS: { id: GroupId; label: string; icon: ReactNode }[] = [
   { id: "git", label: "Git", icon: <IconGitBranch size={15} /> },
   { id: "terminal", label: "Terminal", icon: <IconTerminal2 size={15} /> },
   { id: "activity", label: "Activity", icon: <IconActivity size={15} /> },
+  { id: "keepAwake", label: "Keep awake", icon: <IconCoffee size={15} /> },
   { id: "links", label: "Links", icon: <IconLink size={15} /> },
   { id: "browser", label: "Browser panes", icon: <IconAppWindow size={15} /> },
 ];
@@ -324,6 +359,12 @@ export function SettingsDialog(props: {
   const hideDisabled = hideDisabledActions(settings ?? {});
   const projectNews = showProjectNews(settings ?? {});
   const projectColumn = showProjectColumn(settings ?? {});
+  const keepAwake = keepAwakePrefs(settings ?? {});
+  // Only to learn whether this machine has a battery, so the two battery rows can
+  // be left out on a desktop rather than offering controls that can never apply.
+  // The dialog is remounted on every open, so this is one request per open.
+  const { state: caffeinate } = useCaffeinate();
+  const hasBattery = caffeinate?.has_battery ?? true;
 
   // Not persisted, and deliberately so: the dialog is remounted on every open, so
   // it always opens on General rather than wherever a previous visit ended up.
@@ -1458,6 +1499,120 @@ export function SettingsDialog(props: {
                   />
                 </Row>
               ))}
+            </Stack>
+          </Tabs.Panel>
+
+          <Tabs.Panel
+            value="keepAwake"
+            style={PANEL_STYLE}
+            pl={{ base: 0, sm: "lg" }}
+          >
+            <Stack gap="md">
+              {/* A group of its own rather than rows under General, and the group
+                  doc's rule is why: General is "settings that answer to no larger
+                  surface", and these answer to two — the coffee cup and Sharing.
+                  They are also the one set here that decides what Veld may do to
+                  somebody's *hardware*, which is worth a heading a user can find
+                  by scanning rather than by remembering where it was filed. */}
+              <SectionTitle>While you're sharing</SectionTitle>
+              <Text size="xs" c="dimmed">
+                A share is only useful while this machine is up, so Veld holds it
+                awake for you and lets go when the share ends. Asked twice
+                because the answer differs: on mains nothing is being spent, and
+                on battery it is your charge. Neither one ever keeps the machine
+                awake with the lid shut on battery — that is the durable setting
+                Veld only ever touches when you ask it to yourself.
+              </Text>
+              <Row
+                label="Keep this machine awake while sharing, on mains power"
+                help="Covers a shut lid too, which costs nothing here: the macOS flag for it is valid on AC power only, so no privileged helper is involved."
+              >
+                <Checkbox
+                  size="xs"
+                  checked={keepAwake.sharingOnPower}
+                  disabled={locked}
+                  onChange={(e) =>
+                    set({ [KEEP_AWAKE_SHARING_ON_POWER]: e.currentTarget.checked })
+                  }
+                />
+              </Row>
+              <Row
+                label="For at most"
+                help="A ceiling, not a countdown — the hold normally ends when the share does, since shares expire on their own. Measured from when the sharing started, and it starts again if you unplug or plug in."
+              >
+                <NativeSelect
+                  size="xs"
+                  w={140}
+                  data={KEEP_AWAKE_MINUTES}
+                  value={String(keepAwake.sharingOnPowerMinutes)}
+                  disabled={locked || !keepAwake.sharingOnPower}
+                  onChange={(e) =>
+                    set({
+                      [KEEP_AWAKE_SHARING_ON_POWER_MINUTES]: Number(
+                        e.currentTarget.value,
+                      ),
+                    })
+                  }
+                />
+              </Row>
+              {hasBattery && (
+                <>
+                  <Row
+                    label="Keep this machine awake while sharing, on battery"
+                    help="Holds off idle sleep only. A shut lid still sleeps the machine, so a laptop that goes in a bag mid-share sleeps the way it always did."
+                  >
+                    <Checkbox
+                      size="xs"
+                      checked={keepAwake.sharingOnBattery}
+                      disabled={locked}
+                      onChange={(e) =>
+                        set({
+                          [KEEP_AWAKE_SHARING_ON_BATTERY]: e.currentTarget.checked,
+                        })
+                      }
+                    />
+                  </Row>
+                  <Row
+                    label="For at most"
+                    help="Shorter than the mains allowance on purpose: this one is spending your charge."
+                  >
+                    <NativeSelect
+                      size="xs"
+                      w={140}
+                      data={KEEP_AWAKE_MINUTES}
+                      value={String(keepAwake.sharingOnBatteryMinutes)}
+                      disabled={locked || !keepAwake.sharingOnBattery}
+                      onChange={(e) =>
+                        set({
+                          [KEEP_AWAKE_SHARING_ON_BATTERY_MINUTES]: Number(
+                            e.currentTarget.value,
+                          ),
+                        })
+                      }
+                    />
+                  </Row>
+                </>
+              )}
+              {hasBattery && caffeinate?.platform === "macos" && (
+                <>
+                  <SectionTitle>When you ask</SectionTitle>
+                  <Row
+                    label="Cover a shut lid on battery too"
+                    help="The one case that needs the privileged helper, because macOS offers no unprivileged way to ask. Turning this off is a guarantee rather than a preference: Veld then never writes pmset disablesleep on this machine, even when you pick a length from the coffee menu — and a shut lid on battery sleeps."
+                  >
+                    <Checkbox
+                      size="xs"
+                      checked={keepAwake.manualOnBattery}
+                      disabled={locked}
+                      onChange={(e) =>
+                        set({
+                          [KEEP_AWAKE_MANUAL_ON_BATTERY]: e.currentTarget.checked,
+                        })
+                      }
+                    />
+                  </Row>
+                </>
+              )}
             </Stack>
           </Tabs.Panel>
 

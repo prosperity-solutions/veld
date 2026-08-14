@@ -51,7 +51,15 @@ export function useCaffeinate(): UseCaffeinate {
     // that died) is both the least expected and the most expensive to miss. The
     // timed case, whose deadline the user already knows, was the only one being
     // announced.
-    if (prev?.active && !next.active) {
+    //
+    // The one exception is a hold **nobody asked for**: an automatic one ends
+    // every time a share stops, which is many times a day and is not news. Left
+    // in, this branch would pop a toast in every open window for something the
+    // user never turned on — the busiest and least informative notification in
+    // the app. The state it *would* be reporting is not dropped: the cup's menu
+    // says the allowance is used up, and it says it persistently rather than for
+    // four seconds while somebody is looking elsewhere.
+    if (prev?.active && !next.active && prev.reason !== "sharing") {
       notifyDone("Keep-awake ended — this machine can sleep again");
     }
   }, []);

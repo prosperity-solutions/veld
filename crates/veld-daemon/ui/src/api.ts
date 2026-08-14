@@ -1085,6 +1085,35 @@ export interface CaffeinateState {
    * needs to know before shutting the lid.
    */
   covers_battery: boolean;
+  /**
+   * Which reasons are holding the machine awake. `"sharing"` is the automatic
+   * one — a live share — and it is the case the copy has to name, because a lit
+   * coffee cup nobody lit is the surprise this whole feature has to pay for.
+   */
+  reason: "manual" | "sharing" | "both" | "none";
+  /** Where this machine's power is coming from, measured rather than assumed. */
+  power_source: "mains" | "battery";
+  /**
+   * Whether this machine has a battery at all. A desktop gets no "on battery"
+   * settings rows — a control that can never apply is worse than no control.
+   */
+  has_battery: boolean;
+  /** Does a shut lid keep this machine awake right now. */
+  covers_lid: boolean;
+  /**
+   * Why it does not, when it does not — and the reason this is not a boolean.
+   * `"no_helper"` is the only one that should ever point at `veld setup
+   * privileged`: `"automatic"` means veld deliberately never asked (one click on
+   * a duration buys it), and `"setting"` means it was told not to. Reporting a
+   * fault for something never attempted is what these three prevent.
+   */
+  lid_gap?: "automatic" | "setting" | "no_helper" | null;
+  /**
+   * Sharing is live, but the automatic hold has had its allowance for this share
+   * — the cap ran out, or somebody switched it off. Said rather than left to be
+   * inferred from a cup that quietly stopped glowing.
+   */
+  sharing_spent: boolean;
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {

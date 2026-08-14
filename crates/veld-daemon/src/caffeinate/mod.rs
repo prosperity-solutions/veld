@@ -15,6 +15,11 @@
 //! | macOS | `caffeinate -s -i` | System sleep (on AC power) and idle sleep |
 //! | Linux | `systemd-inhibit --what=handle-lid-switch:sleep:idle --mode=block` | logind's lid-close handling, suspend, and idle |
 //!
+//! Each has a **narrower form** that holds idle sleep only and leaves a shut lid
+//! alone — `caffeinate -i`, and `--what=idle`. See the sharing section below for
+//! which holds get which, and why that is the difference between a default that
+//! is defensible and one that is not.
+//!
 //! The wrapped utility is `cat`, with its stdin held open by this daemon and
 //! nothing ever written to it. That one choice is what makes the whole lifecycle
 //! honest: **the inhibition cannot outlive the daemon**. Turning it off closes
@@ -52,10 +57,34 @@
 //! The lease itself is the helper's safety property, not this module's; see
 //! `veld-helper`'s `sleep` module for why a durable `pmset` setting may only be
 //! held on something that expires.
+//!
+//! # Sharing arms this too, and that changes what may be held
+//!
+//! A share is only useful while the machine serving it is up, so a live share is
+//! a reason to hold — see [`decide`] for the state machine, which is pure and
+//! carries the rules. What belongs *here* is the consequence for this module's
+//! central promise. An automatic hold has **no press behind it**, and the
+//! privileged half writes a durable system setting, so:
+//!
+//! > **An automatic hold never asks the privileged helper for anything, on either
+//! > power source.**
+//!
+//! That is what keeps "veld never simply sets `disablesleep`" true after this
+//! feature rather than approximately true. The cost is only on battery, and only
+//! for a lid: on **mains** the widest hold is free (`caffeinate -s` is documented
+//! as valid on AC power only, and Linux's lid inhibitor is unprivileged on either
+//! source), so an automatic hold on mains covers a shut lid exactly like a manual
+//! one. On battery it covers idle sleep and nothing else, and one click on a
+//! duration in the menu buys the rest.
+//!
+//! Which power source that is, is measured rather than assumed — see [`power`].
+
+mod decide;
+mod power;
 
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -70,8 +99,11 @@ use serde_json::{Value, json};
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::Mutex;
 use tracing::{info, warn};
+use veld_core::db::KeepAwakePrefs;
 use veld_core::helper::HelperClient;
 
+use self::decide::{Coverage, LidGap, Plan, ShareFacts, State};
+use self::power::{Power, PowerSource};
 use super::management::check_csrf;
 
 /// Shortest timed session. Below a minute the round trip costs more than the
@@ -129,6 +161,15 @@ const _: () =
 /// minute stale about that shows up as one menu that has not caught up yet.
 const PRIVILEGED_PROBE_TTL: Duration = Duration::from_secs(60);
 
+/// How long a power-source reading is reused.
+///
+/// Shorter than the privileged probe's, because unlike "is a helper installed"
+/// this genuinely changes while somebody is looking at it — plugging a laptop in
+/// should widen the hold and lengthen its cap within a moment, not within a
+/// minute. Half the supervising tick, so a tick never re-uses the reading the
+/// previous one took.
+const POWER_TTL: Duration = Duration::from_secs(15);
+
 /// Ceiling on a helper round trip made while the session lock is held.
 ///
 /// `HelperClient` bounds its own sends at 15s, which is right for a `veld start`
@@ -150,18 +191,16 @@ const HELPER_CALL_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The live inhibition, if there is one. At most one per machine.
 struct Session {
-    /// Distinguishes this session from its successor, so an expiry task that
-    /// wakes after a replacement cannot tear the *new* session down.
-    id: u64,
     child: Child,
     /// The write end of the wrapped `cat`'s stdin. Holding it is the inhibition;
     /// dropping it is the whole shutdown sequence.
     stdin: Option<ChildStdin>,
     started_at: DateTime<Utc>,
-    /// `None` for "until I turn it off".
-    expires_at: Option<DateTime<Utc>>,
-    /// The task watching `expires_at`. `None` for an unlimited session.
-    timer: Option<tokio::task::JoinHandle<()>>,
+    /// What this process was spawned to hold. A session whose coverage no longer
+    /// matches the plan — the power source changed, or a manual reason arrived
+    /// beside an automatic one — is replaced rather than adjusted, because the
+    /// coverage lives in the child's argv.
+    coverage: Coverage,
     /// Whether the privileged half — battery, lid closed — is in force.
     ///
     /// Shared with the renewal task rather than a plain `bool`, so a lease that
@@ -170,14 +209,51 @@ struct Session {
     /// clearing it before releasing is what stops a renewal landing after the
     /// release and re-arming a lease nobody wants.
     battery: Arc<AtomicBool>,
+    /// Whether a lease was *wanted*. Distinct from whether one is held: the
+    /// status has to tell "veld never asked" from "veld asked and could not get
+    /// it", because only the second is a fault the user can act on.
+    wanted_lease: bool,
     /// The privileged helper this session's lease lives on, and the task
     /// renewing it. Both `None` when there is no privileged half.
     helper: Option<HelperClient>,
     renew: Option<tokio::task::JoinHandle<()>>,
 }
 
-static ACTIVE: LazyLock<Mutex<Option<Session>>> = LazyLock::new(|| Mutex::new(None));
-static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+/// Everything behind the one lock.
+///
+/// The remembered [`State`] outlives any session — an episode's opt-out has to
+/// survive the hold it ended — so it cannot live *in* `Session`. Keeping both
+/// under a single mutex is what makes the reconciler's decision and its action
+/// one critical section, which in turn is what lets it be fired from a detached
+/// task with no sequence number: two concurrent runs cannot interleave a decision
+/// taken from one set of facts with an action taken for another.
+#[derive(Default)]
+struct Machine {
+    state: State,
+    session: Option<Session>,
+}
+
+static ACTIVE: LazyLock<Mutex<Machine>> = LazyLock::new(|| Mutex::new(Machine::default()));
+
+/// What the share manager last saw, written **absolutely** rather than as a delta.
+///
+/// A `fetch_add`/`fetch_sub` pair would be the obvious shape and is a trap: a
+/// `DELETE /api/shares/{id}` for an id that is already gone reaches the manager
+/// and bails without removing anything, so a decrement placed beside the lock
+/// rather than inside the removal underflows — after which the count never
+/// reaches zero again, the episode never ends, and the machine is held awake for
+/// the daemon's life. Storing the map's length cannot have that bug.
+///
+/// A `std::sync::Mutex`, not the async one: it is written from inside the share
+/// manager's own lock, where there is nothing to await, and held for a move.
+static SHARES: LazyLock<std::sync::Mutex<ShareFacts>> =
+    LazyLock::new(|| std::sync::Mutex::new(ShareFacts::default()));
+
+/// Cached power reading. See [`POWER_TTL`].
+static POWER: LazyLock<Mutex<Option<(Instant, Power)>>> = LazyLock::new(|| Mutex::new(None));
+
+/// Runs the supervising tick at most once per process.
+static SUPERVISOR: std::sync::Once = std::sync::Once::new();
 
 /// Cached answer to "is a privileged helper reachable", with the time it was
 /// learned. See [`PRIVILEGED_PROBE_TTL`].
@@ -226,7 +302,7 @@ fn program_name() -> Result<&'static str, String> {
 /// user's `PATH` would let a `~/bin/caffeinate` decide what "keep awake" means.
 /// The AGENTS.md rule it looks like it should follow is about *user-supplied*
 /// commands; nothing about this argv comes from a config or a request.
-fn inhibitor_argv() -> Result<Vec<String>, String> {
+fn inhibitor_argv(coverage: Coverage) -> Result<Vec<String>, String> {
     let name = program_name()?;
     let path = which_on_path(name).ok_or_else(|| {
         format!("Keeping this machine awake needs `{name}`, which isn’t on this machine.")
@@ -235,17 +311,31 @@ fn inhibitor_argv() -> Result<Vec<String>, String> {
     let mut argv = vec![path.to_string_lossy().into_owned()];
     if cfg!(target_os = "macos") {
         // -s: no system sleep — this is the one that survives a closed lid, and
-        //     it is honoured on AC power only (see the module docs).
+        //     it is honoured on AC power only (see the module docs). Asked for
+        //     only when the plan wants the lid covered; on battery it would be a
+        //     no-op anyway, so leaving it off there costs nothing and keeps the
+        //     argv an honest statement of what is being held.
         // -i: no idle sleep — the one that keeps a locked screen from putting
-        //     the machine under while a build runs.
+        //     the machine under while a build runs. Always asked for: it is the
+        //     whole of an automatic hold on battery.
         // Display sleep is deliberately *not* held: the screen may blank and
         // lock, which is what somebody walking away from the machine wants.
-        argv.push("-s".to_owned());
+        if coverage == Coverage::LidToo {
+            argv.push("-s".to_owned());
+        }
         argv.push("-i".to_owned());
     } else {
         // `handle-lid-switch` is what makes a closed lid a no-op; `sleep` covers
         // an explicit suspend request and `idle` covers logind's idle action.
-        argv.push("--what=handle-lid-switch:sleep:idle".to_owned());
+        //
+        // Unlike macOS the lid half here holds on battery too and needs no root,
+        // which is exactly why it must be *asked for* rather than taken: an
+        // automatic hold that pinned a discharging laptop open in somebody's bag
+        // is the outcome the narrower `--what` exists to prevent.
+        match coverage {
+            Coverage::LidToo => argv.push("--what=handle-lid-switch:sleep:idle".to_owned()),
+            Coverage::IdleOnly => argv.push("--what=idle".to_owned()),
+        }
         argv.push("--who=Veld".to_owned());
         argv.push("--why=Veld is keeping this machine awake".to_owned());
         argv.push("--mode=block".to_owned());
@@ -473,8 +563,8 @@ async fn stop_session(mut session: Session) {
 /// machine awake" forever with nothing held. This module's own docs call that the
 /// worst outcome available ("a status that lies in the optimistic direction is
 /// worse than no status"), so the status path checks before answering.
-async fn reap_if_dead(guard: &mut Option<Session>) {
-    let dead = match guard.as_mut() {
+async fn reap_if_dead(machine: &mut Machine) {
+    let dead = match machine.session.as_mut() {
         Some(session) => match session.child.try_wait() {
             Ok(Some(status)) => {
                 // The one log line that explains a keep-awake which silently did
@@ -493,26 +583,53 @@ async fn reap_if_dead(guard: &mut Option<Session>) {
         None => false,
     };
     if dead {
-        take_and_stop(guard).await;
+        take_and_stop(&mut machine.session).await;
+        // The reasons stay — the caller re-plans immediately after this, so a
+        // hold whose inhibitor died is respawned rather than silently lost. What
+        // stops that becoming a spawn loop is `reconcile`'s opt-out on failure.
     }
 }
 
-/// Stop whatever is in `guard`, aborting its expiry task. For the callers that
-/// are *not* the expiry task.
-async fn take_and_stop(guard: &mut Option<Session>) {
-    if let Some(mut session) = guard.take() {
-        if let Some(timer) = session.timer.take() {
-            timer.abort();
-        }
+/// Stop whatever session is in `slot`.
+async fn take_and_stop(slot: &mut Option<Session>) {
+    if let Some(session) = slot.take() {
         stop_session(session).await;
     }
 }
 
-/// Start (or replace) the inhibition. `duration_secs` of `None` means no limit.
-async fn start(duration_secs: Option<u64>) -> Result<Value, (StatusCode, String)> {
-    let argv = inhibitor_argv().map_err(|e| (StatusCode::NOT_IMPLEMENTED, e))?;
+/// Bring the held inhibition into line with the machine's state.
+///
+/// **Takes no lock of its own** — it runs inside the caller's, which is the whole
+/// point. The naive shape, where a reconciler locks and then calls a `start` that
+/// locks again, deadlocks on the first share after boot (`tokio::sync::Mutex` is
+/// not reentrant) and takes the coffee cup, its two mutating routes and every
+/// status poll down with it, permanently. Splitting the lock-free half out is
+/// what makes decision and action one critical section.
+async fn apply(
+    machine: &mut Machine,
+    prefs: &KeepAwakePrefs,
+    power: Power,
+) -> Result<(), (StatusCode, String)> {
+    let Some(plan) = machine.state.plan(prefs, power) else {
+        take_and_stop(&mut machine.session).await;
+        return Ok(());
+    };
 
-    let mut guard = ACTIVE.lock().await;
+    // A live session that already holds the right thing is left strictly alone.
+    // Deadlines live in `state`, not in the child, so a changed deadline is not a
+    // reason to respawn an inhibitor — only a changed *coverage* is.
+    if let Some(session) = machine.session.as_ref() {
+        if session.coverage == plan.coverage && session.wanted_lease == plan.want_lease {
+            return Ok(());
+        }
+    }
+
+    spawn_session(machine, plan).await
+}
+
+/// Spawn an inhibitor for `plan` and retire whatever it replaces.
+async fn spawn_session(machine: &mut Machine, plan: Plan) -> Result<(), (StatusCode, String)> {
+    let argv = inhibitor_argv(plan.coverage).map_err(|e| (StatusCode::NOT_IMPLEMENTED, e))?;
 
     let mut cmd = Command::new(&argv[0]);
     cmd.args(&argv[1..])
@@ -549,62 +666,156 @@ async fn start(duration_secs: Option<u64>) -> Result<Value, (StatusCode, String)
     // reap, seconds in the bad case), and a spawn that then failed would have
     // destroyed a running session while reporting only "couldn't start". The two
     // inhibitors overlap for an instant instead, which costs nothing.
-    take_and_stop(&mut guard).await;
-
-    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-    let started_at = Utc::now();
-    let expires_at = duration_secs.map(|secs| started_at + chrono::Duration::seconds(secs as i64));
-    let timer = expires_at.map(|deadline| tokio::spawn(expire_at(id, deadline)));
+    take_and_stop(&mut machine.session).await;
 
     // The privileged half, after the unprivileged one is already holding: this
     // can only ever *add* battery/lid-closed coverage, so its failure must not
-    // cost the caller the hold they asked for.
-    let helper = acquire_battery_lease().await;
+    // cost the caller the hold they asked for. Only ever reached for a hold a
+    // human asked for — see the module docs.
+    let helper = if plan.want_lease {
+        acquire_battery_lease().await
+    } else {
+        None
+    };
     let battery = Arc::new(AtomicBool::new(helper.is_some()));
     let renew = helper
         .clone()
         .map(|client| tokio::spawn(renew_battery_lease(client, Arc::clone(&battery))));
 
     info!(
-        seconds = ?duration_secs,
+        reason = machine.state.reasons.wire(),
+        coverage = ?plan.coverage,
         battery = battery.load(Ordering::Relaxed),
         "keeping this machine awake"
     );
-    *guard = Some(Session {
-        id,
+    machine.session = Some(Session {
         child,
         stdin,
-        started_at,
-        expires_at,
-        timer,
+        started_at: Utc::now(),
+        coverage: plan.coverage,
         battery,
+        wanted_lease: plan.want_lease,
         helper,
         renew,
     });
-    // Cached by now — `acquire_battery_lease` just asked.
-    let capable = battery_capable().await;
-    Ok(status_of(guard.as_ref(), capable))
+    start_supervisor();
+    Ok(())
 }
 
-/// Watch the wall clock and stop session `id` once `deadline` passes.
-async fn expire_at(id: u64, deadline: DateTime<Utc>) {
-    loop {
-        let remaining = deadline - Utc::now();
-        if remaining <= chrono::Duration::zero() {
-            break;
-        }
-        let nap = remaining.to_std().unwrap_or(EXPIRY_TICK).min(EXPIRY_TICK);
-        tokio::time::sleep(nap).await;
+/// Re-read the world and act on it. The one entry point every trigger uses.
+///
+/// Fired by a share starting or stopping, by a settings change, and by the
+/// supervising tick. Idempotent, because [`State::recompute`] reads the current
+/// facts rather than a remembered edge — so two of these racing converge instead
+/// of needing an epoch to order them.
+pub(crate) async fn reconcile() {
+    let shares = *SHARES.lock().expect("share facts");
+    let idle = {
+        let guard = ACTIVE.lock().await;
+        guard.session.is_none() && guard.state.reasons.is_empty()
+    };
+    // Nothing held and nothing shared: there is no decision to make, and making
+    // it anyway would spawn `pmset` and open a database every thirty seconds for
+    // the life of a daemon whose user is not sharing anything.
+    if idle && shares.count == 0 {
+        return;
     }
+
+    // Both reads happen **before** the lock. `keep_awake()` goes through a
+    // blocking rusqlite handle and the power probe spawns a process; either one
+    // inside the critical section would stall every status poll behind it, and
+    // this module's own `get_state` already avoids exactly that shape.
+    let prefs = match load_prefs().await {
+        Some(prefs) => prefs,
+        None => return,
+    };
+    let power = current_power().await;
+
     let mut guard = ACTIVE.lock().await;
-    // Only if this is still *our* session: a replacement started while we slept
-    // owns the machine now, and tearing it down would silently shorten it.
-    if guard.as_ref().is_some_and(|s| s.id == id) {
-        if let Some(session) = guard.take() {
-            stop_session(session).await;
-            info!("keep-awake expired; this machine can sleep again");
+    reap_if_dead(&mut guard).await;
+    guard.state.recompute(Utc::now(), &prefs, power, shares);
+    if let Err((_, message)) = apply(&mut guard, &prefs, power).await {
+        // A detached caller has nowhere to return this to, and the share that
+        // triggered it must not fail because the machine cannot be held awake.
+        warn!(error = %message, "could not update the keep-awake hold");
+        // One attempt per episode: a machine that cannot spawn an inhibitor at
+        // all would otherwise retry on every share event and every tick forever.
+        guard.state.opted_out = true;
+        guard.state.reasons.sharing = None;
+    }
+}
+
+/// Read the keep-awake settings off the blocking database handle.
+async fn load_prefs() -> Option<KeepAwakePrefs> {
+    match tokio::task::spawn_blocking(|| veld_core::db::Db::open().map(|db| db.keep_awake())).await
+    {
+        Ok(Ok(prefs)) => Some(prefs),
+        Ok(Err(e)) => {
+            warn!(error = %e, "could not read the keep-awake settings");
+            None
+        }
+        Err(e) => {
+            warn!(error = %e, "the keep-awake settings read panicked");
+            None
         }
     }
+}
+
+/// The tick that makes every deadline and every power change take effect.
+///
+/// One task for the process rather than one per deadline. A single
+/// `sleep(duration)` would be wrong for the case that matters: the machine *can*
+/// still be suspended while this is on (macOS, battery, lid shut), and tokio's
+/// timer runs on a monotonic clock that does not advance across a suspend — so a
+/// four-hour session slept through for one hour would run for five. Re-deciding
+/// against the wall clock instead means a suspend shortens the remaining time
+/// exactly as the user's watch says it should.
+///
+/// It is also what notices a charger being plugged in or pulled out, which is
+/// deliberately a poll: neither platform offers a power-source event this daemon
+/// could subscribe to without linking a system framework, and the cost of being
+/// up to a tick late is a hold that is briefly wider or narrower than it will be.
+fn start_supervisor() {
+    SUPERVISOR.call_once(|| {
+        tokio::spawn(async {
+            loop {
+                tokio::time::sleep(EXPIRY_TICK).await;
+                reconcile().await;
+            }
+        });
+    });
+}
+
+/// The current power source, cached.
+///
+/// The probe spawns a process on macOS and the idle status is polled by every
+/// open client on window focus, so caching is not an optimisation — it is what
+/// stops a tab switch costing a `pmset`. Single-flighted the same way the
+/// privileged probe is, and for the same reason.
+async fn current_power() -> Power {
+    let mut cache = POWER.lock().await;
+    if let Some((learned, answer)) = *cache {
+        if learned.elapsed() < POWER_TTL {
+            return answer;
+        }
+    }
+    let answer = power::read().await;
+    *cache = Some((Instant::now(), answer));
+    answer
+}
+
+/// Record what the share manager currently holds, and act on it.
+///
+/// Called from `ShareManager` at its two chokepoints. The write is synchronous
+/// and absolute (see [`SHARES`]); the reconcile is **detached on purpose** —
+/// `spawn_session` can spend seconds against a wedged privileged helper, and a
+/// share start must never wait on the machine being kept awake.
+pub(crate) fn shares_changed(count: usize, latest_expiry: Option<DateTime<Utc>>) {
+    *SHARES.lock().expect("share facts") = ShareFacts {
+        count,
+        latest_expiry,
+    };
+    tokio::spawn(reconcile());
 }
 
 // ---------------------------------------------------------------------------
@@ -618,8 +829,32 @@ async fn expire_at(id: u64, deadline: DateTime<Utc>) {
 /// `platform` plus two booleans, not a sentence. Composing "on mains power only,
 /// run `veld setup privileged`" is the bundle's job — the daemon knows the facts,
 /// and the copy belongs where it can be edited without a daemon release.
-fn status_of(session: Option<&Session>, battery_capable: bool) -> Value {
-    let unsupported = inhibitor_argv().err();
+fn status_of(
+    machine: &Machine,
+    battery_capable: bool,
+    power: Power,
+    prefs: &KeepAwakePrefs,
+) -> Value {
+    // Reported for the coverage the machine would take *now*, which is the one a
+    // menu offering "keep awake" is about to get.
+    let unsupported = inhibitor_argv(Coverage::LidToo).err();
+    let session = machine.session.as_ref();
+    let reasons = machine.state.reasons;
+    let plan = machine.state.plan(prefs, power);
+    // A lease that was wanted and is not held is the one case worth reporting as
+    // a fault. Read from the flag the renewal task owns, so a lease that started
+    // failing stops being claimed rather than leaving a promise nothing is keeping.
+    let lease_held = session.is_some_and(|s| s.battery.load(Ordering::Relaxed));
+    let lid_gap = match plan.map(|p| p.lid_gap) {
+        Some(Some(gap)) => Some(gap),
+        Some(None) if session.is_some() && !lease_held => {
+            // The plan wanted the lid covered on battery and the helper did not
+            // come through. This is the only path that should ever point the user
+            // at `veld setup privileged`.
+            (power.source == PowerSource::Battery).then_some(LidGap::NoHelper)
+        }
+        _ => None,
+    };
     let mut out = json!({
         "supported": unsupported.is_none(),
         "unsupported_reason": unsupported,
@@ -631,29 +866,67 @@ fn status_of(session: Option<&Session>, battery_capable: bool) -> Value {
         // privileged helper. Always false on Linux, where the unprivileged
         // inhibitor already covers battery and there is nothing to add.
         "battery_capable": battery_capable,
-        // Whether it is *in force* for the live session. Read from the flag the
-        // renewal task owns, so a lease that started failing stops being claimed.
-        "covers_battery": session.is_some_and(|s| s.battery.load(Ordering::Relaxed)),
+        // Retained under its old name and meaning: is the privileged lease in
+        // force right now. `lid_gap` is what the UI composes its copy from.
+        "covers_battery": lease_held,
+        // Where this machine's power is coming from, and whether it has a battery
+        // at all — the settings dialog hides two rows that can never apply on a
+        // desktop rather than offering controls that do nothing.
+        "power_source": power.source.as_str(),
+        "has_battery": power.has_battery,
+        // Which reasons hold: `manual`, `sharing`, `both`, or `none`. The copy is
+        // composed in the bundle, as everything else here is — the daemon knows
+        // the facts, and a sentence belongs where it can be edited without a
+        // daemon release.
+        "reason": reasons.wire(),
+        // Does a shut lid keep this machine awake right now, and if not, why not.
+        // Four different answers, and telling them apart is what stops the UI
+        // reporting a fault for a lease that was never asked for.
+        "covers_lid": session.is_some() && lid_gap.is_none(),
+        "lid_gap": lid_gap.map(|gap| match gap {
+            LidGap::Automatic => "automatic",
+            LidGap::Setting => "setting",
+            LidGap::NoHelper => "no_helper",
+        }),
+        // Sharing is live but the automatic hold is not, and will not come back
+        // for this share — its cap ran out, or somebody switched it off. The one
+        // state a user would otherwise have to infer from a cup that stopped
+        // glowing, so it is said rather than left to be noticed.
+        "sharing_spent": machine.state.opted_out,
     });
     if let Some(s) = session {
+        let expires_at = reasons.expires_at();
         out["started_at"] = json!(s.started_at.to_rfc3339());
-        out["expires_at"] = json!(s.expires_at.map(|t| t.to_rfc3339()));
-        // Clamped at zero: between the deadline passing and the expiry task
+        out["expires_at"] = json!(expires_at.map(|t| t.to_rfc3339()));
+        // Clamped at zero: between the deadline passing and the supervising tick
         // taking the lock there is a moment where this would be negative, and a
         // negative "remaining" renders as a countdown running backwards.
-        out["remaining_secs"] = json!(s.expires_at.map(|t| (t - Utc::now()).num_seconds().max(0)));
+        out["remaining_secs"] = json!(expires_at.map(|t| (t - Utc::now()).num_seconds().max(0)));
     }
     out
 }
 
-async fn get_state() -> Json<Value> {
+/// Build a status, doing every await that must not happen under the lock first.
+async fn current_status() -> Json<Value> {
     // Learned before the lock, not under it: the probe can take up to 3s on a
     // wedged helper, and holding the session lock for that would stall a
     // concurrent start or stop behind a read.
     let capable = battery_capable().await;
+    let power = current_power().await;
+    let prefs = load_prefs().await.unwrap_or(KeepAwakePrefs {
+        sharing_on_power: true,
+        sharing_on_power_minutes: 120,
+        sharing_on_battery: true,
+        sharing_on_battery_minutes: 30,
+        manual_on_battery: true,
+    });
     let mut guard = ACTIVE.lock().await;
     reap_if_dead(&mut guard).await;
-    Json(status_of(guard.as_ref(), capable))
+    Json(status_of(&guard, capable, power, &prefs))
+}
+
+async fn get_state() -> Json<Value> {
+    current_status().await
 }
 
 #[derive(Deserialize)]
@@ -678,28 +951,70 @@ async fn post_start(
             ));
         }
     }
-    Ok(Json(start(body.duration_secs).await?))
+    let prefs = load_prefs().await.ok_or((
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "could not read the keep-awake settings".to_owned(),
+    ))?;
+    let power = current_power().await;
+    {
+        let mut guard = ACTIVE.lock().await;
+        let expires_at = body
+            .duration_secs
+            .map(|secs| Utc::now() + chrono::Duration::seconds(secs as i64));
+        guard.state.manual_start(expires_at);
+        apply(&mut guard, &prefs, power).await?;
+    }
+    Ok(current_status().await)
 }
 
 async fn delete_stop(headers: HeaderMap) -> Result<Json<Value>, (StatusCode, String)> {
     check_csrf(&headers).map_err(|s| (s, "missing X-Veld-Request header".to_owned()))?;
-    let mut guard = ACTIVE.lock().await;
-    // Idempotent: turning off something already off is a success, so two windows
-    // clicking "off" don't produce an error toast in the slower one.
-    take_and_stop(&mut guard).await;
-    // Released before the capability probe: the answer does not depend on the
-    // session, and holding the lock across a round trip would stall every status
-    // poll behind a stop. `get_state` avoids the same thing for the same reason.
-    drop(guard);
-    Ok(Json(status_of(None, battery_capable().await)))
+    let shares = *SHARES.lock().expect("share facts");
+    {
+        let mut guard = ACTIVE.lock().await;
+        // Idempotent: turning off something already off is a success, so two
+        // windows clicking "off" don't produce an error toast in the slower one.
+        // `manual_stop` is what makes it *stay* off while a share is live — the
+        // automatic half would otherwise re-arm on the next tick, which is a
+        // button that does not work.
+        guard.state.manual_stop(shares);
+        take_and_stop(&mut guard.session).await;
+    }
+    Ok(current_status().await)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ACTIVE, MAX_DURATION_SECS, MIN_DURATION_SECS, inhibitor_argv, routes, status_of};
+    use super::decide::Coverage;
+    use super::power::{Power, PowerSource};
+    use super::{
+        ACTIVE, MAX_DURATION_SECS, MIN_DURATION_SECS, Machine, inhibitor_argv, routes, status_of,
+    };
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
+    use veld_core::db::KeepAwakePrefs;
+
+    fn prefs() -> KeepAwakePrefs {
+        KeepAwakePrefs {
+            sharing_on_power: true,
+            sharing_on_power_minutes: 120,
+            sharing_on_battery: true,
+            sharing_on_battery_minutes: 30,
+            manual_on_battery: true,
+        }
+    }
+
+    fn mains() -> Power {
+        Power {
+            source: PowerSource::Mains,
+            has_battery: true,
+        }
+    }
+
+    fn idle_status(battery_capable: bool) -> serde_json::Value {
+        status_of(&Machine::default(), battery_capable, mains(), &prefs())
+    }
 
     fn req(method: &str, csrf: bool, body: &str) -> Request<Body> {
         let mut b = Request::builder()
@@ -745,7 +1060,7 @@ mod tests {
         // a privileged helper, so in a unit test it would open a connection to
         // this machine's real **root** helper socket — slow, dependent on what is
         // installed, and nothing to do with what this test is about.
-        assert!(ACTIVE.lock().await.is_none());
+        assert!(ACTIVE.lock().await.session.is_none());
     }
 
     /// `null` is the wire form of "no time limit" and must survive the round
@@ -762,9 +1077,12 @@ mod tests {
     /// from, so it must carry `supported` on a machine where nothing is running.
     #[test]
     fn the_idle_status_reports_support_and_no_session() {
-        let v = status_of(None, false);
+        let v = idle_status(false);
         assert_eq!(v["active"], serde_json::json!(false));
-        assert_eq!(v["supported"], serde_json::json!(inhibitor_argv().is_ok()));
+        assert_eq!(
+            v["supported"],
+            serde_json::json!(inhibitor_argv(Coverage::LidToo).is_ok())
+        );
         // No countdown fields on an idle status — a UI reading `remaining_secs`
         // must not find a stale one from a session that ended.
         assert!(v.get("remaining_secs").is_none());
@@ -777,12 +1095,12 @@ mod tests {
     fn battery_capability_and_battery_coverage_are_reported_separately() {
         // Capable but idle: nothing is covered, and the menu may still say the
         // machine *can* do it.
-        let idle_capable = status_of(None, true);
+        let idle_capable = idle_status(true);
         assert_eq!(idle_capable["battery_capable"], serde_json::json!(true));
         assert_eq!(idle_capable["covers_battery"], serde_json::json!(false));
 
         // Not capable: both false, on every platform, with no session.
-        let idle_incapable = status_of(None, false);
+        let idle_incapable = idle_status(false);
         assert_eq!(idle_incapable["battery_capable"], serde_json::json!(false));
         assert_eq!(idle_incapable["covers_battery"], serde_json::json!(false));
     }
@@ -792,7 +1110,7 @@ mod tests {
     /// user whose lid-closed sleep is already covered.
     #[test]
     fn the_status_names_the_platform_it_is_speaking_for() {
-        let v = status_of(None, false);
+        let v = idle_status(false);
         let expected = if cfg!(target_os = "macos") {
             "macos"
         } else if cfg!(target_os = "linux") {
@@ -807,7 +1125,7 @@ mod tests {
     /// still reports success, so pin the load-bearing parts per platform.
     #[test]
     fn the_platform_argv_asks_for_the_right_inhibition() {
-        let Ok(argv) = inhibitor_argv() else {
+        let Ok(argv) = inhibitor_argv(Coverage::LidToo) else {
             // No inhibitor on this machine (a container without systemd); the
             // status test above already covers what the UI is told about that.
             return;
@@ -831,5 +1149,59 @@ mod tests {
             );
             assert!(argv.contains(&"--mode=block".to_owned()), "{argv:?}");
         }
+    }
+
+    /// The narrow form is what an automatic hold gets on battery, and it is the
+    /// whole reason default-on is defensible: veld may stop a shared machine
+    /// dozing off without anybody asking, and may **not** pin a laptop open in
+    /// somebody's bag. A stray `-s` or `handle-lid-switch` here would ship the
+    /// second behaviour while every other test stayed green.
+    #[test]
+    fn the_narrow_argv_holds_idle_sleep_and_leaves_the_lid_alone() {
+        let Ok(argv) = inhibitor_argv(Coverage::IdleOnly) else {
+            return;
+        };
+        assert_eq!(argv.last().map(String::as_str), Some("cat"));
+        if cfg!(target_os = "macos") {
+            assert!(argv.contains(&"-i".to_owned()), "{argv:?}");
+            assert!(!argv.contains(&"-s".to_owned()), "{argv:?}");
+        } else {
+            assert!(argv.contains(&"--what=idle".to_owned()), "{argv:?}");
+            assert!(
+                !argv.iter().any(|a| a.contains("handle-lid-switch")),
+                "{argv:?}"
+            );
+            assert!(argv.contains(&"--mode=block".to_owned()), "{argv:?}");
+        }
+    }
+
+    /// A status must never point somebody at `veld setup privileged` for a lease
+    /// veld deliberately never asked for. This is the one that stops the existing
+    /// lid note becoming a fault report on every automatic hold.
+    #[tokio::test]
+    async fn an_automatic_hold_reports_its_lid_gap_as_automatic_not_as_a_fault() {
+        use super::decide::ShareFacts;
+        use chrono::Utc;
+
+        let battery = Power {
+            source: PowerSource::Battery,
+            has_battery: true,
+        };
+        let mut machine = Machine::default();
+        machine.state.recompute(
+            Utc::now(),
+            &prefs(),
+            battery,
+            ShareFacts {
+                count: 1,
+                latest_expiry: None,
+            },
+        );
+        // `battery_capable: true` is the trap: a helper *is* installed, so a
+        // status that only knew "capable but not covered" would report a fault.
+        let status = status_of(&machine, true, battery, &prefs());
+        assert_eq!(status["reason"], serde_json::json!("sharing"));
+        assert_eq!(status["lid_gap"], serde_json::json!("automatic"));
+        assert_eq!(status["covers_battery"], serde_json::json!(false));
     }
 }

@@ -278,6 +278,46 @@ pub const DEFAULT_RUN_HISTORY_DAYS: i64 = 3;
 /// that module fails if the two ever drift.
 pub const MAX_RUN_HISTORY_DAYS: i64 = 7;
 
+/// How long an automatic keep-awake may hold, in minutes, per power source.
+///
+/// These are the *caps on a hold nobody pressed a button for*, which is what makes
+/// them different in kind from the durations in the coffee menu. The floor is five
+/// minutes rather than zero because zero is not a shorter hold, it is the switch
+/// beside the number already being off — and a cap of zero would arm an inhibitor
+/// and drop it on the same tick, spawning a process per share for no coverage. The
+/// ceiling matches the longest duration the menu itself offers: a machine held
+/// awake for longer than a working day, with no press behind it, is the outcome
+/// this whole feature is shaped to avoid.
+pub const MIN_KEEP_AWAKE_MINUTES: i64 = 5;
+pub const MAX_KEEP_AWAKE_MINUTES: i64 = 8 * 60;
+
+/// Defaults for the two automatic caps, which are deliberately *not* equal.
+///
+/// Mains is the generous one: nothing is being spent, `caffeinate -s` is valid on
+/// AC power only so it needs no privileged helper, and 120 minutes sits clear of
+/// both share TTL defaults (peer 2h, web 1h) so the hold normally just ends when
+/// the share does rather than racing it. Battery is the short one for the obvious
+/// reason — the cost is somebody's charge — and 30 minutes is about the length of
+/// the thing a battery-backed share actually is: showing someone a page.
+pub const DEFAULT_KEEP_AWAKE_SHARING_ON_POWER_MINUTES: i64 = 120;
+pub const DEFAULT_KEEP_AWAKE_SHARING_ON_BATTERY_MINUTES: i64 = 30;
+
+/// The five keep-awake settings as one value. See [`Db::keep_awake`].
+///
+/// The two `sharing_*` pairs govern a hold **nobody asked for**; `manual_on_battery`
+/// governs how far a hold somebody *did* ask for is allowed to reach. Keeping them
+/// in one struct is what makes that asymmetry visible at every call site, because
+/// the rule that falls out of it is the feature's load-bearing one: an automatic
+/// hold never asks the privileged helper for anything, on either power source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeepAwakePrefs {
+    pub sharing_on_power: bool,
+    pub sharing_on_power_minutes: i64,
+    pub sharing_on_battery: bool,
+    pub sharing_on_battery_minutes: i64,
+    pub manual_on_battery: bool,
+}
+
 /// Longest accepted `terminal.fontFamily`. A CSS font-family list that needs more
 /// than this is not a font list.
 const MAX_FONT_FAMILY_LEN: usize = 200;
@@ -416,6 +456,11 @@ pub enum SettingKey {
     TerminalInterceptSystemOpen,
     TerminalShellIntegration,
     TerminalAgentIntegration,
+    KeepAwakeSharingOnPower,
+    KeepAwakeSharingOnPowerMinutes,
+    KeepAwakeSharingOnBattery,
+    KeepAwakeSharingOnBatteryMinutes,
+    KeepAwakeManualOnBattery,
     ExtensionsAutoRefresh,
     ExtensionsSource,
     NewsSource,
@@ -501,6 +546,11 @@ impl SettingKey {
         Self::FocusModeSuppressBell,
         Self::FocusModeSuppressToasts,
         Self::FocusModeSuppressOsNotifications,
+        Self::KeepAwakeSharingOnPower,
+        Self::KeepAwakeSharingOnPowerMinutes,
+        Self::KeepAwakeSharingOnBattery,
+        Self::KeepAwakeSharingOnBatteryMinutes,
+        Self::KeepAwakeManualOnBattery,
     ];
 
     pub fn as_str(&self) -> &str {
@@ -548,6 +598,11 @@ impl SettingKey {
             Self::FocusModeSuppressBell => "focus.suppressBell",
             Self::FocusModeSuppressToasts => "focus.suppressToasts",
             Self::FocusModeSuppressOsNotifications => "focus.suppressOsNotifications",
+            Self::KeepAwakeSharingOnPower => "keepAwake.sharingOnPower",
+            Self::KeepAwakeSharingOnPowerMinutes => "keepAwake.sharingOnPowerMinutes",
+            Self::KeepAwakeSharingOnBattery => "keepAwake.sharingOnBattery",
+            Self::KeepAwakeSharingOnBatteryMinutes => "keepAwake.sharingOnBatteryMinutes",
+            Self::KeepAwakeManualOnBattery => "keepAwake.manualOnBattery",
             Self::Unknown(k) => k,
         }
     }
@@ -597,6 +652,11 @@ impl SettingKey {
             "focus.suppressBell" => Self::FocusModeSuppressBell,
             "focus.suppressToasts" => Self::FocusModeSuppressToasts,
             "focus.suppressOsNotifications" => Self::FocusModeSuppressOsNotifications,
+            "keepAwake.sharingOnPower" => Self::KeepAwakeSharingOnPower,
+            "keepAwake.sharingOnPowerMinutes" => Self::KeepAwakeSharingOnPowerMinutes,
+            "keepAwake.sharingOnBattery" => Self::KeepAwakeSharingOnBattery,
+            "keepAwake.sharingOnBatteryMinutes" => Self::KeepAwakeSharingOnBatteryMinutes,
+            "keepAwake.manualOnBattery" => Self::KeepAwakeManualOnBattery,
             other => Self::Unknown(other.to_string()),
         }
     }
@@ -688,8 +748,20 @@ impl SettingKey {
             | Self::FocusModeEnabled
             | Self::FocusModeSuppressBell
             | Self::FocusModeSuppressToasts
-            | Self::FocusModeSuppressOsNotifications => {
-                Value::from(value.as_bool().ok_or_else(bad)?)
+            | Self::FocusModeSuppressOsNotifications
+            | Self::KeepAwakeSharingOnPower
+            | Self::KeepAwakeSharingOnBattery
+            | Self::KeepAwakeManualOnBattery => Value::from(value.as_bool().ok_or_else(bad)?),
+            // Clamped, not enumerated, even though the dialog offers a fixed list:
+            // the cap is a duration like every other number here, and a client that
+            // sends 45 should get 45 rather than a rejection it cannot act on.
+            // The floor is not zero — a cap of zero would arm a hold and drop it on
+            // the same tick, which is what turning the switch *off* already means.
+            Self::KeepAwakeSharingOnPowerMinutes | Self::KeepAwakeSharingOnBatteryMinutes => {
+                Value::from(
+                    clamp_i64(value, MIN_KEEP_AWAKE_MINUTES, MAX_KEEP_AWAKE_MINUTES)
+                        .ok_or_else(bad)?,
+                )
             }
             // The one list-valued setting, and the one whose entries are checked
             // by a parser that lives elsewhere: `veld_core::ide::parse_origin` is
@@ -1295,6 +1367,28 @@ pub fn defaults() -> BTreeMap<String, Value> {
             SettingKey::FocusModeSuppressOsNotifications,
             Value::from(true),
         ),
+        // Both automatic halves default **on**, and they are two settings rather
+        // than one because the answer genuinely differs by power source: on mains
+        // nothing is being spent, while on battery the hold costs somebody's
+        // charge. Splitting them is what lets the mains half be generous without
+        // making the battery half reckless — a single switch would have to be one
+        // or the other, and either choice is wrong half the time.
+        (SettingKey::KeepAwakeSharingOnPower, Value::from(true)),
+        (
+            SettingKey::KeepAwakeSharingOnPowerMinutes,
+            Value::from(DEFAULT_KEEP_AWAKE_SHARING_ON_POWER_MINUTES),
+        ),
+        (SettingKey::KeepAwakeSharingOnBattery, Value::from(true)),
+        (
+            SettingKey::KeepAwakeSharingOnBatteryMinutes,
+            Value::from(DEFAULT_KEEP_AWAKE_SHARING_ON_BATTERY_MINUTES),
+        ),
+        // On, which is what the coffee menu already did before this setting
+        // existed — so the default changes nothing and the row is purely an off
+        // switch. Turning it off is a real guarantee and not a preference: veld
+        // then never writes `pmset disablesleep` on this machine, on any path,
+        // even the one where a human pressed the button and asked for it.
+        (SettingKey::KeepAwakeManualOnBattery, Value::from(true)),
     ]
     .into_iter()
     .map(|(k, v)| (k.as_str().to_string(), v))
@@ -1507,6 +1601,44 @@ impl Db {
             .flatten()
             .and_then(|v| v.as_bool())
             .unwrap_or(true)
+    }
+
+    /// The five keep-awake settings, read in one go.
+    ///
+    /// One call rather than five because the daemon's caffeinate module reads them
+    /// as a set on every share event and every power change, and it must do the
+    /// read *before* taking its session lock — a per-key round trip through a
+    /// blocking rusqlite handle inside that critical section would stall every
+    /// status poll behind it.
+    pub fn keep_awake(&self) -> KeepAwakePrefs {
+        let flag = |key: SettingKey, fallback: bool| {
+            self.setting(&key)
+                .ok()
+                .flatten()
+                .and_then(|v| v.as_bool())
+                .unwrap_or(fallback)
+        };
+        let minutes = |key: SettingKey, fallback: i64| {
+            self.setting(&key)
+                .ok()
+                .flatten()
+                .and_then(|v| v.as_i64())
+                .unwrap_or(fallback)
+                .clamp(MIN_KEEP_AWAKE_MINUTES, MAX_KEEP_AWAKE_MINUTES)
+        };
+        KeepAwakePrefs {
+            sharing_on_power: flag(SettingKey::KeepAwakeSharingOnPower, true),
+            sharing_on_power_minutes: minutes(
+                SettingKey::KeepAwakeSharingOnPowerMinutes,
+                DEFAULT_KEEP_AWAKE_SHARING_ON_POWER_MINUTES,
+            ),
+            sharing_on_battery: flag(SettingKey::KeepAwakeSharingOnBattery, true),
+            sharing_on_battery_minutes: minutes(
+                SettingKey::KeepAwakeSharingOnBatteryMinutes,
+                DEFAULT_KEEP_AWAKE_SHARING_ON_BATTERY_MINUTES,
+            ),
+            manual_on_battery: flag(SettingKey::KeepAwakeManualOnBattery, true),
+        }
     }
 
     /// Which checkout's `veld.json` `ide.extensions` are read from

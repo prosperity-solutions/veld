@@ -167,6 +167,19 @@ const FALLBACK = {
   // search, so falling back to "search is off" would print a promise this client
   // then refuses to keep.
   searchUrl: "https://www.google.com/search?q=%s",
+  // All three keep-awake switches match the Rust defaults. The file's
+  // "previous release's behaviour" rule is silent here rather than disagreeing:
+  // before these keys there was no automatic hold at all, so it would say `false`
+  // — but the `quickSwitch*` exception governs, because an older daemon that
+  // cannot know the keys would otherwise make the cup's own "do this whenever I
+  // share" switch render unchecked while the daemon it is talking to is holding
+  // the machine awake. A control that disagrees with what is happening is worse
+  // than one that is a release behind.
+  keepAwakeSharingOnPower: true,
+  keepAwakeSharingOnPowerMinutes: 120,
+  keepAwakeSharingOnBattery: true,
+  keepAwakeSharingOnBatteryMinutes: 30,
+  keepAwakeManualOnBattery: true,
   // "Work it out from the login shell" — both the shipped default and the
   // previous release's behaviour, so the file's two rules agree here. Nothing on
   // this side interprets the value: it names a shell the *daemon* spawns, and the
@@ -670,6 +683,81 @@ export function logsTimeZone(doc: SettingsDoc): LogTimeZone {
  */
 export function hideDisabledActions(doc: SettingsDoc): boolean {
   return bool(doc, "ui.hideDisabledActions", FALLBACK.hideDisabledActions);
+}
+
+/** The five `keepAwake.*` keys. See [`keepAwakePrefs`]. */
+export const KEEP_AWAKE_SHARING_ON_POWER = "keepAwake.sharingOnPower";
+export const KEEP_AWAKE_SHARING_ON_POWER_MINUTES = "keepAwake.sharingOnPowerMinutes";
+export const KEEP_AWAKE_SHARING_ON_BATTERY = "keepAwake.sharingOnBattery";
+export const KEEP_AWAKE_SHARING_ON_BATTERY_MINUTES = "keepAwake.sharingOnBatteryMinutes";
+export const KEEP_AWAKE_MANUAL_ON_BATTERY = "keepAwake.manualOnBattery";
+
+export interface KeepAwakePrefs {
+  sharingOnPower: boolean;
+  sharingOnPowerMinutes: number;
+  sharingOnBattery: boolean;
+  sharingOnBatteryMinutes: number;
+  manualOnBattery: boolean;
+}
+
+/**
+ * The keep-awake settings, as one value.
+ *
+ * Read as a set rather than one key at a time because the two `sharing*` pairs
+ * are one decision asked twice — the answer genuinely differs by power source,
+ * since a hold on mains spends nothing and the same hold on battery spends
+ * somebody's charge. The daemon reads them the same way, for the same reason.
+ *
+ * `manualOnBattery` is the odd one out and deliberately kept alongside: the two
+ * pairs govern a hold **nobody asked for**, while this one governs how far a hold
+ * somebody *did* ask for is allowed to reach. Turning it off is a guarantee
+ * rather than a preference — veld then never writes `pmset disablesleep` on this
+ * machine, on any path.
+ */
+export function keepAwakePrefs(doc: SettingsDoc): KeepAwakePrefs {
+  return {
+    sharingOnPower: bool(
+      doc,
+      KEEP_AWAKE_SHARING_ON_POWER,
+      FALLBACK.keepAwakeSharingOnPower,
+    ),
+    sharingOnPowerMinutes: num(
+      doc,
+      KEEP_AWAKE_SHARING_ON_POWER_MINUTES,
+      FALLBACK.keepAwakeSharingOnPowerMinutes,
+    ),
+    sharingOnBattery: bool(
+      doc,
+      KEEP_AWAKE_SHARING_ON_BATTERY,
+      FALLBACK.keepAwakeSharingOnBattery,
+    ),
+    sharingOnBatteryMinutes: num(
+      doc,
+      KEEP_AWAKE_SHARING_ON_BATTERY_MINUTES,
+      FALLBACK.keepAwakeSharingOnBatteryMinutes,
+    ),
+    manualOnBattery: bool(
+      doc,
+      KEEP_AWAKE_MANUAL_ON_BATTERY,
+      FALLBACK.keepAwakeManualOnBattery,
+    ),
+  };
+}
+
+/**
+ * Which of the two automatic switches is in force, given where the power is
+ * coming from.
+ *
+ * The cup's menu shows **one** "do this whenever I share" switch, not two, and
+ * this is what it reads and writes: the one that applies to the machine's actual
+ * state right now. Offering both there would be the settings dialog's job done
+ * badly in a dropdown — the dialog has the room for the pair and the labels to
+ * tell them apart, and the menu has neither.
+ */
+export function autoWhileSharingKey(powerSource: "mains" | "battery"): string {
+  return powerSource === "battery"
+    ? KEEP_AWAKE_SHARING_ON_BATTERY
+    : KEEP_AWAKE_SHARING_ON_POWER;
 }
 
 /**
