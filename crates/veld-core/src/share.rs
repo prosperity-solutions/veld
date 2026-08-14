@@ -599,6 +599,33 @@ pub enum DaemonError {
     Api(String),
 }
 
+/// The machine's keep-awake state, as `GET /api/caffeinate` reports it.
+///
+/// Deliberately partial: this mirrors only the fields the CLI has a sentence for.
+/// The dashboard's own `CaffeinateState` carries more (coverage gaps, capability
+/// probes, the power source) because it composes copy from them, and duplicating
+/// that here would mean two places to keep in step for a line of terminal output.
+/// Unknown fields are ignored by serde, so a newer daemon adding one costs
+/// nothing.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct CaffeinateState {
+    /// Whether this machine can be kept awake at all (a Linux box with no
+    /// `systemd-inhibit` cannot). `false` means there is nothing to report and
+    /// nothing the user could do about it.
+    #[serde(default)]
+    pub supported: bool,
+    pub active: bool,
+    /// `manual`, `sharing`, `both`, or `none`.
+    #[serde(default)]
+    pub reason: String,
+    /// Seconds left when the daemon answered. Absent or `null` = no time limit.
+    #[serde(default)]
+    pub remaining_secs: Option<i64>,
+    /// Whether a shut lid keeps the machine awake right now.
+    #[serde(default)]
+    pub covers_lid: bool,
+}
+
 /// Thin HTTP client for the daemon's `/api/shares` control API.
 pub struct DaemonClient {
     http: reqwest::Client,
@@ -670,6 +697,23 @@ impl DaemonClient {
             .post(format!("{}/api/shares/join", self.base))
             .header("X-Veld-Request", "1")
             .json(req)
+            .send()
+            .await
+            .map_err(Self::map_send)?;
+        Self::parse(resp).await
+    }
+
+    /// The machine's keep-awake state (`GET /api/caffeinate`).
+    ///
+    /// On this client because the two CLI callers are both *about* sharing in the
+    /// end: `veld share` says whether the machine will stay up long enough to be
+    /// worth the link it just printed, and `veld doctor` answers "why won't this
+    /// Mac sleep" for somebody with no window open. Neither adds a keep-awake
+    /// subcommand — there deliberately still is none.
+    pub async fn caffeinate(&self) -> Result<CaffeinateState, DaemonError> {
+        let resp = self
+            .http
+            .get(format!("{}/api/caffeinate", self.base))
             .send()
             .await
             .map_err(Self::map_send)?;

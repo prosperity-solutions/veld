@@ -18,11 +18,20 @@
  * everything. On macOS the unprivileged half stops at mains power, and the
  * battery/lid-closed half needs the privileged helper — so the footer states
  * which of the three cases this machine is in. See `LidNote`.
+ *
+ * **The machine can also be held awake by something nobody clicked**: a live
+ * share arms it (see the daemon's `caffeinate` module). That is the one state
+ * this control has to work hardest at, because a lit cup the user did not light
+ * is the whole cost of that default. So the reason is named in the tooltip, in
+ * the menu's first line, and — when the automatic allowance has been spent while
+ * a share is still up — in a line that says so rather than leaving somebody to
+ * notice the cup went out.
  */
-import { ActionIcon, Menu, Tooltip } from "@mantine/core";
+import { ActionIcon, Menu, Switch, Tooltip } from "@mantine/core";
 import { IconCoffee, IconCoffeeOff } from "@tabler/icons-react";
 
-import type { CaffeinateState } from "../api";
+import type { CaffeinateState, SettingsDoc } from "../api";
+import { autoWhileSharingKey } from "../shared/settings";
 import { formatRemaining, useCaffeinate } from "../shared/useCaffeinate";
 
 /**
@@ -41,35 +50,57 @@ const DURATIONS: Array<{ label: string; secs: number }> = [
 ];
 
 /**
- * What the menu says about a closed lid on battery — the one case the
- * unprivileged hold cannot reach.
+ * What the menu says about a closed lid — the coverage that is not uniform.
  *
- * Three different facts, and they must not be collapsed. *Not capable* is
- * actionable (`veld setup privileged` fixes it) and is the common case. *Capable
- * but not covering* means a lease was asked for and not held — a real fault,
- * worth saying so the user does not shut the lid on a promise. *Covering* earns
- * one line of confirmation, because "will this survive me closing the laptop"
- * is the actual question somebody opens this menu with.
+ * Four different facts, and they must not be collapsed. The daemon tells them
+ * apart in `lid_gap` precisely so this note cannot report a fault for a lease
+ * that was never asked for:
  *
- * Nothing at all on Linux, where the inhibitor already covers battery, and
- * nothing on macOS while idle-but-capable — there is no caveat to give somebody
- * who has not switched it on yet. Deliberately not a promise that turning it on
- * *will* cover the lid: the `active && !covers_battery` branch below exists
- * precisely for the take that does not land.
+ * - `automatic` — an automatic hold on battery deliberately holds idle sleep
+ *   only. Not a fault and not a missing install; one click on a duration buys
+ *   the rest, so the note says that instead of naming a command.
+ * - `setting` — *Settings → Keep awake* says not to. Points at the setting.
+ * - `no_helper` — veld asked and could not get it. Two sentences, split on
+ *   `battery_capable`: no helper installed names the command that installs one,
+ *   and a helper that refused the lease is a fault with nothing to suggest. This
+ *   is the only note that should ever mention `veld setup privileged`.
+ * - none, while active — one line of confirmation, because "will this survive me
+ *   closing the laptop" is the actual question somebody opens this menu with.
+ *
+ * Nothing at all while idle: there is no caveat to give somebody who has not
+ * switched it on yet, and no promise to make about a take that has not landed.
  */
-function LidNote(props: { state: CaffeinateState | null; active: boolean }) {
-  const { state, active } = props;
-  if (state?.platform !== "macos") return null;
+function LidNote(props: { state: CaffeinateState | null }) {
+  const { state } = props;
+  if (!state?.active) return null;
 
-  const note = !state.battery_capable
-    ? // No backticks: a Menu.Label renders text, not markdown, so they would
-      // show up as literal characters.
-      "A closed lid on battery still sleeps. Run veld setup privileged to cover that too."
-    : active && !state.covers_battery
-      ? "A closed lid on battery still sleeps — the privileged helper didn’t take the lease."
-      : active
-        ? "Covers a closed lid, on battery too."
-        : null;
+  // No backticks anywhere below: a Menu.Label renders text, not markdown, so
+  // they would show up as literal characters.
+  // A `lid_gap` this bundle does not know about renders nothing rather than
+  // falling through to the "covers a closed lid" reassurance below it. The Rust
+  // side's match is exhaustive and the compiler enforces it; nothing enforces
+  // the pair, so an older bundle meeting a newer daemon has to fail quiet rather
+  // than fail confident.
+  const known = new Set(["no_helper", "setting", "automatic"]);
+  if (state.lid_gap && !known.has(state.lid_gap)) return null;
+
+  const note =
+    state.lid_gap === "no_helper"
+      ? // Two cases behind one `lid_gap`, and only the daemon's `battery_capable`
+        // tells them apart: *no helper installed* is the common one and has a
+        // command that fixes it, while *installed but the lease was refused* is a
+        // fault with no user action. Collapsing them dropped the instruction
+        // entirely — the one actionable sentence this menu ever had.
+        !state.battery_capable
+        ? "A closed lid on battery still sleeps. Run veld setup privileged to cover that too."
+        : "A closed lid on battery still sleeps — the privileged helper didn’t take the lease."
+      : state.lid_gap === "setting"
+        ? "A closed lid on battery still sleeps — that’s off in Settings → Keep awake."
+        : state.lid_gap === "automatic"
+          ? "A closed lid still sleeps this machine. Pick a length above to cover that too."
+          : state.covers_lid
+            ? "Covers a closed lid, on battery too."
+            : null;
   if (!note) return null;
 
   return (
@@ -82,8 +113,21 @@ function LidNote(props: { state: CaffeinateState | null; active: boolean }) {
   );
 }
 
-export function KeepAwakeButton(props: { hideDisabled: boolean }) {
+export function KeepAwakeButton(props: {
+  hideDisabled: boolean;
+  settings: SettingsDoc;
+  /** Writes a settings patch. The app's own `saveSettings`. */
+  onSetting: (patch: SettingsDoc) => void;
+}) {
   const { state, start, stop } = useCaffeinate();
+
+  // Which of the two automatic switches the menu offers is decided by the power
+  // source the *daemon* reports, not by anything this client knows — which is
+  // why it is read here rather than passed in. Showing both switches in a
+  // dropdown would be the settings dialog's job done badly; showing the one that
+  // is in force answers the question somebody opened the menu with.
+  const autoKey = autoWhileSharingKey(state?.power_source ?? "mains");
+  const autoWhileSharing = props.settings[autoKey] !== false;
 
   // Optimistic until the first answer lands: the supported case is the common
   // one, and a control that appears a beat late reads as jank. A click before
@@ -116,26 +160,48 @@ export function KeepAwakeButton(props: { hideDisabled: boolean }) {
   // `window.addEventListener` away from a confusing bug.
   const left =
     typeof remaining === "number" ? `${formatRemaining(remaining)} left` : "no time limit";
-  // Only macOS has a gap to qualify: on Linux the unprivileged inhibitor already
-  // covers a closed lid on battery, so a "mains power only" caveat there would
-  // be advice about a limitation that does not exist.
-  const mainsOnly = state?.platform === "macos" && !state.covers_battery;
+  // Whether a human asked for any of this. `"sharing"` alone means nobody did,
+  // which changes what every string below should say.
+  const automatic = state?.reason === "sharing";
+  // Sharing is live and the automatic hold has had its allowance for this share.
+  // Worth its own line: the cup going out mid-share is otherwise something the
+  // user has to notice rather than be told.
+  const spent = (state?.sharing_spent ?? false) && !active;
+  // Not the same state as `spent`, and it must not borrow its copy: this machine
+  // could not start an inhibitor, so "it comes back with the next share" would
+  // be a promise nothing is keeping.
+  const failed = (state?.hold_failed ?? false) && !active;
+  const lidCaveat = active && !state?.covers_lid;
+
   const tooltip = !active
-    ? "This machine may sleep — click to keep it awake"
-    : mainsOnly
-      ? `Keeping this machine awake on mains power — ${left}`
-      : `Keeping this machine awake — ${left}`;
+    ? failed
+      ? "This machine may sleep — Veld could not start the keep-awake"
+      : spent
+        ? "This machine may sleep — its automatic time for this share is used up"
+        : "This machine may sleep — click to keep it awake"
+    : automatic
+      ? lidCaveat
+        ? `Keeping this machine awake while you're sharing — ${left}. A shut lid still sleeps it.`
+        : `Keeping this machine awake while you're sharing — ${left}`
+      : lidCaveat
+        ? `Keeping this machine awake — ${left}. A shut lid still sleeps it.`
+        : `Keeping this machine awake — ${left}`;
 
   return (
-    <Menu position="bottom-end" width={260}>
+    <Menu position="bottom-end" width={272} closeOnItemClick={false}>
       <Menu.Target>
         <Tooltip label={tooltip}>
           <ActionIcon
             size="md"
             variant={active ? "filled" : "default"}
             color={active ? "teal" : undefined}
-            aria-label="Keep this machine awake"
-            aria-pressed={active}
+            aria-label={
+              automatic ? "Keeping this machine awake while sharing" : "Keep this machine awake"
+            }
+            // Only a hold somebody *pressed* is a pressed toggle. Asserting it for
+            // an automatic one tells a screen-reader user they did something they
+            // did not do.
+            aria-pressed={active && !automatic}
           >
             {active ? <IconCoffee size={14} /> : <IconCoffeeOff size={14} />}
           </ActionIcon>
@@ -144,7 +210,9 @@ export function KeepAwakeButton(props: { hideDisabled: boolean }) {
       <Menu.Dropdown>
         {active ? (
           <>
-            <Menu.Label>{`On — ${left}`}</Menu.Label>
+            <Menu.Label>
+              {automatic ? `On while you're sharing — ${left}` : `On — ${left}`}
+            </Menu.Label>
             <Menu.Item
               color="red"
               leftSection={<IconCoffeeOff size={14} />}
@@ -153,10 +221,21 @@ export function KeepAwakeButton(props: { hideDisabled: boolean }) {
               Let this machine sleep
             </Menu.Item>
             <Menu.Divider />
-            <Menu.Label>Change to</Menu.Label>
+            <Menu.Label>{automatic ? "Keep it awake myself, for" : "Change to"}</Menu.Label>
           </>
         ) : (
-          <Menu.Label>Keep this machine awake for</Menu.Label>
+          <>
+            {failed ? (
+              <Menu.Label style={{ whiteSpace: "normal" }}>
+                Veld could not start the keep-awake on this machine. See the daemon log.
+              </Menu.Label>
+            ) : spent ? (
+              <Menu.Label style={{ whiteSpace: "normal" }}>
+                Automatic keep-awake is used up for this share. It comes back with the next one.
+              </Menu.Label>
+            ) : null}
+            <Menu.Label>Keep this machine awake for</Menu.Label>
+          </>
         )}
         {DURATIONS.map((d) => (
           <Menu.Item key={d.secs} onClick={() => void start(d.secs)}>
@@ -164,7 +243,32 @@ export function KeepAwakeButton(props: { hideDisabled: boolean }) {
           </Menu.Item>
         ))}
         <Menu.Item onClick={() => void start(null)}>Until I turn it off</Menu.Item>
-        <LidNote state={state} active={active} />
+        <LidNote state={state} />
+        <Menu.Divider />
+        {/* The setting lives here as well as in Settings, and this is the copy
+            that matters more: nobody's route to this feature is the settings
+            dialog. It is "why is my machine awake" → the cup → its menu, so the
+            switch that stops it has to be reachable at the end of that route.
+            `closeOnItemClick={false}` on the Menu is what lets it be flipped
+            without the dropdown vanishing under the pointer. */}
+        <Menu.Item closeMenuOnClick={false} component="div">
+          <Switch
+            size="xs"
+            checked={autoWhileSharing}
+            // Both labels name their power source. Only the battery one did,
+            // which left the mains switch reading as the whole feature — so
+            // somebody who turned it off on mains, unplugged, and shared got a
+            // machine held awake by a switch they believed they had turned off.
+            // Naming both is what makes the *other* one discoverable, and
+            // Settings is where both are visible at once.
+            label={
+              state?.power_source === "battery"
+                ? "Do this whenever I share, on battery"
+                : "Do this whenever I share, on mains power"
+            }
+            onChange={(e) => props.onSetting({ [autoKey]: e.currentTarget.checked })}
+          />
+        </Menu.Item>
       </Menu.Dropdown>
     </Menu>
   );

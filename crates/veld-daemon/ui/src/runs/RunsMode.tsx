@@ -30,6 +30,11 @@ import type { ReactNode } from "react";
  * separate state so their churn re-renders only the stat cells).
  */
 export function RunsMode(props: { modeSwitch: ReactNode;
+  /** Search, keep-awake and focus mode, as one cluster — built by the app and
+   *  shared with the IDE bar so the two modes cannot drift in what they offer.
+   *  Keep-awake in particular has to be here: this is a screen sharing is
+   *  started from, and a live share holds the machine awake on its own. */
+  controls: ReactNode;
   /** Theme, what's new and settings, as one menu — built by the app and shared
    *  with the IDE bar so the two modes cannot drift. */
   overflowMenu: ReactNode;
@@ -193,6 +198,7 @@ export function RunsMode(props: { modeSwitch: ReactNode;
         <Text size="xs" c="dimmed">
           {meta}
         </Text>
+        {props.controls}
         {props.overflowMenu}
       </div>
 

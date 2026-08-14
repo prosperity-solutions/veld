@@ -28,6 +28,7 @@ import { useCopyFlash } from "./copy";
 import { QrCode } from "./QrCode";
 import { copyLinkWithQr, copyQrImage } from "./qrClipboard";
 import { notifyDone, notifyError } from "./notify";
+import { formatRemaining, useCaffeinate } from "./useCaffeinate";
 
 /**
  * This run's shares: the peer share (at most one) and any public web shares.
@@ -703,7 +704,53 @@ export function RunSharePanel(props: {
       {(props.otherRuns ?? []).map((s) => (
         <OtherRunShare key={s.id} share={s} onChanged={props.onChanged} />
       ))}
+      {/* Only in the modal, never on a runs-mode card. Not a layout preference:
+          this line reads the machine's keep-awake state, and runs mode renders
+          one of these panels *per environment* — so a card-level note would mean
+          a poller per card for one machine-wide fact. Runs mode gets the same
+          answer from the coffee cup in its top bar, which is exactly why that
+          cluster stopped being IDE-only. */}
+      {!props.collapsibleShares && !idle && <KeepAwakeNote />}
     </div>
+  );
+}
+
+/**
+ * What sharing is doing to this machine's sleep, said where the sharing is.
+ *
+ * The contextual half of telling somebody about a hold they did not ask for: the
+ * coffee cup shows *that* the machine is awake, and this says *why* at the moment
+ * they are looking at the thing causing it. Silent when there is nothing to
+ * report — a line saying "this machine may sleep" under every share would be
+ * noise on the common path, where the machine sleeping is what it always did.
+ */
+function KeepAwakeNote() {
+  const { state } = useCaffeinate();
+  if (!state) return null;
+
+  // Both "may sleep" branches are gated on the machine **not** being held, the
+  // same way the cup's are. `hold_failed` and `sharing_spent` describe the
+  // automatic half and outlive it: a user who reacts to either by clicking a
+  // duration themselves is now genuinely held awake, and a panel still saying
+  // "it may sleep" is the pessimistic twin of the optimistic lie this module's
+  // docs call worse than no status at all.
+  const note = !state.active && state.hold_failed
+    ? "Veld could not keep this machine awake — it may sleep and drop the share."
+    : !state.active && state.sharing_spent
+    ? "This machine may sleep now — its automatic keep-awake for this share is used up."
+    : state.reason === "sharing" || state.reason === "both"
+      ? typeof state.remaining_secs === "number"
+        ? `This machine will stay awake for another ${formatRemaining(state.remaining_secs)}${
+            state.covers_lid ? "." : ", unless you shut the lid."
+          }`
+        : "This machine is being kept awake."
+      : null;
+  if (!note) return null;
+
+  return (
+    <Text size="xs" c="dimmed" px={12} pb={8}>
+      {note}
+    </Text>
   );
 }
 

@@ -250,6 +250,14 @@ async fn patch_settings(
     // effective value is what matters and this is one database read, where a
     // `patch.contains_key` gate is a second place that has to know the key's name.
     veld_core::user_path::set_preferred_shell(Some(db.terminal_shell()));
+    // Keep-awake reads its settings per decision, but only *makes* a decision on
+    // a share event or its own tick — so without this, switching the automatic
+    // hold off mid-share leaves the machine held for up to another thirty
+    // seconds, and switching it on does nothing until the next share starts.
+    // Detached and unconditional, for the same reason as the line above: the
+    // reconcile returns early when nothing is held and nothing is shared, which
+    // is cheaper than a second place that has to know these five key names.
+    tokio::spawn(crate::feedback_server::caffeinate::settings_changed());
     // Echo the full effective document back, so the caller applies exactly what
     // was stored rather than what it asked for — the clamp is invisible otherwise
     // and a slider would sit at a value the daemon never accepted.

@@ -75,8 +75,8 @@ pub(crate) fn lock_db_env() -> std::sync::MutexGuard<'static, ()> {
     DB_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-#[path = "caffeinate.rs"]
-mod caffeinate;
+#[path = "caffeinate/mod.rs"]
+pub(crate) mod caffeinate;
 
 /// Note the terminal sessions being left running.
 ///

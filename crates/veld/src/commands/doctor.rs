@@ -53,6 +53,15 @@ struct Diagnostics {
     daemon_status: String,
     caddy_status: String,
     ca_status: String,
+    /// Whether anything is keeping this machine awake, and why.
+    ///
+    /// The helper line above already reports the *privileged* half, and that was
+    /// only ever half the answer: the ordinary unprivileged hold — the one every
+    /// machine can take, and the one a live share now arms by itself — appeared
+    /// in no CLI output at all. So "why won't this Mac sleep", asked from a
+    /// support transcript with no window open, had no answer for the common case
+    /// and a partial one for the rare case. Empty when nothing is held.
+    keep_awake: String,
 
     // Checks
     checks: Vec<Check>,
@@ -292,6 +301,7 @@ impl Diagnostics {
 
         // Daemon
         self.daemon_status = check_daemon_status().await;
+        self.keep_awake = check_keep_awake().await;
 
         // Caddy (only check independently if helper didn't report it)
         if self.caddy_status.is_empty() || self.caddy_status == "not running" {
@@ -1043,6 +1053,9 @@ impl Diagnostics {
             "Daemon:",
             colorize_status(&self.daemon_status)
         );
+        if !self.keep_awake.is_empty() {
+            println!("    {:<14}{}", "Keep awake:", self.keep_awake);
+        }
         println!(
             "    {:<14}{}",
             "Caddy:",
@@ -1101,6 +1114,10 @@ impl Diagnostics {
                 "daemon": self.daemon_status,
                 "caddy": self.caddy_status,
                 "ca": self.ca_status,
+                // Empty string rather than null when nothing is held: this is a
+                // human-readable phrase, and a consumer branching on it wants
+                // "is there one" rather than a shape to destructure.
+                "keep_awake": self.keep_awake,
             },
             "checks": checks,
             // `null` when nothing is updating, so a consumer can branch on
@@ -1283,6 +1300,64 @@ fn read_mode(path: &Path) -> String {
 }
 
 /// Check daemon status via launchctl (macOS) or socket existence.
+/// What is holding this machine awake, as one phrase.
+///
+/// Read from the daemon rather than by looking for a `caffeinate` process: the
+/// hold is an inhibitor wrapped around a pipe *this daemon* owns, so the daemon
+/// is the only thing that can say why it exists — and "why" is the whole point
+/// of the line. A share holding it is the case worth naming, because that is the
+/// one nobody pressed a button for.
+async fn check_keep_awake() -> String {
+    let Ok(state) = veld_core::share::DaemonClient::new().caffeinate().await else {
+        // No daemon, or one too old to answer. Neither is worth a row — the
+        // daemon's own status line above already says if it is not running.
+        return String::new();
+    };
+    if !state.active {
+        return String::new();
+    }
+    let reason_is_sharing = state.reason == "sharing";
+    let why = match state.reason.as_str() {
+        "sharing" => "because a share is live",
+        "both" => "you asked, and a share is live",
+        _ => "you asked",
+    };
+    let left = match state.remaining_secs {
+        Some(secs) => format!(", {} left", humanize_secs(secs)),
+        None => ", no time limit".to_owned(),
+    };
+    let lid = if state.covers_lid {
+        ""
+    } else {
+        " (a shut lid still sleeps it)"
+    };
+    // Every other row in this report that states a problem also names the thing
+    // that fixes it; this one used to be the exception, and it is the row a
+    // terminal-only user reaches while trying to *stop* the hold. There is
+    // deliberately no keep-awake subcommand to name (see `veld_core::agent`'s
+    // reasoning about config-declared behaviour), so it names the surface.
+    let how = if reason_is_sharing {
+        " — stop sharing, or turn it off in Settings → Keep awake"
+    } else {
+        " — turn it off from the cup in the top bar"
+    };
+    format!("held awake — {why}{left}{lid}{how}")
+}
+
+/// `"3h 12m"` / `"12m"` / `"under a minute"`. Mirrors `veld share`'s own.
+fn humanize_secs(seconds: i64) -> String {
+    if seconds < 60 {
+        return "under a minute".to_owned();
+    }
+    let hours = seconds / 3600;
+    let minutes = (seconds % 3600) / 60;
+    match (hours, minutes) {
+        (0, m) => format!("{m}m"),
+        (h, 0) => format!("{h}h"),
+        (h, m) => format!("{h}h {m}m"),
+    }
+}
+
 async fn check_daemon_status() -> String {
     // Try launchctl on macOS
     if cfg!(target_os = "macos") {

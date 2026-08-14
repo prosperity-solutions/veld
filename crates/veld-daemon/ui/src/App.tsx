@@ -51,7 +51,7 @@ import { InboxIcon, inboxDescription } from "./inbox/InboxIcon";
 import { inbox, notifyKey } from "./inbox/inbox";
 import { useInbox } from "./inbox/useInbox";
 import { useSettings } from "./shared/useSettings";
-import { KeepAwakeButton } from "./components/KeepAwakeButton";
+import { TopBarControls } from "./components/TopBarControls";
 import {
   activeRun,
   bestFuzzyMatch,
@@ -105,8 +105,6 @@ import {
   IconAlertTriangleFilled,
   IconArrowBackUp,
   IconArrowsExchange,
-  IconBell,
-  IconBellOff,
   IconCheck,
   IconChevronDown,
   IconChevronLeft,
@@ -123,7 +121,6 @@ import {
   IconAdjustments,
   IconReload,
   IconRefreshDot,
-  IconSearch,
   IconSettings,
   IconSparkles,
   IconStack2,
@@ -2163,6 +2160,10 @@ function AppInner(props: {
    */
   /** The column toggle, for the key handler registered once at boot. */
   const toggleProjectColumnRef = useRef<() => void>(() => {});
+  /** Same shape and same reason as `toggleProjectColumnRef`: the key handler and
+   *  the Electron accelerator are registered once at boot, so they reach the
+   *  current closure through a ref rather than capturing a stale one. */
+  const openPaletteRef = useRef<() => void>(() => {});
 
   const previousRepoRootRef = useRef<string | null>(null);
   const lastRepoRootRef = useRef<string | null>(null);
@@ -2547,7 +2548,7 @@ function AppInner(props: {
       const mod = e.metaKey || e.ctrlKey;
       if (mod && (e.key === "k" || ((e.key === "P" || e.key === "p") && e.shiftKey))) {
         e.preventDefault();
-        setDialog({ kind: "search" });
+        openPaletteRef.current();
       }
       // ⌘, / Ctrl+, — the platform convention for preferences. Bound here so a
       // plain browser tab has the shortcut too; the Electron app *also* has it as
@@ -3163,7 +3164,7 @@ function AppInner(props: {
   useEffect(
     () =>
       onBrowserAccelerator(({ accelerator }) => {
-        if (accelerator === "palette") setDialog({ kind: "search" });
+        if (accelerator === "palette") openPaletteRef.current();
         // A focused native browser pane swallows every keystroke, so these arrive
         // here instead of through the window's own key handler. Same two chords,
         // same meaning — see `browserViews.js`.
@@ -4416,33 +4417,44 @@ function AppInner(props: {
   // ---- render -------------------------------------------------------------
 
   /**
-   * Focus mode: a standing "stop interrupting me" toggle, between search and the
-   * overflow menu.
+   * The end of the top bar — search, keep-awake, focus mode — built once and
+   * threaded into **both** modes, the way `overflowMenu` already is.
    *
-   * **IDE-mode top bar only** — unlike `overflowMenu`, this is not threaded into
-   * `RunsMode`'s props: that bar has no search icon to sit
-   * beside either, and Runs mode has no rail to be the thing this silences.
-   * The setting itself is still global and still in force there (the master
-   * switch also has a row in Settings → Activity → Focus mode, reachable from
-   * either mode's ⋯ menu) — only the one-click top-bar shortcut is IDE-only.
+   * All three used to be IDE-only, on the reasoning that Runs mode's bar had no
+   * search icon for them to sit beside. Keep-awake is what made that wrong
+   * rather than merely inconsistent: a live share now arms it by itself, and
+   * Runs mode is a screen on which sharing is started — so the one mode with no
+   * keep-awake control was also a mode where the machine could be held awake
+   * with nothing on screen saying so, and nothing to switch it off with. Sharing
+   * that cluster is the fix; see `TopBarControls`.
    *
-   * The three sub-toggles it acts on (bell, in-app toasts, OS notifications)
-   * live beside that master row, mirroring the notify table above them; this
-   * button is a one-click on/off, not a picker of its own.
+   * Search is handed a mode-aware opener because what the palette finds —
+   * worktrees, panes, run actions — only exists in the IDE. Switching first
+   * means every palette item behaves exactly as it always has.
    */
-  const focusModeButton = (
-    <Tooltip label={focus.enabled ? "Focus mode: on — click to turn off" : "Focus mode: off — click to turn on"}>
-      <ActionIcon
-        size="md"
-        variant={focus.enabled ? "filled" : "default"}
-        color={focus.enabled ? "teal" : undefined}
-        aria-label="Focus mode"
-        aria-pressed={focus.enabled}
-        onClick={() => void saveSettings({ "focus.enabled": !focus.enabled })}
-      >
-        {focus.enabled ? <IconBellOff size={14} /> : <IconBell size={14} />}
-      </ActionIcon>
-    </Tooltip>
+  /**
+   * One owner for "open the command palette", shared by the top-bar button, ⌘K
+   * and Veld Desktop's accelerator.
+   *
+   * The mode switch is the reason it has to be one: what the palette finds —
+   * worktrees, panes, run actions — only exists in the IDE, so opening it over
+   * Runs mode lists things whose selection changes nothing visible. Switching
+   * first means every palette item behaves exactly as it always has, with no
+   * per-item special case. Three call sites applying that rule independently is
+   * how two of them end up not applying it.
+   */
+  const openPalette = () => {
+    if (mode !== "ide") setMode("ide");
+    setDialog({ kind: "search" });
+  };
+  openPaletteRef.current = openPalette;
+
+  const topBarControls = (
+    <TopBarControls
+      settings={settings ?? {}}
+      onSetting={(patch) => void saveSettings(patch)}
+      onSearch={() => openPalette()}
+    />
   );
 
   /** One owner for "flip the project column", shared by the top-bar button and
@@ -4718,6 +4730,7 @@ function AppInner(props: {
       <div className="frame">
         <RunsMode
           modeSwitch={modeSwitch}
+          controls={topBarControls}
           overflowMenu={overflowMenu}
           historyDays={historyDays}
           logsTz={logsTz}
@@ -5005,8 +5018,7 @@ function AppInner(props: {
         }}
         onStop={() => worktree && stopWorktree(worktree, run)}
         onRestart={() => worktree && restartWorktree(worktree, run)}
-        onSearch={() => setDialog({ kind: "search" })}
-        focusModeButton={focusModeButton}
+        controls={topBarControls}
         overflowMenu={overflowMenu}
         configVarsButton={configVarsButton}
         nodeActions={nodeActionsButton}
@@ -5937,8 +5949,9 @@ function TopBar(props: {
   onStart: () => void;
   onStop: () => void;
   onRestart: () => void;
-  onSearch: () => void;
-  focusModeButton: React.ReactNode;
+  /** Search, keep-awake and focus mode — see `TopBarControls`, mounted by both
+   *  modes so the two bars cannot drift in what they offer. */
+  controls: React.ReactNode;
   /** Theme, what's new and settings, as one menu at the end of the bar. */
   overflowMenu: React.ReactNode;
   configVarsButton: React.ReactNode;
@@ -6247,17 +6260,12 @@ function TopBar(props: {
           onOpenInPane={props.onOpenInPane}
         />
       )}
-      <Tooltip label="Search (⌘K)">
-        <ActionIcon size="md" variant="default" onClick={props.onSearch}>
-          <IconSearch size={14} />
-        </ActionIcon>
-      </Tooltip>
-      {/* Machine-wide, so it owns its own state rather than being threaded from
-          the app like the buttons below it. IDE-mode only, for the same reason
-          `focusModeButton` is: Runs mode's bar has no search icon to sit beside,
-          and the switch itself stays in force there either way. */}
-      <KeepAwakeButton hideDisabled={props.hideDisabled} />
-      {props.focusModeButton}
+      {/* Search, keep-awake and focus mode, as one component both modes mount —
+          see `TopBarControls`. They used to be three IDE-only controls here;
+          keep-awake being armable by a live share is what forced the change,
+          since Runs mode is a screen where sharing happens and would otherwise
+          hold the machine awake with nothing on it saying so. */}
+      {props.controls}
       {/* Last, and the only thing after focus mode: everything Veld-level (theme,
           what's new, settings) is inside it. Project actions live in the project
           menu at the *start* of the bar, which is what this split bought. */}
