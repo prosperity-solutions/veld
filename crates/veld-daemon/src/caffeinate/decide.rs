@@ -715,7 +715,7 @@ mod tests {
     }
 
     #[test]
-    fn a_manual_hold_on_battery_asks_for_the_lease_unless_told_not_to() {
+    fn a_manual_hold_on_battery_asks_for_the_lease_unless_told_not_to_on_macos() {
         let mut state = State::default();
         state.manual_start(Some(t(60)));
 
@@ -727,11 +727,23 @@ mod tests {
         let mut off = prefs();
         off.manual_on_battery = false;
         let plan = state.plan(&off, battery()).expect("a hold");
-        assert_eq!(plan.coverage, Coverage::IdleOnly);
         assert!(!plan.want_lease);
-        // Not `NoHelper`: veld was told not to ask, so telling the user to install
-        // a privileged helper would be advice for a problem they do not have.
-        assert_eq!(plan.lid_gap, Some(LidGap::Setting));
+        if cfg!(target_os = "macos") {
+            assert_eq!(plan.coverage, Coverage::IdleOnly);
+            // Not `NoHelper`: veld was told not to ask, so telling the user to
+            // install a privileged helper would be advice for a problem they do
+            // not have.
+            assert_eq!(plan.lid_gap, Some(LidGap::Setting));
+        } else {
+            // **The setting is macOS-only, and this is the assertion that says
+            // so.** Its whole meaning is "never write `pmset disablesleep`";
+            // Linux has no privileged half to decline, and its lid inhibitor is
+            // unprivileged on either source — so honouring the flag there would
+            // narrow a manual hold for a reason that does not exist on the
+            // platform, and the settings dialog does not even render the row.
+            assert_eq!(plan.coverage, Coverage::LidToo);
+            assert_eq!(plan.lid_gap, None);
+        }
     }
 
     #[test]
