@@ -133,6 +133,18 @@ pub struct State {
     /// This episode has had its automatic hold and will not get another. Set by
     /// the cap running out, and by a human switching the hold off while sharing.
     pub opted_out: bool,
+    /// The inhibitor could not be started, so nothing is being held and retrying
+    /// on every tick would achieve nothing but churn.
+    ///
+    /// Separate from [`Self::opted_out`] because the two mean opposite things to
+    /// a reader: a spent cap is the feature working as configured, and this is
+    /// the feature not working at all. Cleared when the episode ends, like the
+    /// opt-out — a machine that could not spawn an inhibitor an hour ago may be
+    /// able to now, and the next sharing is the natural moment to find out.
+    pub spawn_failed: bool,
+    /// Consecutive inhibitors that exited on their own straight after spawning.
+    /// See `reap_if_dead`.
+    pub deaths: u32,
 }
 
 /// How wide a hold is.
@@ -215,6 +227,8 @@ impl State {
             // the sharing it was said during.
             self.episode = None;
             self.opted_out = false;
+            self.spawn_failed = false;
+            self.deaths = 0;
             self.reasons.sharing = None;
             return;
         }
@@ -224,7 +238,24 @@ impl State {
             PowerSource::Battery => (prefs.sharing_on_battery, prefs.sharing_on_battery_minutes),
         };
 
-        if !enabled || self.opted_out {
+        // Plugging in after the battery allowance ran out restarts it, because the
+        // mains hold is the one that spends nothing — refusing it would leave a
+        // charging laptop asleep on the strength of a limit that no longer
+        // applies. The reverse is deliberately *not* symmetric: clearing the
+        // opt-out on a mains→battery change would let somebody cycle the charger
+        // for unlimited battery allowances, which is the whole thing the battery
+        // cap exists to bound.
+        if self.opted_out
+            && power.source == PowerSource::Mains
+            && self
+                .episode
+                .is_some_and(|e| e.power == PowerSource::Battery)
+        {
+            self.opted_out = false;
+            self.episode = None;
+        }
+
+        if !enabled || self.opted_out || self.spawn_failed {
             self.reasons.sharing = None;
             // The episode's clock is forgotten while the switch is off so that
             // turning it back on — or plugging in, when only the other source is
@@ -298,7 +329,13 @@ impl State {
                 lid_gap: Some(LidGap::Automatic),
             });
         }
-        if !prefs.manual_on_battery {
+        // macOS only, because that is the whole of what the setting means: "never
+        // write `pmset disablesleep`". Linux has no privileged half to decline —
+        // its lid inhibitor is unprivileged on either power source — so honouring
+        // the flag there would narrow a manual hold to `--what=idle` for a reason
+        // that does not exist on the platform, and the settings dialog does not
+        // even render the row there to explain it.
+        if cfg!(target_os = "macos") && !prefs.manual_on_battery {
             return Some(Plan {
                 coverage: Coverage::IdleOnly,
                 want_lease: false,
@@ -316,13 +353,51 @@ impl State {
     }
 }
 
+/// What the live inhibitor is actually holding, for [`lid_state`].
+///
+/// The session's own fields, lifted out so the derivation below can be tested
+/// without a real child process — which is why it went untested and shipped a
+/// bug that reported a fault on every Linux laptop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LiveHold {
+    pub coverage: Coverage,
+    /// Whether a privileged lease was *wanted*. Distinct from whether one is
+    /// held: only a lease that was asked for and refused is a fault.
+    pub wanted_lease: bool,
+    /// Whether it is held right now, per the renewal task's flag.
+    pub lease_held: bool,
+}
+
+/// Does a shut lid keep this machine awake right now, and if not, why not.
+///
+/// Answered from the **running child** rather than from the plan. The two
+/// disagree for one tick after the power source changes — `apply` respawns on a
+/// coverage change, and until it has, the plan says the lid is covered while a
+/// narrow inhibitor is what is actually holding. Answering from the plan there
+/// prints "covers a closed lid" for a hold that does not, which this module's
+/// docs call worse than no status at all.
+pub fn lid_state(plan: Option<Plan>, live: Option<LiveHold>) -> (bool, Option<LidGap>) {
+    let gap = match (plan.map(|p| p.lid_gap), live) {
+        (Some(Some(gap)), _) => Some(gap),
+        // The lease was wanted and is not held: the helper did not come through.
+        // The `wanted_lease` test is what keeps this the only path that points a
+        // user at `veld setup privileged` — asking merely whether the machine is
+        // on battery reported a fault on every Linux laptop, where no lease is
+        // ever wanted because the unprivileged inhibitor already covers the lid.
+        (Some(None), Some(l)) if l.wanted_lease && !l.lease_held => Some(LidGap::NoHelper),
+        _ => None,
+    };
+    let covered = live.is_some_and(|l| l.coverage == Coverage::LidToo) && gap.is_none();
+    (covered, gap)
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::{DateTime, Duration, TimeZone as _, Utc};
     use veld_core::db::KeepAwakePrefs;
 
     use super::super::power::{Power, PowerSource};
-    use super::{Coverage, LidGap, ShareFacts, State};
+    use super::{Coverage, LidGap, LiveHold, Plan, ShareFacts, State, lid_state};
 
     fn t(minute: i64) -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 8, 14, 12, 0, 0).unwrap() + Duration::minutes(minute)
@@ -594,6 +669,112 @@ mod tests {
             state.plan(&prefs(), battery()).expect("a hold").coverage,
             Coverage::LidToo
         );
+    }
+
+    #[test]
+    fn a_linux_manual_hold_on_battery_is_not_a_missing_helper() {
+        // The bug this seam exists for. Linux wants no lease *by construction*
+        // (its lid inhibitor is unprivileged), so `lease_held` is always false —
+        // and a gap derived from "on battery and no lease" told every Linux
+        // laptop to run `veld setup privileged` while its lid was already
+        // covered.
+        let live = LiveHold {
+            coverage: Coverage::LidToo,
+            wanted_lease: false,
+            lease_held: false,
+        };
+        let plan = Plan {
+            coverage: Coverage::LidToo,
+            want_lease: false,
+            lid_gap: None,
+        };
+        assert_eq!(lid_state(Some(plan), Some(live)), (true, None));
+    }
+
+    #[test]
+    fn a_lease_that_was_wanted_and_refused_is_the_one_reported_fault() {
+        let live = LiveHold {
+            coverage: Coverage::LidToo,
+            wanted_lease: true,
+            lease_held: false,
+        };
+        let plan = Plan {
+            coverage: Coverage::LidToo,
+            want_lease: true,
+            lid_gap: None,
+        };
+        assert_eq!(
+            lid_state(Some(plan), Some(live)),
+            (false, Some(LidGap::NoHelper))
+        );
+    }
+
+    #[test]
+    fn a_plan_that_outran_its_child_does_not_claim_the_lid() {
+        // One tick after plugging in: the plan says mains/lid-covered, the
+        // running inhibitor is still the narrow one. The status must report the
+        // child, not the intention.
+        let live = LiveHold {
+            coverage: Coverage::IdleOnly,
+            wanted_lease: false,
+            lease_held: false,
+        };
+        let plan = Plan {
+            coverage: Coverage::LidToo,
+            want_lease: false,
+            lid_gap: None,
+        };
+        assert_eq!(lid_state(Some(plan), Some(live)), (false, None));
+    }
+
+    #[test]
+    fn nothing_held_covers_no_lid() {
+        assert_eq!(lid_state(None, None), (false, None));
+    }
+
+    #[test]
+    fn plugging_in_after_the_battery_cap_ran_out_restarts_it() {
+        // Refusing would leave a *charging* laptop asleep on the strength of a
+        // limit that no longer applies, and the mains hold spends nothing.
+        let mut state = State::default();
+        state.recompute(t(0), &prefs(), battery(), sharing(1));
+        state.recompute(t(30), &prefs(), battery(), sharing(1));
+        assert!(state.opted_out);
+
+        state.recompute(t(31), &prefs(), mains(), sharing(1));
+        assert!(!state.opted_out);
+        assert_eq!(state.reasons.sharing, Some(t(151)));
+    }
+
+    #[test]
+    fn unplugging_after_the_mains_cap_ran_out_does_not_restart_it() {
+        // The asymmetry is the point: clearing the opt-out in this direction
+        // would let somebody cycle the charger for unlimited battery allowances,
+        // which is the whole thing the battery cap exists to bound.
+        let mut state = State::default();
+        state.recompute(t(0), &prefs(), mains(), sharing(1));
+        state.recompute(t(120), &prefs(), mains(), sharing(1));
+        assert!(state.opted_out);
+
+        state.recompute(t(121), &prefs(), battery(), sharing(1));
+        assert!(state.opted_out);
+        assert_eq!(state.reasons.sharing, None);
+    }
+
+    #[test]
+    fn a_machine_that_cannot_hold_is_not_told_its_allowance_is_used_up() {
+        // `spawn_failed` and `opted_out` must stay separate: one is the feature
+        // working as configured, the other is it not working, and the UI says
+        // different things for them.
+        let mut state = State::default();
+        state.spawn_failed = true;
+        state.recompute(t(0), &prefs(), mains(), sharing(1));
+        assert_eq!(state.reasons.sharing, None);
+        assert!(!state.opted_out);
+
+        // Cleared with the episode, so the next sharing tries again.
+        state.recompute(t(1), &prefs(), mains(), none());
+        assert!(!state.spawn_failed);
     }
 
     #[test]

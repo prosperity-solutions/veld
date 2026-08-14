@@ -294,9 +294,13 @@ pub const MAX_KEEP_AWAKE_MINUTES: i64 = 8 * 60;
 /// Defaults for the two automatic caps, which are deliberately *not* equal.
 ///
 /// Mains is the generous one: nothing is being spent, `caffeinate -s` is valid on
-/// AC power only so it needs no privileged helper, and 120 minutes sits clear of
-/// both share TTL defaults (peer 2h, web 1h) so the hold normally just ends when
-/// the share does rather than racing it. Battery is the short one for the obvious
+/// AC power only so it needs no privileged helper, and 120 minutes is the peer
+/// TTL default exactly (web is 1h), so for a default share the hold ends when the
+/// share does. Note what that is *not*: slack. The two deadlines coincide, and
+/// what decides which binds is ordering — the episode clock starts after the
+/// manifest's `created_at`, by the latency of the reconcile that arms it — plus
+/// `min(cap, latest share expiry)`, which is what makes the share's own death
+/// the thing that ends the hold rather than a race between two timers. Battery is the short one for the obvious
 /// reason — the cost is somebody's charge — and 30 minutes is about the length of
 /// the thing a battery-backed share actually is: showing someone a page.
 pub const DEFAULT_KEEP_AWAKE_SHARING_ON_POWER_MINUTES: i64 = 120;

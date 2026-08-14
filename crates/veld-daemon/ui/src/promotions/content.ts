@@ -149,10 +149,10 @@ export const PROMOTIONS: Promotion[] = [
   },
   {
     // A **default that flipped**, which is the category this channel exists for:
-    // it happens *to* the reader, with no action of theirs, and there is no
-    // moment in the product where they would otherwise discover it. Sharing from
-    // the CLI or the in-page overlay never opens a Veld window at all, so for
-    // those users this card is the only thing that will ever mention it.
+    // it happens *to* the reader, with no action of theirs. The surface that
+    // earns the card is the **in-page overlay**: it starts shares without ever
+    // opening a Veld window, and unlike `veld share` — which prints an `Awake:`
+    // line — it says nothing about the hold at all.
     //
     // A second card about keep-awake two days after `keep-awake` is real budget
     // spent, and it is spent knowingly: default-on *and* silent is the one

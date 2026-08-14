@@ -2160,6 +2160,10 @@ function AppInner(props: {
    */
   /** The column toggle, for the key handler registered once at boot. */
   const toggleProjectColumnRef = useRef<() => void>(() => {});
+  /** Same shape and same reason as `toggleProjectColumnRef`: the key handler and
+   *  the Electron accelerator are registered once at boot, so they reach the
+   *  current closure through a ref rather than capturing a stale one. */
+  const openPaletteRef = useRef<() => void>(() => {});
 
   const previousRepoRootRef = useRef<string | null>(null);
   const lastRepoRootRef = useRef<string | null>(null);
@@ -2544,7 +2548,7 @@ function AppInner(props: {
       const mod = e.metaKey || e.ctrlKey;
       if (mod && (e.key === "k" || ((e.key === "P" || e.key === "p") && e.shiftKey))) {
         e.preventDefault();
-        setDialog({ kind: "search" });
+        openPaletteRef.current();
       }
       // ⌘, / Ctrl+, — the platform convention for preferences. Bound here so a
       // plain browser tab has the shortcut too; the Electron app *also* has it as
@@ -3160,7 +3164,7 @@ function AppInner(props: {
   useEffect(
     () =>
       onBrowserAccelerator(({ accelerator }) => {
-        if (accelerator === "palette") setDialog({ kind: "search" });
+        if (accelerator === "palette") openPaletteRef.current();
         // A focused native browser pane swallows every keystroke, so these arrive
         // here instead of through the window's own key handler. Same two chords,
         // same meaning — see `browserViews.js`.
@@ -4428,14 +4432,28 @@ function AppInner(props: {
    * worktrees, panes, run actions — only exists in the IDE. Switching first
    * means every palette item behaves exactly as it always has.
    */
+  /**
+   * One owner for "open the command palette", shared by the top-bar button, ⌘K
+   * and Veld Desktop's accelerator.
+   *
+   * The mode switch is the reason it has to be one: what the palette finds —
+   * worktrees, panes, run actions — only exists in the IDE, so opening it over
+   * Runs mode lists things whose selection changes nothing visible. Switching
+   * first means every palette item behaves exactly as it always has, with no
+   * per-item special case. Three call sites applying that rule independently is
+   * how two of them end up not applying it.
+   */
+  const openPalette = () => {
+    if (mode !== "ide") setMode("ide");
+    setDialog({ kind: "search" });
+  };
+  openPaletteRef.current = openPalette;
+
   const topBarControls = (
     <TopBarControls
       settings={settings ?? {}}
       onSetting={(patch) => void saveSettings(patch)}
-      onSearch={() => {
-        if (mode !== "ide") setMode("ide");
-        setDialog({ kind: "search" });
-      }}
+      onSearch={() => openPalette()}
     />
   );
 

@@ -103,7 +103,7 @@ use veld_core::db::KeepAwakePrefs;
 use veld_core::helper::HelperClient;
 
 use self::decide::{Coverage, LidGap, Plan, ShareFacts, State};
-use self::power::{Power, PowerSource};
+use self::power::Power;
 use super::management::check_csrf;
 
 /// Shortest timed session. Below a minute the round trip costs more than the
@@ -169,6 +169,18 @@ const PRIVILEGED_PROBE_TTL: Duration = Duration::from_secs(60);
 /// minute. Half the supervising tick, so a tick never re-uses the reading the
 /// previous one took.
 const POWER_TTL: Duration = Duration::from_secs(15);
+
+/// How many inhibitors may die on their own before this stops re-spawning them.
+///
+/// Two rather than one, because a single death is also what a `veld update`
+/// racing a spawn looks like, and giving up on the first would turn a transient
+/// into a session-long outage.
+const IMMEDIATE_DEATHS_BEFORE_GIVING_UP: u32 = 2;
+
+/// The coupling the paragraph above states, as the compile error every other
+/// coupled pair in this file already is: a tick that re-used the previous tick's
+/// reading would notice a charger a whole tick late for no reason.
+const _: () = assert!(POWER_TTL.as_secs() * 2 <= EXPIRY_TICK.as_secs());
 
 /// Ceiling on a helper round trip made while the session lock is held.
 ///
@@ -584,9 +596,25 @@ async fn reap_if_dead(machine: &mut Machine) {
     };
     if dead {
         take_and_stop(&mut machine.session).await;
-        // The reasons stay — the caller re-plans immediately after this, so a
-        // hold whose inhibitor died is respawned rather than silently lost. What
-        // stops that becoming a spawn loop is `reconcile`'s opt-out on failure.
+        // The reasons stay, so the caller re-plans and a hold whose inhibitor
+        // died is respawned rather than silently lost.
+        //
+        // What bounds the respawn is **not** `reconcile`'s failure path — an
+        // inhibitor that starts cleanly and then exits (polkit refusing a
+        // `handle-lid-switch` inhibitor to a daemon with no active login session
+        // is the documented case) returns `Ok`, so that path never fires. It is
+        // this counter: a child that dies immediately, twice running, is a
+        // machine that cannot hold the inhibition, and re-exec'ing it twice a
+        // minute for the daemon's life would achieve nothing but noise in the
+        // log it is already writing.
+        machine.state.deaths += 1;
+        if machine.state.deaths >= IMMEDIATE_DEATHS_BEFORE_GIVING_UP {
+            warn!(
+                "the keep-awake process keeps exiting on its own; giving up until sharing changes"
+            );
+            machine.state.spawn_failed = true;
+            machine.state.reasons = decide::Reasons::default();
+        }
     }
 }
 
@@ -688,6 +716,7 @@ async fn spawn_session(machine: &mut Machine, plan: Plan) -> Result<(), (StatusC
         battery = battery.load(Ordering::Relaxed),
         "keeping this machine awake"
     );
+    machine.state.deaths = 0;
     machine.session = Some(Session {
         child,
         stdin,
@@ -698,7 +727,6 @@ async fn spawn_session(machine: &mut Machine, plan: Plan) -> Result<(), (StatusC
         helper,
         renew,
     });
-    start_supervisor();
     Ok(())
 }
 
@@ -709,20 +737,29 @@ async fn spawn_session(machine: &mut Machine, plan: Plan) -> Result<(), (StatusC
 /// facts rather than a remembered edge — so two of these racing converge instead
 /// of needing an epoch to order them.
 pub(crate) async fn reconcile() {
-    let shares = *SHARES.lock().expect("share facts");
-    let idle = {
+    let quiet = {
         let guard = ACTIVE.lock().await;
-        guard.session.is_none() && guard.state.reasons.is_empty()
+        guard.session.is_none()
+            && guard.state.reasons.is_empty()
+            && SHARES.lock().unwrap_or_else(|e| e.into_inner()).count == 0
     };
     // Nothing held and nothing shared: there is no decision to make, and making
     // it anyway would spawn `pmset` and open a database every thirty seconds for
     // the life of a daemon whose user is not sharing anything.
-    if idle && shares.count == 0 {
+    if quiet {
         return;
     }
 
-    // Both reads happen **before** the lock. `keep_awake()` goes through a
-    // blocking rusqlite handle and the power probe spawns a process; either one
+    // **Before** the spawn, not after it. Tying the tick to a successful
+    // `spawn_session` looked equivalent and was not: a share started while the
+    // switch for the current power source is *off* arms nothing, so nothing
+    // would ever poll — and plugging the charger in, which is precisely the
+    // event that should widen the answer, would never be noticed. The supervisor
+    // has to exist wherever there is something to supervise, which is here.
+    start_supervisor();
+
+    // Both reads happen **before** the session lock. `keep_awake()` goes through
+    // a blocking rusqlite handle and the power probe spawns a process; either one
     // inside the critical section would stall every status poll behind it, and
     // this module's own `get_state` already avoids exactly that shape.
     let prefs = match load_prefs().await {
@@ -732,6 +769,13 @@ pub(crate) async fn reconcile() {
     let power = current_power().await;
 
     let mut guard = ACTIVE.lock().await;
+    // Read **under** the session lock, unlike prefs and power above. Those two
+    // are stale-tolerant — being a moment behind on a setting or a charger costs
+    // one tick — but the share count is what decides whether a hold exists at
+    // all, and a reconcile that read `1` before an unshare and applied after it
+    // would re-arm a hold with nothing shared, claiming "while you're sharing" in
+    // the UI until the next tick undid it.
+    let shares = *SHARES.lock().unwrap_or_else(|e| e.into_inner());
     reap_if_dead(&mut guard).await;
     guard.state.recompute(Utc::now(), &prefs, power, shares);
     if let Err((_, message)) = apply(&mut guard, &prefs, power).await {
@@ -740,8 +784,14 @@ pub(crate) async fn reconcile() {
         warn!(error = %message, "could not update the keep-awake hold");
         // One attempt per episode: a machine that cannot spawn an inhibitor at
         // all would otherwise retry on every share event and every tick forever.
-        guard.state.opted_out = true;
-        guard.state.reasons.sharing = None;
+        //
+        // Deliberately **not** `opted_out`, which is the same wire field the UI
+        // renders as "automatic keep-awake is used up for this share, it comes
+        // back with the next one". That sentence is true of a spent cap and false
+        // of a machine whose inhibitor will not start, and the second is the case
+        // where a user most needs the message not to be reassuring.
+        guard.state.spawn_failed = true;
+        guard.state.reasons = decide::Reasons::default();
     }
 }
 
@@ -811,7 +861,7 @@ async fn current_power() -> Power {
 /// `spawn_session` can spend seconds against a wedged privileged helper, and a
 /// share start must never wait on the machine being kept awake.
 pub(crate) fn shares_changed(count: usize, latest_expiry: Option<DateTime<Utc>>) {
-    *SHARES.lock().expect("share facts") = ShareFacts {
+    *SHARES.lock().unwrap_or_else(|e| e.into_inner()) = ShareFacts {
         count,
         latest_expiry,
     };
@@ -844,17 +894,13 @@ fn status_of(
     // A lease that was wanted and is not held is the one case worth reporting as
     // a fault. Read from the flag the renewal task owns, so a lease that started
     // failing stops being claimed rather than leaving a promise nothing is keeping.
-    let lease_held = session.is_some_and(|s| s.battery.load(Ordering::Relaxed));
-    let lid_gap = match plan.map(|p| p.lid_gap) {
-        Some(Some(gap)) => Some(gap),
-        Some(None) if session.is_some() && !lease_held => {
-            // The plan wanted the lid covered on battery and the helper did not
-            // come through. This is the only path that should ever point the user
-            // at `veld setup privileged`.
-            (power.source == PowerSource::Battery).then_some(LidGap::NoHelper)
-        }
-        _ => None,
-    };
+    let live = session.map(|s| decide::LiveHold {
+        coverage: s.coverage,
+        wanted_lease: s.wanted_lease,
+        lease_held: s.battery.load(Ordering::Relaxed),
+    });
+    let lease_held = live.is_some_and(|l| l.lease_held);
+    let (covers_lid, lid_gap) = decide::lid_state(plan, live);
     let mut out = json!({
         "supported": unsupported.is_none(),
         "unsupported_reason": unsupported,
@@ -882,7 +928,7 @@ fn status_of(
         // Does a shut lid keep this machine awake right now, and if not, why not.
         // Four different answers, and telling them apart is what stops the UI
         // reporting a fault for a lease that was never asked for.
-        "covers_lid": session.is_some() && lid_gap.is_none(),
+        "covers_lid": covers_lid,
         "lid_gap": lid_gap.map(|gap| match gap {
             LidGap::Automatic => "automatic",
             LidGap::Setting => "setting",
@@ -893,6 +939,9 @@ fn status_of(
         // state a user would otherwise have to infer from a cup that stopped
         // glowing, so it is said rather than left to be noticed.
         "sharing_spent": machine.state.opted_out,
+        // The inhibitor could not be started at all. Distinct from a spent cap
+        // because the remedy is different and the reassurance is wrong.
+        "hold_failed": machine.state.spawn_failed,
     });
     if let Some(s) = session {
         let expires_at = reasons.expires_at();
@@ -913,12 +962,19 @@ async fn current_status() -> Json<Value> {
     // concurrent start or stop behind a read.
     let capable = battery_capable().await;
     let power = current_power().await;
+    // The defaults, from the one place that defines them — an inline copy here
+    // would be a fourth statement of the same five numbers, and the one nothing
+    // checks. `manual_on_battery` is deliberately **false** in this fallback
+    // rather than its real default: with the database unreadable we cannot know
+    // whether the user turned it off, and guessing `true` makes `plan` want a
+    // lease, find none held, and report `no_helper` — sending somebody to
+    // `veld setup privileged` to fix a lease they themselves declined.
     let prefs = load_prefs().await.unwrap_or(KeepAwakePrefs {
         sharing_on_power: true,
-        sharing_on_power_minutes: 120,
+        sharing_on_power_minutes: veld_core::db::DEFAULT_KEEP_AWAKE_SHARING_ON_POWER_MINUTES,
         sharing_on_battery: true,
-        sharing_on_battery_minutes: 30,
-        manual_on_battery: true,
+        sharing_on_battery_minutes: veld_core::db::DEFAULT_KEEP_AWAKE_SHARING_ON_BATTERY_MINUTES,
+        manual_on_battery: false,
     });
     let mut guard = ACTIVE.lock().await;
     reap_if_dead(&mut guard).await;
@@ -961,15 +1017,26 @@ async fn post_start(
         let expires_at = body
             .duration_secs
             .map(|secs| Utc::now() + chrono::Duration::seconds(secs as i64));
+        // Rolled back on failure, which the `?` alone would not do. A manual
+        // reason left behind with no session is not merely untidy: it makes
+        // `Reasons::is_empty()` false forever, so `reconcile`'s quiet
+        // short-circuit never fires again and every tick re-attempts the spawn
+        // that just failed — on a machine that has no inhibitor at all, for the
+        // daemon's life. The old `start()` could not have this bug because it
+        // built the child before writing any state.
+        let restore = guard.state.reasons;
         guard.state.manual_start(expires_at);
-        apply(&mut guard, &prefs, power).await?;
+        if let Err(e) = apply(&mut guard, &prefs, power).await {
+            guard.state.reasons = restore;
+            return Err(e);
+        }
     }
     Ok(current_status().await)
 }
 
 async fn delete_stop(headers: HeaderMap) -> Result<Json<Value>, (StatusCode, String)> {
     check_csrf(&headers).map_err(|s| (s, "missing X-Veld-Request header".to_owned()))?;
-    let shares = *SHARES.lock().expect("share facts");
+    let shares = *SHARES.lock().unwrap_or_else(|e| e.into_inner());
     {
         let mut guard = ACTIVE.lock().await;
         // Idempotent: turning off something already off is a success, so two

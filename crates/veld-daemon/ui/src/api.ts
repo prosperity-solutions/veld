@@ -1114,6 +1114,13 @@ export interface CaffeinateState {
    * inferred from a cup that quietly stopped glowing.
    */
   sharing_spent: boolean;
+  /**
+   * The inhibitor could not be started at all. Distinct from `sharing_spent`,
+   * which is the feature working as configured — this is it not working, and
+   * telling somebody their allowance "comes back with the next share" would be
+   * reassurance for a machine that is not holding anything.
+   */
+  hold_failed: boolean;
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {

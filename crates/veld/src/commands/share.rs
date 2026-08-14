@@ -72,7 +72,11 @@ async fn keep_awake_line(client: &DaemonClient) -> Option<String> {
             return None;
         }
     }
-    Some("off — this machine may sleep and drop the share".to_owned())
+    // Budget spent without the hold appearing. That is *usually* the switch
+    // being off, but it is also what a loaded machine looks like while the
+    // detached reconcile is still opening a database and spawning `pmset` — so
+    // the line stops short of the definite claim it used to make.
+    Some("this machine may sleep and drop the share".to_owned())
 }
 
 /// `veld share [run] [--node ...] [--ttl secs] [--approve MODE] [--web]
@@ -157,10 +161,22 @@ pub async fn share(
     match client.start_share(&req).await {
         Ok(resp) => {
             if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&resp).unwrap_or_default()
-                );
+                // The same fact the human receipt prints as `Awake:`, as a field
+                // — an agent driving `veld share` has exactly the same reason to
+                // know whether this machine will still be up to serve the link,
+                // and the docs promise the line without qualifying it by output
+                // mode. `null` when there is nothing to say.
+                let mut out = serde_json::to_value(&resp).unwrap_or_default();
+                if let Some(obj) = out.as_object_mut() {
+                    obj.insert(
+                        "keep_awake".to_owned(),
+                        match keep_awake_line(&client).await {
+                            Some(note) => serde_json::Value::String(note),
+                            None => serde_json::Value::Null,
+                        },
+                    );
+                }
+                println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
             } else if web {
                 output::print_success(&format!(
                     "Sharing {} node(s) on the public web.",
@@ -315,10 +331,22 @@ pub async fn join(ticket: String, label: Option<String>, remember: bool, json: b
         // it. Interactively, prompt and retry (bounded).
         if let Some(relay_url) = resp.needs_relay_token.clone() {
             if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&resp).unwrap_or_default()
-                );
+                // The same fact the human receipt prints as `Awake:`, as a field
+                // — an agent driving `veld share` has exactly the same reason to
+                // know whether this machine will still be up to serve the link,
+                // and the docs promise the line without qualifying it by output
+                // mode. `null` when there is nothing to say.
+                let mut out = serde_json::to_value(&resp).unwrap_or_default();
+                if let Some(obj) = out.as_object_mut() {
+                    obj.insert(
+                        "keep_awake".to_owned(),
+                        match keep_awake_line(&client).await {
+                            Some(note) => serde_json::Value::String(note),
+                            None => serde_json::Value::Null,
+                        },
+                    );
+                }
+                println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
                 return 1;
             }
             if prompts >= MAX_TOKEN_PROMPTS {

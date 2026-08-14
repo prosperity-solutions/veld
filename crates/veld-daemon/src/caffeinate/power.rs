@@ -58,10 +58,18 @@ pub struct Power {
 impl Power {
     /// The answer to use when nothing could be measured. See the module docs for
     /// why the unknown case is battery rather than mains.
+    ///
+    /// `has_battery` is **true** here, and the two fields are conservative in
+    /// opposite-looking directions on purpose because different consumers read
+    /// them. The source drives what is held, where guessing battery spends
+    /// nothing. `has_battery` drives whether the settings dialog *offers* the
+    /// battery rows — and a machine we could not ask is not a machine we know is
+    /// a desktop, so claiming `false` would hide the very switch the cup is
+    /// writing to while the daemon applies the battery cap.
     const fn unknown() -> Self {
         Self {
             source: PowerSource::Battery,
-            has_battery: false,
+            has_battery: true,
         }
     }
 
@@ -119,9 +127,10 @@ fn parse_pmset(stdout: &str) -> Power {
     } else if stdout.contains("'Battery Power'") {
         PowerSource::Battery
     } else {
-        // Understood nothing. A Mac with no battery line and no recognised source
-        // is still more likely a desktop than a laptop we misread, but this is the
-        // path the module docs are about: guess battery, spend nothing.
+        // Understood nothing about the source. `has_battery` is still whatever
+        // the output actually showed — that half was readable even when this one
+        // was not, and it is what decides whether Settings offers the battery
+        // rows at all.
         return Power {
             source: PowerSource::Battery,
             has_battery,

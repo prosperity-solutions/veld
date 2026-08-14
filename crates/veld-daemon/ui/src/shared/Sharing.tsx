@@ -728,7 +728,9 @@ function KeepAwakeNote() {
   const { state } = useCaffeinate();
   if (!state) return null;
 
-  const note = state.sharing_spent
+  const note = state.hold_failed
+    ? "Veld could not keep this machine awake — it may sleep and drop the share."
+    : state.sharing_spent
     ? "This machine may sleep now — its automatic keep-awake for this share is used up."
     : state.reason === "sharing" || state.reason === "both"
       ? typeof state.remaining_secs === "number"

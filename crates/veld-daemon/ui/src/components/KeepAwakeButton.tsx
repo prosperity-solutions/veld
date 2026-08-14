@@ -150,12 +150,18 @@ export function KeepAwakeButton(props: {
   // Worth its own line: the cup going out mid-share is otherwise something the
   // user has to notice rather than be told.
   const spent = (state?.sharing_spent ?? false) && !active;
+  // Not the same state as `spent`, and it must not borrow its copy: this machine
+  // could not start an inhibitor, so "it comes back with the next share" would
+  // be a promise nothing is keeping.
+  const failed = (state?.hold_failed ?? false) && !active;
   const lidCaveat = active && !state?.covers_lid;
 
   const tooltip = !active
-    ? spent
-      ? "This machine may sleep — its automatic time for this share is used up"
-      : "This machine may sleep — click to keep it awake"
+    ? failed
+      ? "This machine may sleep — Veld could not start the keep-awake"
+      : spent
+        ? "This machine may sleep — its automatic time for this share is used up"
+        : "This machine may sleep — click to keep it awake"
     : automatic
       ? lidCaveat
         ? `Keeping this machine awake while you're sharing — ${left}. A shut lid still sleeps it.`
@@ -202,7 +208,11 @@ export function KeepAwakeButton(props: {
           </>
         ) : (
           <>
-            {spent ? (
+            {failed ? (
+              <Menu.Label style={{ whiteSpace: "normal" }}>
+                Veld could not start the keep-awake on this machine. See the daemon log.
+              </Menu.Label>
+            ) : spent ? (
               <Menu.Label style={{ whiteSpace: "normal" }}>
                 Automatic keep-awake is used up for this share. It comes back with the next one.
               </Menu.Label>
