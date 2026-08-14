@@ -67,7 +67,7 @@ const PATH_RESOLVE_TIMEOUT: Duration = Duration::from_secs(10);
 /// rather than one per call. Note that a caller shared between the two, like
 /// `endpoint::resolve_secret`, counts as daemon-side and uses the cache.
 pub async fn resolve_user_path() -> String {
-    if let Some(path) = resolve_with_fallback(None).await {
+    if let Some(path) = resolve_with_fallback(&resolution_shell(), None).await {
         info!(path = %path, "resolved user PATH from login shell");
         return path;
     }
@@ -93,9 +93,16 @@ pub async fn resolve_user_path() -> String {
 /// callers ([`resolve_user_path`], [`cached_user_path`]'s warm loop), `Some`
 /// for a project-scoped resolution ([`cached_user_path_for`]) so a directory-
 /// keyed version-manager hook in the rc file sees the right `$PWD`.
-async fn resolve_with_fallback(cwd: Option<&std::path::Path>) -> Option<String> {
-    let preferred = resolution_shell();
-    if let Some(path) = login_shell_path(&preferred, cwd).await {
+///
+/// `preferred` is passed in rather than read from [`resolution_shell`] here, and
+/// that is the point: it lets this module's own tests exercise resolution with a
+/// stub shell **without publishing that stub into the process-global
+/// [`preferred_shell`]**, which every other test in the crate reads. Issue #310
+/// was exactly that leak — a stub answering `PATH=/old/bin` made `cat` and `sh`
+/// unspawnable for whichever `values` test happened to run alongside it, so the
+/// crate's suite was permanently a few tests red locally.
+async fn resolve_with_fallback(preferred: &str, cwd: Option<&std::path::Path>) -> Option<String> {
+    if let Some(path) = login_shell_path(preferred, cwd).await {
         return Some(path);
     }
     let login = crate::shell::auto_shell();
@@ -134,6 +141,11 @@ fn preferred_shell() -> &'static std::sync::Mutex<Option<String>> {
 /// reaches the *next* resolution rather than the next daemon restart. Values that
 /// are not usable are already filtered by [`crate::shell::resolve`] upstream; an
 /// empty string here is treated as `None`.
+///
+/// **The daemon is the only caller — tests must not use this.** Publishing here
+/// changes what every *other* concurrently-running test in the crate resolves;
+/// a test that needs a stub shell passes it as an argument instead
+/// (see [`resolve_with_fallback`]).
 pub fn set_preferred_shell(shell: Option<String>) {
     let shell = shell.map(|s| s.trim().to_owned()).filter(|s| !s.is_empty());
     if let Ok(mut guard) = preferred_shell().lock() {
@@ -283,6 +295,12 @@ pub async fn cached_user_path() -> String {
 /// liveness checks in one scan tick, concurrent HTTP calls) piggyback on the
 /// one in flight rather than each spawning their own login shell.
 pub async fn cached_user_path_for(project_root: &std::path::Path) -> String {
+    cached_user_path_for_with_shell(&resolution_shell(), project_root).await
+}
+
+/// [`cached_user_path_for`] with the resolution shell handed in — see
+/// [`resolve_with_fallback`] for why that is a parameter and not a global read.
+async fn cached_user_path_for_with_shell(shell: &str, project_root: &std::path::Path) -> String {
     // Normalized so distinct spellings of the same physical directory
     // (`./x` vs `x`, a trailing slash, a symlink) don't fragment the cache
     // into separate entries that each pay their own login-shell cost. Falls
@@ -341,19 +359,20 @@ pub async fn cached_user_path_for(project_root: &std::path::Path) -> String {
 
     match decision {
         Decision::LockPoisoned => {
-            return resolve_with_fallback(Some(&key))
+            return resolve_with_fallback(shell, Some(&key))
                 .await
                 .unwrap_or_else(process_path_fallback);
         }
         Decision::UseCachedValue(value) => value,
         Decision::StartBackgroundRefresh(value, handle) => {
             let dir = key.clone();
+            let shell = shell.to_owned();
             handle.spawn(async move {
-                refresh_dir_cache(&dir).await;
+                refresh_dir_cache(&shell, &dir).await;
             });
             value
         }
-        Decision::ResolveColdInline => refresh_dir_cache(&key).await,
+        Decision::ResolveColdInline => refresh_dir_cache(shell, &key).await,
     }
 }
 
@@ -364,8 +383,8 @@ pub async fn cached_user_path_for(project_root: &std::path::Path) -> String {
 /// [`DirEntry::refreshing`], whether or not this call set it — a cold call
 /// (no prior entry) has nothing to clear, and that's fine. Returns the value
 /// now published (the fresh resolution, or the preserved existing one).
-async fn refresh_dir_cache(project_root: &std::path::Path) -> String {
-    let resolved = resolve_with_fallback(Some(project_root)).await;
+async fn refresh_dir_cache(shell: &str, project_root: &std::path::Path) -> String {
+    let resolved = resolve_with_fallback(shell, Some(project_root)).await;
     if let Some(path) = &resolved {
         info!(path = %path, dir = %project_root.display(), "resolved project-directory user PATH from login shell");
     }
@@ -424,7 +443,7 @@ fn dir_cell() -> &'static std::sync::Mutex<std::collections::HashMap<std::path::
 
 /// Re-resolve and publish per [`publish_value`].
 async fn refresh_user_path_cache() {
-    let resolved = resolve_with_fallback(None).await;
+    let resolved = resolve_with_fallback(&resolution_shell(), None).await;
     if let Some(path) = &resolved {
         info!(path = %path, "resolved user PATH from login shell");
     }
@@ -616,10 +635,10 @@ mod tests {
     // that fails to start), the public helper must produce a non-empty PATH so
     // callers can unconditionally `.env("PATH", …)` with the result.
     //
-    // Locked: `resolve_user_path` reads the process-wide `preferred_shell`
-    // global via `resolution_shell()`, which a sibling test can be mid-way
-    // through pointing at its own stub shell file — an unserialized read here
-    // could exec that stub while a sibling is rewriting it in place.
+    // No longer sensitive to a sibling's stub shell — nothing in this module
+    // publishes one any more (issue #310) — but still serialised, because the
+    // real login shell it spawns is the expensive resolution this crate's tests
+    // otherwise avoid piling up concurrently.
     #[tokio::test]
     async fn resolves_to_a_non_empty_path() {
         let _serialised = cache_test_lock().lock().await;
@@ -713,12 +732,14 @@ mod tests {
         let shell = root_path.join("stub-shell");
         std::fs::write(&shell, "#!/bin/sh\necho \"PATH=$(pwd)/bin:/usr/bin\"\n").unwrap();
         std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).unwrap();
-        set_preferred_shell(Some(shell.to_str().unwrap().to_owned()));
+        let stub = shell.to_str().unwrap();
 
-        let path_a = cached_user_path_for(&project_a).await;
-        let path_b = cached_user_path_for(&project_b).await;
+        let path_a = cached_user_path_for_with_shell(stub, &project_a).await;
+        let path_b = cached_user_path_for_with_shell(stub, &project_b).await;
 
-        set_preferred_shell(None);
+        // The stub reached resolution as an argument, never as published
+        // process-wide state — see `resolve_with_fallback` and issue #310.
+        assert_eq!(resolution_shell(), crate::shell::auto_shell());
 
         assert_eq!(path_a, format!("{}/bin:/usr/bin", project_a.display()));
         assert_eq!(path_b, format!("{}/bin:/usr/bin", project_b.display()));
@@ -746,9 +767,9 @@ mod tests {
         };
 
         write_shell("/old/bin");
-        set_preferred_shell(Some(shell.to_str().unwrap().to_owned()));
+        let stub = shell.to_str().unwrap().to_owned();
 
-        let first = cached_user_path_for(&dir).await;
+        let first = cached_user_path_for_with_shell(&stub, &dir).await;
         assert_eq!(first, "/old/bin");
 
         // Force the entry stale (simulating `PATH_WARM_INTERVAL` elapsing)
@@ -771,7 +792,7 @@ mod tests {
         write_shell("/new/bin");
 
         // A stale hit returns the OLD value with no wait — the whole point.
-        let second = cached_user_path_for(&dir).await;
+        let second = cached_user_path_for_with_shell(&stub, &dir).await;
         assert_eq!(second, "/old/bin");
 
         // The background refresh it triggered eventually publishes the new
@@ -790,7 +811,9 @@ mod tests {
                 break;
             }
         }
-        set_preferred_shell(None);
+        // The background refresh carried the stub as an argument too — nothing
+        // about it leaked into the process-global shell (issue #310).
+        assert_eq!(resolution_shell(), crate::shell::auto_shell());
         assert_eq!(refreshed.flatten(), Some("/new/bin".to_owned()));
     }
 
