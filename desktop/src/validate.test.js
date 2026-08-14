@@ -23,6 +23,7 @@ const {
   safeTransferTabs,
   safeUrl,
   safeUserAgent,
+  safeWindowId,
   safeWorktreeId,
   safeZoom,
 } = require("./validate");
@@ -286,6 +287,35 @@ test("safeWorktreeId takes a rowid and nothing else", () => {
   assert.equal(safeWorktreeId("7"), 7);
   for (const none of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, "", "abc", null, {}]) {
     assert.equal(safeWorktreeId(none), null, JSON.stringify(none));
+  }
+});
+
+test("safeWindowId takes only a numeric string", () => {
+  assert.equal(safeWindowId("7"), 7);
+  // Unlike `safeWorktreeId`, a bare number is refused: the wire contract is
+  // always a string, since the id crosses IPC as the opaque token `detach`/
+  // `drop-out` handed back — a caller that already has the number should
+  // never have gotten one in the first place.
+  for (const none of [
+    7,
+    0,
+    -1,
+    1.5,
+    Number.NaN,
+    "",
+    "abc",
+    null,
+    {},
+    // `Number()` alone accepts every one of these; the id must be plain
+    // decimal digits and nothing `Number()` would merely tolerate.
+    "0x7",
+    "7e2",
+    " 7 ",
+    "+7",
+    "7.0",
+    "007",
+  ]) {
+    assert.equal(safeWindowId(none), null, JSON.stringify(none));
   }
 });
 

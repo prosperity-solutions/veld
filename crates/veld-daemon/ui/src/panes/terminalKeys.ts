@@ -49,6 +49,41 @@ function isPaletteChord(e: KeyboardEvent): boolean {
 }
 
 /**
+ * The window-level shortcuts added alongside the Shortcuts overview — focus
+ * mode, the IDE/Runs switch, update main, cycling the run selector,
+ * start/stop, restart, worktree navigation, opening the overview itself, and
+ * tab-cycling — all of which must reach `App.tsx`'s keydown effect from a
+ * focused terminal for the same structural reason the palette chord does.
+ *
+ * Matched on `e.key`, never `e.code`, for every letter here — mirroring
+ * exactly what `App.tsx`'s own handler tests, since a mismatch here would
+ * swallow the key on one layout while the window listener expects a different
+ * physical key on another (see the ⌘B comment in `App.tsx` for why `code` is
+ * wrong for a letter). Tab and the arrow keys have no such layout hazard.
+ *
+ * `/` allows Shift (it sits behind Shift on German, Spanish and French
+ * layouts — the same class of hazard `App.tsx`'s comma-chord comment already
+ * names) but is gated on `e.metaKey` alone, not `mod`: the literal-Ctrl variant
+ * is readline's undo (`Ctrl+_`/`Ctrl+/`), the same reason `Ctrl+K` below is
+ * left to the shell rather than the palette. So on Linux/Windows, opening the
+ * Shortcuts overview from a focused terminal is reachable everywhere except
+ * the terminal itself — a narrower version of the same trade.
+ */
+function isAppShortcutChord(e: KeyboardEvent): boolean {
+  const mod = e.ctrlKey || e.metaKey;
+  if (mod && e.shiftKey && !e.altKey) {
+    if (["f", "v", "u", "o", "k"].includes(e.key.toLowerCase())) return true;
+    if (e.key === "Enter") return true;
+  }
+  if (mod && !e.shiftKey && !e.altKey && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
+    return true;
+  }
+  if (e.metaKey && !e.altKey && e.key === "/") return true;
+  if (e.ctrlKey && !e.metaKey && !e.altKey && e.key === "Tab") return true;
+  return false;
+}
+
+/**
  * `⌘,` / `Ctrl+,` — the settings accelerator, which the app binds at the window.
  *
  * A focused terminal swallows every key, so without letting this one propagate the
@@ -68,7 +103,7 @@ function isSettingsChord(e: KeyboardEvent): boolean {
  * handle the event normally, `false` to make it ignore the event *before* it
  * cancels it.
  *
- * Two things need to be false:
+ * Several things need to be false:
  *
  * - **The palette accelerator** (`Ctrl/⌘+Shift+P`), which must keep propagating
  *   to the window listener in `App.tsx`. xterm cancels the keys it handles
@@ -76,6 +111,10 @@ function isSettingsChord(e: KeyboardEvent): boolean {
  *   terminal would otherwise swallow anything the app binds. `Ctrl+K`
  *   deliberately is not in this list: that one is readline's
  *   kill-to-end-of-line and belongs to the shell.
+ * - **Every other window-level shortcut** (`isAppShortcutChord`) — focus mode,
+ *   the view switch, update main, run cycling, start/stop, restart, worktree
+ *   navigation, opening the Shortcuts overview, and tab-cycling — for the
+ *   same reason as the palette chord above.
  * - **Shift+Enter**, which this handler answers itself by sending
  *   [`SHIFT_ENTER_SEQUENCE`]. `preventDefault` here is load-bearing: without it
  *   the browser still delivers the key to xterm's hidden textarea and the shell
@@ -103,10 +142,11 @@ export function handleKeyEvent(
     return !(
       isPaletteChord(e) ||
       isSettingsChord(e) ||
+      isAppShortcutChord(e) ||
       (shiftEnterNewline && isShiftEnter(e))
     );
   }
-  if (isPaletteChord(e) || isSettingsChord(e)) return false;
+  if (isPaletteChord(e) || isSettingsChord(e) || isAppShortcutChord(e)) return false;
   if (shiftEnterNewline && isShiftEnter(e)) {
     e.preventDefault();
     send(SHIFT_ENTER_SEQUENCE);

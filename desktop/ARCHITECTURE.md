@@ -949,16 +949,19 @@ Minimal by design. Main process only does:
    never names a channel, so it cannot reach a handler the preload doesn't list.
    Both handler sets resolve their target window from `event.sender` and require
    the main frame, so an iframe inside a pane can reach none of them and a
-   renderer acts on its own window — with **two deliberate exceptions, both
-   because the state behind them is process-wide, not per window**:
+   renderer acts on its own window — with **three deliberate exceptions**:
    `veld:browser:clear-session` clears a `persist:` partition, which every
    window's panes share, so it reloads all of them (scoping only the *repair* to
    the sender left another window rendering a signed-in page whose jar was
-   already gone), and `veld:window:detach` opens a new window by definition.
-   `veld:window:seed` is resolved from `event.sender` without the frame check,
-   because it is answered during preload where `senderFrame` is not yet
-   populated; nothing else can reach it, since Electron runs a preload in the
-   main frame only and the embedded panes have no preload at all.
+   already gone), `veld:window:detach` opens a new window by definition, and
+   `veld:window:focus` raises a *different* window than the sender's, named by
+   an id the page holds (keyboard tab-cycling onto a detached window's, the one
+   caller today) — `senderFrame` still gates who may *ask*, the exception is
+   only in which window the ask acts on. `veld:window:seed` is resolved from
+   `event.sender` without the frame check, because it is answered during
+   preload where `senderFrame` is not yet populated; nothing else can reach it,
+   since Electron runs a preload in the main frame only and the embedded panes
+   have no preload at all.
 5. Own the browser panes' lifetime: views are keyed by (window, view id), so a
    renderer can only address its own. They are disposed when the window closes,
    and otherwise only when the page asks — it calls `reset()` as it boots, before

@@ -101,6 +101,24 @@ contextBridge.exposeInMainWorld("veldDesktop", {
     /** Whether the shell reopened this window on a slot it owned before. Only
      *  then may the page restore that slot's durable layout — see `readLayouts`. */
     restored: fromArgv("--veld-window-restored=") === "1",
+    /** The window this one detached from, as the `record.id` string `focus`
+     *  below matches on — `null` for a main window or a detached one with no
+     *  live origin (see `WindowRecord.originId`). Lets a detached window's own
+     *  keyboard tab-cycling reach back to where it came from.
+     *
+     *  A **function**, not a value read once at boot like `seed`/`restored`:
+     *  `restoreWindows` (windows.js) only resolves a restored window's origin
+     *  *after* every window in the batch has already launched, so a value
+     *  baked into this preload's argv at launch would be permanently `null`
+     *  for exactly the windows that survive an app restart. Calling this
+     *  fresh each time asks the main process what the record holds right now. */
+    originWindowId: () => {
+      try {
+        return ipcRenderer.sendSync("veld:window:origin") || null;
+      } catch {
+        return null;
+      }
+    },
     seed: windowSeed(),
     /** Native full screen at page start, and every change after it. The top bar
      *  gives back its traffic-light inset in full screen — macOS moves those
@@ -166,6 +184,12 @@ contextBridge.exposeInMainWorld("veldDesktop", {
      *  shell can do; a plain browser tab has no equivalent and marks itself
      *  instead. */
     focusSelf: () => ipcRenderer.invoke("veld:window:focus-self"),
+    /** Bring a *different*, specific window to the front, addressed by the
+     *  `windowId` `detach`/`dropOut` handed back when it opened. Used for
+     *  keyboard tab-cycling once it runs past this window's own docks and onto a
+     *  detached tab's window. Resolves `false` for an id that no longer names a
+     *  live window — the caller's answer either way is to move on. */
+    focus: (windowId) => ipcRenderer.invoke("veld:window:focus", { windowId }),
     /** A tab drag started here. Every window freezes its embedded browser views
      *  (they paint over all DOM, so an overlay under one is invisible) and the
      *  shell starts carrying the cursor to whichever window it is over. */

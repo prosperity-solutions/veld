@@ -63,6 +63,31 @@ export const windowRestored: boolean =
   (window as { veldDesktop?: { window?: { restored?: unknown } } }).veldDesktop?.window
     ?.restored === true;
 
+/**
+ * The window this one detached from, as the opaque id `DesktopWindowApi.focus`
+ * takes — `null` for a main window, a plain browser tab, or a detached window
+ * whose origin is no longer live (see `WindowRecord.originId`'s own doc: a
+ * restored window's persisted `origin` is a suffix, not this).
+ *
+ * Lets a detached window's own keyboard tab-cycling reach back to the window
+ * it came from, which `focus` alone cannot do — that call needs an id to raise,
+ * and nothing else on this side ever learns one for a window that isn't itself.
+ *
+ * **A function, read on every call, not a value snapshotted at boot.** A
+ * window restored across an app restart has its origin resolved by the main
+ * process only after every window in that restore has already launched
+ * (`restoreWindows` in `windows.js`), so a boot-time snapshot would be `null`
+ * forever for exactly those windows — asking fresh each time this is actually
+ * needed sidesteps that ordering instead of caching a stale answer.
+ */
+export function getOriginWindowId(): string | null {
+  const fn = (window as { veldDesktop?: { window?: { originWindowId?: unknown } } }).veldDesktop
+    ?.window?.originWindowId;
+  if (typeof fn !== "function") return null;
+  const raw = fn();
+  return typeof raw === "string" && raw !== "" ? raw : null;
+}
+
 /** A payload of tabs moving between windows. Deliberately `unknown[]`: the
  *  receiving side runs them through `parseTransferTabs`, which is the same gate
  *  a restored layout goes through. */
@@ -111,7 +136,14 @@ export interface DesktopWindowApi {
     repoRoot: string;
     ratio: number;
     tabs: unknown[];
-  }): Promise<{ opened: boolean; reason?: string | null; accepted?: string[] }>;
+  }): Promise<{
+    opened: boolean;
+    reason?: string | null;
+    accepted?: string[];
+    /** Opaque id of the window that opened, for `focus` below. Absent when
+     *  nothing opened. */
+    windowId?: string;
+  }>;
   /** A tab drag started in this window. */
   dragBegin(): Promise<boolean>;
   dragEnd(): Promise<boolean>;
@@ -149,6 +181,9 @@ export interface DesktopWindowApi {
     opened: boolean;
     reason?: string | null;
     accepted?: string[];
+    /** Opaque id of the window the tabs landed in — new or existing — for
+     *  `focus` below. Absent on a refusal. */
+    windowId?: string;
   }>;
   /** Native full screen when the page started. Optional: an older shell has no
    *  such field, and `undefined` reads as the windowed state it always had. */
@@ -170,6 +205,21 @@ export interface DesktopWindowApi {
    * absent simply marks itself the way a browser tab does.
    */
   focusSelf?(): Promise<boolean>;
+  /**
+   * Bring a *different*, specific window to the front, addressed by the
+   * `windowId` `detach`/`dropOut` handed back when it opened or received tabs.
+   *
+   * Its one caller is keyboard tab-cycling once the tab list runs past this
+   * window's own docks and onto a detached tab's own window — a case
+   * `focusSelf` cannot cover, since it only ever raises the caller itself.
+   * Resolves `false` for an id that no longer names a live window (it closed
+   * since); the caller's answer either way is to drop that entry and try the
+   * next one.
+   *
+   * Optional: an older shell has no such channel, and cycling simply stops at
+   * the last tab still in this window's own docks.
+   */
+  focus?(windowId: string): Promise<boolean>;
   snapshot(payload: TabTransfer): Promise<boolean>;
   setTitle(title: string): Promise<boolean>;
   close(): Promise<boolean>;

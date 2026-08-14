@@ -170,4 +170,12 @@ export const PROMOTIONS: Promotion[] = [
     body: "This machine stays awake while you're sharing, and lets go when the share ends. Two hours on mains, half an hour on battery — both in Settings → Keep awake.",
     glyph: "device",
   },
+  {
+    id: "keyboard-shortcuts",
+    since: "2026-08-14",
+    eyebrow: "New",
+    headline: "Navigate faster thanks to more shortcuts",
+    body: "Move between worktrees and tabs, switch views, and start, stop or restart a run without the mouse. See the full list from the ⋯ menu → Shortcuts.",
+    glyph: "panes",
+  },
 ];

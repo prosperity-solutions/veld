@@ -27,6 +27,7 @@ const {
   safeRepoRoot,
   safeTitle,
   safeTransferTabs,
+  safeWindowId,
   safeWorktreeId,
   transferFromSeed,
 } = require("./validate");
@@ -897,7 +898,7 @@ function queueDrop(target, worktreeId, tabs) {
   if (target.win.isMinimized()) target.win.restore();
   target.win.show();
   target.win.focus();
-  return { moved: true, opened: false, accepted: tabs.map((t) => t.id) };
+  return { moved: true, opened: false, accepted: tabs.map((t) => t.id), windowId: String(target.id) };
 }
 
 /**
@@ -1102,6 +1103,33 @@ function registerWindowIpc(ipcMain) {
   });
 
   /**
+   * The window this one detached from, as the `record.id` string
+   * `veld:window:focus` matches on — `null` for a main window, or a detached
+   * one with no live origin (see `WindowRecord.originId`'s own doc: a
+   * persisted `origin` *suffix* is not this — it can name a window that no
+   * longer holds that identity).
+   *
+   * **Read live, not baked into argv at launch.** `restoreWindows` resolves
+   * every persisted `origin` suffix to its *current* `record.id` only after
+   * every window in the restored set has already been opened (it cannot do
+   * so any earlier — the ids being resolved to don't exist until `openWindow`
+   * assigns them). An argv value is fixed at that same launch moment, so a
+   * window restored across an app restart would carry `null` forever
+   * regardless of what `record.originId` resolves to a moment later. Querying
+   * on demand — called by the renderer whenever it actually needs the answer
+   * (unlike the seed/full-screen state above, nothing needs this in the first
+   * paint) — reads whatever the record holds *now*, sidestepping the ordering
+   * problem entirely rather than reopening it with a push notification on
+   * every resolution. Guarded like every other on-demand handler
+   * (`senderWindow`, main frame only), unlike `seed`/`fullscreen` above, which
+   * cannot be — this one is never called before the frame exists.
+   */
+  ipcMain.on("veld:window:origin", (event) => {
+    const originId = recordFor(senderWindow(event))?.originId;
+    event.returnValue = typeof originId === "number" ? String(originId) : null;
+  });
+
+  /**
    * Open another full window, optionally already pointed at a worktree.
    *
    * The selection travels as a payload rather than being left to the new
@@ -1214,6 +1242,33 @@ function registerWindowIpc(ipcMain) {
     if (win.isMinimized()) win.restore();
     win.show();
     win.focus();
+    return true;
+  });
+
+  /**
+   * Bring a *different*, specific window to the front — the counterpart to
+   * `focus-self` above. Its one caller today is "next/previous tab" cycling in
+   * the renderer once the tab list runs past this window's own docks and into a
+   * detached tab's own window, addressed by the `windowId` `detach`/`drop-out`
+   * handed back when it opened.
+   *
+   * Matched on `WindowRecord.id`, never on Electron's own `BrowserWindow.id`:
+   * the id a renderer holds across its lifetime has to survive the window it
+   * names being closed and a *different* window opening later, and only the
+   * hand-rolled counter (never reused, unlike a suffix — see `WindowRecord.id`)
+   * has that property. `false` for "not found" covers both an id that never
+   * existed and one whose window has since closed, and either way the caller's
+   * answer is the same: drop it and try the next entry in the list.
+   */
+  ipcMain.handle("veld:window:focus", (event, payload) => {
+    if (!senderWindow(event)) return false;
+    const id = safeWindowId(payload?.windowId);
+    if (id === null) return false;
+    const target = allRecords().find((r) => r.id === id && !r.closing);
+    if (!target || target.win.isDestroyed()) return false;
+    if (target.win.isMinimized()) target.win.restore();
+    target.win.show();
+    target.win.focus();
     return true;
   });
 
@@ -1347,7 +1402,7 @@ function registerWindowIpc(ipcMain) {
       if (target.win.isMinimized()) target.win.restore();
       target.win.show();
       target.win.focus();
-      return { moved: true, opened: false, accepted };
+      return { moved: true, opened: false, accepted, windowId: String(target.id) };
     }
 
     if (!canOpenAnother(windows.size)) return { moved: false, opened: false, reason: "cap" };
@@ -1367,6 +1422,9 @@ function registerWindowIpc(ipcMain) {
       opened: win !== null,
       reason: win ? null : "cap",
       accepted: win ? tabs.map((t) => t.id) : [],
+      // Stringified: crosses IPC as an opaque token the renderer holds and later
+      // hands back to `veld:window:focus`, never as a number it might reason about.
+      windowId: win ? String(recordFor(win).id) : undefined,
     };
   });
 
@@ -1424,6 +1482,7 @@ function registerWindowIpc(ipcMain) {
       opened: win !== null,
       reason: win ? null : "cap",
       accepted: win ? tabs.map((t) => t.id) : [],
+      windowId: win ? String(recordFor(win).id) : undefined,
     };
   });
 

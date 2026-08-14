@@ -4,6 +4,9 @@ import { SHIFT_ENTER_SEQUENCE, handleKeyEvent } from "./terminalKeys";
 /** Minimal stand-in for the fields the handler reads, plus a preventDefault spy. */
 function key(init: {
   code: string;
+  /** Defaults to `code` — fine for every existing case here, none of which
+   *  match on `.key`. The app-shortcut cases below pass this explicitly. */
+  key?: string;
   type?: string;
   shift?: boolean;
   ctrl?: boolean;
@@ -14,6 +17,7 @@ function key(init: {
   const e = {
     type: init.type ?? "keydown",
     code: init.code,
+    key: init.key ?? init.code,
     shiftKey: init.shift ?? false,
     ctrlKey: init.ctrl ?? false,
     altKey: init.alt ?? false,
@@ -60,15 +64,13 @@ describe("handleKeyEvent", () => {
     expect(r.prevented).toBe(false);
   });
 
-  it("leaves Enter with other modifiers alone", () => {
-    // Alt+Enter already sends ESC CR through xterm itself, and Ctrl/⌘+Enter are
-    // chords programs bind. Swallowing any of them here would be eating
-    // somebody else's keybinding.
-    for (const mod of ["alt", "ctrl", "meta"] as const) {
-      const r = run({ code: "Enter", shift: true, [mod]: true });
-      expect(r.handled, `Shift+${mod}+Enter must pass through`).toBe(true);
-      expect(r.sent).toEqual([]);
-    }
+  it("leaves Alt+Shift+Enter alone", () => {
+    // Alt+Enter already sends ESC CR through xterm itself. Ctrl/⌘+Shift+Enter
+    // is its own case below — it is now the app's start/stop chord, which is
+    // the opposite answer from this one.
+    const r = run({ code: "Enter", key: "Enter", shift: true, alt: true });
+    expect(r.handled).toBe(true);
+    expect(r.sent).toEqual([]);
   });
 
   it("lets the palette accelerator reach the app", () => {
@@ -86,6 +88,57 @@ describe("handleKeyEvent", () => {
     // kill-to-end-of-line belongs to the shell, which is why the palette has a
     // second accelerator at all.
     expect(run({ code: "KeyK", ctrl: true }).handled).toBe(true);
+  });
+
+  it("returns every new window-level shortcut to the window listener (not to xterm)", () => {
+    // Mirrors exactly what App.tsx's keydown effect matches, per chord — a
+    // mismatch here would have xterm swallow the key on one layout while the
+    // window listener expects a different physical key on another. This only
+    // pins `handleKeyEvent`'s own contract (`false` = xterm ignores the event
+    // without cancelling it, so it keeps bubbling); whether `App.tsx` then
+    // acts on it is `isEditableTarget`'s xterm-textarea exemption, asserted
+    // separately where that function lives.
+    for (const mod of ["ctrl", "meta"] as const) {
+      for (const letter of ["f", "v", "u", "o", "k"]) {
+        const r = run({ code: `Key${letter.toUpperCase()}`, key: letter, shift: true, [mod]: true });
+        expect(r.handled, `${mod}+shift+${letter} must pass through`).toBe(false);
+        expect(r.sent).toEqual([]);
+      }
+      expect(
+        run({ code: "Enter", key: "Enter", shift: true, [mod]: true }).handled,
+        `${mod}+shift+Enter must pass through (not the Shift+Enter substitution)`,
+      ).toBe(false);
+      expect(
+        run({ code: "ArrowUp", key: "ArrowUp", [mod]: true }).handled,
+        `${mod}+ArrowUp must pass through`,
+      ).toBe(false);
+      expect(
+        run({ code: "ArrowDown", key: "ArrowDown", [mod]: true }).handled,
+        `${mod}+ArrowDown must pass through`,
+      ).toBe(false);
+    }
+    expect(run({ code: "Tab", key: "Tab", ctrl: true }).handled).toBe(false);
+    expect(run({ code: "Tab", key: "Tab", ctrl: true, shift: true }).handled).toBe(false);
+    // Cmd+Tab is the OS's own app switcher and never reaches a page, but the
+    // guard is still worth pinning: `ctrlKey` alone gates this chord, not `mod`.
+    expect(run({ code: "Tab", key: "Tab", meta: true }).handled).toBe(true);
+  });
+
+  it("opens the Shortcuts overview from a terminal on ⌘/, but leaves Ctrl+/ to readline", () => {
+    // `Ctrl+/` is readline's undo (`C-_`) — the same class of shell binding
+    // `Ctrl+K` is already reserved for below — so only the literal Meta key
+    // reaches the window listener for this one chord, unlike every other
+    // shortcut above where either counts as `mod`.
+    expect(run({ code: "Slash", key: "/", meta: true }).handled).toBe(false);
+    expect(run({ code: "Slash", key: "/", meta: true, shift: true }).handled).toBe(false);
+    expect(run({ code: "Slash", key: "/", ctrl: true }).handled).toBe(true);
+  });
+
+  it("leaves an app-shortcut letter alone with no modifier, or with only mod (no shift)", () => {
+    // `f`/`v`/`u`/`o`/`k` are ordinary typing without Shift, and ⌘F specifically
+    // is find-in-page — a different, unrelated chord this handler must not eat.
+    expect(run({ code: "KeyF", key: "f" }).handled).toBe(true);
+    expect(run({ code: "KeyF", key: "f", meta: true }).handled).toBe(true);
   });
 
   it("sends nothing on keyup, and hides the keyup from xterm too", () => {

@@ -110,6 +110,7 @@ When a change introduces new config fields, CLI flags, subcommands, or user-visi
 | `schema/v3/veld.schema.json` | JSON Schema for v3 configs. **Hand-maintained — there is no compiler check tying it to the Rust types.** Any config field you add or change must be reflected here AND covered by `schema/v3/examples/`, which `tests/validate-schema.sh` validates against the schema and `schema_v3_examples_round_trip` deserializes with serde. That pair is the drift gate; skipping it ships a schema that confidently reports the wrong thing in the editor |
 | `docs/migrating-to-v3.md` | Migration guide. Update whenever v3 gains a field, or whenever something changes for v1/v2 configs too |
 | `docs/extensions-vision.md` | **Customization backlog.** When a proposed change is a *new feature* in the customization realm (needs a provider API, provider-specific schema, or provider-specific auth — see the universal-primitive test there), add a row to its extension backlog. Never build the extension itself in that PR; capture the need. See the Rules for agents section |
+| `crates/veld-daemon/ui/src/shortcuts/registry.ts` | **Keyboard shortcuts.** The single source of truth for the in-app Shortcuts overview (⋯ menu → "Shortcuts…"). A shortcut added, changed or removed touches **three** places in the same diff: `App.tsx`'s keydown effect (dispatch), this file (the row), and — easy to miss — `panes/terminalKeys.ts`'s `isAppShortcutChord`, which is what lets a mod+shift chord reach the window listener at all while a terminal pane has focus; skip it and the shortcut silently does nothing in the pane most users spend the most time in. `registry.test.ts` only guards this file's own shape (unique kebab-case ids, non-empty combos), not that the other two still agree with it |
 | `crates/veld-daemon/ui/src/promotions/content.ts` | **Feature promotions.** Ask, for every change, whether users should be *told* — see [docs/promotions.md](docs/promotions.md). "No" is the expected answer: a promotion interrupts every user once, and the channel is only worth having while opening it is worth their attention. Promote a change that alters how somebody works and that they would not otherwise find; never a fix, a perf win, a flag, or a config field. State the call either way. If you do write one: **the outcome, not the mechanism** — the headline is what the reader can now do or stop doing, not what Veld now displays. *"Walk away from a running agent; the worktree that needs you says so"*, never *"each worktree shows a glyph for its terminals"*. If the sentence reads as true to somebody who will never use the feature, it is describing the product instead of their day. (Not to be confused with `ide.news`, which is how a *project* tells its own team something changed — same vocabulary and same storage, but authored in a repo's `veld.json`, not here) |
 | `website/index.html` | **Marketing site.** If the change adds or renames a user-visible capability, decide whether it belongs on the site and, if so, update the relevant part — the features grid, CLI reference, sharing section, or the architecture diagram (`for the nerds`). Keep the brand tokens per `website/AGENTS.md` / `docs/branding.md`. |
 | `website/llms-full.txt` | LLM-facing docs — sync with any `index.html` content change (see `website/AGENTS.md`) |
@@ -580,11 +581,13 @@ run, while a plain terminal in the same app works perfectly.
   and **the daemon never looks inside a layout** — it is an opaque JSON document, so
   a new pane kind is a UI-only change instead of a migration and an older daemon
   round-trips a newer client's fields instead of erasing them. What Electron kept is
-  only what a daemon cannot do: raise a window (`veld:window:focus-self`) and route
-  a cross-window tab drop. **A browser tab cannot be focused** — `window.focus()`
-  outside a user gesture is ignored — so a refusal carries the holder's *kind* and
-  the UI says where the worktree is instead of promising a raise that will not
-  happen; do not "fix" that by calling `focus()` anyway.
+  only what a daemon cannot do: raise a window (`veld:window:focus-self` for the
+  caller itself, `veld:window:focus` for a specific *other* window a page holds an
+  id for — keyboard tab-cycling onto a detached window's is the one caller today)
+  and route a cross-window tab drop. **A browser tab cannot be focused** —
+  `window.focus()` outside a user gesture is ignored — so a refusal carries the
+  holder's *kind* and the UI says where the worktree is instead of promising a
+  raise that will not happen; do not "fix" that by calling `focus()` anyway.
 - **`veld update` holds a lock, and nothing that the update replaces may own it.**
   One update at a time is enforced by `veld_core::update_lock`: a lock *directory*
   at `~/.veld/update.lock` (`mkdir` is the create-or-fail primitive, and already

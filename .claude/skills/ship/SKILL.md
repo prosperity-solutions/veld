@@ -236,6 +236,23 @@ If the change adds config fields, CLI flags, subcommands, or user-visible
 behaviour, update **all** listed files. Purely-internal changes are exempt — say
 so explicitly rather than skipping silently.
 
+**Any new, changed, or removed keyboard shortcut is user-visible behaviour.**
+The checklist's row for it is `crates/veld-daemon/ui/src/shortcuts/registry.ts`
+— the single source the in-app Shortcuts overview (⋯ menu → "Shortcuts…") reads
+from — but a mod+shift (or Ctrl-literal) chord actually touches **three**
+places, not two: `App.tsx`'s keydown effect (dispatch), the registry row, and
+`crates/veld-daemon/ui/src/panes/terminalKeys.ts`'s `isAppShortcutChord`,
+which is what lets the chord reach the window listener at all while a
+terminal pane has focus — xterm otherwise consumes it first. An earlier
+review round on
+this feature's own diff found the third one missing for every chord it added;
+skip it and the shortcut silently does nothing in the pane most users spend
+the most time in. There is no compiler check tying any of the three together;
+`registry.test.ts` only catches a malformed or duplicate entry in its own
+file, not a drift from the other two. Treat this the same as the
+schema/example pairing for config fields elsewhere in the checklist: update
+all sides in the same diff.
+
 Explicitly ask **"does the marketing website need to change?"** For any
 user-visible capability, decide whether it belongs on `website/index.html`
 (features grid, CLI reference, sharing, the `for the nerds` architecture

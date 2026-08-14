@@ -525,17 +525,22 @@ function attachListeners(window, viewId, entry) {
 
   // While a native view has keyboard focus the renderer sees no keys at all, so
   // the app's own accelerators are dead the moment you click into a preview.
-  // Two bindings are intercepted and forwarded: `Ctrl/⌘+Shift+P` for the command
-  // palette, and `Ctrl/⌘+F` for the pane's own find bar — both are the app's
-  // documented shortcuts. `⇧P` is safely outside anything a previewed page
-  // wants for itself; `F` is a real, accepted trade-off rather than a free
-  // one — a dev-server preview with its own find (a docs site, an embedded
-  // Monaco/CodeMirror editor) loses that binding entirely, since this fires
-  // ahead of the page's own key handlers and there is no escape hatch. This is
-  // the same trade a real browser tab already makes: Chrome's own find bar
-  // owns `Ctrl/⌘+F` unconditionally too, so a page cannot claim it there
-  // either — this pane behaving the same way is consistent with that, not a
-  // new risk this diff introduces.
+  // Bindings intercepted and forwarded: `Ctrl/⌘+Shift+P` for the command
+  // palette, `Ctrl/⌘+F` for the pane's own find bar, and `Ctrl+Tab`/`Ctrl+⇧Tab`
+  // for tab-cycling — all app-documented shortcuts. `⇧P` and `Tab` are safely
+  // outside anything a previewed page wants for itself; `F` is a real, accepted
+  // trade-off rather than a free one — a dev-server preview with its own find
+  // (a docs site, an embedded Monaco/CodeMirror editor) loses that binding
+  // entirely, since this fires ahead of the page's own key handlers and there
+  // is no escape hatch. This is the same trade a real browser tab already
+  // makes: Chrome's own find bar owns `Ctrl/⌘+F` unconditionally too, so a
+  // page cannot claim it there either — this pane behaving the same way is
+  // consistent with that, not a new risk this diff introduces. The other eight
+  // window-level shortcuts added alongside tab-cycling (worktree navigation,
+  // focus mode, the view switch, update main, run cycling, start/stop,
+  // restart, and opening the Shortcuts overview) are not forwarded from here
+  // — a follow-up, not an oversight; clicking back into the rail or top bar
+  // reaches them same as before this pane existed.
   wc.on("before-input-event", (event, input) => {
     if (input.type !== "keyDown") return;
     if (
@@ -597,6 +602,26 @@ function attachListeners(window, viewId, entry) {
         send(window, "veld:browser:accelerator", { viewId, accelerator: "project:toggle" });
         return;
       }
+    }
+    // Ctrl+Tab / Ctrl+⇧Tab — tab-cycling, forwarded for the same reason the
+    // digits are: a native view takes the whole keyboard, and this is the
+    // one chord whose entire job is *leaving* wherever focus currently is.
+    // Without it, clicking into a browser pane has no keyboard way out at
+    // all — every other shortcut in this file assumes the page still sees
+    // keystrokes, but this is the one that stops being true here.
+    //
+    // `input.control`, never `input.meta`: Cmd+Tab is the OS's own app
+    // switcher and this process never sees it, matching the one chord in the
+    // page's own keydown effect that keys off `ctrlKey` alone (see
+    // `App.tsx`'s tab-switching handler).
+    if (input.control && !input.meta && !input.alt && input.key === "Tab") {
+      event.preventDefault();
+      window.webContents.focus();
+      send(window, "veld:browser:accelerator", {
+        viewId,
+        accelerator: input.shift ? "tab:previous" : "tab:next",
+      });
+      return;
     }
     if (!input.shift) return;
     if (!(input.control || input.meta)) return;
