@@ -428,6 +428,12 @@ fn after_settings_write(db: &veld_core::db::Db) -> Result<Value, ApiError> {
     // Unconditional rather than gated on the key being present in the patch: the
     // effective value is what matters and this is one database read, where a
     // `patch.contains_key` gate is a second place that has to know the key's name.
+    // Note for whoever adds a settings test next: this publishes into
+    // process-wide state, so a test that PATCHes `terminal.shell` to a stub
+    // changes what every *other* test in this binary resolves as its user
+    // `PATH` — the shape of issue #310, where two `veld-core` tests published a
+    // stub shell and left the crate's suite permanently a few tests red. Patch
+    // it back, or don't route through this handler.
     veld_core::user_path::set_preferred_shell(Some(db.terminal_shell()));
     // Keep-awake reads its settings per decision, but only *makes* a decision on
     // a share event or its own tick — so without this, switching the automatic

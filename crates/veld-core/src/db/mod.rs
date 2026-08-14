@@ -1365,6 +1365,10 @@ mod tests {
     /// all, and this asserts it is false for exactly the binary that must not.
     #[test]
     fn a_cargo_built_binary_never_claims_the_installed_database() {
+        // Both predicates resolve through `HOME`, which `console.rs`'s tests
+        // repoint at a tempdir — under this same guard, so taking it here is
+        // what makes that exclusion real rather than one-sided.
+        let _guard = crate::test_support::process_state_guard();
         assert!(
             Db::cargo_target_db().is_some(),
             "a cargo-built test binary must sit under a CACHEDIR.TAG-marked target dir"
@@ -1378,6 +1382,9 @@ mod tests {
 
     #[test]
     fn a_test_binary_never_resolves_to_the_real_user_database() {
+        // `dirs::data_dir()` below reads `HOME` — see the sibling test above for
+        // why that means taking the crate-wide process-state guard.
+        let _guard = crate::test_support::process_state_guard();
         // The guard's own regression test, and it can only pass by being true of
         // the binary running it: this test executable lives under cargo's target
         // directory, so `default_path()` must hand back the dev database.
