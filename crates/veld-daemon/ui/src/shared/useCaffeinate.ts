@@ -145,6 +145,12 @@ export function useCaffeinate(): UseCaffeinate {
       if (mounted === 0) {
         if (onFocus) window.removeEventListener("focus", onFocus);
         onFocus = null;
+        // Forget the last state along with the last consumer. Kept, it becomes
+        // the `prev` that the next mount's first load compares against — so a
+        // hold that ended while nothing was rendering (the top bar unmounts on a
+        // mode switch) would announce itself on the way back in, for an ending
+        // nobody was there to miss.
+        current = null;
       }
       syncTimer();
     };

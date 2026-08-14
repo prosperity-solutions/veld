@@ -170,17 +170,17 @@ const PRIVILEGED_PROBE_TTL: Duration = Duration::from_secs(60);
 /// previous one took.
 const POWER_TTL: Duration = Duration::from_secs(15);
 
+/// The coupling the paragraph above states, as the compile error every other
+/// coupled pair in this file already is: a reading older than the cadence that
+/// consumes it would notice a charger a whole tick late for no reason.
+const _: () = assert!(POWER_TTL.as_secs() * 2 <= EXPIRY_TICK.as_secs());
+
 /// How many inhibitors may die on their own before this stops re-spawning them.
 ///
 /// Two rather than one, because a single death is also what a `veld update`
 /// racing a spawn looks like, and giving up on the first would turn a transient
 /// into a session-long outage.
 const IMMEDIATE_DEATHS_BEFORE_GIVING_UP: u32 = 2;
-
-/// The coupling the paragraph above states, as the compile error every other
-/// coupled pair in this file already is: a tick that re-used the previous tick's
-/// reading would notice a charger a whole tick late for no reason.
-const _: () = assert!(POWER_TTL.as_secs() * 2 <= EXPIRY_TICK.as_secs());
 
 /// Ceiling on a helper round trip made while the session lock is held.
 ///
@@ -604,7 +604,7 @@ async fn reap_if_dead(machine: &mut Machine) {
         machine.state.deaths = 0;
     }
     if dead {
-        take_and_stop(&mut machine.session).await;
+        take_and_stop(machine).await;
         // The reasons stay, so the caller re-plans and a hold whose inhibitor
         // died is respawned rather than silently lost.
         //
@@ -628,10 +628,14 @@ async fn reap_if_dead(machine: &mut Machine) {
 }
 
 /// Stop whatever session is in `slot`.
-async fn take_and_stop(slot: &mut Option<Session>) {
-    if let Some(session) = slot.take() {
+async fn take_and_stop(machine: &mut Machine) {
+    if let Some(session) = machine.session.take() {
         stop_session(session).await;
     }
+    // A stale count from an earlier hold would make the *next*, unrelated one
+    // give up on its first death — exactly what a threshold of two exists to
+    // prevent.
+    machine.state.deaths = 0;
 }
 
 /// Bring the held inhibition into line with the machine's state.
@@ -648,7 +652,14 @@ async fn apply(
     power: Power,
 ) -> Result<(), (StatusCode, String)> {
     let Some(plan) = machine.state.plan(prefs, power) else {
-        take_and_stop(&mut machine.session).await;
+        if machine.session.is_some() {
+            // The counterpart of the line above. The old per-session expiry task
+            // logged this and nothing replaced it when that task went, so a hold
+            // ending left no trace at all in the daemon log — which is the one
+            // place somebody reconstructs "why did this machine sleep at 3am".
+            info!("keep-awake ended; this machine can sleep again");
+        }
+        take_and_stop(machine).await;
         return Ok(());
     };
 
@@ -703,7 +714,7 @@ async fn spawn_session(machine: &mut Machine, plan: Plan) -> Result<(), (StatusC
     // reap, seconds in the bad case), and a spawn that then failed would have
     // destroyed a running session while reporting only "couldn't start". The two
     // inhibitors overlap for an instant instead, which costs nothing.
-    take_and_stop(&mut machine.session).await;
+    take_and_stop(machine).await;
 
     // The privileged half, after the unprivileged one is already holding: this
     // can only ever *add* battery/lid-closed coverage, so its failure must not
@@ -723,6 +734,7 @@ async fn spawn_session(machine: &mut Machine, plan: Plan) -> Result<(), (StatusC
         reason = machine.state.reasons.wire(),
         coverage = ?plan.coverage,
         battery = battery.load(Ordering::Relaxed),
+        until = ?machine.state.reasons.expires_at(),
         "keeping this machine awake"
     );
     // **Both** callers of this need the tick, which is why it is here as well as
@@ -761,11 +773,22 @@ pub(crate) async fn reconcile() {
         let guard = ACTIVE.lock().await;
         guard.session.is_none()
             && guard.state.reasons.is_empty()
+            // **Every** latching bit, not just the visible ones. Testing only
+            // the session and the reasons made `recompute`'s "the episode is
+            // over" arm unreachable in a running daemon — the share count hits
+            // zero, this returns early, and the flags that arm clears stay set
+            // for the daemon's life. One failed spawn then meant no automatic
+            // hold ever again, with the cup permanently reporting a machine that
+            // could not be held awake.
+            && guard.state.episode.is_none()
+            && guard.state.opted_out.is_none()
+            && !guard.state.spawn_failed
+            && guard.state.deaths == 0
             && SHARES.lock().unwrap_or_else(|e| e.into_inner()).count == 0
     };
-    // Nothing held and nothing shared: there is no decision to make, and making
-    // it anyway would spawn `pmset` and open a database every thirty seconds for
-    // the life of a daemon whose user is not sharing anything.
+    // Nothing held, nothing shared, and nothing remembered: there is no decision
+    // to make, and making it anyway would spawn `pmset` and open a database every
+    // thirty seconds for the life of a daemon whose user is not sharing anything.
     if quiet {
         return;
     }
@@ -804,17 +827,46 @@ pub(crate) async fn reconcile() {
         // A detached caller has nowhere to return this to, and the share that
         // triggered it must not fail because the machine cannot be held awake.
         warn!(error = %message, "could not update the keep-awake hold");
-        // One attempt per episode: a machine that cannot spawn an inhibitor at
-        // all would otherwise retry on every share event and every tick forever.
-        //
-        // Deliberately **not** `opted_out`, which is the same wire field the UI
-        // renders as "automatic keep-awake is used up for this share, it comes
-        // back with the next one". That sentence is true of a spent cap and false
-        // of a machine whose inhibitor will not start, and the second is the case
-        // where a user most needs the message not to be reassuring.
-        guard.state.spawn_failed = true;
-        guard.state.reasons = decide::Reasons::default();
+        // Only the **automatic** reason is dropped. Clearing all of them also
+        // cancelled a manual hold the user had explicitly asked for — and since
+        // `spawn_session` fails *before* it retires the predecessor, a transient
+        // failure left the old inhibitor running while the next tick planned for
+        // no reasons at all and tore that working session down. One failed fork
+        // could end an eight-hour hold.
+        guard.state.reasons.sharing = None;
+        // And only when nothing survived: a machine still holding something is
+        // not a machine that cannot hold anything, and the flag is what the cup
+        // reports as "Veld could not start the keep-awake".
+        if guard.session.is_none() {
+            guard.state.spawn_failed = true;
+        }
     }
+}
+
+/// How long a settings read is reused by the status path.
+///
+/// `GET /api/caffeinate` has no CSRF gate — it is a read — and is polled by every
+/// open client on window focus, so a database open per request is a blocking-pool
+/// slot a cross-origin page can spend at will. The same reasoning the helper
+/// probe and the power reading are already cached under. Short, because the cup's
+/// own switch writes these settings and the menu should reflect it.
+const PREFS_TTL: Duration = Duration::from_secs(5);
+
+static PREFS: LazyLock<Mutex<Option<(Instant, KeepAwakePrefs)>>> =
+    LazyLock::new(|| Mutex::new(None));
+
+/// The keep-awake settings, cached and single-flighted like the other two reads
+/// on the status path.
+async fn cached_prefs() -> KeepAwakePrefs {
+    let mut cache = PREFS.lock().await;
+    if let Some((learned, prefs)) = *cache {
+        if learned.elapsed() < PREFS_TTL {
+            return prefs;
+        }
+    }
+    let prefs = load_prefs().await.unwrap_or_else(fallback_prefs);
+    *cache = Some((Instant::now(), prefs));
+    prefs
 }
 
 /// What to assume when the settings cannot be read.
@@ -870,11 +922,38 @@ fn start_supervisor() {
     SUPERVISOR.call_once(|| {
         tokio::spawn(async {
             loop {
-                tokio::time::sleep(EXPIRY_TICK).await;
+                // The *sooner* of the cadence and the next deadline. A plain
+                // tick made a manual hold stop up to thirty seconds late, where
+                // the per-session timer it replaced stopped within milliseconds
+                // — and "4 hours" ending at 4:00:29 is the number the user was
+                // shown being wrong. Still wall-clock, and still re-decided from
+                // scratch, so a suspend shortens the remaining time exactly as
+                // the user's watch says it should.
+                tokio::time::sleep(next_wakeup().await).await;
                 reconcile().await;
             }
         });
     });
+}
+
+/// How long until the supervisor should next re-decide.
+///
+/// Bounded above by [`EXPIRY_TICK`], because a hold can also end for reasons no
+/// deadline predicts — a share stopping, an inhibitor dying, a charger moving.
+async fn next_wakeup() -> Duration {
+    let guard = ACTIVE.lock().await;
+    let until_deadline = guard
+        .state
+        .reasons
+        .expires_at()
+        .map(|at| (at - Utc::now()).to_std().unwrap_or(Duration::ZERO));
+    drop(guard);
+    match until_deadline {
+        // A deadline already passed, or is within a tick: wake for it. Floored so
+        // a deadline in the past cannot spin.
+        Some(remaining) if remaining < EXPIRY_TICK => remaining.max(Duration::from_millis(250)),
+        _ => EXPIRY_TICK,
+    }
 }
 
 /// The current power source, cached.
@@ -901,6 +980,16 @@ async fn current_power() -> Power {
 /// and absolute (see [`SHARES`]); the reconcile is **detached on purpose** —
 /// `spawn_session` can spend seconds against a wedged privileged helper, and a
 /// share start must never wait on the machine being kept awake.
+/// Drop the cached settings, because they were just written.
+///
+/// Without this the cup's own "do this whenever I share" switch could take a
+/// TTL to be reflected back by the status it is rendered from — a control that
+/// visibly lags the click that moved it.
+pub(crate) async fn settings_changed() {
+    *PREFS.lock().await = None;
+    reconcile().await;
+}
+
 pub(crate) fn shares_changed(count: usize, latest_expiry: Option<DateTime<Utc>>) {
     *SHARES.lock().unwrap_or_else(|e| e.into_inner()) = ShareFacts {
         count,
@@ -979,7 +1068,7 @@ fn status_of(
         // for this share — its cap ran out, or somebody switched it off. The one
         // state a user would otherwise have to infer from a cup that stopped
         // glowing, so it is said rather than left to be noticed.
-        "sharing_spent": machine.state.opted_out,
+        "sharing_spent": machine.state.opted_out.is_some(),
         // The inhibitor could not be started at all. Distinct from a spent cap
         // because the remedy is different and the reassurance is wrong.
         "hold_failed": machine.state.spawn_failed,
@@ -1003,7 +1092,7 @@ async fn current_status() -> Json<Value> {
     // concurrent start or stop behind a read.
     let capable = battery_capable().await;
     let power = current_power().await;
-    let prefs = load_prefs().await.unwrap_or_else(fallback_prefs);
+    let prefs = cached_prefs().await;
     let mut guard = ACTIVE.lock().await;
     reap_if_dead(&mut guard).await;
     Json(status_of(&guard, capable, power, &prefs))
@@ -1035,10 +1124,11 @@ async fn post_start(
             ));
         }
     }
-    let prefs = load_prefs().await.ok_or((
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "could not read the keep-awake settings".to_owned(),
-    ))?;
+    // Falls back rather than refusing. The coffee button predates this feature
+    // and had no database dependency at all, so a locked or unreadable DB must
+    // not break it — the settings only decide the *battery lease* half, and
+    // `fallback_prefs` declines that rather than guessing at it.
+    let prefs = load_prefs().await.unwrap_or_else(fallback_prefs);
     let power = current_power().await;
     {
         let mut guard = ACTIVE.lock().await;
@@ -1073,7 +1163,7 @@ async fn delete_stop(headers: HeaderMap) -> Result<Json<Value>, (StatusCode, Str
         // automatic half would otherwise re-arm on the next tick, which is a
         // button that does not work.
         guard.state.manual_stop(shares);
-        take_and_stop(&mut guard.session).await;
+        take_and_stop(&mut guard).await;
     }
     Ok(current_status().await)
 }

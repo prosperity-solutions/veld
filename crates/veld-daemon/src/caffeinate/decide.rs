@@ -81,8 +81,11 @@ impl Reasons {
         }
     }
 
-    /// Drop whichever reasons have run out. Returns whether the *cap* of an
-    /// automatic hold was what expired, which is the case that opts the episode out.
+    /// Drop whichever reasons have run out.
+    ///
+    /// Says nothing about *why* one ran out — telling a spent cap from a share's
+    /// own expiry is `recompute`'s job, because only it knows the two deadlines
+    /// that were combined to make this one, and only the cap opts an episode out.
     fn prune(&mut self, now: DateTime<Utc>) {
         if let Some(Some(deadline)) = self.manual {
             if now >= deadline {
@@ -104,6 +107,22 @@ impl Reasons {
             (false, false) => "none",
         }
     }
+}
+
+/// Why an episode stopped getting an automatic hold.
+///
+/// Two reasons, and they must not be collapsed: one is the cap doing its job,
+/// the other is a person pressing a button. Plugging in restarts the first —
+/// the mains allowance spends nothing, so refusing it would leave a charging
+/// laptop asleep on the strength of a limit that no longer applies. It must
+/// never restart the second, or a charger silently undoes "let this machine
+/// sleep".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OptOut {
+    /// The allowance for this episode ran out.
+    CapSpent,
+    /// A human switched the hold off while sharing was live.
+    UserSaidNo,
 }
 
 /// The live sharing episode's clock. See the module docs.
@@ -130,9 +149,9 @@ pub struct ShareFacts {
 pub struct State {
     pub reasons: Reasons,
     pub episode: Option<Episode>,
-    /// This episode has had its automatic hold and will not get another. Set by
-    /// the cap running out, and by a human switching the hold off while sharing.
-    pub opted_out: bool,
+    /// This episode has had its automatic hold and will not get another, and
+    /// why. See [`OptOut`].
+    pub opted_out: Option<OptOut>,
     /// The inhibitor could not be started, so nothing is being held and retrying
     /// on every tick would achieve nothing but churn.
     ///
@@ -158,8 +177,8 @@ pub enum Coverage {
 
 /// Why a shut lid is *not* covered, when it is not.
 ///
-/// Four genuinely different answers, and the reason this is an enum rather than a
-/// bool: the existing UI note for the fourth one tells the user to run
+/// Three genuinely different answers, and the reason this is an enum rather than a
+/// bool: the existing UI note for `NoHelper` tells the user to run
 /// `veld setup privileged`, which is right when veld asked and could not get it and
 /// actively wrong when veld never asked. Reporting a fault for something never
 /// attempted is the failure this prevents.
@@ -203,7 +222,7 @@ impl State {
     pub fn manual_stop(&mut self, shares: ShareFacts) {
         self.reasons = Reasons::default();
         if shares.count > 0 {
-            self.opted_out = true;
+            self.opted_out = Some(OptOut::UserSaidNo);
         }
     }
 
@@ -226,14 +245,24 @@ impl State {
             // it is why "let this machine sleep" survives for exactly as long as
             // the sharing it was said during.
             self.episode = None;
-            self.opted_out = false;
+            self.opted_out = None;
             self.spawn_failed = false;
             self.deaths = 0;
             self.reasons.sharing = None;
             return;
         }
 
-        let (enabled, cap_minutes) = match power.source {
+        // An unmeasured reading picks **the episode's own** source, not the
+        // battery it fell back to. Guarding only the clock restart left the other
+        // half of the same bug: one timed-out `pmset` part-way through a mains
+        // episode selected the 30-minute battery cap, decided the allowance was
+        // already spent, and opted the episode out — with the mains-restart
+        // clause unable to undo it, because the episode still says mains.
+        let source = match (power.measured, self.episode) {
+            (false, Some(episode)) => episode.power,
+            _ => power.source,
+        };
+        let (enabled, cap_minutes) = match source {
             PowerSource::Mains => (prefs.sharing_on_power, prefs.sharing_on_power_minutes),
             PowerSource::Battery => (prefs.sharing_on_battery, prefs.sharing_on_battery_minutes),
         };
@@ -241,21 +270,27 @@ impl State {
         // Plugging in after the battery allowance ran out restarts it, because the
         // mains hold is the one that spends nothing — refusing it would leave a
         // charging laptop asleep on the strength of a limit that no longer
-        // applies. The reverse is deliberately *not* symmetric: clearing the
-        // opt-out on a mains→battery change would let somebody cycle the charger
-        // for unlimited battery allowances, which is the whole thing the battery
-        // cap exists to bound.
-        if self.opted_out
+        // applies.
+        //
+        // Only a **spent cap**, never a person: a charger must not undo "let this
+        // machine sleep". And note honestly what this does *not* bound — plugging
+        // in and then out again is a measured source change, which starts a fresh
+        // episode and a fresh battery allowance by the ordinary rule. The
+        // asymmetry here buys the user-said-no case, not a limit on charger
+        // cycling; bounding that would need a budget across episodes, which is a
+        // different feature and is written down as such in the module docs.
+        if self.opted_out == Some(OptOut::CapSpent)
+            && power.measured
             && power.source == PowerSource::Mains
             && self
                 .episode
                 .is_some_and(|e| e.power == PowerSource::Battery)
         {
-            self.opted_out = false;
+            self.opted_out = None;
             self.episode = None;
         }
 
-        if !enabled || self.opted_out || self.spawn_failed {
+        if !enabled || self.opted_out.is_some() || self.spawn_failed {
             self.reasons.sharing = None;
             // The episode's clock is forgotten while the switch is off so that
             // turning it back on — or plugging in, when only the other source is
@@ -274,10 +309,10 @@ impl State {
             // An *unmeasured* source never restarts the clock: a probe that timed
             // out is not somebody unplugging a laptop, and treating it as one let
             // a flaky `pmset` reset the allowance on every flap.
-            Some(existing) if existing.power == power.source || !power.measured => existing,
+            Some(existing) if existing.power == source || !power.measured => existing,
             _ => Episode {
                 clock_started_at: now,
-                power: power.source,
+                power: source,
             },
         };
         self.episode = Some(episode);
@@ -295,7 +330,7 @@ impl State {
             // clear everything anyway — recording an opt-out for it would be
             // recording a decision nobody made.
             if now >= cap_deadline {
-                self.opted_out = true;
+                self.opted_out = Some(OptOut::CapSpent);
             }
             return;
         }
@@ -310,14 +345,26 @@ impl State {
         }
         let manual = self.reasons.manual.is_some();
 
+        // The privileged lease is for a hold a **human asked for**, on macOS,
+        // with the setting on — and deliberately **not** conditioned on the
+        // power source. The source is learned on a tick; a lid slam is not. A
+        // manual hold on mains whose owner shuts the lid and pulls the charger
+        // suspends the machine before any tick could notice, so a lease taken
+        // only once battery is *observed* is a lease taken too late. Asking on
+        // mains costs nothing beyond a lease the helper's watchdog reverts
+        // anyway, and it is what the pre-existing behaviour did.
+        //
+        // `manual` is the whole of what keeps the feature's central rule true:
+        // an automatic hold never reaches this.
+        let want_lease = manual && cfg!(target_os = "macos") && prefs.manual_on_battery;
+
         // On mains the widest hold is free: `caffeinate -s` is valid on AC power
-        // only, needs no privileged helper and writes nothing durable, and Linux's
-        // lid inhibitor is unprivileged on either source. So there is nothing to
-        // withhold and nothing to decide.
+        // only, needs no privileged helper and writes nothing durable, and
+        // Linux's lid inhibitor is unprivileged on either source.
         if power.source == PowerSource::Mains {
             return Some(Plan {
                 coverage: Coverage::LidToo,
-                want_lease: false,
+                want_lease,
                 lid_gap: None,
             });
         }
@@ -335,9 +382,9 @@ impl State {
         // macOS only, because that is the whole of what the setting means: "never
         // write `pmset disablesleep`". Linux has no privileged half to decline —
         // its lid inhibitor is unprivileged on either power source — so honouring
-        // the flag there would narrow a manual hold to `--what=idle` for a reason
-        // that does not exist on the platform, and the settings dialog does not
-        // even render the row there to explain it.
+        // the flag there would narrow a manual hold for a reason that does not
+        // exist on the platform, and the settings dialog does not even render the
+        // row there to explain it.
         if cfg!(target_os = "macos") && !prefs.manual_on_battery {
             return Some(Plan {
                 coverage: Coverage::IdleOnly,
@@ -347,10 +394,7 @@ impl State {
         }
         Some(Plan {
             coverage: Coverage::LidToo,
-            // macOS is the only platform with a privileged half; Linux's
-            // `handle-lid-switch` inhibitor already holds on battery unprivileged.
-            // Whether the lease was actually granted is the caller's to report.
-            want_lease: cfg!(target_os = "macos"),
+            want_lease,
             lid_gap: None,
         })
     }
@@ -400,7 +444,7 @@ mod tests {
     use veld_core::db::KeepAwakePrefs;
 
     use super::super::power::{Power, PowerSource};
-    use super::{Coverage, LidGap, LiveHold, Plan, ShareFacts, State, lid_state};
+    use super::{Coverage, LidGap, LiveHold, OptOut, Plan, ShareFacts, State, lid_state};
 
     fn t(minute: i64) -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 8, 14, 12, 0, 0).unwrap() + Duration::minutes(minute)
@@ -482,12 +526,12 @@ mod tests {
     fn the_last_share_ending_drops_the_automatic_hold_and_clears_the_opt_out() {
         let mut state = State::default();
         state.recompute(t(0), &prefs(), mains(), sharing(1));
-        state.opted_out = true;
+        state.opted_out = Some(OptOut::CapSpent);
 
         state.recompute(t(5), &prefs(), mains(), none());
         assert_eq!(state.reasons.sharing, None);
         assert!(state.episode.is_none());
-        assert!(!state.opted_out);
+        assert!(state.opted_out.is_none());
     }
 
     #[test]
@@ -500,7 +544,7 @@ mod tests {
 
         state.recompute(t(30), &prefs(), battery(), sharing(1));
         assert_eq!(state.reasons.sharing, None);
-        assert!(state.opted_out);
+        assert!(state.opted_out.is_some());
 
         state.recompute(t(31), &prefs(), battery(), sharing(1));
         assert_eq!(state.reasons.sharing, None);
@@ -519,7 +563,7 @@ mod tests {
         state.recompute(t(0), &prefs(), mains(), shares);
         state.recompute(t(20), &prefs(), mains(), shares);
         assert_eq!(state.reasons.sharing, None);
-        assert!(!state.opted_out);
+        assert!(state.opted_out.is_none());
     }
 
     #[test]
@@ -593,7 +637,7 @@ mod tests {
         let mut state = State::default();
         state.manual_start(Some(t(60)));
         state.manual_stop(none());
-        assert!(!state.opted_out);
+        assert!(state.opted_out.is_none());
     }
 
     #[test]
@@ -754,10 +798,10 @@ mod tests {
         let mut state = State::default();
         state.recompute(t(0), &prefs(), battery(), sharing(1));
         state.recompute(t(30), &prefs(), battery(), sharing(1));
-        assert!(state.opted_out);
+        assert!(state.opted_out.is_some());
 
         state.recompute(t(31), &prefs(), mains(), sharing(1));
-        assert!(!state.opted_out);
+        assert!(state.opted_out.is_none());
         assert_eq!(state.reasons.sharing, Some(t(151)));
     }
 
@@ -769,10 +813,10 @@ mod tests {
         let mut state = State::default();
         state.recompute(t(0), &prefs(), mains(), sharing(1));
         state.recompute(t(120), &prefs(), mains(), sharing(1));
-        assert!(state.opted_out);
+        assert!(state.opted_out.is_some());
 
         state.recompute(t(121), &prefs(), battery(), sharing(1));
-        assert!(state.opted_out);
+        assert!(state.opted_out.is_some());
         assert_eq!(state.reasons.sharing, None);
     }
 
@@ -785,7 +829,7 @@ mod tests {
         state.spawn_failed = true;
         state.recompute(t(0), &prefs(), mains(), sharing(1));
         assert_eq!(state.reasons.sharing, None);
-        assert!(!state.opted_out);
+        assert!(state.opted_out.is_none());
 
         // Cleared with the episode, so the next sharing tries again.
         state.recompute(t(1), &prefs(), mains(), none());
@@ -804,6 +848,33 @@ mod tests {
         state.recompute(t(10), &prefs(), unmeasured(), sharing(1));
         // The clock still belongs to the measured mains reading that started it.
         assert_eq!(state.episode.expect("an episode").clock_started_at, t(0));
+    }
+
+    #[test]
+    fn a_charger_does_not_undo_let_this_machine_sleep() {
+        // The two opt-outs must not be collapsed: plugging in restarts a spent
+        // *cap*, and must never restart a hold a person switched off — a button
+        // the charger undoes is a button that does not work.
+        let mut state = State::default();
+        state.recompute(t(0), &prefs(), battery(), sharing(1));
+        state.manual_stop(sharing(1));
+        assert_eq!(state.opted_out, Some(OptOut::UserSaidNo));
+
+        state.recompute(t(5), &prefs(), mains(), sharing(1));
+        assert_eq!(state.opted_out, Some(OptOut::UserSaidNo));
+        assert_eq!(state.reasons.sharing, None);
+    }
+
+    #[test]
+    fn an_unmeasured_reading_does_not_pick_the_other_sources_cap() {
+        // Guarding only the clock restart left the other half of the same bug: a
+        // timed-out probe part-way through a mains episode selected the
+        // 30-minute battery cap and declared the allowance already spent.
+        let mut state = State::default();
+        state.recompute(t(0), &prefs(), mains(), sharing(1));
+        state.recompute(t(45), &prefs(), unmeasured(), sharing(1));
+        assert!(state.opted_out.is_none());
+        assert_eq!(state.reasons.sharing, Some(t(120)));
     }
 
     #[test]

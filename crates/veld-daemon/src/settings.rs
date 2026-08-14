@@ -257,7 +257,7 @@ async fn patch_settings(
     // Detached and unconditional, for the same reason as the line above: the
     // reconcile returns early when nothing is held and nothing is shared, which
     // is cheaper than a second place that has to know these five key names.
-    tokio::spawn(crate::feedback_server::caffeinate::reconcile());
+    tokio::spawn(crate::feedback_server::caffeinate::settings_changed());
     // Echo the full effective document back, so the caller applies exactly what
     // was stored rather than what it asked for — the clamp is invisible otherwise
     // and a slider would sit at a value the daemon never accepted.
