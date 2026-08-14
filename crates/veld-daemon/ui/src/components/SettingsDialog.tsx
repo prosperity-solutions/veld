@@ -1126,8 +1126,13 @@ const SECTION_BLURBS: Record<string, string> = {
     "The top-bar toggle between search and settings. On, it silences whichever of these three channels are checked below — for the background-activity channel only, never for feedback on something you just clicked yourself.",
   "While you're sharing":
     "A share is only useful while this machine is up, so Veld holds it awake for you and lets go when the share ends. Asked twice because the answer differs: on mains nothing is being spent, and on battery it is your charge. Neither one ever keeps the machine awake with the lid shut on battery — that is the durable setting Veld only ever touches when you ask it to yourself.",
+  // No "above"/"below" here either: one group renders per tab, so the keep-awake
+  // rows this refers to are on a different tab and not on screen. Same rule the
+  // catalog's own spec help follows, for the same reason — it is stated there as
+  // "a positional reference is a lie on a terminal", and it is equally a lie
+  // across a tab boundary.
   "Share links expire after":
-    "How long a link keeps working, counted from when you started sharing. This is usually what ends a share — and so what ends the keep-awake above, which is a ceiling over this rather than a second countdown. A project can override both in its veld.json, and veld share --ttl overrides everything for one share.",
+    "How long a link keeps working, counted from when you started sharing. This is usually what ends a share — and so what ends the automatic keep-awake with it, since the caps under Keep awake are a ceiling over this rather than a second countdown. A project can override these in its veld.json, and veld share --ttl overrides everything for one share.",
 };
 
 /** What this machine is, as far as this dialog needs to know. */

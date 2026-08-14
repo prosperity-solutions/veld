@@ -1190,7 +1190,7 @@ Three places can answer "how long", most specific first:
 
 | Where | Scope | Bounded? |
 |-------|-------|----------|
-| `veld share --ttl <seconds>` | one share | no — a deliberate number for one link |
+| `veld share --ttl <seconds>` | one share | no upper bound; floored at 60s |
 | these config fields | the project, committed for the team | yes, 5–480 min |
 | `sharing.peerTtlMinutes` / `sharing.webTtlMinutes` (`veld settings`) | this machine; carries the default | yes, 5–480 min |
 

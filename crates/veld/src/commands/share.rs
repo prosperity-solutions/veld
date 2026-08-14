@@ -270,7 +270,7 @@ pub async fn share(
                 }
                 println!();
                 println!(
-                    "  Stop:  {}",
+                    "  Stop:    {}",
                     output::dim(&format!("veld unshare {}", resp.share_id))
                 );
                 // The lifetime actually in force, which until now only `--json`
@@ -282,7 +282,7 @@ pub async fn share(
                 // deadline.
                 println!("  Expires: {}", output::dim(&expires_note(resp.expires_at)));
                 if let Some(note) = keep_awake_line(&client).await {
-                    println!("  Awake: {}", output::dim(&note));
+                    println!("  Awake:   {}", output::dim(&note));
                 }
                 if resp
                     .public_urls

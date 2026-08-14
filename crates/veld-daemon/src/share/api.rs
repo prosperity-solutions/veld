@@ -571,9 +571,10 @@ fn config_ttl_minutes(sharing: Option<&SharingConfig>, mode: ExposeMode) -> Opti
 ///    to leave room for. Bounded *below* at one minute, though, which is not a
 ///    limit but the same invariant the config branch is clamped for — a share
 ///    whose `expires_at` is already in the past is minted, printed with a join
-///    link, and reaped on the next tick. `--ttl 0` and `--ttl -5` were already
-///    able to do that before this function existed; stating the precedence is
-///    what made leaving them the only branch that can a visible inconsistency.
+///    link, and reaped on the next tick. `--ttl 0` and `--ttl -5` could already
+///    do that before this function existed; what changed is that the three
+///    sources are now stated side by side, which made this the only one of them
+///    able to violate an invariant the other two are checked against.
 /// 2. the project's `veld.json` (`sharing.peer_ttl_minutes` / `web_ttl_minutes`),
 ///    because a share's useful life is a property of what is being shared, and a
 ///    checkout should get the team's answer without configuring a machine;

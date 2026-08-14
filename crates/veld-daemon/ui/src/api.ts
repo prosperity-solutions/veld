@@ -1127,11 +1127,25 @@ export interface CaffeinateState {
    */
   hold_failed: boolean;
   /**
-   * When `reason` is `"sharing"` (or `"both"`), whether the countdown is the
-   * share's own expiry rather than the "For at most" cap. A share's own default
-   * life (2h peer, 1h web) is shorter than any cap somebody would actually set,
-   * so this is `true` more often than the setting's name suggests — copy that
-   * attributes the countdown to the cap is wrong whenever it is.
+   * Whether the automatic hold's deadline is the shares' own expiry rather than
+   * the "For at most" cap. A share's own default life (2h peer, 1h web) is
+   * shorter than any cap somebody would actually set, so this is `true` more
+   * often than the setting's name suggests — copy that attributes the countdown
+   * to the cap is wrong whenever it is.
+   *
+   * **Only meaningful while `reason` is `"sharing"`. Gate on that, not on this
+   * field alone.** The daemon also sends `true` under `"both"`, where it still
+   * describes the automatic deadline — but `remaining_secs` there is
+   * `expires_at()`, the *later* of the manual and automatic deadlines, so it is
+   * usually the manual hold's number. Attributing that to the share is the exact
+   * mis-attribution this field exists to prevent, and it shipped once already
+   * (the sharing panel, caught in review). Every consumer —
+   * `KeepAwakeButton.tsx`, `Sharing.tsx`, `veld share`, `veld doctor` — pairs
+   * this with `reason === "sharing"` for that reason.
+   *
+   * Also `true` for **any** number of live shares: it is derived from the latest
+   * expiry across all of them, which is why the copy says "your shares" rather
+   * than naming one.
    */
   sharing_bound_by_share: boolean;
 }
