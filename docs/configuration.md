@@ -1766,6 +1766,7 @@ element no shell ever sees (inert text — a mistake, but not an exposure).
 | `port-name-collision` | Two port names that collapse to one `VELD_PORT_<NAME>` (names are upper-cased and `-` becomes `_`), so map order would decide which value the process receives | **error** |
 | `ambiguous-primary-port` | Several ports and no unambiguous primary: none named `http`, or more than one marked `"protocol": "http"`. Silent when every port is explicitly `tcp` — that node legitimately has no primary | **error** |
 | `web-share-needs-http` | A `"protocol": "tcp"` port opting into the `web` audience. The gateway serves HTTP and a browser cannot speak a raw protocol through it, so the share would silently drop the port the author asked to publish | **error** |
+| `share-ttl-range` | A `sharing.peer_ttl_minutes` / `web_ttl_minutes` outside 5–480. The daemon clamps rather than refuses, so the share still works — this is the only surface that says the committed number is not the one in force, and it names the value that will apply | warn |
 | `unknown-var` | `${vars.x}` naming a var that is not declared, listing the declared names | **error** |
 | `vars-cannot-nest` | A var referencing another var | **error** |
 | `machine-var-empty-choices` | `"choices": []` on a machine var — no value could satisfy it, including the declared default | **error** |
