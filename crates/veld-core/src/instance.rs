@@ -64,6 +64,20 @@ pub fn daemon_port() -> u16 {
         .unwrap_or(DEFAULT_DAEMON_PORT)
 }
 
+/// Whether a daemon port was **named** rather than defaulted.
+///
+/// The difference matters to a caller deciding whether the daemon it can reach is
+/// really its own. Defaulting to [`DEFAULT_DAEMON_PORT`] finds whatever installed
+/// daemon happens to be running, which is a different process from a dev
+/// instance's — and by this repo's own convention an instance that sets this also
+/// sets `VELD_DB_PATH`, so a named port is the signal that the pairing is
+/// deliberate.
+pub fn daemon_port_is_explicit() -> bool {
+    env_nonempty("VELD_DAEMON_PORT")
+        .and_then(|v| v.parse::<u16>().ok())
+        .is_some()
+}
+
 /// Base URL of this instance's daemon control API.
 pub fn daemon_base() -> String {
     format!("http://127.0.0.1:{}", daemon_port())

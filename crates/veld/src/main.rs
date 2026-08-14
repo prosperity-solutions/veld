@@ -413,6 +413,27 @@ enum Command {
         pin: bool,
     },
 
+    /// Read and change Veld's own settings.
+    ///
+    /// These are machine-wide preferences — which shell terminals open, where new
+    /// worktrees land, whether Veld may keep this machine awake — and they are
+    /// the same ones the settings dialog in the IDE edits.
+    ///
+    /// Not to be confused with `veld config`, which is about a *project's*
+    /// veld.json and the machine-overridable vars it declares.
+    Settings {
+        /// Show only settings under this key prefix, e.g. `keepAwake` or
+        /// `terminal`. Matches whole segments, so `ui` finds every `ui.*`.
+        prefix: Option<String>,
+
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+
+        #[command(subcommand)]
+        cmd: Option<SettingsCmd>,
+    },
+
     /// Print the project's veld.json configuration.
     Config {
         /// Print only the path to veld.json instead of its contents.
@@ -745,6 +766,71 @@ enum RunsCmd {
 /// to veld's own database, never to veld.json — veld does not rewrite a user's
 /// config, and the whole point is that the answer differs per machine.
 #[derive(Subcommand)]
+enum SettingsCmd {
+    /// Print one setting's effective value and nothing else.
+    ///
+    /// Bare, so it drops into a shell substitution:
+    /// `SHELL=$(veld settings get terminal.shell)`.
+    Get {
+        /// The setting's name, e.g. terminal.shell.
+        key: String,
+
+        /// Output as JSON, with where the value came from.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Change one setting.
+    ///
+    /// The value is written bare — `true`, `60`, `/bin/bash` — not as JSON. A
+    /// number outside its range is **clamped rather than refused**, and the
+    /// clamp is reported; run `veld settings describe` first to see the range.
+    Set {
+        /// The setting's name.
+        key: String,
+
+        /// The new value. For a list setting, either a JSON array or a
+        /// comma-separated list.
+        ///
+        /// `allow_hyphen_values` because real values start with one: `-1` for a
+        /// number, and `-apple-system` heads most CSS font stacks. Without it
+        /// clap refuses them as unknown flags before the catalog is consulted,
+        /// which contradicts the documented promise that an out-of-range number
+        /// is *clamped rather than refused* — and reports it as an argument error
+        /// about a flag that is not a flag.
+        #[arg(allow_hyphen_values = true)]
+        value: String,
+
+        /// Output as JSON, including whether the value was clamped.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Put one setting back on its default.
+    Unset {
+        /// The setting's name.
+        key: String,
+
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Explain one setting: what it does, its type, its default, and what it
+    /// accepts.
+    ///
+    /// "What it accepts" rather than "every value it accepts": for a closed set
+    /// that is the list, but `terminal.shell` and the other runtime-offered keys
+    /// have no enumerable one, and a number's answer is a range plus the fact
+    /// that going outside it clamps rather than fails.
+    Describe {
+        /// The setting's name.
+        key: String,
+
+        /// Output as JSON — the setting's whole catalog entry.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum ConfigCmd {
     /// List every machine-overridable var: its effective value, where that value
     /// came from, and what the config says about it.
@@ -1025,6 +1111,27 @@ async fn main() {
         Command::Nodes { json } => commands::nodes::run(json).await,
 
         Command::Presets { json, pin } => commands::presets::run(json, pin).await,
+
+        // The outer `--json` is OR-ed into the inner one throughout, so both
+        // `veld settings --json get x` and `veld settings get x --json` work —
+        // the same shape `veld config` and `veld runs` already have.
+        Command::Settings { prefix, json, cmd } => match cmd {
+            Some(SettingsCmd::Get { key, json: inner }) => {
+                commands::settings::get(key, json || inner).await
+            }
+            Some(SettingsCmd::Set {
+                key,
+                value,
+                json: inner,
+            }) => commands::settings::set(key, value, json || inner).await,
+            Some(SettingsCmd::Unset { key, json: inner }) => {
+                commands::settings::unset(key, json || inner).await
+            }
+            Some(SettingsCmd::Describe { key, json: inner }) => {
+                commands::settings::describe(key, json || inner).await
+            }
+            None => commands::settings::list(prefix, json).await,
+        },
 
         Command::Config {
             path,
@@ -1323,6 +1430,19 @@ fn command_survives_an_update(command: &Command) -> bool {
             | Command::Desktop {
                 command: None | Some(DesktopCommand::Status { .. })
             }
+            // The **read** half of `veld settings`, for the same reason `Config`
+            // is here: `describe` touches nothing at all (it prints a compile-time
+            // catalog), while the listing and `get` open the database read-only,
+            // exactly as `veld config vars` does. Blocking them produced a
+            // *wrong* answer rather than a blocked one — `$(veld settings get
+            // terminal.shell)`, a substitution the README advertises, yields an
+            // empty string with the explanation on stderr where a script never
+            // looks. `set` and `unset` stay blocked: they write, and the daemon
+            // they would write through is being restarted.
+            | Command::Settings {
+                cmd: None | Some(SettingsCmd::Get { .. } | SettingsCmd::Describe { .. }),
+                ..
+            }
     )
 }
 
@@ -1428,5 +1548,86 @@ async fn maybe_show_update_banner() {
             );
             eprintln!();
         }
+    }
+}
+
+#[cfg(test)]
+mod update_gate_tests {
+    use super::*;
+
+    /// A value that begins with `-` reaches the validator instead of clap's
+    /// unknown-flag error.
+    ///
+    /// Two of these are real, not contrived: `-1` is what somebody types to test
+    /// the documented "out of range is clamped, not refused" promise, and
+    /// `-apple-system` heads most CSS font stacks. Both used to die with
+    /// "unexpected argument", which is an error about a flag for something that
+    /// is not one.
+    #[test]
+    fn a_setting_value_may_begin_with_a_hyphen() {
+        for value in ["-1", "-apple-system, system-ui", "--weird"] {
+            let cli = Cli::try_parse_from(["veld", "settings", "set", "k", value])
+                .unwrap_or_else(|e| panic!("clap refused {value:?}: {e}"));
+            let Some(Command::Settings {
+                cmd: Some(SettingsCmd::Set { value: got, .. }),
+                ..
+            }) = cli.command
+            else {
+                panic!("parsed into the wrong command for {value:?}")
+            };
+            assert_eq!(got, value);
+        }
+    }
+
+    /// Reading a setting survives an update; writing one does not.
+    ///
+    /// The split matters because the gate's failure is a *wrong answer*, not a
+    /// blocked one: `veld settings get` is advertised in README.md as a shell
+    /// substitution, and a blocked run yields an empty string with the
+    /// explanation on stderr, where no script looks. `describe` touches nothing
+    /// at all — it prints a compile-time catalog — and the listing and `get` open
+    /// the database read-only, which is why `Config` is already on the allow-list.
+    ///
+    /// **Both directions are asserted deliberately.** The allow-list is a
+    /// `matches!`, so adding `Settings { .. }` unqualified would silently
+    /// re-enable `set` and `unset` during an update — a write aimed at a daemon
+    /// that is being restarted — and a test that only checked the reads would
+    /// still pass.
+    #[test]
+    fn reading_a_setting_survives_an_update_but_writing_one_does_not() {
+        let settings = |cmd| Command::Settings {
+            prefix: None,
+            json: false,
+            cmd,
+        };
+
+        assert!(command_survives_an_update(&settings(None)));
+        assert!(command_survives_an_update(&settings(Some(
+            SettingsCmd::Get {
+                key: "terminal.shell".into(),
+                json: false,
+            }
+        ))));
+        assert!(command_survives_an_update(&settings(Some(
+            SettingsCmd::Describe {
+                key: "terminal.shell".into(),
+                json: false,
+            }
+        ))));
+
+        // The writes reach a daemon the update is restarting.
+        assert!(!command_survives_an_update(&settings(Some(
+            SettingsCmd::Set {
+                key: "terminal.shell".into(),
+                value: "/bin/bash".into(),
+                json: false,
+            }
+        ))));
+        assert!(!command_survives_an_update(&settings(Some(
+            SettingsCmd::Unset {
+                key: "terminal.shell".into(),
+                json: false,
+            }
+        ))));
     }
 }

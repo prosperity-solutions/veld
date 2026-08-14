@@ -15,6 +15,7 @@ pub mod logging;
 pub mod opener;
 pub mod orchestrator;
 pub mod paths;
+pub mod percent;
 pub mod port;
 pub mod presets;
 pub mod process;

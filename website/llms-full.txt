@@ -183,6 +183,11 @@ veld stop --name dev
 | `veld config vars [--json]` | List machine-overridable vars: effective value, and which scope supplied it. A `secret` value is described, never printed |
 | `veld config set <NAME> <VALUE\|--env N\|--file P\|--shell C> [--worktree] [--json]` | Answer a machine-overridable var on this machine. Project-scoped by default, so every worktree of the repo shares it; `--worktree` narrows it to this checkout. The source flags store a *pointer* instead of a value, which is how a `secret` var is answered without veld taking custody |
 | `veld config unset <NAME> [--worktree] [--json]` | Forget this machine's answer, falling back to the next scope and then the config `default` |
+| `veld settings [PREFIX] [--json]` | Veld's own machine-wide preferences — the ones the IDE settings dialog edits, not a project's config. Each row carries the effective value, whether it was set or is still the default, and what the setting is. `PREFIX` narrows by whole key segments (`veld settings keepAwake`) |
+| `veld settings get <KEY> [--json]` | One effective value, printed bare so it drops straight into a shell substitution |
+| `veld settings set <KEY> <VALUE> [--json]` | Change one setting. Values are bare (`true`, `60`, `/bin/bash`); a list takes JSON or a comma-separated string. **A number outside its range is clamped rather than refused**, and the clamp is reported — an enum or a malformed string is refused, with the validator's own reason |
+| `veld settings unset <KEY> [--json]` | Put one setting back on its default |
+| `veld settings describe <KEY> [--json]` | What the setting does, its type, its default, its allowed values or range, and any other setting it depends on. The command to run before `set`, since a clamped number otherwise looks like a success |
 | `veld init` | Create a new veld.json (veld also reads veld.jsonc) |
 
 All commands support `--json` for structured output, making veld scriptable and CI/agent-friendly.

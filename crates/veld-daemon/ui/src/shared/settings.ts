@@ -79,7 +79,7 @@ const FALLBACK = {
   cursorStyle: "block" as CursorStyle,
   cursorBlink: true,
   scrollback: 10000,
-  bellVolume: 50,
+  bellVolume: 75,
   shiftEnterNewline: true,
   reconnectTries: 3,
   reconnectBackoffSeconds: 5,
@@ -122,7 +122,7 @@ const FALLBACK = {
   // and the "previous release's behaviour" rule agree, because the honest reason is the
   // signal's own unevenness: exact for a shell command, absent for a supported agent, and
   // meaningless for an unsupported one. See `defaults()` in veld-core's settings.rs.
-  activityShowWorking: false,
+  activityShowWorking: true,
   // The notification table. Only `commandFinished` is off — see the Rust `defaults()`
   // for why each one is where it is. `notifyWaiting` in particular defaults on because
   // an OSC 9 banner already fired before this table existed, and a `false` here would
