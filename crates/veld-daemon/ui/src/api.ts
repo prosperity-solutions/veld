@@ -1128,10 +1128,11 @@ export interface CaffeinateState {
   hold_failed: boolean;
   /**
    * Whether the automatic hold's deadline is the shares' own expiry rather than
-   * the "For at most" cap. A share's own default life (2h peer, 1h web) is
-   * shorter than any cap somebody would actually set, so this is `true` more
-   * often than the setting's name suggests — copy that attributes the countdown
-   * to the cap is wrong whenever it is.
+   * the "For at most" cap. Either can be the shorter one: with the default pair
+   * (4h peer / 2h web against a 2h mains cap) the cap binds and this is `false`,
+   * while a `--ttl`, a project's shorter override, or a raised cap makes it
+   * `true`. Copy that attributes the countdown to the cap is wrong whenever it
+   * is `true`.
    *
    * **Only meaningful while `reason` is `"sharing"`. Gate on that, not on this
    * field alone.** The daemon also sends `true` under `"both"`, where it still

@@ -1172,7 +1172,7 @@ Because a token declaration is part of a relay's endpoint identity, changing the
 
 ### `sharing.peer_ttl_minutes` / `sharing.web_ttl_minutes`
 
-How long this project's share **links** live, per audience, in minutes — `5`–`480`, clamped rather than refused. Defaults are **120** for a peer share and **60** for `--web`, web being shorter for the reason it always was: its audience is the open internet, so an idle share should die sooner.
+How long this project's share **links** live, per audience, in minutes — `5`–`480`, clamped rather than refused. Defaults are **240** for a peer share and **120** for `--web`, web being shorter for the reason it always was: its audience is the open internet, so an idle share should die sooner.
 
 ```json
 {
@@ -1184,7 +1184,11 @@ How long this project's share **links** live, per audience, in minutes — `5`�
 }
 ```
 
-**This is normally the deadline that actually ends a share** — and therefore what ends the automatic keep-awake with it. The two are easy to confuse, and the confusion is the reason these fields exist: `keepAwake.sharingOnPowerMinutes` / `…OnBatteryMinutes` are a **ceiling** over the share's own life, not a second countdown, because the hold's deadline is `min(cap, latest share expiry)`. So "keep this machine awake while sharing, for at most 4 hours" under a default 2-hour peer link counts down from **2 hours**, and the cap never binds. The coffee menu now says so when that is what is happening.
+**Two deadlines govern a live share, and which one binds is worth knowing.** The automatic keep-awake's deadline is `min(cap, latest share expiry)`, where the cap is `keepAwake.sharingOnPowerMinutes` / `…OnBatteryMinutes` — a **ceiling on what Veld does to your hardware unasked**, not a second countdown.
+
+With the defaults, the **cap** is the shorter one: a 2-hour mains cap under a 4-hour peer link means Veld holds the machine awake for two hours, and the link keeps working afterwards for as long as the machine happens to be up. That is deliberate — the two answer different questions, so they are not set to the same number.
+
+The share's expiry binds instead whenever it is the shorter of the two: a `veld share --ttl`, a project that shortens these fields, or a keep-awake cap raised past the link's life. The coffee menu, the sharing panel, `veld share` and `veld doctor` all say when that is the case, because a countdown showing the *share's* deadline next to a keep-awake setting you configured yourself is otherwise indistinguishable from the setting being ignored.
 
 Three places can answer "how long", most specific first:
 

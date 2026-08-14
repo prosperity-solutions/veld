@@ -164,10 +164,10 @@ export function KeepAwakeButton(props: {
   // which changes what every string below should say.
   const automatic = state?.reason === "sharing";
   // The countdown above is the shares' own life ending, not the "For at most"
-  // cap somebody configured. True far more often than that setting's name
-  // suggests — a share's own default life (2h peer, 1h web) is shorter than any
-  // cap a person would actually set — so this has to be said, or the cup claims
-  // a number it did not compute.
+  // cap somebody configured. Not the default case — the default pair puts the cap
+  // in front — but it is what a `--ttl`, a project override or a raised cap
+  // produces, and there the cup would otherwise claim a number it did not
+  // compute.
   //
   // The shared predicate rather than the condition written out again: the other
   // consumer wrote it out and got the `"both"` case wrong. See

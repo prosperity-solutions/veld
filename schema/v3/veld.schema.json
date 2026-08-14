@@ -1959,13 +1959,13 @@
           "type": "integer",
           "minimum": 5,
           "maximum": 480,
-          "description": "How long this project's peer share links live, in minutes. Overrides the machine's `sharing.peerTtlMinutes` setting; `veld share --ttl` overrides both for one share. Default 120. The daemon CLAMPS to this range rather than refusing, so a value outside it still loads and shares work — `veld lint` warns (share-ttl-range) and names the value that will apply. Mirrors MIN/MAX_SHARE_TTL_MINUTES in veld-core."
+          "description": "How long this project's peer share links live, in minutes. Overrides the machine's `sharing.peerTtlMinutes` setting; `veld share --ttl` overrides both for one share. Default 240. The daemon CLAMPS to this range rather than refusing, so a value outside it still loads and shares work — `veld lint` warns (share-ttl-range) and names the value that will apply. Mirrors MIN/MAX_SHARE_TTL_MINUTES in veld-core."
         },
         "web_ttl_minutes": {
           "type": "integer",
           "minimum": 5,
           "maximum": 480,
-          "description": "How long this project's `--web` share links live, in minutes. Shorter than peer by default because the audience is the open internet. Overrides the machine's `sharing.webTtlMinutes` setting; `veld share --ttl` overrides both. Default 60. Clamped, not refused, at the bounds above — `veld lint` warns (share-ttl-range). Mirrors MIN/MAX_SHARE_TTL_MINUTES in veld-core."
+          "description": "How long this project's `--web` share links live, in minutes. Shorter than peer by default because the audience is the open internet. Overrides the machine's `sharing.webTtlMinutes` setting; `veld share --ttl` overrides both. Default 120. Clamped, not refused, at the bounds above — `veld lint` warns (share-ttl-range). Mirrors MIN/MAX_SHARE_TTL_MINUTES in veld-core."
         }
       }
     }

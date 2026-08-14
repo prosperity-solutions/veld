@@ -1083,12 +1083,12 @@ fn status_of(
         // because the remedy is different and the reassurance is wrong.
         "hold_failed": machine.state.spawn_failed,
         // Whether the countdown, when it is the automatic one, is the shares' own
-        // expiry rather than the "For at most" setting. A share's own default
-        // life (2h peer, 1h web) is shorter than any cap somebody would actually
-        // configure, so this is `true` more often than the setting's name
-        // suggests — the UI needs it to avoid saying "kept awake for the length
-        // you set" about a number that is actually "until the share you started
-        // happens to end".
+        // expiry rather than the "For at most" setting. Either can be the shorter
+        // one: the default pair (4h peer / 2h web against a 2h mains cap) puts the
+        // cap in front, while a `--ttl`, a project override or a raised cap puts
+        // the shares' expiry there. The UI needs to know which, to avoid saying
+        // "kept awake for the length you set" about a number that is actually
+        // "until the sharing you started happens to end".
         //
         // **`AND`ed with a live sharing reason here, not trusted from the state.**
         // `recompute` resets the flag beside every place *it* clears

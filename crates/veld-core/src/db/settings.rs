@@ -363,16 +363,23 @@ pub const MAX_KEEP_AWAKE_MINUTES: i64 = 8 * 60;
 
 /// Defaults for the two automatic caps, which are deliberately *not* equal.
 ///
-/// Mains is the generous one: nothing is being spent, `caffeinate -s` is valid on
-/// AC power only so it needs no privileged helper, and 120 minutes is the peer
-/// TTL default exactly (web is 1h), so for a default share the hold ends when the
-/// share does. Note what that is *not*: slack. The two deadlines coincide, and
-/// what decides which binds is ordering — the episode clock starts after the
-/// manifest's `created_at`, by the latency of the reconcile that arms it — plus
-/// `min(cap, latest share expiry)`, which is what makes the share's own death
-/// the thing that ends the hold rather than a race between two timers. Battery is the short one for the obvious
-/// reason — the cost is somebody's charge — and 30 minutes is about the length of
-/// the thing a battery-backed share actually is: showing someone a page.
+/// Mains is the generous one: nothing is being spent, and `caffeinate -s` is
+/// valid on AC power only so it needs no privileged helper. Battery is the short
+/// one for the obvious reason — the cost is somebody's charge — and 30 minutes is
+/// about the length of the thing a battery-backed share actually is: showing
+/// someone a page.
+///
+/// **These are shorter than the share TTLs they cap** (see
+/// [`DEFAULT_SHARING_PEER_TTL_MINUTES`], 4h peer / 2h web), and that is the
+/// deliberate shape rather than an oversight. The hold's deadline is
+/// `min(cap, latest share expiry)`, so on a default machine the *cap* is what ends
+/// it: veld holds the hardware awake for as long as it is willing to do so
+/// unasked, and the link then survives on its own for whatever remains — reachable
+/// while the machine is up, and no longer keeping it up. An earlier revision set
+/// the mains cap equal to the peer TTL, which made the two deadlines coincide and
+/// left which one "won" decided by reconcile latency; that is the ambiguity
+/// `sharing_bound_by_share` and its 60-second material gap exist to keep out of
+/// the UI.
 pub const DEFAULT_KEEP_AWAKE_SHARING_ON_POWER_MINUTES: i64 = 120;
 pub const DEFAULT_KEEP_AWAKE_SHARING_ON_BATTERY_MINUTES: i64 = 30;
 
@@ -380,17 +387,25 @@ pub const DEFAULT_KEEP_AWAKE_SHARING_ON_BATTERY_MINUTES: i64 = 30;
 ///
 /// **These are the numbers that actually end a default share**, and until they
 /// were settings they were two `const`s inside the daemon's share API with no
-/// surface at all. That mattered more than it looked: the keep-awake cap above is
-/// `min(cap, latest share expiry)`, and a share's own life is *shorter* than any
-/// cap somebody would set — so "keep this machine awake while sharing, for at
-/// most 4 hours" counted down from 2h, and the cap the user configured was never
-/// the thing binding. Making the other half of that `min` configurable is what
-/// lets the two be reasoned about together.
+/// surface at all. That mattered more than it looked: the automatic keep-awake's
+/// deadline is `min(cap, latest share expiry)`, so whichever of the two is
+/// shorter is the one a countdown is really reporting — and when the share was
+/// always the shorter one, "keep this machine awake while sharing, for at most 4
+/// hours" counted down from 2h with nothing saying why. Making the other half of
+/// that `min` configurable is what lets the two be reasoned about together.
+///
+/// A peer link now outlives the **mains** keep-awake cap
+/// ([`DEFAULT_KEEP_AWAKE_SHARING_ON_POWER_MINUTES`], 2h) rather than coinciding
+/// with it, so on a default machine the *cap* is what ends the hold and the share
+/// stays reachable afterwards for as long as the machine happens to be up. That
+/// is the intended shape: the cap bounds what veld does to somebody's hardware
+/// without being asked, and the link's life is a separate question about how long
+/// a colleague has to open it.
 ///
 /// Web is the shorter one for the reason it always was (§6.1): its audience is
 /// the open internet, so an idle share should die sooner.
-pub const DEFAULT_SHARING_PEER_TTL_MINUTES: i64 = 120;
-pub const DEFAULT_SHARING_WEB_TTL_MINUTES: i64 = 60;
+pub const DEFAULT_SHARING_PEER_TTL_MINUTES: i64 = 240;
+pub const DEFAULT_SHARING_WEB_TTL_MINUTES: i64 = 120;
 
 /// Bounds on a **stored default** share TTL.
 ///

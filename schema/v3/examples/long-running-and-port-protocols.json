@@ -15,7 +15,7 @@
   // `veld share --ttl` overrides both for one share.
   "sharing": {
     "relays": "public",
-    "peer_ttl_minutes": 240,
+    "peer_ttl_minutes": 480,
     "web_ttl_minutes": 30
   },
 

@@ -37,9 +37,12 @@
 //! Within an episode the deadline is
 //! `min(clock_started_at + cap_for_this_source, latest live share expiry)`. Binding
 //! it to the shares is what stops this being a second, independent timer racing the
-//! share reaper: shares already expire on their own (peer 2h, web 1h by default),
-//! so the cap is a **ceiling** that normally never binds rather than a countdown
-//! that usually fires first.
+//! share reaper: shares already expire on their own (peer 4h, web 2h by default),
+//! so the cap is a **ceiling** rather than a second countdown racing it. With the
+//! default pair the cap is the shorter of the two and therefore the one that ends
+//! the hold; a share shorter than the cap — a `--ttl`, a project override, a
+//! raised cap — puts the share's expiry in front instead, which is what
+//! `sharing_bound_by_share` reports.
 //!
 //! Reaching the cap **opts the episode out**. Without that the hold would re-arm on
 //! the next tick and the cap would be a lie; with it, "at most N minutes while
@@ -168,13 +171,16 @@ pub struct State {
     /// rather than the configured cap.
     ///
     /// `min(cap, latest share expiry)` picks a number without recording which
-    /// side of it won, and a share's own default life (2h peer, 1h web) is
-    /// shorter than any cap a person would set — so in the common case this is
-    /// `true`: the cap somebody configured is not what is counting down, the
-    /// share dying is. Nothing upstream of `recompute` could tell the two apart
-    /// from `Reasons::expires_at()` alone, and the UI needs to: the copy that
-    /// says "kept awake for the length you set" is a different, false claim from
-    /// "kept awake until the share you started happens to end."
+    /// side of it won, and **either can be the shorter one**. With the default
+    /// pair — 4h peer / 2h web against a 2h mains cap — the *cap* binds and this
+    /// is `false`; a `--ttl`, a project's shorter `veld.json` override, or a cap
+    /// raised past the link's life puts the share's expiry in front and makes it
+    /// `true`.
+    ///
+    /// Nothing upstream of `recompute` could tell the two apart from
+    /// `Reasons::expires_at()` alone, and the UI needs to: "kept awake for the
+    /// length you set" is a different, false claim from "kept awake until the
+    /// sharing you started happens to end."
     pub sharing_bound_by_share: bool,
 }
 
@@ -349,9 +355,9 @@ impl State {
             Some(share_deadline) => cap_deadline.min(share_deadline),
             None => cap_deadline,
         };
-        // A share's own default life (2h peer, 1h web) is shorter than any cap a
-        // person would set, so this is `true` far more often than the "For at
-        // most" setting's name suggests — see the field doc.
+        // Either deadline can be the shorter one — see the field doc. The default
+        // pair puts the cap in front; a shorter share (a `--ttl`, a project
+        // override, a raised cap) puts the share's own expiry there.
         //
         // **A material gap, not any gap.** `cap_deadline` counts from
         // `clock_started_at`, which is set on the first tick *after* a share is
@@ -591,7 +597,7 @@ mod tests {
     #[test]
     fn a_share_shorter_than_the_cap_is_reported_as_the_binding_deadline() {
         // The bug `sharing_bound_by_share` exists for: a share's own default life
-        // (2h peer, 1h web) is shorter than any cap a person would actually set,
+        // (4h peer, 2h web) can be shorter than the cap,
         // so "For at most" is not what is ending the hold here — the UI needs to
         // know that, or it claims the wrong thing.
         let mut state = State::default();

@@ -610,7 +610,7 @@ enum Command {
         /// No upper bound; anything under 60 is raised to 60, since a share that
         /// expires before its link can be opened is not a shorter share. The
         /// default comes from `sharing.peerTtlMinutes` / `sharing.webTtlMinutes`
-        /// (`veld settings`, 120/60 minutes out of the box), or the project's
+        /// (`veld settings`, 240/120 minutes out of the box), or the project's
         /// `sharing.peer_ttl_minutes` / `web_ttl_minutes` in veld.json.
         #[arg(long)]
         ttl: Option<i64>,
