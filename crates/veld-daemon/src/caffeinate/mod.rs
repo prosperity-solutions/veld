@@ -668,8 +668,15 @@ async fn apply(
     // A live session that already holds the right thing is left strictly alone.
     // Deadlines live in `state`, not in the child, so a changed deadline is not a
     // reason to respawn an inhibitor — only a changed *coverage* is.
-    if let Some(session) = machine.session.as_ref() {
+    if let Some(session) = machine.session.as_mut() {
         if session.coverage == plan.coverage && session.wanted_lease == plan.want_lease {
+            // `lease_required` can change while the argv and the lease do not:
+            // unplugging under a manual macOS hold keeps the same inhibitor and
+            // the same lease, and turns that lease from an early precaution into
+            // the only thing covering the lid. Respawning for it would be waste —
+            // the child is correct — but leaving it stale means a lease that is
+            // genuinely missing on battery stops being reported as a fault.
+            session.lease_required = plan.lease_required;
             return Ok(());
         }
     }
