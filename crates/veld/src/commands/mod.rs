@@ -15,6 +15,7 @@ pub mod open_url;
 pub mod presets;
 pub mod restart;
 pub mod runs;
+pub mod settings;
 pub mod setup;
 pub mod share;
 pub mod start;

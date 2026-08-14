@@ -1,5 +1,10 @@
 // Typed client for the daemon's management + desktop APIs (same origin).
 
+// The one import this module has, and a type-only one: the settings catalog's wire
+// shape lives beside the code that renders from it, and erasing at compile time
+// means api.ts still has no runtime dependency on anything.
+import type { SettingsCatalog } from "./shared/catalog";
+
 export type RunStatus =
   | "starting"
   | "running"
@@ -1344,6 +1349,17 @@ export const api = {
    * TypeScript is a default that drifts from the Rust one.
    */
   settings: () => request<{ settings: SettingsDoc }>("/api/settings"),
+  /**
+   * What each setting *is* — its title, its help, the group it belongs to, the
+   * shape and the choices a surface should offer. See `shared/catalog.ts`.
+   *
+   * A separate document from {@link settings} because it answers a different
+   * question and changes on a different schedule: values change when a human
+   * changes them, descriptions change when the daemon is upgraded. The settings
+   * dialog renders from this rather than from hand-written rows, which is what
+   * makes adding a setting a Rust-only edit.
+   */
+  catalog: () => request<SettingsCatalog>("/api/settings/catalog"),
   /**
    * Whether this machine is currently being kept awake.
    *

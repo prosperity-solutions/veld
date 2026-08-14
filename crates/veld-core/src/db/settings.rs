@@ -36,6 +36,9 @@ use std::collections::BTreeMap;
 use rusqlite::{OptionalExtension, params};
 use serde_json::Value;
 
+use super::settings_catalog::{
+    CURSOR_STYLES, Choice, GIT_CREATE_SOURCES, MARKER_STYLES, WORKTREE_STORAGE_MODES,
+};
 use super::{Db, DbError, now_str};
 
 /// The scope a setting is stored under. Only [`SCOPE_GLOBAL`] is written today;
@@ -47,10 +50,39 @@ pub const SCOPE_GLOBAL: &str = "global";
 /// `Origin` fetches the remote and bases the new branch on `origin/<default>`,
 /// so a worktree is never born behind the remote. `Local` uses the main
 /// checkout's current HEAD.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum GitCreateSource {
+    #[default]
     Origin,
     Local,
+}
+
+impl GitCreateSource {
+    /// Every source this binary understands. Mirrors [`ConfigSource::ALL`] and
+    /// [`LogTimeZone::ALL`], and for the reason those two spell out: the
+    /// validator's allow-list and the daemon's reader both derive from this, so a
+    /// third variant cannot validate on write and then be read back as `Origin`
+    /// by a hand-written comparison that never learned about it. This key had
+    /// exactly that shape — `== Some("local")` in [`Db::git_create_from`] beside
+    /// a `one_of` listing both spellings — which is the defect class
+    /// `a_config_source_is_never_hand_compared` was written for.
+    pub const ALL: &'static [GitCreateSource] = &[Self::Origin, Self::Local];
+
+    pub const ORIGIN: &'static str = "origin";
+    pub const LOCAL: &'static str = "local";
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Origin => Self::ORIGIN,
+            Self::Local => Self::LOCAL,
+        }
+    }
+
+    /// The inverse of [`Self::as_str`], exhaustive by construction over
+    /// [`Self::ALL`].
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|src| src.as_str() == s)
+    }
 }
 
 /// Which checkout's `veld.json` a project-declared surface reads its
@@ -113,10 +145,19 @@ impl ConfigSource {
     /// check that never learned about it.
     pub const ALL: &'static [ConfigSource] = &[Self::Main, Self::Worktree];
 
+    /// The stored spellings, named so the catalog's [`Choice`](super::settings_catalog::Choice)
+    /// lists can cite the same literal this type's `as_str` returns rather than
+    /// writing `"main"` a second time. Two labels for one value is a real case
+    /// here — `extensions.source` and `news.source` describe `worktree`
+    /// differently — so the *labels* cannot be shared, which is exactly why the
+    /// values must be.
+    pub const MAIN: &'static str = "main";
+    pub const WORKTREE: &'static str = "worktree";
+
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Main => "main",
-            Self::Worktree => "worktree",
+            Self::Main => Self::MAIN,
+            Self::Worktree => Self::WORKTREE,
         }
     }
 
@@ -223,12 +264,41 @@ pub const MAX_RECONNECT_FIRST_DELAY_SECONDS: i64 = 30;
 /// above that is history for the life of the page, not across a reload.
 pub const DEFAULT_SCROLLBACK: i64 = 10_000;
 
+/// Terminal font size, in CSS pixels.
+///
+/// Named rather than written inline because the catalog cites the same bounds to
+/// tell a client what to offer — see `settings_catalog`'s *Why this is a
+/// projection*. Six is the smallest size xterm's renderer measures reliably;
+/// seventy-two is a presentation, not a terminal.
+pub const DEFAULT_FONT_SIZE: i64 = 12;
+pub const MIN_FONT_SIZE: i64 = 6;
+pub const MAX_FONT_SIZE: i64 = 72;
+
 /// Terminal bell volume, as a percentage 0–100.
 ///
 /// Scales the Web-Audio tone a `BEL` plays. A percentage rather than a linear
 /// amplitude because that is what a slider is: 0 is silent, 100 is the loudest
 /// this build will play. `playBell` in the UI maps it onto a gain.
-pub const DEFAULT_BELL_VOLUME: i64 = 50;
+///
+/// **75, not half.** `playBell` multiplies this by a 0.5 peak (`terminalHost.ts`),
+/// so the slider's 100 is already a deliberately soft tone rather than a alarm —
+/// which made a 50 default quiet enough to miss in a room with anything else going
+/// on, for a signal whose entire job is to be noticed while you are looking
+/// somewhere else. Anyone who wants it softer has the slider.
+pub const DEFAULT_BELL_VOLUME: i64 = 75;
+
+/// Bounds on the bell volume. A percentage, so these are what a percentage is —
+/// named for the same reason the font-size bounds above are.
+pub const MIN_BELL_VOLUME: i64 = 0;
+pub const MAX_BELL_VOLUME: i64 = 100;
+
+/// Bounds on the scrollback. Zero is a terminal with no history, which is a
+/// legitimate thing to want on a memory-tight machine.
+pub const MIN_SCROLLBACK: i64 = 0;
+
+/// Bounds on the run-history horizon. Zero means "show everything" — see
+/// [`DEFAULT_RUN_HISTORY_DAYS`].
+pub const MIN_RUN_HISTORY_DAYS: i64 = 0;
 
 /// Upper bound on scrollback.
 ///
@@ -425,10 +495,14 @@ impl LogTimeZone {
     /// same Rust↔TS gap this module's header already names around `FALLBACK`.
     pub const ALL: &'static [LogTimeZone] = &[Self::Local, Self::Utc];
 
+    /// The stored spellings — see [`ConfigSource::MAIN`] for why these are named.
+    pub const LOCAL: &'static str = "local";
+    pub const UTC: &'static str = "utc";
+
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Local => "local",
-            Self::Utc => "utc",
+            Self::Local => Self::LOCAL,
+            Self::Utc => Self::UTC,
         }
     }
 
@@ -496,7 +570,7 @@ pub enum SettingKey {
 }
 
 impl SettingKey {
-    /// Every known key.
+    /// Every known key, **in the order a surface should present them**.
     ///
     /// Exists so tests can enumerate the variants, which is the only thing that
     /// catches the two silent misses when a key is added: [`Self::parse`] ends in an
@@ -506,55 +580,81 @@ impl SettingKey {
     /// silently becomes the real default, the exact Rust↔TS drift this module's docs
     /// claim is impossible. `as_str` and `validate` are exhaustive matches and need
     /// no help; these two do.
+    ///
+    /// **The order is load-bearing and is grouped, not alphabetical.** It runs
+    /// group by group in [`SettingGroup::ALL`] order and, inside a group, section
+    /// by section in the order those headings appear — because
+    /// [`catalog`](super::settings_catalog::catalog) walks this list and the
+    /// settings dialog renders whatever it is handed. Making this *the* display
+    /// order is what keeps a new setting from needing a second list somewhere to
+    /// say where it goes; the cost is that inserting one means inserting it in
+    /// the right place here rather than at the end.
     pub const ALL: &'static [SettingKey] = &[
-        Self::TerminalShell,
-        Self::TerminalFontSize,
-        Self::TerminalFontFamily,
-        Self::TerminalCursorStyle,
-        Self::TerminalCursorBlink,
-        Self::TerminalScrollback,
-        Self::TerminalShiftEnterNewline,
-        Self::TerminalBellVolume,
-        Self::TerminalDetachGrace,
-        Self::TerminalReconnectTries,
-        Self::TerminalReconnectBackoffSeconds,
-        Self::TerminalReconnectFirstDelaySeconds,
-        Self::TerminalOpenUrlsInApp,
-        Self::TerminalInterceptSystemOpen,
-        Self::TerminalShellIntegration,
-        Self::TerminalAgentIntegration,
+        // ── General ──────────────────────────────────────────────────────────
         Self::ExtensionsAutoRefresh,
         Self::ExtensionsSource,
-        Self::NewsSource,
-        Self::ActivityShowWorking,
-        Self::ActivityNotifyCommandFinished,
-        Self::ActivityNotifyCommandFailed,
-        Self::ActivityNotifyAgentWaiting,
-        Self::ActivityNotifyNoticed,
-        Self::ActivityNotifyAgentFinished,
         Self::WorktreeMarkerStyle,
         Self::WorktreeTrashRetention,
         Self::RunsHistoryDays,
         Self::LogsTimeZone,
-        Self::BrowserQuickSwitchResponsive,
-        Self::BrowserQuickSwitchColorScheme,
-        Self::BrowserExternalOrigins,
-        Self::BrowserSearchUrl,
         Self::UiHideDisabledActions,
-        Self::UiShowProjectNews,
         Self::UiShowProjectColumn,
+        Self::UiShowProjectNews,
+        Self::NewsSource,
+        // ── Git ──────────────────────────────────────────────────────────────
         Self::GitCreateFrom,
         Self::WorktreeStorageMode,
         Self::WorktreeStorageDir,
+        // ── Terminal › Appearance ────────────────────────────────────────────
+        Self::TerminalFontSize,
+        Self::TerminalFontFamily,
+        Self::TerminalCursorStyle,
+        Self::TerminalCursorBlink,
+        // ── Terminal › Behaviour ─────────────────────────────────────────────
+        Self::TerminalShell,
+        Self::TerminalScrollback,
+        Self::TerminalShiftEnterNewline,
+        Self::TerminalBellVolume,
+        Self::TerminalDetachGrace,
+        // ── Terminal › Auto-reconnect ────────────────────────────────────────
+        Self::TerminalReconnectTries,
+        Self::TerminalReconnectFirstDelaySeconds,
+        Self::TerminalReconnectBackoffSeconds,
+        // ── Activity › Noticing ──────────────────────────────────────────────
+        Self::TerminalShellIntegration,
+        Self::TerminalAgentIntegration,
+        Self::ActivityShowWorking,
+        // ── Activity › Notifying ─────────────────────────────────────────────
+        Self::ActivityNotifyCommandFinished,
+        Self::ActivityNotifyCommandFailed,
+        Self::ActivityNotifyAgentWaiting,
+        // `AgentFinished` before `Noticed`, matching the screen this list replaced
+        // — and not merely for continuity: `activity.notifyNoticed`'s help says
+        // "Its own row rather than the agent one above", which is false the moment
+        // these two swap. A help string that refers to a neighbour is a constraint
+        // on this order, not just prose.
+        Self::ActivityNotifyAgentFinished,
+        Self::ActivityNotifyNoticed,
+        // ── Activity › Focus mode ────────────────────────────────────────────
         Self::FocusModeEnabled,
         Self::FocusModeSuppressBell,
         Self::FocusModeSuppressToasts,
         Self::FocusModeSuppressOsNotifications,
+        // ── Keep awake › While you're sharing ────────────────────────────────
         Self::KeepAwakeSharingOnPower,
         Self::KeepAwakeSharingOnPowerMinutes,
         Self::KeepAwakeSharingOnBattery,
         Self::KeepAwakeSharingOnBatteryMinutes,
+        // ── Keep awake › When you ask ────────────────────────────────────────
         Self::KeepAwakeManualOnBattery,
+        // ── Links ────────────────────────────────────────────────────────────
+        Self::TerminalOpenUrlsInApp,
+        Self::TerminalInterceptSystemOpen,
+        Self::BrowserExternalOrigins,
+        // ── Browser panes ────────────────────────────────────────────────────
+        Self::BrowserQuickSwitchResponsive,
+        Self::BrowserQuickSwitchColorScheme,
+        Self::BrowserSearchUrl,
     ];
 
     pub fn as_str(&self) -> &str {
@@ -675,17 +775,29 @@ impl SettingKey {
     ///
     /// An [`Unknown`](Self::Unknown) key accepts anything — it is being preserved,
     /// not interpreted.
-    fn validate(&self, value: &Value) -> Result<Value, DbError> {
+    pub(super) fn validate(&self, value: &Value) -> Result<Value, DbError> {
         let bad = || DbError::InvalidSetting {
             key: self.as_str().to_string(),
             value: value.to_string(),
+            reason: None,
+        };
+        // For the validators that already produce a sentence. Pass theirs along
+        // rather than collapsing it — see `DbError::InvalidSetting`.
+        let because = |reason: String| DbError::InvalidSetting {
+            key: self.as_str().to_string(),
+            value: value.to_string(),
+            reason: Some(reason),
         };
         Ok(match self {
-            Self::TerminalFontSize => Value::from(clamp_i64(value, 6, 72).ok_or_else(bad)?),
-            Self::TerminalScrollback => {
-                Value::from(clamp_i64(value, 0, MAX_SCROLLBACK).ok_or_else(bad)?)
+            Self::TerminalFontSize => {
+                Value::from(clamp_i64(value, MIN_FONT_SIZE, MAX_FONT_SIZE).ok_or_else(bad)?)
             }
-            Self::TerminalBellVolume => Value::from(clamp_i64(value, 0, 100).ok_or_else(bad)?),
+            Self::TerminalScrollback => {
+                Value::from(clamp_i64(value, MIN_SCROLLBACK, MAX_SCROLLBACK).ok_or_else(bad)?)
+            }
+            Self::TerminalBellVolume => {
+                Value::from(clamp_i64(value, MIN_BELL_VOLUME, MAX_BELL_VOLUME).ok_or_else(bad)?)
+            }
             Self::TerminalDetachGrace => Value::from(
                 clamp_i64(value, MIN_DETACH_GRACE_MINUTES, MAX_DETACH_GRACE_MINUTES)
                     .ok_or_else(bad)?,
@@ -728,9 +840,9 @@ impl SettingKey {
             // Zero is "show everything" — the same off-switch shape as the trash
             // retention above, and for the same reason: the value a user picks to
             // turn a filter off must not be clamped into turning it on.
-            Self::RunsHistoryDays => {
-                Value::from(clamp_i64(value, 0, MAX_RUN_HISTORY_DAYS).ok_or_else(bad)?)
-            }
+            Self::RunsHistoryDays => Value::from(
+                clamp_i64(value, MIN_RUN_HISTORY_DAYS, MAX_RUN_HISTORY_DAYS).ok_or_else(bad)?,
+            ),
             Self::TerminalCursorBlink
             | Self::TerminalShiftEnterNewline
             | Self::TerminalOpenUrlsInApp
@@ -786,8 +898,17 @@ impl SettingKey {
                 let mut out = Vec::with_capacity(items.len());
                 for item in items {
                     let raw = item.as_str().ok_or_else(bad)?.trim();
-                    if raw.len() > MAX_ORIGIN_LEN || crate::ide::parse_origin(raw).is_err() {
-                        return Err(bad());
+                    if raw.len() > MAX_ORIGIN_LEN {
+                        return Err(because(format!(
+                            "{raw:?} is longer than {MAX_ORIGIN_LEN} bytes"
+                        )));
+                    }
+                    // `parse_origin`'s own message names the entry, which matters
+                    // here in a way it does not for a scalar key: the value being
+                    // refused is a list, so "not valid" without saying *which*
+                    // one leaves the author re-reading sixty-four patterns.
+                    if let Err(why) = crate::ide::parse_origin(raw) {
+                        return Err(because(format!("{raw:?}: {why}")));
                     }
                     // Stored as the author wrote it (trimmed), not as the parsed
                     // shape: this is the value a text field round-trips, and the
@@ -804,11 +925,9 @@ impl SettingKey {
             // normalisation — the field round-trips its own value.
             Self::BrowserSearchUrl => {
                 let s = value.as_str().ok_or_else(bad)?;
-                Value::from(parse_search_template(s).map_err(|_| bad())?)
+                Value::from(parse_search_template(s).map_err(because)?)
             }
-            Self::TerminalCursorStyle => {
-                one_of(value, &["block", "underline", "bar"]).ok_or_else(bad)?
-            }
+            Self::TerminalCursorStyle => one_of(value, CURSOR_STYLES).ok_or_else(bad)?,
             // Which shell a terminal opens. Validated by **shape** — `"auto"` or an
             // absolute path — and never by existence, which is
             // `veld_core::shell::resolve`'s job at spawn time: a value must be
@@ -820,16 +939,20 @@ impl SettingKey {
             Self::TerminalShell => {
                 let s = value.as_str().ok_or_else(bad)?.trim();
                 if !crate::shell::is_valid_preference(s) {
-                    return Err(bad());
+                    return Err(because(format!(
+                        "must be {:?} or an absolute path to a shell — a bare name would be \
+                         looked up on the daemon's own PATH, which is not yours",
+                        crate::shell::AUTO
+                    )));
                 }
                 Value::from(s)
             }
-            Self::WorktreeMarkerStyle => one_of(value, &["color", "emoji"]).ok_or_else(bad)?,
+            Self::WorktreeMarkerStyle => one_of(value, MARKER_STYLES).ok_or_else(bad)?,
             // Where a *new* worktree's branch is cut from. Rejected rather than
             // coerced (same as the other enums here): the daemon acts on this
             // directly in `create_worktree`, so a stored value neither surface
             // honours would silently change where branches come from.
-            Self::GitCreateFrom => one_of(value, &["origin", "local"]).ok_or_else(bad)?,
+            Self::GitCreateFrom => one_of(value, GIT_CREATE_SOURCES).ok_or_else(bad)?,
             // Which checkout's `veld.json` `ide.extensions`/`ide.news` declarations
             // are read from. Rejected rather than coerced, same reason as every
             // other enum here: the daemon acts on this directly (`worktree_target`
@@ -841,7 +964,7 @@ impl SettingKey {
             // Where a *new* worktree's checkout lands. Rejected rather than
             // coerced, same reason as `GitCreateFrom` just above: the daemon acts
             // on this directly in `create_worktree`.
-            Self::WorktreeStorageMode => one_of(value, &["sibling", "custom"]).ok_or_else(bad)?,
+            Self::WorktreeStorageMode => one_of(value, WORKTREE_STORAGE_MODES).ok_or_else(bad)?,
             // A filesystem path, not a hostname or a CSS value — the two other
             // free-text keys in this file bound their characters because of where
             // the string is interpolated (a search URL, a stylesheet rule). This
@@ -865,16 +988,25 @@ impl SettingKey {
             // look absolute like a real choice would.
             Self::WorktreeStorageDir => {
                 let s = value.as_str().ok_or_else(bad)?.trim();
-                if s.len() > MAX_WORKTREE_STORAGE_DIR_LEN || s.chars().any(char::is_control) {
-                    return Err(bad());
+                if s.len() > MAX_WORKTREE_STORAGE_DIR_LEN {
+                    return Err(because(format!(
+                        "is longer than {MAX_WORKTREE_STORAGE_DIR_LEN} bytes"
+                    )));
+                }
+                if s.chars().any(char::is_control) {
+                    return Err(because("must not contain control characters".into()));
                 }
                 if !s.is_empty() {
                     let p = std::path::Path::new(s);
-                    if !p.is_absolute()
-                        || p.components()
-                            .any(|c| matches!(c, std::path::Component::ParentDir))
+                    if !p.is_absolute() {
+                        return Err(because(
+                            "must be an absolute path (or empty, for the default)".into(),
+                        ));
+                    }
+                    if p.components()
+                        .any(|c| matches!(c, std::path::Component::ParentDir))
                     {
-                        return Err(bad());
+                        return Err(because("must not contain ..".into()));
                     }
                 }
                 Value::from(s)
@@ -901,20 +1033,36 @@ impl SettingKey {
             // validator that will be wrong eventually.
             Self::TerminalFontFamily => {
                 let s = value.as_str().ok_or_else(bad)?.trim();
-                if s.is_empty()
-                    || s.len() > MAX_FONT_FAMILY_LEN
-                    || s.contains(['{', '}', ';', '<', '>', '\n', '\r'])
-                {
-                    return Err(bad());
+                if s.is_empty() {
+                    return Err(because("must name at least one font family".into()));
+                }
+                if s.len() > MAX_FONT_FAMILY_LEN {
+                    return Err(because(format!(
+                        "is longer than {MAX_FONT_FAMILY_LEN} bytes"
+                    )));
+                }
+                if s.contains(['{', '}', ';', '<', '>', '\n', '\r']) {
+                    return Err(because(
+                        "must not contain { } ; < > or a newline — this ends up inside a CSS \
+                         rule, so those characters could escape it"
+                            .into(),
+                    ));
                 }
                 Value::from(s)
             }
             // Preserved, but bounded — see MAX_UNKNOWN_* above.
             Self::Unknown(k) => {
-                if k.len() > MAX_UNKNOWN_KEY_LEN
-                    || serde_json::to_string(value)?.len() > MAX_UNKNOWN_VALUE_LEN
-                {
-                    return Err(bad());
+                if k.len() > MAX_UNKNOWN_KEY_LEN {
+                    return Err(because(format!(
+                        "this build does not know this setting, and an unrecognised key may not \
+                         be longer than {MAX_UNKNOWN_KEY_LEN} bytes"
+                    )));
+                }
+                if serde_json::to_string(value)?.len() > MAX_UNKNOWN_VALUE_LEN {
+                    return Err(because(format!(
+                        "this build does not know this setting, and an unrecognised value may \
+                         not be longer than {MAX_UNKNOWN_VALUE_LEN} bytes"
+                    )));
                 }
                 value.clone()
             }
@@ -1101,9 +1249,19 @@ fn clamp_i64(value: &Value, lo: i64, hi: i64) -> Option<i64> {
     Some(n.clamp(lo, hi))
 }
 
-fn one_of(value: &Value, allowed: &[&str]) -> Option<Value> {
+/// Accept a string that is one of a catalog choice list's values.
+///
+/// Takes the *same* `&'static [Choice]` slice the catalog offers rather than a
+/// hand-written `&["block", "underline", "bar"]` beside it. That is the whole
+/// point of the slice being shared: the set a client is told it may pick from and
+/// the set the daemon will accept are one literal, so they cannot agree today and
+/// disagree after somebody adds a fourth cursor style to one of them.
+fn one_of(value: &Value, allowed: &[Choice]) -> Option<Value> {
     let s = value.as_str()?;
-    allowed.contains(&s).then(|| Value::from(s))
+    allowed
+        .iter()
+        .any(|choice| choice.value == s)
+        .then(|| Value::from(s))
 }
 
 /// The one source of truth for every default.
@@ -1118,7 +1276,7 @@ pub fn defaults() -> BTreeMap<String, Value> {
         // shipped zsh since Catalina, so a bash user's `~/.bashrc` aliases,
         // completions and tool integrations were loading in no veld terminal.
         (SettingKey::TerminalShell, Value::from(crate::shell::AUTO)),
-        (SettingKey::TerminalFontSize, Value::from(12)),
+        (SettingKey::TerminalFontSize, Value::from(DEFAULT_FONT_SIZE)),
         (
             SettingKey::TerminalFontFamily,
             Value::from("\"JetBrains Mono Variable\", \"JetBrains Mono\", ui-monospace, monospace"),
@@ -1221,21 +1379,26 @@ pub fn defaults() -> BTreeMap<String, Value> {
         // `desktop.rs`), now a setting rather than hardcoded, so it can be flipped
         // to `worktree` to preview a card before merging it.
         (SettingKey::NewsSource, Value::from("main")),
-        // **Off**, reversing an earlier default-on decision on evidence from real use.
+        // **On.** This default has now moved twice — on, then off on evidence from
+        // real use, and now on again as a maintainer call. The reasoning that took
+        // it off still stands and is worth keeping rather than deleting, because it
+        // is what this switch's accuracy actually depends on:
         //
-        // The signal is only as good as its producers, and today they are uneven. A plain
+        // The signal is only as good as its producers, and they are uneven. A plain
         // shell command is exact — a start mark with no end mark yet genuinely means
         // "running here". A coding agent is not: no *installed* hook reports `Working`
         // (the one that did, `SessionStart`, was blocking and set the state once, so an
         // idle agent spun forever), and an agent veld has no installer for reports
-        // nothing at all. A spinner that is authoritative for builds, absent for
-        // supported agents and meaningless for unsupported ones is not something to put
-        // in front of everybody by default.
+        // nothing at all. So the spinner is authoritative for builds, absent for
+        // supported agents, and meaningless for unsupported ones.
         //
-        // Kept as a setting rather than removed, because for the build case it answers a
-        // real question ("is that still going?") and costs nothing to produce. Promoting
-        // it back to on wants `PostToolUse` first — see `veld_core::agent`.
-        (SettingKey::ActivityShowWorking, Value::from(false)),
+        // The judgement that changed is what to do about that: an absent spinner is a
+        // missing hint rather than a wrong one, and the build case — "is that still
+        // going?" — is common enough to be worth showing everybody. It also loses to
+        // every unseen event in the rail, so a worktree waiting for you still reads as
+        // waiting rather than as working. `PostToolUse` (see `veld_core::agent`) is
+        // still what would make it accurate for agents; this does not wait for it.
+        (SettingKey::ActivityShowWorking, Value::from(true)),
         // The notification table. Four rows and not one switch, because "a command
         // finished" and "a coding agent is waiting for you" are not the same event and a
         // single answer for both is wrong in one direction or the other.
@@ -1484,6 +1647,50 @@ impl Db {
         Ok(())
     }
 
+    /// Delete stored rows, putting those settings back on their defaults.
+    ///
+    /// **Deleting the row is the only correct way to reset one**, and the reason
+    /// is [`defaults`]: writing the default *value* back would store a row that
+    /// happens to match today's default and would then silently stop tracking it
+    /// the next time the default changes — the user asked for "whatever Veld
+    /// thinks is right", not for the number that answered that question once.
+    /// It is also what makes an unset distinguishable from a deliberate choice
+    /// that agrees with the default, which is what `veld settings` reports in its
+    /// `FROM` column.
+    ///
+    /// Returns how many rows actually existed, so a caller can tell "reset" from
+    /// "was already on the default" without a prior read. Unknown keys are
+    /// deleted too — an unrecognised key is a preference this build cannot
+    /// interpret, not one it may not clear.
+    pub fn unset_settings(&self, keys: &[String]) -> Result<usize, DbError> {
+        let mut conn = self.lock();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let mut removed = 0;
+        for key in keys {
+            removed += tx.execute(
+                "DELETE FROM settings WHERE scope = ?1 AND key = ?2",
+                params![SCOPE_GLOBAL, key],
+            )?;
+        }
+        tx.commit()?;
+        Ok(removed)
+    }
+
+    /// Which settings have a stored row — i.e. have been set rather than left on
+    /// their default.
+    ///
+    /// The `FROM` column of `veld settings`, and the thing that makes an
+    /// effective value legible: a document of forty-eight values says nothing
+    /// about which of them anybody chose.
+    pub fn settings_with_stored_value(&self) -> Result<Vec<String>, DbError> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare("SELECT key FROM settings WHERE scope = ?1 ORDER BY key")?;
+        let rows = stmt
+            .query_map(params![SCOPE_GLOBAL], |r| r.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     /// The detach grace the daemon should enforce, as a `Duration`.
     ///
     /// The daemon reads this one itself, so it goes through the clamp rather than
@@ -1683,18 +1890,11 @@ impl Db {
     /// validated by [`SettingKey::GitCreateFrom`], so a value that is not
     /// `"local"` here is `"origin"` (the default).
     pub fn git_create_from(&self) -> GitCreateSource {
-        if self
-            .setting(&SettingKey::GitCreateFrom)
+        self.setting(&SettingKey::GitCreateFrom)
             .ok()
             .flatten()
-            .and_then(|v| v.as_str().map(str::to_owned))
-            .as_deref()
-            == Some("local")
-        {
-            GitCreateSource::Local
-        } else {
-            GitCreateSource::Origin
-        }
+            .and_then(|v| v.as_str().and_then(GitCreateSource::parse))
+            .unwrap_or_default()
     }
 
     /// The configured base directory for a *new* worktree's checkout
@@ -2478,20 +2678,11 @@ mod tests {
         // gets deleted instead of maintained.
         let max = format!("{MAX_RUN_HISTORY_DAYS} days");
         let default = format!("{DEFAULT_RUN_HISTORY_DAYS} days");
-        // The settings dialog's `max=` is the same class of copy as the prose: a literal
-        // in another language that silently disagrees once this constant moves. Its own
-        // comment claimed a test tied the two, and none did — a false claim of a gate is
-        // worse than an admitted gap, so here is the gate.
-        let dialog_max = format!("max={{{MAX_RUN_HISTORY_DAYS}}}");
         for (rel, needle) in [
             ("README.md", &max),
             ("README.md", &default),
             ("website/llms-full.txt", &max),
             ("website/llms-full.txt", &default),
-            (
-                "crates/veld-daemon/ui/src/components/SettingsDialog.tsx",
-                &dialog_max,
-            ),
         ] {
             let path = root.join(rel);
             let text = std::fs::read_to_string(&path)
@@ -2502,6 +2693,27 @@ mod tests {
                  DEFAULT_RUN_HISTORY_DAYS / MAX_RUN_HISTORY_DAYS"
             );
         }
+
+        // The dialog's half of this gate has **inverted**, and that is the point of
+        // the catalog. It used to assert `SettingsDialog.tsx` *contained*
+        // `max={7}` — a literal in another language that silently disagreed once
+        // this constant moved. The dialog now reads the bound from
+        // `GET /api/settings/catalog`, whose `runs.historyDays` range cites
+        // `MAX_RUN_HISTORY_DAYS` directly, so the two cannot disagree and there is
+        // nothing left to pin. What is worth pinning is that nobody puts it back:
+        // a hardcoded bound beside a catalog-driven control is a control that
+        // stops matching the daemon the next time the constant moves, and it would
+        // look like the old, tested arrangement while being the untested one.
+        let dialog = root.join("crates/veld-daemon/ui/src/components/SettingsDialog.tsx");
+        let text = std::fs::read_to_string(&dialog)
+            .unwrap_or_else(|e| panic!("read {}: {e}", dialog.display()));
+        let hardcoded = format!("max={{{MAX_RUN_HISTORY_DAYS}}}");
+        assert!(
+            !text.contains(&hardcoded),
+            "SettingsDialog.tsx hardcodes {hardcoded:?}. Bounds come from the \
+             settings catalog now — render `choices.max` rather than restating \
+             MAX_RUN_HISTORY_DAYS in TypeScript."
+        );
     }
 
     #[test]

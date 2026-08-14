@@ -3847,7 +3847,7 @@ web:local [2026-03-12T08:30:01.456789Z] Connected to database
 
 - `--utc` prints the stored string verbatim; `--local` forces local. Either overrides the `logs.timeZone` setting for one command, and the two cannot be combined with each other or with `--json`. `veld start --attach` has no such flags — it follows the setting, so a `veld logs` beside it shows the same clock.
 - **`--json` always emits UTC**, whatever the setting says. It is the machine-readable shape, so `timestamp` has exactly one spelling regardless of who ran the command.
-- The setting lives at **Settings → General** in the `/ide` management UI (and Veld Desktop), and defaults to `local`. The `/ide` logs view follows it, and each timestamp's tooltip carries the full date, both zones, and the exact stored value.
+- The setting lives at **Settings → General** in the `/ide` management UI (and Veld Desktop), and defaults to `local`. From a terminal it is `veld settings set logs.timeZone utc` (see [Veld Settings](#veld-settings)). The `/ide` logs view follows it, and each timestamp's tooltip carries the full date, both zones, and the exact stored value.
 - **The first-generation dashboard at `https://veld.localhost/` always shows local time** and does not read this setting — it fetches no settings at all. So with `logs.timeZone` set to `utc`, that one page still shows local. It is a frozen surface; `/ide` is where the setting applies.
 - **"Local" means each reader's own clock, not one shared clock.** The setting fixes the policy; the zone is resolved where the timestamp is rendered — from the process environment for the CLI, from the browser for `/ide`. So a `veld logs` run with an empty `TZ` prints `+00:00` (an empty `TZ` resolves to UTC) while the same daemon's `/ide` shows your machine's zone, and a browser on another machine shows that machine's. Use `--utc` when two readers must agree exactly.
 - **One hour a year, the displayed time is not monotonic.** At the DST fall-back the local clock repeats an hour, so correctly-ordered lines can render `02:59:00` then `02:01:00`. The lines are not misordered and nothing is wrong with the data — the stored UTC values are strictly increasing, which is what Veld sorts by. `veld logs` shows the offset inline (`+02:00` then `+01:00`), and in `/ide` the tooltip's offset is the tiebreak. `--utc` avoids the ambiguity entirely.
@@ -3902,6 +3902,77 @@ previewing the app you are building.
   page is. Turn search off if you would rather a mistyped query left no trace.
 
 ---
+
+## Veld Settings
+
+Everything above describes a **project's** `veld.json`. Veld also has settings of
+its own — machine-wide preferences that belong to the person, not the repo: which
+shell terminals open, where new worktrees land, whether Veld may keep this machine
+awake, which events are allowed to interrupt you.
+
+They are the settings the IDE's settings dialog edits, and they are reachable from
+a terminal:
+
+```sh
+veld settings                          # all of them: value, whether it was set, what it is
+veld settings keepAwake                # narrowed to one key prefix
+veld settings --json                   # the agent-facing form
+
+veld settings get terminal.shell
+veld settings set terminal.shell /bin/bash
+veld settings unset terminal.shell     # back to the default
+veld settings describe terminal.shell  # type, default, allowed values, and any dependency
+```
+
+**`describe` is the one to reach for first**, because two of Veld's rules make
+guessing unsafe:
+
+- **Numbers are clamped, not refused.** `veld settings set
+  keepAwake.sharingOnBatteryMinutes 900` stores `480` and says so. Without the
+  range in front of you, a wrong guess otherwise looks exactly like a success.
+- **Strings and enums are refused, not coerced** — and the refusal now carries the
+  reason (`must not put %s in the host — it belongs in the path or query`).
+
+```
+$ veld settings describe worktree.trashRetentionDays
+worktree.trashRetentionDays
+  Empty the worktree trash after
+
+  0 keeps trashed worktrees until you empty the trash yourself — the default.
+  Set a number of days and a worktree you moved to the trash is deleted for
+  good after that long. …
+
+  type      int
+  default   0
+  group     General
+  range     0–365 days
+            out-of-range values are clamped, not refused
+            0 means keep
+```
+
+### Where the descriptions come from
+
+Every setting's type, default, allowed values, title and help text live in **one
+catalog in `veld-core`**, which the daemon serves at `GET /api/settings/catalog`.
+The settings dialog renders from it and `veld settings` prints from it, so the two
+cannot describe a setting differently — and the values a dialog offers are the
+same literal the daemon's validator accepts.
+
+A consequence worth knowing when reading the CLI's output: what a surface
+**offers** is not always everything it **accepts**. `keepAwake.*Minutes` offer six
+durations and accept anything in range; `terminal.shell` offers the shells found
+on this machine and accepts any absolute path. `describe` shows both.
+
+### `veld settings` vs `veld config`
+
+Different things, and the distinction is not cosmetic:
+
+| | `veld settings` | `veld config vars` / `set` / `unset` |
+|---|---|---|
+| What it holds | Veld's own preferences | a **project's** machine-specific values, declared in its `veld.json` |
+| Who defines the keys | Veld | the repo, via `vars` with a `machine` block |
+| Scope | this machine | this machine, per project (narrowable to one worktree) |
+| Exists without a project | yes | no |
 
 ## JSON Schema
 

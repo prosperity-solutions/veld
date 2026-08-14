@@ -18,8 +18,9 @@ use std::time::{Duration, Instant};
 
 use axum::{
     Json, Router,
+    extract::Path,
     http::{HeaderMap, StatusCode},
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use serde_json::Value;
 use tracing::warn;
@@ -29,8 +30,141 @@ use super::management::{check_csrf, open_db};
 pub fn routes() -> Router {
     Router::new()
         .route("/api/settings", get(get_settings).patch(patch_settings))
+        .route("/api/settings/catalog", get(get_catalog))
+        .route("/api/settings/{key}", delete(delete_setting))
         .route("/api/shells", get(get_shells))
         .route("/api/shells/intercept", post(post_shell_intercept))
+}
+
+/// A failure with, when there is one, a sentence for the caller.
+///
+/// The rest of this daemon answers with a bare [`StatusCode`], which is right
+/// where the status *is* the whole message (403 for a missing CSRF header). It
+/// stops being right for a rejected settings write: the validator already knows
+/// why — *"must not put %s in the host"* — and a 400 with an empty body throws
+/// that away at the last hop, leaving `veld settings set` and the dialog both
+/// saying "invalid" about a value whose fault is knowable.
+///
+/// Deliberately local to this module rather than a daemon-wide error type. Every
+/// other handler here is fine as it is, and a shared type would invite the
+/// question of what to put in it for handlers with nothing to say.
+#[derive(Debug)]
+pub(crate) struct ApiError {
+    status: StatusCode,
+    message: Option<String>,
+}
+
+impl ApiError {
+    fn bad_request(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            message: Some(message.into()),
+        }
+    }
+
+    fn internal() -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: None,
+        }
+    }
+}
+
+/// So `check_csrf` and `open_db`, which answer in bare statuses, still work with
+/// `?` in a handler that returns this.
+impl From<StatusCode> for ApiError {
+    fn from(status: StatusCode) -> Self {
+        Self {
+            status,
+            message: None,
+        }
+    }
+}
+
+impl axum::response::IntoResponse for ApiError {
+    fn into_response(self) -> axum::response::Response {
+        match self.message {
+            // The `error` key is what `veld`'s own `--json` output uses for a
+            // failure, so a CLI can surface the daemon's sentence unchanged.
+            Some(message) => {
+                (self.status, Json(serde_json::json!({ "error": message }))).into_response()
+            }
+            None => self.status.into_response(),
+        }
+    }
+}
+
+/// The header a `veld` CLI uses to name the database it is reading.
+///
+/// See [`require_same_db`]. A browser never sends it, and must not have to.
+const DB_HEADER: &str = "X-Veld-Db";
+
+/// Refuse a write from a client that reads a *different* database than this
+/// daemon writes.
+///
+/// This is not hypothetical and it is not only a dev-stack concern. `veld`'s own
+/// backstop resolves a **cargo-built** binary to `.veld-dev/veld-cargo.db` so a
+/// test can never migrate the real user database — but the daemon it would reach
+/// over HTTP is whatever is listening on the port, which for a bare `cargo run`
+/// is the *installed* daemon on the *real* database. So `veld settings set`
+/// would write one database and `veld settings get` would read another: the set
+/// reports success, the get reports the old value, and the user's real
+/// preferences change with nothing pointing at why. That happened once, during
+/// this feature's own smoke test, which is why the check exists rather than a
+/// comment saying to be careful.
+///
+/// The comparison lives here because only this process knows which file it
+/// actually opened; a CLI can compute what *it* would open and nothing more.
+/// Absent header means an ordinary browser client and is allowed — the check is
+/// for callers that have a database of their own, not an authentication step.
+fn require_same_db(headers: &HeaderMap) -> Result<(), ApiError> {
+    let Some(raw) = headers.get(DB_HEADER) else {
+        // No header at all: an ordinary browser client, which cannot know a
+        // filesystem path and must not be asked to.
+        return Ok(());
+    };
+    let ours = veld_core::db::Db::default_path().map_err(|e| {
+        warn!("could not resolve this daemon's database path: {e}");
+        ApiError::internal()
+    })?;
+    // Both ends compare the **percent-encoded** form. The header is a
+    // `HeaderValue`, whose readable range is `32..=126`, while its builder
+    // accepts any byte from 32 up — so a raw path carrying one non-ASCII byte
+    // (an accented username is enough) produced a header this daemon could not
+    // decode. Read as absent, that was waved through as "a browser client", and
+    // the guard silently stopped guarding for exactly the machines it still had
+    // to protect. Encoding makes the value ASCII by construction.
+    let ours_encoded = veld_core::percent::encode_component(&ours.to_string_lossy());
+    // A header that is present but undecodable is a **mismatch**, never an
+    // absence. Unreachable once both ends encode, which is why it must refuse
+    // rather than shrug: if it is ever reached, the two ends disagree about the
+    // encoding and that is precisely when the comparison must not be skipped.
+    let Ok(theirs) = raw.to_str() else {
+        return Err(ApiError {
+            status: StatusCode::CONFLICT,
+            message: Some(format!(
+                "this daemon's settings live in {} — the caller sent a database \
+                 path this daemon cannot decode",
+                ours.display()
+            )),
+        });
+    };
+    if ours_encoded == theirs {
+        return Ok(());
+    }
+    // Decoded for the message. `theirs` is the percent-encoded form both ends
+    // compare, so echoing it raw produced
+    // "the caller is reading %2FUsers%2Fyou%2F..." — a sentence naming a path
+    // nobody typed, in the one place a human is trying to work out which two
+    // files disagree.
+    let theirs = veld_core::percent::decode_component(theirs);
+    Err(ApiError {
+        status: StatusCode::CONFLICT,
+        message: Some(format!(
+            "this daemon's settings live in {} — the caller is reading {theirs}",
+            ours.display()
+        )),
+    })
 }
 
 /// How long a probe result is reused.
@@ -221,24 +355,69 @@ async fn get_settings() -> Result<Json<Value>, StatusCode> {
 async fn patch_settings(
     headers: HeaderMap,
     Json(patch): Json<BTreeMap<String, Value>>,
-) -> Result<Json<Value>, StatusCode> {
+) -> Result<Json<Value>, ApiError> {
     check_csrf(&headers)?;
+    require_same_db(&headers)?;
     if patch.is_empty() {
         // An empty patch is a no-op that would otherwise report 200 and change
         // nothing, which is indistinguishable from success at the call site.
-        return Err(StatusCode::BAD_REQUEST);
+        return Err(ApiError::bad_request("a settings patch must name a key"));
     }
     let db = open_db()?;
     db.patch_settings(&patch).map_err(|e| match e {
         veld_core::db::DbError::InvalidSetting { .. } => {
             warn!("rejected settings patch: {e}");
-            StatusCode::BAD_REQUEST
+            // The validator's own sentence — see `DbError::InvalidSetting`. This
+            // is the only place it can reach a CLI or a dialog, and dropping it
+            // is what made a refused `browser.searchUrl` unfixable without
+            // reading the Rust.
+            ApiError::bad_request(e.to_string())
         }
         other => {
             warn!("failed to write settings: {other}");
-            StatusCode::INTERNAL_SERVER_ERROR
+            ApiError::internal()
         }
     })?;
+    Ok(Json(after_settings_write(&db)?))
+}
+
+/// Remove one setting's stored row, putting it back on its default.
+///
+/// A `DELETE` rather than a `PATCH` carrying `null`, because those are two
+/// different facts and one of them is already taken: an unknown key stores
+/// whatever JSON it is handed, `null` included, so "reset this" and "store the
+/// value null under this key" would be the same request. The method that means
+/// *remove* is the one that says so.
+async fn delete_setting(
+    headers: HeaderMap,
+    Path(key): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    check_csrf(&headers)?;
+    require_same_db(&headers)?;
+    let db = open_db()?;
+    // `Db::unset_settings` returns the rows it actually removed, and its own doc
+    // says the point is that a caller can tell "reset" from "was already on the
+    // default" without a prior read. Dropping it here is what made
+    // `veld settings unset <typo>` print a confident "cleared" and exit 0.
+    let removed = db.unset_settings(&[key]).map_err(|e| {
+        warn!("failed to unset setting: {e}");
+        ApiError::internal()
+    })?;
+    let mut body = after_settings_write(&db)?;
+    body["removed"] = serde_json::json!(removed);
+    Ok(Json(body))
+}
+
+/// The two side effects every settings write owes the rest of the daemon, plus
+/// the effective document to echo back.
+///
+/// Factored out of `patch_settings` when `DELETE` arrived rather than copied
+/// into it: both of these are *unconditional* re-reads precisely so that no
+/// caller has to know which keys it touched, and a second handler that
+/// remembered the echo but forgot the shell re-publish would be a bug nothing
+/// fails on — the wrong `PATH` shows up later, in a terminal, with no trail back
+/// to a settings write.
+fn after_settings_write(db: &veld_core::db::Db) -> Result<Value, ApiError> {
     // `terminal.shell` is read by one thing that cannot re-read it per call: the
     // login shell `veld_core::user_path` spawns to learn the user's `PATH`, which
     // lives in a crate the gateway and the CLI link too and therefore holds no
@@ -263,9 +442,22 @@ async fn patch_settings(
     // and a slider would sit at a value the daemon never accepted.
     let settings = db.settings().map_err(|e| {
         warn!("failed to re-read settings: {e}");
-        StatusCode::INTERNAL_SERVER_ERROR
+        ApiError::internal()
     })?;
-    Ok(Json(serde_json::json!({ "settings": settings })))
+    Ok(serde_json::json!({ "settings": settings }))
+}
+
+/// The catalog: what each setting is, what it may hold, and what to call it.
+///
+/// Unauthenticated and uncached like `GET /api/settings`, and it carries no user
+/// data at all — every byte of it is a compile-time constant of this binary. It
+/// is served rather than bundled so that the `/ide` client and `veld settings`
+/// describe a setting identically without either one holding a copy.
+async fn get_catalog() -> Json<Value> {
+    Json(serde_json::json!({
+        "groups": veld_core::db::catalog_groups(),
+        "settings": veld_core::db::catalog(),
+    }))
 }
 
 #[cfg(test)]
@@ -422,5 +614,275 @@ mod tests {
         );
 
         unsafe { std::env::remove_var("VELD_DB_PATH") };
+    }
+}
+
+#[cfg(test)]
+mod catalog_tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::ServiceExt;
+
+    async fn body_json(res: axum::response::Response) -> Value {
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    /// The catalog is public and complete. Public because it is the same
+    /// unauthenticated contract `GET /api/settings` already has and carries no
+    /// user data — every byte is a compile-time constant of this binary.
+    #[tokio::test]
+    async fn the_catalog_is_served_without_a_csrf_header() {
+        let res = routes()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/settings/catalog")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        let doc = body_json(res).await;
+        let groups = doc["groups"].as_array().expect("groups");
+        let settings = doc["settings"].as_array().expect("settings");
+        assert_eq!(groups.len(), veld_core::db::SettingGroup::ALL.len());
+        assert_eq!(settings.len(), veld_core::db::SettingKey::ALL.len());
+
+        // Every entry carries what a client needs to render it without knowing
+        // any key by name — the property the whole catalog exists for.
+        for entry in settings {
+            for field in [
+                "key", "title", "help", "group", "type", "default", "choices",
+            ] {
+                assert!(!entry[field].is_null(), "{} has no {field}", entry["key"]);
+            }
+            assert!(
+                !entry["choices"]["kind"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .is_empty(),
+                "{}'s choices carry no kind",
+                entry["key"]
+            );
+        }
+    }
+
+    /// Every group a setting claims is one the catalog also publishes, over the
+    /// wire rather than only in Rust. A client tabs by these ids, so a group that
+    /// exists on a setting and not in the list renders an empty tab or drops the
+    /// setting entirely.
+    #[tokio::test]
+    async fn every_settings_group_is_published() {
+        let res = routes()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/settings/catalog")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let doc = body_json(res).await;
+        let ids: Vec<String> = doc["groups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|g| g["id"].as_str().unwrap().to_string())
+            .collect();
+        for entry in doc["settings"].as_array().unwrap() {
+            let group = entry["group"].as_str().unwrap().to_string();
+            assert!(
+                ids.contains(&group),
+                "{} is in unpublished group {group}",
+                entry["key"]
+            );
+        }
+    }
+
+    /// The unset is a write, so it is gated like one. Without this a cross-site
+    /// page could reset any preference — quieter than changing it, and just as
+    /// much of a change.
+    #[tokio::test]
+    async fn the_csrf_gate_applies_to_the_delete() {
+        let res = routes()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/settings/terminal.fontSize")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    }
+
+    /// A caller reading a different database is refused, and the refusal says
+    /// which two files disagree.
+    ///
+    /// This is the guard that would have prevented the incident in
+    /// `require_same_db`'s own doc comment: a cargo-built `veld` writing the
+    /// installed daemon's real database while reading its own dev one. Asserted
+    /// on `DELETE` as well as `PATCH` because a reset is as destructive as a set
+    /// and the two handlers are separate call sites.
+    #[tokio::test]
+    async fn a_caller_reading_another_database_is_refused() {
+        for (method, uri, body) in [
+            ("PATCH", "/api/settings", r#"{"terminal.fontSize":14}"#),
+            ("DELETE", "/api/settings/terminal.fontSize", ""),
+        ] {
+            let res = routes()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .header("content-type", "application/json")
+                        .header("x-veld-request", "1")
+                        .header(DB_HEADER, "/definitely/not/this/daemons/veld.db")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                res.status(),
+                StatusCode::CONFLICT,
+                "{method} {uri} accepted a foreign database"
+            );
+            let doc = body_json(res).await;
+            let error = doc["error"].as_str().unwrap_or_default();
+            assert!(
+                error.contains("/definitely/not/this/daemons/veld.db"),
+                "the refusal must name the caller's database, got {error:?}"
+            );
+        }
+    }
+
+    /// A header the daemon cannot decode is a **mismatch**, never an absence.
+    ///
+    /// `HeaderValue::to_str` refuses any byte >= 127 (`http`'s `is_visible_ascii`),
+    /// while the CLI builds the value from a `String`, which accepts them. So a
+    /// user whose database path holds one non-ASCII byte — a non-ASCII macOS
+    /// username is enough — sent a header the daemon read as *absent* and was
+    /// waved through as "an ordinary browser client". A guard that exists because
+    /// it already cost somebody their real settings must not fail open for the
+    /// subset of users with an accent in their home directory. Both ends now
+    /// compare the percent-encoded form, so the value is ASCII by construction and
+    /// this arm is unreachable in practice — which is why it must be a refusal
+    /// rather than a shrug.
+    #[tokio::test]
+    async fn a_database_header_the_daemon_cannot_read_is_refused_not_ignored() {
+        let res = routes()
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/settings")
+                    .header("content-type", "application/json")
+                    .header("x-veld-request", "1")
+                    // Raw UTF-8, the shape the CLI used to send for
+                    // `/Users/Jos\u{e9}/Library/Application Support/veld/veld.db`.
+                    .header(
+                        DB_HEADER,
+                        axum::http::HeaderValue::from_bytes("/Users/Jos\u{e9}/veld.db".as_bytes())
+                            .unwrap(),
+                    )
+                    .body(Body::from(r#"{"terminal.fontSize":14}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            res.status(),
+            StatusCode::CONFLICT,
+            "an undecodable database header was treated as absent and the write was allowed"
+        );
+    }
+
+    /// A caller whose database path matches is accepted, and the value it sends
+    /// stays readable however the path is spelled.
+    ///
+    /// The other half of the fix. Refusing an undecodable header would have been
+    /// enough for *safety* and would have left every user with an accent in their
+    /// home directory permanently on the direct-write fallback, silently losing
+    /// the two side effects that are the entire reason a write goes through the
+    /// daemon. Encoding is what makes those machines work rather than merely fail
+    /// safely.
+    ///
+    /// Deliberately does **not** set `VELD_DB_PATH`. An earlier version did, to
+    /// force a non-ASCII path, and it raced `a_rejected_value_is_a_400` — that
+    /// test opens the database through the handler without taking `lock_db_env`,
+    /// so it saw this one's tempdir after it had been removed and reported 500
+    /// instead of 400, about one run in three. The env var is process-wide; a
+    /// test that mutates it is a test every unlocked sibling now depends on.
+    /// `veld_core::percent`'s own tests cover the non-ASCII encoding; what this
+    /// needs from the router is only that the *comparison* accepts a correctly
+    /// encoded match, which the real path proves without touching the
+    /// environment at all.
+    #[tokio::test]
+    async fn a_caller_whose_database_path_matches_is_accepted() {
+        // Removing this test's own `VELD_DB_PATH` mutation was not enough: it
+        // reads `Db::default_path()` here and `require_same_db` reads it again
+        // inside the request, across an await, while a sibling in this module
+        // sets and clears that process-wide variable. Two reads of env-derived
+        // state that must agree need the lock whether or not *this* test is the
+        // one writing. Measured: 3 failures in 12 filtered runs without it.
+        let _env = crate::feedback_server::lock_db_env();
+        let ours = veld_core::db::Db::default_path().unwrap();
+        let encoded = veld_core::percent::encode_component(&ours.to_string_lossy());
+        assert!(
+            encoded.bytes().all(|b| (32..127).contains(&b)),
+            "the encoder must produce a header a daemon can read back"
+        );
+
+        let res = routes()
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/settings")
+                    .header("content-type", "application/json")
+                    .header("x-veld-request", "1")
+                    .header(DB_HEADER, encoded)
+                    // Empty, so this asserts on the database check alone and
+                    // writes nothing: a 400 means it got *past* `require_same_db`,
+                    // which is the whole claim. A 409 would mean it did not.
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            res.status(),
+            StatusCode::BAD_REQUEST,
+            "a matching database path must be accepted, not refused with 409"
+        );
+    }
+
+    /// An absent header is an ordinary browser client and is allowed through.
+    ///
+    /// The check exists for callers that have a database of their own; making it
+    /// mandatory would break `/ide`, which is the one client that cannot possibly
+    /// know a filesystem path.
+    #[tokio::test]
+    async fn a_client_with_no_database_of_its_own_is_not_refused() {
+        let res = routes()
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/settings")
+                    .header("content-type", "application/json")
+                    .header("x-veld-request", "1")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // 400 for the empty patch — the point is that it got *past* the database
+        // check rather than being refused with a 409.
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     }
 }

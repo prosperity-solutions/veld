@@ -22,6 +22,7 @@ mod layouts;
 mod logs;
 mod panes;
 mod settings;
+mod settings_catalog;
 pub(crate) mod state;
 mod stats;
 mod var_overrides;
@@ -34,7 +35,12 @@ pub use panes::{PaneSession, mint_pane_token};
 pub use settings::{
     ConfigSource, DEFAULT_DETACH_GRACE_MINUTES, DEFAULT_KEEP_AWAKE_SHARING_ON_BATTERY_MINUTES,
     DEFAULT_KEEP_AWAKE_SHARING_ON_POWER_MINUTES, GitCreateSource, KeepAwakePrefs, LogTimeZone,
-    MAX_KEEP_AWAKE_MINUTES, MAX_RUN_HISTORY_DAYS, MIN_KEEP_AWAKE_MINUTES,
+    MAX_KEEP_AWAKE_MINUTES, MAX_RUN_HISTORY_DAYS, MIN_KEEP_AWAKE_MINUTES, SettingKey, defaults,
+    parse_search_template,
+};
+pub use settings_catalog::{
+    CatalogEntry, CatalogGroup, Choice, Choices, Requires, RuntimeSource, SettingGroup, Spec,
+    ValueShape, catalog, catalog_groups,
 };
 pub use var_overrides::{OverrideScope, VarOverride};
 pub use worktrees::{
@@ -78,8 +84,22 @@ pub enum DbError {
     #[error("{0:?} is not a usable worktree marker colour")]
     InvalidColor(String),
 
-    #[error("{value} is not a valid value for setting {key:?}")]
-    InvalidSetting { key: String, value: String },
+    /// A known setting was given a value its validator refuses.
+    ///
+    /// `reason` carries what the refusing validator already knew and used to
+    /// throw away. `browser.searchUrl` is the case that made this worth a field:
+    /// [`settings::parse_search_template`](crate::db::parse_search_template)
+    /// returns sentences like *"must not put %s in the host — it belongs in the
+    /// path or query"*, and collapsing that to "not a valid value" left the CLI
+    /// and the dialog telling a user their template was wrong without telling
+    /// them how. `None` is the honest answer for the validators that genuinely
+    /// have nothing to add (a bool that got a string).
+    #[error("{value} is not a valid value for setting {key:?}{}", reason.as_deref().map(|r| format!(" — {r}")).unwrap_or_default())]
+    InvalidSetting {
+        key: String,
+        value: String,
+        reason: Option<String>,
+    },
 
     #[error("another checkout of this repo is already called {0:?} — pick a different alias")]
     AliasTaken(String),
@@ -258,6 +278,20 @@ impl Db {
             .ok_or(DbError::NoDataDir)
     }
 
+    /// Whether this process resolves to the **installed user's** database —
+    /// `<data_dir>/veld/veld.db` — rather than to a `VELD_DB_PATH` override or a
+    /// cargo build's own [`cargo_target_db`].
+    ///
+    /// Extracted from [`Self::open`], which had this condition inline to decide
+    /// whether the one-time legacy import should run. It earned a name when a
+    /// second caller needed the same fact for a different reason: a `veld` CLI
+    /// deciding whether the daemon on the default port is *its* daemon. Both
+    /// questions are the same question — "is this the real one?" — and answering
+    /// it in two places is how they would come to disagree.
+    pub fn uses_installed_database() -> bool {
+        Self::path_override().is_none() && Self::cargo_target_db().is_none()
+    }
+
     /// Open (and migrate) the central database at the default path.
     ///
     /// On first open of the default database this also runs a one-time
@@ -274,7 +308,7 @@ impl Db {
         // Mirrors `default_path`'s precedence: only the genuine `<data_dir>`
         // database gets the import (an empty VELD_DB_PATH counts as unset there
         // too).
-        if Self::path_override().is_none() && Self::cargo_target_db().is_none() {
+        if Self::uses_installed_database() {
             db.import_legacy_files_once();
         }
         Ok(db)
@@ -1315,6 +1349,31 @@ mod tests {
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
         assert_eq!(v, MIGRATIONS.last().unwrap().version);
+    }
+
+    /// A cargo build must never claim the installed user's database — which is
+    /// what tells a CLI that the daemon on the default port is *not* its own.
+    ///
+    /// The sibling of the test below, at the level the mistake actually happened.
+    /// `default_path()` already keeps a cargo-built binary's *reads* off the real
+    /// database; it says nothing about a **write sent over HTTP**, and
+    /// `veld settings set` sends one. During #306's own smoke test a cargo-built
+    /// `veld` wrote the developer's real settings through the installed daemon
+    /// while reading `.veld-dev/veld-cargo.db`, so the set reported success and
+    /// the matching get reported the old value. `Db::uses_installed_database` is
+    /// the predicate `veld settings` consults before it will talk to a daemon at
+    /// all, and this asserts it is false for exactly the binary that must not.
+    #[test]
+    fn a_cargo_built_binary_never_claims_the_installed_database() {
+        assert!(
+            Db::cargo_target_db().is_some(),
+            "a cargo-built test binary must sit under a CACHEDIR.TAG-marked target dir"
+        );
+        assert!(
+            !Db::uses_installed_database(),
+            "a cargo build claimed the installed database — a CLI would then write \
+             the real one through the installed daemon while reading the dev one"
+        );
     }
 
     #[test]
