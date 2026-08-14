@@ -1379,6 +1379,7 @@ fn humanize_secs(seconds: i64) -> String {
     }
 }
 
+/// Check daemon status via launchctl (macOS) or socket existence.
 async fn check_daemon_status() -> String {
     // Try launchctl on macOS
     if cfg!(target_os = "macos") {

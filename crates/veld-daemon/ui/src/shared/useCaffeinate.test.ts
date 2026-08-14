@@ -21,16 +21,6 @@ describe("formatRemaining", () => {
 });
 
 /**
- * The store's own rules, exercised through the module's private surface.
- *
- * Worth pinning because this file is where two defects have already lived: an
- * ending toast that fired once per mounted component (three, after the cup, the
- * sharing note and the settings dialog all started reading this), and an
- * interval whose cleanup could never run, so the poll outlived every hold.
- * Both are transition logic, which is exactly what a component test would not
- * have caught either.
- */
-/**
  * Which deadline the countdown may be attributed to.
  *
  * Pinned because the `"both"` case shipped wrong: the sharing panel appended
@@ -72,6 +62,16 @@ describe("attributesToShares", () => {
   });
 });
 
+/**
+ * The store's own rules, exercised through the module's private surface.
+ *
+ * Worth pinning because this file is where two defects have already lived: an
+ * ending toast that fired once per mounted component (three, after the cup, the
+ * sharing note and the settings dialog all started reading this), and an
+ * interval whose cleanup could never run, so the poll outlived every hold.
+ * Both are transition logic, which is exactly what a component test would not
+ * have caught either.
+ */
 describe("the shared store's transitions", () => {
   // The real predicate, not a restatement of it: a test that re-implements the
   // rule it is checking passes happily while the implementation drifts away

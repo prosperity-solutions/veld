@@ -1139,9 +1139,10 @@ export interface CaffeinateState {
    * `expires_at()`, the *later* of the manual and automatic deadlines, so it is
    * usually the manual hold's number. Attributing that to the share is the exact
    * mis-attribution this field exists to prevent, and it shipped once already
-   * (the sharing panel, caught in review). Every consumer —
-   * `KeepAwakeButton.tsx`, `Sharing.tsx`, `veld share`, `veld doctor` — pairs
-   * this with `reason === "sharing"` for that reason.
+   * (the sharing panel, caught in review). So no consumer reads this field
+   * alone: the two UI ones go through `attributesToShares` in
+   * `shared/useCaffeinate.ts`, which is where the rule lives and is tested, and
+   * `veld share` / `veld doctor` pair it with `reason == "sharing"` in Rust.
    *
    * Also `true` for **any** number of live shares: it is derived from the latest
    * expiry across all of them, which is why the copy says "your shares" rather
