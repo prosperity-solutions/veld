@@ -600,7 +600,7 @@ legibility are not readable off a diff.
   near-duplicate `-ink` tokens to keep in step.
 - **`--info` is a new palette token.** There was no blue, so an `info` badge had
   to borrow `--live` and read as success — four tones pretending to be five.
-- **The icon allowlist grew from 32 to 63 names** and is now shared by panes and
+- **The icon allowlist grew from 32 to 80 names** and is now shared by panes and
   extensions. Rejected: allowing *any* Tabler name via a dynamic `import()`. The
   bundle must contain every icon it can render, and per-icon code-splitting buys
   ~6000 names at the cost of a fetch-and-flash on first render plus a hard

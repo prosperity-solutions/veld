@@ -3,7 +3,7 @@ import {
   IconAlertTriangle,
   IconCircleCheck,
   IconLoader,
-  IconQuestionMark,
+  IconMessageQuestion,
 } from "@tabler/icons-react";
 
 import type { RowState, RowSummary } from "./inbox";
@@ -17,7 +17,7 @@ import type { RowState, RowSummary } from "./inbox";
  *
  * # The icons are the maintainer's, hand-picked against this row
  *
- * `question-mark` (pulsing) for an agent waiting on you — it is *asking* you something,
+ * `message-question` (pulsing) for an agent waiting on you — it is *asking* you something,
  * which is what every blocked state actually is: a permission prompt, a question, a plan
  * to approve. `alert-triangle` (pulsing) for a failure, `circle-check` in the brand green
  * for something that ended well, `loader` spinning for activity.
@@ -41,7 +41,7 @@ import type { RowState, RowSummary } from "./inbox";
  * worktree marker dot at the other end of the row.
  */
 export const ICONS: Record<RowState, typeof IconCircleCheck> = {
-  attention: IconQuestionMark,
+  attention: IconMessageQuestion,
   failed: IconAlertTriangle,
   finished: IconCircleCheck,
   working: IconLoader,
