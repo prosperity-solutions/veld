@@ -251,9 +251,11 @@ impl State {
         self.reasons.prune(now);
 
         if shares.count == 0 {
-            // The episode is over. This is the only place the opt-out clears, and
-            // it is why "let this machine sleep" survives for exactly as long as
-            // the sharing it was said during.
+            // The episode is over. One of the two places an opt-out clears — the
+            // other is the cap-spent-then-plugged-in clause below, which is why
+            // that one has to check *which* opt-out it is looking at. This is
+            // the unconditional one, and it is why "let this machine sleep"
+            // survives for exactly as long as the sharing it was said during.
             self.episode = None;
             self.opted_out = None;
             self.spawn_failed = false;
