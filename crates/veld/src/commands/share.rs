@@ -25,6 +25,34 @@ fn humanize(seconds: i64) -> String {
     }
 }
 
+/// `"in 2h (14:32 local)"` — the share's own lifetime, as the receipt states it.
+///
+/// Both halves on purpose: the duration answers "did the `--ttl` I passed, or the
+/// `veld.json` my team committed, actually take" — which nothing in the default
+/// output used to answer, since two of the three sources clamp silently — and the
+/// wall-clock time answers "will this still work after lunch" without arithmetic.
+/// Local time, like the log timestamps: this is read by the person at the machine.
+fn expires_note(expires_at: i64) -> String {
+    let secs_left = expires_at - chrono::Utc::now().timestamp();
+    match chrono::DateTime::from_timestamp(expires_at, 0) {
+        Some(at) => {
+            let local = at.with_timezone(&chrono::Local).format("%H:%M");
+            // A share already past its expiry is not a thing a caller can produce
+            // any more (the mint floors every branch above zero), but a clock step
+            // between mint and this line can still get here — and "in -3m" reads
+            // as a bug in veld rather than a clock that moved.
+            if secs_left <= 0 {
+                format!("now ({local} local)")
+            } else {
+                format!("in {} ({local} local)", humanize(secs_left))
+            }
+        }
+        // `saturating_add` at the mint site can produce a timestamp `chrono`
+        // refuses; `--ttl 9223372036854775807` is the way there.
+        None => "not for a very long time".to_owned(),
+    }
+}
+
 /// One line saying whether this machine will still be up to serve the link that
 /// was just printed.
 ///
@@ -56,6 +84,18 @@ async fn keep_awake_line(client: &DaemonClient) -> Option<String> {
         let armed = state.active && (state.reason == "sharing" || state.reason == "both");
         if armed {
             let until = match state.remaining_secs {
+                // Naming *which* deadline this is, when it is the share's own —
+                // this receipt is the surface that reaches the person who just
+                // shared, so "stays awake for 1h 59m" under a 4-hour setting is
+                // read here first and misread here first.
+                //
+                // `"sharing"` only, never `"both"`: `remaining_secs` is the later
+                // of the two deadlines, so under a manual hold the number is not
+                // the share's and attributing it would be the same false claim in
+                // a new place.
+                Some(secs) if state.reason == "sharing" && state.sharing_bound_by_share => {
+                    format!("for {} — until your sharing expires", humanize(secs))
+                }
                 Some(secs) => format!("for {}", humanize(secs)),
                 None => "until you turn it off".to_owned(),
             };
@@ -230,11 +270,19 @@ pub async fn share(
                 }
                 println!();
                 println!(
-                    "  Stop:  {}",
+                    "  Stop:    {}",
                     output::dim(&format!("veld unshare {}", resp.share_id))
                 );
+                // The lifetime actually in force, which until now only `--json`
+                // carried. Three things can decide it (`--ttl`, the project's
+                // veld.json, this machine's setting) and two of them silently
+                // clamp, so "did my number take?" had no answer in the default
+                // output — and the `Awake:` line below is not it: that one only
+                // appears when keep-awake is on *and* the share is the binding
+                // deadline.
+                println!("  Expires: {}", output::dim(&expires_note(resp.expires_at)));
                 if let Some(note) = keep_awake_line(&client).await {
-                    println!("  Awake: {}", output::dim(&note));
+                    println!("  Awake:   {}", output::dim(&note));
                 }
                 if resp
                     .public_urls
@@ -272,6 +320,10 @@ pub async fn share(
                 println!(
                     "  Stop:     {}",
                     output::dim(&format!("veld unshare {}", resp.share_id))
+                );
+                println!(
+                    "  Expires:  {}",
+                    output::dim(&expires_note(resp.expires_at))
                 );
                 if let Some(note) = keep_awake_line(&client).await {
                     println!("  Awake:    {}", output::dim(&note));
@@ -725,5 +777,31 @@ mod tests {
         c.rtt_ms = None;
         let line = connection_line("sh-1", &c);
         assert!(line.contains("host: no open path"), "{line}");
+    }
+
+    #[test]
+    fn the_expiry_receipt_states_a_duration_and_a_wall_clock() {
+        // The line exists to answer "did my --ttl take", so the duration is the
+        // load-bearing half; the clock time is what saves the reader arithmetic.
+        let note = super::expires_note(chrono::Utc::now().timestamp() + 2 * 60 * 60);
+        assert!(
+            note.starts_with("in 1h 59m") || note.starts_with("in 2h"),
+            "{note}"
+        );
+        assert!(note.contains("local"), "{note}");
+    }
+
+    #[test]
+    fn an_absurd_expiry_does_not_render_as_a_negative_countdown() {
+        // `--ttl i64::MAX` saturates at the mint site, which produces a timestamp
+        // `chrono` will not represent. Neither half of this may render as a bug in
+        // veld: no panic, and no "in -3m".
+        assert_eq!(
+            super::expires_note(i64::MAX),
+            "not for a very long time",
+            "a saturated expiry must not fall through to arithmetic"
+        );
+        let past = super::expires_note(chrono::Utc::now().timestamp() - 180);
+        assert!(past.starts_with("now ("), "{past}");
     }
 }

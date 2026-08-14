@@ -1126,6 +1126,30 @@ export interface CaffeinateState {
    * reassurance for a machine that is not holding anything.
    */
   hold_failed: boolean;
+  /**
+   * Whether the automatic hold's deadline is the shares' own expiry rather than
+   * the "For at most" cap. Either can be the shorter one: with the default pair
+   * (4h peer / 2h web against a 2h mains cap) the cap binds and this is `false`,
+   * while a `--ttl`, a project's shorter override, or a raised cap makes it
+   * `true`. Copy that attributes the countdown to the cap is wrong whenever it
+   * is `true`.
+   *
+   * **Only meaningful while `reason` is `"sharing"`. Gate on that, not on this
+   * field alone.** The daemon also sends `true` under `"both"`, where it still
+   * describes the automatic deadline — but `remaining_secs` there is
+   * `expires_at()`, the *later* of the manual and automatic deadlines, so it is
+   * usually the manual hold's number. Attributing that to the share is the exact
+   * mis-attribution this field exists to prevent, and it shipped once already
+   * (the sharing panel, caught in review). So no consumer reads this field
+   * alone: the two UI ones go through `attributesToShares` in
+   * `shared/useCaffeinate.ts`, which is where the rule lives and is tested, and
+   * `veld share` / `veld doctor` pair it with `reason == "sharing"` in Rust.
+   *
+   * Also `true` for **any** number of live shares: it is derived from the latest
+   * expiry across all of them, which is why the copy says "your shares" rather
+   * than naming one.
+   */
+  sharing_bound_by_share: boolean;
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {

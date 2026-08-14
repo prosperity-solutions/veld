@@ -1594,6 +1594,27 @@ pub struct SharingConfig {
         skip_serializing_if = "is_false"
     )]
     pub dangerously_embed_relay_tokens_in_ticket: bool,
+
+    /// How long this project's share links live, per mode, in **minutes**.
+    ///
+    /// The project's answer to the same question the `sharing.peerTtlMinutes` /
+    /// `sharing.webTtlMinutes` settings answer per machine, and it **wins** over
+    /// them: a share's lifetime is a property of what is being shared — a demo
+    /// environment somebody hands round for an afternoon versus a database port —
+    /// so the repo that describes the environment is the right place to bound it,
+    /// and a checkout gets the team's answer without anybody configuring a
+    /// machine. `veld share --ttl` still overrides both, for one share.
+    ///
+    /// Absent means "unset" rather than a number, which is what keeps the
+    /// precedence honest: a project that says nothing must fall through to the
+    /// setting rather than pin the default and shadow it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_ttl_minutes: Option<i64>,
+
+    /// See [`Self::peer_ttl_minutes`]. Shorter by default, because the audience
+    /// is the open internet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_ttl_minutes: Option<i64>,
 }
 
 /// `skip_serializing_if` predicate: omit a `bool` field when it is `false`.
@@ -3343,6 +3364,7 @@ pub fn validate(config: &VeldConfig) -> Vec<Finding> {
     check_node_refs(config, &mut findings);
     check_preset_keys(config, &mut findings);
     check_reserved_namespaces(config, &mut findings);
+    check_share_ttls(config, &mut findings);
     // Total ordering, including `message`: several findings can share a
     // `location` (two bad `depends_on` entries in one variant), and `depends_on`
     // is a `HashMap`, so a partial sort would leave `veld lint --json` output
@@ -5748,6 +5770,52 @@ fn check_depends_on_literal(config: &VeldConfig, out: &mut Vec<Finding>) {
     }
 }
 
+/// Warn when `sharing.peer_ttl_minutes` / `web_ttl_minutes` is outside the
+/// accepted range and will therefore be clamped.
+///
+/// The daemon clamps these at share time, so an out-of-range value is not a load
+/// failure — but a silent clamp on **this** field is worth a warning that the
+/// other clamped numbers do not need. It decides how long a share link keeps
+/// working, `--web` publishes that link to the open internet, and the settings
+/// path already tells its caller (`veld settings set --json` reports
+/// `clamped: true`). Without this, a project author writing `480` when they meant
+/// `4800` — or the reverse — has no surface anywhere that says the value they
+/// committed is not the value in force.
+fn check_share_ttls(config: &VeldConfig, out: &mut Vec<Finding>) {
+    const RULE: &str = "share-ttl-range";
+    // The same constants the daemon clamps with, not a local copy. An earlier
+    // version of this function declared its own pair and justified them with "the
+    // schema gate keeps them honest" — which was simply false: nothing compares
+    // the schema's `minimum`/`maximum` to anything, so bumping the real bound
+    // would have left this rule reporting a limit the daemon no longer applies.
+    // `crate::db` is an ungated module of this same crate, so there was never a
+    // dependency reason either. What keeps the *third* statement (schema/v3,
+    // hand-maintained) honest is `share_ttl_bounds_match_the_schema` below.
+    use crate::db::{MAX_SHARE_TTL_MINUTES as MAX, MIN_SHARE_TTL_MINUTES as MIN};
+
+    let Some(sharing) = &config.sharing else {
+        return;
+    };
+    for (field, value) in [
+        ("peer_ttl_minutes", sharing.peer_ttl_minutes),
+        ("web_ttl_minutes", sharing.web_ttl_minutes),
+    ] {
+        if let Some(minutes) = value {
+            if !(MIN..=MAX).contains(&minutes) {
+                out.push(Finding::warning(
+                    RULE,
+                    format!("sharing.{field}"),
+                    format!(
+                        "{minutes} is outside {MIN}–{MAX} minutes; the daemon will use \
+                         {} instead",
+                        minutes.clamp(MIN, MAX)
+                    ),
+                ));
+            }
+        }
+    }
+}
+
 /// Reject syntactically invalid proxy header names/values, once and loudly.
 /// Both proxies otherwise skip invalid headers silently (the gateway) or hand
 /// them to Caddy verbatim (the local proxy), so a typo like `"X Frame Options"`
@@ -6024,6 +6092,106 @@ mod tests {
             !validate(&config)
                 .iter()
                 .any(|f| f.rule == "proxy-header-syntax")
+        );
+    }
+
+    /// The bound is stated twice — once in Rust, once in the hand-maintained
+    /// JSON Schema — and nothing else compares them.
+    ///
+    /// This test is the whole of "the schema keeps them honest". Two review angles
+    /// independently caught a comment here asserting that a gate like this already
+    /// existed when it did not; `tests/validate-schema.sh` only checks that
+    /// examples *satisfy* the schema, never that the schema's literals match the
+    /// constants the daemon enforces. Without this, widening
+    /// `MAX_SHARE_TTL_MINUTES` leaves an editor red-squiggling a value the daemon
+    /// accepts — a schema confidently reporting the wrong thing, which the
+    /// documentation checklist calls out as the specific hazard of a hand-written
+    /// schema.
+    #[test]
+    fn share_ttl_bounds_match_the_schema() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../schema/v3/veld.schema.json"
+        );
+        let schema: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).expect("the v3 schema"))
+                .expect("valid JSON");
+        let props = &schema["$defs"]["sharing"]["properties"];
+        for field in ["peer_ttl_minutes", "web_ttl_minutes"] {
+            let spec = &props[field];
+            assert!(
+                spec.is_object(),
+                "schema/v3 has no sharing.{field} — the field would be rejected by \
+                 `additionalProperties: false`"
+            );
+            assert_eq!(
+                spec["minimum"].as_i64(),
+                Some(crate::db::MIN_SHARE_TTL_MINUTES),
+                "sharing.{field} minimum disagrees with MIN_SHARE_TTL_MINUTES"
+            );
+            assert_eq!(
+                spec["maximum"].as_i64(),
+                Some(crate::db::MAX_SHARE_TTL_MINUTES),
+                "sharing.{field} maximum disagrees with MAX_SHARE_TTL_MINUTES"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_warns_when_a_share_ttl_will_be_clamped() {
+        // The clamp is silent at share time, so `veld lint` is the only surface
+        // that can tell a project author the number they committed is not the
+        // number in force.
+        let base = r#"{"schemaVersion":"3","name":"t","nodes":{"a":{"variants":{"local":{"type":"start_server"}}}}}"#;
+        let mut config: VeldConfig = serde_json::from_str(base).unwrap();
+        config.sharing = Some(SharingConfig {
+            relays: None,
+            gateway: None,
+            dangerously_embed_relay_tokens_in_ticket: false,
+            peer_ttl_minutes: Some(10_000),
+            web_ttl_minutes: Some(0),
+        });
+        let findings = validate(&config);
+        let ttl: Vec<&Finding> = findings
+            .iter()
+            .filter(|f| f.rule == "share-ttl-range")
+            .collect();
+        assert_eq!(ttl.len(), 2, "{findings:?}");
+        // A warning, not an error: the config still loads and the share still
+        // works, so this must not fail `veld lint`'s exit code.
+        assert!(ttl.iter().all(|f| f.severity == Severity::Warning));
+        // Each finding names its own field and the value that will actually apply.
+        let peer = ttl
+            .iter()
+            .find(|f| f.location == "sharing.peer_ttl_minutes")
+            .expect("a peer finding");
+        assert!(peer.message.contains("480"), "{}", peer.message);
+        let web = ttl
+            .iter()
+            .find(|f| f.location == "sharing.web_ttl_minutes")
+            .expect("a web finding");
+        assert!(web.message.contains('5'), "{}", web.message);
+
+        // In range — including the two bounds themselves — says nothing.
+        config.sharing = Some(SharingConfig {
+            relays: None,
+            gateway: None,
+            dangerously_embed_relay_tokens_in_ticket: false,
+            peer_ttl_minutes: Some(480),
+            web_ttl_minutes: Some(5),
+        });
+        assert!(
+            !validate(&config)
+                .iter()
+                .any(|f| f.rule == "share-ttl-range")
+        );
+
+        // And a config that says nothing about TTLs is not a config with bad ones.
+        config.sharing = None;
+        assert!(
+            !validate(&config)
+                .iter()
+                .any(|f| f.rule == "share-ttl-range")
         );
     }
 
@@ -9951,6 +10119,8 @@ mod tests {
             relays: Some(RelayPolicy::Public),
             gateway: None,
             dangerously_embed_relay_tokens_in_ticket: false,
+            peer_ttl_minutes: None,
+            web_ttl_minutes: None,
         };
         assert!(
             !serde_json::to_string(&off)

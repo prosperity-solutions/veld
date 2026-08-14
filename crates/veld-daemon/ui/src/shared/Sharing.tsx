@@ -28,7 +28,7 @@ import { useCopyFlash } from "./copy";
 import { QrCode } from "./QrCode";
 import { copyLinkWithQr, copyQrImage } from "./qrClipboard";
 import { notifyDone, notifyError } from "./notify";
-import { formatRemaining, useCaffeinate } from "./useCaffeinate";
+import { attributesToShares, formatRemaining, useCaffeinate } from "./useCaffeinate";
 
 /**
  * This run's shares: the peer share (at most one) and any public web shares.
@@ -741,8 +741,17 @@ function KeepAwakeNote() {
     : state.reason === "sharing" || state.reason === "both"
       ? typeof state.remaining_secs === "number"
         ? `This machine will stay awake for another ${formatRemaining(state.remaining_secs)}${
-            state.covers_lid ? "." : ", unless you shut the lid."
-          }`
+            // Whose deadline that is, when it is not the keep-awake setting's.
+            // Said here as well as on the cup because this panel is where
+            // somebody reads it as a promise about *the share*, and the number
+            // being the share's own expiry is the thing that makes "for at most
+            // 4 hours" look broken when it is not.
+            //
+            // `attributesToShares` rather than the condition written out here:
+            // this line is where the `"both"` exclusion was got wrong once, and
+            // the rule now lives in one tested place. See its doc.
+            attributesToShares(state) ? " — when the last of your shares expires" : ""
+          }${state.covers_lid ? "." : ", unless you shut the lid."}`
         : "This machine is being kept awake."
       : null;
   if (!note) return null;

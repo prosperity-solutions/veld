@@ -37,9 +37,12 @@
 //! Within an episode the deadline is
 //! `min(clock_started_at + cap_for_this_source, latest live share expiry)`. Binding
 //! it to the shares is what stops this being a second, independent timer racing the
-//! share reaper: shares already expire on their own (peer 2h, web 1h by default),
-//! so the cap is a **ceiling** that normally never binds rather than a countdown
-//! that usually fires first.
+//! share reaper: shares already expire on their own (peer 4h, web 2h by default),
+//! so the cap is a **ceiling** rather than a second countdown racing it. With the
+//! default pair the cap is the shorter of the two and therefore the one that ends
+//! the hold; a share shorter than the cap — a `--ttl`, a project override, a
+//! raised cap — puts the share's expiry in front instead, which is what
+//! `sharing_bound_by_share` reports.
 //!
 //! Reaching the cap **opts the episode out**. Without that the hold would re-arm on
 //! the next tick and the cap would be a lie; with it, "at most N minutes while
@@ -164,6 +167,21 @@ pub struct State {
     /// Consecutive inhibitors that exited on their own straight after spawning.
     /// See `reap_if_dead`.
     pub deaths: u32,
+    /// Whether the *automatic* deadline just computed is the share's own expiry
+    /// rather than the configured cap.
+    ///
+    /// `min(cap, latest share expiry)` picks a number without recording which
+    /// side of it won, and **either can be the shorter one**. With the default
+    /// pair — 4h peer / 2h web against a 2h mains cap — the *cap* binds and this
+    /// is `false`; a `--ttl`, a project's shorter `veld.json` override, or a cap
+    /// raised past the link's life puts the share's expiry in front and makes it
+    /// `true`.
+    ///
+    /// Nothing upstream of `recompute` could tell the two apart from
+    /// `Reasons::expires_at()` alone, and the UI needs to: "kept awake for the
+    /// length you set" is a different, false claim from "kept awake until the
+    /// sharing you started happens to end."
+    pub sharing_bound_by_share: bool,
 }
 
 /// How wide a hold is.
@@ -231,6 +249,7 @@ impl State {
     /// button look broken.
     pub fn manual_stop(&mut self, shares: ShareFacts) {
         self.reasons = Reasons::default();
+        self.sharing_bound_by_share = false;
         if shares.count > 0 {
             self.opted_out = Some(OptOut::UserSaidNo);
         }
@@ -261,6 +280,7 @@ impl State {
             self.spawn_failed = false;
             self.deaths = 0;
             self.reasons.sharing = None;
+            self.sharing_bound_by_share = false;
             return;
         }
 
@@ -304,6 +324,7 @@ impl State {
 
         if !enabled || self.opted_out.is_some() || self.spawn_failed {
             self.reasons.sharing = None;
+            self.sharing_bound_by_share = false;
             // The episode's clock is forgotten while the switch is off so that
             // turning it back on — or plugging in, when only the other source is
             // enabled — starts a fresh allowance rather than resuming a clock that
@@ -334,9 +355,34 @@ impl State {
             Some(share_deadline) => cap_deadline.min(share_deadline),
             None => cap_deadline,
         };
+        // Either deadline can be the shorter one — see the field doc. The default
+        // pair puts the cap in front; a shorter share (a `--ttl`, a project
+        // override, a raised cap) puts the share's own expiry there.
+        //
+        // **A material gap, not any gap.** `cap_deadline` counts from
+        // `clock_started_at`, which is set on the first tick *after* a share is
+        // minted, so a cap and a share TTL set to the same number leave the share
+        // deadline earlier by the reconcile latency alone — a second or two. That
+        // is now two clicks to arrange rather than a coincidence: the settings
+        // dialog offers 120/240/480 for both, from separate preset lists that
+        // happen to be identical. Reporting "that's your sharing ending, not this
+        // limit" about two limits the user deliberately set to the same value is
+        // technically true and useless, so a difference under a minute does not
+        // count as one deadline binding over the other.
+        self.sharing_bound_by_share = deadline + Duration::seconds(60) < cap_deadline;
 
         if now >= deadline {
             self.reasons.sharing = None;
+            // Reset beside this clear like the three above it, so `State` never
+            // describes a deadline for a reason it no longer holds.
+            //
+            // **Not what protects the wire** — `status_of` derives the reported
+            // value as `sharing_bound_by_share && reasons.sharing.is_some()`,
+            // precisely because these four resets cover only `recompute` and it is
+            // not the only writer of `reasons.sharing`. This keeps the in-memory
+            // value honest for a future reader of `State`; the guard at the point
+            // of emission is what keeps the API honest.
+            self.sharing_bound_by_share = false;
             // Only the *cap* opts the episode out. Reaching the shares' own expiry
             // means they are about to be reaped, which will end the episode and
             // clear everything anyway — recording an opt-out for it would be
@@ -525,10 +571,14 @@ mod tests {
         let mut state = State::default();
         state.recompute(t(0), &prefs(), mains(), sharing(1));
         assert_eq!(state.reasons.sharing, Some(t(120)));
+        // The cap is what ends this hold, not the share — `sharing(1)` puts the
+        // share's own expiry far out on purpose.
+        assert!(!state.sharing_bound_by_share);
 
         let mut state = State::default();
         state.recompute(t(0), &prefs(), battery(), sharing(1));
         assert_eq!(state.reasons.sharing, Some(t(30)));
+        assert!(!state.sharing_bound_by_share);
     }
 
     #[test]
@@ -542,6 +592,92 @@ mod tests {
         };
         state.recompute(t(0), &prefs(), mains(), shares);
         assert_eq!(state.reasons.sharing, Some(t(45)));
+    }
+
+    #[test]
+    fn a_share_shorter_than_the_cap_is_reported_as_the_binding_deadline() {
+        // The bug `sharing_bound_by_share` exists for: a share's own default life
+        // (4h peer, 2h web) can be shorter than the cap,
+        // so "For at most" is not what is ending the hold here — the UI needs to
+        // know that, or it claims the wrong thing.
+        let mut state = State::default();
+        let shares = ShareFacts {
+            count: 1,
+            latest_expiry: Some(t(45)),
+        };
+        state.recompute(t(0), &prefs(), mains(), shares);
+        assert_eq!(state.reasons.sharing, Some(t(45)));
+        assert!(state.sharing_bound_by_share);
+    }
+
+    #[test]
+    fn a_cap_and_a_share_set_to_the_same_length_is_not_a_bound_share() {
+        // Two clicks in one dialog: the keep-awake cap and the share TTL both
+        // offer 120/240/480. The episode clock starts on the tick *after* the
+        // share is minted, so the share deadline is a moment earlier and a bare
+        // `<` would announce the share as the binding one — true to the second,
+        // and useless to somebody who set both to two hours on purpose.
+        let mut state = State::default();
+        let shares = ShareFacts {
+            count: 1,
+            // The mains cap is 120 from `prefs()`; the episode clock starts at
+            // t(0) here, so this is the same deadline two seconds early.
+            latest_expiry: Some(t(120) - Duration::seconds(2)),
+        };
+        state.recompute(t(0), &prefs(), mains(), shares);
+        assert!(state.reasons.sharing.is_some());
+        assert!(
+            !state.sharing_bound_by_share,
+            "a sub-minute difference is reconcile latency, not a deadline winning"
+        );
+
+        // A real gap still reports.
+        let shares = ShareFacts {
+            count: 1,
+            latest_expiry: Some(t(45)),
+        };
+        let mut state = State::default();
+        state.recompute(t(0), &prefs(), mains(), shares);
+        assert!(state.sharing_bound_by_share);
+    }
+
+    #[test]
+    fn a_share_expiring_under_a_live_cap_clears_the_binding_flag() {
+        // The fourth clearing path, and the one a consumer would meet most often:
+        // between a share's own expiry and the reaper dropping it, `shares.count`
+        // is still non-zero and the cap has NOT been reached — so this returns
+        // early with `reasons.sharing` cleared, and the flag has to go with it or
+        // the API reports `sharing_bound_by_share: true` beside `reason: "none"`.
+        let mut state = State::default();
+        let shares = ShareFacts {
+            count: 1,
+            latest_expiry: Some(t(45)),
+        };
+        state.recompute(t(0), &prefs(), mains(), shares);
+        assert!(state.sharing_bound_by_share);
+
+        // t(45) is the share's expiry; the mains cap (120) is still well ahead.
+        state.recompute(t(45), &prefs(), mains(), shares);
+        assert_eq!(state.reasons.sharing, None);
+        assert!(state.opted_out.is_none(), "the share expired, not the cap");
+        assert!(
+            !state.sharing_bound_by_share,
+            "a cleared sharing reason must not leave a deadline attribution behind"
+        );
+    }
+
+    #[test]
+    fn the_last_share_ending_clears_the_binding_flag_too() {
+        let mut state = State::default();
+        let shares = ShareFacts {
+            count: 1,
+            latest_expiry: Some(t(45)),
+        };
+        state.recompute(t(0), &prefs(), mains(), shares);
+        assert!(state.sharing_bound_by_share);
+
+        state.recompute(t(5), &prefs(), mains(), none());
+        assert!(!state.sharing_bound_by_share);
     }
 
     #[test]

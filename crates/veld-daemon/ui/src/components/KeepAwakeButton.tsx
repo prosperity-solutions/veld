@@ -32,7 +32,7 @@ import { IconCoffee, IconCoffeeOff } from "@tabler/icons-react";
 
 import type { CaffeinateState, SettingsDoc } from "../api";
 import { autoWhileSharingKey } from "../shared/settings";
-import { formatRemaining, useCaffeinate } from "../shared/useCaffeinate";
+import { attributesToShares, formatRemaining, useCaffeinate } from "../shared/useCaffeinate";
 
 /**
  * The offered limits.
@@ -163,6 +163,16 @@ export function KeepAwakeButton(props: {
   // Whether a human asked for any of this. `"sharing"` alone means nobody did,
   // which changes what every string below should say.
   const automatic = state?.reason === "sharing";
+  // The countdown above is the shares' own life ending, not the "For at most"
+  // cap somebody configured. Not the default case — the default pair puts the cap
+  // in front — but it is what a `--ttl`, a project override or a raised cap
+  // produces, and there the cup would otherwise claim a number it did not
+  // compute.
+  //
+  // The shared predicate rather than the condition written out again: the other
+  // consumer wrote it out and got the `"both"` case wrong. See
+  // `attributesToShares`.
+  const boundByShare = attributesToShares(state);
   // Sharing is live and the automatic hold has had its allowance for this share.
   // Worth its own line: the cup going out mid-share is otherwise something the
   // user has to notice rather than be told.
@@ -181,8 +191,8 @@ export function KeepAwakeButton(props: {
         : "This machine may sleep — click to keep it awake"
     : automatic
       ? lidCaveat
-        ? `Keeping this machine awake while you're sharing — ${left}. A shut lid still sleeps it.`
-        : `Keeping this machine awake while you're sharing — ${left}`
+        ? `Keeping this machine awake while you're sharing — ${left}${boundByShare ? " (your sharing ending, not your keep-awake setting)" : ""}. A shut lid still sleeps it.`
+        : `Keeping this machine awake while you're sharing — ${left}${boundByShare ? " (your sharing ending, not your keep-awake setting)" : ""}`
       : lidCaveat
         ? `Keeping this machine awake — ${left}. A shut lid still sleeps it.`
         : `Keeping this machine awake — ${left}`;
@@ -213,6 +223,22 @@ export function KeepAwakeButton(props: {
             <Menu.Label>
               {automatic ? `On while you're sharing — ${left}` : `On — ${left}`}
             </Menu.Label>
+            {boundByShare && (
+              // Wrapped like `LidNote`'s: a `Menu.Label` is single-line by
+              // default and this is a sentence.
+              //
+              // Says which deadline the number above is, and stops there. It
+              // deliberately does NOT point at *Settings → Sharing*: a share's
+              // expiry is stamped when it is minted, so nothing in that dialog
+              // shortens or extends the hold this label sits under — naming it
+              // here would send somebody to a control that cannot move the number
+              // they are reading, which is a new version of the same defect.
+              // Changing the durations below, or ending the sharing, are the two
+              // things that do act on it.
+              <Menu.Label style={{ whiteSpace: "normal" }}>
+                That's your sharing ending, not this limit.
+              </Menu.Label>
+            )}
             <Menu.Item
               color="red"
               leftSection={<IconCoffeeOff size={14} />}

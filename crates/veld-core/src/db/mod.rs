@@ -34,9 +34,10 @@ pub use logs::{LogFilter, LogRow, LogStream, stream_is_per_node};
 pub use panes::{PaneSession, mint_pane_token};
 pub use settings::{
     ConfigSource, DEFAULT_DETACH_GRACE_MINUTES, DEFAULT_KEEP_AWAKE_SHARING_ON_BATTERY_MINUTES,
-    DEFAULT_KEEP_AWAKE_SHARING_ON_POWER_MINUTES, GitCreateSource, KeepAwakePrefs, LogTimeZone,
-    MAX_KEEP_AWAKE_MINUTES, MAX_RUN_HISTORY_DAYS, MIN_KEEP_AWAKE_MINUTES, SettingKey, defaults,
-    parse_search_template,
+    DEFAULT_KEEP_AWAKE_SHARING_ON_POWER_MINUTES, DEFAULT_SHARING_PEER_TTL_MINUTES,
+    DEFAULT_SHARING_WEB_TTL_MINUTES, GitCreateSource, KeepAwakePrefs, LogTimeZone,
+    MAX_KEEP_AWAKE_MINUTES, MAX_RUN_HISTORY_DAYS, MAX_SHARE_TTL_MINUTES, MIN_KEEP_AWAKE_MINUTES,
+    MIN_SHARE_TTL_MINUTES, SettingKey, defaults, parse_search_template,
 };
 pub use settings_catalog::{
     CatalogEntry, CatalogGroup, Choice, Choices, Requires, RuntimeSource, SettingGroup, Spec,

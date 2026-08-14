@@ -92,7 +92,7 @@ The same applies to anything else that reads the file as strict JSON — `veld c
 | `proxy`             | object | No       | Reverse-proxy header rules (see [Proxy](#proxy))   |
 | `env`               | object | No       | Global environment variables inherited by all nodes |
 | `vars`              | object | No       | One definition point per value, referenced as `${vars.<name>}` (see [`vars`](#vars)). A var may declare itself [machine-overridable](#machine-overridable-vars) |
-| `sharing`           | object | No       | Sharing policy: relays and public gateway (see [Sharing](#sharing)) |
+| `sharing`           | object | No       | Sharing policy: relays, public gateway, share-link lifetimes (see [Sharing](#sharing)) |
 | `setup`             | array  | No       | Lifecycle steps that run before the graph (see [Setup & Teardown]) |
 | `teardown`          | array  | No       | Lifecycle steps that run after all nodes stop (see [Setup & Teardown]) |
 | `nodes`             | object | Yes      | The dependency graph nodes                        |
@@ -1170,6 +1170,41 @@ This ships the relay secret **inside every share link** — Slack, email, browse
 
 Because a token declaration is part of a relay's endpoint identity, changing the *declaration* (e.g. switching the `env` var name) is picked up on the next share, but rotating the *underlying* secret behind an unchanged declaration takes effect only when the daemon next binds that relay — in practice, on daemon restart, since a bound endpoint is cached for the daemon's life.
 
+### `sharing.peer_ttl_minutes` / `sharing.web_ttl_minutes`
+
+How long this project's share **links** live, per audience, in minutes — `5`–`480`, clamped rather than refused. Defaults are **240** for a peer share and **120** for `--web`, web being shorter for the reason it always was: its audience is the open internet, so an idle share should die sooner.
+
+```json
+{
+  "sharing": {
+    "relays": "public",
+    "peer_ttl_minutes": 240,
+    "web_ttl_minutes": 30
+  }
+}
+```
+
+**Two deadlines govern a live share, and which one binds is worth knowing.** The automatic keep-awake's deadline is `min(cap, latest share expiry)`, where the cap is `keepAwake.sharingOnPowerMinutes` / `…OnBatteryMinutes` — a **ceiling on what Veld does to your hardware unasked**, not a second countdown.
+
+With the defaults, the **cap** is the shorter one: a 2-hour mains cap under a 4-hour peer link means Veld holds the machine awake for two hours, and the link keeps working afterwards for as long as the machine happens to be up. That is deliberate — the two answer different questions, so they are not set to the same number.
+
+The share's expiry binds instead whenever it is the shorter of the two: a `veld share --ttl`, a project that shortens these fields, or a keep-awake cap raised past the link's life. The coffee menu, the sharing panel, `veld share` and `veld doctor` all say when that is the case, because a countdown showing the *share's* deadline next to a keep-awake setting you configured yourself is otherwise indistinguishable from the setting being ignored.
+
+Three places can answer "how long", most specific first:
+
+| Where | Scope | Bounded? |
+|-------|-------|----------|
+| `veld share --ttl <seconds>` | one share | no upper bound; floored at 60s |
+| these config fields | the project, committed for the team | yes, 5–480 min |
+| `sharing.peerTtlMinutes` / `sharing.webTtlMinutes` (`veld settings`) | this machine; carries the default | yes, 5–480 min |
+
+A project that says nothing falls through to the machine setting rather than pinning the default, which is what keeps a team's answer and a personal one from silently shadowing each other. Each answer **replaces** the next rather than being `min`-ed with it, in both directions: a project asking for 480 minutes overrides a machine set to 5. The limit that bounds this is the 5–480 clamp, which applies to the project's number as much as the machine's — `min(config, setting)` was rejected because it turns a personal choice into a ceiling on every project you check out, with nothing saying why the repo's declared lifetime is not in force.
+
+Two things worth knowing before you rely on a committed value:
+
+- **Out of range is clamped, not refused.** `peer_ttl_minutes: 10000` loads and yields 480. `veld lint` warns (`share-ttl-range`) and names the value that will actually apply, which is the only surface that tells you — the daemon clamps silently at share time.
+- **A misspelled key is ignored, and fails *long*.** `sharing` has no `deny_unknown_fields`, so `web_ttl_mins` is dropped and that share falls through to the machine setting — 60 minutes rather than the shorter number you meant. `veld lint` cannot catch this one; check `veld share --json`'s `expires_at` if the value matters.
+
 ### `sharing.gateway`
 
 The public web gateway this environment registers `web` shares with (used by `veld share --web`). A bare URL string, or an object carrying the gateway's registration auth token:
@@ -1735,6 +1770,7 @@ element no shell ever sees (inert text — a mistake, but not an exposure).
 | `port-name-collision` | Two port names that collapse to one `VELD_PORT_<NAME>` (names are upper-cased and `-` becomes `_`), so map order would decide which value the process receives | **error** |
 | `ambiguous-primary-port` | Several ports and no unambiguous primary: none named `http`, or more than one marked `"protocol": "http"`. Silent when every port is explicitly `tcp` — that node legitimately has no primary | **error** |
 | `web-share-needs-http` | A `"protocol": "tcp"` port opting into the `web` audience. The gateway serves HTTP and a browser cannot speak a raw protocol through it, so the share would silently drop the port the author asked to publish | **error** |
+| `share-ttl-range` | A `sharing.peer_ttl_minutes` / `web_ttl_minutes` outside 5–480. The daemon clamps rather than refuses, so the share still works — this is the only surface that says the committed number is not the one in force, and it names the value that will apply | warn |
 | `unknown-var` | `${vars.x}` naming a var that is not declared, listing the declared names | **error** |
 | `vars-cannot-nest` | A var referencing another var | **error** |
 | `machine-var-empty-choices` | `"choices": []` on a machine var — no value could satisfy it, including the declared default | **error** |
@@ -3959,9 +3995,20 @@ cannot describe a setting differently — and the values a dialog offers are the
 same literal the daemon's validator accepts.
 
 A consequence worth knowing when reading the CLI's output: what a surface
-**offers** is not always everything it **accepts**. `keepAwake.*Minutes` offer six
-durations and accept anything in range; `terminal.shell` offers the shells found
-on this machine and accepts any absolute path. `describe` shows both.
+**offers** is not always everything it **accepts**. `keepAwake.*Minutes` and
+`sharing.*TtlMinutes` offer six durations and accept anything in range;
+`terminal.shell` offers the shells found on this machine and accepts any absolute
+path. `describe` shows both.
+
+### One setting a project can override
+
+`sharing.peerTtlMinutes` and `sharing.webTtlMinutes` — how long a share link lives
+— are the machine's *default* answer, and a project's `veld.json` overrides them
+via [`sharing.peer_ttl_minutes` / `sharing.web_ttl_minutes`](#sharingpeer_ttl_minutes--sharingweb_ttl_minutes);
+`veld share --ttl` overrides both for one share. That is deliberate rather than an
+exception to the table below: a share's useful life is a property of *what is being
+shared*, so the repo describing the environment is the right place to bound it, and
+a fresh checkout gets the team's answer without configuring a machine.
 
 ### `veld settings` vs `veld config`
 
