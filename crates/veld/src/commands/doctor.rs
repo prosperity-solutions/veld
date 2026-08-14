@@ -1316,6 +1316,7 @@ async fn check_keep_awake() -> String {
     if !state.active {
         return String::new();
     }
+    let reason_is_sharing = state.reason == "sharing";
     let why = match state.reason.as_str() {
         "sharing" => "because a share is live",
         "both" => "you asked, and a share is live",
@@ -1330,7 +1331,17 @@ async fn check_keep_awake() -> String {
     } else {
         " (a shut lid still sleeps it)"
     };
-    format!("held awake — {why}{left}{lid}")
+    // Every other row in this report that states a problem also names the thing
+    // that fixes it; this one used to be the exception, and it is the row a
+    // terminal-only user reaches while trying to *stop* the hold. There is
+    // deliberately no keep-awake subcommand to name (see `veld_core::agent`'s
+    // reasoning about config-declared behaviour), so it names the surface.
+    let how = if reason_is_sharing {
+        " — stop sharing, or turn it off in Settings → Keep awake"
+    } else {
+        " — turn it off from the cup in the top bar"
+    };
+    format!("held awake — {why}{left}{lid}{how}")
 }
 
 /// `"3h 12m"` / `"12m"` / `"under a minute"`. Mirrors `veld share`'s own.

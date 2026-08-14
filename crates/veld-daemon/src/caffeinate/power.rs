@@ -50,6 +50,15 @@ impl PowerSource {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Power {
     pub source: PowerSource,
+    /// Whether the source was actually read, as opposed to assumed.
+    ///
+    /// The state machine restarts a sharing episode's clock when the source
+    /// changes, on the reasoning that a change is a deliberate act by the person
+    /// holding the laptop. A *failed reading* is not that, and treating it as one
+    /// let a flaky `pmset` on a mains machine restart the clock on every flap —
+    /// so the cap never accumulated and the machine was held awake indefinitely
+    /// by the thing meant to bound it.
+    pub measured: bool,
     /// Whether this machine has a battery at all. `false` for a desktop, and for
     /// any machine we could not ask.
     pub has_battery: bool,
@@ -69,6 +78,7 @@ impl Power {
     const fn unknown() -> Self {
         Self {
             source: PowerSource::Battery,
+            measured: false,
             has_battery: true,
         }
     }
@@ -76,6 +86,7 @@ impl Power {
     const fn mains_only() -> Self {
         Self {
             source: PowerSource::Mains,
+            measured: true,
             has_battery: false,
         }
     }
@@ -133,11 +144,13 @@ fn parse_pmset(stdout: &str) -> Power {
         // rows at all.
         return Power {
             source: PowerSource::Battery,
+            measured: false,
             has_battery,
         };
     };
     Power {
         source,
+        measured: true,
         has_battery,
     }
 }
@@ -179,10 +192,12 @@ fn read_linux() -> Power {
         // A supply said so.
         (Some(true), _) => Power {
             source: PowerSource::Mains,
+            measured: true,
             has_battery,
         },
         (Some(false), _) => Power {
             source: PowerSource::Battery,
+            measured: true,
             has_battery,
         },
         // No mains supply and no battery: a desktop, a server, a VM. Nothing to
@@ -192,6 +207,7 @@ fn read_linux() -> Power {
         // guessing mains would be actively wrong.
         (None, true) => Power {
             source: PowerSource::Battery,
+            measured: true,
             has_battery: true,
         },
     }
@@ -209,6 +225,7 @@ mod tests {
             parse_pmset(out),
             Power {
                 source: PowerSource::Mains,
+                measured: true,
                 has_battery: true,
             }
         );
@@ -224,6 +241,7 @@ mod tests {
             parse_pmset(out),
             Power {
                 source: PowerSource::Battery,
+                measured: true,
                 has_battery: true,
             }
         );
@@ -235,6 +253,7 @@ mod tests {
             parse_pmset("Now drawing from 'AC Power'\n"),
             Power {
                 source: PowerSource::Mains,
+                measured: true,
                 has_battery: false,
             }
         );

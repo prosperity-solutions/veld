@@ -271,7 +271,10 @@ impl State {
         // change is a deliberate act by the person holding the laptop, and the cap
         // that applies afterwards is the one for the source they moved to.
         let episode = match self.episode {
-            Some(existing) if existing.power == power.source => existing,
+            // An *unmeasured* source never restarts the clock: a probe that timed
+            // out is not somebody unplugging a laptop, and treating it as one let
+            // a flaky `pmset` reset the allowance on every flap.
+            Some(existing) if existing.power == power.source || !power.measured => existing,
             _ => Episode {
                 clock_started_at: now,
                 power: power.source,
@@ -416,6 +419,7 @@ mod tests {
     fn mains() -> Power {
         Power {
             source: PowerSource::Mains,
+            measured: true,
             has_battery: true,
         }
     }
@@ -423,6 +427,17 @@ mod tests {
     fn battery() -> Power {
         Power {
             source: PowerSource::Battery,
+            measured: true,
+            has_battery: true,
+        }
+    }
+
+    /// What a timed-out `pmset` produces: reads as battery, but is not evidence
+    /// that anybody unplugged anything.
+    fn unmeasured() -> Power {
+        Power {
+            source: PowerSource::Battery,
+            measured: false,
             has_battery: true,
         }
     }
@@ -775,6 +790,20 @@ mod tests {
         // Cleared with the episode, so the next sharing tries again.
         state.recompute(t(1), &prefs(), mains(), none());
         assert!(!state.spawn_failed);
+    }
+
+    #[test]
+    fn a_failed_power_reading_does_not_restart_the_clock() {
+        // The bug this guards: a mains machine with a flaky probe flapped
+        // mains→unknown→mains, restarting the episode clock each time, so the
+        // 120-minute cap never accumulated and the hold never ended.
+        let mut state = State::default();
+        state.recompute(t(0), &prefs(), mains(), sharing(1));
+        assert_eq!(state.reasons.sharing, Some(t(120)));
+
+        state.recompute(t(10), &prefs(), unmeasured(), sharing(1));
+        // The clock still belongs to the measured mains reading that started it.
+        assert_eq!(state.episode.expect("an episode").clock_started_at, t(0));
     }
 
     #[test]

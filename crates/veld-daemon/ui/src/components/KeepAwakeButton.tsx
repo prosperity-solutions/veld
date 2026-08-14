@@ -74,6 +74,14 @@ function LidNote(props: { state: CaffeinateState | null }) {
 
   // No backticks anywhere below: a Menu.Label renders text, not markdown, so
   // they would show up as literal characters.
+  // A `lid_gap` this bundle does not know about renders nothing rather than
+  // falling through to the "covers a closed lid" reassurance below it. The Rust
+  // side's match is exhaustive and the compiler enforces it; nothing enforces
+  // the pair, so an older bundle meeting a newer daemon has to fail quiet rather
+  // than fail confident.
+  const known = new Set(["no_helper", "setting", "automatic"]);
+  if (state.lid_gap && !known.has(state.lid_gap)) return null;
+
   const note =
     state.lid_gap === "no_helper"
       ? "A closed lid on battery still sleeps — the privileged helper didn’t take the lease."
@@ -238,10 +246,16 @@ export function KeepAwakeButton(props: {
           <Switch
             size="xs"
             checked={autoWhileSharing}
+            // Both labels name their power source. Only the battery one did,
+            // which left the mains switch reading as the whole feature — so
+            // somebody who turned it off on mains, unplugged, and shared got a
+            // machine held awake by a switch they believed they had turned off.
+            // Naming both is what makes the *other* one discoverable, and
+            // Settings is where both are visible at once.
             label={
               state?.power_source === "battery"
                 ? "Do this whenever I share, on battery"
-                : "Do this whenever I share"
+                : "Do this whenever I share, on mains power"
             }
             onChange={(e) => props.onSetting({ [autoKey]: e.currentTarget.checked })}
           />

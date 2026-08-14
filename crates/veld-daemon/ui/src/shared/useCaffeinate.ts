@@ -44,6 +44,35 @@ let timer: ReturnType<typeof setInterval> | null = null;
 let onFocus: (() => void) | null = null;
 
 /**
+ * Should an ending be announced?
+ *
+ * **Any** unrequested `active → inactive`, not only a timed expiry. Gating on
+ * `expires_at` excluded the "until I turn it off" session — the overnight one,
+ * whose ending (a daemon restart from `veld update`, a crash, an inhibitor that
+ * died) is both the least expected and the most expensive to miss. The timed
+ * case, whose deadline the user already knows, was the only one being announced.
+ *
+ * The one exception is a hold **nobody asked for**: an automatic one ends every
+ * time a share stops, which is many times a day and is not news. Left in, this
+ * would pop a toast in every open window for something the user never turned on
+ * — the busiest and least informative notification in the app. The state it
+ * would be reporting is not dropped: the cup's menu says the allowance is used
+ * up, and says it persistently rather than for four seconds while somebody is
+ * looking elsewhere. `"both"` is deliberately *not* exempt: the user did press
+ * something, and its ending is news in the way an automatic one is not.
+ *
+ * Exported for the test rather than inlined, so what is asserted is this rule
+ * and not a second copy of it that can drift.
+ */
+export function announcesEnding(
+  prev: CaffeinateState | null,
+  next: CaffeinateState,
+  requested: boolean,
+): boolean {
+  return !requested && !!prev?.active && !next.active && prev.reason !== "sharing";
+}
+
+/**
  * Publish a new state, announcing an ending nobody asked for.
  *
  * `stop()` writes through `publish` with `requested` set, which is what
@@ -52,24 +81,33 @@ let onFocus: (() => void) | null = null;
 function publish(next: CaffeinateState, requested = false) {
   const prev = current;
   current = next;
-  // **Any** unrequested `active → inactive`, not only a timed expiry. Gating on
-  // `expires_at` excluded the "until I turn it off" session — the overnight one,
-  // whose ending (a daemon restart from `veld update`, a crash, an inhibitor
-  // that died) is both the least expected and the most expensive to miss. The
-  // timed case, whose deadline the user already knows, was the only one being
-  // announced.
-  //
-  // The one exception is a hold **nobody asked for**: an automatic one ends
-  // every time a share stops, which is many times a day and is not news. Left
-  // in, this would pop a toast in every open window for something the user never
-  // turned on — the busiest and least informative notification in the app. The
-  // state it would be reporting is not dropped: the cup's menu says the
-  // allowance is used up, and says it persistently rather than for four seconds
-  // while somebody is looking elsewhere.
-  if (!requested && prev?.active && !next.active && prev.reason !== "sharing") {
+  if (announcesEnding(prev, next, requested)) {
     notifyDone("Keep-awake ended — this machine can sleep again");
   }
   for (const listener of listeners) listener(next);
+  syncTimer();
+}
+
+/**
+ * Run the slow tick exactly while something is being held and something is
+ * rendering this.
+ *
+ * Centralised rather than driven from a hook effect, which is where the first
+ * version of this got it wrong: the effect's cleanup closed over the `active`
+ * it was created with — always `true`, since the effect early-returns otherwise
+ * — so the condition guarding `clearInterval` could never hold, and the interval
+ * outlived every hold for the life of the page. An idle machine has no countdown
+ * to follow, and polling it forever is exactly what the comment above promises
+ * not to do.
+ */
+function syncTimer() {
+  const wanted = mounted > 0 && (current?.active ?? false);
+  if (wanted && !timer) {
+    timer = setInterval(() => void load(), TICK_MS);
+  } else if (!wanted && timer) {
+    clearInterval(timer);
+    timer = null;
+  }
 }
 
 async function load() {
@@ -99,6 +137,7 @@ export function useCaffeinate(): UseCaffeinate {
       onFocus = () => void load();
       window.addEventListener("focus", onFocus);
     }
+    syncTimer();
     void load();
     return () => {
       listeners.delete(setState);
@@ -106,26 +145,10 @@ export function useCaffeinate(): UseCaffeinate {
       if (mounted === 0) {
         if (onFocus) window.removeEventListener("focus", onFocus);
         onFocus = null;
-        if (timer) clearInterval(timer);
-        timer = null;
       }
+      syncTimer();
     };
   }, []);
-
-  // The tick exists only while something is being held — an idle machine has no
-  // countdown to follow. Driven off the shared state, so three mounted hooks
-  // still produce one interval.
-  const active = state?.active ?? false;
-  useEffect(() => {
-    if (!active || timer) return;
-    timer = setInterval(() => void load(), TICK_MS);
-    return () => {
-      if (!active && timer) {
-        clearInterval(timer);
-        timer = null;
-      }
-    };
-  }, [active]);
 
   const start = useCallback(async (durationSecs: number | null) => {
     try {

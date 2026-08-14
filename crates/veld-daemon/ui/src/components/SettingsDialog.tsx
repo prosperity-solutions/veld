@@ -167,6 +167,22 @@ const KEEP_AWAKE_MINUTES = [
   { value: "480", label: "8 hours" },
 ];
 
+/**
+ * The offered caps, plus whatever is actually stored if it is not one of them.
+ *
+ * The daemon clamps to [5, 480] and accepts any value in that range from the
+ * API, so a stored 5 or 45 is legal and this list does not contain it — and a
+ * `NativeSelect` whose `value` matches no `<option>` renders blank and warns.
+ * Showing the real value is also the honest thing: the control must not imply
+ * the machine is set to something it is not.
+ */
+function keepAwakeOptions(minutes: number) {
+  if (KEEP_AWAKE_MINUTES.some((o) => o.value === String(minutes))) return KEEP_AWAKE_MINUTES;
+  return [...KEEP_AWAKE_MINUTES, { value: String(minutes), label: `${minutes} minutes` }].sort(
+    (a, b) => Number(a.value) - Number(b.value),
+  );
+}
+
 /** Sentinel for the "Custom…" option; not a font stack. */
 const CUSTOM_FONT = "\u0000custom";
 
@@ -1543,7 +1559,7 @@ export function SettingsDialog(props: {
                 <NativeSelect
                   size="xs"
                   w={140}
-                  data={KEEP_AWAKE_MINUTES}
+                  data={keepAwakeOptions(keepAwake.sharingOnPowerMinutes)}
                   value={String(keepAwake.sharingOnPowerMinutes)}
                   disabled={locked || !keepAwake.sharingOnPower}
                   onChange={(e) =>
@@ -1579,7 +1595,7 @@ export function SettingsDialog(props: {
                     <NativeSelect
                       size="xs"
                       w={140}
-                      data={KEEP_AWAKE_MINUTES}
+                      data={keepAwakeOptions(keepAwake.sharingOnBatteryMinutes)}
                       value={String(keepAwake.sharingOnBatteryMinutes)}
                       disabled={locked || !keepAwake.sharingOnBattery}
                       onChange={(e) =>

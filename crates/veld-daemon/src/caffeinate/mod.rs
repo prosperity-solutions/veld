@@ -594,6 +594,15 @@ async fn reap_if_dead(machine: &mut Machine) {
         },
         None => false,
     };
+    // Still running, having survived to a *later* reconcile than the one that
+    // spawned it: whatever killed the previous inhibitor was transient. Reset
+    // here rather than in `spawn_session`, where the first version of this put
+    // it — every death is followed immediately by a respawn inside the same
+    // `reconcile`, so resetting on spawn made the count alternate 1→0 and the
+    // give-up arm below unreachable, which is the whole of what it is for.
+    if !dead && machine.session.is_some() {
+        machine.state.deaths = 0;
+    }
     if dead {
         take_and_stop(&mut machine.session).await;
         // The reasons stay, so the caller re-plans and a hold whose inhibitor
@@ -716,7 +725,18 @@ async fn spawn_session(machine: &mut Machine, plan: Plan) -> Result<(), (StatusC
         battery = battery.load(Ordering::Relaxed),
         "keeping this machine awake"
     );
-    machine.state.deaths = 0;
+    // **Both** callers of this need the tick, which is why it is here as well as
+    // in `reconcile`. `post_start` applies directly and never reconciles, so a
+    // manual hold on a daemon that had never hosted a share or seen a settings
+    // write would have had nothing at all to expire it — "keep this machine
+    // awake for 15 minutes" would have held until the daemon stopped, which is
+    // the exact failure direction this module promises never to take. `Once`
+    // makes the double call free.
+    start_supervisor();
+    // It started, so whatever stopped the last attempt is over. Without this the
+    // flag outlives the failure it describes and the UI keeps reporting a
+    // machine that cannot be held awake while one is being held.
+    machine.state.spawn_failed = false;
     machine.session = Some(Session {
         child,
         stdin,
@@ -762,10 +782,12 @@ pub(crate) async fn reconcile() {
     // a blocking rusqlite handle and the power probe spawns a process; either one
     // inside the critical section would stall every status poll behind it, and
     // this module's own `get_state` already avoids exactly that shape.
-    let prefs = match load_prefs().await {
-        Some(prefs) => prefs,
-        None => return,
-    };
+    // Falling back rather than returning. Bailing here looked safe and is the
+    // opposite: nothing else prunes a deadline or stops a session, so a database
+    // that is briefly unreadable — locked, disk full, mid-`veld update` — would
+    // leave the machine held awake for as long as it stayed that way, which is
+    // the one direction this module promises never to fail in.
+    let prefs = load_prefs().await.unwrap_or_else(fallback_prefs);
     let power = current_power().await;
 
     let mut guard = ACTIVE.lock().await;
@@ -792,6 +814,25 @@ pub(crate) async fn reconcile() {
         // where a user most needs the message not to be reassuring.
         guard.state.spawn_failed = true;
         guard.state.reasons = decide::Reasons::default();
+    }
+}
+
+/// What to assume when the settings cannot be read.
+///
+/// The defaults come from the one place that defines them — an inline copy would
+/// be a fourth statement of the same numbers, and the one nothing checks.
+/// `manual_on_battery` is deliberately **false** here rather than its real
+/// default: with the database unreadable we cannot know whether the user turned
+/// it off, and guessing `true` makes `plan` want a lease, find none held, and
+/// report `no_helper` — sending somebody to `veld setup privileged` to fix a
+/// lease they themselves declined.
+fn fallback_prefs() -> KeepAwakePrefs {
+    KeepAwakePrefs {
+        sharing_on_power: true,
+        sharing_on_power_minutes: veld_core::db::DEFAULT_KEEP_AWAKE_SHARING_ON_POWER_MINUTES,
+        sharing_on_battery: true,
+        sharing_on_battery_minutes: veld_core::db::DEFAULT_KEEP_AWAKE_SHARING_ON_BATTERY_MINUTES,
+        manual_on_battery: false,
     }
 }
 
@@ -962,20 +1003,7 @@ async fn current_status() -> Json<Value> {
     // concurrent start or stop behind a read.
     let capable = battery_capable().await;
     let power = current_power().await;
-    // The defaults, from the one place that defines them — an inline copy here
-    // would be a fourth statement of the same five numbers, and the one nothing
-    // checks. `manual_on_battery` is deliberately **false** in this fallback
-    // rather than its real default: with the database unreadable we cannot know
-    // whether the user turned it off, and guessing `true` makes `plan` want a
-    // lease, find none held, and report `no_helper` — sending somebody to
-    // `veld setup privileged` to fix a lease they themselves declined.
-    let prefs = load_prefs().await.unwrap_or(KeepAwakePrefs {
-        sharing_on_power: true,
-        sharing_on_power_minutes: veld_core::db::DEFAULT_KEEP_AWAKE_SHARING_ON_POWER_MINUTES,
-        sharing_on_battery: true,
-        sharing_on_battery_minutes: veld_core::db::DEFAULT_KEEP_AWAKE_SHARING_ON_BATTERY_MINUTES,
-        manual_on_battery: false,
-    });
+    let prefs = load_prefs().await.unwrap_or_else(fallback_prefs);
     let mut guard = ACTIVE.lock().await;
     reap_if_dead(&mut guard).await;
     Json(status_of(&guard, capable, power, &prefs))
@@ -1075,6 +1103,7 @@ mod tests {
     fn mains() -> Power {
         Power {
             source: PowerSource::Mains,
+            measured: true,
             has_battery: true,
         }
     }
@@ -1252,6 +1281,7 @@ mod tests {
 
         let battery = Power {
             source: PowerSource::Battery,
+            measured: true,
             has_battery: true,
         };
         let mut machine = Machine::default();

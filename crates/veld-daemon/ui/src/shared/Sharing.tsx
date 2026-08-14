@@ -728,9 +728,15 @@ function KeepAwakeNote() {
   const { state } = useCaffeinate();
   if (!state) return null;
 
-  const note = state.hold_failed
+  // Both "may sleep" branches are gated on the machine **not** being held, the
+  // same way the cup's are. `hold_failed` and `sharing_spent` describe the
+  // automatic half and outlive it: a user who reacts to either by clicking a
+  // duration themselves is now genuinely held awake, and a panel still saying
+  // "it may sleep" is the pessimistic twin of the optimistic lie this module's
+  // docs call worse than no status at all.
+  const note = !state.active && state.hold_failed
     ? "Veld could not keep this machine awake — it may sleep and drop the share."
-    : state.sharing_spent
+    : !state.active && state.sharing_spent
     ? "This machine may sleep now — its automatic keep-awake for this share is used up."
     : state.reason === "sharing" || state.reason === "both"
       ? typeof state.remaining_secs === "number"
