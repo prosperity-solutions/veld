@@ -367,13 +367,15 @@ impl State {
 
         if now >= deadline {
             self.reasons.sharing = None;
-            // Reset beside this clear like the three above it, and for a reason
-            // this path makes sharper than they do: the share side is what
-            // usually wins the `min`, so without this the flag stays `true` from
-            // the moment a share expires until the reaper drops it — reported
-            // next to `reason: "none"`. Every consumer happens to gate on
-            // `reason` today, and relying on that is what let a stale flag
-            // become a false sentence in the sharing panel once already.
+            // Reset beside this clear like the three above it, so `State` never
+            // describes a deadline for a reason it no longer holds.
+            //
+            // **Not what protects the wire** — `status_of` derives the reported
+            // value as `sharing_bound_by_share && reasons.sharing.is_some()`,
+            // precisely because these four resets cover only `recompute` and it is
+            // not the only writer of `reasons.sharing`. This keeps the in-memory
+            // value honest for a future reader of `State`; the guard at the point
+            // of emission is what keeps the API honest.
             self.sharing_bound_by_share = false;
             // Only the *cap* opts the episode out. Reaching the shares' own expiry
             // means they are about to be reaped, which will end the episode and

@@ -5770,12 +5770,8 @@ fn check_depends_on_literal(config: &VeldConfig, out: &mut Vec<Finding>) {
     }
 }
 
-/// Reject syntactically invalid proxy header names/values, once and loudly.
-/// Both proxies otherwise skip invalid headers silently (the gateway) or hand
-/// them to Caddy verbatim (the local proxy), so a typo like `"X Frame Options"`
-/// would no-op with no diagnostic — and an unvalidated value reaching the
-/// persisted Caddy route could poison the shared config reload.
-/// `sharing.peer_ttl_minutes` / `web_ttl_minutes` outside the accepted range.
+/// Warn when `sharing.peer_ttl_minutes` / `web_ttl_minutes` is outside the
+/// accepted range and will therefore be clamped.
 ///
 /// The daemon clamps these at share time, so an out-of-range value is not a load
 /// failure — but a silent clamp on **this** field is worth a warning that the
@@ -5820,6 +5816,11 @@ fn check_share_ttls(config: &VeldConfig, out: &mut Vec<Finding>) {
     }
 }
 
+/// Reject syntactically invalid proxy header names/values, once and loudly.
+/// Both proxies otherwise skip invalid headers silently (the gateway) or hand
+/// them to Caddy verbatim (the local proxy), so a typo like `"X Frame Options"`
+/// would no-op with no diagnostic — and an unvalidated value reaching the
+/// persisted Caddy route could poison the shared config reload.
 fn check_proxy_headers(config: &VeldConfig, out: &mut Vec<Finding>) {
     const RULE: &str = "proxy-header-syntax";
 
