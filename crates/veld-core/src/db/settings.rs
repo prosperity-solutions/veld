@@ -348,6 +348,60 @@ pub const DEFAULT_RUN_HISTORY_DAYS: i64 = 3;
 /// that module fails if the two ever drift.
 pub const MAX_RUN_HISTORY_DAYS: i64 = 7;
 
+/// How often the daemon writes a copy of the database, in minutes.
+///
+/// **The floor is what makes this a preference rather than a foot-gun.** A backup
+/// is cheap because it omits the bulk tables (see
+/// [`veld_core::db::backup`](super::backup)), but it is not free: it opens a second
+/// connection, walks every remaining table and writes a file. A one-minute interval
+/// on a machine with a large registry would spend more of the daemon's time copying
+/// state than serving it, and buys a minute of freshness nobody has ever wanted. The
+/// ceiling is a day, past which "periodic" stops being true.
+pub const MIN_BACKUP_INTERVAL_MINUTES: i64 = 5;
+pub const MAX_BACKUP_INTERVAL_MINUTES: i64 = 24 * 60;
+
+/// Hourly-ish, which is the interval whose worst case is the amount of work a
+/// person will happily redo: the state this protects is *arrangement* — which repos
+/// are registered, which worktrees exist, how the lanes and panes are laid out —
+/// and an hour of that is a few minutes to recreate. Five minutes was the interval
+/// the filed issue sketched; it is available, and it is not the default, because the
+/// cost of the shorter interval is paid every hour of every day while the benefit is
+/// paid out once, if ever.
+pub const DEFAULT_BACKUP_INTERVAL_MINUTES: i64 = 60;
+
+/// How many of the most recent backups are kept.
+///
+/// One is not enough and is the trap this bound exists to refuse: the failure being
+/// protected against is a database that became unreadable, and nothing guarantees
+/// the daemon noticed before it copied it. A handful of generations is what lets
+/// somebody step back past a bad one.
+pub const MIN_BACKUP_KEEP: i64 = 2;
+pub const MAX_BACKUP_KEEP: i64 = 500;
+
+/// Twelve recent copies — half a day at the default interval, and enough
+/// generations to step back past a few bad ones.
+pub const DEFAULT_BACKUP_KEEP: i64 = 12;
+
+/// How many days keep one backup each, beyond the recent ones.
+///
+/// **Zero is off, and is deliberately inside the range** — the same shape as
+/// `worktree.trashRetentionDays`: a user turning the daily tail off must not have
+/// their zero clamped up into turning it on. A count alone bounds disk and not
+/// *time*: twelve copies at a five-minute interval is an hour of history, so a
+/// corruption noticed the next morning has nothing to restore from. One backup per
+/// day, kept for a fortnight, is what covers "I only noticed on Monday".
+pub const MIN_BACKUP_KEEP_DAILY: i64 = 0;
+pub const MAX_BACKUP_KEEP_DAILY: i64 = 365;
+
+/// A fortnight of dailies. Each is a few megabytes, so the whole tail is smaller
+/// than one screenshot-heavy feedback thread.
+pub const DEFAULT_BACKUP_KEEP_DAILY: i64 = 14;
+
+/// Longest accepted `backup.dir`. Same reasoning and same bound as
+/// [`MAX_WORKTREE_STORAGE_DIR_LEN`] — a filesystem path, generous but bounded,
+/// because the whole settings document round-trips through every client.
+const MAX_BACKUP_DIR_LEN: usize = 1024;
+
 /// How long an automatic keep-awake may hold, in minutes, per power source.
 ///
 /// These are the *caps on a hold nobody pressed a button for*, which is what makes
@@ -434,6 +488,19 @@ pub struct KeepAwakePrefs {
     pub sharing_on_battery: bool,
     pub sharing_on_battery_minutes: i64,
     pub manual_on_battery: bool,
+}
+
+/// The five `backup.*` settings as one value. See [`Db::backup_prefs`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackupPrefs {
+    pub enabled: bool,
+    pub interval_minutes: i64,
+    pub keep: i64,
+    pub keep_daily: i64,
+    /// Where artifacts are written — the configured `backup.dir` if it is an
+    /// absolute path, else the derived default. `None` only when this platform
+    /// reports no data directory at all.
+    pub dir: Option<std::path::PathBuf>,
 }
 
 /// Longest accepted `terminal.fontFamily`. A CSS font-family list that needs more
@@ -612,6 +679,11 @@ pub enum SettingKey {
     FocusModeSuppressBell,
     FocusModeSuppressToasts,
     FocusModeSuppressOsNotifications,
+    BackupEnabled,
+    BackupIntervalMinutes,
+    BackupKeep,
+    BackupKeepDaily,
+    BackupDir,
     Unknown(String),
 }
 
@@ -647,6 +719,12 @@ impl SettingKey {
         Self::UiShowProjectColumn,
         Self::UiShowProjectNews,
         Self::NewsSource,
+        // ── General › Database backups ───────────────────────────────────────
+        Self::BackupEnabled,
+        Self::BackupIntervalMinutes,
+        Self::BackupKeep,
+        Self::BackupKeepDaily,
+        Self::BackupDir,
         // ── Git ──────────────────────────────────────────────────────────────
         Self::GitCreateFrom,
         Self::WorktreeStorageMode,
@@ -760,6 +838,11 @@ impl SettingKey {
             Self::KeepAwakeManualOnBattery => "keepAwake.manualOnBattery",
             Self::SharingPeerTtlMinutes => "sharing.peerTtlMinutes",
             Self::SharingWebTtlMinutes => "sharing.webTtlMinutes",
+            Self::BackupEnabled => "backup.enabled",
+            Self::BackupIntervalMinutes => "backup.intervalMinutes",
+            Self::BackupKeep => "backup.keep",
+            Self::BackupKeepDaily => "backup.keepDaily",
+            Self::BackupDir => "backup.dir",
             Self::Unknown(k) => k,
         }
     }
@@ -816,6 +899,11 @@ impl SettingKey {
             "keepAwake.manualOnBattery" => Self::KeepAwakeManualOnBattery,
             "sharing.peerTtlMinutes" => Self::SharingPeerTtlMinutes,
             "sharing.webTtlMinutes" => Self::SharingWebTtlMinutes,
+            "backup.enabled" => Self::BackupEnabled,
+            "backup.intervalMinutes" => Self::BackupIntervalMinutes,
+            "backup.keep" => Self::BackupKeep,
+            "backup.keepDaily" => Self::BackupKeepDaily,
+            "backup.dir" => Self::BackupDir,
             other => Self::Unknown(other.to_string()),
         }
     }
@@ -922,7 +1010,67 @@ impl SettingKey {
             | Self::FocusModeSuppressOsNotifications
             | Self::KeepAwakeSharingOnPower
             | Self::KeepAwakeSharingOnBattery
-            | Self::KeepAwakeManualOnBattery => Value::from(value.as_bool().ok_or_else(bad)?),
+            | Self::KeepAwakeManualOnBattery
+            | Self::BackupEnabled => Value::from(value.as_bool().ok_or_else(bad)?),
+            // Clamped like every other duration here. The daemon acts on this one
+            // — it is the period of its own timer — so it is normalised at the
+            // store rather than trusted from the wire.
+            Self::BackupIntervalMinutes => Value::from(
+                clamp_i64(
+                    value,
+                    MIN_BACKUP_INTERVAL_MINUTES,
+                    MAX_BACKUP_INTERVAL_MINUTES,
+                )
+                .ok_or_else(bad)?,
+            ),
+            // No off switch inside the range: `backup.enabled` is the off switch,
+            // and a `keep` of zero would mean the daemon writes a backup and then
+            // immediately deletes it — work with no artifact at the end of it.
+            Self::BackupKeep => {
+                Value::from(clamp_i64(value, MIN_BACKUP_KEEP, MAX_BACKUP_KEEP).ok_or_else(bad)?)
+            }
+            // Zero *is* inside the range here, and means "no daily tail" — the same
+            // shape as `worktree.trashRetentionDays`: a user turning the tail off
+            // must not have their zero clamped up into turning it on. Unlike that
+            // key, zero is also the range's own floor, so no special case is needed.
+            Self::BackupKeepDaily => Value::from(
+                clamp_i64(value, MIN_BACKUP_KEEP_DAILY, MAX_BACKUP_KEEP_DAILY).ok_or_else(bad)?,
+            ),
+            // Same rules and same reasoning as `worktree.storageDir`: a filesystem
+            // path, so only length, control characters and `..` are refused, and
+            // empty is a real value meaning "the derived default".
+            //
+            // `..` matters more here than it does there. This directory is the one
+            // veld *deletes files from* on a timer, so a stored `../..` would have
+            // retention pruning walk somewhere the user never pointed at. Pruning
+            // refuses to delete anything that does not match veld's own artifact
+            // name pattern, which is the real guard — this is the shape being
+            // caught at the point somebody chose it.
+            Self::BackupDir => {
+                let s = value.as_str().ok_or_else(bad)?.trim();
+                if s.len() > MAX_BACKUP_DIR_LEN {
+                    return Err(because(format!(
+                        "is longer than {MAX_BACKUP_DIR_LEN} bytes"
+                    )));
+                }
+                if s.chars().any(char::is_control) {
+                    return Err(because("must not contain control characters".into()));
+                }
+                if !s.is_empty() {
+                    let p = std::path::Path::new(s);
+                    if !p.is_absolute() {
+                        return Err(because(
+                            "must be an absolute path (or empty, for the default)".into(),
+                        ));
+                    }
+                    if p.components()
+                        .any(|c| matches!(c, std::path::Component::ParentDir))
+                    {
+                        return Err(because("must not contain ..".into()));
+                    }
+                }
+                Value::from(s)
+            }
             // Clamped, not enumerated, even though the dialog offers a fixed list:
             // the cap is a duration like every other number here, and a client that
             // sends 45 should get 45 rather than a rejection it cannot act on.
@@ -1632,6 +1780,29 @@ pub fn defaults() -> BTreeMap<String, Value> {
             SettingKey::SharingWebTtlMinutes,
             Value::from(DEFAULT_SHARING_WEB_TTL_MINUTES),
         ),
+        // **On**, and this is the one default in this file that is a safety
+        // posture rather than a preference. Every other key here decides how veld
+        // behaves; this one decides whether the user's whole install survives a
+        // filesystem event. A backup that ships off is a backup nobody has on the
+        // day they need it — and the cost of it being on is a few megabytes an
+        // hour, because the artifact omits the tables that make the live file
+        // large. The switch exists for someone who has their own snapshotting and
+        // wants veld to stay out of it.
+        (SettingKey::BackupEnabled, Value::from(true)),
+        (
+            SettingKey::BackupIntervalMinutes,
+            Value::from(DEFAULT_BACKUP_INTERVAL_MINUTES),
+        ),
+        (SettingKey::BackupKeep, Value::from(DEFAULT_BACKUP_KEEP)),
+        (
+            SettingKey::BackupKeepDaily,
+            Value::from(DEFAULT_BACKUP_KEEP_DAILY),
+        ),
+        // Empty means the derived default — see `backup::default_dir`. Stored
+        // empty rather than resolved once, because the resolved path depends on
+        // the machine and a value baked into one user's database would be wrong
+        // on the next one they restore it onto.
+        (SettingKey::BackupDir, Value::from("")),
     ]
     .into_iter()
     .map(|(k, v)| (k.as_str().to_string(), v))
@@ -2035,6 +2206,60 @@ impl Db {
             .unwrap_or_default();
         let path = std::path::PathBuf::from(dir.trim());
         path.is_absolute().then_some(path)
+    }
+
+    /// The five `backup.*` settings as one value, with `backup.dir` already
+    /// resolved to a real path.
+    ///
+    /// One struct rather than five reads for the same reason [`KeepAwakePrefs`] is
+    /// one: the daemon's scheduler needs all of them on every tick, and reading
+    /// them separately is five chances for one to be read from a different pass
+    /// than the rest. Every field degrades to its default rather than failing —
+    /// a broken preference must not stop a backup, which is the one subsystem
+    /// whose whole job is to still be working when other things are not.
+    ///
+    /// `dir` is `None` only when the platform has no data directory at all, which
+    /// is the same condition [`DbError::NoDataDir`] covers for the database
+    /// itself: on such a machine there is nothing to back up either.
+    pub fn backup_prefs(&self) -> BackupPrefs {
+        let bool_of = |key: SettingKey, fallback: bool| {
+            self.setting(&key)
+                .ok()
+                .flatten()
+                .and_then(|v| v.as_bool())
+                .unwrap_or(fallback)
+        };
+        let int_of = |key: SettingKey, fallback: i64| {
+            self.setting(&key)
+                .ok()
+                .flatten()
+                .and_then(|v| v.as_i64())
+                .unwrap_or(fallback)
+        };
+        let configured = self
+            .setting(&SettingKey::BackupDir)
+            .ok()
+            .flatten()
+            .and_then(|v| v.as_str().map(str::to_owned))
+            .unwrap_or_default();
+        let configured = std::path::PathBuf::from(configured.trim());
+        BackupPrefs {
+            enabled: bool_of(SettingKey::BackupEnabled, true),
+            interval_minutes: int_of(
+                SettingKey::BackupIntervalMinutes,
+                DEFAULT_BACKUP_INTERVAL_MINUTES,
+            )
+            .clamp(MIN_BACKUP_INTERVAL_MINUTES, MAX_BACKUP_INTERVAL_MINUTES),
+            keep: int_of(SettingKey::BackupKeep, DEFAULT_BACKUP_KEEP)
+                .clamp(MIN_BACKUP_KEEP, MAX_BACKUP_KEEP),
+            keep_daily: int_of(SettingKey::BackupKeepDaily, DEFAULT_BACKUP_KEEP_DAILY)
+                .clamp(MIN_BACKUP_KEEP_DAILY, MAX_BACKUP_KEEP_DAILY),
+            dir: if configured.is_absolute() {
+                Some(configured)
+            } else {
+                super::backup::default_dir()
+            },
+        }
     }
 
     /// The global half of the exempt list: origins that must open in the system

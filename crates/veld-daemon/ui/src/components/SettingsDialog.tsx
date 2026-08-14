@@ -18,11 +18,12 @@
  *
  * - **Painting.** The tab icons (keyed off each group's stable id), the panel's
  *   scroll shape, and the blurbs that introduce a *section* rather than a row.
- * - **Five controls a description cannot produce** — the shell and font pickers,
- *   the folder picker, the origin-list editor and the search-URL field. They live
- *   in {@link OVERRIDES}, keyed by setting key, and still take their title from the
- *   catalog. Four of the five are a `Choices::Runtime`, which is exactly Rust's way
- *   of saying "the client owns this one"; see that map's own comment.
+ * - **Six controls a description cannot produce** — the shell and font pickers,
+ *   the two folder pickers, the origin-list editor and the search-URL field. They
+ *   live in {@link OVERRIDES}, keyed by setting key, and still take their title from
+ *   the catalog. Four of the six are a `Choices::Runtime`, which is exactly Rust's
+ *   way of saying "the client owns this one"; the other two are validators only the
+ *   client can run. See that map's own comment.
  * - **Hardware facts.** Whether this machine has a battery is not a preference and
  *   no daemon catalog describes it as one, so the battery rows are filtered
  *   client-side in {@link HARDWARE_GATES}.
@@ -511,9 +512,16 @@ function ChoiceControl(props: ControlProps) {
 // The controls a catalog cannot describe
 //
 // Each one is hand-written, keyed by setting key in `OVERRIDES` below, and each
-// still takes its title from the catalog. Four of the five are the keys Rust marks
-// `Choices::Runtime` — its way of saying the client owns the list — and the fifth
-// (`browser.searchUrl`) is a validator only the pane's own parser can run.
+// still takes its title from the catalog. Four of the six are the keys Rust marks
+// `Choices::Runtime` — its way of saying the client owns the list. The other two,
+// `browser.externalOrigins` and `browser.searchUrl`, are `Choices::Free` and are
+// here for a different reason: each needs a validator only the client can run.
+// (The count said "four of the five" before `backup.dir` joined, and was already
+// wrong by one then — `externalOrigins` was never Runtime either.)
+//
+// A `Choices::Runtime` key with no entry here does not fail to compile: the union is
+// exhausted by `source`, not by key, so it renders as a visible "cannot show this"
+// row instead. `backup.dir` shipped that way for one review round.
 // ---------------------------------------------------------------------------
 
 /**
@@ -532,22 +540,30 @@ const CUSTOM_SHELL = "\u0000custom-shell";
 /** Sentinel for the "Custom…" option; not a font stack. */
 const CUSTOM_FONT = "\u0000custom";
 
-/** Mirrors `MAX_WORKTREE_STORAGE_DIR_LEN` in veld-core's settings.rs. */
+/**
+ * Mirrors `MAX_WORKTREE_STORAGE_DIR_LEN` and `MAX_BACKUP_DIR_LEN` in veld-core's
+ * settings.rs — one number because both validators use the same one.
+ */
 const MAX_WORKTREE_STORAGE_DIR_LEN = 1024;
 
 /**
- * Every rule the daemon's `WorktreeStorageDir` validator enforces, mirrored
- * so a value this box would reject never round-trips through a save attempt
- * first — the daemon's 400 has no body a user would ever see. `null` means
- * empty is a real value here too (the off switch, not an error).
+ * Every rule the daemon's directory validators enforce, mirrored so a value this
+ * box would reject never round-trips through a save attempt first — the daemon's
+ * 400 has no body a user would ever see. `null` means empty is a real value here
+ * too (the off switch, not an error).
+ *
+ * Shared by `worktree.storageDir` and `backup.dir`, whose Rust validators are the
+ * same four rules. If one of them ever diverges, this splits into two — a single
+ * mirror of two different validators is worse than none, because the box that
+ * silently disagrees is the one nobody suspects.
  */
-function worktreeStorageDirError(path: string): string | null {
+function absoluteDirError(path: string): string | null {
   const v = path.trim();
   if (v === "") return null;
-  // Bytes, not JS's UTF-16 code units: the Rust validator this mirrors
-  // (`WorktreeStorageDir` in settings.rs) measures `s.len()`, which is a
-  // byte count — a path with any multi-byte character would otherwise pass
-  // this check under the limit and still get 400'd server-side.
+  // Bytes, not JS's UTF-16 code units: the Rust validators this mirrors
+  // (`WorktreeStorageDir` and `BackupDir` in settings.rs) measure `s.len()`,
+  // which is a byte count — a path with any multi-byte character would
+  // otherwise pass this check under the limit and still get 400'd server-side.
   if (new TextEncoder().encode(v).length > MAX_WORKTREE_STORAGE_DIR_LEN) {
     return `Must be ${MAX_WORKTREE_STORAGE_DIR_LEN} bytes or fewer`;
   }
@@ -580,6 +596,11 @@ interface CustomControls {
   setCustomShell: (v: boolean) => void;
   customFont: boolean;
   setCustomFont: (v: boolean) => void;
+  /**
+   * Where backups go while `backup.dir` is empty, as the daemon resolves it.
+   * `null` while the catalog is still loading, or from a daemon too old to send it.
+   */
+  backupDir: string | null;
 }
 
 interface OverrideProps extends ControlProps {
@@ -815,20 +836,42 @@ function FontRow({ entry, settings, disabled, set, custom }: OverrideProps) {
   );
 }
 
-function StorageDirRow({ entry, settings, disabled, set }: OverrideProps) {
+/**
+ * A path box with a native folder picker beside it, for a setting Rust marks
+ * `Choices::Runtime { Directory }`.
+ *
+ * Parameterised rather than copied: `backup.dir` arrived with the same
+ * `Choices::Runtime` marking and no entry in {@link OVERRIDES}, which meant it fell
+ * through to `Unsupported` and the one backup setting whose whole point is *where
+ * the copies go* rendered as "this version cannot show this setting". A second
+ * hand-written copy of this row would have been the other way to fix that, and the
+ * two would have drifted.
+ */
+function DirectoryRow({
+  entry,
+  settings,
+  disabled,
+  set,
+  purpose,
+  placeholder,
+  emptyNote,
+}: OverrideProps & {
+  purpose: "worktree-storage" | "backup-dir";
+  placeholder: string;
+  emptyNote: string;
+}) {
   const committed = asString(settingValue(settings, entry));
-  const [storageDir, setStorageDir] = useDraft(committed, settings);
+  const [dir, setDir] = useDraft(committed, settings);
   const [picking, setPicking] = useState(false);
   const [pickError, setPickError] = useState<string | null>(null);
-  // Mirrors the daemon's own validator (`worktree.storageDir` in
-  // veld-core's settings.rs) — see the blur handler below for why a
-  // client-side mirror exists at all. All three of the daemon's rules, not
-  // only the absolute-path one: a mirror that only caught the common case
-  // would still let a pasted over-long path or one carrying a tab pass here
-  // and 400 with no explanation, which is the exact failure this exists to
-  // prevent.
-  const storageDirError = worktreeStorageDirError(storageDir);
-  const storageDirBroken = storageDirError !== null;
+  // Mirrors the daemon's own validators — `WorktreeStorageDir` and `BackupDir` in
+  // veld-core's settings.rs, which enforce the same four rules — see the blur
+  // handler below for why a client-side mirror exists at all. All of the daemon's rules, not only the
+  // absolute-path one: a mirror that only caught the common case would still let a
+  // pasted over-long path or one carrying a tab pass here and 400 with no
+  // explanation, which is the exact failure this exists to prevent.
+  const dirError = absoluteDirError(dir);
+  const dirBroken = dirError !== null;
   return (
     <Row label={entry.title} help={entry.help}>
       <Stack gap={4} style={{ alignItems: "flex-end" }}>
@@ -836,27 +879,26 @@ function StorageDirRow({ entry, settings, disabled, set }: OverrideProps) {
           <TextInput
             size="xs"
             w={220}
-            value={storageDir}
+            value={dir}
             disabled={disabled}
-            placeholder="/Users/you/veld-worktrees"
+            placeholder={placeholder}
             styles={{
               input: {
                 fontFamily: "var(--mantine-font-family-monospace)",
               },
             }}
-            error={storageDirError ?? undefined}
-            onChange={(e) => setStorageDir(e.currentTarget.value)}
+            error={dirError ?? undefined}
+            onChange={(e) => setDir(e.currentTarget.value)}
             onBlur={() => {
-              const v = storageDir.trim();
+              const v = dir.trim();
               if (v === committed) return;
-              // Reuses `storageDirBroken` (computed above from this
-              // same state) rather than a second inline copy of the
-              // predicate — see the note on `searchUrl` below for
-              // why the check exists here at all: the daemon's 400
-              // has no body a user would ever see, so a rejected
-              // value would otherwise just snap back with no
+              // Reuses `dirBroken` (computed above from this same state)
+              // rather than a second inline copy of the predicate — see the
+              // note on `searchUrl` below for why the check exists here at
+              // all: the daemon's 400 has no body a user would ever see, so
+              // a rejected value would otherwise just snap back with no
               // explanation.
-              if (storageDirBroken) return;
+              if (dirBroken) return;
               set({ [entry.key]: v });
             }}
           />
@@ -869,9 +911,9 @@ function StorageDirRow({ entry, settings, disabled, set }: OverrideProps) {
               setPicking(true);
               setPickError(null);
               try {
-                const picked = await api.pickDirectory("worktree-storage");
+                const picked = await api.pickDirectory(purpose);
                 if (picked) {
-                  setStorageDir(picked);
+                  setDir(picked);
                   set({ [entry.key]: picked });
                 }
               } catch (e) {
@@ -889,14 +931,52 @@ function StorageDirRow({ entry, settings, disabled, set }: OverrideProps) {
             {pickError}
           </Text>
         )}
-        {!committed && !storageDirBroken && (
+        {!committed && !dirBroken && (
           <Text size="xs" c="dimmed">
-            No folder chosen yet — new checkouts still land next to each
-            repository until one is.
+            {emptyNote}
           </Text>
         )}
       </Stack>
     </Row>
+  );
+}
+
+function StorageDirRow(props: OverrideProps) {
+  return (
+    <DirectoryRow
+      {...props}
+      purpose="worktree-storage"
+      placeholder="/Users/you/veld-worktrees"
+      emptyNote="No folder chosen yet — new checkouts still land next to each repository until one is."
+    />
+  );
+}
+
+/**
+ * `backup.dir`, whose empty state is a real value — "the folder veld derives" —
+ * rather than an unset one.
+ *
+ * **The empty box shows the actual derived path**, greyed, because the only
+ * question this row is ever asked is *where are my backups*. It used to show an
+ * invented example (`/Volumes/backup/veld`) with a sentence underneath saying the
+ * default was in use, which read as a contradiction: a placeholder looks like the
+ * value, so the box and the note disagreed about what veld was doing. The daemon
+ * sends the resolved path with the catalog; the note now adds only the thing the
+ * path itself cannot say, which is that it shares a disk with the database.
+ */
+function BackupDirRow(props: OverrideProps) {
+  const derived = props.custom.backupDir;
+  return (
+    <DirectoryRow
+      {...props}
+      purpose="backup-dir"
+      placeholder={derived ?? "/Volumes/backup/veld"}
+      emptyNote={
+        derived
+          ? "That is the folder Veld picks, and it is on the same disk as the database it is copying. Pick another to keep the copies somewhere this machine's own storage cannot take with it."
+          : "Using the folder Veld picks beside its own data — which is on the same disk as the database it is copying."
+      }
+    />
   );
 }
 
@@ -1071,6 +1151,7 @@ const OVERRIDES: Record<string, ComponentType<OverrideProps>> = {
   "terminal.shell": ShellRow,
   "terminal.fontFamily": FontRow,
   "worktree.storageDir": StorageDirRow,
+  "backup.dir": BackupDirRow,
   "browser.externalOrigins": ExternalOriginsRow,
   "browser.searchUrl": SearchUrlRow,
 };
@@ -1120,6 +1201,8 @@ const GROUP_ICONS: Record<string, ReactNode> = {
  * otherwise split a section in two.
  */
 const SECTION_BLURBS: Record<string, string> = {
+  "Database backups":
+    "Every repository, checkout, lane, layout and setting on this page lives in one file, and nothing else on this machine has a copy of it. These decide how often Veld takes one, how many it keeps, and where they go. Copies leave out logs and resource samples, so one is a few megabytes rather than the hundreds the live file can reach. `veld backup` lists them; `veld backup restore` puts one back.",
   Notifying:
     "System notifications, and only while Veld is not the focused window — nothing interrupts you about a pane you could be looking at. The rail still marks everything either way.",
   "Focus mode":
@@ -1291,6 +1374,7 @@ export function SettingsDialog(props: {
     setCustomShell,
     customFont,
     setCustomFont,
+    backupDir: catalog?.machine?.backupDir ?? null,
   };
 
   const set = (patch: SettingsDoc) => {

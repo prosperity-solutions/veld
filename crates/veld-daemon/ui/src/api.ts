@@ -1482,7 +1482,7 @@ export const api = {
    * cannot inject anything into the native dialog's title.
    */
   pickDirectory: async (
-    purpose?: "worktree-storage",
+    purpose?: "worktree-storage" | "backup-dir",
   ): Promise<string | null> => {
     const qs = purpose ? `?purpose=${encodeURIComponent(purpose)}` : "";
     const res = await fetch(`/api/pick-directory${qs}`, {

@@ -2488,14 +2488,44 @@ pub async fn uninstall() -> Result<(), anyhow::Error> {
         // Limitation: under sudo, env_reset strips XDG_DATA_HOME, so a user
         // with a custom data home falls back to the default path here and
         // their veld data dir survives a privileged uninstall.
+        // An `XDG_DATA_HOME` that is empty or relative is treated as unset — which
+        // the XDG spec itself requires, and which matters more here than anywhere
+        // else that reads it: this path is handed to `remove_dir_all`, so a
+        // relative one would delete `veld/` and `veld-backups/` **relative to the
+        // caller's working directory** rather than in the user's data home.
         #[cfg(not(target_os = "macos"))]
         let veld_data = std::env::var("XDG_DATA_HOME")
+            .ok()
             .map(PathBuf::from)
-            .unwrap_or_else(|_| home.join(".local").join("share"))
+            .filter(|p| p.is_absolute())
+            .unwrap_or_else(|| home.join(".local").join("share"))
             .join("veld");
         if veld_data.exists() {
             if let Err(e) = std::fs::remove_dir_all(&veld_data) {
                 tracing::warn!(path = %veld_data.display(), error = %e, "failed to remove data dir");
+            }
+        }
+
+        // The default backup directory is a **sibling** of the data directory, not
+        // a child, so the removal above does not reach it — which is deliberate
+        // (`veld_core::db::backup::default_dir`: backups must outlive an `rm -rf`
+        // of Veld's own data directory). Uninstall is the one place that has to
+        // reach it anyway: an artifact carries everything `veld.db` does,
+        // including relay tokens and sensitive node outputs, and the database
+        // above is removed for exactly that reason. Leaving the copies behind
+        // would leave the secrets behind.
+        //
+        // **Only the default folder.** A `backup.dir` pointed somewhere custom is
+        // deliberately left alone: it is the user's own folder, the database that
+        // would say where it is has just been deleted, and deleting from a path read
+        // out of state veld no longer has is how an uninstall removes somebody's
+        // Documents. Everything that tells a user what uninstall removes has to say
+        // "the default backup folder" for that reason — `veld uninstall`'s warning
+        // and the README's Storage section both do.
+        let backups = veld_data.with_file_name("veld-backups");
+        if backups.exists() {
+            if let Err(e) = std::fs::remove_dir_all(&backups) {
+                tracing::warn!(path = %backups.display(), error = %e, "failed to remove backup dir");
             }
         }
     }

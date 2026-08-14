@@ -224,6 +224,46 @@ Three rules that make it worth the spend rather than theatre:
   blocks the user (and future agents) from cleaning up. This is also what makes
   the trash flow surface these files: the IDE now lists them at trash/delete
   time, so a clean tree is the happy path for everyone.
+- **Drive it yourself against a running stack, before any checkpoint and before
+  the review loop.** You do not need the maintainer to test the software for you,
+  and a review subagent cannot do this at all. See AGENTS.md → the dev-stack
+  table:
+
+  ```sh
+  veld start --preset dev-headless    # this worktree's daemon + /ide + database
+  veld-dev-<worktree> <anything>      # your build, your daemon, your database
+  veld urls                           # the /ide to open in a browser tab
+  ```
+
+  `dev-link` writes that wrapper on every start and removes it at stop, so the
+  binary is already pointed at the right instance — nothing to export per
+  command, and it cannot reach the real database. Run the actual user journey,
+  not just the unit under test: the command a person types, the row it prints,
+  the settings screen it appears on, the timer that has to fire.
+
+  **What this catches that nothing else does**: anything on a daemon timer (you
+  can watch it fire, and watch a guard correctly stop it firing); any assumption
+  that the installed instance is the only one (a hint naming `launchctl … 
+  dev.veld.daemon` is *wrong* on a dev instance and disturbs the developer's real
+  daemon — `Db::uses_installed_database()` is how you tell); and every piece of
+  rendered UI, where a placeholder and the sentence under it can contradict each
+  other while both are individually correct.
+
+  Two traps worth knowing before you start:
+
+  - **`dev` and `dev-headless` include `dev-db:fresh`, so `veld restart` empties
+    that database.** State you set up for a test is gone after a restart that
+    looked routine, and the conclusion you drew from it silently inverts — a
+    restore verified before the restart reads as failed after it. Use `dev-keep`
+    for anything stateful.
+  - **The running daemon is the binary it started with.** A Rust change is not
+    live until the stack restarts, which (see above) is also what wipes the
+    database on the `fresh` presets. Rebuild, restart, *then* re-seed state.
+
+  Do this **before** the review loop. A finding from a real run is worth more
+  than the same finding from round four, and it stops the loop reviewing a design
+  you are about to change.
+
 - If Step 0 chose a pre-review checkpoint — the default *one checkpoint, before
   review*, or the two-checkpoint variant: this is **checkpoint one**. Finish the
   whole feature (including the docs audit in Step 3), leave it building and
@@ -314,6 +354,11 @@ here:
 - **Pre-pass first** (§1.1) — `rustup update stable`, clippy, `cargo fmt --check`,
   tests, plus the UI checks when `crates/veld-daemon/ui` is touched. Red pre-pass
   → fix before spawning anything. Its output is out of scope for every subagent.
+- **Have already driven it on a real stack** (Step 2). Subagents read a diff;
+  they cannot start a daemon, watch a timer fire, or see two correct sentences
+  contradict each other on screen. Findings from a real run are cheapest before
+  the loop starts, not after four rounds have reviewed the version you then
+  change.
 - **Build the context pack once** (§1) and hand the same one to every angle:
   diff target, intent, in/out of scope paths, change shape, and the pinned
   dependency source paths (`~/.cargo/registry/src/...`).

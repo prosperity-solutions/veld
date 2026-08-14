@@ -463,6 +463,16 @@ async fn get_catalog() -> Json<Value> {
     Json(serde_json::json!({
         "groups": veld_core::db::catalog_groups(),
         "settings": veld_core::db::catalog(),
+        // Facts about *this machine* that a catalog cannot state, because they are
+        // not properties of the setting. `backup.dir`'s stored value is empty until
+        // somebody picks a folder, and "empty" is a real value meaning "the one veld
+        // derives" — so a client showing an empty box has no way to answer the only
+        // question the row is ever asked, which is *where are my backups*. Resolved
+        // here rather than in the bundle because the answer depends on the platform,
+        // on `VELD_DB_PATH`, and on whether this is a dev build.
+        "machine": {
+            "backupDir": veld_core::db::backup::default_dir(),
+        },
     }))
 }
 
@@ -638,8 +648,14 @@ mod catalog_tests {
     }
 
     /// The catalog is public and complete. Public because it is the same
-    /// unauthenticated contract `GET /api/settings` already has and carries no
-    /// user data — every byte is a compile-time constant of this binary.
+    /// unauthenticated contract `GET /api/settings` already has.
+    ///
+    /// It used to be true that *every byte is a compile-time constant of this
+    /// binary*; `machine.backupDir` is the exception, and it is a runtime path.
+    /// That is not a new class of exposure — `GET /api/settings` is gated
+    /// identically and already returns `worktree.storageDir`, an absolute path the
+    /// user chose — but the old claim would have quietly stopped being true, which
+    /// is worse than the path itself.
     #[tokio::test]
     async fn the_catalog_is_served_without_a_csrf_header() {
         let res = routes()
@@ -658,6 +674,19 @@ mod catalog_tests {
         let settings = doc["settings"].as_array().expect("settings");
         assert_eq!(groups.len(), veld_core::db::SettingGroup::ALL.len());
         assert_eq!(settings.len(), veld_core::db::SettingKey::ALL.len());
+
+        // The one runtime fact the catalog carries. `backup.dir`'s stored value is
+        // empty until somebody picks a folder, and empty is a real value meaning
+        // "the one veld derives" — so without this the settings dialog cannot
+        // answer the only question that row is ever asked, and showed an invented
+        // example path instead while a sentence beneath it said the default was in
+        // use. The two contradicted each other; a real path says one thing.
+        assert_eq!(
+            doc["machine"]["backupDir"].as_str(),
+            veld_core::db::backup::default_dir()
+                .as_deref()
+                .and_then(std::path::Path::to_str),
+        );
 
         // Every entry carries what a client needs to render it without knowing
         // any key by name — the property the whole catalog exists for.

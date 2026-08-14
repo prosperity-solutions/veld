@@ -15,6 +15,7 @@
 //! newer than this binary fails to open with [`DbError::NewerSchema`]
 //! instead of corrupting data — running environments are never touched.
 
+pub mod backup;
 pub(crate) mod feedback;
 mod import;
 mod kv;
@@ -33,11 +34,13 @@ pub use layouts::{LayoutRejected, LayoutWrite, MAX_LAYOUT_BYTES, PaneLayout};
 pub use logs::{LogFilter, LogRow, LogStream, stream_is_per_node};
 pub use panes::{PaneSession, mint_pane_token};
 pub use settings::{
-    ConfigSource, DEFAULT_DETACH_GRACE_MINUTES, DEFAULT_KEEP_AWAKE_SHARING_ON_BATTERY_MINUTES,
-    DEFAULT_KEEP_AWAKE_SHARING_ON_POWER_MINUTES, DEFAULT_SHARING_PEER_TTL_MINUTES,
-    DEFAULT_SHARING_WEB_TTL_MINUTES, GitCreateSource, KeepAwakePrefs, LogTimeZone,
-    MAX_KEEP_AWAKE_MINUTES, MAX_RUN_HISTORY_DAYS, MAX_SHARE_TTL_MINUTES, MIN_KEEP_AWAKE_MINUTES,
-    MIN_SHARE_TTL_MINUTES, SettingKey, defaults, parse_search_template,
+    BackupPrefs, ConfigSource, DEFAULT_BACKUP_INTERVAL_MINUTES, DEFAULT_BACKUP_KEEP,
+    DEFAULT_BACKUP_KEEP_DAILY, DEFAULT_DETACH_GRACE_MINUTES,
+    DEFAULT_KEEP_AWAKE_SHARING_ON_BATTERY_MINUTES, DEFAULT_KEEP_AWAKE_SHARING_ON_POWER_MINUTES,
+    DEFAULT_SHARING_PEER_TTL_MINUTES, DEFAULT_SHARING_WEB_TTL_MINUTES, GitCreateSource,
+    KeepAwakePrefs, LogTimeZone, MAX_KEEP_AWAKE_MINUTES, MAX_RUN_HISTORY_DAYS,
+    MAX_SHARE_TTL_MINUTES, MIN_KEEP_AWAKE_MINUTES, MIN_SHARE_TTL_MINUTES, SettingKey, defaults,
+    parse_search_template,
 };
 pub use settings_catalog::{
     CatalogEntry, CatalogGroup, Choice, Choices, Requires, RuntimeSource, SettingGroup, Spec,
@@ -368,6 +371,71 @@ impl Db {
         self.conn.lock().expect("veld db mutex poisoned")
     }
 
+    /// The highest schema version this binary can open — the last entry in
+    /// [`MIGRATIONS`], and the number [`DbError::NewerSchema`] reports as
+    /// `supported`.
+    ///
+    /// Public because a backup artifact has to be judged *before* it is opened:
+    /// `backup::restore` reads the candidate file's `user_version` straight out of
+    /// its header and compares it against this, so a restore that would produce an
+    /// unopenable database is refused rather than performed. Doing that after the
+    /// move would mean discovering it with the live database already replaced.
+    pub fn supported_schema_version() -> i64 {
+        MIGRATIONS.last().map(|m| m.version).unwrap_or(0)
+    }
+
+    /// Whether this database holds anything a person would miss.
+    ///
+    /// **The question a backup has to ask before it runs**, because `Db::open()`
+    /// creates and migrates: on a machine whose `veld.db` was deleted, an empty one
+    /// is minted within seconds by whichever daemon task opens it next, and backing
+    /// *that* up produces an artifact that passes every check, wins the restore
+    /// pick, and turns the `veld doctor` row green — the exact second failure of the
+    /// incident the backup feature was built for.
+    ///
+    /// **Asked of every table rather than of a chosen few**, which is the part that
+    /// was got wrong first. Naming `projects` and `repos` looked precise and refused
+    /// real users: `projects` is derived from run rows and the GC deletes ended runs
+    /// after seven days, while `repos` is only ever written by the Desktop worktree
+    /// registry — so a CLI-only user who had not started a run for a week had
+    /// neither, while their settings, relay tokens, lanes and pane layouts were all
+    /// still there. The incident's own loss was settings rows.
+    ///
+    /// `kv` and the bulk tables are excluded: `kv` is where veld keeps its own
+    /// bookkeeping (a first-use stamp, a GC timestamp) and is non-empty on a
+    /// database nobody has touched, and the bulk tables are excluded from backups
+    /// anyway, so a machine holding nothing but log lines has nothing to restore.
+    ///
+    /// Short-circuits on the first non-empty table, so the common answer costs one
+    /// `EXISTS` query.
+    pub fn holds_user_state(&self) -> Result<bool, DbError> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+        )?;
+        let names: Vec<String> = stmt
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<Result<_, _>>()?;
+        drop(stmt);
+        for name in names {
+            if name == "kv" || backup::EXCLUDED_TABLES.contains(&name.as_str()) {
+                continue;
+            }
+            let any: bool = conn.query_row(
+                &format!(
+                    "SELECT EXISTS(SELECT 1 FROM \"{}\")",
+                    name.replace('"', "\"\"")
+                ),
+                [],
+                |r| r.get(0),
+            )?;
+            if any {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// The current schema version (`PRAGMA user_version`). For diagnostics.
     pub fn schema_version(&self) -> Result<i64, DbError> {
         let conn = self.lock();
@@ -462,6 +530,13 @@ impl Db {
 /// only to fresh databases and every upgraded user would be missing it
 /// (e.g. "no such column" at runtime). Schema changes are always a NEW
 /// migration appended to `MIGRATIONS`.
+/// A new table added here is **backed up automatically**: [`backup`] enumerates
+/// tables from `sqlite_master` minus a denylist, so nothing has to be remembered
+/// for the common case. The one case that does need a thought is a *high-volume*
+/// table — logs, samples, blobs — which belongs in
+/// [`backup::EXCLUDED_TABLES`](backup::EXCLUDED_TABLES) or every backup starts
+/// carrying it. Written here because this is where somebody adding one is
+/// looking.
 struct Migration {
     version: i64,
     name: &'static str,

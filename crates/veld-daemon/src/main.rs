@@ -1,3 +1,4 @@
+mod backup;
 mod broadcaster;
 mod feedback_server;
 mod gc;
@@ -252,6 +253,13 @@ async fn main() -> Result<()> {
         gc::run_gc_scheduler(gc_manager).await;
     });
 
+    // Copies of the central database, on the user's interval. Its own task rather
+    // than a step inside the GC pass: the GC runs every 10 minutes and this is
+    // configurable down to 5, and the two failure modes are unrelated — a backup
+    // must keep happening on a machine where route cleanup is failing, and vice
+    // versa.
+    let backup_handle = tokio::spawn(backup::run_backup_scheduler());
+
     // Which shell that resolution — and every terminal — uses. Published from
     // here because `veld_core::user_path` is linked into the gateway and the CLI
     // too, neither of which has a database to read a setting from; a failure to
@@ -342,6 +350,7 @@ async fn main() -> Result<()> {
     // Abort background tasks.
     monitor_handle.abort();
     gc_handle.abort();
+    backup_handle.abort();
     stats_handle.abort();
     dashboard_ports_handle.abort();
     user_path_handle.abort();

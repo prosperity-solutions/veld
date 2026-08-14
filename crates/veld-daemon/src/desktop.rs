@@ -257,6 +257,7 @@ struct PickDirectoryQuery {
 fn pick_directory_prompt(purpose: Option<&str>) -> &'static str {
     match purpose {
         Some("worktree-storage") => "Choose a folder for worktree checkouts",
+        Some("backup-dir") => "Choose a folder for Veld's database backups",
         _ => "Choose a git repository",
     }
 }

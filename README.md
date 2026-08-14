@@ -200,6 +200,9 @@ veld stop --name dev
 | `veld settings set <key> <value> [--json]` | Change one setting. Values are written bare (`true`, `60`, `/bin/bash`); a list takes JSON or commas. A number outside its range is **clamped rather than refused**, and the clamp is reported |
 | `veld settings unset <key> [--json]` | Put one setting back on its default |
 | `veld settings describe <key> [--json]` | What a setting does, its type, its default, and every value it accepts — including whether an out-of-range number will be clamped |
+| `veld backup [--dir D] [--json]` | Every copy of Veld's database: when it was taken, its schema version, its size, and whether it can actually be restored. Works when the database itself will not open |
+| `veld backup now [--dir D] [--json]` | Take a copy immediately, outside the daemon's schedule. Retention still applies |
+| `veld backup restore [PATH] [--dir D] [--force] [-y] [--json]` | Put a copy back. With no `PATH`, the newest **usable** one — not simply the newest file. The database being replaced is renamed, never deleted. Refuses while the daemon is running unless `--force` |
 | `veld init` | Create a new veld.json (veld also reads veld.jsonc) |
 
 ## Configuration
@@ -398,6 +401,43 @@ On Linux systemd captures unit output itself: `journalctl --user -u veld-daemon`
 ### Storage
 
 All CLI/daemon state — run state, the project registry, service logs, per-node and per-process resource samples, feedback threads and screenshots, relay auth tokens, the desktop worktree registry, and the IDE's pane layouts — lives in one SQLite database at `<data_dir>/veld/veld.db` (macOS: `~/Library/Application Support/veld/veld.db`; Linux: `~/.local/share/veld/veld.db`; override with `VELD_DB_PATH`). The file is `0600` (it holds secrets) and runs in WAL mode, so the CLI, daemon, and detached log writers read and write concurrently without file locking. The schema is versioned (`PRAGMA user_version`) and migrates forward automatically on upgrade — a CLI update never orphans or stops running environments because the data shape changed. A database created by a *newer* veld is refused with an error instead of being modified.
+
+#### Backups
+
+Because all of that is one file, the daemon keeps copies of it. Every
+`backup.intervalMinutes` (60 by default) it writes a compact copy into
+`<data_dir>/veld-backups/` — a **sibling** of the data directory rather than a
+child, so an `rm -rf` of Veld's own folder does not take the copies with it. Point
+`backup.dir` at an external drive or a synced folder if you want them off this
+disk; no local default survives the disk itself failing.
+
+A copy is a real `veld.db`, so restoring is a file move and not an import. It omits
+the tables that make the live file large — log lines, resource samples, feedback
+screenshots, all of which the housekeeping pass already prunes on an age horizon —
+which is why a copy is typically a few megabytes against a live file that can reach
+hundreds. Retention keeps `backup.keep` recent copies plus one per day for
+`backup.keepDaily` days. It only ever deletes files Veld wrote itself and never
+touches the folder's own permissions, so the folder is safe to share — and it
+never deletes a copy it cannot read, because a backup with a damaged header may
+still be recoverable and is exactly the file worth keeping.
+
+```sh
+veld backup                     # what is there, and which copies are actually usable
+veld backup now                 # take one right now
+veld backup restore             # put the newest restorable one back
+veld settings backup            # the five settings, with their bounds
+```
+
+`veld doctor` reports the newest usable copy and its age alongside its database
+check, and names `veld backup restore` when the database will not open — which is
+the state the whole thing exists for. The database being replaced is renamed, never
+deleted: it is the only evidence of what went wrong.
+
+Two things worth knowing about the copies themselves. Each carries everything the
+database does, **including your relay tokens** — Veld writes one readable only by
+you, which a FAT-formatted drive or a network share cannot honour, and says so when
+that happens. And `veld uninstall` removes the *default* backup folder for that same
+reason; a `backup.dir` you pointed somewhere else is your folder and is left alone.
 
 ## Extensions
 
