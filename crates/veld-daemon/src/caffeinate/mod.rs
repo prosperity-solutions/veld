@@ -221,10 +221,12 @@ struct Session {
     /// clearing it before releasing is what stops a renewal landing after the
     /// release and re-arming a lease nobody wants.
     battery: Arc<AtomicBool>,
-    /// Whether a lease was *wanted*. Distinct from whether one is held: the
-    /// status has to tell "veld never asked" from "veld asked and could not get
-    /// it", because only the second is a fault the user can act on.
+    /// Whether a lease was *wanted*, which is what decides whether this session
+    /// has to be respawned when the plan changes its mind about one.
     wanted_lease: bool,
+    /// Whether this session's coverage **depends** on that lease. Only this one
+    /// makes a missing lease a fault worth reporting. See `decide::Plan`.
+    lease_required: bool,
     /// The privileged helper this session's lease lives on, and the task
     /// renewing it. Both `None` when there is no privileged half.
     helper: Option<HelperClient>,
@@ -756,6 +758,7 @@ async fn spawn_session(machine: &mut Machine, plan: Plan) -> Result<(), (StatusC
         coverage: plan.coverage,
         battery,
         wanted_lease: plan.want_lease,
+        lease_required: plan.lease_required,
         helper,
         renew,
     });
@@ -1026,7 +1029,7 @@ fn status_of(
     // failing stops being claimed rather than leaving a promise nothing is keeping.
     let live = session.map(|s| decide::LiveHold {
         coverage: s.coverage,
-        wanted_lease: s.wanted_lease,
+        lease_required: s.lease_required,
         lease_held: s.battery.load(Ordering::Relaxed),
     });
     let lease_held = live.is_some_and(|l| l.lease_held);

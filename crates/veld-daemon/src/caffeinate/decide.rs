@@ -198,8 +198,18 @@ pub enum LidGap {
 pub struct Plan {
     pub coverage: Coverage,
     /// Whether to hold the privileged `pmset disablesleep` lease. Only ever true
-    /// for a hold a human asked for, on battery, on macOS, with the setting on.
+    /// for a hold a human asked for, on macOS, with the setting on.
     pub want_lease: bool,
+    /// Whether the coverage claimed above **depends** on that lease.
+    ///
+    /// Not the same question as wanting one, and conflating them reports a fault
+    /// on the commonest Mac there is. On mains the lease is taken *early* — the
+    /// source is learned on a tick and a lid slam is not — but `caffeinate -s`
+    /// is what actually covers the lid there, so failing to get the lease costs
+    /// nothing and must not be announced. On battery the lease is the only thing
+    /// that covers a shut lid, so failing to get it is exactly the fault the
+    /// user needs to know about before they close the laptop.
+    pub lease_required: bool,
     /// `None` when the lid is covered; otherwise why it is not.
     pub lid_gap: Option<LidGap>,
 }
@@ -365,6 +375,7 @@ impl State {
             return Some(Plan {
                 coverage: Coverage::LidToo,
                 want_lease,
+                lease_required: false,
                 lid_gap: None,
             });
         }
@@ -376,6 +387,7 @@ impl State {
             return Some(Plan {
                 coverage: Coverage::IdleOnly,
                 want_lease: false,
+                lease_required: false,
                 lid_gap: Some(LidGap::Automatic),
             });
         }
@@ -389,12 +401,16 @@ impl State {
             return Some(Plan {
                 coverage: Coverage::IdleOnly,
                 want_lease: false,
+                lease_required: false,
                 lid_gap: Some(LidGap::Setting),
             });
         }
         Some(Plan {
             coverage: Coverage::LidToo,
             want_lease,
+            // On battery, macOS has no unprivileged way to hold a shut lid, so
+            // the lease is not a bonus here — it is the coverage.
+            lease_required: cfg!(target_os = "macos"),
             lid_gap: None,
         })
     }
@@ -408,9 +424,10 @@ impl State {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LiveHold {
     pub coverage: Coverage,
-    /// Whether a privileged lease was *wanted*. Distinct from whether one is
-    /// held: only a lease that was asked for and refused is a fault.
-    pub wanted_lease: bool,
+    /// Whether the coverage this session claims **depends** on a privileged
+    /// lease. Only a lease that was *needed* and refused is a fault — one taken
+    /// early on mains, where `caffeinate -s` does the covering, is not.
+    pub lease_required: bool,
     /// Whether it is held right now, per the renewal task's flag.
     pub lease_held: bool,
 }
@@ -426,12 +443,15 @@ pub struct LiveHold {
 pub fn lid_state(plan: Option<Plan>, live: Option<LiveHold>) -> (bool, Option<LidGap>) {
     let gap = match (plan.map(|p| p.lid_gap), live) {
         (Some(Some(gap)), _) => Some(gap),
-        // The lease was wanted and is not held: the helper did not come through.
-        // The `wanted_lease` test is what keeps this the only path that points a
-        // user at `veld setup privileged` — asking merely whether the machine is
-        // on battery reported a fault on every Linux laptop, where no lease is
-        // ever wanted because the unprivileged inhibitor already covers the lid.
-        (Some(None), Some(l)) if l.wanted_lease && !l.lease_held => Some(LidGap::NoHelper),
+        // The lease was *needed* and is not held: the helper did not come
+        // through. Two narrower tests than the obvious one, each paid for by a
+        // bug — asking merely whether the machine is on battery reported a fault
+        // on every Linux laptop, where no lease is ever wanted because the
+        // unprivileged inhibitor already covers the lid; and asking whether one
+        // was *wanted* reported a fault on every helperless Mac on mains, where
+        // the lease is taken early against a future lid slam and `caffeinate -s`
+        // is what is actually covering the lid.
+        (Some(None), Some(l)) if l.lease_required && !l.lease_held => Some(LidGap::NoHelper),
         _ => None,
     };
     let covered = live.is_some_and(|l| l.coverage == Coverage::LidToo) && gap.is_none();
@@ -739,12 +759,13 @@ mod tests {
         // covered.
         let live = LiveHold {
             coverage: Coverage::LidToo,
-            wanted_lease: false,
+            lease_required: false,
             lease_held: false,
         };
         let plan = Plan {
             coverage: Coverage::LidToo,
             want_lease: false,
+            lease_required: false,
             lid_gap: None,
         };
         assert_eq!(lid_state(Some(plan), Some(live)), (true, None));
@@ -754,12 +775,13 @@ mod tests {
     fn a_lease_that_was_wanted_and_refused_is_the_one_reported_fault() {
         let live = LiveHold {
             coverage: Coverage::LidToo,
-            wanted_lease: true,
+            lease_required: true,
             lease_held: false,
         };
         let plan = Plan {
             coverage: Coverage::LidToo,
             want_lease: true,
+            lease_required: true,
             lid_gap: None,
         };
         assert_eq!(
@@ -775,12 +797,13 @@ mod tests {
         // child, not the intention.
         let live = LiveHold {
             coverage: Coverage::IdleOnly,
-            wanted_lease: false,
+            lease_required: false,
             lease_held: false,
         };
         let plan = Plan {
             coverage: Coverage::LidToo,
             want_lease: false,
+            lease_required: false,
             lid_gap: None,
         };
         assert_eq!(lid_state(Some(plan), Some(live)), (false, None));
@@ -875,6 +898,26 @@ mod tests {
         state.recompute(t(45), &prefs(), unmeasured(), sharing(1));
         assert!(state.opted_out.is_none());
         assert_eq!(state.reasons.sharing, Some(t(120)));
+    }
+
+    #[test]
+    fn a_mac_with_no_helper_on_mains_is_not_a_missing_helper_either() {
+        // The mirror of the Linux case, and the defect this split was written
+        // for: on mains the lease is taken *early* against a future lid slam,
+        // but `caffeinate -s` is what covers the lid — so failing to get one on
+        // a helperless Mac costs nothing and must not be announced as a fault.
+        let live = LiveHold {
+            coverage: Coverage::LidToo,
+            lease_required: false,
+            lease_held: false,
+        };
+        let plan = Plan {
+            coverage: Coverage::LidToo,
+            want_lease: true,
+            lease_required: false,
+            lid_gap: None,
+        };
+        assert_eq!(lid_state(Some(plan), Some(live)), (true, None));
     }
 
     #[test]
