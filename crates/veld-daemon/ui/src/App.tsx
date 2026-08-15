@@ -5076,7 +5076,7 @@ function AppInner(props: {
    *
    * A detached tab is not in any `Dock` any more (see `panes/model.ts`), so
    * landing on one means asking the shell to raise that *other* window rather
-   * than calling `activateTab`. `focus` resolving `false` — or its promise
+   * than clicking a tab strip button that does not exist for it. `focus` resolving `false` — or its promise
    * rejecting, which `ipcRenderer.invoke` does when the main process throws —
    * means that window has since closed with no way this one could have heard
    * about it: the id is forgotten and the same press retries the next
@@ -5109,19 +5109,36 @@ function AppInner(props: {
     const idx = currentId ? order.indexOf(currentId) : -1;
     const id = order[nextIndex(idx, delta, order.length)];
     if (docked.includes(id)) {
+      // A real click on the tab, not a restatement of what one does. This
+      // used to call `setLayouts(activateTab(...))` directly — the same
+      // state update `PaneArea`'s own `onClick={props.onSelect}` makes — plus
+      // a manual `.focus()` for the DOM-focus side effect a click gets for
+      // free. That covered the green "focused pane" border, but a browser
+      // pane reopening after being cycled away and back stayed unreliable in
+      // a way clicking the same tab never was — evidence of some other
+      // click-only side effect neither fix accounted for. Rather than keep
+      // guessing which one and re-deriving it here, this dispatches the
+      // genuine `click` a mouse would have: whatever a click does, cycling
+      // now does exactly that, by construction, forever — no second copy of
+      // the tab-activation logic to keep in sync with `PaneArea`'s.
+      //
+      // `.focus()` first, `.click()` second — the order a real mouse click
+      // produces (the browser's default mousedown action moves focus before
+      // the click event fires), since `.click()` alone only dispatches the
+      // `click` event and does not move focus by itself.
+      const button = document.getElementById(tabElementId(id));
+      if (button instanceof HTMLElement) {
+        button.focus();
+        button.click();
+        return;
+      }
+      // Fallback for the tab strip not having rendered this button yet —
+      // should not happen (every tab in the layout always has one), but
+      // cycling should still do *something* rather than silently no-op.
       setLayouts((prev) => {
         const current = prev[wt.id];
         return current ? { ...prev, [wt.id]: activateTab(current, id) } : prev;
       });
-      // `activateTab` only updates layout state — it does not move DOM focus,
-      // and the green "focused pane" border is driven by real `:focus-within`
-      // (see `PaneArea.tsx`), not by that state. A click gets this for free
-      // (focusing the button IS the click); a keyboard press has no click to
-      // piggyback on, so without this the border silently stops tracking
-      // cycling and keeps pointing at wherever focus last was. The button
-      // already exists in the DOM regardless of which tab is selected, so
-      // this does not need to wait for the state update above to commit.
-      document.getElementById(tabElementId(id))?.focus();
       return;
     }
     if (!desktopWindow || !desktopWindow.focus) return;
