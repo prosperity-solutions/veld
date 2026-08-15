@@ -190,6 +190,12 @@ contextBridge.exposeInMainWorld("veldDesktop", {
      *  detached tab's window. Resolves `false` for an id that no longer names a
      *  live window — the caller's answer either way is to move on. */
     focus: (windowId) => ipcRenderer.invoke("veld:window:focus", { windowId }),
+    /** This window was just the target of `focus` above — tab-cycling landed
+     *  here. `win.show()`/`win.focus()` are OS-level operations the target's
+     *  own renderer has no way to notice on their own, but "which tab looks
+     *  focused" is DOM state only that renderer can fix — hence a push rather
+     *  than something the caller could do from the other side. */
+    onCycledTo: (fn) => on("veld:window:cycled-to", fn),
     /** A tab drag started here. Every window freezes its embedded browser views
      *  (they paint over all DOM, so an overlay under one is invisible) and the
      *  shell starts carrying the cursor to whichever window it is over. */

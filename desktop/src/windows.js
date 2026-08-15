@@ -1269,6 +1269,13 @@ function registerWindowIpc(ipcMain) {
     if (target.win.isMinimized()) target.win.restore();
     target.win.show();
     target.win.focus();
+    // `show()`/`focus()` are this process's business; which of the target's
+    // own tabs looks focused is the target renderer's own DOM state, which
+    // this process cannot reach into from here — a push telling it "you were
+    // just cycled to" is what lets it redo that part of what a real click
+    // does for its own active tab, the same gap `veld:window:focus`'s own
+    // caller already had to close for the window it starts in.
+    target.win.webContents.send("veld:window:cycled-to");
     return true;
   });
 

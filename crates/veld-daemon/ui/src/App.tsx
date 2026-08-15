@@ -3396,6 +3396,24 @@ function AppInner(props: {
     [],
   );
 
+  // This window was just the target of keyboard tab-cycling from elsewhere —
+  // the DOM-focus counterpart to what `stepTab`'s `.focus()`+`.click()`
+  // already does for a tab within the *same* window. `veld:window:focus`'s
+  // `show()`/`focus()` are OS-level operations the far side has no way to
+  // follow with "and put real focus on whichever tab is active here" — only
+  // this window's own renderer can do that part, hence the push.
+  useEffect(
+    () =>
+      desktopWindow?.onCycledTo?.(() => {
+        const wt = worktreeRef.current;
+        if (!wt) return;
+        const layout = layoutsRef.current[wt.id];
+        const activeId = layout?.docks[layout.focused].activeId;
+        if (activeId) document.getElementById(tabElementId(activeId))?.focus();
+      }),
+    [],
+  );
+
   // A shell set its own tab title (OSC 0/2). The host has already gated it on
   // the pane allowing renaming (a plain terminal always may; a config pane only
   // with its flag), so this is a pure write: adopt the title onto the tab the

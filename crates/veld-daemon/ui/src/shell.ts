@@ -220,6 +220,18 @@ export interface DesktopWindowApi {
    * the last tab still in this window's own docks.
    */
   focus?(windowId: string): Promise<boolean>;
+  /**
+   * This window was just the target of `focus` above. `show()`/`focus()` are
+   * OS-level operations the target window's own renderer has no way to
+   * notice — but which of its own tabs looks focused is DOM state only that
+   * renderer can fix, hence a push rather than something the caller could
+   * reach in and do from the other side.
+   *
+   * Optional: an older shell has no such channel, and a window cycled to
+   * shows whatever tab was already active there until something else
+   * changes it.
+   */
+  onCycledTo?(fn: () => void): () => void;
   snapshot(payload: TabTransfer): Promise<boolean>;
   setTitle(title: string): Promise<boolean>;
   close(): Promise<boolean>;
