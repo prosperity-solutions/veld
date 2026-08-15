@@ -41,6 +41,28 @@ describe("SHORTCUTS", () => {
       expect(ids.has(id)).toBe(true);
     }
   });
+
+  // The veld feedback overlay (`feedback-overlay/keyboard.ts`) binds
+  // mod+Shift+{V, ., F, S, P, C} on a capture-phase listener that always wins
+  // a shared chord — this is why focus mode and the view switch moved to
+  // L/X. A regression here is exactly how that collision shipped the first
+  // time: nothing checked a new mod+shift letter against the overlay's list.
+  it("keeps every mod+shift single-letter combo off the feedback overlay's own chords", () => {
+    const overlayLetters = new Set(["V", "F", "S", "P", "C"]);
+    // `command-palette`'s ⌘⇧P is a pre-existing, deliberate second accelerator
+    // (`isPaletteChord` in terminalKeys.ts, predating this registry) that
+    // turns out to collide too — a real, separate bug, left alone here rather
+    // than folded into this pass; this exemption is what keeps this guard
+    // from also blocking on it.
+    for (const s of SHORTCUTS) {
+      if (s.id === "command-palette") continue;
+      for (const combo of s.combos) {
+        if (!combo.mod || !combo.shift || combo.keys.length !== 1) continue;
+        const letter = combo.keys[0];
+        expect(overlayLetters.has(letter), `${s.id} uses mod+shift+${letter}`).toBe(false);
+      }
+    }
+  });
 });
 
 describe("nextIndex", () => {

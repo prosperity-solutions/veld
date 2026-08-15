@@ -142,7 +142,7 @@ import { Notifications } from "@mantine/notifications";
 import { ContextMenuProvider, useContextMenu } from "mantine-contextmenu";
 import { theme as mantineTheme } from "./theme";
 import { RunsMode } from "./runs/RunsMode";
-import { PaneArea } from "./panes/PaneArea";
+import { PaneArea, tabElementId } from "./panes/PaneArea";
 import type { RunPaneContext } from "./panes/RunPanes";
 import { notifyDone, notifyError, notifyRedirect, notifyTerminal, showSystemNotification } from "./shared/notify";
 import {
@@ -1841,12 +1841,21 @@ function AppInner(props: {
   };
 
   /**
-   * The rail's per-row ▶. With a stored choice it starts straight through, like
-   * the top bar; with **no** choice yet it selects the worktree and opens the
-   * same picker the top bar uses, so a first start is "choose, then Done" on the
-   * row you clicked — not a silent default run of the first preset.
+   * ▶ from any surface — the rail, the top bar, ⌘⇧Enter. With a stored choice
+   * it starts straight through; with **no** choice yet it selects the worktree
+   * and opens the picker, so a first start is "choose, then Done" — not a
+   * silent default run of the first preset.
+   *
+   * Used to be three copies of this same branch (rail, top bar, and the
+   * keyboard shortcut below reached in early without it), which is how the
+   * keyboard one shipped missing the picker check the other two already had.
+   * `resolveStoredSelection`, not the top bar's reactive `storedStart`: the
+   * latter is a hook value scoped to whichever worktree is on screen when it
+   * renders, and both the rail (per-row, no hook) and the keyboard chord
+   * (fires long after render, off a ref) need to ask the question fresh for
+   * an arbitrary worktree instead.
    */
-  const onRailStart = (w: Worktree) => {
+  const startOrOpenPicker = (w: Worktree) => {
     if (resolveStoredSelection(w)) {
       startWorktree(w);
       return;
@@ -2585,14 +2594,26 @@ function AppInner(props: {
       // exist is discoverability, so it gets the closest thing this app has
       // to a universal "help" chord (Slack, Notion, GitHub all bind it).
       // **Shift is not excluded**, unlike every mod-only chord above: `/` sits
-      // behind Shift on German, Spanish and French layouts (QWERTZ/AZERTY),
-      // the same class of layout hazard the comma chord above already
-      // documents by name — excluding Shift the way `,` does would make this
-      // chord unreachable on exactly those keyboards. **Not in a chromeless
-      // window** — it is "a bare dock and nothing else" by design (see its
-      // own render branch below) and renders no dialogs at all; setting this
-      // state there would be a silent no-op.
-      if (mod && !e.altKey && e.key === "/") {
+      // behind Shift on German and Spanish layouts (QWERTZ), the same class
+      // of layout hazard the comma chord above already documents by name —
+      // excluding Shift the way `,` does would make this chord unreachable on
+      // exactly those keyboards. **Not in a chromeless window** — it is "a
+      // bare dock and nothing else" by design (see its own render branch
+      // below) and renders no dialogs at all; setting this state there would
+      // be a silent no-op.
+      //
+      // **`e.code === "Digit7"` is a second, `e.shiftKey`-gated match**, added
+      // because `e.key === "/"` alone was reported still broken on German
+      // layouts even after Shift stopped being excluded above. On German and
+      // Spanish QWERTZ, `/` is physically Shift+7 (code `Digit7`) — the
+      // suspected cause is a Chromium-on-macOS behaviour where holding
+      // **Cmd** together with Shift+digit reports the unshifted `"7"` instead
+      // of the shifted `"/"` for `e.key`, but this has not been confirmed
+      // against a live German layout, only inferred from the symptom. This
+      // fallback is the mitigation either way: it is gated on `e.shiftKey` so
+      // it cannot also fire the shiftless ⌘7 "go to project 7" chord below,
+      // and does nothing if `e.key === "/"` was already correct.
+      if (mod && !e.altKey && (e.key === "/" || (e.shiftKey && e.code === "Digit7"))) {
         if (chromeless) return;
         e.preventDefault();
         setDialog({ kind: "shortcuts" });
@@ -2644,19 +2665,26 @@ function AppInner(props: {
           toggleProjectColumnRef.current();
           return;
         }
-        // ⌘/Ctrl+↑ / ⌘/Ctrl+↓ — move the rail's selection to the worktree above
-        // or below the current one, in the order the rail actually renders
-        // them (`railGroups`, flattened — not raw `worktrees`, which is
-        // grouping-blind). Guarded like ⌘B: `mod` alone also means Cmd+Up/Down's
-        // own text-field binding on macOS (jump to the start/end of a textarea),
+        // ⌘/Ctrl + ↑/↓/←/→ — move the rail's selection to the worktree above
+        // or below the current one (←/→ are plain aliases for ↑/↓, for anyone
+        // whose rail reads left-to-right in their head), in the order the
+        // rail actually renders them (`railGroups`, flattened — not raw
+        // `worktrees`, which is grouping-blind), wrapping past either end.
+        // Guarded like ⌘B: `mod` alone also means Cmd+Up/Down's own
+        // text-field binding on macOS (jump to the start/end of a textarea),
         // so a focused input keeps that instead. **Not in a chromeless window**
         // — a detached window is a satellite of the worktree its origin claimed
         // (`selectWorktree`'s own comment), and moving its selection off that
         // worktree is exactly the thing being a satellite means it must not do.
-        if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+        if (
+          e.key === "ArrowUp" ||
+          e.key === "ArrowDown" ||
+          e.key === "ArrowLeft" ||
+          e.key === "ArrowRight"
+        ) {
           if (isEditableTarget(e.target) || chromeless) return;
           e.preventDefault();
-          stepWorktree(e.key === "ArrowUp" ? -1 : 1);
+          stepWorktree(e.key === "ArrowUp" || e.key === "ArrowLeft" ? -1 : 1);
           return;
         }
       }
@@ -2677,16 +2705,39 @@ function AppInner(props: {
         stepTab(e.shiftKey ? -1 : 1);
         return;
       }
-      // ⌘/Ctrl+⇧ + a letter or Enter — the run/worktree actions with no chord
-      // yet: focus mode, the IDE/Runs view switch, update main, cycling the
-      // run selector, start/stop, and restart. One guard for all of them:
-      // none means anything to a focused text field, unlike ⌘B's emacs binding
-      // or Cmd+Up/Down's caret motion above.
+      // ⌘/Ctrl+⇧ + a letter, arrow or Enter — the run/worktree actions with no
+      // chord yet: focus mode, the IDE/Runs view switch, update main, cycling
+      // the run selector, start/stop, restart, and a second way to cycle
+      // tabs. One guard for all of them: none means anything to a focused
+      // text field, unlike ⌘B's emacs binding or Cmd+Up/Down's caret motion
+      // above.
       if (mod && e.shiftKey && !e.altKey && !isEditableTarget(e.target)) {
+        // ⌘⇧←/↑ (previous) and ⌘⇧→/↓ (next) — a mod+shift alias for the
+        // Ctrl+Tab chord above, for anyone who reaches for shift-arrows
+        // before they reach for the literal-Ctrl chord browsers reserve for
+        // their own tabs. No `chromeless`/`mode` guard, same as Ctrl+Tab: a
+        // detached window has its own dock to cycle too.
+        if (e.key === "ArrowLeft" || e.key === "ArrowUp") {
+          e.preventDefault();
+          stepTab(-1);
+          return;
+        }
+        if (e.key === "ArrowRight" || e.key === "ArrowDown") {
+          e.preventDefault();
+          stepTab(1);
+          return;
+        }
         // Focus mode is a plain settings toggle with nothing worktree- or
         // view-specific about it, so it is the one chord in this block with no
         // `chromeless`/`mode` guard — it means the same thing everywhere.
-        if (e.key === "f" || e.key === "F") {
+        // **⌘⇧L, not ⌘⇧F.** The veld feedback overlay's own keydown listener
+        // (`feedback-overlay/keyboard.ts`) binds mod+Shift+F itself (its
+        // "select an element" mode) on a **capture-phase** document listener,
+        // which always runs before this bubble-phase one and neither side
+        // calls `stopPropagation` — the overlay's chord wins outright, by
+        // design (the overlay keeps its own shortcuts), so this one has to
+        // live somewhere else.
+        if (e.key === "l" || e.key === "L") {
           e.preventDefault();
           saveSettingsRef.current({ "focus.enabled": !focusPrefsRef.current.enabled });
           return;
@@ -2694,7 +2745,9 @@ function AppInner(props: {
         // Switching view is the one worktree-scoped chord that must keep
         // working from *both* views — that is its whole job — so it is
         // guarded on `chromeless` alone, never on `mode`.
-        if (e.key === "v" || e.key === "V") {
+        // **⌘⇧X, not ⌘⇧V** — the feedback overlay claims mod+Shift+V for its
+        // own toolbar toggle, the same collision as ⌘⇧F above.
+        if (e.key === "x" || e.key === "X") {
           e.preventDefault();
           if (chromeless) return;
           setModeRef.current(modeRef.current === "ide" ? "runs" : "ide");
@@ -2724,7 +2777,10 @@ function AppInner(props: {
           const wt = worktreeRef.current;
           if (!wt) return;
           // Mirrors `TopBar`'s ▶/■ button exactly: same `disabled` expression,
-          // same choice of target by `running || starting`.
+          // same choice of target by `running || starting`. The start side
+          // goes through `startOrOpenPickerRef` rather than starting the
+          // worktree directly — a worktree with no stored selection yet needs
+          // the picker, the same as the ▶ button and the rail's row already do.
           const pendingAction = pendingActionRef.current;
           const starting = startingRef.current;
           const running = runningRef.current;
@@ -2733,7 +2789,7 @@ function AppInner(props: {
             (!running && !canStartRef.current && !starting);
           if (disabled) return;
           if (running || starting) stopWorktreeRef.current(wt, boundRunRef.current);
-          else startWorktreeRef.current(wt);
+          else startOrOpenPickerRef.current(wt);
           return;
         }
         if (e.key === "k" || e.key === "K") {
@@ -4994,8 +5050,8 @@ function AppInner(props: {
   canStartRef.current = worktree ? canStartWorktree(worktree) : false;
   const canRunWorktreeNowRef = useRef(canRunWorktreeNow);
   canRunWorktreeNowRef.current = canRunWorktreeNow;
-  const startWorktreeRef = useRef(startWorktree);
-  startWorktreeRef.current = startWorktree;
+  const startOrOpenPickerRef = useRef(startOrOpenPicker);
+  startOrOpenPickerRef.current = startOrOpenPicker;
   const stopWorktreeRef = useRef(stopWorktree);
   stopWorktreeRef.current = stopWorktree;
   const restartWorktreeRef = useRef(restartWorktree);
@@ -5010,15 +5066,15 @@ function AppInner(props: {
   updateMainRef.current = updateMain;
 
   /** Move the rail's selection up or down, in the order it renders — the
-   *  flattened `railGroups`, not raw `worktrees`. Does not wrap: past either
-   *  end of the rail there is nothing to select, unlike tab-cycling below. */
+   *  flattened `railGroups`, not raw `worktrees` — wrapping at both ends like
+   *  tab-cycling below: past the last worktree goes to the first and vice
+   *  versa, rather than stopping dead at either end of the rail. */
   function stepWorktree(delta: number) {
     const wt = worktreeRef.current;
     if (!wt) return;
     const order = railGroups(worktreesRef.current, lanesRef.current).flatMap((g) => g.worktrees);
     const idx = order.findIndex((w) => w.id === wt.id);
-    if (idx === -1) return;
-    const next = order[idx + delta];
+    const next = order[nextIndex(idx, delta, order.length)];
     if (next) void selectWorktreeRef.current(next);
   }
 
@@ -5070,6 +5126,15 @@ function AppInner(props: {
         const current = prev[wt.id];
         return current ? { ...prev, [wt.id]: activateTab(current, id) } : prev;
       });
+      // `activateTab` only updates layout state — it does not move DOM focus,
+      // and the green "focused pane" border is driven by real `:focus-within`
+      // (see `PaneArea.tsx`), not by that state. A click gets this for free
+      // (focusing the button IS the click); a keyboard press has no click to
+      // piggyback on, so without this the border silently stops tracking
+      // cycling and keeps pointing at wherever focus last was. The button
+      // already exists in the DOM regardless of which tab is selected, so
+      // this does not need to wait for the state update above to commit.
+      document.getElementById(tabElementId(id))?.focus();
       return;
     }
     if (!desktopWindow || !desktopWindow.focus) return;
@@ -5337,17 +5402,7 @@ function AppInner(props: {
         // The bound run, named explicitly: the top bar is the run-level surface,
         // and ■ here must end the run whose name the selector is showing — never
         // whichever one `activeRun` would have picked.
-        onStart={() => {
-          // A worktree with no selection yet opens the picker instead of
-          // guessing: the user asked to run, so the first gesture is choosing
-          // what. Once a choice exists, ▶ starts it directly.
-          if (worktree && !storedStart) {
-            startAfterDone.current = true;
-            setStartConfigOpen(true);
-          } else if (worktree) {
-            startWorktree(worktree);
-          }
-        }}
+        onStart={() => worktree && startOrOpenPicker(worktree)}
         onStop={() => worktree && stopWorktree(worktree, run)}
         onRestart={() => worktree && restartWorktree(worktree, run)}
         controls={topBarControls}
@@ -5446,7 +5501,7 @@ function AppInner(props: {
             onSelect={(w) => void selectWorktree(w)}
             onAdd={(lane) => setDialog({ kind: "new-worktree", lane })}
             onMenu={(e, w) => worktreeMenu(w)(e)}
-            onStart={onRailStart}
+            onStart={startOrOpenPicker}
             onStop={stopWorktree}
             onDiagnose={diagnoseWorktree}
             showWorking={activity.showWorking}

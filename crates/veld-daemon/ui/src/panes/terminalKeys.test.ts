@@ -99,7 +99,11 @@ describe("handleKeyEvent", () => {
     // acts on it is `isEditableTarget`'s xterm-textarea exemption, asserted
     // separately where that function lives.
     for (const mod of ["ctrl", "meta"] as const) {
-      for (const letter of ["f", "v", "u", "o", "k"]) {
+      // `l`/`x`, not `f`/`v`: the veld feedback overlay claims mod+Shift+F/V
+      // for its own bindings, so App.tsx moved focus mode and the view
+      // switch off them — see the matching comment there and in
+      // `isAppShortcutChord`.
+      for (const letter of ["l", "x", "u", "o", "k"]) {
         const r = run({ code: `Key${letter.toUpperCase()}`, key: letter, shift: true, [mod]: true });
         expect(r.handled, `${mod}+shift+${letter} must pass through`).toBe(false);
         expect(r.sent).toEqual([]);
@@ -116,6 +120,18 @@ describe("handleKeyEvent", () => {
         run({ code: "ArrowDown", key: "ArrowDown", [mod]: true }).handled,
         `${mod}+ArrowDown must pass through`,
       ).toBe(false);
+      // ←/→ alias worktree-nav's ↑/↓, and — with Shift held too — alias
+      // tab-cycling's Ctrl+Tab.
+      for (const arrowKey of ["ArrowLeft", "ArrowRight"]) {
+        expect(
+          run({ code: arrowKey, key: arrowKey, [mod]: true }).handled,
+          `${mod}+${arrowKey} must pass through`,
+        ).toBe(false);
+        expect(
+          run({ code: arrowKey, key: arrowKey, shift: true, [mod]: true }).handled,
+          `${mod}+shift+${arrowKey} must pass through`,
+        ).toBe(false);
+      }
     }
     expect(run({ code: "Tab", key: "Tab", ctrl: true }).handled).toBe(false);
     expect(run({ code: "Tab", key: "Tab", ctrl: true, shift: true }).handled).toBe(false);
@@ -134,9 +150,19 @@ describe("handleKeyEvent", () => {
     expect(run({ code: "Slash", key: "/", ctrl: true }).handled).toBe(true);
   });
 
+  it("opens the Shortcuts overview on German/Spanish ⌘⇧7, the Digit7-fallback for ⌘/", () => {
+    // macOS Chromium's Cmd+Shift+digit quirk reports `key: "7"`, not `"/"`, on
+    // these layouts — this is the fallback that catches it. Gated on
+    // `e.shiftKey` so it never fires the shiftless ⌘7 "go to project 7" chord.
+    expect(run({ code: "Digit7", key: "7", meta: true, shift: true }).handled).toBe(false);
+    // Without Shift it is an ordinary ⌘7 and must stay untouched here.
+    expect(run({ code: "Digit7", key: "7", meta: true }).handled).toBe(true);
+  });
+
   it("leaves an app-shortcut letter alone with no modifier, or with only mod (no shift)", () => {
-    // `f`/`v`/`u`/`o`/`k` are ordinary typing without Shift, and ⌘F specifically
-    // is find-in-page — a different, unrelated chord this handler must not eat.
+    // `l`/`x`/`u`/`o`/`k` are ordinary typing without Shift, and ⌘F
+    // specifically is find-in-page — a different, unrelated chord this
+    // handler must not eat.
     expect(run({ code: "KeyF", key: "f" }).handled).toBe(true);
     expect(run({ code: "KeyF", key: "f", meta: true }).handled).toBe(true);
   });

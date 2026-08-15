@@ -97,10 +97,13 @@ export const SHORTCUTS: ShortcutDef[] = [
     id: "navigate-worktrees",
     category: "navigation",
     title: "Navigate worktrees",
-    description: "Move the rail's selection to the worktree above or below.",
+    description:
+      "Move the rail's selection to the worktree above or below, wrapping at either end. ←/→ are aliases for ↑/↓.",
     combos: [
       { mod: true, keys: ["↑"] },
       { mod: true, keys: ["↓"] },
+      { mod: true, keys: ["←"] },
+      { mod: true, keys: ["→"] },
     ],
   },
   {
@@ -126,13 +129,18 @@ export const SHORTCUTS: ShortcutDef[] = [
     category: "layout",
     title: "Switch tabs",
     description:
-      "Focus the next or previous tab, including one detached into its own window.",
+      "Focus the next or previous tab, including one detached into its own window. ⌘⇧←/→/↑/↓ are aliases for Ctrl+Tab/Ctrl+⇧Tab.",
     combos: [
       { ctrl: true, keys: ["Tab"] },
       { ctrl: true, shift: true, keys: ["Tab"] },
+      { mod: true, shift: true, keys: ["←"] },
+      { mod: true, shift: true, keys: ["→"] },
     ],
     // Every mainstream browser claims Ctrl+Tab for switching its own tabs
-    // before a page ever sees the keydown.
+    // before a page ever sees the keydown. The ⌘⇧-arrow aliases are not
+    // claimed the same way and work in a plain browser tab too, but the row
+    // stays desktop-only rather than splitting one shortcut across two rows
+    // for a detail this granular.
     desktopOnly: true,
   },
   {
@@ -147,7 +155,9 @@ export const SHORTCUTS: ShortcutDef[] = [
     category: "layout",
     title: "Switch IDE / Runs view",
     description: "Toggle between the worktree cockpit and runs management.",
-    combos: [{ mod: true, shift: true, keys: ["V"] }],
+    // Not ⌘⇧V — the veld feedback overlay claims that chord for its own
+    // toolbar toggle.
+    combos: [{ mod: true, shift: true, keys: ["X"] }],
   },
   // ---- run --------------------------------------------------------------
   {
@@ -191,6 +201,11 @@ export const SHORTCUTS: ShortcutDef[] = [
     category: "general",
     title: "Command palette",
     description: "Search everything and jump anywhere.",
+    // ⌘⇧P is the terminal-safe second accelerator (`isPaletteChord` in
+    // `panes/terminalKeys.ts`) — it also happens to collide with the veld
+    // feedback overlay's own mod+Shift+P binding, a known, pre-existing issue
+    // left as-is here rather than folded into this pass (see the exemption
+    // for this id in `registry.test.ts`).
     combos: [
       { mod: true, keys: ["K"] },
       { mod: true, shift: true, keys: ["P"] },
@@ -208,7 +223,9 @@ export const SHORTCUTS: ShortcutDef[] = [
     category: "general",
     title: "Toggle focus mode",
     description: "Turn focus mode's notification silencing on or off.",
-    combos: [{ mod: true, shift: true, keys: ["F"] }],
+    // Not ⌘⇧F — the veld feedback overlay claims that chord for its own
+    // "select an element" mode.
+    combos: [{ mod: true, shift: true, keys: ["L"] }],
   },
   {
     id: "settings",

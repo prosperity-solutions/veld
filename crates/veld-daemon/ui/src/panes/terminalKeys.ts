@@ -51,9 +51,14 @@ function isPaletteChord(e: KeyboardEvent): boolean {
 /**
  * The window-level shortcuts added alongside the Shortcuts overview — focus
  * mode, the IDE/Runs switch, update main, cycling the run selector,
- * start/stop, restart, worktree navigation, opening the overview itself, and
- * tab-cycling — all of which must reach `App.tsx`'s keydown effect from a
- * focused terminal for the same structural reason the palette chord does.
+ * start/stop, restart, worktree navigation (incl. the ←/→ aliases), opening
+ * the overview itself, and tab-cycling (incl. its ⌘⇧-arrow aliases) — all of
+ * which must reach `App.tsx`'s keydown effect from a focused terminal for the
+ * same structural reason the palette chord does.
+ *
+ * `l`/`x`, not `f`/`v`: the veld feedback overlay claims mod+Shift+F and
+ * mod+Shift+V for its own bindings, so `App.tsx` moved focus mode and the
+ * view switch off them — see the matching comment there.
  *
  * Matched on `e.key`, never `e.code`, for every letter here — mirroring
  * exactly what `App.tsx`'s own handler tests, since a mismatch here would
@@ -61,24 +66,30 @@ function isPaletteChord(e: KeyboardEvent): boolean {
  * physical key on another (see the ⌘B comment in `App.tsx` for why `code` is
  * wrong for a letter). Tab and the arrow keys have no such layout hazard.
  *
- * `/` allows Shift (it sits behind Shift on German, Spanish and French
- * layouts — the same class of hazard `App.tsx`'s comma-chord comment already
- * names) but is gated on `e.metaKey` alone, not `mod`: the literal-Ctrl variant
- * is readline's undo (`Ctrl+_`/`Ctrl+/`), the same reason `Ctrl+K` below is
- * left to the shell rather than the palette. So on Linux/Windows, opening the
+ * `/` allows Shift (it sits behind Shift on German and Spanish layouts — the
+ * same class of hazard `App.tsx`'s comma-chord comment already names) but is
+ * gated on `e.metaKey` alone, not `mod`: the literal-Ctrl variant is
+ * readline's undo (`Ctrl+_`/`Ctrl+/`), the same reason `Ctrl+K` below is left
+ * to the shell rather than the palette. So on Linux/Windows, opening the
  * Shortcuts overview from a focused terminal is reachable everywhere except
- * the terminal itself — a narrower version of the same trade.
+ * the terminal itself — a narrower version of the same trade. The
+ * `e.shiftKey && e.code === "Digit7"` arm alongside it is the same German/
+ * Spanish-layout fallback `App.tsx`'s own `/`-chord comment explains (and
+ * flags as an unconfirmed suspected cause, not a verified one).
  */
 function isAppShortcutChord(e: KeyboardEvent): boolean {
   const mod = e.ctrlKey || e.metaKey;
   if (mod && e.shiftKey && !e.altKey) {
-    if (["f", "v", "u", "o", "k"].includes(e.key.toLowerCase())) return true;
+    if (["l", "x", "u", "o", "k"].includes(e.key.toLowerCase())) return true;
     if (e.key === "Enter") return true;
+    if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(e.key)) return true;
   }
-  if (mod && !e.shiftKey && !e.altKey && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
-    return true;
+  if (mod && !e.shiftKey && !e.altKey) {
+    if (e.key === "ArrowUp" || e.key === "ArrowDown" || e.key === "ArrowLeft" || e.key === "ArrowRight") {
+      return true;
+    }
   }
-  if (e.metaKey && !e.altKey && e.key === "/") return true;
+  if (e.metaKey && !e.altKey && (e.key === "/" || (e.shiftKey && e.code === "Digit7"))) return true;
   if (e.ctrlKey && !e.metaKey && !e.altKey && e.key === "Tab") return true;
   return false;
 }

@@ -24,14 +24,14 @@ export function ShortcutsDialog(props: { onClose: () => void }) {
                 <Text size="xs" fw={600} tt="uppercase" c="dimmed" mb={6}>
                   {categoryLabel(category)}
                 </Text>
-                <Table verticalSpacing="xs" withRowBorders={false}>
+                <Table verticalSpacing="xs" withRowBorders>
                   <Table.Tbody>
                     {rows.map((s) => (
                       <Table.Tr key={s.id}>
-                        <Table.Td style={{ whiteSpace: "nowrap", width: "28%" }}>
+                        <Table.Td style={{ whiteSpace: "nowrap", width: "26%" }}>
                           {s.title}
                         </Table.Td>
-                        <Table.Td style={{ whiteSpace: "nowrap", width: "26%" }}>
+                        <Table.Td style={{ whiteSpace: "nowrap", width: "24%" }}>
                           <Group gap={6} wrap="nowrap">
                             {s.combos.map((combo, i) => (
                               <Fragment key={i}>
@@ -52,16 +52,21 @@ export function ShortcutsDialog(props: { onClose: () => void }) {
                           </Group>
                         </Table.Td>
                         <Table.Td>
-                          <Group gap={6} wrap="nowrap">
-                            <Text size="sm" c="dimmed">
-                              {s.description}
-                            </Text>
-                            {s.desktopOnly && (
-                              <Badge size="xs" variant="light" color="gray">
-                                Desktop app
-                              </Badge>
-                            )}
-                          </Group>
+                          <Text size="sm" c="dimmed">
+                            {s.description}
+                          </Text>
+                        </Table.Td>
+                        {/* Its own column, `width: 1` shrink-to-content —
+                            inline with the description (the previous layout)
+                            let a long description's own `nowrap` Group push
+                            the badge past the row's width with nothing left
+                            to render it in, which is what truncated it. */}
+                        <Table.Td style={{ whiteSpace: "nowrap", width: 1 }}>
+                          {s.desktopOnly && (
+                            <Badge size="xs" variant="light" color="gray">
+                              Desktop app
+                            </Badge>
+                          )}
                         </Table.Td>
                       </Table.Tr>
                     ))}

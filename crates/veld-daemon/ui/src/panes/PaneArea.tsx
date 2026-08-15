@@ -1821,8 +1821,12 @@ function TabScroller(props: {
 }
 
 /** The DOM id of a tab's button, and of a dock's panel. Both exist only so the
- *  tab and the panel it controls can name each other. */
-function tabElementId(tabId: string): string {
+ *  tab and the panel it controls can name each other. Exported so a
+ *  non-click activation (keyboard tab-cycling in `App.tsx`'s `stepTab`) can
+ *  find the same button a click would have focused, and move real DOM focus
+ *  onto it — `activateTab` alone only updates layout state, and the
+ *  `:focus-within`-driven "focused pane" border reads real focus, not it. */
+export function tabElementId(tabId: string): string {
   return `pane-tab-${tabId}`;
 }
 function dockPanelId(index: DockIndex): string {
