@@ -201,15 +201,12 @@ export const SHORTCUTS: ShortcutDef[] = [
     category: "general",
     title: "Command palette",
     description: "Search everything and jump anywhere.",
-    // ⌘⇧P is the terminal-safe second accelerator (`isPaletteChord` in
-    // `panes/terminalKeys.ts`) — it also happens to collide with the veld
-    // feedback overlay's own mod+Shift+P binding, a known, pre-existing issue
-    // left as-is here rather than folded into this pass (see the exemption
-    // for this id in `registry.test.ts`).
-    combos: [
-      { mod: true, keys: ["K"] },
-      { mod: true, shift: true, keys: ["P"] },
-    ],
+    // Used to also have a Ctrl/⌘+Shift+P second accelerator, for reaching it
+    // from a focused terminal on Linux/Windows where Ctrl+K belongs to
+    // readline — removed because it collided with the veld feedback
+    // overlay's own mod+Shift+P binding, and ⌘K already covers every other
+    // case (macOS terminals included, since xterm never claims meta combos).
+    combos: [{ mod: true, keys: ["K"] }],
   },
   {
     id: "open-shortcuts",

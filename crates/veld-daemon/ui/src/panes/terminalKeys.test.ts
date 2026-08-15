@@ -73,20 +73,9 @@ describe("handleKeyEvent", () => {
     expect(r.sent).toEqual([]);
   });
 
-  it("lets the palette accelerator reach the app", () => {
-    for (const mod of ["ctrl", "meta"] as const) {
-      const r = run({ code: "KeyP", shift: true, [mod]: true });
-      expect(r.handled).toBe(false);
-      // Returning false is the whole mechanism: xterm ignores the event without
-      // cancelling it, so it keeps propagating to the window listener.
-      expect(r.prevented).toBe(false);
-      expect(r.sent).toEqual([]);
-    }
-  });
-
   it("leaves Ctrl+K to readline", () => {
-    // kill-to-end-of-line belongs to the shell, which is why the palette has a
-    // second accelerator at all.
+    // kill-to-end-of-line belongs to the shell — the palette is reachable
+    // from a focused terminal only via ⌘K, not Ctrl+K.
     expect(run({ code: "KeyK", ctrl: true }).handled).toBe(true);
   });
 
@@ -209,13 +198,5 @@ describe("the shiftEnterNewline preference", () => {
       handleKeyEvent(key({ code: "Enter", shift: true }).e, (d) => sent.push(d)),
     ).toBe(false);
     expect(sent).toEqual([SHIFT_ENTER_SEQUENCE, SHIFT_ENTER_SEQUENCE]);
-  });
-
-  it("leaves the palette chord alone regardless of the preference", () => {
-    for (const pref of [true, false]) {
-      expect(
-        handleKeyEvent(key({ code: "KeyP", shift: true, meta: true }).e, () => {}, pref),
-      ).toBe(false);
-    }
   });
 });

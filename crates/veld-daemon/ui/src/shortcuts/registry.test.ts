@@ -49,13 +49,7 @@ describe("SHORTCUTS", () => {
   // time: nothing checked a new mod+shift letter against the overlay's list.
   it("keeps every mod+shift single-letter combo off the feedback overlay's own chords", () => {
     const overlayLetters = new Set(["V", "F", "S", "P", "C"]);
-    // `command-palette`'s ⌘⇧P is a pre-existing, deliberate second accelerator
-    // (`isPaletteChord` in terminalKeys.ts, predating this registry) that
-    // turns out to collide too — a real, separate bug, left alone here rather
-    // than folded into this pass; this exemption is what keeps this guard
-    // from also blocking on it.
     for (const s of SHORTCUTS) {
-      if (s.id === "command-palette") continue;
       for (const combo of s.combos) {
         if (!combo.mod || !combo.shift || combo.keys.length !== 1) continue;
         const letter = combo.keys[0];

@@ -43,18 +43,15 @@ function isShiftEnter(e: KeyboardEvent): boolean {
   );
 }
 
-/** Whether an event is the command palette's terminal-safe accelerator. */
-function isPaletteChord(e: KeyboardEvent): boolean {
-  return (e.ctrlKey || e.metaKey) && e.shiftKey && e.code === "KeyP";
-}
-
 /**
  * The window-level shortcuts added alongside the Shortcuts overview — focus
  * mode, the IDE/Runs switch, update main, cycling the run selector,
  * start/stop, restart, worktree navigation (incl. the ←/→ aliases), opening
  * the overview itself, and tab-cycling (incl. its ⌘⇧-arrow aliases) — all of
  * which must reach `App.tsx`'s keydown effect from a focused terminal for the
- * same structural reason the palette chord does.
+ * same reason `isSettingsChord` below does: xterm cancels every key it
+ * handles, and a focused terminal would otherwise swallow these before the
+ * window listener ever saw them.
  *
  * `l`/`x`, not `f`/`v`: the veld feedback overlay claims mod+Shift+F and
  * mod+Shift+V for its own bindings, so `App.tsx` moved focus mode and the
@@ -69,10 +66,10 @@ function isPaletteChord(e: KeyboardEvent): boolean {
  * `/` allows Shift (it sits behind Shift on German and Spanish layouts — the
  * same class of hazard `App.tsx`'s comma-chord comment already names) but is
  * gated on `e.metaKey` alone, not `mod`: the literal-Ctrl variant is
- * readline's undo (`Ctrl+_`/`Ctrl+/`), the same reason `Ctrl+K` below is left
- * to the shell rather than the palette. So on Linux/Windows, opening the
- * Shortcuts overview from a focused terminal is reachable everywhere except
- * the terminal itself — a narrower version of the same trade. The
+ * readline's undo (`Ctrl+_`/`Ctrl+/`), the same class of shell binding
+ * `Ctrl+K` below is left to. So on Linux/Windows, opening the Shortcuts
+ * overview from a focused terminal is reachable everywhere except the
+ * terminal itself — a narrower version of the same trade. The
  * `e.shiftKey && e.code === "Digit7"` arm alongside it is the same German/
  * Spanish-layout fallback `App.tsx`'s own `/`-chord comment explains (and
  * flags as an unconfirmed suspected cause, not a verified one).
@@ -116,16 +113,17 @@ function isSettingsChord(e: KeyboardEvent): boolean {
  *
  * Several things need to be false:
  *
- * - **The palette accelerator** (`Ctrl/⌘+Shift+P`), which must keep propagating
- *   to the window listener in `App.tsx`. xterm cancels the keys it handles
+ * - **`isSettingsChord`** (`⌘,`/`Ctrl+,`), which must keep propagating to the
+ *   window listener in `App.tsx`. xterm cancels the keys it handles
  *   (`preventDefault` + `stopPropagation` on its own textarea), so a focused
- *   terminal would otherwise swallow anything the app binds. `Ctrl+K`
- *   deliberately is not in this list: that one is readline's
- *   kill-to-end-of-line and belongs to the shell.
- * - **Every other window-level shortcut** (`isAppShortcutChord`) — focus mode,
- *   the view switch, update main, run cycling, start/stop, restart, worktree
+ *   terminal would otherwise swallow anything the app binds.
+ * - **Every window-level shortcut** (`isAppShortcutChord`) — focus mode, the
+ *   view switch, update main, run cycling, start/stop, restart, worktree
  *   navigation, opening the Shortcuts overview, and tab-cycling — for the
- *   same reason as the palette chord above.
+ *   same reason. `Ctrl+K` (the command palette's other chord) deliberately
+ *   is not among them: that one is readline's kill-to-end-of-line and
+ *   belongs to the shell, so the palette is reachable from a focused
+ *   terminal only via ⌘K, not Ctrl+K.
  * - **Shift+Enter**, which this handler answers itself by sending
  *   [`SHIFT_ENTER_SEQUENCE`]. `preventDefault` here is load-bearing: without it
  *   the browser still delivers the key to xterm's hidden textarea and the shell
@@ -151,13 +149,12 @@ export function handleKeyEvent(
     // off we never claimed the keydown, so swallowing the keyup would drop a
     // release xterm is expecting.
     return !(
-      isPaletteChord(e) ||
       isSettingsChord(e) ||
       isAppShortcutChord(e) ||
       (shiftEnterNewline && isShiftEnter(e))
     );
   }
-  if (isPaletteChord(e) || isSettingsChord(e) || isAppShortcutChord(e)) return false;
+  if (isSettingsChord(e) || isAppShortcutChord(e)) return false;
   if (shiftEnterNewline && isShiftEnter(e)) {
     e.preventDefault();
     send(SHIFT_ENTER_SEQUENCE);

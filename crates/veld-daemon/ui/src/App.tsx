@@ -2563,11 +2563,14 @@ function AppInner(props: {
   //   - Escape reaches the shell, not this handler. vim, less and TUI menus keep
   //     working. The dialog guard below therefore only matters when focus is
   //     outside a terminal.
-  //   - Ctrl+K is readline's kill-to-end-of-line and stays with the shell. That
-  //     leaves the palette unreachable from a focused terminal on Linux/Windows
-  //     (⌘K survives, because xterm doesn't claim meta combos), which is why
-  //     Ctrl/⌘+Shift+P exists as a second accelerator — terminalHost lets that
-  //     one through explicitly.
+  //   - Ctrl+K is readline's kill-to-end-of-line and stays with the shell. On
+  //     macOS ⌘K still opens the palette from a focused terminal (xterm never
+  //     claims meta combos), but on Linux/Windows the palette has no chord
+  //     that reaches it from inside a focused terminal — `mod` there is
+  //     Ctrl, and Ctrl+K belongs to the shell. Accepted trade-off: it used to
+  //     have a Ctrl/⌘+Shift+P second accelerator for exactly this gap, removed
+  //     because it collided with the veld feedback overlay's own binding and
+  //     ⌘K already covers every other case.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const mod = e.metaKey || e.ctrlKey;
@@ -2576,7 +2579,7 @@ function AppInner(props: {
       // the usual shift-uppercases relationship per the UI Events spec), so
       // without this a Caps-Lock-on ⌘⇧K — the restart-run chord below — would
       // also open the palette on the same press.
-      if (mod && ((e.key === "k" && !e.shiftKey) || ((e.key === "P" || e.key === "p") && e.shiftKey))) {
+      if (mod && e.key === "k" && !e.shiftKey) {
         e.preventDefault();
         openPaletteRef.current();
       }
