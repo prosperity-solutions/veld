@@ -61,7 +61,7 @@ function isShiftEnter(e: KeyboardEvent): boolean {
  * exactly what `App.tsx`'s own handler tests, since a mismatch here would
  * swallow the key on one layout while the window listener expects a different
  * physical key on another (see the ⌘B comment in `App.tsx` for why `code` is
- * wrong for a letter). Tab and the arrow keys have no such layout hazard.
+ * wrong for a letter). The arrow keys have no such layout hazard.
  *
  * `/` allows Shift (it sits behind Shift on German and Spanish layouts — the
  * same class of hazard `App.tsx`'s comma-chord comment already names) but is
@@ -87,7 +87,6 @@ function isAppShortcutChord(e: KeyboardEvent): boolean {
     }
   }
   if (e.metaKey && !e.altKey && (e.key === "/" || (e.shiftKey && e.code === "Digit7"))) return true;
-  if (e.ctrlKey && !e.metaKey && !e.altKey && e.key === "Tab") return true;
   return false;
 }
 

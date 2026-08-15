@@ -109,8 +109,7 @@ describe("handleKeyEvent", () => {
         run({ code: "ArrowDown", key: "ArrowDown", [mod]: true }).handled,
         `${mod}+ArrowDown must pass through`,
       ).toBe(false);
-      // ←/→ alias worktree-nav's ↑/↓, and — with Shift held too — alias
-      // tab-cycling's Ctrl+Tab.
+      // ←/→ alias worktree-nav's ↑/↓, and — with Shift held too — tab-cycling.
       for (const arrowKey of ["ArrowLeft", "ArrowRight"]) {
         expect(
           run({ code: arrowKey, key: arrowKey, [mod]: true }).handled,
@@ -122,11 +121,8 @@ describe("handleKeyEvent", () => {
         ).toBe(false);
       }
     }
-    expect(run({ code: "Tab", key: "Tab", ctrl: true }).handled).toBe(false);
-    expect(run({ code: "Tab", key: "Tab", ctrl: true, shift: true }).handled).toBe(false);
-    // Cmd+Tab is the OS's own app switcher and never reaches a page, but the
-    // guard is still worth pinning: `ctrlKey` alone gates this chord, not `mod`.
-    expect(run({ code: "Tab", key: "Tab", meta: true }).handled).toBe(true);
+    // Plain Tab (no modifier) is unrelated typing and must stay untouched.
+    expect(run({ code: "Tab", key: "Tab" }).handled).toBe(true);
   });
 
   it("opens the Shortcuts overview from a terminal on ⌘/, but leaves Ctrl+/ to readline", () => {

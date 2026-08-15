@@ -2691,35 +2691,21 @@ function AppInner(props: {
           return;
         }
       }
-      // Ctrl+Tab / Ctrl+⇧Tab — focus the next/previous tab, continuing into
-      // this worktree's own detached windows once the docked ones run out.
-      // **Literal `ctrlKey`, not `mod`.** Cmd+Tab is the OS's own app switcher
-      // on macOS and never reaches a page at all, so every tabbed app on that
-      // platform (Safari, Chrome, VS Code) binds tab-switching to the physical
-      // Ctrl key even there — the one chord in this file where the Mac/other
-      // split does not run through `mod`. Not guarded on `isEditableTarget`: no
-      // text field binds Ctrl+Tab for anything, and every tabbed app keeps this
-      // working regardless of where the caret is. Runs everywhere, chromeless
-      // included: a detached window has its own dock to cycle, and `stepTab`
-      // is what makes that this worktree's *whole* tab list, not just this
-      // window's slice of it.
-      if (e.ctrlKey && !e.metaKey && !e.altKey && e.key === "Tab") {
-        e.preventDefault();
-        stepTab(e.shiftKey ? -1 : 1);
-        return;
-      }
       // ⌘/Ctrl+⇧ + a letter, arrow or Enter — the run/worktree actions with no
       // chord yet: focus mode, the IDE/Runs view switch, update main, cycling
-      // the run selector, start/stop, restart, and a second way to cycle
-      // tabs. One guard for all of them: none means anything to a focused
-      // text field, unlike ⌘B's emacs binding or Cmd+Up/Down's caret motion
-      // above.
+      // the run selector, start/stop, restart, and tab-cycling. One guard for
+      // all of them: none means anything to a focused text field, unlike
+      // ⌘B's emacs binding or Cmd+Up/Down's caret motion above.
       if (mod && e.shiftKey && !e.altKey && !isEditableTarget(e.target)) {
-        // ⌘⇧←/↑ (previous) and ⌘⇧→/↓ (next) — a mod+shift alias for the
-        // Ctrl+Tab chord above, for anyone who reaches for shift-arrows
-        // before they reach for the literal-Ctrl chord browsers reserve for
-        // their own tabs. No `chromeless`/`mode` guard, same as Ctrl+Tab: a
-        // detached window has its own dock to cycle too.
+        // ⌘⇧←/↑ (previous) and ⌘⇧→/↓ (next) — focus the next/previous tab,
+        // continuing into this worktree's own detached windows once the
+        // docked ones run out. No `chromeless`/`mode` guard: a detached
+        // window has its own dock to cycle, and `stepTab` is what makes that
+        // this worktree's *whole* tab list, not just this window's slice of
+        // it. Used to have a literal-Ctrl+Tab chord alongside this one, for
+        // the same reason every tabbed app on macOS binds tab-switching to
+        // the physical Ctrl key (Cmd+Tab is the OS's own app switcher) —
+        // removed as redundant with this one, which needs no such split.
         if (e.key === "ArrowLeft" || e.key === "ArrowUp") {
           e.preventDefault();
           stepTab(-1);
@@ -3401,8 +3387,6 @@ function AppInner(props: {
         // here instead of through the window's own key handler. Same chords,
         // same meaning — see `browserViews.js`.
         else if (accelerator === "project:toggle") goToPreviousProject();
-        else if (accelerator === "tab:next") stepTab(1);
-        else if (accelerator === "tab:previous") stepTab(-1);
         else if (accelerator.startsWith("project:")) {
           goToProject(Number(accelerator.slice("project:".length)));
         }

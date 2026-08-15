@@ -17,6 +17,15 @@ describe("SHORTCUTS", () => {
     expect(duplicateShortcutIds(SHORTCUTS)).toEqual([]);
   });
 
+  it("treats a missing description as valid but an empty one as a mistake", () => {
+    const base = { id: "x", category: "general" as const, title: "X", combos: [{ keys: ["X"] }] };
+    expect(shortcutProblems(base)).toEqual([]);
+    expect(shortcutProblems({ ...base, description: "" })).toEqual([
+      "x: description must not be an empty string — omit it instead",
+    ]);
+    expect(shortcutProblems({ ...base, description: "A sentence." })).toEqual([]);
+  });
+
   // The registry is the single source of truth for the overview dialog — see
   // its own doc comment. This is a floor, not a drift gate: it cannot see
   // whether `App.tsx`'s keydown effect still agrees with what is listed here,

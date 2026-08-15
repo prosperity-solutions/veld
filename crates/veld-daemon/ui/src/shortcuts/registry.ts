@@ -6,12 +6,12 @@
  * **Metadata only. Dispatch stays where it already lived**, in `App.tsx`'s one
  * central keydown effect. Every existing chord there carries hard-won,
  * platform-specific nuance — `e.code` vs `e.key` for AZERTY digits, an
- * `isEditableTarget` guard for ⌘B's emacs binding, literal `ctrlKey` instead of
- * `mod` for tab-switching — and a generic matcher driven off this file would
- * either lose that nuance or have to reinvent it per entry anyway, for no
- * reader benefit: nobody reads a dispatch table to learn a shortcut exists: an
- * unfindable in-app entry is much of why an overview dialog earns its keep in
- * the first place, and that entry lives here.
+ * `isEditableTarget` guard for ⌘B's emacs binding — and a generic matcher
+ * driven off this file would either lose that nuance or have to reinvent it
+ * per entry anyway, for no reader benefit: nobody reads a dispatch table to
+ * learn a shortcut exists: an unfindable in-app entry is much of why an
+ * overview dialog earns its keep in the first place, and that entry lives
+ * here.
  *
  * **This is the single source of truth for the overview, not for behaviour.**
  * Add, change or remove a mod+shift (or Ctrl-literal) chord and there are
@@ -40,12 +40,13 @@ export type ShortcutCategory = "navigation" | "layout" | "run" | "general";
 /**
  * One chord, platform-neutral.
  *
- * `mod` is the cross-platform accelerator every other chord in the app already
- * uses (⌘ on macOS, Ctrl elsewhere — `e.metaKey || e.ctrlKey` in the keydown
- * effect). `ctrl` is different: the *literal* Ctrl key on every platform,
- * reserved for the one chord (tab-switching) where macOS itself already claims
- * Cmd for something else (the app switcher), so every tabbed app on that
- * platform binds Ctrl instead — Safari, Chrome, VS Code among them.
+ * `mod` is the cross-platform accelerator every chord in the app uses (⌘ on
+ * macOS, Ctrl elsewhere — `e.metaKey || e.ctrlKey` in the keydown effect).
+ * `ctrl` is different: the *literal* Ctrl key on every platform, for a chord
+ * where macOS itself already claims Cmd for something else — no row uses it
+ * today (tab-cycling's Ctrl+Tab, the one that did, was removed as redundant
+ * with its ⌘⇧-arrow alias), but the field stays for the next chord that
+ * needs it.
  */
 export interface KeyCombo {
   mod?: boolean;
@@ -62,17 +63,23 @@ export interface ShortcutDef {
   id: string;
   category: ShortcutCategory;
   title: string;
-  /** One sentence. */
-  description: string;
+  /**
+   * One sentence, and optional: only where the title alone does not cover a
+   * real behavioural detail — that a chord wraps or has an alias, which run a
+   * selector cycles to, a desktop-only scope. A row whose title already says
+   * everything (`"Toggle project column"`, `"Open Settings"`) does not get
+   * one just to fill the column; that reads as narration, not information.
+   */
+  description?: string;
   /** Usually one combo; two for a pair shown on the same row (next/previous,
    *  up/down) rather than as two separate rows. */
   combos: KeyCombo[];
   /**
    * Unreachable in a plain browser tab. Some chords are claimed outright by
-   * every mainstream browser's own chrome — Ctrl+Tab for switching real browser
-   * tabs is the clearest case, exactly like ⌘1…⌘9 already is (see the comment
-   * at `App.tsx`'s digit-shortcut handler) — so the dialog says so rather than
-   * listing a row that silently does nothing for someone using Veld in a tab.
+   * every mainstream browser's own chrome — ⌘1…⌘9 is the clearest case (see
+   * the comment at `App.tsx`'s digit-shortcut handler) — so the dialog says
+   * so rather than listing a row that silently does nothing for someone using
+   * Veld in a tab.
    */
   desktopOnly?: boolean;
 }
@@ -110,7 +117,6 @@ export const SHORTCUTS: ShortcutDef[] = [
     id: "switch-project",
     category: "navigation",
     title: "Switch to project 1–9",
-    description: "Jump straight to the Nth project in the project column.",
     combos: [{ mod: true, keys: ["1…9"] }],
     // Chrome and Safari reserve ⌘1…⌘9 for their own tab strip — see the
     // matching comment in App.tsx's digit-shortcut handler.
@@ -120,7 +126,6 @@ export const SHORTCUTS: ShortcutDef[] = [
     id: "previous-project",
     category: "navigation",
     title: "Back to previous project",
-    description: "Return to the project you were on before this one.",
     combos: [{ mod: true, keys: ["`"] }],
   },
   // ---- layout ---------------------------------------------------------------
@@ -128,33 +133,24 @@ export const SHORTCUTS: ShortcutDef[] = [
     id: "switch-tab",
     category: "layout",
     title: "Switch tabs",
-    description:
-      "Focus the next or previous tab, including one detached into its own window. ⌘⇧←/→/↑/↓ are aliases for Ctrl+Tab/Ctrl+⇧Tab.",
+    description: "Focus the next or previous tab, including one detached into its own window.",
     combos: [
-      { ctrl: true, keys: ["Tab"] },
-      { ctrl: true, shift: true, keys: ["Tab"] },
       { mod: true, shift: true, keys: ["←"] },
       { mod: true, shift: true, keys: ["→"] },
+      { mod: true, shift: true, keys: ["↑"] },
+      { mod: true, shift: true, keys: ["↓"] },
     ],
-    // Every mainstream browser claims Ctrl+Tab for switching its own tabs
-    // before a page ever sees the keydown. The ⌘⇧-arrow aliases are not
-    // claimed the same way and work in a plain browser tab too, but the row
-    // stays desktop-only rather than splitting one shortcut across two rows
-    // for a detail this granular.
-    desktopOnly: true,
   },
   {
     id: "toggle-project-column",
     category: "layout",
     title: "Toggle project column",
-    description: "Show or hide the project column.",
     combos: [{ mod: true, keys: ["B"] }],
   },
   {
     id: "switch-view",
     category: "layout",
     title: "Switch IDE / Runs view",
-    description: "Toggle between the worktree cockpit and runs management.",
     // Not ⌘⇧V — the veld feedback overlay claims that chord for its own
     // toolbar toggle.
     combos: [{ mod: true, shift: true, keys: ["X"] }],
@@ -171,7 +167,6 @@ export const SHORTCUTS: ShortcutDef[] = [
     id: "restart-run",
     category: "run",
     title: "Restart run",
-    description: "Restart the run bound to this worktree.",
     combos: [{ mod: true, shift: true, keys: ["K"] }],
     // Firefox reserves Ctrl+Shift+K for its Web Console.
     desktopOnly: true,
@@ -189,7 +184,6 @@ export const SHORTCUTS: ShortcutDef[] = [
     id: "update-main",
     category: "run",
     title: "Update main",
-    description: "Fetch and fast-forward the main checkout.",
     // Not checked against every Linux input method (IBus's Unicode
     // code-point entry uses Ctrl+Shift+U on some distributions and would
     // claim this chord ahead of the browser or the app either).
@@ -212,7 +206,6 @@ export const SHORTCUTS: ShortcutDef[] = [
     id: "open-shortcuts",
     category: "general",
     title: "Open this overview",
-    description: "Show the full shortcut list.",
     combos: [{ mod: true, keys: ["/"] }],
   },
   {
@@ -228,14 +221,12 @@ export const SHORTCUTS: ShortcutDef[] = [
     id: "settings",
     category: "general",
     title: "Open Settings",
-    description: "Open the Settings dialog.",
     combos: [{ mod: true, keys: [","] }],
   },
   {
     id: "close-dialog",
     category: "general",
     title: "Close dialog",
-    description: "Close whatever dialog is open.",
     combos: [{ keys: ["Esc"] }],
   },
   {
@@ -251,7 +242,6 @@ export const SHORTCUTS: ShortcutDef[] = [
     id: "new-window",
     category: "general",
     title: "New window",
-    description: "Open another full Veld window.",
     combos: [{ mod: true, keys: ["N"] }],
     // A browser tab has no equivalent — ⌘N there opens a new *browser*
     // window, unrelated to Veld.
@@ -297,7 +287,11 @@ export function shortcutProblems(s: ShortcutDef): string[] {
   const problems: string[] = [];
   if (!/^[a-z0-9]+(-[a-z0-9]+)*$/.test(s.id)) problems.push(`${s.id || "(empty)"}: id must be kebab-case`);
   if (!s.title) problems.push(`${s.id}: title is required`);
-  if (!s.description) problems.push(`${s.id}: description is required`);
+  // Description is optional (see the field's own doc comment) — but an empty
+  // string is a mistake, not a deliberate omission, so it is still flagged.
+  if (s.description !== undefined && !s.description) {
+    problems.push(`${s.id}: description must not be an empty string — omit it instead`);
+  }
   if (s.combos.length === 0) problems.push(`${s.id}: needs at least one combo`);
   for (const combo of s.combos) {
     if (combo.keys.length === 0) problems.push(`${s.id}: a combo needs at least one key`);

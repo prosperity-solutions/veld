@@ -52,9 +52,11 @@ export function ShortcutsDialog(props: { onClose: () => void }) {
                           </Group>
                         </Table.Td>
                         <Table.Td>
-                          <Text size="sm" c="dimmed">
-                            {s.description}
-                          </Text>
+                          {s.description && (
+                            <Text size="sm" c="dimmed">
+                              {s.description}
+                            </Text>
+                          )}
                         </Table.Td>
                         {/* Its own column, `width: 1` shrink-to-content —
                             inline with the description (the previous layout)
