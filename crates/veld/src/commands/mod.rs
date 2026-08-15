@@ -1,5 +1,6 @@
 pub mod action;
 pub mod agent;
+pub mod backup;
 pub mod config;
 pub mod desktop;
 pub mod doctor;

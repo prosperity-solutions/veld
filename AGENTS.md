@@ -439,6 +439,48 @@ run, while a plain terminal in the same app works perfectly.
   | `just dev-db-from-real` | Bootstrap tier: snapshot the **real** DB into that one |
   | `just dev-db-reset` | Wipe the bootstrap dev DBs for a fresh-install path (per-run DBs are untouched) |
 
+  **Drive your own change against a running stack before you call it done.**
+  `veld start --preset dev-headless` (no Electron shell — `dev` if you want it)
+  brings up a daemon, a `/ide` and a database that are *this worktree's*, and
+  `dev-link` writes `~/.local/bin/veld-dev-<worktree>`: a wrapper that runs
+  **your** `target/debug/veld` with that run's `VELD_DB_PATH`, daemon port and
+  socket already exported. So `veld-dev-<worktree> <anything>` is your build
+  talking to your daemon against your database, in parallel with the installed
+  veld and with every other worktree's stack. Nothing to set up per command, and
+  nothing that can touch the real database.
+
+  This is not the same test as `cargo test` plus a scratch `VELD_DB_PATH`, and
+  the difference is not theoretical:
+
+  - **A scratch database has no daemon.** Anything on a timer — a scheduler tick,
+    a watchdog, a reconcile — is only ever *reasoned about* until a real daemon
+    runs it. Watching one fire, and watching it *not* fire when a guard says it
+    should not, is a different kind of evidence.
+  - **An installed-instance assumption reads as correct until a dev instance
+    disproves it.** `veld backup restore`'s refusal told the user to
+    `launchctl bootout … dev.veld.daemon` — right for the installed daemon, and
+    on a dev instance it names a *different* daemon that does not own that
+    database and whose restart disturbs the environments the developer is
+    actually running. Five review rounds and every scratch-database smoke test
+    passed it; one `veld-dev-<worktree> backup restore` did not.
+    `Db::uses_installed_database()` is the predicate for telling the two apart.
+  - **The `/ide` is served by your daemon**, so a settings row, a pane, a badge
+    or a toast is inspectable in a browser tab at that run's dashboard URL
+    (`veld urls`) without building or launching Veld Desktop.
+
+  Prefer `dev-headless` when you only need the CLI and the web UI — it starts
+  faster and needs no app. Use `dev-db:from-real` when the change touches a
+  migration, and `dev-db:fresh` when it has to behave on an empty install; both
+  are real states worth seeing, and they are not the same test.
+
+  **`dev` and `dev-headless` carry `dev-db:fresh`, so `veld restart` empties that
+  database.** That is the variant's job, and it is a trap while testing anything
+  stateful: state you set up, and any conclusion you drew from it, is gone after a
+  restart that looked routine — a restore verified before the restart reads as
+  having failed after it. `dev-keep` is the preset for a test that has to survive
+  one. Rebuilding the daemon onto new code *does* need a restart, so decide which
+  you are doing before you type it.
+
   Two files, both in `.veld-dev/`: `veld.db` belongs to the `just dev` instance,
   and `veld-cargo.db` is what a plain `cargo run`/`cargo test` gets — **as long
   as `VELD_DB_PATH` is unset**, because `Db::path_override` consults it before

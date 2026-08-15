@@ -95,10 +95,34 @@ pub fn daemon_socket() -> PathBuf {
     if let Some(p) = env_nonempty("VELD_DAEMON_SOCK") {
         return PathBuf::from(p);
     }
+    default_daemon_socket()
+}
+
+/// The **installed** instance's daemon socket, ignoring `VELD_DAEMON_SOCK`.
+///
+/// The socket the installed daemon is on whatever this process was pointed at —
+/// which is the question to ask when the thing being acted on is the installed
+/// *database*, since the two overrides are independent. `veld backup restore` is
+/// the caller: a CLI told to use a different socket must still notice the installed
+/// daemon holding the file it is about to replace.
+pub fn default_daemon_socket() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".veld")
         .join("daemon.sock")
+}
+
+/// Whether [`daemon_socket`] is the installed instance's socket rather than one
+/// this process was pointed at.
+///
+/// Exists so a caller can ask whether the daemon it can reach is the one that owns
+/// the database it is about to act on. Those are separate overrides —
+/// `VELD_DB_PATH` and `VELD_DAEMON_SOCK` — and when only one of them is set the
+/// socket and the database belong to different instances. `veld backup restore`
+/// needs exactly that: refusing because *a* daemon is running, when that daemon
+/// holds a different database entirely, blocks a restore for no reason.
+pub fn daemon_socket_is_default() -> bool {
+    env_nonempty("VELD_DAEMON_SOCK").is_none()
 }
 
 /// Where this instance's terminal runtime state lives: the holder sockets, and the

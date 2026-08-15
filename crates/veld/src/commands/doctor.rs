@@ -433,10 +433,21 @@ impl Diagnostics {
                 Err(e) => {
                     self.checks.push(Check {
                         pass: false,
-                        label: format!("Database not usable at {path}: {e}"),
+                        label: format!(
+                            "Database not usable at {path}: {e} — see the backup row below, \
+                             then `veld backup restore`"
+                        ),
                     });
                 }
             }
+
+            // 0b. Backups. Reported unconditionally, pass or fail, for the same
+            // reason the daemon-log row is: the moment somebody needs to know
+            // whether there is a copy of their state is the moment they are
+            // already in trouble, and "is there one, how old, what schema" is not
+            // a question to answer by hunting for a directory.
+            let backups = check_backups();
+            self.checks.push(backups);
         }
 
         // 1. Helper socket reachable
@@ -1376,6 +1387,197 @@ fn humanize_secs(seconds: i64) -> String {
         (0, m) => format!("{m}m"),
         (h, 0) => format!("{h}h"),
         (h, m) => format!("{h}h {m}m"),
+    }
+}
+
+/// How old, in the largest unit that still says something.
+///
+/// Rounded down deliberately: a backup 23 hours old reading "0 day(s)" would make
+/// a stale one look fresh, so the hour branch keeps it until it really is a day.
+fn describe_age(age: chrono::Duration) -> String {
+    if age.num_hours() >= 24 {
+        format!("{} day(s) old", age.num_days())
+    } else if age.num_minutes() >= 60 {
+        format!("{} hour(s) old", age.num_hours())
+    } else {
+        format!("{} minute(s) old", age.num_minutes().max(0))
+    }
+}
+
+/// Whether there is a recent, usable copy of the database — and how to use it.
+///
+/// **Passes on "there is a usable backup", not on "backups are switched on"**, and
+/// the difference is the whole row. The real incident this feature answers had two
+/// failures, not one: the file died, *and* the copies that survived it opened
+/// perfectly while containing nothing anybody wanted. A row that reported the
+/// setting would have said everything was fine on that machine, both times.
+///
+/// So the newest artifact is actually opened and checked here, its age is stated
+/// rather than implied, and the daemon's last recorded attempt is reported when it
+/// failed — a backup subsystem failing quietly is indistinguishable from one that
+/// is working until the day it matters.
+fn check_backups() -> Check {
+    use veld_core::db::backup;
+
+    let db = veld_core::db::Db::default_path()
+        .ok()
+        .filter(|p| p.exists())
+        .and_then(|_| veld_core::db::Db::open().ok());
+
+    // Fall back to the derived default when the settings cannot be read, exactly
+    // as `veld backup` does — a database that will not open is the case this row
+    // exists for, so it must not depend on one.
+    let dir = db
+        .as_ref()
+        .and_then(|db| db.backup_prefs().dir)
+        .or_else(backup::default_dir);
+    let enabled = db.as_ref().map(|db| db.backup_prefs().enabled);
+
+    let Some(dir) = dir else {
+        return Check {
+            pass: false,
+            label: "No backup directory could be determined for the database".into(),
+        };
+    };
+
+    // Reported whether or not it is the reason for a failure: a failure recorded
+    // by the daemon explains a stale newest-backup that would otherwise look like
+    // nothing was ever configured.
+    let last_error = db
+        .as_ref()
+        .and_then(|db| db.kv_get(backup::LAST_RUN_KEY).ok().flatten())
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .filter(|v| v["ok"] == serde_json::Value::Bool(false))
+        .and_then(|v| v["error"].as_str().map(str::to_owned));
+
+    let now = chrono::Utc::now();
+    let artifacts = backup::list(&dir);
+    // **`newest_usable` decides what "usable" means, and this row asks it** rather
+    // than re-deriving half its rule. Re-deriving it is what went wrong: this
+    // filter kept `taken_at <= now` after `newest_usable` was fixed to
+    // de-prioritise a future-dated artifact rather than disqualify it, so on a
+    // machine whose clock is behind its own backups doctor reported that nothing
+    // could be restored while `veld backup restore` restored one perfectly well.
+    //
+    // **The deep check, for the one artifact this row reports on.** `inspect` is the
+    // sweep's cheap `quick_check`, which does not compare index content against
+    // table content — so an artifact `veld backup restore` would refuse could be the
+    // one doctor called healthy. That is the incident's second failure in a new
+    // costume, and it is worth one full scan of one file to close. The *count* stays
+    // shallow: it is a survey, and deep-checking a folder of hundreds is what
+    // `inspect`/`inspect_deep` were split apart to avoid.
+    let newest = backup::newest_restorable(&dir, now);
+    let usable = artifacts
+        .iter()
+        .filter(|a| backup::inspect(&a.path).is_ok())
+        .count();
+
+    // How stale is too stale. Generous on purpose — a laptop that slept through
+    // several intervals is healthy, and a check that cries wolf is a check people
+    // learn to skip — but bounded, because the whole point of this row is the state
+    // where backups silently stopped.
+    let interval = db
+        .as_ref()
+        .map(|db| db.backup_prefs().interval_minutes)
+        .unwrap_or(veld_core::db::DEFAULT_BACKUP_INTERVAL_MINUTES);
+    let stale_after =
+        chrono::Duration::minutes(interval.saturating_mul(4)).max(chrono::Duration::hours(12));
+
+    let dir_note = tilde_path(&dir);
+    match newest.as_ref() {
+        Some(a) => {
+            let age = now - a.taken_at;
+            // **A backup that exists is not a backup that is current**, and passing
+            // on existence alone is the failure this whole feature was filed
+            // against: the copies that survived the real incident opened fine and
+            // were weeks old. Nothing else notices a scheduler that stopped — a
+            // daemon that is not running records no failure — so if this row does
+            // not say it, nobody does.
+            // **A backup dated in the future makes "how old is it" unanswerable, so
+            // it must not be answered.** `age` goes negative, `describe_age` clamps
+            // it to "0 minute(s) old", and the staleness test can then never fire —
+            // this row turns permanently green on a machine whose clock disagrees
+            // with its own backups, which is exactly the state it exists to report.
+            // Reported as its own condition rather than folded into staleness,
+            // because the fix is to look at the clock, not at the backups.
+            let ahead = a.taken_at > now;
+            let stale = enabled != Some(false) && !ahead && age > stale_after;
+            // **The word and the verdict are computed from the same condition.**
+            // They were not: a fresh backup that is world-readable failed the check
+            // while the label still opened with "OK", and both fields go out over
+            // `--json` verbatim — so an agent matching on the text saw a pass on
+            // precisely the exposed-secrets case this row exists to raise.
+            let pass = !stale && !ahead && a.owner_only;
+            let state = match (stale, ahead, a.owner_only) {
+                (true, _, _) => "STALE",
+                (_, true, _) => "CLOCK",
+                (_, _, false) => "EXPOSED",
+                _ => "OK",
+            };
+            let mut label = format!(
+                "Database backup {state} ({} of {} usable in {dir_note}, newest {}, schema v{})",
+                usable,
+                artifacts.len(),
+                describe_age(age),
+                a.schema_version,
+            );
+            if ahead {
+                label.push_str(
+                    " — dated in the future, so this machine's clock disagrees with its \
+                     own backups and their age cannot be judged. The backups are still \
+                     restorable; check the clock",
+                );
+            }
+            if stale {
+                label.push_str(
+                    " — nothing has written one since; check the daemon is running \
+                     (`veld doctor` Services above) or run `veld backup now`",
+                );
+            }
+            if !a.owner_only {
+                // The mode veld asks for is not always the mode it gets: a FAT or
+                // SMB volume cannot express one, and an artifact carries the same
+                // secrets the database is 0600 for.
+                label.push_str(" — readable by more than you; a backup carries relay tokens");
+            }
+            if let Some(error) = last_error {
+                label.push_str(&format!(" — last attempt failed: {error}"));
+            }
+            Check { pass, label }
+        }
+        None if enabled == Some(false) => Check {
+            // Not a failure: somebody turned it off on purpose, and a red row for a
+            // deliberate choice is how a check earns being ignored.
+            pass: true,
+            label: format!("Database backups are switched off (backup.enabled) — {dir_note}"),
+        },
+        None => {
+            let why = last_error
+                .map(|e| format!(" — last attempt failed: {e}"))
+                .unwrap_or_else(|| {
+                    " — the daemon writes one on the backup.intervalMinutes schedule; \
+                     `veld backup now` takes one immediately"
+                        .to_string()
+                });
+            // **"None" no longer implies "nothing is there."** `newest` is the deep
+            // check and `usable` is the shallow one, so this arm is reachable with
+            // artifacts present that `veld backup` lists as `ok`: every one passes
+            // `quick_check` and none survives `integrity_check`. Saying "no usable
+            // backup" flatly would have doctor and the listing contradicting each
+            // other — the failure this row keeps being rewritten to avoid. Say which
+            // check they failed instead.
+            let label = if usable > 0 {
+                format!(
+                    "No restorable database backup in {dir_note} — {usable} of \
+                     {} pass a quick check but none survives a full integrity check, \
+                     so none can be restored{why}",
+                    artifacts.len()
+                )
+            } else {
+                format!("No usable database backup in {dir_note}{why}")
+            };
+            Check { pass: false, label }
+        }
     }
 }
 

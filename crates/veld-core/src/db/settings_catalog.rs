@@ -77,8 +77,8 @@
 //!
 //! # Offered is not accepted
 //!
-//! [`Choices`] describes what a surface should **offer**. For five keys — the two
-//! [`Choices::Presets`] and the three [`Choices::Runtime`] — that is deliberately
+//! [`Choices`] describes what a surface should **offer**. For six keys — the two
+//! [`Choices::Presets`] and the four [`Choices::Runtime`] — that is deliberately
 //! narrower than what `validate` **accepts**, and collapsing the two would make
 //! this catalog lie:
 //!
@@ -89,7 +89,8 @@
 //!   any absolute path, by shape, never by existence;
 //! - `terminal.fontFamily` offers what the browser reports it can render and
 //!   accepts any CSS font list that cannot escape a stylesheet rule;
-//! - `worktree.storageDir` offers a folder picker and accepts any absolute path.
+//! - `worktree.storageDir` and `backup.dir` offer a folder picker and accept any
+//!   absolute path — or empty, which is each one's "no folder chosen" value.
 //!
 //! [`Choices::Presets`] and [`Choices::Runtime`] are how that asymmetry is stated
 //! rather than hidden, and they are also exactly the keys whose control the bundle
@@ -99,12 +100,14 @@ use serde::Serialize;
 use serde_json::Value;
 
 use super::settings::{
-    ConfigSource, MAX_BELL_VOLUME, MAX_DETACH_GRACE_MINUTES, MAX_FONT_SIZE, MAX_KEEP_AWAKE_MINUTES,
+    ConfigSource, MAX_BACKUP_INTERVAL_MINUTES, MAX_BACKUP_KEEP, MAX_BACKUP_KEEP_DAILY,
+    MAX_BELL_VOLUME, MAX_DETACH_GRACE_MINUTES, MAX_FONT_SIZE, MAX_KEEP_AWAKE_MINUTES,
     MAX_RECONNECT_BACKOFF_SECONDS, MAX_RECONNECT_FIRST_DELAY_SECONDS, MAX_RECONNECT_TRIES,
     MAX_RUN_HISTORY_DAYS, MAX_SCROLLBACK, MAX_SHARE_TTL_MINUTES, MAX_TRASH_RETENTION_DAYS,
-    MIN_BELL_VOLUME, MIN_DETACH_GRACE_MINUTES, MIN_FONT_SIZE, MIN_KEEP_AWAKE_MINUTES,
-    MIN_RECONNECT_BACKOFF_SECONDS, MIN_RECONNECT_FIRST_DELAY_SECONDS, MIN_RECONNECT_TRIES,
-    MIN_RUN_HISTORY_DAYS, MIN_SCROLLBACK, MIN_SHARE_TTL_MINUTES, SettingKey, defaults,
+    MIN_BACKUP_INTERVAL_MINUTES, MIN_BACKUP_KEEP, MIN_BACKUP_KEEP_DAILY, MIN_BELL_VOLUME,
+    MIN_DETACH_GRACE_MINUTES, MIN_FONT_SIZE, MIN_KEEP_AWAKE_MINUTES, MIN_RECONNECT_BACKOFF_SECONDS,
+    MIN_RECONNECT_FIRST_DELAY_SECONDS, MIN_RECONNECT_TRIES, MIN_RUN_HISTORY_DAYS, MIN_SCROLLBACK,
+    MIN_SHARE_TTL_MINUTES, SettingKey, defaults,
 };
 
 /// Which part of the product a setting is about.
@@ -468,6 +471,7 @@ const SHARE_TTL_PRESETS: &[Choice] = &[
 // one arm would silently split a section in two.
 // ---------------------------------------------------------------------------
 
+const DATABASE_BACKUPS: Option<&str> = Some("Database backups");
 const APPEARANCE: Option<&str> = Some("Appearance");
 const BEHAVIOUR: Option<&str> = Some("Behaviour");
 const AUTO_RECONNECT: Option<&str> = Some("Auto-reconnect");
@@ -673,6 +677,96 @@ impl SettingKey {
                     options: NEWS_SOURCES,
                 },
                 requires: None,
+            },
+
+            // ── General › Database backups ───────────────────────────────────
+            Self::BackupEnabled => toggle_in(
+                "Back up Veld's database",
+                "Everything Veld knows lives in one file: your repositories, your worktrees and \
+                 their lanes and markers, pane layouts, run history, these settings. Nothing else \
+                 on the machine has a copy, and losing that file is a fresh install rather than a \
+                 bad day. On, Veld writes a compact copy of it on the interval below — logs and \
+                 resource samples are left out, so a copy is a few megabytes rather than the \
+                 hundreds the live file can reach. Turn it off if you already snapshot your home \
+                 directory and would rather Veld stayed out of it.",
+                General,
+                DATABASE_BACKUPS,
+            ),
+            Self::BackupIntervalMinutes => Spec {
+                title: "Back up every",
+                help: "How far back the worst case throws you: a database lost just before the \
+                       next copy costs you this much rearranging. The work being protected is \
+                       arrangement rather than content — which repositories are registered, which \
+                       checkouts exist, how they are laid out — so an hour of it is a few minutes \
+                       to redo. Shorten it if you reorganise constantly; the copy is cheap either \
+                       way.",
+                group: General,
+                section: DATABASE_BACKUPS,
+                shape: ValueShape::Int,
+                choices: Choices::Range {
+                    min: MIN_BACKUP_INTERVAL_MINUTES,
+                    max: MAX_BACKUP_INTERVAL_MINUTES,
+                    step: None,
+                    unit: Some("min"),
+                    empty_means: None,
+                },
+                requires: requires_true("backup.enabled"),
+            },
+            Self::BackupKeep => Spec {
+                title: "Keep the most recent",
+                help: "Generations to keep, newest first. More than one because nothing \
+                       guarantees Veld noticed a database had gone wrong before it copied it — \
+                       the generations are what let you step back past a bad one.",
+                group: General,
+                section: DATABASE_BACKUPS,
+                shape: ValueShape::Int,
+                choices: Choices::Range {
+                    min: MIN_BACKUP_KEEP,
+                    max: MAX_BACKUP_KEEP,
+                    step: None,
+                    unit: Some("copies"),
+                    empty_means: None,
+                },
+                requires: requires_true("backup.enabled"),
+            },
+            Self::BackupKeepDaily => Spec {
+                title: "And one per day for",
+                help: "A count on its own bounds disk space and not time: twelve copies taken \
+                       every five minutes is an hour of history, so a problem you only notice the \
+                       next morning has nothing left to go back to. This keeps the first copy of \
+                       each day beyond the recent ones. 0 keeps only the recent ones.",
+                group: General,
+                section: DATABASE_BACKUPS,
+                shape: ValueShape::Int,
+                choices: Choices::Range {
+                    min: MIN_BACKUP_KEEP_DAILY,
+                    max: MAX_BACKUP_KEEP_DAILY,
+                    step: Some(7),
+                    unit: Some("days"),
+                    empty_means: Some("none"),
+                },
+                requires: requires_true("backup.enabled"),
+            },
+            Self::BackupDir => Spec {
+                title: "Backup folder",
+                help: "Empty means the folder Veld picks beside its own data directory, which is \
+                       on the same disk as the database it is copying — that survives the file \
+                       going bad, and it does not survive the disk going with it. Point this at \
+                       an external drive or a synced folder if you want the copies somewhere the \
+                       machine's own storage cannot take with it. An absolute path. Veld only \
+                       ever deletes files it wrote itself from here, and never changes the \
+                       folder's own permissions, so it is safe to share with something else. \
+                       Worth knowing before you do: a copy carries everything the database does, \
+                       including the tokens for your relays — Veld writes each one readable only \
+                       by you, which a drive formatted FAT or a network share cannot honour, and \
+                       says so when that happens. `veld backup` shows what is in the folder.",
+                group: General,
+                section: DATABASE_BACKUPS,
+                shape: ValueShape::Text,
+                choices: Choices::Runtime {
+                    source: RuntimeSource::Directory,
+                },
+                requires: requires_true("backup.enabled"),
             },
 
             // ── Git ──────────────────────────────────────────────────────────

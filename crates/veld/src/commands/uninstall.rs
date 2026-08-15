@@ -39,8 +39,17 @@ pub async fn run() -> i32 {
         let app = veld_core::setup::desktop_app_status()
             .map(|(p, _)| format!(", and {}", p.display()))
             .unwrap_or_default();
+        // Backups are named rather than folded into "cached state": they are the
+        // one thing here somebody may have been keeping deliberately, and the copies
+        // of the database go with the database for the same reason it goes at all —
+        // they carry the same secrets.
+        // "the default backup folder", not "its backups": a `backup.dir` pointed at
+        // an external drive is the user's own folder and is deliberately left alone
+        // (see `setup.rs`). Promising more than that would tell somebody their
+        // secrets-bearing copies were gone when they are still on the drive.
         eprintln!(
-            "{} This will remove Veld, its daemons, certificates and cached state{app}.",
+            "{} This will remove Veld, its daemons, certificates, cached state and the \
+             default database-backup folder{app}.",
             output::yellow("Warning:"),
         );
         eprint!("Continue? [y/N] ");

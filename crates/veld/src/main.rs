@@ -598,6 +598,27 @@ enum Command {
         json: bool,
     },
 
+    /// Copies of Veld's own database: list them, take one, put one back.
+    ///
+    /// Everything Veld knows — repositories, worktrees, lanes, layouts, run
+    /// history, settings — lives in one SQLite file, and the daemon keeps compact
+    /// copies of it on the interval in `veld settings backup`.
+    Backup {
+        /// Where to look, overriding the `backup.dir` setting for this command.
+        // `global` so it reads naturally after the verb — `veld backup now --dir
+        // /Volumes/disk` — rather than only in front of it, which is where a
+        // parent-only flag has to go and is not where anybody types it. A `//`
+        // comment, not a doc comment: clap renders those as help text, and this is
+        // a note to the next maintainer rather than to a user.
+        #[arg(long, value_name = "DIR", global = true)]
+        dir: Option<std::path::PathBuf>,
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+        #[command(subcommand)]
+        cmd: Option<BackupCmd>,
+    },
+
     /// Share a running environment with a colleague over peer-to-peer.
     Share {
         /// Run to share (defaults to the only active run).
@@ -830,6 +851,50 @@ enum SettingsCmd {
         key: String,
 
         /// Output as JSON — the setting's whole catalog entry.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// `veld backup` and its verbs.
+///
+/// Every one of these has to work on a machine whose database will not open —
+/// that is the only day anybody runs them — so none of them requires a readable
+/// database, and the backup directory falls back to the derived default when the
+/// `backup.dir` setting cannot be read.
+#[derive(Subcommand)]
+enum BackupCmd {
+    /// Take a backup right now, outside the daemon's schedule.
+    ///
+    /// Retention still applies, so this cannot fill a disk that the scheduled
+    /// backup keeps bounded.
+    Now {
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Put a backup back in place.
+    ///
+    /// With no path, the newest backup that is actually **usable** is chosen —
+    /// which is not always the newest file, since a backup taken after the damage
+    /// started is exactly the one to skip. The database being replaced is renamed,
+    /// never deleted: it is the only evidence of what went wrong.
+    Restore {
+        /// A specific backup file. Defaults to the newest usable one.
+        #[arg(value_name = "PATH")]
+        path: Option<std::path::PathBuf>,
+
+        /// Restore even though the daemon is running. Its work after this point
+        /// goes to the database being replaced and is lost, so restart it
+        /// afterwards.
+        #[arg(long)]
+        force: bool,
+
+        /// Skip the confirmation prompt.
+        #[arg(long, short = 'y')]
+        yes: bool,
+
+        /// Output as JSON.
         #[arg(long)]
         json: bool,
     },
@@ -1241,6 +1306,19 @@ async fn main() {
 
         Command::Doctor { json } => commands::doctor::run(json).await,
 
+        // Same outer/inner `--json` OR-ing as `settings`, `config` and `runs`, so
+        // both `veld backup --json now` and `veld backup now --json` work.
+        Command::Backup { dir, json, cmd } => match cmd {
+            Some(BackupCmd::Now { json: inner }) => commands::backup::now(dir, json || inner),
+            Some(BackupCmd::Restore {
+                path,
+                force,
+                yes,
+                json: inner,
+            }) => commands::backup::restore(path, dir, force, yes, json || inner).await,
+            None => commands::backup::list(dir, json),
+        },
+
         Command::Share {
             run,
             node,
@@ -1448,6 +1526,14 @@ fn command_survives_an_update(command: &Command) -> bool {
                 cmd: None | Some(SettingsCmd::Get { .. } | SettingsCmd::Describe { .. }),
                 ..
             }
+            // The **read** half of `veld backup`, and only that half. Listing reads
+            // a directory and opens each artifact, none of which an update touches,
+            // and "what can I go back to" is a question somebody asks precisely when
+            // an update has gone wrong. `now` and `restore` stay blocked: one writes
+            // a copy of a database that may be mid-migration, and the other would
+            // swap the live file out from under the migration itself — which is the
+            // one way to turn a stuck update into a lost database.
+            | Command::Backup { cmd: None, .. }
     )
 }
 
@@ -1634,5 +1720,55 @@ mod update_gate_tests {
                 json: false,
             }
         ))));
+    }
+
+    /// Listing backups survives an update; taking or restoring one does not.
+    ///
+    /// The same shape as the settings split above and for a sharper reason: an
+    /// update is migrating the database, and `restore` would swap the file out from
+    /// under the migration — the one way to turn a stuck update into a lost
+    /// database. Both directions are asserted because the allow-list is a
+    /// `matches!`, so a `Backup { .. }` written unqualified would silently permit
+    /// exactly that with the read half's test still passing.
+    #[test]
+    fn listing_backups_survives_an_update_but_writing_one_does_not() {
+        let backup = |cmd| Command::Backup {
+            dir: None,
+            json: false,
+            cmd,
+        };
+
+        assert!(command_survives_an_update(&backup(None)));
+        assert!(!command_survives_an_update(&backup(Some(BackupCmd::Now {
+            json: false
+        }))));
+        assert!(!command_survives_an_update(&backup(Some(
+            BackupCmd::Restore {
+                path: None,
+                force: false,
+                yes: false,
+                json: false,
+            }
+        ))));
+    }
+
+    /// `--dir` reads after the verb, which is where it is typed.
+    ///
+    /// It is declared on the parent, so without `global` clap accepts it only in
+    /// front of the subcommand — and `veld backup now --dir /Volumes/disk` fails
+    /// with "unexpected argument", which is what it did first.
+    #[test]
+    fn the_backup_directory_flag_reads_on_either_side_of_the_verb() {
+        for argv in [
+            vec!["veld", "backup", "--dir", "/tmp/b", "now"],
+            vec!["veld", "backup", "now", "--dir", "/tmp/b"],
+        ] {
+            let cli = Cli::try_parse_from(&argv).expect("should parse");
+            let Some(Command::Backup { dir, cmd, .. }) = cli.command else {
+                panic!("parsed into the wrong command for {argv:?}")
+            };
+            assert_eq!(dir.as_deref(), Some(std::path::Path::new("/tmp/b")));
+            assert!(matches!(cmd, Some(BackupCmd::Now { .. })));
+        }
     }
 }

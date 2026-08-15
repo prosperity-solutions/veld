@@ -104,10 +104,25 @@ export interface CatalogGroup {
   label: string;
 }
 
+/**
+ * Facts about this machine that no catalog entry can carry, because they are not
+ * properties of a setting.
+ */
+export interface CatalogMachine {
+  /**
+   * Where backups go when `backup.dir` is empty — resolved by the daemon, since it
+   * depends on the platform, on `VELD_DB_PATH` and on whether this is a dev build.
+   * `null` on a machine with no data directory at all.
+   */
+  backupDir: string | null;
+}
+
 /** `GET /api/settings/catalog`. */
 export interface SettingsCatalog {
   groups: CatalogGroup[];
   settings: CatalogEntry[];
+  /** Optional so an older daemon's response still parses. */
+  machine?: CatalogMachine;
 }
 
 /**

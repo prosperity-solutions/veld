@@ -3944,7 +3944,8 @@ previewing the app you are building.
 Everything above describes a **project's** `veld.json`. Veld also has settings of
 its own — machine-wide preferences that belong to the person, not the repo: which
 shell terminals open, where new worktrees land, whether Veld may keep this machine
-awake, which events are allowed to interrupt you.
+awake, which events are allowed to interrupt you, how often Veld copies its own
+database.
 
 They are the settings the IDE's settings dialog edits, and they are reachable from
 a terminal:
@@ -4009,6 +4010,46 @@ via [`sharing.peer_ttl_minutes` / `sharing.web_ttl_minutes`](#sharingpeer_ttl_mi
 exception to the table below: a share's useful life is a property of *what is being
 shared*, so the repo describing the environment is the right place to bound it, and
 a fresh checkout gets the team's answer without configuring a machine.
+
+### Database backups
+
+Five settings, under `backup.*`, govern the copies Veld keeps of its own database
+— the file every other thing on this page eventually ends up in. They are in the
+**General** group, under *Database backups*:
+
+| Key | Default | What it decides |
+|---|---|---|
+| `backup.enabled` | `true` | Whether the daemon copies the database at all |
+| `backup.intervalMinutes` | `60` | How often (5–1440). The worst case is how much *arrangement* you would redo, not how much work you would lose |
+| `backup.keep` | `12` | How many recent copies survive (2–500) |
+| `backup.keepDaily` | `14` | How many days keep one copy each, beyond the recent ones (0–365; `0` is off) |
+| `backup.dir` | *(empty)* | Where copies go. Empty means `<data_dir>/veld-backups` |
+
+`keep` and `keepDaily` are both there because either one alone is wrong. A count
+bounds disk and not time — twelve copies taken every five minutes is an hour of
+history, so a problem noticed the next morning has nothing to go back to. A day
+count alone is unbounded on a machine backing up constantly.
+
+The default directory is a **sibling** of `<data_dir>/veld`, not a child, so
+removing Veld's data directory does not remove the copies. It is still the same
+disk: point `backup.dir` at an external drive or a synced folder if you want them
+elsewhere. Veld only ever deletes files it wrote itself from that folder and never
+changes the folder's own permissions, so it is safe to share with something else.
+It also never deletes a copy it cannot read: a backup whose header is damaged may
+still be recoverable, and is the last file worth destroying. Those are reported
+rather than cleaned up, so a folder full of them says so.
+
+Before pointing it at shared storage: **a copy carries everything the database
+does, including your relay auth tokens.** Veld writes each one readable only by
+you and warns — in `veld backup now`, in the daemon log and in `veld doctor` —
+when the filesystem cannot express that, which is the case on FAT-formatted drives
+and most network shares. `veld uninstall` removes the *default* folder for the same
+reason it removes the database; a custom `backup.dir` is your folder and is left
+alone.
+
+See the [README's Storage section](../README.md#storage) for what a copy contains
+and how a restore works, and `veld backup` / `veld backup restore` for the
+commands.
 
 ### `veld settings` vs `veld config`
 
