@@ -3387,6 +3387,8 @@ function AppInner(props: {
         // here instead of through the window's own key handler. Same chords,
         // same meaning — see `browserViews.js`.
         else if (accelerator === "project:toggle") goToPreviousProject();
+        else if (accelerator === "tab:next") stepTab(1);
+        else if (accelerator === "tab:previous") stepTab(-1);
         else if (accelerator.startsWith("project:")) {
           goToProject(Number(accelerator.slice("project:".length)));
         }

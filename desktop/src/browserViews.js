@@ -526,24 +526,22 @@ function attachListeners(window, viewId, entry) {
   // While a native view has keyboard focus the renderer sees no keys at all, so
   // the app's own accelerators are dead the moment you click into a preview.
   // Bindings intercepted and forwarded: `Ctrl/⌘+Shift+P` for the command
-  // palette and `Ctrl/⌘+F` for the pane's own find bar — both app-documented
-  // shortcuts. `⇧P` is safely outside anything a previewed page wants for
-  // itself; `F` is a real, accepted trade-off rather than a free one — a
-  // dev-server preview with its own find (a docs site, an embedded
-  // Monaco/CodeMirror editor) loses that binding entirely, since this fires
-  // ahead of the page's own key handlers and there is no escape hatch. This
-  // is the same trade a real browser tab already makes: Chrome's own find bar
-  // owns `Ctrl/⌘+F` unconditionally too, so a page cannot claim it there
-  // either — this pane behaving the same way is consistent with that, not a
-  // new risk this diff introduces. Tab-cycling used to be forwarded too
-  // (`Ctrl+Tab`, then a mod+shift-arrow chord after that) but isn't any more:
-  // the arrow variant is exactly the chord an embedded text editor's own
-  // "select to line start/end" binding uses, which `Ctrl+Tab` never
-  // collided with. Every other window-level shortcut (worktree navigation,
-  // tab-cycling, focus mode, the view switch, update main, run cycling,
-  // start/stop, restart, and opening the Shortcuts overview) is not
-  // forwarded from here — a follow-up, not an oversight; clicking back into
-  // the rail or top bar reaches them same as before this pane existed.
+  // palette, `Ctrl/⌘+F` for the pane's own find bar, and `Ctrl/⌘+⇧` + an arrow
+  // for tab-cycling — all app-documented shortcuts. `⇧P` is safely outside
+  // anything a previewed page wants for itself; `F` and the arrows are a real,
+  // accepted trade-off rather than a free one — a dev-server preview with its
+  // own find (a docs site, an embedded Monaco/CodeMirror editor) loses that
+  // binding entirely, and the same editor's "select to line start/end"
+  // (Ctrl/⌘+⇧+arrow) loses that one too, since this fires ahead of the page's
+  // own key handlers and there is no escape hatch. This is the same trade a
+  // real browser tab already makes: Chrome's own find bar owns `Ctrl/⌘+F`
+  // unconditionally too, so a page cannot claim it there either — this pane
+  // behaving the same way is consistent with that, not a new risk this diff
+  // introduces. Every other window-level shortcut (worktree navigation, focus
+  // mode, the view switch, update main, run cycling, start/stop, restart, and
+  // opening the Shortcuts overview) is not forwarded from here — a follow-up,
+  // not an oversight; clicking back into the rail or top bar reaches them
+  // same as before this pane existed.
   wc.on("before-input-event", (event, input) => {
     if (input.type !== "keyDown") return;
     if (
@@ -603,6 +601,26 @@ function attachListeners(window, viewId, entry) {
         event.preventDefault();
         window.webContents.focus();
         send(window, "veld:browser:accelerator", { viewId, accelerator: "project:toggle" });
+        return;
+      }
+    }
+    // Tab-cycling: `Ctrl/⌘+⇧` + an arrow, forwarded for the same reason the
+    // digits are — a native view takes the whole keyboard, and this is one of
+    // the few chords whose entire job is *leaving* wherever focus currently
+    // is. Without it, cycling into a browser pane has no keyboard way out at
+    // all. Matches `App.tsx`'s own keydown effect: left/up is previous,
+    // right/down is next.
+    if ((input.control || input.meta) && input.shift && !input.alt) {
+      if (input.key === "ArrowLeft" || input.key === "ArrowUp") {
+        event.preventDefault();
+        window.webContents.focus();
+        send(window, "veld:browser:accelerator", { viewId, accelerator: "tab:previous" });
+        return;
+      }
+      if (input.key === "ArrowRight" || input.key === "ArrowDown") {
+        event.preventDefault();
+        window.webContents.focus();
+        send(window, "veld:browser:accelerator", { viewId, accelerator: "tab:next" });
         return;
       }
     }
