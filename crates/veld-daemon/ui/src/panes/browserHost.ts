@@ -1516,6 +1516,24 @@ if (desktop) {
   window.addEventListener("resize", () => {
     for (const v of views.values()) syncGeometry(v);
   });
+  // This window regaining OS-level focus — Electron proxies that straight to
+  // the DOM `focus` event, no IPC of its own needed. Force-reasserts every
+  // mounted view's visibility rather than trusting the cache for the same
+  // reason `mountBrowser` does (see `applyVisibility`'s own doc comment): a
+  // window that was raised programmatically — cycling a detached one to the
+  // front is the case this exists for — never ran through a real click, and a
+  // real click turned out to be covering for more than the DOM-focus and
+  // activation work this file already knew to redo. Whatever that gap
+  // actually is on the shell's side, this reaches it too: a `focus` here
+  // means *some* window just came to the front, on-screen and expected to be
+  // showing its page, which is exactly the moment worth re-asserting rather
+  // than assuming the cache still agrees with what the shell has.
+  window.addEventListener("focus", () => {
+    for (const v of views.values()) {
+      applyVisibility(v, true);
+      syncGeometry(v);
+    }
+  });
 }
 
 // ---------------------------------------------------------------------------
