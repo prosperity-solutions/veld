@@ -5093,6 +5093,7 @@ function AppInner(props: {
    * forget), so a failed origin is simply excluded from `tried` on the next
    * loop rather than ever retried a second time.
    */
+  const detachedAnchorRef = useRef<{ id: string; sawActiveId: string | null } | null>(null);
   function stepTab(delta: number, tried: ReadonlySet<string> = new Set()) {
     const wt = worktreeRef.current;
     if (!wt) return;
@@ -5107,10 +5108,31 @@ function AppInner(props: {
     const detached = detachedAll.filter((id) => !tried.has(id));
     const order = [...docked, ...detached];
     if (order.length === 0) return;
-    const currentId = layout ? layout.docks[layout.focused].activeId : null;
+    const dockActiveId = layout ? layout.docks[layout.focused].activeId : null;
+    // Landing on a detached window has nothing in `layout` to record it —
+    // `docks[*].activeId` can only ever name one of *this* window's own two
+    // panes, never "parked on an external window." Without `detachedAnchorRef`,
+    // the position that lookup returns is whatever docked tab was last
+    // genuinely active, forever — so a press that steps from the last docked
+    // tab onto a detached window, followed (once focus bounces back here) by
+    // another press, recomputes from that same stale docked id and lands on
+    // the same detached window again: a ping-pong between one tab and one
+    // detached window instead of continuing around the order. The anchor is
+    // only trusted while `dockActiveId` still matches what it was when set —
+    // a real change (the user clicked a different tab in the meantime) makes
+    // that comparison fail, and the stale anchor is dropped in favour of
+    // reality rather than followed past a switch it never saw happen.
+    const anchor = detachedAnchorRef.current;
+    const currentId =
+      anchor && anchor.sawActiveId === dockActiveId && order.includes(anchor.id)
+        ? anchor.id
+        : dockActiveId;
     const idx = currentId ? order.indexOf(currentId) : -1;
     const id = order[nextIndex(idx, delta, order.length)];
     if (docked.includes(id)) {
+      // Landing on a real pane in this window is fully described by the
+      // layout state the click below produces — nothing stale to carry.
+      detachedAnchorRef.current = null;
       // A real click on the tab, not a restatement of what one does. This
       // used to call `setLayouts(activateTab(...))` directly — the same
       // state update `PaneArea`'s own `onClick={props.onSelect}` makes — plus
@@ -5144,6 +5166,9 @@ function AppInner(props: {
       return;
     }
     if (!desktopWindow || !desktopWindow.focus) return;
+    // Remember this as the logical position, keyed to the docked state as of
+    // now — see the comment above `anchor` for why.
+    detachedAnchorRef.current = { id, sawActiveId: dockActiveId };
     const retry = () => {
       if (!chromeless) forgetDetachedWindow(wt.id, id);
       stepTab(delta, new Set([...tried, id]));
