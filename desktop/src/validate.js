@@ -337,24 +337,6 @@ function safeWorktreeId(raw) {
 }
 
 /**
- * A window record id (`WindowRecord.id`), as the renderer holds it: an opaque
- * string handed back from `detach`/`drop-out` and passed into `veld:window:focus`
- * to raise that window later (used for "next/previous tab" cycling onto a
- * detached tab's window). Strings, not the number `record.id` actually is,
- * because a page value crossing IPC is never trusted to still be the type it
- * left as.
- */
-/** Plain decimal digits only — `Number()` alone accepts far more than that
- *  ("0x7", "7e2", " 7 ", "+7", "7.0"), none of which is a `record.id` a page
- *  could have legitimately been handed back. */
-const WINDOW_ID_RE = /^[1-9][0-9]*$/;
-function safeWindowId(raw) {
-  if (typeof raw !== "string" || !WINDOW_ID_RE.test(raw)) return null;
-  const n = Number(raw);
-  return Number.isSafeInteger(n) ? n : null;
-}
-
-/**
  * A repository root, which the shell only ever puts in the `?repo=` parameter of
  * a URL it builds itself.
  *
@@ -497,7 +479,6 @@ module.exports = {
   safeRadius,
   safeTitle,
   safeWorktreeId,
-  safeWindowId,
   transferFromSeed,
   safeRepoRoot,
   safeTransferTab,

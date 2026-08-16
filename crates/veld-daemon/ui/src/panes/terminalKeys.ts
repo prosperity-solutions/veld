@@ -46,12 +46,11 @@ function isShiftEnter(e: KeyboardEvent): boolean {
 /**
  * The window-level shortcuts added alongside the Shortcuts overview — focus
  * mode, the IDE/Runs switch, update main, cycling the run selector,
- * start/stop, restart, worktree navigation (incl. the ←/→ aliases), opening
- * the overview itself, and tab-cycling (incl. its ⌘⇧-arrow aliases) — all of
- * which must reach `App.tsx`'s keydown effect from a focused terminal for the
- * same reason `isSettingsChord` below does: xterm cancels every key it
- * handles, and a focused terminal would otherwise swallow these before the
- * window listener ever saw them.
+ * start/stop, restart, worktree navigation (incl. the ←/→ aliases), and
+ * opening the overview itself — all of which must reach `App.tsx`'s keydown
+ * effect from a focused terminal for the same reason `isSettingsChord` below
+ * does: xterm cancels every key it handles, and a focused terminal would
+ * otherwise swallow these before the window listener ever saw them.
  *
  * `l`/`x`, not `f`/`v`: the veld feedback overlay claims mod+Shift+F and
  * mod+Shift+V for its own bindings, so `App.tsx` moved focus mode and the
@@ -79,7 +78,6 @@ function isAppShortcutChord(e: KeyboardEvent): boolean {
   if (mod && e.shiftKey && !e.altKey) {
     if (["l", "x", "u", "o", "k"].includes(e.key.toLowerCase())) return true;
     if (e.key === "Enter") return true;
-    if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(e.key)) return true;
   }
   if (mod && !e.shiftKey && !e.altKey) {
     if (e.key === "ArrowUp" || e.key === "ArrowDown" || e.key === "ArrowLeft" || e.key === "ArrowRight") {
@@ -118,8 +116,8 @@ function isSettingsChord(e: KeyboardEvent): boolean {
  *   terminal would otherwise swallow anything the app binds.
  * - **Every window-level shortcut** (`isAppShortcutChord`) — focus mode, the
  *   view switch, update main, run cycling, start/stop, restart, worktree
- *   navigation, opening the Shortcuts overview, and tab-cycling — for the
- *   same reason. `Ctrl+K` (the command palette's other chord) deliberately
+ *   navigation, and opening the Shortcuts overview — for the same reason.
+ *   `Ctrl+K` (the command palette's other chord) deliberately
  *   is not among them: that one is readline's kill-to-end-of-line and
  *   belongs to the shell, so the palette is reachable from a focused
  *   terminal only via ⌘K, not Ctrl+K.

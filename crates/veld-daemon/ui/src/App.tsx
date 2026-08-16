@@ -142,7 +142,7 @@ import { Notifications } from "@mantine/notifications";
 import { ContextMenuProvider, useContextMenu } from "mantine-contextmenu";
 import { theme as mantineTheme } from "./theme";
 import { RunsMode } from "./runs/RunsMode";
-import { PaneArea, tabElementId } from "./panes/PaneArea";
+import { PaneArea } from "./panes/PaneArea";
 import type { RunPaneContext } from "./panes/RunPanes";
 import { notifyDone, notifyError, notifyRedirect, notifyTerminal, showSystemNotification } from "./shared/notify";
 import {
@@ -264,7 +264,6 @@ import {
   chromeless,
   desktopApp,
   desktopWindow,
-  getOriginWindowId,
   isElectron,
   layoutSlot,
   openSettingsOnBoot,
@@ -2693,29 +2692,10 @@ function AppInner(props: {
       }
       // ⌘/Ctrl+⇧ + a letter, arrow or Enter — the run/worktree actions with no
       // chord yet: focus mode, the IDE/Runs view switch, update main, cycling
-      // the run selector, start/stop, restart, and tab-cycling. One guard for
-      // all of them: none means anything to a focused text field, unlike
-      // ⌘B's emacs binding or Cmd+Up/Down's caret motion above.
+      // the run selector, start/stop, and restart. One guard for all of them:
+      // none means anything to a focused text field, unlike ⌘B's emacs
+      // binding or Cmd+Up/Down's caret motion above.
       if (mod && e.shiftKey && !e.altKey && !isEditableTarget(e.target)) {
-        // ⌘⇧←/↑ (previous) and ⌘⇧→/↓ (next) — focus the next/previous tab,
-        // continuing into this worktree's own detached windows once the
-        // docked ones run out. No `chromeless`/`mode` guard: a detached
-        // window has its own dock to cycle, and `stepTab` is what makes that
-        // this worktree's *whole* tab list, not just this window's slice of
-        // it. Used to have a literal-Ctrl+Tab chord alongside this one, for
-        // the same reason every tabbed app on macOS binds tab-switching to
-        // the physical Ctrl key (Cmd+Tab is the OS's own app switcher) —
-        // removed as redundant with this one, which needs no such split.
-        if (e.key === "ArrowLeft" || e.key === "ArrowUp") {
-          e.preventDefault();
-          stepTab(-1);
-          return;
-        }
-        if (e.key === "ArrowRight" || e.key === "ArrowDown") {
-          e.preventDefault();
-          stepTab(1);
-          return;
-        }
         // Focus mode is a plain settings toggle with nothing worktree- or
         // view-specific about it, so it is the one chord in this block with no
         // `chromeless`/`mode` guard — it means the same thing everywhere.
@@ -2881,36 +2861,6 @@ function AppInner(props: {
     loadLayouts(layoutSlot, windowSeed, windowRestored, chromeless),
   );
   const layout = worktree ? layouts[worktree.id] : undefined;
-
-  /**
-   * Detached windows this app knows about, per worktree — in the order they
-   * were opened. The only registry of them on this side: once a tab leaves via
-   * `detach`/`dropOut`, it is gone from every `PaneLayout` here (see
-   * `panes/model.ts`), so without this list "next/previous tab" cycling has no
-   * way to reach a detached tab at all, only to skip past where it used to be.
-   *
-   * Not reconciled against which of these windows are still actually open —
-   * there is no push from the shell for "a window closed". `focus()` returning
-   * `false` is what tells the keyboard handler an entry is stale, at which
-   * point it prunes that id; see the cycling helper in the keydown effect.
-   */
-  const [detachedWindows, setDetachedWindows] = useState<Record<number, string[]>>({});
-  const detachedWindowsRef = useRef(detachedWindows);
-  detachedWindowsRef.current = detachedWindows;
-  const onWorktreeDetachedWindow = useCallback((worktreeId: number, windowId: string) => {
-    setDetachedWindows((prev) => {
-      const list = prev[worktreeId] ?? [];
-      return list.includes(windowId) ? prev : { ...prev, [worktreeId]: [...list, windowId] };
-    });
-  }, []);
-  /** Drop a stale id once `focus()` reports the window it named is gone. */
-  const forgetDetachedWindow = useCallback((worktreeId: number, windowId: string) => {
-    setDetachedWindows((prev) => {
-      const list = prev[worktreeId];
-      if (!list || !list.includes(windowId)) return prev;
-      return { ...prev, [worktreeId]: list.filter((id) => id !== windowId) };
-    });
-  }, []);
 
   /**
    * The rail's attention affordance: go to this worktree's node health.
@@ -3387,29 +3337,9 @@ function AppInner(props: {
         // here instead of through the window's own key handler. Same chords,
         // same meaning — see `browserViews.js`.
         else if (accelerator === "project:toggle") goToPreviousProject();
-        else if (accelerator === "tab:next") stepTab(1);
-        else if (accelerator === "tab:previous") stepTab(-1);
         else if (accelerator.startsWith("project:")) {
           goToProject(Number(accelerator.slice("project:".length)));
         }
-      }),
-    [],
-  );
-
-  // This window was just the target of keyboard tab-cycling from elsewhere —
-  // the DOM-focus counterpart to what `stepTab`'s `.focus()`+`.click()`
-  // already does for a tab within the *same* window. `veld:window:focus`'s
-  // `show()`/`focus()` are OS-level operations the far side has no way to
-  // follow with "and put real focus on whichever tab is active here" — only
-  // this window's own renderer can do that part, hence the push.
-  useEffect(
-    () =>
-      desktopWindow?.onCycledTo?.(() => {
-        const wt = worktreeRef.current;
-        if (!wt) return;
-        const layout = layoutsRef.current[wt.id];
-        const activeId = layout?.docks[layout.focused].activeId;
-        if (activeId) document.getElementById(tabElementId(activeId))?.focus();
       }),
     [],
   );
@@ -5073,9 +5003,9 @@ function AppInner(props: {
   updateMainRef.current = updateMain;
 
   /** Move the rail's selection up or down, in the order it renders — the
-   *  flattened `railGroups`, not raw `worktrees` — wrapping at both ends like
-   *  tab-cycling below: past the last worktree goes to the first and vice
-   *  versa, rather than stopping dead at either end of the rail. */
+   *  flattened `railGroups`, not raw `worktrees` — wrapping at both ends:
+   *  past the last worktree goes to the first and vice versa, rather than
+   *  stopping dead at either end of the rail. */
   function stepWorktree(delta: number) {
     const wt = worktreeRef.current;
     if (!wt) return;
@@ -5083,120 +5013,6 @@ function AppInner(props: {
     const idx = order.findIndex((w) => w.id === wt.id);
     const next = order[nextIndex(idx, delta, order.length)];
     if (next) void selectWorktreeRef.current(next);
-  }
-
-  /**
-   * Focus the next/previous tab, continuing into this worktree's own detached
-   * windows once the docked ones run out, and wrapping at both ends — unlike
-   * `stepWorktree`, a small fixed tab strip is the case every tabbed app wraps.
-   * Works the same way in a chromeless (detached) window, where the one
-   * "other" entry is `originWindowId` — the window this one came from — so
-   * cycling out of a detached dock has somewhere to go rather than only ever
-   * wrapping inside it.
-   *
-   * A detached tab is not in any `Dock` any more (see `panes/model.ts`), so
-   * landing on one means asking the shell to raise that *other* window rather
-   * than clicking a tab strip button that does not exist for it. `focus` resolving `false` — or its promise
-   * rejecting, which `ipcRenderer.invoke` does when the main process throws —
-   * means that window has since closed with no way this one could have heard
-   * about it: the id is forgotten and the same press retries the next
-   * candidate, which is the promise `shell.ts`'s and `windows.js`'s own
-   * docstrings for `focus` make. `tried` is what makes that retry terminate:
-   * it is *this call's* local record of ids already found stale, filtered out
-   * of `detachedWindowsRef`'s copy before recomputing the order, rather than
-   * relying on the state update `forgetDetachedWindow` schedules — which is
-   * not visible on `detachedWindowsRef.current` until the next render, well
-   * after a synchronous retry would need it to be. In a chromeless window
-   * `originWindowId` is not tracked in that state at all (there is nothing to
-   * forget), so a failed origin is simply excluded from `tried` on the next
-   * loop rather than ever retried a second time.
-   */
-  const detachedAnchorRef = useRef<{ id: string; sawActiveId: string | null } | null>(null);
-  function stepTab(delta: number, tried: ReadonlySet<string> = new Set()) {
-    const wt = worktreeRef.current;
-    if (!wt) return;
-    const layout = layoutsRef.current[wt.id];
-    const docked = layout ? allTabs(layout).map((t) => t.id) : [];
-    const detachedAll = chromeless
-      ? (() => {
-          const origin = getOriginWindowId();
-          return origin ? [origin] : [];
-        })()
-      : (detachedWindowsRef.current[wt.id] ?? []);
-    const detached = detachedAll.filter((id) => !tried.has(id));
-    const order = [...docked, ...detached];
-    if (order.length === 0) return;
-    const dockActiveId = layout ? layout.docks[layout.focused].activeId : null;
-    // Landing on a detached window has nothing in `layout` to record it —
-    // `docks[*].activeId` can only ever name one of *this* window's own two
-    // panes, never "parked on an external window." Without `detachedAnchorRef`,
-    // the position that lookup returns is whatever docked tab was last
-    // genuinely active, forever — so a press that steps from the last docked
-    // tab onto a detached window, followed (once focus bounces back here) by
-    // another press, recomputes from that same stale docked id and lands on
-    // the same detached window again: a ping-pong between one tab and one
-    // detached window instead of continuing around the order. The anchor is
-    // only trusted while `dockActiveId` still matches what it was when set —
-    // a real change (the user clicked a different tab in the meantime) makes
-    // that comparison fail, and the stale anchor is dropped in favour of
-    // reality rather than followed past a switch it never saw happen.
-    const anchor = detachedAnchorRef.current;
-    const currentId =
-      anchor && anchor.sawActiveId === dockActiveId && order.includes(anchor.id)
-        ? anchor.id
-        : dockActiveId;
-    const idx = currentId ? order.indexOf(currentId) : -1;
-    const id = order[nextIndex(idx, delta, order.length)];
-    if (docked.includes(id)) {
-      // Landing on a real pane in this window is fully described by the
-      // layout state the click below produces — nothing stale to carry.
-      detachedAnchorRef.current = null;
-      // A real click on the tab, not a restatement of what one does. This
-      // used to call `setLayouts(activateTab(...))` directly — the same
-      // state update `PaneArea`'s own `onClick={props.onSelect}` makes — plus
-      // a manual `.focus()` for the DOM-focus side effect a click gets for
-      // free. That covered the green "focused pane" border, but a browser
-      // pane reopening after being cycled away and back stayed unreliable in
-      // a way clicking the same tab never was — evidence of some other
-      // click-only side effect neither fix accounted for. Rather than keep
-      // guessing which one and re-deriving it here, this dispatches the
-      // genuine `click` a mouse would have: whatever a click does, cycling
-      // now does exactly that, by construction, forever — no second copy of
-      // the tab-activation logic to keep in sync with `PaneArea`'s.
-      //
-      // `.focus()` first, `.click()` second — the order a real mouse click
-      // produces (the browser's default mousedown action moves focus before
-      // the click event fires), since `.click()` alone only dispatches the
-      // `click` event and does not move focus by itself.
-      const button = document.getElementById(tabElementId(id));
-      if (button instanceof HTMLElement) {
-        button.focus();
-        button.click();
-        return;
-      }
-      // Fallback for the tab strip not having rendered this button yet —
-      // should not happen (every tab in the layout always has one), but
-      // cycling should still do *something* rather than silently no-op.
-      setLayouts((prev) => {
-        const current = prev[wt.id];
-        return current ? { ...prev, [wt.id]: activateTab(current, id) } : prev;
-      });
-      return;
-    }
-    if (!desktopWindow || !desktopWindow.focus) return;
-    // Remember this as the logical position, keyed to the docked state as of
-    // now — see the comment above `anchor` for why.
-    detachedAnchorRef.current = { id, sawActiveId: dockActiveId };
-    const retry = () => {
-      if (!chromeless) forgetDetachedWindow(wt.id, id);
-      stepTab(delta, new Set([...tried, id]));
-    };
-    desktopWindow
-      .focus(id)
-      .then((ok) => {
-        if (!ok) retry();
-      })
-      .catch(retry);
   }
 
   /** Step the run selector to the next entry — "select preset" from the
@@ -5616,7 +5432,6 @@ function AppInner(props: {
               showWorking={activity.showWorking}
               runCtx={runCtx}
               searchUrl={searchTemplate}
-              onDetachedWindow={onWorktreeDetachedWindow}
             />
           ) : null}
         </div>

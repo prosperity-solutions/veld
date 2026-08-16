@@ -299,21 +299,6 @@ export function PaneArea(props: {
    * component that fetches it is a component that renders before it arrives.
    */
   searchUrl: string;
-  /**
-   * A tab just left this window's docks for another window — new or existing —
-   * identified by the opaque `windowId` the shell handed back. Lets the app
-   * track which detached windows exist for this worktree, so keyboard
-   * "next/previous tab" cycling can raise one once it runs past this window's
-   * own tabs. Absent under a browser tab or an older shell, where `windowId`
-   * never arrives either.
-   *
-   * Carries `worktreeId` rather than relying on the app re-deriving "which
-   * worktree" from whatever is selected when the shell's promise resolves —
-   * this component's own `props.worktreeId` at the moment the detach was
-   * requested is the one correct answer, selection changes in the meantime
-   * notwithstanding.
-   */
-  onDetachedWindow?: (worktreeId: number, windowId: string) => void;
 }) {
   const { layout, onLayout } = props;
   const areaRef = useRef<HTMLDivElement>(null);
@@ -650,7 +635,6 @@ export function PaneArea(props: {
       }
       const accepted = new Set(result.accepted ?? tabs.map((t) => t.id));
       moved = tabs.filter((t) => accepted.has(t.id));
-      if (result.windowId) props.onDetachedWindow?.(props.worktreeId, result.windowId);
     } catch (err) {
       notifyError("Couldn't move that pane", err);
       return;
@@ -691,7 +675,6 @@ export function PaneArea(props: {
           `${tabs.length - moved.length} of ${tabs.length} could not be moved to the new window.`,
         );
       }
-      if (result.windowId) props.onDetachedWindow?.(props.worktreeId, result.windowId);
     } catch (err) {
       notifyError("Couldn't open a new window", err);
       return;
@@ -1821,12 +1804,8 @@ function TabScroller(props: {
 }
 
 /** The DOM id of a tab's button, and of a dock's panel. Both exist only so the
- *  tab and the panel it controls can name each other. Exported so a
- *  non-click activation (keyboard tab-cycling in `App.tsx`'s `stepTab`) can
- *  find the same button a click would have focused, and move real DOM focus
- *  onto it — `activateTab` alone only updates layout state, and the
- *  `:focus-within`-driven "focused pane" border reads real focus, not it. */
-export function tabElementId(tabId: string): string {
+ *  tab and the panel it controls can name each other. */
+function tabElementId(tabId: string): string {
   return `pane-tab-${tabId}`;
 }
 function dockPanelId(index: DockIndex): string {

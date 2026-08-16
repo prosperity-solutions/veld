@@ -581,13 +581,11 @@ run, while a plain terminal in the same app works perfectly.
   and **the daemon never looks inside a layout** — it is an opaque JSON document, so
   a new pane kind is a UI-only change instead of a migration and an older daemon
   round-trips a newer client's fields instead of erasing them. What Electron kept is
-  only what a daemon cannot do: raise a window (`veld:window:focus-self` for the
-  caller itself, `veld:window:focus` for a specific *other* window a page holds an
-  id for — keyboard tab-cycling onto a detached window's is the one caller today)
-  and route a cross-window tab drop. **A browser tab cannot be focused** —
-  `window.focus()` outside a user gesture is ignored — so a refusal carries the
-  holder's *kind* and the UI says where the worktree is instead of promising a
-  raise that will not happen; do not "fix" that by calling `focus()` anyway.
+  only what a daemon cannot do: raise a window (`veld:window:focus-self`) and route
+  a cross-window tab drop. **A browser tab cannot be focused** — `window.focus()`
+  outside a user gesture is ignored — so a refusal carries the holder's *kind* and
+  the UI says where the worktree is instead of promising a raise that will not
+  happen; do not "fix" that by calling `focus()` anyway.
 - **`veld update` holds a lock, and nothing that the update replaces may own it.**
   One update at a time is enforced by `veld_core::update_lock`: a lock *directory*
   at `~/.veld/update.lock` (`mkdir` is the create-or-fail primitive, and already

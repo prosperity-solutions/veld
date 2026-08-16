@@ -559,23 +559,11 @@ function shouldShow(v: View): boolean {
  * resume, and each state event from the shell — so without the comparison a page
  * that reports progress produces a `setVisible` IPC round trip per event, all
  * saying what the shell already knows.
- *
- * `force` bypasses that comparison. It exists because the comparison is against
- * `v.visible`, which is written optimistically *before* `desktop.setVisible`'s
- * result is known (below) — so a call that is dropped, throws, or loses a race
- * against a later one for the same view leaves the cache claiming a visibility
- * the shell never actually applied, and the next *unchanged* answer then goes
- * uncorrected forever, since the comparison reads it as nothing to do. This is
- * the same failure `createShellView`'s retry path hit for exactly this field
- * (see its own comment, a few functions up) — `mountBrowser` forces it for the
- * same reason: a remount is a point this code already claims self-corrects the
- * cache, so it should not trust the cache to decide whether that correction is
- * needed.
  */
-function applyVisibility(v: View, force = false): void {
+function applyVisibility(v: View): void {
   if (!desktop) return;
   const next = shouldShow(v);
-  if (!force && v.visible === next) return;
+  if (v.visible === next) return;
   v.visible = next;
   // Swallowed deliberately: visibility is re-asserted by every later mount,
   // suspend and state event, so one lost call self-corrects — unlike a navigation.
@@ -879,11 +867,7 @@ export function mountBrowser(id: string, parent: HTMLElement, options: BrowserVi
   const v = ensure(id, options);
   if (v.container.parentElement !== parent) parent.appendChild(v.container);
   v.mounted = true;
-  // Forced: this reattaches an existing view (a fresh `ensure` create already
-  // starts `visible: true` truthfully), so `v.visible`'s cached answer from
-  // whatever this view was doing before is exactly the value `applyVisibility`'s
-  // own doc comment warns can be wrong — see it for why.
-  applyVisibility(v, true);
+  applyVisibility(v);
   // Observed under both backends: the native view mirrors the box, and a fitted
   // emulated viewport is scaled to it, so either way the answer changes with the
   // pane's size.
@@ -1515,24 +1499,6 @@ if (desktop) {
   }, 400);
   window.addEventListener("resize", () => {
     for (const v of views.values()) syncGeometry(v);
-  });
-  // This window regaining OS-level focus — Electron proxies that straight to
-  // the DOM `focus` event, no IPC of its own needed. Force-reasserts every
-  // mounted view's visibility rather than trusting the cache for the same
-  // reason `mountBrowser` does (see `applyVisibility`'s own doc comment): a
-  // window that was raised programmatically — cycling a detached one to the
-  // front is the case this exists for — never ran through a real click, and a
-  // real click turned out to be covering for more than the DOM-focus and
-  // activation work this file already knew to redo. Whatever that gap
-  // actually is on the shell's side, this reaches it too: a `focus` here
-  // means *some* window just came to the front, on-screen and expected to be
-  // showing its page, which is exactly the moment worth re-asserting rather
-  // than assuming the cache still agrees with what the shell has.
-  window.addEventListener("focus", () => {
-    for (const v of views.values()) {
-      applyVisibility(v, true);
-      syncGeometry(v);
-    }
   });
 }
 

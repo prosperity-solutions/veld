@@ -44,9 +44,7 @@ export type ShortcutCategory = "navigation" | "layout" | "run" | "general";
  * macOS, Ctrl elsewhere — `e.metaKey || e.ctrlKey` in the keydown effect).
  * `ctrl` is different: the *literal* Ctrl key on every platform, for a chord
  * where macOS itself already claims Cmd for something else — no row uses it
- * today (tab-cycling's Ctrl+Tab, the one that did, was removed as redundant
- * with its ⌘⇧-arrow alias), but the field stays for the next chord that
- * needs it.
+ * today, but the field stays for the chord that eventually needs it.
  */
 export interface KeyCombo {
   mod?: boolean;
@@ -129,18 +127,6 @@ export const SHORTCUTS: ShortcutDef[] = [
     combos: [{ mod: true, keys: ["`"] }],
   },
   // ---- layout ---------------------------------------------------------------
-  {
-    id: "switch-tab",
-    category: "layout",
-    title: "Switch tabs",
-    description: "Focus the next or previous tab, including one detached into its own window.",
-    combos: [
-      { mod: true, shift: true, keys: ["←"] },
-      { mod: true, shift: true, keys: ["→"] },
-      { mod: true, shift: true, keys: ["↑"] },
-      { mod: true, shift: true, keys: ["↓"] },
-    ],
-  },
   {
     id: "toggle-project-column",
     category: "layout",

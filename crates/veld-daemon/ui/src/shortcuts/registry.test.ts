@@ -35,7 +35,6 @@ describe("SHORTCUTS", () => {
     const ids = new Set(SHORTCUTS.map((s) => s.id));
     for (const id of [
       "navigate-worktrees",
-      "switch-tab",
       "focus-mode",
       "switch-view",
       "update-main",
@@ -112,8 +111,9 @@ describe("comboTokens", () => {
   });
 
   it("keeps a literal ctrl distinct from mod", () => {
-    // Tab-switching binds the physical Ctrl key on every platform, Mac
-    // included — see the `KeyCombo` doc comment.
+    // For the chord that binds the physical Ctrl key on every platform, Mac
+    // included, rather than the cross-platform `mod` accelerator — see the
+    // `KeyCombo` doc comment.
     expect(comboTokens({ ctrl: true, keys: ["Tab"] }, true)).toEqual(["Ctrl", "Tab"]);
   });
 });

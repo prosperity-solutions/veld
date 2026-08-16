@@ -109,15 +109,11 @@ describe("handleKeyEvent", () => {
         run({ code: "ArrowDown", key: "ArrowDown", [mod]: true }).handled,
         `${mod}+ArrowDown must pass through`,
       ).toBe(false);
-      // ←/→ alias worktree-nav's ↑/↓, and — with Shift held too — tab-cycling.
+      // ←/→ alias worktree-nav's ↑/↓.
       for (const arrowKey of ["ArrowLeft", "ArrowRight"]) {
         expect(
           run({ code: arrowKey, key: arrowKey, [mod]: true }).handled,
           `${mod}+${arrowKey} must pass through`,
-        ).toBe(false);
-        expect(
-          run({ code: arrowKey, key: arrowKey, shift: true, [mod]: true }).handled,
-          `${mod}+shift+${arrowKey} must pass through`,
         ).toBe(false);
       }
     }

@@ -45,7 +45,7 @@ No port numbers. No manual wiring. Just clean, stable, human-readable URLs.
 - **Reverse-proxy header rules** — add or strip request/response headers on the local proxy and the public web gateway with a `proxy` config block (project/node/variant). Veld does no header manipulation by default.
 - **Peer-to-peer sharing** — share a running environment with a colleague over an encrypted P2P tunnel (`veld share`); they open the same URLs on their own machine, and a shared `tcp` port (a database, a debugger) shows up as a local port on theirs. **Consent is per port**, declared in config, so a node can expose its app and withhold its ops console. Relays are configurable (public or self-hosted) for compliance. No accounts, no Veld-hosted server.
 - **Public web sharing** — expose a service to someone *without* Veld (`veld share --web`): a self-hosted gateway (`veld-gateway`, one Docker container) mints a real public URL anyone can open in a browser. The overlay's **Copy public URL** action translates your current page (path + query preserved) into the public link.
-- **Keyboard shortcuts** — navigate worktrees and tabs, toggle focus mode, switch between the IDE and Runs views, and start/stop/restart a run, all without the mouse. The full list, with each platform's own modifier keys, is in the ⋯ menu → Shortcuts.
+- **Keyboard shortcuts** — navigate worktrees, toggle focus mode, switch between the IDE and Runs views, and start/stop/restart a run, all without the mouse. The full list, with each platform's own modifier keys, is in the ⋯ menu → Shortcuts.
 
 ## Install
 
