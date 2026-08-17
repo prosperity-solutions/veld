@@ -69,7 +69,7 @@ test("the legacy claim stub asks the main process rather than granting", () => {
 });
 
 test("the bridge exposes what the current /ide needs", () => {
-  for (const name of ["showsWorktree", "focusSelf"]) {
+  for (const name of ["showsWorktree", "focusSelf", "zoom", "onZoom"]) {
     assert.match(preload, new RegExp(`\\b${name}\\s*:`), `preload.js must expose ${name}`);
   }
 });

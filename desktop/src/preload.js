@@ -68,6 +68,23 @@ function windowFullScreen() {
   }
 }
 
+/**
+ * The page's zoom factor at preload time, synchronously.
+ *
+ * The top bar's traffic-light inset is `calc(100px / var(--topbar-zoom))`, so
+ * the first paint of a window restored at a remembered (non-100%) zoom needs
+ * the factor now, not a tick later — same reason as `windowFullScreen`. Falls
+ * back to 1 (100%) when an older shell has no channel.
+ */
+function windowZoom() {
+  try {
+    const z = ipcRenderer.sendSync("veld:window:zoom");
+    return typeof z === "number" && Number.isFinite(z) && z > 0 ? z : 1;
+  } catch {
+    return 1;
+  }
+}
+
 /** Subscribe to a main→renderer channel, returning an unsubscribe. */
 function on(channel, fn) {
   const listener = (_event, payload) => fn(payload);
@@ -107,6 +124,11 @@ contextBridge.exposeInMainWorld("veldDesktop", {
      *  buttons out of the content area, and no CSS in the page can see that. */
     fullScreen: windowFullScreen(),
     onFullScreen: (fn) => on("veld:window:fullscreen", fn),
+    /** Page zoom at start, and every change after it. The top bar divides its
+     *  traffic-light inset by it so the gap before the view switcher holds its
+     *  DIP width as the page zooms. */
+    zoom: windowZoom(),
+    onZoom: (fn) => on("veld:window:zoom", fn),
     /** Open another full window. With no payload it inherits the app-wide last
      *  selection (what ⌘N does); with one it opens on that worktree. */
     newWindow: (payload) => ipcRenderer.invoke("veld:window:new", payload ?? {}),

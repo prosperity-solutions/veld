@@ -100,6 +100,28 @@ function safeBounds(raw) {
 }
 
 /**
+ * The vertical position of a macOS traffic light, centred against the top bar.
+ *
+ * The OS draws the traffic lights at a fixed size while the top bar is CSS and
+ * scales with the page's zoom factor, so a light centred on the *unzoomed* bar
+ * drifts off the bar's own controls as the page zooms. `zoom` scales the bar's
+ * height: a `topbarHeight`-pixel CSS bar renders `topbarHeight × zoom`
+ * device-independent pixels tall, and the light stays centred on that.
+ *
+ * `topbarHeight` and `trafficLightSize` mirror `TOPBAR_HEIGHT` and
+ * `TRAFFIC_LIGHT_SIZE` in `desktop/src/main.js`, and at `zoom = 1` the answer
+ * is the pure centred value — deliberately no fudge constant, since the
+ * centred 100% position is the correct one (an earlier `- 2` nudge up only
+ * compensated for testing at 90% zoom).
+ *
+ * This is the one piece of the feature that is arithmetic over plain values,
+ * so it lives here rather than in `windows.js` and has tests.
+ */
+function trafficLightY(topbarHeight, trafficLightSize, zoom) {
+  return Math.round((topbarHeight * zoom - trafficLightSize) / 2);
+}
+
+/**
  * One persisted window, or `null` if the entry is unusable.
  *
  * This parses a file this process wrote, so nothing here is adversarial — but it
@@ -433,6 +455,7 @@ module.exports = {
   releaseClaims,
   restoreBudget,
   safeBounds,
+  trafficLightY,
   parseWindowRecord,
   parseWindowList,
   readLastMainBounds,

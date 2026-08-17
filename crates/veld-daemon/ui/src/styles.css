@@ -255,7 +255,15 @@ select:focus {
  * padding or gap is not a reason to move this. */
 .topbar.electron {
   height: 40px;
-  padding-left: 100px; /* traffic-light inset */
+  /* The inset is **divided by the page zoom** (`--topbar-zoom`, set by
+   * `watchZoom` in `shell.ts`) so the gap before the view switcher holds a
+   * fixed DIP width as the page zooms. The lights are OS-drawn at a fixed
+   * size while the inset is CSS and scales with the page — a plain `100px`
+   * would grow the gap on zoom-in and collapse it into the lights on
+   * zoom-out. `calc(100px / 1.5)` renders `66.67px` CSS, which at 1.5× is
+   * back to 100 DIP. `1` is the fallback for a page with no shell (a plain
+   * browser tab has no `.electron` top bar anyway). */
+  padding-left: calc(100px / var(--topbar-zoom, 1)); /* traffic-light inset */
   -webkit-app-region: drag;
 }
 .topbar.electron > * {
