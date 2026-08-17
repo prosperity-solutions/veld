@@ -7,6 +7,7 @@ import {
   deriveAlias,
   deriveBranch,
   deriveDisplayName,
+  takenExcluding,
   worktreeLabel,
 } from "./worktreeName";
 
@@ -198,5 +199,21 @@ describe("aliasCollides", () => {
     // Empty means "nothing to create"; reporting a collision on top of that would
     // put a confusing error under an empty field.
     expect(aliasCollides("", ["", "main"])).toBe(false);
+  });
+});
+
+describe("takenExcluding", () => {
+  it("is a no-op without a pending alias", () => {
+    const taken = ["main", "chk"];
+    expect(takenExcluding(taken, null)).toBe(taken);
+  });
+
+  it("drops only the pending alias, slug-compared", () => {
+    // `main_2` and `main-2` are one name to the router, so a pending `main-2`
+    // silences the sibling `main_2` the dialog's own create is about to make.
+    expect(takenExcluding(["main", "main_2"], "main-2")).toEqual(["main"]);
+    // A pending alias never masks an unrelated, real collision.
+    expect(takenExcluding(["main", "chk"], "main")).toEqual(["chk"]);
+    expect(takenExcluding(["main", "chk"], "")).toEqual(["main", "chk"]);
   });
 });

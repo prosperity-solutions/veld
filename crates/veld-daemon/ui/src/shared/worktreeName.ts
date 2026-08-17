@@ -238,3 +238,19 @@ export function aliasCollides(alias: string, taken: string[]): boolean {
   if (slug === "") return false;
   return taken.some((t) => storedSlug(t) === slug);
 }
+
+/**
+ * `taken` with `pending` removed (slug-compared) — the aliases that are truly
+ * taken *now*, ignoring one the caller is itself in the middle of creating.
+ *
+ * The New worktree dialog relies on this: while its create request is in flight,
+ * the 5s poll can already surface the checkout the daemon is registering, so
+ * `taken` starts containing exactly the alias being made and the courtesy check
+ * would light up against the dialog's *own* creation. `pending` is the alias
+ * submitted, and it is the only alias that may be mid-flight — the dialog is the
+ * sole creator, and a concurrent create from elsewhere is still a real collision.
+ */
+export function takenExcluding(taken: string[], pending: string | null): string[] {
+  if (!pending) return taken;
+  return taken.filter((t) => !aliasCollides(pending, [t]));
+}
