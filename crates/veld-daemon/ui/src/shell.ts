@@ -150,6 +150,11 @@ export interface DesktopWindowApi {
   fullScreen?: boolean;
   /** …and every change to it. Optional for the same reason. */
   onFullScreen?(fn: (p: { fullScreen: boolean }) => void): () => void;
+  /** The page's zoom factor when it started. Optional: an older shell has no
+   *  such field, and `undefined` reads as 100%. */
+  zoom?: number;
+  /** …and every change to it. Optional for the same reason. */
+  onZoom?(fn: (p: { zoom: number }) => void): () => void;
   /**
    * Bring this window to the front, because somebody asked to be taken to the
    * worktree it is showing.
@@ -197,6 +202,32 @@ export function watchFullScreen(): () => void {
   };
   apply(desktopWindow?.fullScreen === true);
   return desktopWindow?.onFullScreen?.((p) => apply(p?.fullScreen === true)) ?? (() => {});
+}
+
+/**
+ * Mirror the page's zoom factor onto the `--topbar-zoom` custom property.
+ *
+ * On the root rather than in React state for the same reason full screen is on
+ * the body: the thing that reads it is one CSS rule — `.topbar.electron`'s
+ * traffic-light inset is `calc(100px / var(--topbar-zoom, 1))` — and the top
+ * bar has no React owner of the window. The zoom is the shell's to know (the
+ * main process polls it; the page cannot see its own factor), so this is the
+ * daemon-side half of the `veld:window:zoom` channel the shell pushes on
+ * change. Dividing the inset by the factor keeps the gap before the view
+ * switcher fixed in DIP as the page zooms: the lights are OS-drawn at a fixed
+ * size, so an inset that scales with the page makes the gap grow on zoom-in and
+ * collapse into the lights on zoom-out.
+ *
+ * Called once at boot from `main.tsx`, beside `watchFullScreen`, and nothing
+ * unsubscribes for the same reason.
+ */
+export function watchZoom(): () => void {
+  const apply = (zoom: number) => {
+    const value = Number.isFinite(zoom) && zoom > 0 ? zoom : 1;
+    document.documentElement.style.setProperty("--topbar-zoom", String(value));
+  };
+  apply(desktopWindow?.zoom ?? 1);
+  return desktopWindow?.onZoom?.((p) => apply(p?.zoom ?? 1)) ?? (() => {});
 }
 
 /** App-level surfaces the Electron main process drives. */

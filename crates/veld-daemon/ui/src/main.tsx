@@ -11,12 +11,13 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./App";
 import { persistInbox } from "./inbox/persist";
-import { watchFullScreen } from "./shell";
+import { watchFullScreen, watchZoom } from "./shell";
 
 // Before the first render: the top bar's traffic-light inset is a CSS rule keyed
 // off `<body data-fullscreen>`, and a page that boots in full screen would
 // otherwise paint one frame with a 90px gutter for buttons macOS is not drawing.
 watchFullScreen();
+watchZoom();
 
 // Also before the first render, and outside React: `StrictMode` mounts every effect
 // twice in development, so a restore-once done in an effect would run twice — harmless

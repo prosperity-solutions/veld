@@ -20,6 +20,7 @@ const {
   safeBounds,
   serializeWindowList,
   slotFor,
+  trafficLightY,
 } = require("./windowState");
 
 test("the first window keeps the bare base slot", () => {
@@ -29,6 +30,25 @@ test("the first window keeps the bare base slot", () => {
   assert.equal(slotFor("main", null), "main");
   assert.equal(slotFor("main", "w2"), "main-w2");
   assert.equal(slotFor("dev-4211", "w3"), "dev-4211-w3");
+});
+
+test("trafficLightY centres the light on the zoomed bar", () => {
+  const bar = 40;
+  const size = 14;
+  // At 100% the answer is the pure centred value, (40 - 14) / 2 = 13 — no
+  // fudge constant. (An earlier `- 2` nudge up was an artifact of testing at
+  // 90% zoom.)
+  assert.equal(trafficLightY(bar, size, 1), 13);
+  // Zooming scales the bar's DIP height, so the light drops to stay centred on
+  // the taller bar: (40*1.5 - 14) / 2 = 23.
+  assert.equal(trafficLightY(bar, size, 1.5), 23);
+  // Half-integer DIP positions are rounded, like every other rect this module
+  // hands to Electron.
+  assert.equal(trafficLightY(bar, size, 1.25), 18);
+  // Below ~0.35 zoom the bar is shorter than the light and the centred answer
+  // goes negative — the light no longer fits, which is a genuine limit of the
+  // centring, not something to clamp into a wrong position.
+  assert.ok(trafficLightY(bar, size, 0.25) < 0);
 });
 
 test("isSuffix takes w2..w99 and nothing else", () => {
