@@ -1195,6 +1195,13 @@ UI selection state (project, worktree) lives in the URL (`?repo=…&wt=…`) wit
 localStorage as fallback — every view is addressable, which is the foundation
 for later multi-window / split layouts (one URL per window).
 
+Switching *project* resolves through a third input: `veld.lastWorktree.<root>`
+(`crates/veld-daemon/ui/src/ide/lastWorktree.ts`), per window slot with the
+unscoped key as the seed, so a project reopens on the worktree that window was
+last granted there rather than on its main checkout. It stores a worktree *path*
+because rowids are reused, and it is only ever a selection — the daemon's claim
+registry and the acquire hunt still decide what a client may show.
+
 ## Daemon API additions
 
 All under the existing management router (`crates/veld-daemon/src/management.rs`
