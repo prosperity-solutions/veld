@@ -28,6 +28,7 @@ import {
   deriveAlias,
   deriveBranch,
   deriveDisplayName,
+  takenExcluding,
 } from "../shared/worktreeName";
 import { randomMarker } from "../shared/markerPick";
 
@@ -273,33 +274,58 @@ export function NewWorktreeDialog(props: {
   const displayName = deriveDisplayName(name);
   const derivedBranch = deriveBranch(name);
   const branch = branchEdit ?? derivedBranch;
-  const collides = aliasCollides(alias, props.takenAliases);
+  /** The alias this dialog has submitted and is waiting on. While a create is
+   *  in flight the 5s `refresh()` poll can already surface the checkout it is
+   *  creating (the daemon registers the row before its response returns), so
+   *  `takenAliases` starts containing exactly the alias being made and the
+   *  courtesy check below lights up against the dialog's *own* creation — a
+   *  slow `git fetch origin` make that a seconds-long, confusing red error on
+   *  a create that then finishes fine. Set at submit, cleared only when the
+   *  create *fails* (the dialog stays open; a poll may then legitimately show
+   *  a sibling that really does collide). On success the dialog closes, so it
+   *  staying set across the reorder/refresh that follow is exactly the window
+   *  it exists to silence. */
+  const [pendingAlias, setPendingAlias] = useState<string | null>(null);
+  const taken = takenExcluding(props.takenAliases, pendingAlias);
+  const collides = aliasCollides(alias, taken);
   // An existing branch is named exactly, not slugged: `deriveBranch` would happily
   // turn `feature/JIRA-12` into `feature/jira-12`, which is a different ref and would
   // fail `git worktree add` with a confusing "invalid reference".
   const branchRequired = !createBranch;
   const ready = alias !== "" && branch !== "" && !collides;
 
-  const { busy, error, submit } = useSubmit(() =>
-    props.onCreate({
-      branch,
-      create_branch: createBranch,
-      // Always explicit, never left to the daemon's branch-derived default: the name
-      // is the primary field, so a checkout must end up called what the dialog said
-      // it would be. It also means a collision is a 409 that created nothing rather
-      // than a silent `-2` suffix.
-      alias,
-      // What the rail will show. Sent even when it happens to equal the alias:
-      // "the name is what you typed" is one rule, and a dialog that silently
-      // stops storing it once you type something already slug-shaped is two.
-      display_name: displayName,
-      // Always sent when a list resolved, so the checkout wears what the dialog
-      // showed. Empty only while the fetch is in flight, where the daemon's own
-      // assignment is the honest fallback.
-      emoji: chosen.emoji || undefined,
-      marker_color: chosen.color || undefined,
-    }),
-  );
+  const { busy, error, submit } = useSubmit(() => {
+    // Captured at submit, before the daemon's response: this is the alias the
+    // in-flight create is about to make, and it must not read as a collision
+    // when the poll catches up with the daemon mid-request.
+    setPendingAlias(alias);
+    return props
+      .onCreate({
+        branch,
+        create_branch: createBranch,
+        // Always explicit, never left to the daemon's branch-derived default: the name
+        // is the primary field, so a checkout must end up called what the dialog said
+        // it would be. It also means a collision is a 409 that created nothing rather
+        // than a silent `-2` suffix.
+        alias,
+        // What the rail will show. Sent even when it happens to equal the alias:
+        // "the name is what you typed" is one rule, and a dialog that silently
+        // stops storing it once you type something already slug-shaped is two.
+        display_name: displayName,
+        // Always sent when a list resolved, so the checkout wears what the dialog
+        // showed. Empty only while the fetch is in flight, where the daemon's own
+        // assignment is the honest fallback.
+        emoji: chosen.emoji || undefined,
+        marker_color: chosen.color || undefined,
+      })
+      .catch((e) => {
+        // The create is no longer in flight. The dialog stays open on failure,
+        // so the courtesy check must be truthful again: if the daemon's own
+        // refresh now lists a sibling, that is a real collision worth saying.
+        setPendingAlias(null);
+        throw e;
+      });
+  });
 
   return (
     <Modal title="New worktree" onClose={props.onClose}>
