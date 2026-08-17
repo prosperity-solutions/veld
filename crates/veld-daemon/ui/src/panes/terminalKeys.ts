@@ -43,9 +43,49 @@ function isShiftEnter(e: KeyboardEvent): boolean {
   );
 }
 
-/** Whether an event is the command palette's terminal-safe accelerator. */
-function isPaletteChord(e: KeyboardEvent): boolean {
-  return (e.ctrlKey || e.metaKey) && e.shiftKey && e.code === "KeyP";
+/**
+ * The window-level shortcuts added alongside the Shortcuts overview — focus
+ * mode, the IDE/Runs switch, update main, cycling the run selector,
+ * start/stop, restart, worktree navigation (incl. the ←/→ aliases), and
+ * opening the overview itself — all of which must reach `App.tsx`'s keydown
+ * effect from a focused terminal for the same reason `isSettingsChord` below
+ * does: xterm cancels every key it handles, and a focused terminal would
+ * otherwise swallow these before the window listener ever saw them.
+ *
+ * `l`/`x`, not `f`/`v`: the veld feedback overlay claims mod+Shift+F and
+ * mod+Shift+V for its own bindings, so `App.tsx` moved focus mode and the
+ * view switch off them — see the matching comment there.
+ *
+ * Matched on `e.key`, never `e.code`, for every letter here — mirroring
+ * exactly what `App.tsx`'s own handler tests, since a mismatch here would
+ * swallow the key on one layout while the window listener expects a different
+ * physical key on another (see the ⌘B comment in `App.tsx` for why `code` is
+ * wrong for a letter). The arrow keys have no such layout hazard.
+ *
+ * `/` allows Shift (it sits behind Shift on German and Spanish layouts — the
+ * same class of hazard `App.tsx`'s comma-chord comment already names) but is
+ * gated on `e.metaKey` alone, not `mod`: the literal-Ctrl variant is
+ * readline's undo (`Ctrl+_`/`Ctrl+/`), the same class of shell binding
+ * `Ctrl+K` below is left to. So on Linux/Windows, opening the Shortcuts
+ * overview from a focused terminal is reachable everywhere except the
+ * terminal itself — a narrower version of the same trade. The
+ * `e.shiftKey && e.code === "Digit7"` arm alongside it is the same German/
+ * Spanish-layout fallback `App.tsx`'s own `/`-chord comment explains (and
+ * flags as an unconfirmed suspected cause, not a verified one).
+ */
+function isAppShortcutChord(e: KeyboardEvent): boolean {
+  const mod = e.ctrlKey || e.metaKey;
+  if (mod && e.shiftKey && !e.altKey) {
+    if (["l", "x", "u", "o", "k"].includes(e.key.toLowerCase())) return true;
+    if (e.key === "Enter") return true;
+  }
+  if (mod && !e.shiftKey && !e.altKey) {
+    if (e.key === "ArrowUp" || e.key === "ArrowDown" || e.key === "ArrowLeft" || e.key === "ArrowRight") {
+      return true;
+    }
+  }
+  if (e.metaKey && !e.altKey && (e.key === "/" || (e.shiftKey && e.code === "Digit7"))) return true;
+  return false;
 }
 
 /**
@@ -68,14 +108,19 @@ function isSettingsChord(e: KeyboardEvent): boolean {
  * handle the event normally, `false` to make it ignore the event *before* it
  * cancels it.
  *
- * Two things need to be false:
+ * Several things need to be false:
  *
- * - **The palette accelerator** (`Ctrl/⌘+Shift+P`), which must keep propagating
- *   to the window listener in `App.tsx`. xterm cancels the keys it handles
+ * - **`isSettingsChord`** (`⌘,`/`Ctrl+,`), which must keep propagating to the
+ *   window listener in `App.tsx`. xterm cancels the keys it handles
  *   (`preventDefault` + `stopPropagation` on its own textarea), so a focused
- *   terminal would otherwise swallow anything the app binds. `Ctrl+K`
- *   deliberately is not in this list: that one is readline's
- *   kill-to-end-of-line and belongs to the shell.
+ *   terminal would otherwise swallow anything the app binds.
+ * - **Every window-level shortcut** (`isAppShortcutChord`) — focus mode, the
+ *   view switch, update main, run cycling, start/stop, restart, worktree
+ *   navigation, and opening the Shortcuts overview — for the same reason.
+ *   `Ctrl+K` (the command palette's other chord) deliberately
+ *   is not among them: that one is readline's kill-to-end-of-line and
+ *   belongs to the shell, so the palette is reachable from a focused
+ *   terminal only via ⌘K, not Ctrl+K.
  * - **Shift+Enter**, which this handler answers itself by sending
  *   [`SHIFT_ENTER_SEQUENCE`]. `preventDefault` here is load-bearing: without it
  *   the browser still delivers the key to xterm's hidden textarea and the shell
@@ -101,12 +146,12 @@ export function handleKeyEvent(
     // off we never claimed the keydown, so swallowing the keyup would drop a
     // release xterm is expecting.
     return !(
-      isPaletteChord(e) ||
       isSettingsChord(e) ||
+      isAppShortcutChord(e) ||
       (shiftEnterNewline && isShiftEnter(e))
     );
   }
-  if (isPaletteChord(e) || isSettingsChord(e)) return false;
+  if (isSettingsChord(e) || isAppShortcutChord(e)) return false;
   if (shiftEnterNewline && isShiftEnter(e)) {
     e.preventDefault();
     send(SHIFT_ENTER_SEQUENCE);

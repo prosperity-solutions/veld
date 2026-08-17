@@ -144,12 +144,7 @@ export interface DesktopWindowApi {
     repoRoot: string;
     ratio: number;
     tabs: unknown[];
-  }): Promise<{
-    moved: boolean;
-    opened: boolean;
-    reason?: string | null;
-    accepted?: string[];
-  }>;
+  }): Promise<{ moved: boolean; opened: boolean; reason?: string | null; accepted?: string[] }>;
   /** Native full screen when the page started. Optional: an older shell has no
    *  such field, and `undefined` reads as the windowed state it always had. */
   fullScreen?: boolean;

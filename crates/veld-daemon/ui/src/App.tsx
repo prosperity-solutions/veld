@@ -47,6 +47,8 @@ import { StartScreen } from "./promotions/StartScreen";
 import { usePromotions } from "./promotions/usePromotions";
 import { WhatsNewDialog } from "./promotions/WhatsNew";
 import { SettingsDialog } from "./components/SettingsDialog";
+import { ShortcutsDialog } from "./shortcuts/ShortcutsDialog";
+import { nextIndex } from "./shortcuts/registry";
 import { InboxIcon, inboxDescription } from "./inbox/InboxIcon";
 import { inbox, notifyKey } from "./inbox/inbox";
 import { useInbox } from "./inbox/useInbox";
@@ -114,6 +116,7 @@ import {
   IconDotsVertical,
   IconFolderPlus,
   IconHistory,
+  IconKeyboard,
   IconMoon,
   IconPlayerPlayFilled,
   IconPlayerStopFilled,
@@ -154,8 +157,8 @@ import {
   type PaneLayout,
   type PaneLayoutUpdate,
   SESSIONS_STORAGE_KEY,
-  activateTab,
   activeTab,
+  activateTab,
   addTab,
   addTabToFocused,
   adoptTabs,
@@ -387,6 +390,17 @@ const CHANNEL_DOWN_NOTICE_MS = 4000;
  */
 function isEditableTarget(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false;
+  // xterm's own hidden input (`xterm-helper-textarea`), not a real text field
+  // someone is composing in — a terminal's content is a PTY relay, not prose.
+  // Every chord guarded by this function used to be one `panes/terminalKeys.ts`
+  // let xterm consume first, so `target` here was never actually this element
+  // in practice — xterm's own `preventDefault`/`stopPropagation` meant the
+  // keydown never reached this listener at all. `isAppShortcutChord` changed
+  // that: it explicitly bypasses xterm for the new shortcuts below, which is
+  // exactly what makes this exemption load-bearing now rather than dead code
+  // — without it, every one of those chords would silently do nothing from a
+  // focused terminal, the opposite of what the bypass exists for.
+  if (target.classList.contains("xterm-helper-textarea")) return false;
   const tag = target.tagName;
   return tag === "INPUT" || tag === "TEXTAREA" || target.isContentEditable;
 }
@@ -1826,12 +1840,21 @@ function AppInner(props: {
   };
 
   /**
-   * The rail's per-row ▶. With a stored choice it starts straight through, like
-   * the top bar; with **no** choice yet it selects the worktree and opens the
-   * same picker the top bar uses, so a first start is "choose, then Done" on the
-   * row you clicked — not a silent default run of the first preset.
+   * ▶ from any surface — the rail, the top bar, ⌘⇧Enter. With a stored choice
+   * it starts straight through; with **no** choice yet it selects the worktree
+   * and opens the picker, so a first start is "choose, then Done" — not a
+   * silent default run of the first preset.
+   *
+   * Used to be three copies of this same branch (rail, top bar, and the
+   * keyboard shortcut below reached in early without it), which is how the
+   * keyboard one shipped missing the picker check the other two already had.
+   * `resolveStoredSelection`, not the top bar's reactive `storedStart`: the
+   * latter is a hook value scoped to whichever worktree is on screen when it
+   * renders, and both the rail (per-row, no hook) and the keyboard chord
+   * (fires long after render, off a ref) need to ask the question fresh for
+   * an arbitrary worktree instead.
    */
-  const onRailStart = (w: Worktree) => {
+  const startOrOpenPicker = (w: Worktree) => {
     if (resolveStoredSelection(w)) {
       startWorktree(w);
       return;
@@ -1978,6 +2001,7 @@ function AppInner(props: {
     | { kind: "new-lane"; worktree?: Worktree }
     | { kind: "rename-lane"; lane: string }
     | { kind: "settings" }
+    | { kind: "shortcuts" }
     | { kind: "remove-repo"; repo: Repo }
     | { kind: "search" }
     /**
@@ -2538,15 +2562,23 @@ function AppInner(props: {
   //   - Escape reaches the shell, not this handler. vim, less and TUI menus keep
   //     working. The dialog guard below therefore only matters when focus is
   //     outside a terminal.
-  //   - Ctrl+K is readline's kill-to-end-of-line and stays with the shell. That
-  //     leaves the palette unreachable from a focused terminal on Linux/Windows
-  //     (⌘K survives, because xterm doesn't claim meta combos), which is why
-  //     Ctrl/⌘+Shift+P exists as a second accelerator — terminalHost lets that
-  //     one through explicitly.
+  //   - Ctrl+K is readline's kill-to-end-of-line and stays with the shell. On
+  //     macOS ⌘K still opens the palette from a focused terminal (xterm never
+  //     claims meta combos), but on Linux/Windows the palette has no chord
+  //     that reaches it from inside a focused terminal — `mod` there is
+  //     Ctrl, and Ctrl+K belongs to the shell. Accepted trade-off: it used to
+  //     have a Ctrl/⌘+Shift+P second accelerator for exactly this gap, removed
+  //     because it collided with the veld feedback overlay's own binding and
+  //     ⌘K already covers every other case.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const mod = e.metaKey || e.ctrlKey;
-      if (mod && (e.key === "k" || ((e.key === "P" || e.key === "p") && e.shiftKey))) {
+      // `!e.shiftKey` on the `k` arm is load-bearing, not defensive styling:
+      // with Caps Lock on, Shift+K reports `e.key === "k"` (Caps Lock inverts
+      // the usual shift-uppercases relationship per the UI Events spec), so
+      // without this a Caps-Lock-on ⌘⇧K — the restart-run chord below — would
+      // also open the palette on the same press.
+      if (mod && e.key === "k" && !e.shiftKey) {
         e.preventDefault();
         openPaletteRef.current();
       }
@@ -2559,6 +2591,35 @@ function AppInner(props: {
       if (mod && !e.shiftKey && !e.altKey && e.key === ",") {
         e.preventDefault();
         setDialog({ kind: "settings" });
+      }
+      // ⌘/Ctrl+/ — open the Shortcuts overview. The dialog's own reason to
+      // exist is discoverability, so it gets the closest thing this app has
+      // to a universal "help" chord (Slack, Notion, GitHub all bind it).
+      // **Shift is not excluded**, unlike every mod-only chord above: `/` sits
+      // behind Shift on German and Spanish layouts (QWERTZ), the same class
+      // of layout hazard the comma chord above already documents by name —
+      // excluding Shift the way `,` does would make this chord unreachable on
+      // exactly those keyboards. **Not in a chromeless window** — it is "a
+      // bare dock and nothing else" by design (see its own render branch
+      // below) and renders no dialogs at all; setting this state there would
+      // be a silent no-op.
+      //
+      // **`e.code === "Digit7"` is a second, `e.shiftKey`-gated match**, added
+      // because `e.key === "/"` alone was reported still broken on German
+      // layouts even after Shift stopped being excluded above. On German and
+      // Spanish QWERTZ, `/` is physically Shift+7 (code `Digit7`) — the
+      // suspected cause is a Chromium-on-macOS behaviour where holding
+      // **Cmd** together with Shift+digit reports the unshifted `"7"` instead
+      // of the shifted `"/"` for `e.key`, but this has not been confirmed
+      // against a live German layout, only inferred from the symptom. This
+      // fallback is the mitigation either way: it is gated on `e.shiftKey` so
+      // it cannot also fire the shiftless ⌘7 "go to project 7" chord below,
+      // and does nothing if `e.key === "/"` was already correct.
+      if (mod && !e.altKey && (e.key === "/" || (e.shiftKey && e.code === "Digit7"))) {
+        if (chromeless) return;
+        e.preventDefault();
+        setDialog({ kind: "shortcuts" });
+        return;
       }
       // ⌘1…⌘9 / ⌘` — go to a project by position, or back to the last one.
       //
@@ -2604,6 +2665,113 @@ function AppInner(props: {
           if (isEditableTarget(e.target)) return;
           e.preventDefault();
           toggleProjectColumnRef.current();
+          return;
+        }
+        // ⌘/Ctrl + ↑/↓/←/→ — move the rail's selection to the worktree above
+        // or below the current one (←/→ are plain aliases for ↑/↓, for anyone
+        // whose rail reads left-to-right in their head), in the order the
+        // rail actually renders them (`railGroups`, flattened — not raw
+        // `worktrees`, which is grouping-blind), wrapping past either end.
+        // Guarded like ⌘B: `mod` alone also means Cmd+Up/Down's own
+        // text-field binding on macOS (jump to the start/end of a textarea),
+        // so a focused input keeps that instead. **Not in a chromeless window**
+        // — a detached window is a satellite of the worktree its origin claimed
+        // (`selectWorktree`'s own comment), and moving its selection off that
+        // worktree is exactly the thing being a satellite means it must not do.
+        if (
+          e.key === "ArrowUp" ||
+          e.key === "ArrowDown" ||
+          e.key === "ArrowLeft" ||
+          e.key === "ArrowRight"
+        ) {
+          if (isEditableTarget(e.target) || chromeless) return;
+          e.preventDefault();
+          stepWorktree(e.key === "ArrowUp" || e.key === "ArrowLeft" ? -1 : 1);
+          return;
+        }
+      }
+      // ⌘/Ctrl+⇧ + a letter, arrow or Enter — the run/worktree actions with no
+      // chord yet: focus mode, the IDE/Runs view switch, update main, cycling
+      // the run selector, start/stop, and restart. One guard for all of them:
+      // none means anything to a focused text field, unlike ⌘B's emacs
+      // binding or Cmd+Up/Down's caret motion above.
+      if (mod && e.shiftKey && !e.altKey && !isEditableTarget(e.target)) {
+        // Focus mode is a plain settings toggle with nothing worktree- or
+        // view-specific about it, so it is the one chord in this block with no
+        // `chromeless`/`mode` guard — it means the same thing everywhere.
+        // **⌘⇧L, not ⌘⇧F.** The veld feedback overlay's own keydown listener
+        // (`feedback-overlay/keyboard.ts`) binds mod+Shift+F itself (its
+        // "select an element" mode) on a **capture-phase** document listener,
+        // which always runs before this bubble-phase one and neither side
+        // calls `stopPropagation` — the overlay's chord wins outright, by
+        // design (the overlay keeps its own shortcuts), so this one has to
+        // live somewhere else.
+        if (e.key === "l" || e.key === "L") {
+          e.preventDefault();
+          saveSettingsRef.current({ "focus.enabled": !focusPrefsRef.current.enabled });
+          return;
+        }
+        // Switching view is the one worktree-scoped chord that must keep
+        // working from *both* views — that is its whole job — so it is
+        // guarded on `chromeless` alone, never on `mode`.
+        // **⌘⇧X, not ⌘⇧V** — the feedback overlay claims mod+Shift+V for its
+        // own toolbar toggle, the same collision as ⌘⇧F above.
+        if (e.key === "x" || e.key === "X") {
+          e.preventDefault();
+          if (chromeless) return;
+          setModeRef.current(modeRef.current === "ide" ? "runs" : "ide");
+          return;
+        }
+        // Everything below acts on the IDE cockpit's own selection (a
+        // worktree, its run, its rail) and renders its confirmation dialogs
+        // only in the IDE-mode return — see `settingsDialog`-style hoisting
+        // above for the two that ARE hoisted, and note `update-main-dirty`,
+        // the failure path here, is not one of them. Firing from Runs view or
+        // a chromeless window would act on state the user cannot see or, for
+        // `update-main-dirty`, silently open a dialog nothing renders.
+        if (modeRef.current !== "ide" || chromeless) return;
+        if (e.key === "u" || e.key === "U") {
+          e.preventDefault();
+          updateMainRef.current();
+          return;
+        }
+        if (e.key === "o" || e.key === "O") {
+          e.preventDefault();
+          const wt = worktreeRef.current;
+          if (wt && canRunWorktreeNowRef.current(wt)) stepPreset();
+          return;
+        }
+        if (e.key === "Enter") {
+          e.preventDefault();
+          const wt = worktreeRef.current;
+          if (!wt) return;
+          // Mirrors `TopBar`'s ▶/■ button exactly: same `disabled` expression,
+          // same choice of target by `running || starting`. The start side
+          // goes through `startOrOpenPickerRef` rather than starting the
+          // worktree directly — a worktree with no stored selection yet needs
+          // the picker, the same as the ▶ button and the rail's row already do.
+          const pendingAction = pendingActionRef.current;
+          const starting = startingRef.current;
+          const running = runningRef.current;
+          const disabled =
+            (pendingAction !== null && !starting) ||
+            (!running && !canStartRef.current && !starting);
+          if (disabled) return;
+          if (running || starting) stopWorktreeRef.current(wt, boundRunRef.current);
+          else startOrOpenPickerRef.current(wt);
+          return;
+        }
+        if (e.key === "k" || e.key === "K") {
+          e.preventDefault();
+          const wt = worktreeRef.current;
+          // Mirrors the restart button's own `disabled={!running || pending
+          // !== null}` exactly. Not ⌘⇧R: that chord is Electron's own
+          // `forceReload` menu accelerator (`desktop/src/main.js`'s Edit menu),
+          // which the OS delivers to the menu before this listener ever runs —
+          // the shortcut would silently reload the window instead of firing.
+          if (wt && runningRef.current && pendingActionRef.current === null) {
+            restartWorktreeRef.current(wt, boundRunRef.current);
+          }
           return;
         }
       }
@@ -3166,7 +3334,7 @@ function AppInner(props: {
       onBrowserAccelerator(({ accelerator }) => {
         if (accelerator === "palette") openPaletteRef.current();
         // A focused native browser pane swallows every keystroke, so these arrive
-        // here instead of through the window's own key handler. Same two chords,
+        // here instead of through the window's own key handler. Same chords,
         // same meaning — see `browserViews.js`.
         else if (accelerator === "project:toggle") goToPreviousProject();
         else if (accelerator.startsWith("project:")) {
@@ -4660,6 +4828,12 @@ function AppInner(props: {
             What's new…
           </Menu.Item>
         )}
+        <Menu.Item
+          leftSection={<IconKeyboard size={14} />}
+          onClick={() => setDialog({ kind: "shortcuts" })}
+        >
+          Shortcuts…
+        </Menu.Item>
         <Menu.Divider />
         <Menu.Item
           leftSection={<IconSettings size={14} />}
@@ -4688,6 +4862,13 @@ function AppInner(props: {
       onSave={saveSettings}
       onClose={closeDialog}
     />
+  );
+
+  /** Hoisted for the same reason as `settingsDialog` — reachable from the ⋯
+   *  menu in both view modes, so it has to render before runs mode's early
+   *  return. */
+  const shortcutsDialog = dialog.kind === "shortcuts" && (
+    <ShortcutsDialog onClose={closeDialog} />
   );
 
   /**
@@ -4725,6 +4906,128 @@ function AppInner(props: {
     />
   );
 
+  /** Fetch + fast-forward the main checkout, then re-read the repo so the
+   *  staleness badge clears in the same breath. Shared by the direct click
+   *  and the dirty-confirm dialog's "revert, then update" button. */
+  const doUpdateMain = async () => {
+    if (!repo) return;
+    setUpdatingMain(true);
+    try {
+      await api.updateMain(repo.root);
+      await refresh();
+    } catch (e) {
+      notifyError("Could not update main", e);
+      await refresh();
+    } finally {
+      setUpdatingMain(false);
+    }
+  };
+
+  /**
+   * The one-click "update main". Mirrors the trash flow: check the repo
+   * root's dirty state up front (same `git status` the daemon's own refusal
+   * would otherwise surface a moment later as a bare toast) and, if dirty,
+   * turn it into a choice — revert first, or cancel — instead of failing
+   * blind. A clean tree skips straight to the fast-forward as before.
+   */
+  const updateMain = async () => {
+    if (!repo || updatingMain) return;
+    const main = worktrees.find((w) => w.is_main);
+    if (main) {
+      try {
+        const status = await api.worktreeGitStatus(main.id);
+        if (status.dirty) {
+          setDialog({ kind: "update-main-dirty", root: repo.root, status });
+          return;
+        }
+      } catch {
+        // Status unavailable (git error, checkout gone): fall through and let
+        // the daemon's own dirty check surface the refusal, as before.
+      }
+    }
+    await doUpdateMain();
+  };
+
+  // ---- keyboard shortcuts: refs for the [] keydown effect above -----------
+  //
+  // Everything the effect declares near the top of this component and calls
+  // through by name is mirrored into a ref here, the same idiom `layoutsRef`
+  // and `worktreeRef` use. **Declared above both of this component's early
+  // returns (`mode === "runs"`, `chromeless`) on purpose** — a hook has to run
+  // on every render regardless of which branch that render takes, and a
+  // `useRef` reached only on the "ide, not chromeless" path is exactly the
+  // conditional-hook shape that corrupts every hook after it. The assignments
+  // right below each one are plain statements, not hooks, and running only on
+  // that one path would just mean these shortcuts see a stale value while the
+  // window is chromeless or in Runs view — which does not happen today because
+  // this sits before both branches, but would be the failure mode of moving it
+  // back down without moving the branches too.
+  const lanesRef = useRef(lanes);
+  lanesRef.current = lanes;
+  const selectWorktreeRef = useRef(selectWorktree);
+  selectWorktreeRef.current = selectWorktree;
+  const runsRef = useRef(runs);
+  runsRef.current = runs;
+  const setSelectedRunNameRef = useRef(setSelectedRunName);
+  setSelectedRunNameRef.current = setSelectedRunName;
+  const boundRunRef = useRef(run);
+  boundRunRef.current = run;
+  const runningRef = useRef(false);
+  runningRef.current = !!run?.live && status !== "stopped";
+  // Mirrors `TopBar`'s own `starting`/`pending`/`canStart` exactly (App.tsx's
+  // `TopBar` component, the ▶/■/⟳ buttons) so the keyboard equivalents below
+  // are gated on the same conditions those buttons disable on — a keyboard
+  // start/stop/restart must not fire where the click it stands in for
+  // wouldn't have.
+  const pendingActionRef = useRef(pendingForRun(worktree, run?.name));
+  pendingActionRef.current = pendingForRun(worktree, run?.name);
+  const startingRef = useRef(false);
+  startingRef.current = spinnerAction(pendingActionRef.current, run) === "start";
+  const canStartRef = useRef(false);
+  canStartRef.current = worktree ? canStartWorktree(worktree) : false;
+  const canRunWorktreeNowRef = useRef(canRunWorktreeNow);
+  canRunWorktreeNowRef.current = canRunWorktreeNow;
+  const startOrOpenPickerRef = useRef(startOrOpenPicker);
+  startOrOpenPickerRef.current = startOrOpenPicker;
+  const stopWorktreeRef = useRef(stopWorktree);
+  stopWorktreeRef.current = stopWorktree;
+  const restartWorktreeRef = useRef(restartWorktree);
+  restartWorktreeRef.current = restartWorktree;
+  const modeRef = useRef(mode);
+  modeRef.current = mode;
+  const setModeRef = useRef(setMode);
+  setModeRef.current = setMode;
+  const saveSettingsRef = useRef(saveSettings);
+  saveSettingsRef.current = saveSettings;
+  const updateMainRef = useRef(updateMain);
+  updateMainRef.current = updateMain;
+
+  /** Move the rail's selection up or down, in the order it renders — the
+   *  flattened `railGroups`, not raw `worktrees` — wrapping at both ends:
+   *  past the last worktree goes to the first and vice versa, rather than
+   *  stopping dead at either end of the rail. */
+  function stepWorktree(delta: number) {
+    const wt = worktreeRef.current;
+    if (!wt) return;
+    const order = railGroups(worktreesRef.current, lanesRef.current).flatMap((g) => g.worktrees);
+    const idx = order.findIndex((w) => w.id === wt.id);
+    const next = order[nextIndex(idx, delta, order.length)];
+    if (next) void selectWorktreeRef.current(next);
+  }
+
+  /** Step the run selector to the next entry — "select preset" from the
+   *  keyboard. Live runs only, the same default the selector itself opens
+   *  with before "show ended" is clicked. Forward only: the one caller
+   *  (⌘⇧O) has no reverse chord, so a `delta` parameter would be dead. */
+  function stepPreset() {
+    const list = sortRunsForDisplay(
+      selectorRuns(runsRef.current, selectedRunRef.current || undefined, false).runs,
+    );
+    if (list.length === 0) return;
+    const idx = list.findIndex((r) => r.name === selectedRunRef.current);
+    setSelectedRunNameRef.current(list[nextIndex(idx, 1, list.length)].name);
+  }
+
   if (mode === "runs") {
     return (
       <div className="frame">
@@ -4738,6 +5041,7 @@ function AppInner(props: {
         {settingsDialog}
         {configVarsDialog}
         {whatsNewDialog}
+        {shortcutsDialog}
       </div>
     );
   }
@@ -4862,48 +5166,6 @@ function AppInner(props: {
     );
   }
 
-  /** Fetch + fast-forward the main checkout, then re-read the repo so the
-   *  staleness badge clears in the same breath. Shared by the direct click
-   *  and the dirty-confirm dialog's "revert, then update" button. */
-  const doUpdateMain = async () => {
-    if (!repo) return;
-    setUpdatingMain(true);
-    try {
-      await api.updateMain(repo.root);
-      await refresh();
-    } catch (e) {
-      notifyError("Could not update main", e);
-      await refresh();
-    } finally {
-      setUpdatingMain(false);
-    }
-  };
-
-  /**
-   * The one-click "update main". Mirrors the trash flow: check the repo
-   * root's dirty state up front (same `git status` the daemon's own refusal
-   * would otherwise surface a moment later as a bare toast) and, if dirty,
-   * turn it into a choice — revert first, or cancel — instead of failing
-   * blind. A clean tree skips straight to the fast-forward as before.
-   */
-  const updateMain = async () => {
-    if (!repo || updatingMain) return;
-    const main = worktrees.find((w) => w.is_main);
-    if (main) {
-      try {
-        const status = await api.worktreeGitStatus(main.id);
-        if (status.dirty) {
-          setDialog({ kind: "update-main-dirty", root: repo.root, status });
-          return;
-        }
-      } catch {
-        // Status unavailable (git error, checkout gone): fall through and let
-        // the daemon's own dirty check surface the refusal, as before.
-      }
-    }
-    await doUpdateMain();
-  };
-
   return (
     <div className="frame">
       <TopBar
@@ -5005,17 +5267,7 @@ function AppInner(props: {
         // The bound run, named explicitly: the top bar is the run-level surface,
         // and ■ here must end the run whose name the selector is showing — never
         // whichever one `activeRun` would have picked.
-        onStart={() => {
-          // A worktree with no selection yet opens the picker instead of
-          // guessing: the user asked to run, so the first gesture is choosing
-          // what. Once a choice exists, ▶ starts it directly.
-          if (worktree && !storedStart) {
-            startAfterDone.current = true;
-            setStartConfigOpen(true);
-          } else if (worktree) {
-            startWorktree(worktree);
-          }
-        }}
+        onStart={() => worktree && startOrOpenPicker(worktree)}
         onStop={() => worktree && stopWorktree(worktree, run)}
         onRestart={() => worktree && restartWorktree(worktree, run)}
         controls={topBarControls}
@@ -5114,7 +5366,7 @@ function AppInner(props: {
             onSelect={(w) => void selectWorktree(w)}
             onAdd={(lane) => setDialog({ kind: "new-worktree", lane })}
             onMenu={(e, w) => worktreeMenu(w)(e)}
-            onStart={onRailStart}
+            onStart={startOrOpenPicker}
             onStop={stopWorktree}
             onDiagnose={diagnoseWorktree}
             showWorking={activity.showWorking}
@@ -5415,6 +5667,7 @@ function AppInner(props: {
       {settingsDialog}
       {configVarsDialog}
       {whatsNewDialog}
+      {shortcutsDialog}
       {sharingDialog}
       {dialog.kind === "search" && (
         <CommandPalette
