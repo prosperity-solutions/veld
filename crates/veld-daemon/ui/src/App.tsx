@@ -190,6 +190,12 @@ import {
 } from "./panes/model";
 import { acquireWorktree } from "./ide/acquire";
 import { channel, type ClaimResult, type ClientInfo } from "./ide/channel";
+import {
+  lastWorktreeName,
+  recallLastWorktree,
+  rememberLastWorktree,
+  worktreeKeyToReopen,
+} from "./ide/lastWorktree";
 import { awayNote, openableWorktrees, worktreeSetKey } from "./ide/ownership";
 import {
   MAX_PROJECT_SHORTCUTS,
@@ -2201,6 +2207,27 @@ function AppInner(props: {
   }, [repo?.root]);
 
   /**
+   * Go to a project, landing on the worktree it was last on.
+   *
+   * One function for all six ways to switch project — the column, ⌘1…⌘9, ⌘`, the
+   * top bar's selector, the right-click menu and the palette — which previously
+   * each spelled out `setActiveWtKey("")` and therefore each had to be found and
+   * changed together. `""` is still what a project with no memory gets, so the
+   * fallback chain (main checkout, then the first row) is unchanged for a project
+   * opened for the first time.
+   */
+  const switchToProject = (root: string) => {
+    const target = reposRef.current.find((r) => r.root === root);
+    setActiveRepoRoot(root);
+    setActiveWtKey(
+      worktreeKeyToReopen(
+        target?.worktrees ?? [],
+        recallLastWorktree(window.localStorage, selectionKeys(lastWorktreeName(root))),
+      ),
+    );
+  };
+
+  /**
    * Go to the project at a keyboard position, or back to the previous one.
    *
    * Both read the list through `reposRef`, which is the *daemon's* order — the same
@@ -2208,16 +2235,16 @@ function AppInner(props: {
    * in refs because the key handler is registered once at boot; see the effect that
    * registers it.
    *
-   * Selecting a project, not a worktree: `setActiveWtKey("")` lets the fallback pick
-   * the main checkout, and the acquire hunt takes it from there. A chord that took a
-   * specific worktree would fight whichever window already has it, for a gesture
-   * that never named one.
+   * Selecting a project, not a worktree: `switchToProject` names the one this
+   * window was last on there — or nothing, for a project it has never opened, and
+   * then the fallback picks the main checkout. Either way the acquire hunt takes it
+   * from there, which is what keeps a remembered worktree from fighting whichever
+   * window already has it: a refused claim lands on a free one instead.
    */
   const goToProject = (digit: number) => {
     const target = projectForShortcut(reposRef.current, digit);
     if (!target || target.root === lastRepoRootRef.current) return;
-    setActiveRepoRoot(target.root);
-    setActiveWtKey("");
+    switchToProject(target.root);
   };
   const goToPreviousProject = () => {
     const target = toggleTarget(
@@ -2226,8 +2253,7 @@ function AppInner(props: {
       previousRepoRootRef.current,
     );
     if (!target) return;
-    setActiveRepoRoot(target.root);
-    setActiveWtKey("");
+    switchToProject(target.root);
   };
 
   /** The project column's right-click menu. The same actions the selector offers,
@@ -2239,10 +2265,7 @@ function AppInner(props: {
         key: "switch",
         title: `Switch to ${r.name}`,
         icon: <IconArrowsExchange size={14} />,
-        onClick: () => {
-          setActiveRepoRoot(r.root);
-          setActiveWtKey("");
-        },
+        onClick: () => switchToProject(r.root),
       },
       ...(canOpenSecondView
         ? [
@@ -3177,6 +3200,54 @@ function AppInner(props: {
     // acquire is itself what cancels the old one.
     void acquireRef.current(worktree);
   }, [chromeless, worktree?.id]);
+
+  /**
+   * Each project remembers the worktree it was last on. See `ide/lastWorktree.ts`.
+   *
+   * **The granted worktree, not the selected one**, which is why this sits here
+   * rather than beside `switchToProject`: `shownId` is set only by a claim this
+   * client won (`show`, and `selectWorktree`'s success path) and nulled by
+   * `notGranted` on a refusal, so this records where the window *is*, not what the
+   * switch asked for. A remembered worktree another window holds is refused and the
+   * acquire hunt lands on a free one; recording the request would send the next
+   * switch straight back into the same refusal — and on the two paths where the
+   * hunt ends showing nothing (`blocked`, and a refusal that is not
+   * `shown_elsewhere`) it would name a worktree this window was refused.
+   *
+   * The same test is what stops a *fallback* resolution being recorded before it is
+   * real: `repo` is `repos.find(activeRepoRoot) ?? repos[0]`, so a deep link to a
+   * root this machine has not imported — or the frame after another window removes
+   * the project you are on — resolves to a different project entirely. Nothing is
+   * written until that landing has been granted, by which point the window really
+   * is there and it is the truth about it.
+   *
+   * **Never from a detached window.** It is a satellite of its origin's claim
+   * rather than a claimant, and it sets `shownId` directly (`selectWorktree`) — so
+   * without the `chromeless` guard, detaching a tab would overwrite the unscoped
+   * key that every brand-new window slot inherits.
+   *
+   * One thing the id comparison does *not* prove, so that a reader does not assume
+   * it: `shownId` can be **stale and still equal**. Nothing nulls it when the
+   * selection moves without a claim (see the acquire effect above), and a rowid is
+   * reused table-wide — the hazard the `gone` effect's docstring below describes,
+   * which that effect cannot catch either, since its `alive` set spans every repo.
+   * Grant a worktree, permanently delete it, let another project's new checkout
+   * inherit the number, and this reads as granted. It records the right thing
+   * anyway: `worktree` is resolved from the *selected* project's own list, so what
+   * lands in the memory is the checkout on screen. The stale id is a real defect in
+   * the claim path — that window is displaying panes it never claimed — but it is
+   * that path's to fix, not this one's, and this write is true either way.
+   *
+   * Keyed on the ids and the path, never on `worktree` itself: the 5s poll hands
+   * back an equal row in a new object, and an effect keyed on the object re-runs on
+   * every one of them (see `worktreeSetKey`).
+   */
+  useEffect(() => {
+    if (chromeless || !worktree || shownId !== worktree.id) return;
+    const root = repo?.root;
+    if (!root) return;
+    rememberLastWorktree(window.localStorage, selectionKeys(lastWorktreeName(root)), worktree);
+  }, [chromeless, repo?.root, worktree?.id, worktree?.path, shownId]);
 
   // Cleared as soon as this window is showing something it owns.
   useEffect(() => {
@@ -4413,10 +4484,7 @@ function AppInner(props: {
         label: `Switch to ${r.name}`,
         hint: r.available ? r.root : "unavailable",
         alt: [r.root],
-        run: () => {
-          setActiveRepoRoot(r.root);
-          setActiveWtKey("");
-        },
+        run: () => switchToProject(r.root),
       });
       for (const w of r.worktrees) {
         // Same omission as the "Worktrees" group: there is nowhere to go in a
@@ -5256,10 +5324,7 @@ function AppInner(props: {
         canOpenWindow={canOpenSecondView}
         secondViewLabel={secondViewLabel}
         projectColumnButton={projectColumnButton}
-        onSelectRepo={(root) => {
-          setActiveRepoRoot(root);
-          setActiveWtKey("");
-        }}
+        onSelectRepo={switchToProject}
         onOpenProjectWindow={(root) => void openProjectWindow(root)}
         onImport={() => setDialog({ kind: "import" })}
         onRemoveRepo={(r) => setDialog({ kind: "remove-repo", repo: r })}
@@ -5340,10 +5405,7 @@ function AppInner(props: {
               activeRoot={repo?.root ?? null}
               showWorking={activity.showWorking}
               elsewhere={elsewhere}
-              onSelect={(root) => {
-                setActiveRepoRoot(root);
-                setActiveWtKey("");
-              }}
+              onSelect={switchToProject}
               onReorder={reorderProjectsTo}
               onMenu={(e, r) => projectMenu(r)(e)}
               onImport={() => setDialog({ kind: "import" })}
@@ -5443,6 +5505,11 @@ function AppInner(props: {
           onImport={async (path) => {
             const imported = await api.importRepo(path);
             await refresh();
+            // Deliberately not `switchToProject`: a project being imported has no
+            // remembered worktree worth restoring, and `reposRef` does not contain
+            // it yet anyway — it is assigned during render, and this runs inside
+            // the dialog's handler. `""` lets the fallback take the main checkout,
+            // which is where an import should land.
             setActiveRepoRoot(imported.root);
             setActiveWtKey("");
             closeDialog();
@@ -5536,9 +5603,22 @@ function AppInner(props: {
             // regardless threw the window off a project the user was working in —
             // dropping the worktree key and starting a fresh acquire hunt — because
             // they removed some other one.
+            // **Land on the survivor properly, rather than clearing the
+            // selection and letting the fallback find it.** Both end on the first
+            // remaining project, but only this one lands on the worktree that
+            // project was last on — and the difference is not cosmetic: the
+            // fallback lands on its *main* checkout, that landing is then granted,
+            // and the recorder writes it, so removing one project would quietly
+            // overwrite another project's remembered place. `reposRef` is the
+            // pre-removal list, which in the daemon's order minus the removed root
+            // is exactly what `repos[0]` resolves to after the refresh.
             if (removed === activeRepoRootRef.current) {
-              setActiveRepoRoot("");
-              setActiveWtKey("");
+              const survivor = reposRef.current.find((r) => r.root !== removed);
+              if (survivor) switchToProject(survivor.root);
+              else {
+                setActiveRepoRoot("");
+                setActiveWtKey("");
+              }
             }
             await refresh();
             closeDialog();
