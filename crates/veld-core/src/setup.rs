@@ -1573,19 +1573,56 @@ pub async fn check_update() -> Result<Option<String>, anyhow::Error> {
         .context("failed to build HTTP client")?;
 
     let url = format!("https://api.github.com/repos/{GITHUB_REPO}/releases/latest");
-    let resp = client
-        .get(&url)
-        .header("Accept", "application/vnd.github+json")
-        .send()
-        .await
-        .context("failed to fetch latest release from GitHub")?;
 
-    if !resp.status().is_success() {
+    // Retried on the same terms as the install script download, and for the same
+    // reason rather than for symmetry: this is the *first* GitHub call `veld update`
+    // makes, and on the app-driven path Veld Desktop has already quit by the time it
+    // runs — so a single transient 503 here ends the update with the user's app
+    // closed and nothing installed. The download's retry would never be reached.
+    //
+    // Silent, unlike the download's: the other caller is the passive "a newer
+    // version is available" nudge in `main.rs`, which runs on ordinary commands
+    // under a 5s `tokio::time::timeout`. Narrating a retry there would put two
+    // lines of GitHub weather on every `veld` invocation during an outage. That
+    // timeout also means the nudge simply gives up mid-retry, which is the right
+    // outcome for a best-effort check and the reason the extra attempts cost it
+    // nothing — but the two are now coupled, so do not shorten either alone.
+    let mut attempt = 0u32;
+    let resp = loop {
+        attempt += 1;
+        let last = attempt >= INSTALL_SCRIPT_ATTEMPTS;
+
+        let resp = match client
+            .get(&url)
+            .header("Accept", "application/vnd.github+json")
+            .send()
+            .await
+        {
+            Ok(resp) => resp,
+            Err(_) if !last => {
+                tokio::time::sleep(INSTALL_SCRIPT_RETRY_DELAY).await;
+                continue;
+            }
+            Err(e) => {
+                return Err(
+                    anyhow::Error::new(e).context("failed to fetch latest release from GitHub")
+                );
+            }
+        };
+
+        let status = resp.status();
+        if status.is_success() {
+            break resp;
+        }
+        if is_transient_status(status) && !last {
+            tokio::time::sleep(INSTALL_SCRIPT_RETRY_DELAY).await;
+            continue;
+        }
         anyhow::bail!(
-            "GitHub API returned status {} when checking for updates",
-            resp.status()
+            "GitHub API returned status {status} when checking for updates{}",
+            github_outage_hint(status, resp.headers())
         );
-    }
+    };
 
     let body: serde_json::Value = resp
         .json()
@@ -1759,10 +1796,253 @@ fn install_script_override_from(raw: Option<std::ffi::OsString>) -> Option<PathB
     (path.is_absolute() && path.is_file()).then_some(path)
 }
 
+/// The install script could not be fetched, so **nothing ran**.
+///
+/// A distinct type rather than a plain `anyhow!`, for one reason: the caller
+/// follows a failed update with "re-run with `veld update --verbose` to see the
+/// installer's own output", and on this path there is no installer output to see.
+/// A hint that points at a log that does not exist costs the reader the one
+/// minute they had to spend on the real cause. `is_install_script_unavailable`
+/// is how the caller asks.
+///
+/// The message is pre-formatted, not composed from parts, because the surfacing
+/// site prints with `{e}` and the wording differs per failure — a status, a
+/// transport error, a body that was not a script.
+#[derive(Debug)]
+pub struct InstallScriptUnavailable(String);
+
+impl std::fmt::Display for InstallScriptUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for InstallScriptUnavailable {}
+
+/// Did this failure happen *before* the install script ran?
+///
+/// Checks the whole chain, so a caller that adds its own context on the way up
+/// does not hide the answer.
+pub fn is_install_script_unavailable(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| c.is::<InstallScriptUnavailable>())
+}
+
+/// A "this is probably not you" hint for a status that means the far end is
+/// rate-limiting or broken, ready to append to an error message.
+///
+/// Every network fetch an update makes — the release lookup and the install
+/// script — ends at GitHub, so a GitHub incident arrives here as a bare HTTP
+/// status with no explanation attached. The first thing anyone does with an
+/// unexplained `429` is go looking for what they broke locally; naming the
+/// status page spends one line to save that.
+///
+/// Returns `""` rather than an `Option` so a call site can interpolate it
+/// unconditionally.
+///
+/// Takes the headers, not just the status, for one reason: GitHub's REST API
+/// answers an exhausted **unauthenticated** rate limit — 60 requests an hour, and
+/// `veld update` spends one on every run — with `403 Forbidden` as readily as with
+/// `429`, distinguished only by `x-ratelimit-remaining: 0`. On status alone that
+/// case reads as "Forbidden" with no explanation, which is the most misleading
+/// answer of the set: it invites the reader to go looking for a permission problem
+/// that does not exist.
+fn github_outage_hint(
+    status: reqwest::StatusCode,
+    headers: &reqwest::header::HeaderMap,
+) -> &'static str {
+    const RATE_LIMITED: &str = " — GitHub is rate-limiting this network, or is degraded; check \
+                                https://www.githubstatus.com/ and try again in a few minutes";
+
+    let exhausted = headers
+        .get("x-ratelimit-remaining")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.trim() == "0");
+
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        || (status == reqwest::StatusCode::FORBIDDEN && exhausted)
+    {
+        RATE_LIMITED
+    } else if status.is_server_error() {
+        " — GitHub is failing requests; check https://www.githubstatus.com/ and \
+         try again in a few minutes"
+    } else {
+        ""
+    }
+}
+
+/// Statuses worth trying again, matching the set `curl --retry` treats as
+/// transient (408, 429, 5xx) — the same judgement `install.sh` gets from that
+/// flag, made here for the one download that does not go through curl.
+fn is_transient_status(status: reqwest::StatusCode) -> bool {
+    status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        || status == reqwest::StatusCode::REQUEST_TIMEOUT
+        || status.is_server_error()
+}
+
+/// How many times a transient failure downloading the install script is tried,
+/// and how long between tries.
+///
+/// Three attempts two seconds apart, not an exponential climb into the minutes:
+/// somebody is watching a progress line while this runs, and an incident that
+/// outlasts a short backoff is not one a longer backoff would have survived
+/// either. The retry is here for the single-request blip; the error message is
+/// what handles the rest.
+///
+/// A server-sent `Retry-After` is deliberately **ignored**, which is the one place
+/// this half and `install.sh`'s `curl --retry` differ on purpose. curl prefers that
+/// header to its own `--retry-delay` and does not cap it, so a rate-limiting CDN
+/// answering `Retry-After: 600` can stall an install for half an hour — which is
+/// why the flags there carry `--retry-max-time`. A flat delay has no such header to
+/// obey, so there is nothing to cap.
+const INSTALL_SCRIPT_ATTEMPTS: u32 = 3;
+const INSTALL_SCRIPT_RETRY_DELAY: Duration = Duration::from_secs(2);
+
+/// Does this look like `install.sh` rather than something a proxy, a CDN or a
+/// captive portal wrote?
+///
+/// **Why a guard on the body at all**, given the status check in
+/// `download_install_script`: this text is handed to `bash -c`, so anything that
+/// reaches it *runs*. The failure that motivated both halves was a real 429 from
+/// `raw.githubusercontent.com` during a GitHub incident — two lines of prose,
+/// executed, producing `429:: command not found`, a syntax error on the
+/// parenthesis in GitHub's terms-of-service URL, and a final report of "install
+/// script exited with code 2". The status check catches that one. This catches
+/// the case a status code cannot: an interception layer that serves its own page
+/// with `200 OK`.
+///
+/// Deliberately weak — a shebang, and the one variable every caller of this
+/// script sets — because a tight fingerprint would be a second contract to keep
+/// in step with a file published from `main` that this crate cannot see.
+///
+/// `the_repo_install_script_passes_the_shape_gate` pins it against this checkout's
+/// script, and **that guarantee runs one way only.** This predicate ships inside
+/// released binaries; the script is fetched from `main`. So a commit that renames
+/// `VELD_VERSION` in `install.sh` *and* updates this predicate together is green in
+/// CI and breaks `veld update` for every CLI already installed, which is reading
+/// the new script with the old predicate. Nothing can catch that from here — the
+/// only safe move is to treat the marker as a published contract and not rename it.
+fn looks_like_install_script(body: &str) -> bool {
+    body.starts_with("#!") && body.contains("VELD_VERSION")
+}
+
+/// Fetch the install script, retrying transient failures, and refuse to return
+/// anything that is not a shell script.
+///
+/// The caller runs what this returns, so every early exit here is a `bail!`: an
+/// error the user reads is always better than a body `bash` interprets.
+async fn download_install_script(
+    client: &reqwest::Client,
+    url: &str,
+) -> Result<String, anyhow::Error> {
+    let mut attempt = 0u32;
+    loop {
+        attempt += 1;
+        // Computed before the request, so a config of one attempt takes the
+        // give-up branch rather than looping: the retry paths below are only
+        // reachable while another attempt is actually left.
+        let last = attempt >= INSTALL_SCRIPT_ATTEMPTS;
+
+        let retry = |reason: String| async move {
+            eprintln!(
+                "  {reason}; retrying in {}s ({}/{INSTALL_SCRIPT_ATTEMPTS})",
+                INSTALL_SCRIPT_RETRY_DELAY.as_secs(),
+                attempt + 1
+            );
+            tokio::time::sleep(INSTALL_SCRIPT_RETRY_DELAY).await;
+        };
+
+        // A transport failure (DNS, TLS, connect, timeout) is retried on the same
+        // terms as a transient status. During an incident both happen, and which
+        // one a given request gets is luck.
+        let resp = match client.get(url).send().await {
+            Ok(resp) => resp,
+            Err(e) if !last => {
+                retry(format!("Could not reach {url} ({e})")).await;
+                continue;
+            }
+            // The transport error is interpolated rather than attached as a
+            // `context`, because the one place this is printed formats with `{e}`
+            // and would drop a cause chain — "failed to download" without the
+            // "why" is the message this whole change exists to stop shipping.
+            Err(e) => {
+                return Err(InstallScriptUnavailable(format!(
+                    "failed to download the install script from {url}: {e}"
+                ))
+                .into());
+            }
+        };
+
+        let status = resp.status();
+        if !status.is_success() {
+            if is_transient_status(status) && !last {
+                retry(format!("{url} returned HTTP {}", status.as_u16())).await;
+                continue;
+            }
+            return Err(InstallScriptUnavailable(format!(
+                "failed to download the install script: {url} returned HTTP {status}{}",
+                github_outage_hint(status, resp.headers())
+            ))
+            .into());
+        }
+
+        // Retried on the same terms as the `send()` above, for the same reason: a
+        // connection reset part-way through the body, or the client timeout firing
+        // during the read, is the same transient transport failure — it just
+        // happens after the status line rather than before it. Treating only one of
+        // the two as transient would be a distinction the network does not make.
+        let body = match resp.text().await {
+            Ok(body) => body,
+            Err(e) if !last => {
+                retry(format!(
+                    "Could not read the install script from {url} ({e})"
+                ))
+                .await;
+                continue;
+            }
+            Err(e) => {
+                return Err(InstallScriptUnavailable(format!(
+                    "failed to read the install script from {url}: {e}"
+                ))
+                .into());
+            }
+        };
+
+        if !looks_like_install_script(&body) {
+            // The first line, not the length alone: on the failure this was
+            // written for it is literally `429: Too Many Requests`, which
+            // explains the whole thing in one glance.
+            let first: String = body
+                .lines()
+                .next()
+                .unwrap_or("")
+                .trim()
+                .chars()
+                .take(120)
+                .collect();
+            return Err(InstallScriptUnavailable(format!(
+                "{url} did not return the install script ({} bytes, starting {first:?})",
+                body.len()
+            ))
+            .into());
+        }
+
+        return Ok(body);
+    }
+}
+
 /// Download and run the install script with the given version pinned.
 ///
 /// `log`, when given, receives the script's stdout and stderr instead of this
 /// process's.
+///
+/// **What authenticates the script it runs: TLS, and nothing else.** There is no
+/// checksum, no signature, and no pinned commit on `veld.oss.life.li/get`, whose
+/// 302 is followed to whatever host it names — while the script this fetches does
+/// verify every release asset it goes on to download against `checksums.txt`. That
+/// asymmetry predates this function's current shape and is not narrowed by
+/// `looks_like_install_script`, which is a corruption check, not an authenticity
+/// one. Written down because the guard reads like more than it is, and the next
+/// person to add a check here should know which one is actually missing.
 async fn run_install_script(
     version: &str,
     extra_env: &[(String, String)],
@@ -1787,14 +2067,7 @@ async fn run_install_script(
                 .build()
                 .context("failed to build HTTP client")?;
 
-            client
-                .get(&install_url)
-                .send()
-                .await
-                .context("failed to download install script")?
-                .text()
-                .await
-                .context("failed to read install script")?
+            download_install_script(&client, &install_url).await?
         }
     };
 
@@ -2936,10 +3209,233 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        first_existing_file, init_lua_loads_veld_spoon, install_script_override_from,
-        linux_desktop_candidates, parse_launchctl_pid, parse_launchctl_program,
-        parse_systemd_exec_start, parse_systemd_main_pid, pids_running_from, remove_spoon_files,
+        download_install_script, first_existing_file, github_outage_hint,
+        init_lua_loads_veld_spoon, install_script_override_from, is_install_script_unavailable,
+        is_transient_status, linux_desktop_candidates, looks_like_install_script,
+        parse_launchctl_pid, parse_launchctl_program, parse_systemd_exec_start,
+        parse_systemd_main_pid, pids_running_from, remove_spoon_files,
     };
+
+    /// Byte-for-byte what `raw.githubusercontent.com` served during the GitHub
+    /// incident of 2026-08-17, which `veld update` handed to `bash -c`. The first
+    /// line became `429:: command not found`; the parenthesis on the second became
+    /// a syntax error; the user was told "install script exited with code 2".
+    const GITHUB_429_BODY: &str = "429: Too Many Requests\nFor more on scraping GitHub and how it \
+                                   may affect your rights, please review our Terms of Service \
+                                   (https://docs.github.com/en/site-policy/github-terms/github-terms-of-service).\n";
+
+    /// The published install script is what production runs, and
+    /// `looks_like_install_script` is the gate in front of it. If a refactor ever
+    /// renames `VELD_VERSION` or drops the shebang, the gate starts rejecting the
+    /// real thing and *every* `veld update` fails with "did not return the install
+    /// script" — a self-inflicted outage that no other test in this repo would
+    /// catch, because the CLI-side contract test checks the variables the script
+    /// *reads*, not the bytes this predicate looks at.
+    #[test]
+    fn the_repo_install_script_passes_the_shape_gate() {
+        assert!(looks_like_install_script(include_str!(
+            "../../../install.sh"
+        )));
+    }
+
+    /// The whole point: an error body is not a script, so it never reaches bash.
+    #[test]
+    fn an_error_body_is_not_mistaken_for_the_install_script() {
+        assert!(!looks_like_install_script(GITHUB_429_BODY));
+        // A `200 OK` page from a captive portal or a corporate proxy — the case a
+        // status check cannot see, which is why the gate exists as well as the check.
+        assert!(!looks_like_install_script(
+            "<!doctype html><title>Sign in to continue</title>"
+        ));
+        // A shell script that is not *this* shell script — and read the reason it
+        // fails, not the shape of it: the **only** thing asserted here is that the
+        // marker is absent. `"#!/bin/sh\nrm -rf / # VELD_VERSION\n"` passes the
+        // gate. That is not a hole being tolerated, it is what the gate is: an
+        // anti-corruption check on a body fetched over TLS, never an authenticity
+        // check. Nothing here authenticates the script — see the note on
+        // `run_install_script`.
+        assert!(!looks_like_install_script("#!/bin/sh\nrm -rf /\n"));
+        assert!(!looks_like_install_script(""));
+    }
+
+    /// The retry set, matching what `install.sh` gets from `curl --retry`. Asserted
+    /// because the two halves of the installer picking different transient sets is
+    /// exactly the kind of drift nobody notices until an incident.
+    #[test]
+    fn transient_statuses_match_curls_retry_set() {
+        for code in [408, 429, 500, 502, 503, 504] {
+            assert!(
+                is_transient_status(reqwest::StatusCode::from_u16(code).unwrap()),
+                "HTTP {code} should be retried"
+            );
+        }
+        for code in [400, 401, 403, 404, 410] {
+            assert!(
+                !is_transient_status(reqwest::StatusCode::from_u16(code).unwrap()),
+                "HTTP {code} should not be retried"
+            );
+        }
+    }
+
+    /// The hint is the difference between "I broke my machine" and "GitHub is
+    /// having a day", so it has to appear on the statuses an incident produces and
+    /// stay off the ones it does not.
+    #[test]
+    fn the_outage_hint_names_the_status_page_only_when_it_helps() {
+        let none = reqwest::header::HeaderMap::new();
+        for code in [429, 500, 502, 503] {
+            let hint = github_outage_hint(reqwest::StatusCode::from_u16(code).unwrap(), &none);
+            assert!(
+                hint.contains("githubstatus.com"),
+                "HTTP {code} should point at the status page, got {hint:?}"
+            );
+        }
+        // A plain 403 or 404 is an answer, not weather.
+        for code in [403, 404] {
+            assert!(
+                github_outage_hint(reqwest::StatusCode::from_u16(code).unwrap(), &none).is_empty(),
+                "HTTP {code} is not an outage"
+            );
+        }
+    }
+
+    /// GitHub spends an exhausted unauthenticated rate limit as `403`, not only as
+    /// `429`. Without the header check that lands as an unexplained "Forbidden",
+    /// which sends the reader hunting for a permission problem they do not have.
+    #[test]
+    fn an_exhausted_rate_limit_is_recognised_on_a_403() {
+        let mut exhausted = reqwest::header::HeaderMap::new();
+        exhausted.insert("x-ratelimit-remaining", "0".parse().unwrap());
+
+        assert!(
+            github_outage_hint(reqwest::StatusCode::FORBIDDEN, &exhausted)
+                .contains("githubstatus.com")
+        );
+
+        // …and a 403 with budget left is a genuine refusal, which must stay
+        // unexplained rather than be blamed on GitHub's weather.
+        let mut plenty = reqwest::header::HeaderMap::new();
+        plenty.insert("x-ratelimit-remaining", "57".parse().unwrap());
+        assert!(github_outage_hint(reqwest::StatusCode::FORBIDDEN, &plenty).is_empty());
+    }
+
+    /// Serve `responses` in order, one per connection, and return the address.
+    ///
+    /// A hand-rolled listener rather than a mock-HTTP dev-dependency: the assertion
+    /// needs a *transient* status followed by a good body, which is three lines of
+    /// canned bytes, and `veld-core` carries no dev-dependencies today.
+    async fn serve_in_order(responses: Vec<String>) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            for body in responses {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
+                // Read the request line and headers so the client does not see a
+                // reset before it has finished writing.
+                let mut buf = [0u8; 4096];
+                let _ = tokio::io::AsyncReadExt::read(&mut stream, &mut buf).await;
+                let _ = tokio::io::AsyncWriteExt::write_all(&mut stream, body.as_bytes()).await;
+                let _ = tokio::io::AsyncWriteExt::shutdown(&mut stream).await;
+            }
+        });
+        format!("http://{addr}/get")
+    }
+
+    fn http_response(status: &str, body: &str) -> String {
+        format!(
+            "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    const FAKE_SCRIPT: &str = "#!/usr/bin/env bash\necho \"${VELD_VERSION:-}\"\n";
+
+    /// A 429 is reported, not returned — the regression this change is about.
+    ///
+    /// Re-introduce it by deleting the status check in `download_install_script`
+    /// and this test starts returning GitHub's prose as a script to run.
+    #[tokio::test]
+    async fn a_rate_limited_download_fails_instead_of_returning_prose() {
+        let url = serve_in_order(vec![
+            http_response("429 Too Many Requests", GITHUB_429_BODY),
+            http_response("429 Too Many Requests", GITHUB_429_BODY),
+            http_response("429 Too Many Requests", GITHUB_429_BODY),
+        ])
+        .await;
+        let client = reqwest::Client::builder().build().unwrap();
+
+        let err = download_install_script(&client, &url).await.unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("429"), "{msg}");
+        assert!(msg.contains("githubstatus.com"), "{msg}");
+        // And the caller must be able to tell that nothing ran, so it does not
+        // send the reader to an installer log that was never written.
+        assert!(is_install_script_unavailable(&err));
+        assert!(is_install_script_unavailable(
+            &err.context("while updating veld")
+        ));
+    }
+
+    /// A `200 OK` body that is not a script is refused too, because the status is
+    /// not what makes it safe to run.
+    #[tokio::test]
+    async fn a_two_hundred_that_is_not_a_script_is_refused() {
+        let url = serve_in_order(vec![http_response(
+            "200 OK",
+            "<!doctype html><title>Wi-Fi login</title>",
+        )])
+        .await;
+        let client = reqwest::Client::builder().build().unwrap();
+
+        let err = download_install_script(&client, &url).await.unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("did not return the install script"),
+            "{err}"
+        );
+        assert!(is_install_script_unavailable(&err));
+    }
+
+    /// The blip case the retry exists for: one transient failure, then the script.
+    #[tokio::test]
+    async fn a_transient_failure_is_retried_and_the_script_still_arrives() {
+        let url = serve_in_order(vec![
+            http_response("503 Service Unavailable", "upstream is sad"),
+            http_response("200 OK", FAKE_SCRIPT),
+        ])
+        .await;
+        let client = reqwest::Client::builder().build().unwrap();
+
+        let body = download_install_script(&client, &url).await.unwrap();
+        assert_eq!(body, FAKE_SCRIPT);
+    }
+
+    /// A permanent status is *not* retried — a 404 answers the question, and
+    /// re-asking it three times only makes the failure slower.
+    #[tokio::test]
+    async fn a_permanent_status_is_not_retried() {
+        // One response only: a second attempt would find the listener gone and
+        // fail with a transport error instead of the status, so the assertion on
+        // the message is also the assertion that no second attempt happened.
+        let url = serve_in_order(vec![http_response("404 Not Found", "nope")]).await;
+        let client = reqwest::Client::builder().build().unwrap();
+
+        let err = download_install_script(&client, &url).await.unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("404"), "{msg}");
+        assert!(!msg.contains("githubstatus.com"), "{msg}");
+    }
+
+    /// An unrelated error must not read as "the script never ran", or the hint
+    /// disappears from the failures it was written for.
+    #[test]
+    fn an_unrelated_failure_is_not_an_unavailable_script() {
+        assert!(!is_install_script_unavailable(&anyhow::anyhow!(
+            "install script exited with code 1"
+        )));
+    }
 
     /// This user, in the fixture below.
     const ME: u32 = 501;

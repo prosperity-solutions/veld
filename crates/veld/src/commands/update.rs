@@ -991,7 +991,11 @@ async fn perform(
                 }
                 Err(e) => {
                     output::print_error(&format!("Update failed: {e}"), false);
-                    if !verbose {
+                    // Not printed when the script never ran: there is no
+                    // "installer's own output" to go and look at, and the error
+                    // above is already the whole story. This is the case a GitHub
+                    // incident produces, so it is the one most people meet.
+                    if !verbose && !veld_core::setup::is_install_script_unavailable(&e) {
                         println!(
                             "  {}",
                             output::dim(
@@ -1293,9 +1297,18 @@ async fn run_desktop_step(
             // information is on disk either way, because the app hands this
             // process an fd on that log, but nobody reads a log they were not
             // told about.
-            let detail = veld_core::setup::desktop_update_log_path()
-                .as_deref()
-                .and_then(super::desktop::last_diagnostic);
+            //
+            // Not when the script never ran, though: the download precedes the log
+            // truncation, so on that path the "last complaint" is a leftover from an
+            // earlier run and would attach a stale, wrong reason to a message that is
+            // already complete. Same guard as `veld desktop update`.
+            let detail = if veld_core::setup::is_install_script_unavailable(&e) {
+                None
+            } else {
+                veld_core::setup::desktop_update_log_path()
+                    .as_deref()
+                    .and_then(super::desktop::last_diagnostic)
+            };
             let e = match detail {
                 Some(reason) => format!("{reason} ({e})"),
                 None => format!("{e}"),

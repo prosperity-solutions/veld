@@ -109,6 +109,28 @@ say() {
 # than the caller, because it is the half holding the socket.
 CURL_PROGRESS="--progress-bar"
 
+# Every download here is a GitHub URL, and GitHub has incidents: `429 Too Many
+# Requests` on raw.githubusercontent, a 503 on a release asset. Both are gone by
+# the next request, and without this a blip in the middle of an install aborts a
+# run that had already closed the app and stopped nothing else.
+#
+# `--retry` alone, not `--retry-all-errors`: curl's own transient set (a timeout,
+# HTTP 408/429/500/502/503/504) is exactly the right one here, whereas retrying
+# *any* error would spend six seconds re-asking for a 404 that will stay a 404 —
+# an old release with no app archive is a supported case, not a blip.
+#
+# `--retry-max-time` is not belt-and-braces on `--retry-delay`, it is the only
+# thing bounding the wait: **curl obeys a server-sent `Retry-After` in preference
+# to `--retry-delay`, and `--max-time` does not cap it.** Measured against a local
+# listener on curl 8.7.1 — a `429` carrying `Retry-After: 25` took 75s, not the 6s
+# the delay implies, and a `Retry-After: 600` was still sleeping past two minutes.
+# That header is exactly what a rate-limiting CDN sends, so without a cap the
+# incident case turns a failed install into a half-hour stall with the app already
+# quit. 30s: room for the ordinary three 2s waits and for retrying a large archive
+# that died part-way, while a large `Retry-After` now fails fast instead of
+# sleeping through it.
+CURL_RETRY="--retry 3 --retry-delay 2 --retry-max-time 30"
+
 # --- Detect platform ---
 
 detect_os() {
@@ -178,12 +200,29 @@ if [ -n "${VELD_VERSION:-}" ]; then
   TAG="v${VERSION}"
 else
   say "Fetching latest release..."
-  TAG="$(curl -fsSL -H "Accept: application/json" "https://api.github.com/repos/${REPO}/releases/latest" | grep -o '"tag_name": *"[^"]*"' | cut -d'"' -f4)"
+  # `if ! TAG=…` rather than a bare assignment, and the construct is the whole
+  # point: under `set -euo pipefail` a failing command substitution aborts the
+  # script *inside* the assignment, so the `[ -z "$VERSION" ]` check below was
+  # unreachable on every path that actually fails — a 429, a 503, a DNS error.
+  # The user got curl's one-line stderr and a silent exit. `if !` suspends
+  # `errexit` for this command, which is what lets the error message run.
+  #
+  # `-f` plus `pipefail` also means a 200 whose body has no `tag_name` lands here
+  # (grep exits 1), so the message below covers "did not answer" and "answered
+  # with something unparseable" alike.
+  if ! TAG="$(curl -fsSL $CURL_RETRY -H "Accept: application/json" "https://api.github.com/repos/${REPO}/releases/latest" | grep -o '"tag_name": *"[^"]*"' | cut -d'"' -f4)"; then
+    TAG=""
+  fi
   VERSION="${TAG#v}"
 fi
 
 if [ -z "$VERSION" ]; then
-  echo "Error: could not determine version"
+  # Named rather than left as a bare "could not determine": `-f` means an empty
+  # TAG is almost always an HTTP failure, and during a GitHub incident that is
+  # what everybody hits at once. Anyone whose network is fine reads past it.
+  echo "Error: could not determine the latest version from the GitHub API."
+  echo "  If GitHub is having an incident (https://www.githubstatus.com/), try again later."
+  echo "  Otherwise pin a version: VELD_VERSION=x.y.z"
   exit 1
 fi
 
@@ -256,7 +295,7 @@ trap 'exit 143' TERM
 
 say "Downloading checksums..."
 HAVE_CHECKSUMS=""
-if curl -fSL -o "${TMP_DIR}/checksums.txt" "$CHECKSUMS_URL" 2>/dev/null; then
+if curl -fSL $CURL_RETRY -o "${TMP_DIR}/checksums.txt" "$CHECKSUMS_URL" 2>/dev/null; then
   HAVE_CHECKSUMS="1"
 else
   echo "Warning: checksums.txt not available, skipping verification"
@@ -566,7 +605,7 @@ install_desktop_app() {
   fi
 
   say "Downloading ${url}..."
-  if ! curl -fSL $CURL_PROGRESS -o "${TMP_DIR}/${zip}" "$url"; then
+  if ! curl -fSL $CURL_PROGRESS $CURL_RETRY -o "${TMP_DIR}/${zip}" "$url"; then
     echo "Warning: could not download ${zip}, skipping the app"
     return 1
   fi
@@ -660,7 +699,7 @@ fi
 # --- Download and extract ---
 
 say "Downloading ${URL}..."
-curl -fSL $CURL_PROGRESS -o "${TMP_DIR}/${TARBALL}" "$URL"
+curl -fSL $CURL_PROGRESS $CURL_RETRY -o "${TMP_DIR}/${TARBALL}" "$URL"
 
 verify_checksum "${TMP_DIR}/${TARBALL}" "$TARBALL" || exit 1
 
