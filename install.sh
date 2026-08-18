@@ -109,6 +109,45 @@ say() {
 # than the caller, because it is the half holding the socket.
 CURL_PROGRESS="--progress-bar"
 
+# Every download here is a GitHub URL, and GitHub has incidents: `429 Too Many
+# Requests` on raw.githubusercontent, a 503 on a release asset. Both are gone by
+# the next request, and without this a blip in the middle of an install aborts a
+# run that had already closed the app and stopped nothing else.
+#
+# `--retry` alone, not `--retry-all-errors`: curl's own transient set (a timeout, a
+# DNS resolution failure, and HTTP 408/429/500/502/503/504) is the right one here,
+# whereas retrying *any* error would spend six seconds re-asking for a 404 that will
+# stay a 404 — an old release with no app archive is a supported case, not a blip.
+# Note what that set excludes, because it decides what the cap below can cost:
+# connection-refused (exit 7) is not retried, and neither is a transfer that dies
+# part-way (exit 18/56) — measured, one connection, no second attempt.
+#
+# `--retry-max-time` is not belt-and-braces on `--retry-delay`, it is the only thing
+# bounding the wait: **curl obeys a server-sent `Retry-After` in preference to
+# `--retry-delay`, and `--max-time` does not cap it.** Measured against a local
+# listener on curl 8.7.1 — a `429` carrying `Retry-After: 25` took 75s, not the 6s
+# the delay implies, and `Retry-After: 600` was still sleeping past two minutes.
+# That header is exactly what a rate-limiting CDN sends, so without a cap an
+# incident turns a failed install into a half-hour stall with the app already quit.
+#
+# 30s, and what that cap does is one sentence: the timer starts before the *first*
+# attempt and includes transfer time, so a retry that would begin more than 30s in
+# does not happen. Measured — a 503 that takes 5s per attempt gets three retries at
+# 30s and none at all at 3s.
+#
+# For everything this script downloads, that is free. A failure curl retries by
+# *status* is a status line, and one arrives as fast for the 113 MB app archive as
+# for a 2 KB checksums file, so the retries all begin in the first second. The only
+# retryable failure slow enough for the cap to refuse one is a timeout — and how long
+# a dead network takes to become a timeout belongs to the kernel's SYN retries rather
+# than to curl, so it is not worth a number here. An installer that stops asking a
+# network that is not answering is the outcome we want anyway.
+#
+# Not the exception it looks like: a transfer that dies part-way is exit 18/56, which
+# is outside curl's retry set with or without a cap (measured: one connection, no
+# second attempt).
+CURL_RETRY="--retry 3 --retry-delay 2 --retry-max-time 30"
+
 # --- Detect platform ---
 
 detect_os() {
@@ -178,12 +217,38 @@ if [ -n "${VELD_VERSION:-}" ]; then
   TAG="v${VERSION}"
 else
   say "Fetching latest release..."
-  TAG="$(curl -fsSL -H "Accept: application/json" "https://api.github.com/repos/${REPO}/releases/latest" | grep -o '"tag_name": *"[^"]*"' | cut -d'"' -f4)"
+  # `if ! TAG=…` rather than a bare assignment, and the construct is the whole
+  # point: under `set -euo pipefail` a failing command substitution aborts the
+  # script *inside* the assignment, so the `[ -z "$VERSION" ]` check below was
+  # unreachable on every path that actually fails — a 429, a 503, a DNS error.
+  # The user got curl's one-line stderr and a silent exit. `if !` suspends
+  # `errexit` for this command, which is what lets the error message run.
+  #
+  # `-f` plus `pipefail` also means a 200 whose body has no `tag_name` lands here
+  # (grep exits 1). That case is why the message below opens cause-neutrally: GitHub
+  # *was* reached, so a first line asserting it was not would be a false statement
+  # about the one case curl said nothing about.
+  if ! TAG="$(curl -fsSL $CURL_RETRY -H "Accept: application/json" "https://api.github.com/repos/${REPO}/releases/latest" | grep -o '"tag_name": *"[^"]*"' | cut -d'"' -f4)"; then
+    TAG=""
+  fi
   VERSION="${TAG#v}"
 fi
 
 if [ -z "$VERSION" ]; then
-  echo "Error: could not determine version"
+  # A neutral first line and the causes underneath it as possibilities, because
+  # three unrelated failures land here and the script cannot tell which: GitHub
+  # answered an error, nothing answered at all, or something answered `200` with a
+  # body that has no `tag_name`. curl printed its own reason above for the first
+  # two and *nothing* for the third, so the lines below have to stand on their own.
+  #
+  # The offline case is listed because curl retries a DNS failure — measured, four
+  # attempts and 6.1s with the flags above — so a laptop with no network reaches
+  # this after a pause long enough to look like GitHub being slow, and telling it
+  # to wait for GitHub to recover would send it in the wrong direction.
+  echo "Error: could not determine the latest version from the GitHub API."
+  echo "  If GitHub is having an incident (https://www.githubstatus.com/), try again later."
+  echo "  If this machine is offline or behind a proxy, that is the more likely cause."
+  echo "  To skip this lookup entirely, pin a version: VELD_VERSION=x.y.z"
   exit 1
 fi
 
@@ -256,7 +321,7 @@ trap 'exit 143' TERM
 
 say "Downloading checksums..."
 HAVE_CHECKSUMS=""
-if curl -fSL -o "${TMP_DIR}/checksums.txt" "$CHECKSUMS_URL" 2>/dev/null; then
+if curl -fSL $CURL_RETRY -o "${TMP_DIR}/checksums.txt" "$CHECKSUMS_URL" 2>/dev/null; then
   HAVE_CHECKSUMS="1"
 else
   echo "Warning: checksums.txt not available, skipping verification"
@@ -566,7 +631,7 @@ install_desktop_app() {
   fi
 
   say "Downloading ${url}..."
-  if ! curl -fSL $CURL_PROGRESS -o "${TMP_DIR}/${zip}" "$url"; then
+  if ! curl -fSL $CURL_PROGRESS $CURL_RETRY -o "${TMP_DIR}/${zip}" "$url"; then
     echo "Warning: could not download ${zip}, skipping the app"
     return 1
   fi
@@ -660,7 +725,7 @@ fi
 # --- Download and extract ---
 
 say "Downloading ${URL}..."
-curl -fSL $CURL_PROGRESS -o "${TMP_DIR}/${TARBALL}" "$URL"
+curl -fSL $CURL_PROGRESS $CURL_RETRY -o "${TMP_DIR}/${TARBALL}" "$URL"
 
 verify_checksum "${TMP_DIR}/${TARBALL}" "$TARBALL" || exit 1
 

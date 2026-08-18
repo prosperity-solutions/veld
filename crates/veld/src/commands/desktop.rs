@@ -88,6 +88,12 @@ pub async fn install(
         // "install script exited with code 1" is true and useless. The script
         // already said why — into the log, where on the handoff path nobody was
         // going to look — so lift that line into the message the user gets.
+        // …unless the script never ran, in which case that log belongs to a
+        // *previous* run: the download happens before the log file is truncated, so
+        // lifting its last line prefixes this failure with an unrelated stale
+        // reason — "checksum verification failed for … (HTTP 429 …)". The error is
+        // the whole story on that path, and nothing else wrote to the log.
+        Err(e) if veld_core::setup::is_install_script_unavailable(&e) => Err(format!("{e}")),
         Err(e) => Err(match opts.log.as_deref().and_then(last_diagnostic) {
             Some(reason) => format!("{reason} ({e})"),
             None => format!("{e}"),
