@@ -738,7 +738,7 @@ for entry in $TAR_CONTENTS; do
     # Binaries, plus the attribution files release tarballs carry since v10.6.x
     # (release.yml copies LICENSE + THIRD-PARTY-LICENSES.md into dist/). New
     # non-binary entries must be added here or `veld update` refuses the tarball.
-    veld|veld-helper|veld-daemon|caddy|LICENSE|THIRD-PARTY-LICENSES.md|"") ;;
+    veld|veld-helper|veld-helper.sig|veld-daemon|caddy|LICENSE|THIRD-PARTY-LICENSES.md|"") ;;
     *) echo "Error: unexpected file in tarball: ${entry}"; exit 1 ;;
   esac
 done
@@ -890,6 +890,17 @@ for bin in veld-helper veld-daemon; do
 done
 if [ -f "${TMP_DIR}/caddy" ]; then
   install_bin "${TMP_DIR}/caddy" "${LIB_DIR}/caddy" nosign
+fi
+
+# The org's detached signature must travel with the helper (issue #261): the
+# running root helper verifies the on-disk binary against it before it will
+# relaunch onto a changed file, so without this every future update is refused
+# fail-closed. The binary above is byte-identical to the CI-signed artifact
+# (install.sh's re-sign is a no-op on the already-signed macOS binary), so the
+# shipped .sig matches.
+if [ -f "${TMP_DIR}/veld-helper.sig" ]; then
+  $NEED_SUDO cp "${TMP_DIR}/veld-helper.sig" "${LIB_DIR}/veld-helper.sig"
+  $NEED_SUDO chmod 644 "${LIB_DIR}/veld-helper.sig"
 fi
 
 # --- Restart running services (picks up new binaries) ---
