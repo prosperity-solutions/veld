@@ -466,10 +466,12 @@ const MAX_DROP_FILES = 20;
  * Two corners are decided rather than handled, and named here because the review
  * that found them will otherwise find them again:
  *
- * - **⌘V acts on images only.** A copied non-image file falls through to xterm's
- *   own text paste; dropping that same file does insert its path. The asymmetry
- *   is deliberate — ⌘V means "paste what is on the clipboard", and for a
- *   document that is its name.
+ * - **⌘V acts on images only**, and everything else is handed to xterm exactly as
+ *   before — whatever xterm then makes of it. Two earlier versions of this note
+ *   claimed a copied *document* pastes its name, which is a guess about what the
+ *   browser puts on the clipboard that nobody here has measured; the reviewable
+ *   fact is only that this handler does not touch it. Dropping that same file
+ *   does insert its path, so a drop is the gesture to reach for.
  * - **A dropped directory** is typed as a path in the desktop app (which is
  *   useful: `ls`, `cd`) and refused in a browser tab, where it has no readable
  *   bytes and the daemon answers "empty file". The toast now carries that
@@ -622,11 +624,12 @@ function attachFileInput(s: Session, canSend: () => boolean): void {
       if (!file) return;
       e.preventDefault();
       e.stopPropagation();
-      // **A copied *file* still has a real path in the desktop app.** Chromium
-      // exposes a Finder file copy as a `file` item with no `text/plain`, so it
-      // reaches here; uploading it would write a second copy of something the
-      // user already has and hand the agent the copy's path instead of the
-      // original's. Ask the shell first, exactly as a drop does.
+      // **Anything that got here with a real path should use it.** A screenshot
+      // has none — it is bytes — and falls through to the upload below. A copied
+      // image *file* may have one, and uploading it would write a second copy of
+      // something the user already has and hand the agent the copy's path instead
+      // of the original's. Asking costs one call and is right either way, so this
+      // does not depend on knowing which flavours a given browser reports.
       const local = pathForFile(file);
       if (local) {
         typePaths([local], 0);
