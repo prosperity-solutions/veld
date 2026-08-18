@@ -2460,13 +2460,19 @@ fn write_private(path: &FsPath, body: &[u8]) -> std::io::Result<()> {
     f.sync_all()
 }
 
-/// Delete pasted files older than [`PASTE_TTL`].
+/// Delete stale files **this code minted** from a directory the caller has already
+/// established is ours.
 ///
-/// On the write path rather than in `gc.rs` deliberately: the directory only ever
-/// grows when somebody pastes, so the moment of a paste is exactly when it is
-/// worth a look, and this keeps the whole feature in one file with no timer to
-/// reason about. Failures are ignored throughout — a file that cannot be read or
-/// removed is not a reason to fail the paste the user is waiting on.
+/// Deliberately knows nothing about *when* it runs: both callers — the write path
+/// in [`paste_file`] and the periodic sweep in [`prune_pastes_now`] — hand it a
+/// verified directory and it does the same thing for each. (An earlier version of
+/// this comment argued the sweep belonged on the write path alone and that there
+/// was "no timer to reason about"; that stopped being true in the same change
+/// that added [`prune_pastes_now`], and the rationale now lives there, where it
+/// is still correct.)
+///
+/// Failures are ignored throughout — a file that cannot be read or removed is not
+/// a reason to fail the paste the user is waiting on.
 fn prune_pastes(dir: &FsPath) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
