@@ -2296,7 +2296,7 @@ fn ensure_paste_dir() -> Result<PathBuf, String> {
 
     #[cfg(unix)]
     {
-        use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
         // The parent (`~/.veld`) may not exist yet on a fresh machine; it is the
         // user's own directory either way, so 0700 is right for it too.
         if let Some(parent) = dir.parent() {
@@ -2310,21 +2310,7 @@ fn ensure_paste_dir() -> Result<PathBuf, String> {
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(e) => return Err(format!("could not create {}: {e}", dir.display())),
         }
-        // `symlink_metadata`, never `metadata`: the latter follows the symlink and
-        // would happily report the *target* as a fine directory we own.
-        let meta = std::fs::symlink_metadata(&dir)
-            .map_err(|e| format!("could not stat {}: {e}", dir.display()))?;
-        if meta.file_type().is_symlink() {
-            return Err(format!("{} is a symlink", dir.display()));
-        }
-        if !meta.is_dir() {
-            return Err(format!("{} is not a directory", dir.display()));
-        }
-        // SAFETY: `geteuid` is always safe — it reads the calling process's own id
-        // and cannot fail.
-        if meta.uid() != unsafe { libc::geteuid() } {
-            return Err(format!("{} belongs to another user", dir.display()));
-        }
+        let meta = paste_dir_is_ours(&dir)?;
         if meta.permissions().mode() & 0o777 != 0o700 {
             // Tightened rather than refused: this is our own directory, and an
             // older veld created it with the process umask.
@@ -2339,6 +2325,36 @@ fn ensure_paste_dir() -> Result<PathBuf, String> {
             .map_err(|e| format!("could not create {}: {e}", dir.display()))?;
         Ok(dir)
     }
+}
+
+/// Confirm a path is a real directory belonging to this user, without following
+/// a symlink and without creating or changing anything.
+///
+/// **Its own function because two call paths need the same answer and only one of
+/// them was asking.** `ensure_paste_dir` checked before writing; the periodic
+/// GC's [`prune_pastes_now`] resolved the directory with `Path::is_dir()`, which
+/// **follows symlinks** — so the one caller that runs unattended, every ten
+/// minutes, with nobody watching, was the one skipping the check. Caught in
+/// review, in a fix from the round before.
+#[cfg(unix)]
+fn paste_dir_is_ours(dir: &FsPath) -> Result<std::fs::Metadata, String> {
+    use std::os::unix::fs::MetadataExt;
+    // `symlink_metadata`, never `metadata`: the latter follows the symlink and
+    // would happily report the *target* as a fine directory we own.
+    let meta = std::fs::symlink_metadata(dir)
+        .map_err(|e| format!("could not stat {}: {e}", dir.display()))?;
+    if meta.file_type().is_symlink() {
+        return Err(format!("{} is a symlink", dir.display()));
+    }
+    if !meta.is_dir() {
+        return Err(format!("{} is not a directory", dir.display()));
+    }
+    // SAFETY: `geteuid` is always safe — it reads the calling process's own id
+    // and cannot fail.
+    if meta.uid() != unsafe { libc::geteuid() } {
+        return Err(format!("{} belongs to another user", dir.display()));
+    }
+    Ok(meta)
 }
 
 /// Reduce a client-supplied filename to something that cannot escape
@@ -2484,9 +2500,20 @@ fn prune_pastes(dir: &FsPath) {
 /// has nothing to sweep, and GC is not the place to mint state.
 pub fn prune_pastes_now() {
     let Some(dir) = paste_dir() else { return };
-    if dir.is_dir() {
-        prune_pastes(&dir);
+    // **The same ownership check the write path makes.** `Path::is_dir()` was the
+    // first version and it follows symlinks, which put the one unattended caller
+    // outside the guarantee the module's own comments claim. A directory that is
+    // not ours is not ours to sweep, whatever it contains.
+    #[cfg(unix)]
+    if let Err(e) = paste_dir_is_ours(&dir) {
+        debug!("skipping paste sweep: {e}");
+        return;
     }
+    #[cfg(not(unix))]
+    if !dir.is_dir() {
+        return;
+    }
+    prune_pastes(&dir);
 }
 
 #[derive(Deserialize)]
@@ -6792,6 +6819,40 @@ mod tests {
         }
         assert!(near.exists(), "a 31-hex near-miss was deleted");
         assert!(!ours.exists(), "the reaper did not run at all");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn paste_dir_is_ours_refuses_a_symlink_and_a_non_directory() {
+        // The check both call paths now share. It exists because the periodic
+        // sweep used `Path::is_dir()`, which follows symlinks — so the caller
+        // that runs every ten minutes with nobody watching was the one outside
+        // the guarantee. `symlink_metadata` is what makes the answer honest.
+        let tmp = tempfile::tempdir().unwrap();
+
+        let real = tmp.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        assert!(
+            paste_dir_is_ours(&real).is_ok(),
+            "our own directory must pass"
+        );
+
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let err = paste_dir_is_ours(&link).expect_err("a symlink must be refused");
+        assert!(err.contains("symlink"), "{err}");
+
+        let file = tmp.path().join("a-file");
+        std::fs::write(&file, b"x").unwrap();
+        assert!(
+            paste_dir_is_ours(&file).is_err(),
+            "a plain file must be refused"
+        );
+
+        assert!(
+            paste_dir_is_ours(&tmp.path().join("missing")).is_err(),
+            "a path that is not there must be refused, not created"
+        );
     }
 
     #[test]
