@@ -458,16 +458,18 @@ const MAX_DROP_FILES = 20;
  *   file the user already has.
  * - **Browser tab, dropped file** — the File API withholds the path by design,
  *   so the bytes are uploaded and the daemon's copy is what gets typed.
- * - **Either shell, pasted image** — a clipboard image has no path anywhere, so
- *   it is always uploaded.
+ * - **Either shell, pasted image** — a screenshot is bytes with no path anywhere,
+ *   so it is uploaded. A copied image *file* is the exception: it does have a
+ *   path, and in the desktop app that real path is used rather than a second
+ *   copy of something the user already has.
  *
  * Two corners are decided rather than handled, and named here because the review
  * that found them will otherwise find them again:
  *
- * - **⌘V handles images only.** A *file* copied in Finder is left to xterm's own
- *   text paste, because the clipboard carries its name as text too and pasting
- *   text is what ⌘V means. Dropping that same file does insert its path — the
- *   asymmetry is deliberate, not an oversight.
+ * - **⌘V acts on images only.** A copied non-image file falls through to xterm's
+ *   own text paste; dropping that same file does insert its path. The asymmetry
+ *   is deliberate — ⌘V means "paste what is on the clipboard", and for a
+ *   document that is its name.
  * - **A dropped directory** is typed as a path in the desktop app (which is
  *   useful: `ls`, `cd`) and refused in a browser tab, where it has no readable
  *   bytes and the daemon answers "empty file". The toast now carries that

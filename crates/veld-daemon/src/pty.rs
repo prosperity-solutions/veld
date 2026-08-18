@@ -2495,16 +2495,22 @@ fn prune_pastes(dir: &FsPath) {
         if !meta.is_file() {
             continue;
         }
-        // **An unreadable age counts as stale**, not as fresh. `elapsed()` is an
-        // `Err` for a *future* mtime — which a backwards clock correction, a VM
-        // snapshot restore, or a dual-boot machine with a local-time RTC all
-        // produce — and treating that as "not old yet" kept the file for the life
-        // of the machine, the exact outcome `PASTE_TTL` exists to prevent. Only
-        // names this code minted reach this line, so erring towards deletion is
-        // erring towards our own file.
-        let stale = meta
-            .modified()
-            .is_ok_and(|m| m.elapsed().map(|age| age > PASTE_TTL).unwrap_or(true));
+        // **A future mtime is measured, not guessed at.** `elapsed()` returns an
+        // `Err` for any mtime ahead of now, and both obvious readings of that are
+        // wrong: treating it as fresh keeps the file for the life of the machine
+        // (the original bug), and treating it as stale deletes a paste the user
+        // just made (the first fix for that bug — measured: an mtime one second
+        // ahead was reaped). A second or two of skew is ordinary on a networked
+        // home, which `gc.rs` itself names, so either mistake fires on a real
+        // machine.
+        //
+        // `SystemTimeError::duration` is how far ahead the stamp actually is, so
+        // a small skew reads as fresh and only an implausibly-future one is
+        // reaped — the same threshold, applied in the other direction.
+        let stale = meta.modified().is_ok_and(|m| match m.elapsed() {
+            Ok(age) => age > PASTE_TTL,
+            Err(ahead) => ahead.duration() > PASTE_TTL,
+        });
         if stale {
             let _ = std::fs::remove_file(entry.path());
         }
@@ -6712,10 +6718,15 @@ mod tests {
     /// module spawns exists.
     static TEST_PASTE_DIR: LazyLock<tempfile::TempDir> = LazyLock::new(|| {
         let dir = tempfile::tempdir().expect("a temp dir for the paste tests");
-        // SAFETY: `set_var` is unsound only against a concurrent reader of the
-        // environment. This runs inside `LazyLock::force` before any of this
-        // module's test servers are spawned, and `VELD_PASTE_DIR` is read by
-        // nothing else in the process.
+        // SAFETY: `set_var` races any concurrent *reader* of the environment, and
+        // under `cargo test` other tests genuinely are running on other threads —
+        // so the "nothing else has started yet" justification this comment used
+        // to give was false (`management.rs` documents the same hazard). What
+        // makes it tolerable is narrower: `VELD_PASTE_DIR` is read by `paste_dir`
+        // and by nothing else in the process, it is written exactly once, and it
+        // is written to the same value every time, so no reader can observe a
+        // change. The repo takes the same trade in `settings.rs` and
+        // `extensions.rs`.
         unsafe { std::env::set_var("VELD_PASTE_DIR", dir.path()) };
         dir
     });
@@ -6826,6 +6837,47 @@ mod tests {
 
         assert!(fresh.exists(), "a file inside the TTL must survive");
         assert!(!stale.exists(), "a file past the TTL must be removed");
+    }
+
+    #[test]
+    fn prune_pastes_keeps_a_file_whose_clock_ran_ahead() {
+        // **Both directions, because this rule has been wrong both ways.** First
+        // a future mtime made a file immortal (`elapsed()` errors, and that read
+        // as "not old yet"); the fix for that deleted anything with a future
+        // stamp, which on a networked home with a server clock a second ahead
+        // reaps the screenshot the user just pasted, before the agent reads it.
+        // A test asserting only one side would have passed for both bugs.
+        isolate_paste_dir();
+        let dir = tempfile::tempdir().unwrap();
+        let set = |name: &str, at: std::time::SystemTime| {
+            let p = dir.path().join(paste_name(name));
+            std::fs::write(&p, b"x").unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(&p)
+                .unwrap()
+                .set_modified(at)
+                .unwrap();
+            p
+        };
+        let now = std::time::SystemTime::now();
+        let skewed = set("skewed.png", now + Duration::from_secs(300));
+        let absurd = set("absurd.png", now + PASTE_TTL + Duration::from_secs(3600));
+        let fresh = set("fresh.png", now - Duration::from_secs(3600));
+        let stale = set("stale.png", now - (PASTE_TTL + Duration::from_secs(60)));
+
+        prune_pastes(dir.path());
+
+        assert!(
+            skewed.exists(),
+            "a few minutes of clock skew must not reap a live paste"
+        );
+        assert!(fresh.exists(), "a fresh file must survive");
+        assert!(
+            !absurd.exists(),
+            "an implausibly-future stamp is still reaped"
+        );
+        assert!(!stale.exists(), "a genuinely old file must go");
     }
 
     #[test]
