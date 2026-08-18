@@ -2273,6 +2273,17 @@ async fn paste_csrf_layer(
 /// `None` when the home directory cannot be resolved, which the caller answers
 /// with a 500 rather than silently falling back to a world-writable location.
 fn paste_dir() -> Option<PathBuf> {
+    // `VELD_PASTE_DIR` first, for the same reason `VELD_PTY_DIR` and
+    // `VELD_DB_PATH` exist (see `veld_core::instance`): everything else a
+    // terminal writes is instance-scoped, and without an override this one
+    // directory is shared by every daemon on the machine — including a dev build
+    // and the test suite, which would otherwise create and *prune* the
+    // developer's own `~/.veld/pastes`.
+    if let Ok(dir) = std::env::var("VELD_PASTE_DIR") {
+        if !dir.is_empty() {
+            return Some(PathBuf::from(dir));
+        }
+    }
     dirs::home_dir().map(|h| h.join(".veld").join("pastes"))
 }
 
@@ -2478,11 +2489,16 @@ fn prune_pastes(dir: &FsPath) {
         if !meta.is_file() {
             continue;
         }
+        // **An unreadable age counts as stale**, not as fresh. `elapsed()` is an
+        // `Err` for a *future* mtime — which a backwards clock correction, a VM
+        // snapshot restore, or a dual-boot machine with a local-time RTC all
+        // produce — and treating that as "not old yet" kept the file for the life
+        // of the machine, the exact outcome `PASTE_TTL` exists to prevent. Only
+        // names this code minted reach this line, so erring towards deletion is
+        // erring towards our own file.
         let stale = meta
             .modified()
-            .ok()
-            .and_then(|m| m.elapsed().ok())
-            .is_some_and(|age| age > PASTE_TTL);
+            .is_ok_and(|m| m.elapsed().map(|age| age > PASTE_TTL).unwrap_or(true));
         if stale {
             let _ = std::fs::remove_file(entry.path());
         }
@@ -5353,6 +5369,7 @@ mod tests {
 
         #[tokio::test]
         async fn paste_file_takes_a_file_larger_than_the_axum_default() {
+            isolate_paste_dir();
             // The regression: axum caps a buffered body at 2 MB unless the route
             // says otherwise, so `MAX_PASTE_BYTES` was dead code and a screenshot
             // from any modern display was refused *mid-upload* — the client saw a
@@ -5382,6 +5399,7 @@ mod tests {
 
         #[tokio::test]
         async fn paste_file_refuses_a_body_past_the_cap() {
+            isolate_paste_dir();
             // The other side of the same layer: past the cap it must be a status
             // the UI can show, not a reset connection. The layer answers before
             // the handler does, so this asserts the *status*, not the message.
@@ -5399,6 +5417,7 @@ mod tests {
 
         #[tokio::test]
         async fn paste_file_writes_only_inside_the_paste_directory() {
+            isolate_paste_dir();
             // The name comes from a page, so it is attacker-shaped. Asserted on
             // the *answer* rather than on the sanitiser, because what matters is
             // where the bytes ended up.
@@ -5431,6 +5450,7 @@ mod tests {
 
         #[tokio::test]
         async fn paste_file_refuses_a_session_that_does_not_exist() {
+            isolate_paste_dir();
             // The gate that keeps this from being a "write a file anywhere on the
             // developer's disk" endpoint for anything that got past CSRF.
             let addr = serve().await;
@@ -5440,6 +5460,7 @@ mod tests {
 
         #[tokio::test]
         async fn paste_file_requires_the_csrf_header() {
+            isolate_paste_dir();
             let addr = serve().await;
             let dir = tempfile::tempdir().unwrap();
             let sid = session_id();
@@ -6674,6 +6695,30 @@ mod tests {
     // Pasting a file into a terminal
     // -----------------------------------------------------------------------
 
+    /// Point [`paste_dir`] at a throwaway directory for this whole test process.
+    ///
+    /// **Without it the suite operates on the developer's own `~/.veld/pastes`** —
+    /// creating it on a machine that has never pasted, and running the reaper over
+    /// real files. Found in review, after `cargo test` had already done exactly
+    /// that here.
+    ///
+    /// A `LazyLock` so the write happens once, before any server thread this
+    /// module spawns exists.
+    static TEST_PASTE_DIR: LazyLock<tempfile::TempDir> = LazyLock::new(|| {
+        let dir = tempfile::tempdir().expect("a temp dir for the paste tests");
+        // SAFETY: `set_var` is unsound only against a concurrent reader of the
+        // environment. This runs inside `LazyLock::force` before any of this
+        // module's test servers are spawned, and `VELD_PASTE_DIR` is read by
+        // nothing else in the process.
+        unsafe { std::env::set_var("VELD_PASTE_DIR", dir.path()) };
+        dir
+    });
+
+    /// Force [`TEST_PASTE_DIR`]. Call first in any test that reaches `paste_dir`.
+    fn isolate_paste_dir() {
+        LazyLock::force(&TEST_PASTE_DIR);
+    }
+
     #[test]
     fn sanitize_paste_name_keeps_an_ordinary_filename_readable() {
         // The name is only ever a hint, but a hint nobody can read defeats its
@@ -6685,6 +6730,7 @@ mod tests {
 
     #[test]
     fn sanitize_paste_name_cannot_escape_the_paste_directory() {
+        isolate_paste_dir();
         // Attacker-shaped input: a `DataTransfer` name comes from a page.
         for hostile in [
             "../../../.ssh/authorized_keys",
@@ -6824,6 +6870,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn paste_dir_is_ours_refuses_a_symlink_and_a_non_directory() {
+        isolate_paste_dir();
         // The check both call paths now share. It exists because the periodic
         // sweep used `Path::is_dir()`, which follows symlinks — so the caller
         // that runs every ten minutes with nobody watching was the one outside

@@ -516,9 +516,12 @@ function attachFileInput(s: Session, canSend: () => boolean): void {
           "Adding a file to the terminal",
           new Error("the terminal is not ready for input yet — try again in a moment"),
         );
-        return;
+        // Falls through rather than returning: a drop can be both un-sendable
+        // *and* have had files fail to upload, and reporting only the first
+        // would silently discard the second.
+      } else {
+        s.term.paste(payload);
       }
-      s.term.paste(payload);
     }
     if (failures > 0) {
       notifyError(
@@ -532,21 +535,22 @@ function attachFileInput(s: Session, canSend: () => boolean): void {
     }
   };
 
-  /** The first real failure in a drop, so the toast can name it. */
-  let lastCause: unknown;
-
-  /** Resolve one dropped file to a path — the shell's, or the daemon's copy. */
-  const resolve = async (file: File): Promise<string | null> => {
+  /**
+   * Resolve one dropped file to a path — the shell's own, or the daemon's copy.
+   *
+   * Returns the failure alongside rather than throwing: one unreadable file in a
+   * multi-file drop must not cost the user the others, but the reason still has
+   * to reach them. Returned rather than stashed in a shared variable, so two
+   * overlapping drops cannot clear each other's cause.
+   */
+  const resolve = async (file: File): Promise<[string | null, unknown]> => {
     const local = pathForFile(file);
-    if (local) return local;
+    if (local) return [local, undefined];
     try {
-      return await api.ptyPasteFile(s.id, file, file.name);
+      return [await api.ptyPasteFile(s.id, file, file.name), undefined];
     } catch (e) {
-      // Kept rather than thrown: one unreadable file in a multi-file drop must
-      // not cost the user the others — but the reason still has to reach them.
-      lastCause ??= e;
       console.warn("veld: could not upload a dropped file", e);
-      return null;
+      return [null, e];
     }
   };
 
@@ -576,14 +580,28 @@ function attachFileInput(s: Session, canSend: () => boolean): void {
       );
       return;
     }
-    lastCause = undefined;
-    void Promise.all(files.map(resolve)).then((paths) => {
-      const resolved = paths.filter((p): p is string => p !== null);
+    void (async () => {
+      // **One at a time.** `Promise.all` started every upload at once, so a drop
+      // of `MAX_DROP_FILES` large files asked the daemon to buffer up to
+      // 20 x 32 MB simultaneously — the per-request cap bounds a request, not a
+      // gesture. Sequential is also simpler than the bounded-concurrency version
+      // and loses nothing: the order is required anyway, since the paths are
+      // typed in the order the user dropped them.
+      const resolved: string[] = [];
+      let cause: unknown;
+      for (const file of files) {
+        const [path, err] = await resolve(file);
+        if (path !== null) resolved.push(path);
+        // The first real reason, kept per drop rather than per session: a second
+        // drop starting while this one is in flight would otherwise clear it and
+        // send this drop's toast back to the generic message.
+        else cause ??= err;
+      }
       // A path a terminal cannot carry — a newline in the name — is dropped by
       // `pathPayload`, so it is counted as a failure here rather than vanishing.
       const carried = resolved.filter(isPastable);
-      typePaths(carried, files.length - carried.length, lastCause);
-    });
+      typePaths(carried, files.length - carried.length, cause);
+    })();
   });
 
   // **Capture phase.** The event's target is xterm's own hidden textarea, which
@@ -602,7 +620,17 @@ function attachFileInput(s: Session, canSend: () => boolean): void {
       if (!file) return;
       e.preventDefault();
       e.stopPropagation();
-      // A clipboard image has no name of its own; the daemon re-sanitises
+      // **A copied *file* still has a real path in the desktop app.** Chromium
+      // exposes a Finder file copy as a `file` item with no `text/plain`, so it
+      // reaches here; uploading it would write a second copy of something the
+      // user already has and hand the agent the copy's path instead of the
+      // original's. Ask the shell first, exactly as a drop does.
+      const local = pathForFile(file);
+      if (local) {
+        typePaths([local], 0);
+        return;
+      }
+      // A clipboard image proper has no name of its own; the daemon re-sanitises
       // whatever it is given anyway, so this only decides readability.
       const name = file.name || clipboardImageName(file.type);
       void api.ptyPasteFile(s.id, file, name).then(

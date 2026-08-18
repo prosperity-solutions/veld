@@ -61,24 +61,6 @@ export function escapePath(path: string): string {
 }
 
 /**
- * The text a set of dropped paths types into the terminal.
- *
- * Space-separated, and with a **trailing space**: what follows a dropped path is
- * always more typing — another path, a question about the file — and the
- * alternative is every user's first keystroke being a space they had to notice
- * they needed. No trailing newline, deliberately: a drop must never submit. The
- * user decides when the line is finished.
- *
- * Empty in, empty out, so a caller need not special-case a drop that resolved to
- * nothing (a directory the browser could not read, an upload that failed).
- *
- * Paths a terminal cannot carry are dropped here too — see [`isPastable`].
- */
-export function isPastable(path: string): boolean {
-  return path.length > 0 && !path.includes("\n") && !path.includes("\r");
-}
-
-/**
  * Why a newline is refused rather than quoted.
  *
  * The first version single-quoted such a path, reasoning that `\` + newline is a
@@ -93,6 +75,24 @@ export function isPastable(path: string): boolean {
  *
  * There is no spelling that survives, so the honest answer is to drop the file
  * and tell the user, which is what the caller does with the count.
+ */
+export function isPastable(path: string): boolean {
+  return path.length > 0 && !path.includes("\n") && !path.includes("\r");
+}
+
+/**
+ * The text a set of dropped paths types into the terminal.
+ *
+ * Space-separated, and with a **trailing space**: what follows a dropped path is
+ * always more typing — another path, a question about the file — and the
+ * alternative is every user's first keystroke being a space they had to notice
+ * they needed. No trailing newline, deliberately: a drop must never submit. The
+ * user decides when the line is finished.
+ *
+ * Empty in, empty out, so a caller need not special-case a drop that resolved to
+ * nothing (a directory the browser could not read, an upload that failed).
+ *
+ * Paths a terminal cannot carry are dropped here too — see [`isPastable`].
  */
 export function pathPayload(paths: readonly string[]): string {
   const usable = paths.filter(isPastable);
@@ -174,6 +174,22 @@ export function clipboardImageIndex(entries: readonly ClipboardEntry[]): number 
 }
 
 /**
+ * Whether the window-level guard should swallow this drag.
+ *
+ * The whole decision of [`guardStrayFileDrops`], extracted so it can be tested:
+ * the listener around it is two `addEventListener` calls, and this is the part
+ * whose failure loses the page.
+ */
+export function shouldSwallowDrop(types: readonly string[], defaultPrevented: boolean): boolean {
+  // Not a file drag at all (a pane tab, a text selection): not ours to touch.
+  if (!isFileDrop(types)) return false;
+  // A pane already took it. Deferring here is what keeps the guard from running
+  // last and repainting the one working target's `copy` cursor as `none`.
+  if (defaultPrevented) return false;
+  return true;
+}
+
+/**
  * Stop a file dropped **anywhere but a terminal pane** from navigating the page.
  *
  * A browser's default action for a dropped file is to open it — replacing the
@@ -197,15 +213,6 @@ export function clipboardImageIndex(entries: readonly ClipboardEntry[]): number 
  *
  * Returns an unsubscribe, for symmetry with the other watchers booted beside it.
  */
-export function shouldSwallowDrop(types: readonly string[], defaultPrevented: boolean): boolean {
-  // Not a file drag at all (a pane tab, a text selection): not ours to touch.
-  if (!isFileDrop(types)) return false;
-  // A pane already took it. Deferring here is what keeps the guard from running
-  // last and repainting the one working target's `copy` cursor as `none`.
-  if (defaultPrevented) return false;
-  return true;
-}
-
 export function guardStrayFileDrops(): () => void {
   const swallow = (e: DragEvent) => {
     if (!shouldSwallowDrop([...(e.dataTransfer?.types ?? [])], e.defaultPrevented)) return;
