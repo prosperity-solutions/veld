@@ -208,15 +208,24 @@ export const PROMOTIONS: Promotion[] = [
     // explicit that a fix is not promotable. They are in the Shortcuts overview,
     // which is where somebody looks for a chord.
     //
-    // Headline is the screenshot rather than the drop because it is the one with
-    // no workaround: a path can be typed, a picture cannot. "straight into an
-    // agent" rather than "into a terminal" for the same reason — the agent is
-    // what the reader is actually talking to.
+    // **Scope is the whole ⌘ family, not just the image.** The line-editing chords
+    // on their own are a fix — a chord that should always have worked — and a fix
+    // is not promotable. Bundled with the paste and the drop they stop being a fix
+    // and become the thing the card is actually about: a pane now behaves like the
+    // terminal you came from, so the habits you already have transfer.
+    //
+    // The headline is the maintainer's, chosen over "Your terminal's ⌘ keys are
+    // back" with the objection on the table and overruled deliberately: it names
+    // nothing, so by this file's own check ("would it read as true to somebody who
+    // will never use the feature") it describes the product rather than the
+    // reader's day, and the body carries the whole informational load. Recorded
+    // because the next person to write a card here will read these as examples —
+    // this one is a judgment call, not the pattern to copy.
     id: "terminal-file-input",
     since: "2026-08-18",
     eyebrow: "New",
-    headline: "Paste a screenshot straight into an agent",
-    body: "⌘V a screenshot, or drop one in, and the agent gets the image — not a path. Other files come in as their path, so you never go looking for one.",
+    headline: "Terminal convenience is back",
+    body: "⌘←/⌘→/⌘⌫ edit the line the way they do everywhere else, and ⌘V or a dropped file hands an agent the picture or the path itself.",
     glyph: "terminal",
   },
 ];
