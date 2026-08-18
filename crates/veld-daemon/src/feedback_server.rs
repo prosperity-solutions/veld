@@ -34,7 +34,9 @@ mod extensions;
 pub mod worktree_trash;
 
 #[path = "pty.rs"]
-mod pty;
+// `pub(crate)` only so the periodic GC can call `pty::prune_pastes_now` — the
+// pasted-file directory is the pty module's, and nothing else reaches into it.
+pub(crate) mod pty;
 
 /// The IDE control channel: worktree claims, focus, and the pane-layout store.
 #[path = "ide.rs"]

@@ -401,6 +401,28 @@ export const SHORTCUTS: ShortcutDef[] = [
     description: "Send a newline to the focused terminal without submitting the line.",
     combos: [{ shift: true, keys: ["Enter"] }],
   },
+  // The two rows below are macOS-only and have no chord elsewhere, because
+  // there is nothing to add there: Ctrl+A/Ctrl+E/Ctrl+U are the shell's own
+  // bindings on every platform, and ⌘ has no counterpart. `combosFor` hides a
+  // row with no combo on the reader's platform — see `ShortcutsDialog`.
+  {
+    id: "terminal-line-bounds",
+    category: "general",
+    title: "Start / end of the line in a terminal",
+    description:
+      "Sends ^A / ^E, the same substitution every other Mac terminal makes for these — so the caret moves in a shell prompt and in a coding agent's composer.",
+    combos: [
+      { mod: true, keys: ["←"], platform: "mac" },
+      { mod: true, keys: ["→"], platform: "mac" },
+    ],
+  },
+  {
+    id: "terminal-kill-line",
+    category: "general",
+    title: "Delete the line in a terminal",
+    description: "Sends ^U, which clears what has been typed back to the start of the line.",
+    combos: [{ mod: true, keys: ["⌫"], platform: "mac" }],
+  },
 ];
 
 /**
@@ -415,6 +437,22 @@ export function isMac(): boolean {
   const uaData = (navigator as { userAgentData?: { platform?: string } }).userAgentData;
   const platform = uaData?.platform || navigator.platform || "";
   return /mac/i.test(platform) || /mac/i.test(navigator.userAgent);
+}
+
+/**
+ * The rows a reader on this platform should actually be shown.
+ *
+ * **Exported so the dialog and its test share one predicate**, which is the only
+ * thing that makes the test mean anything: the first version filtered by
+ * `combosFor(...).length > 0` and then asserted that same expression, so deleting
+ * the dialog's filter left it green. A row bound on one platform only is
+ * legitimate (the terminal line-editing chords are ⌘-only — Ctrl+A/^E/^U are the
+ * shell's own bindings everywhere else), and rendering one off its platform shows
+ * a title with an empty key column, which reads as a broken shortcut rather than
+ * an absent one.
+ */
+export function visibleShortcuts(shortcuts: readonly ShortcutDef[], mac: boolean): ShortcutDef[] {
+  return shortcuts.filter((s) => combosFor(s, mac).length > 0);
 }
 
 /** A combo's tokens in display order, platform-aware. */

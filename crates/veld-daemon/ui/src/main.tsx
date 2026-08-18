@@ -11,6 +11,7 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./App";
 import { persistInbox } from "./inbox/persist";
+import { guardStrayFileDrops } from "./panes/terminalPaste";
 import { watchFullScreen, watchZoom } from "./shell";
 
 // Before the first render: the top bar's traffic-light inset is a CSS rule keyed
@@ -26,6 +27,13 @@ watchZoom();
 // belongs. A reload is exactly the moment you were not looking, so an inbox that did not
 // survive one was failing at its own job.
 persistInbox();
+
+// Also outside React, and for a blunter reason: dropping a file on a browser
+// makes it *navigate to the file*. Terminal panes accept file drops, so a drop
+// that misses one by a few pixels would otherwise throw the whole `/ide` away.
+// On the window rather than in a component so it covers every window this bundle
+// renders — a main window and a detached dock alike.
+guardStrayFileDrops();
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>

@@ -129,15 +129,8 @@ import { paneIcon } from "./paneIcons";
 import { desktopWindow } from "../shell";
 import { type DropZone, sameZone, zoneAt } from "./dropModel";
 import { tabKeyAction } from "./tabKeys";
+import { TAB_MIME } from "./terminalPaste";
 
-/**
- * Drag payload type for a pane tab.
- *
- * A custom MIME type, not `text/plain`: it keeps a tab drag from being accepted
- * by unrelated drop targets (and a dragged file or selection from being
- * accepted here), because `dragover` can only inspect types, never data.
- */
-const TAB_MIME = "application/x-veld-pane-tab";
 
 /** Where a tab dragged from *another* window would land in this one: at a caret
  *  in a dock's strip, or in a region of the pane area. */

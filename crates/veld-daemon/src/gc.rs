@@ -49,6 +49,15 @@ pub async fn run_gc_scheduler(share_manager: Arc<ShareManager>) {
         interval.tick().await;
         info!("running scheduled garbage collection");
 
+        // Files a terminal paste or drop wrote. Swept here as well as on the
+        // write path, because the write path only runs when somebody pastes —
+        // which for most users is rarely, and the documented TTL is a day.
+        //
+        // `spawn_blocking` for the same reason the write path uses it: this is a
+        // `read_dir` plus a `stat` per entry, and on a slow or networked home it
+        // would hold a tokio worker while unrelated terminals wait for frames.
+        let _ = tokio::task::spawn_blocking(crate::feedback_server::pty::prune_pastes_now).await;
+
         match run_gc().await {
             Ok(summary) => {
                 info!(

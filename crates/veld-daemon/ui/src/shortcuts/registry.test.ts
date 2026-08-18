@@ -4,8 +4,10 @@ import {
   combosFor,
   duplicateShortcutIds,
   nextIndex,
+  type ShortcutDef,
   SHORTCUTS,
   shortcutProblems,
+  visibleShortcuts,
 } from "./registry";
 import { handleKeyEvent } from "../panes/terminalKeys";
 
@@ -16,6 +18,7 @@ const KEY_FOR_TOKEN: Record<string, string> = {
   "↓": "ArrowDown",
   "←": "ArrowLeft",
   "→": "ArrowRight",
+  "⌫": "Backspace",
   Enter: "Enter",
   Tab: "Tab",
 };
@@ -141,9 +144,20 @@ describe("SHORTCUTS", () => {
         // exists to prevent, committed by the test itself.
         if (!combo.mod && !combo.shift && !combo.alt && !combo.ctrl) continue;
         const key = KEY_FOR_TOKEN[combo.keys[0]] ?? combo.keys[0].toLowerCase();
+        // **Evaluated on the platform the combo is actually bound on.** A row
+        // tagged `mac` is not bound anywhere else, so asserting it with the
+        // handler's non-Mac behaviour tests a chord nobody can press — and for
+        // the terminal line-editing chords, which the handler answers *itself*
+        // and only on a Mac, it would fail for that reason alone.
+        const macOnly = combo.platform === "mac";
         // A combo with no `mod` is bound to literal keys, so it has exactly one
-        // spelling; `mod` ones must survive both.
-        const mods = combo.mod ? (["ctrlKey", "metaKey"] as const) : (["none"] as const);
+        // spelling; `mod` ones must survive both — except on a Mac-only row,
+        // where `mod` can only ever be pressed as ⌘.
+        const mods = combo.mod
+          ? macOnly
+            ? (["metaKey"] as const)
+            : (["ctrlKey", "metaKey"] as const)
+          : (["none"] as const);
         for (const mod of mods) {
           const event = {
             type: "keydown",
@@ -158,7 +172,7 @@ describe("SHORTCUTS", () => {
             preventDefault: () => {},
           } as unknown as KeyboardEvent;
           expect(
-            handleKeyEvent(event, () => {}),
+            handleKeyEvent(event, () => {}, true, macOnly),
             `${s.id} (${combo.keys[0]}, ${mod}) is swallowed by a focused terminal — ` +
               "add it to isAppShortcutChord in panes/terminalKeys.ts, or to " +
               "NOT_IN_TERMINALS here with the reason",
@@ -247,7 +261,50 @@ describe("one action, one shortcut", () => {
           `${s.id} offers ${mine.length} combos on ${mac ? "mac" : "other"} — a row is one ` +
             "action, or one previous/next pair, never a list of aliases",
         ).toBeLessThanOrEqual(2);
-        expect(mine.length, `${s.id} has no combo at all on ${mac ? "mac" : "other"}`).toBeGreaterThan(0);
+      }
+    }
+  });
+
+  // Previously this asserted every row had a combo on *both* platforms. That
+  // was right while every chord was `mod`-based, and wrong as soon as one was
+  // genuinely one-platform: the terminal line-editing chords are ⌘-only,
+  // because Ctrl+A/^E/^U are already the shell's own bindings everywhere else
+  // and Veld adds nothing there. The rule that survives is the one that was
+  // actually being protected — **no row is a dead entry** — plus the reason it
+  // held: the dialog must not render a row with an empty key column.
+  it("binds every row on at least one platform", () => {
+    for (const s of SHORTCUTS) {
+      expect(
+        combosFor(s, true).length + combosFor(s, false).length,
+        `${s.id} is bound on no platform at all`,
+      ).toBeGreaterThan(0);
+    }
+  });
+
+  it("hides a row that is not bound on the reader's platform", () => {
+    // **Against `visibleShortcuts`, the predicate the dialog itself calls.** The
+    // first version of this test filtered by `combosFor(...).length > 0` and then
+    // asserted that same expression on what it had just filtered — a tautology
+    // that stayed green with the dialog's filter deleted, i.e. it pinned nothing.
+    // A fixture row is what gives it teeth: a mac-only shortcut must be absent
+    // for a non-mac reader.
+    const macOnly: ShortcutDef = {
+      id: "fixture-mac-only",
+      category: "general",
+      title: "Mac only",
+      combos: [{ mod: true, keys: ["\u2190"], platform: "mac" }],
+    };
+    const all = [...SHORTCUTS, macOnly];
+    expect(visibleShortcuts(all, true).map((s) => s.id)).toContain("fixture-mac-only");
+    expect(visibleShortcuts(all, false).map((s) => s.id)).not.toContain("fixture-mac-only");
+
+    // And the property that matters for every real row: nothing reaches the
+    // dialog with an empty key column.
+    for (const mac of [true, false]) {
+      const shown = visibleShortcuts(SHORTCUTS, mac);
+      expect(shown.length, `nothing at all is shown on ${mac ? "mac" : "other"}`).toBeGreaterThan(0);
+      for (const s of shown) {
+        expect(combosFor(s, mac).length, `${s.id} would render with no keys`).toBeGreaterThan(0);
       }
     }
   });

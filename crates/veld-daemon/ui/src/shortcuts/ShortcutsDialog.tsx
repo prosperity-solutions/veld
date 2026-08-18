@@ -8,6 +8,7 @@ import {
   comboTokens,
   combosFor,
   isMac,
+  visibleShortcuts,
 } from "./registry";
 
 /**
@@ -24,7 +25,11 @@ export function ShortcutsDialog(props: { onClose: () => void }) {
       <ScrollArea.Autosize mah="min(70vh, 560px)" type="auto" offsetScrollbars>
         <Stack gap="lg">
           {CATEGORY_ORDER.map((category) => {
-            const rows = SHORTCUTS.filter((s) => s.category === category);
+            // Filtered by **platform as well as category** — see
+            // `visibleShortcuts`, which is shared with the test that pins this.
+            const rows = visibleShortcuts(SHORTCUTS, mac).filter(
+              (s) => s.category === category,
+            );
             if (rows.length === 0) return null;
             return (
               <div key={category}>

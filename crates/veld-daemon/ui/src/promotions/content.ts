@@ -195,4 +195,32 @@ export const PROMOTIONS: Promotion[] = [
     body: "⌃Tab steps tabs, ⌥Tab steps worktrees, and Shift reverses both — from inside a terminal or a browser pane too. Press ⌘/ for the full list.",
     glyph: "panes",
   },
+  {
+    // **A new capability with daily reach, and no way to find it.** The test in
+    // this file's header is "would they otherwise find it" — and here the answer
+    // is emphatically no in a way that is worse than usual: both gestures
+    // *silently did nothing* before. Somebody who tried ⌘V with a screenshot
+    // once, or dropped a file on a pane once, learned that Veld does not do that
+    // and will never try again. A card is the only thing that reaches them.
+    //
+    // **Scope is the whole ⌘ family, not just the image.** The line-editing chords
+    // on their own are a fix — a chord that should always have worked — and a fix
+    // is not promotable. Bundled with the paste and the drop they stop being a fix
+    // and become the thing the card is actually about: a pane now behaves like the
+    // terminal you came from, so the habits you already have transfer.
+    //
+    // The headline is the maintainer's, chosen over "Your terminal's ⌘ keys are
+    // back" with the objection on the table and overruled deliberately: it names
+    // nothing, so by this file's own check ("would it read as true to somebody who
+    // will never use the feature") it describes the product rather than the
+    // reader's day, and the body carries the whole informational load. Recorded
+    // because the next person to write a card here will read these as examples —
+    // this one is a judgment call, not the pattern to copy.
+    id: "terminal-file-input",
+    since: "2026-08-18",
+    eyebrow: "New",
+    headline: "Terminal convenience is back",
+    body: "⌘←/⌘→/⌘⌫ edit the line the way they do everywhere else, and ⌘V or a dropped file hands an agent the picture or the path itself.",
+    glyph: "terminal",
+  },
 ];

@@ -7,7 +7,7 @@
 // channel, so it cannot reach IPC handlers this file does not list. See
 // desktop/src/windows.js and desktop/src/browserViews.js for what the other side
 // enforces.
-const { contextBridge, ipcRenderer } = require("electron");
+const { contextBridge, ipcRenderer, webUtils } = require("electron");
 
 /** A `--flag=value` the main process put on this renderer's command line. */
 function fromArgv(flag) {
@@ -95,6 +95,33 @@ function on(channel, fn) {
 contextBridge.exposeInMainWorld("veldDesktop", {
   shell: "electron",
   version: process.versions.electron,
+  /**
+   * The absolute path of a `File` the user dragged in, or `null`.
+   *
+   * Dropping a file on a terminal pane types its path — that is what every
+   * terminal emulator does with a drop, and what makes it useful to a coding
+   * agent, which reads the path. A plain browser tab cannot do this at all: the
+   * File API deliberately withholds the path, so the web build has to upload the
+   * bytes and use the copy the daemon writes. Here the file is already on this
+   * machine, and pointing at it beats copying it.
+   *
+   * **`webUtils.getPathForFile`, not `file.path`.** Electron removed the `path`
+   * property from `File` in v32 (this shell is on 43); the replacement is a
+   * main-world-inaccessible module, which is exactly why it has to be bridged
+   * here rather than reached for in the page.
+   *
+   * Returns `null` rather than throwing for anything without a path — a `File`
+   * synthesised by a page, or a directory entry the shell cannot resolve — so the
+   * caller's fallback is one falsy check.
+   */
+  pathForFile: (file) => {
+    try {
+      const path = webUtils.getPathForFile(file);
+      return typeof path === "string" && path !== "" ? path : null;
+    } catch {
+      return null;
+    }
+  },
   /**
    * Which persisted pane layout this window owns (`main`, `dev`, …).
    *

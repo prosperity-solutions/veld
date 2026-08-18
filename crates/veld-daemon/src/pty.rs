@@ -311,6 +311,28 @@ pub fn routes() -> Router {
         .route("/api/pty/sessions/{id}", delete(close_session))
         .route("/api/pty/sessions/{id}/open-url", post(open_url))
         .route("/api/pty/sessions/{id}/agent-state", post(agent_state))
+        // **The one route with its own body limit.** axum's default is 2 MB, and
+        // a paste is the only thing here that carries a file — so without this
+        // the handler's own [`MAX_PASTE_BYTES`] check is unreachable and any
+        // screenshot from a modern display is refused. Worse, it is refused
+        // *mid-upload*: the client sees a connection reset rather than a status,
+        // so the UI could not even say why. Scoped to this route, so nothing
+        // else's limit moves.
+        // Two layers, and **the order is the point**. `DefaultBodyLimit` raises
+        // this one route's cap to [`MAX_PASTE_BYTES`] (axum's default is 2 MB,
+        // which silently truncated a real screenshot mid-upload). The CSRF layer
+        // goes *outside* it so the header is checked **before** the body is
+        // buffered: `check_csrf` in the handler runs only after axum has already
+        // extracted `Bytes`, so on its own it would let any drive-by page force a
+        // 32 MB allocation per request with a no-preflight `text/plain` POST and
+        // then answer 403. The handler keeps its own check as the belt to this
+        // layer's braces.
+        .route(
+            "/api/pty/sessions/{id}/paste-file",
+            post(paste_file)
+                .layer(axum::extract::DefaultBodyLimit::max(MAX_PASTE_BYTES))
+                .layer(axum::middleware::from_fn(paste_csrf_layer)),
+        )
 }
 
 /// Write the shim directory a terminal's `$BROWSER` points into.
@@ -2183,6 +2205,476 @@ fn project_external_origins(
             Vec::new()
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Pasting a file into a terminal
+// ---------------------------------------------------------------------------
+
+/// Largest file this endpoint will take.
+///
+/// The payload is a picture from a clipboard or a file dragged onto a pane, and
+/// both arrive fully buffered — so this is a bound on daemon memory as much as on
+/// disk. 32 MB clears a 6K screenshot several times over and refuses a video
+/// somebody dropped by accident before it is read.
+///
+/// **This number only means anything because the route carries a matching
+/// `DefaultBodyLimit`** — see [`routes`]. axum's default is 2 MB, which silently
+/// made every value above it unreachable, and refused the upload *mid-stream* so
+/// the client saw a reset connection rather than a status it could show.
+/// `paste_file_takes_a_file_larger_than_the_axum_default` is what notices if that
+/// layer ever goes away again.
+const MAX_PASTE_BYTES: usize = 32 * 1024 * 1024;
+
+/// How long a pasted file is kept.
+///
+/// It exists to be handed to the program in the terminal *now* — an agent reads
+/// it within seconds of the paste. A day is generous for the case where the
+/// conversation is resumed later, and short enough that a directory of
+/// screenshots does not accumulate for the life of the machine.
+const PASTE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Reject a paste without `X-Veld-Request` **before** its body is read.
+///
+/// Same gate as [`check_csrf`], moved to a layer purely for ordering: an
+/// extractor-level check happens after axum has buffered the whole body, and this
+/// is the one route whose body may be 32 MB.
+async fn paste_csrf_layer(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if req.headers().get("x-veld-request").is_none() {
+        return (StatusCode::FORBIDDEN, "missing X-Veld-Request header").into_response();
+    }
+    next.run(req).await
+}
+
+/// Where pasted files land: `~/.veld/pastes`.
+///
+/// **Not the OS temp directory, and that is a security property rather than a
+/// preference.** This shipped as `std::env::temp_dir().join("veld-pastes")`,
+/// reasoning that `$TMPDIR` is where other terminals put such files and that the
+/// OS would reap them. Both halves were wrong in the same place: `temp_dir()` is
+/// a per-user `$TMPDIR` on macOS but **`/tmp` on Linux**, which is world-writable,
+/// and the name was fixed and predictable. Any other local user could pre-create
+/// `/tmp/veld-pastes` as a **symlink to a directory the victim owns** — then the
+/// victim's next paste chmods that directory to 0700, [`prune_pastes`] deletes
+/// every file in it older than [`PASTE_TTL`], and the upload lands inside it.
+/// Measured against a real symlink: `create_dir_all` returns `Ok`, the target's
+/// mode becomes `40700`, and a planted `id_rsa` was deleted.
+///
+/// `~/.veld` is the user's own directory — the one that already holds sockets,
+/// holder directories and `spawn-logs` — so nobody else can create the path
+/// first, and `veld uninstall` removing it is correct for a scratch file too.
+/// The "OS reaps it" argument it was rejected for was never load-bearing:
+/// [`prune_pastes`] is what actually reaps these, on the write path.
+///
+/// `None` when the home directory cannot be resolved, which the caller answers
+/// with a 500 rather than silently falling back to a world-writable location.
+fn paste_dir() -> Option<PathBuf> {
+    // `VELD_PASTE_DIR` first, for the same reason `VELD_PTY_DIR` and
+    // `VELD_DB_PATH` exist (see `veld_core::instance`): everything else a
+    // terminal writes is instance-scoped, and without an override this one
+    // directory is shared by every daemon on the machine — including a dev build
+    // and the test suite, which would otherwise create and *prune* the
+    // developer's own `~/.veld/pastes`.
+    if let Ok(dir) = std::env::var("VELD_PASTE_DIR") {
+        if !dir.is_empty() {
+            return Some(PathBuf::from(dir));
+        }
+    }
+    dirs::home_dir().map(|h| h.join(".veld").join("pastes"))
+}
+
+/// Create [`paste_dir`] as a private directory, or confirm the existing one is
+/// genuinely ours.
+///
+/// **Never operate on a directory you did not create.** `create_dir_all`
+/// succeeds on a pre-existing path — including a symlink — and a `set_permissions`
+/// afterwards then acts on whatever it points at, which is the whole of the
+/// vulnerability described on [`paste_dir`]. So the directory is created with its
+/// mode *at creation* (`DirBuilder::mode`, no window), and an `AlreadyExists` is
+/// interrogated with `symlink_metadata` — which does **not** follow a symlink —
+/// before anything is written into it.
+///
+/// Under `~/.veld` no other user can win the race to create it, so this is
+/// defence in depth rather than the primary guard. It is still worth having: it
+/// is the check that would have caught the original bug, and it costs one `stat`
+/// per paste.
+fn ensure_paste_dir() -> Result<PathBuf, String> {
+    let dir = paste_dir().ok_or_else(|| "no home directory".to_owned())?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        // The parent (`~/.veld`) may not exist yet on a fresh machine; it is the
+        // user's own directory either way, so 0700 is right for it too.
+        if let Some(parent) = dir.parent() {
+            let _ = std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(parent);
+        }
+        match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(format!("could not create {}: {e}", dir.display())),
+        }
+        let meta = paste_dir_is_ours(&dir)?;
+        if meta.permissions().mode() & 0o777 != 0o700 {
+            // Tightened rather than refused: this is our own directory, and an
+            // older veld created it with the process umask.
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+                .map_err(|e| format!("could not secure {}: {e}", dir.display()))?;
+        }
+        Ok(dir)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| format!("could not create {}: {e}", dir.display()))?;
+        Ok(dir)
+    }
+}
+
+/// Confirm a path is a real directory belonging to this user, without following
+/// a symlink and without creating or changing anything.
+///
+/// **Its own function because two call paths need the same answer and only one of
+/// them was asking.** `ensure_paste_dir` checked before writing; the periodic
+/// GC's [`prune_pastes_now`] resolved the directory with `Path::is_dir()`, which
+/// **follows symlinks** — so the one caller that runs unattended, every ten
+/// minutes, with nobody watching, was the one skipping the check. Caught in
+/// review, in a fix from the round before.
+#[cfg(unix)]
+fn paste_dir_is_ours(dir: &FsPath) -> Result<std::fs::Metadata, String> {
+    use std::os::unix::fs::MetadataExt;
+    // `symlink_metadata`, never `metadata`: the latter follows the symlink and
+    // would happily report the *target* as a fine directory we own.
+    let meta = std::fs::symlink_metadata(dir)
+        .map_err(|e| format!("could not stat {}: {e}", dir.display()))?;
+    if meta.file_type().is_symlink() {
+        return Err(format!("{} is a symlink", dir.display()));
+    }
+    if !meta.is_dir() {
+        return Err(format!("{} is not a directory", dir.display()));
+    }
+    // SAFETY: `geteuid` is always safe — it reads the calling process's own id
+    // and cannot fail.
+    if meta.uid() != unsafe { libc::geteuid() } {
+        return Err(format!("{} belongs to another user", dir.display()));
+    }
+    Ok(meta)
+}
+
+/// Reduce a client-supplied filename to something that cannot escape
+/// [`paste_dir`] or surprise a shell.
+///
+/// **Whitelist, not blacklist.** The name reaches us from a page, so it is
+/// attacker-shaped input: `../../../.ssh/authorized_keys` and a name containing a
+/// NUL are both strings a `DataTransfer` can carry. Everything outside
+/// `[A-Za-z0-9._-]` becomes `_`, which leaves nothing that means "parent
+/// directory", "path separator" or "end of string" in any of them.
+///
+/// A leading dot is stripped for the same reason: it is the one remaining way a
+/// fully-legal name hides the file from the user who has to find it. And the
+/// result is capped, because a 4 KB name is an `ENAMETOOLONG` at best.
+fn sanitize_paste_name(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let cleaned = cleaned.trim_start_matches('.').to_owned();
+    if cleaned.is_empty() {
+        return "paste".to_owned();
+    }
+    // **Cap the stem, keep the extension.** Truncating from the right is the
+    // obvious version and it silently breaks the feature: an agent decides a
+    // pasted path is an image by its extension, so a name that loses `.png` to
+    // the cap arrives as plain text and nothing says why. It takes an ordinary
+    // filename to get there — `Bildschirmfoto 2026-08-18 um 14.32.11 – Veld IDE
+    // Terminal Panes.png` is 67 characters and used to sanitize to `…_Panes.`.
+    //
+    // Every retained character is ASCII, so a character cap and a byte cap are
+    // the same here and neither can split a codepoint.
+    const MAX: usize = 64;
+    if cleaned.chars().count() <= MAX {
+        return cleaned;
+    }
+    // `rsplit_once` on the *sanitized* string, so the extension is already
+    // restricted to the whitelist. An overlong or absent extension is not worth
+    // preserving — that is not a real file suffix — and falls back to a plain
+    // right-truncation.
+    match cleaned.rsplit_once('.') {
+        Some((stem, ext)) if !ext.is_empty() && ext.len() <= 12 && !stem.is_empty() => {
+            let room = MAX.saturating_sub(ext.len() + 1);
+            let kept: String = stem.chars().take(room).collect();
+            format!("{kept}.{ext}")
+        }
+        _ => cleaned.chars().take(MAX).collect(),
+    }
+}
+
+/// Whether a filename is one [`paste_file`] produced: 32 hex characters, a dash,
+/// then the sanitized hint.
+///
+/// Its own function because two places depend on the same shape — the writer that
+/// mints it and the reaper that is allowed to delete it — and a reaper whose idea
+/// of "ours" drifts from the writer's either leaks files forever or deletes
+/// somebody else's.
+fn is_paste_name(name: &str) -> bool {
+    let Some((prefix, rest)) = name.split_once('-') else {
+        return false;
+    };
+    prefix.len() == 32 && prefix.chars().all(|c| c.is_ascii_hexdigit()) && !rest.is_empty()
+}
+
+/// Write a file that is owner-only **from the moment it exists**.
+///
+/// `std::fs::write` creates at `0666 & ~umask` — 0644 on a default umask — and a
+/// `set_permissions` afterwards leaves a window in which the bytes are on disk and
+/// world-readable. For a pasted screenshot on a shared machine that window is the
+/// whole exposure, so the mode is set *at creation* instead.
+///
+/// `create_new` is the second half: it fails rather than following a symlink or
+/// truncating an existing file at that path. The name already carries a random
+/// prefix, so a collision means something is wrong and refusing is right.
+fn write_private(path: &FsPath, body: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut f = opts.open(path)?;
+    f.write_all(body)?;
+    f.sync_all()
+}
+
+/// Delete stale files **this code minted** from a directory the caller has already
+/// established is ours.
+///
+/// Deliberately knows nothing about *when* it runs: both callers — the write path
+/// in [`paste_file`] and the periodic sweep in [`prune_pastes_now`] — hand it a
+/// verified directory and it does the same thing for each. (An earlier version of
+/// this comment argued the sweep belonged on the write path alone and that there
+/// was "no timer to reason about"; that stopped being true in the same change
+/// that added [`prune_pastes_now`], and the rationale now lives there, where it
+/// is still correct.)
+///
+/// Failures are ignored throughout — a file that cannot be read or removed is not
+/// a reason to fail the paste the user is waiting on.
+fn prune_pastes(dir: &FsPath) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        // **Only files this code wrote.** Deleting by age alone made the reaper
+        // as dangerous as whatever directory it was handed — that is how a
+        // symlinked paste dir turned a paste into `rm` on the victim's files.
+        // The directory is now private and verified, so this is the second lock:
+        // a name that does not carry our random prefix is not ours to remove, no
+        // matter how old it is or how the directory came to hold it.
+        if !is_paste_name(&entry.file_name().to_string_lossy()) {
+            continue;
+        }
+        // `symlink_metadata`, so a symlink is never followed to something whose
+        // age is not the link's own.
+        let Ok(meta) = entry.path().symlink_metadata() else {
+            continue;
+        };
+        if !meta.is_file() {
+            continue;
+        }
+        // **A future mtime is measured, not guessed at.** `elapsed()` returns an
+        // `Err` for any mtime ahead of now, and both obvious readings of that are
+        // wrong: treating it as fresh keeps the file for the life of the machine
+        // (the original bug), and treating it as stale deletes a paste the user
+        // just made (the first fix for that bug — measured: an mtime one second
+        // ahead was reaped). A second or two of skew is ordinary on a networked
+        // home, which `gc.rs` itself names, so either mistake fires on a real
+        // machine.
+        //
+        // `SystemTimeError::duration` is how far ahead the stamp actually is, so
+        // a small skew reads as fresh and only an implausibly-future one is
+        // reaped — the same threshold, applied in the other direction.
+        let stale = meta.modified().is_ok_and(|m| match m.elapsed() {
+            Ok(age) => age > PASTE_TTL,
+            Err(ahead) => ahead.duration() > PASTE_TTL,
+        });
+        if stale {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// Sweep old pasted files, for the periodic GC.
+///
+/// **The write path alone was not enough to make the documented TTL true.** A
+/// user who pastes once and never uses the gesture again would keep that file
+/// until their next paste, which may be never — while the README says "pruned
+/// after a day". Nothing else in the daemon knew this directory existed.
+///
+/// Deliberately does not *create* the directory: a machine that has never pasted
+/// has nothing to sweep, and GC is not the place to mint state.
+pub fn prune_pastes_now() {
+    let Some(dir) = paste_dir() else { return };
+    // **The same ownership check the write path makes.** `Path::is_dir()` was the
+    // first version and it follows symlinks, which put the one unattended caller
+    // outside the guarantee the module's own comments claim. A directory that is
+    // not ours is not ours to sweep, whatever it contains.
+    #[cfg(unix)]
+    if let Err(e) = paste_dir_is_ours(&dir) {
+        debug!("skipping paste sweep: {e}");
+        return;
+    }
+    #[cfg(not(unix))]
+    if !dir.is_dir() {
+        return;
+    }
+    prune_pastes(&dir);
+}
+
+#[derive(Deserialize)]
+struct PasteFileQuery {
+    /// The client's name for the file — a hint for readability only. See
+    /// [`sanitize_paste_name`]: it never decides where the file lands.
+    #[serde(default)]
+    name: Option<String>,
+}
+
+#[derive(Serialize)]
+struct PasteFileResponse {
+    /// Absolute path of the file just written. The caller types this into the
+    /// terminal; it does not read the file back.
+    path: String,
+}
+
+/// Write bytes the page could not give a path to, and answer with one.
+///
+/// **Why this exists at all:** a pty carries bytes, not pictures, so "paste an
+/// image into Claude Code" universally means "type the path of an image file".
+/// A clipboard image has no path — it is bytes in the browser — and neither does
+/// a file dropped into a plain browser tab, where the File API withholds it. So
+/// something has to put those bytes on the daemon's filesystem, next to the shell
+/// that will read them. A file dropped in the **desktop app** never comes here:
+/// Electron hands the renderer a real path, and copying a file the user already
+/// has would be worse than pointing at it.
+///
+/// Gated three ways, because it is a write endpoint:
+///
+/// - **CSRF**, like every mutating route here — without it a page in any browser
+///   could drop files onto the developer's disk.
+/// - **A live session id**, which a cross-origin page cannot guess: ids are
+///   client-chosen but the session must already exist in [`SESSIONS`], so this
+///   writes only for someone who already has a terminal open.
+/// - **A size cap** ([`MAX_PASTE_BYTES`]), enforced by the route's own body limit
+///   layer and re-checked here.
+///
+/// The filename is never trusted — see [`sanitize_paste_name`] — and the random
+/// prefix means two pastes of `screenshot.png` cannot collide or overwrite.
+async fn paste_file(
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Query(q): Query<PasteFileQuery>,
+    body: Bytes,
+) -> Result<Json<PasteFileResponse>, ApiError> {
+    check_csrf(&headers)
+        .map_err(|_| err(StatusCode::FORBIDDEN, "missing X-Veld-Request header"))?;
+    if !valid_session_id(&id) {
+        return Err(err(StatusCode::BAD_REQUEST, "invalid session id"));
+    }
+    if body.is_empty() {
+        return Err(err(StatusCode::BAD_REQUEST, "empty file"));
+    }
+    // Belt to the route layer's braces — the layer is what actually stops a large
+    // upload being buffered, and this is what keeps the answer a readable one if
+    // the layer is ever lost in a refactor. Same constant, so they cannot
+    // disagree about where the line is.
+    if body.len() > MAX_PASTE_BYTES {
+        return Err(err(StatusCode::PAYLOAD_TOO_LARGE, "file is too large"));
+    }
+    if !SESSIONS.lock().await.contains_key(&id) {
+        return Err(err(StatusCode::NOT_FOUND, "no such terminal session"));
+    }
+
+    let name = format!(
+        "{}-{}",
+        uuid::Uuid::new_v4().simple(),
+        sanitize_paste_name(q.name.as_deref().unwrap_or(""))
+    );
+
+    // **Off the async worker.** Everything below is synchronous filesystem work:
+    // a `read_dir` plus a `stat` per entry, and a write of up to
+    // [`MAX_PASTE_BYTES`]. Every other handler on this router is small; this is
+    // the one that can hold a tokio worker for tens of milliseconds, and holding
+    // one blocks unrelated terminals' frames.
+    let dir = tokio::task::spawn_blocking(|| {
+        let dir = ensure_paste_dir()?;
+        prune_pastes(&dir);
+        Ok::<_, String>(dir)
+    })
+    .await
+    .map_err(|e| {
+        warn!("paste setup panicked: {e}");
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "could not write the file",
+        )
+    })?
+    .map_err(|e| {
+        warn!("paste directory unusable: {e}");
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "could not write the file",
+        )
+    })?;
+
+    let path = dir.join(&name);
+    // Belt and braces over `sanitize_paste_name`: if the name it returned could
+    // ever contain a separator, this is what notices. A guard the compiler cannot
+    // give us, placed where the value is finally used.
+    if path.parent() != Some(dir.as_path()) {
+        return Err(err(StatusCode::BAD_REQUEST, "invalid file name"));
+    }
+    {
+        let target = path.clone();
+        let body = body.clone();
+        tokio::task::spawn_blocking(move || write_private(&target, &body))
+            .await
+            .map_err(|e| {
+                warn!("paste write panicked: {e}");
+                err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "could not write the file",
+                )
+            })?
+            .map_err(|e| {
+                warn!("could not write {}: {e}", path.display());
+                err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "could not write the file",
+                )
+            })?;
+    }
+
+    debug!(
+        "wrote {} bytes to {} for terminal {id}",
+        body.len(),
+        path.display()
+    );
+    Ok(Json(PasteFileResponse {
+        path: path.display().to_string(),
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -4862,6 +5354,143 @@ mod tests {
             }
         }
 
+        /// POST a body to the paste endpoint over real HTTP.
+        ///
+        /// **Over the wire on purpose.** The bug this exists for — axum's 2 MB
+        /// default body limit truncating a paste — is invisible to a direct call
+        /// of the handler, because it lives in a layer the handler never sees.
+        /// Only a real request goes through the layer.
+        async fn post_paste(
+            addr: SocketAddr,
+            sid: &str,
+            name: &str,
+            body: Vec<u8>,
+        ) -> (reqwest::StatusCode, String) {
+            let res = reqwest::Client::new()
+                .post(format!(
+                    "http://{addr}/api/pty/sessions/{sid}/paste-file?name={name}"
+                ))
+                .header("X-Veld-Request", "1")
+                .body(body)
+                .send()
+                .await
+                .expect("request");
+            let status = res.status();
+            (status, res.text().await.unwrap_or_default())
+        }
+
+        #[tokio::test]
+        async fn paste_file_takes_a_file_larger_than_the_axum_default() {
+            isolate_paste_dir();
+            // The regression: axum caps a buffered body at 2 MB unless the route
+            // says otherwise, so `MAX_PASTE_BYTES` was dead code and a screenshot
+            // from any modern display was refused *mid-upload* — the client saw a
+            // connection reset, not a status. 3 MB is the smallest size that
+            // proves the layer is present; asserting at `MAX_PASTE_BYTES` itself
+            // would cost 32 MB of allocation per run for nothing extra.
+            let addr = serve().await;
+            let dir = tempfile::tempdir().unwrap();
+            let sid = session_id();
+            let _client = open(addr, &sid, dir.path(), "").await;
+
+            let (status, body) =
+                post_paste(addr, &sid, "big.png", vec![7u8; 3 * 1024 * 1024]).await;
+            assert_eq!(status, reqwest::StatusCode::OK, "3 MB was refused: {body}");
+
+            let path = serde_json::from_str::<serde_json::Value>(&body).unwrap()["path"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            let written = std::fs::read(&path).unwrap();
+            assert_eq!(written.len(), 3 * 1024 * 1024, "the file was truncated");
+            assert!(written.iter().all(|b| *b == 7), "the bytes were mangled");
+            let _ = std::fs::remove_file(&path);
+
+            end_session(&sid, "test cleanup").await;
+        }
+
+        #[tokio::test]
+        async fn paste_file_refuses_a_body_past_the_cap() {
+            isolate_paste_dir();
+            // The other side of the same layer: past the cap it must be a status
+            // the UI can show, not a reset connection. The layer answers before
+            // the handler does, so this asserts the *status*, not the message.
+            let addr = serve().await;
+            let dir = tempfile::tempdir().unwrap();
+            let sid = session_id();
+            let _client = open(addr, &sid, dir.path(), "").await;
+
+            let (status, _) =
+                post_paste(addr, &sid, "huge.bin", vec![0u8; MAX_PASTE_BYTES + 1]).await;
+            assert_eq!(status, reqwest::StatusCode::PAYLOAD_TOO_LARGE);
+
+            end_session(&sid, "test cleanup").await;
+        }
+
+        #[tokio::test]
+        async fn paste_file_writes_only_inside_the_paste_directory() {
+            isolate_paste_dir();
+            // The name comes from a page, so it is attacker-shaped. Asserted on
+            // the *answer* rather than on the sanitiser, because what matters is
+            // where the bytes ended up.
+            let addr = serve().await;
+            let dir = tempfile::tempdir().unwrap();
+            let sid = session_id();
+            let _client = open(addr, &sid, dir.path(), "").await;
+
+            let (status, body) = post_paste(
+                addr,
+                &sid,
+                "..%2F..%2F..%2Fveld-escaped.png",
+                b"png".to_vec(),
+            )
+            .await;
+            assert_eq!(status, reqwest::StatusCode::OK);
+            let path = serde_json::from_str::<serde_json::Value>(&body).unwrap()["path"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            assert_eq!(
+                std::path::Path::new(&path).parent(),
+                Some(paste_dir().expect("home directory").as_path()),
+                "a hostile name escaped the paste directory: {path}"
+            );
+            let _ = std::fs::remove_file(&path);
+
+            end_session(&sid, "test cleanup").await;
+        }
+
+        #[tokio::test]
+        async fn paste_file_refuses_a_session_that_does_not_exist() {
+            isolate_paste_dir();
+            // The gate that keeps this from being a "write a file anywhere on the
+            // developer's disk" endpoint for anything that got past CSRF.
+            let addr = serve().await;
+            let (status, _) = post_paste(addr, &session_id(), "x.png", b"png".to_vec()).await;
+            assert_eq!(status, reqwest::StatusCode::NOT_FOUND);
+        }
+
+        #[tokio::test]
+        async fn paste_file_requires_the_csrf_header() {
+            isolate_paste_dir();
+            let addr = serve().await;
+            let dir = tempfile::tempdir().unwrap();
+            let sid = session_id();
+            let _client = open(addr, &sid, dir.path(), "").await;
+
+            let res = reqwest::Client::new()
+                .post(format!(
+                    "http://{addr}/api/pty/sessions/{sid}/paste-file?name=x.png"
+                ))
+                .body(b"png".to_vec())
+                .send()
+                .await
+                .expect("request");
+            assert_eq!(res.status(), reqwest::StatusCode::FORBIDDEN);
+
+            end_session(&sid, "test cleanup").await;
+        }
+
         #[tokio::test]
         async fn upgrade_requires_an_allowed_origin() {
             let addr = serve().await;
@@ -6073,5 +6702,287 @@ mod tests {
             assert!(saw_idle, "an exited pane must read as idle");
             end_session(&sid, "test cleanup").await;
         }
+    }
+    // -----------------------------------------------------------------------
+    // Pasting a file into a terminal
+    // -----------------------------------------------------------------------
+
+    /// Point [`paste_dir`] at a throwaway directory for this whole test process.
+    ///
+    /// **Without it the suite operates on the developer's own `~/.veld/pastes`** —
+    /// creating it on a machine that has never pasted, and running the reaper over
+    /// real files. Found in review, after `cargo test` had already done exactly
+    /// that here.
+    ///
+    /// A `LazyLock` so the write happens once, before any server thread this
+    /// module spawns exists.
+    static TEST_PASTE_DIR: LazyLock<tempfile::TempDir> = LazyLock::new(|| {
+        let dir = tempfile::tempdir().expect("a temp dir for the paste tests");
+        // SAFETY: `set_var` races any concurrent *reader* of the environment, and
+        // under `cargo test` other tests genuinely are running on other threads —
+        // so the "nothing else has started yet" justification this comment used
+        // to give was false (`management.rs` documents the same hazard). What
+        // makes it tolerable is narrower: `VELD_PASTE_DIR` is read by `paste_dir`
+        // and by nothing else in the process, it is written exactly once, and it
+        // is written to the same value every time, so no reader can observe a
+        // change. The repo takes the same trade in `settings.rs` and
+        // `extensions.rs`.
+        unsafe { std::env::set_var("VELD_PASTE_DIR", dir.path()) };
+        dir
+    });
+
+    /// Force [`TEST_PASTE_DIR`]. Call first in any test that reaches `paste_dir`.
+    fn isolate_paste_dir() {
+        LazyLock::force(&TEST_PASTE_DIR);
+    }
+
+    #[test]
+    fn sanitize_paste_name_keeps_an_ordinary_filename_readable() {
+        // The name is only ever a hint, but a hint nobody can read defeats its
+        // own purpose — the point is that the path in the terminal says what it
+        // points at.
+        assert_eq!(sanitize_paste_name("screenshot.png"), "screenshot.png");
+        assert_eq!(sanitize_paste_name("My-Report_v2.pdf"), "My-Report_v2.pdf");
+    }
+
+    #[test]
+    fn sanitize_paste_name_cannot_escape_the_paste_directory() {
+        isolate_paste_dir();
+        // Attacker-shaped input: a `DataTransfer` name comes from a page.
+        for hostile in [
+            "../../../.ssh/authorized_keys",
+            "..",
+            "../",
+            "/etc/passwd",
+            "a/b/c",
+            r"a\b\c",
+        ] {
+            let safe = sanitize_paste_name(hostile);
+            assert!(!safe.contains('/'), "{hostile} kept a separator: {safe}");
+            assert!(!safe.contains('\\'), "{hostile} kept a separator: {safe}");
+            assert_ne!(safe, "..");
+            // The property that actually matters, asserted on the composed path
+            // rather than on the string: the file lands in the directory.
+            let dir = paste_dir().expect("a home directory in the test environment");
+            let path = dir.join(format!("{}-{safe}", uuid::Uuid::new_v4().simple()));
+            assert_eq!(
+                path.parent(),
+                Some(dir.as_path()),
+                "{hostile} escaped: {}",
+                path.display()
+            );
+        }
+    }
+
+    #[test]
+    fn sanitize_paste_name_replaces_shell_and_control_characters() {
+        assert_eq!(sanitize_paste_name("a b;rm -rf c"), "a_b_rm_-rf_c");
+        assert_eq!(sanitize_paste_name("a\nb"), "a_b");
+        assert_eq!(sanitize_paste_name("a\0b"), "a_b");
+        assert_eq!(sanitize_paste_name("$(id).png"), "__id_.png");
+    }
+
+    #[test]
+    fn sanitize_paste_name_never_produces_a_hidden_or_empty_name() {
+        assert_eq!(sanitize_paste_name(""), "paste");
+        // Separators are *replaced*, not dropped — so a name made only of them
+        // survives as underscores rather than falling back. Ugly and safe, which
+        // is the right trade for input this shape: a real `File` hands us a
+        // basename, so a full path arriving here is the hostile case.
+        assert_eq!(sanitize_paste_name("///"), "___");
+        assert_eq!(sanitize_paste_name("/etc/passwd"), "_etc_passwd");
+        // A leading dot is the one legal spelling that hides the file from the
+        // person who has to find it. Interior dots are kept.
+        assert_eq!(sanitize_paste_name(".hidden"), "hidden");
+        assert_eq!(sanitize_paste_name("....png"), "png");
+        assert_eq!(sanitize_paste_name("a.b.png"), "a.b.png");
+    }
+
+    #[test]
+    fn sanitize_paste_name_caps_a_long_name() {
+        let long = "x".repeat(500);
+        assert_eq!(sanitize_paste_name(&long).len(), 64);
+        // Non-ASCII is replaced *before* the cap, so the cap can never split a
+        // codepoint — asserted rather than assumed, since that is what would
+        // panic rather than merely truncate.
+        let wide = "é".repeat(500);
+        assert_eq!(sanitize_paste_name(&wide).len(), 64);
+    }
+
+    /// A name of the shape `paste_file` actually mints: 32 hex, a dash, the hint.
+    fn paste_name(hint: &str) -> String {
+        format!("{}-{hint}", uuid::Uuid::new_v4().simple())
+    }
+
+    #[test]
+    fn prune_pastes_removes_stale_files_and_keeps_fresh_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        let fresh = dir.path().join(paste_name("fresh.png"));
+        let stale = dir.path().join(paste_name("stale.png"));
+        std::fs::write(&fresh, b"a").unwrap();
+        std::fs::write(&stale, b"b").unwrap();
+        // Age the stale one past the TTL by rewriting its mtime. `File::set_modified`
+        // rather than the `filetime` crate: a new dependency would drag in a
+        // `Cargo.lock` change and a `THIRD-PARTY-LICENSES.md` regeneration for a
+        // one-line test helper the standard library already has.
+        let old = std::time::SystemTime::now() - (PASTE_TTL + Duration::from_secs(60));
+        std::fs::File::options()
+            .write(true)
+            .open(&stale)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+
+        prune_pastes(dir.path());
+
+        assert!(fresh.exists(), "a file inside the TTL must survive");
+        assert!(!stale.exists(), "a file past the TTL must be removed");
+    }
+
+    #[test]
+    fn prune_pastes_keeps_a_file_whose_clock_ran_ahead() {
+        // **Both directions, because this rule has been wrong both ways.** First
+        // a future mtime made a file immortal (`elapsed()` errors, and that read
+        // as "not old yet"); the fix for that deleted anything with a future
+        // stamp, which on a networked home with a server clock a second ahead
+        // reaps the screenshot the user just pasted, before the agent reads it.
+        // A test asserting only one side would have passed for both bugs.
+        isolate_paste_dir();
+        let dir = tempfile::tempdir().unwrap();
+        let set = |name: &str, at: std::time::SystemTime| {
+            let p = dir.path().join(paste_name(name));
+            std::fs::write(&p, b"x").unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(&p)
+                .unwrap()
+                .set_modified(at)
+                .unwrap();
+            p
+        };
+        let now = std::time::SystemTime::now();
+        let skewed = set("skewed.png", now + Duration::from_secs(300));
+        let absurd = set("absurd.png", now + PASTE_TTL + Duration::from_secs(3600));
+        let fresh = set("fresh.png", now - Duration::from_secs(3600));
+        let stale = set("stale.png", now - (PASTE_TTL + Duration::from_secs(60)));
+
+        prune_pastes(dir.path());
+
+        assert!(
+            skewed.exists(),
+            "a few minutes of clock skew must not reap a live paste"
+        );
+        assert!(fresh.exists(), "a fresh file must survive");
+        assert!(
+            !absurd.exists(),
+            "an implausibly-future stamp is still reaped"
+        );
+        assert!(!stale.exists(), "a genuinely old file must go");
+    }
+
+    #[test]
+    fn prune_pastes_never_touches_a_file_it_did_not_write() {
+        // The second lock on the reaper. The first version deleted by age alone,
+        // which made it exactly as dangerous as whatever directory it was handed
+        // — a symlinked paste dir turned a paste into `rm` on the victim's files
+        // (a planted `id_rsa`, verified). The directory is private and verified
+        // now; this is what keeps the reaper harmless even if that ever fails.
+        let dir = tempfile::tempdir().unwrap();
+        let old = std::time::SystemTime::now() - (PASTE_TTL + Duration::from_secs(60));
+        let age = |p: &std::path::Path| {
+            std::fs::File::options()
+                .write(true)
+                .open(p)
+                .unwrap()
+                .set_modified(old)
+                .unwrap();
+        };
+
+        // Every one of these is far past the TTL and none is ours.
+        let foreign = ["id_rsa", "notes.txt", "config", "deadbeef.png", "-x.png"];
+        for name in foreign {
+            let f = dir.path().join(name);
+            std::fs::write(&f, b"not ours").unwrap();
+            age(&f);
+        }
+        // A near-miss: the right shape but one character short of 32 hex.
+        let near = dir.path().join(format!("{}-x.png", "a".repeat(31)));
+        std::fs::write(&near, b"not ours").unwrap();
+        age(&near);
+
+        // ...and one that genuinely is ours, so the test cannot pass by pruning
+        // nothing at all.
+        let ours = dir.path().join(paste_name("shot.png"));
+        std::fs::write(&ours, b"ours").unwrap();
+        age(&ours);
+
+        prune_pastes(dir.path());
+
+        for name in foreign {
+            assert!(dir.path().join(name).exists(), "{name} was deleted");
+        }
+        assert!(near.exists(), "a 31-hex near-miss was deleted");
+        assert!(!ours.exists(), "the reaper did not run at all");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn paste_dir_is_ours_refuses_a_symlink_and_a_non_directory() {
+        isolate_paste_dir();
+        // The check both call paths now share. It exists because the periodic
+        // sweep used `Path::is_dir()`, which follows symlinks — so the caller
+        // that runs every ten minutes with nobody watching was the one outside
+        // the guarantee. `symlink_metadata` is what makes the answer honest.
+        let tmp = tempfile::tempdir().unwrap();
+
+        let real = tmp.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        assert!(
+            paste_dir_is_ours(&real).is_ok(),
+            "our own directory must pass"
+        );
+
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let err = paste_dir_is_ours(&link).expect_err("a symlink must be refused");
+        assert!(err.contains("symlink"), "{err}");
+
+        let file = tmp.path().join("a-file");
+        std::fs::write(&file, b"x").unwrap();
+        assert!(
+            paste_dir_is_ours(&file).is_err(),
+            "a plain file must be refused"
+        );
+
+        assert!(
+            paste_dir_is_ours(&tmp.path().join("missing")).is_err(),
+            "a path that is not there must be refused, not created"
+        );
+    }
+
+    #[test]
+    fn is_paste_name_accepts_only_what_paste_file_mints() {
+        assert!(is_paste_name(&paste_name("a.png")));
+        assert!(is_paste_name(&format!("{}-paste", "0".repeat(32))));
+        assert!(!is_paste_name("id_rsa"));
+        assert!(!is_paste_name(&format!("{}-a.png", "a".repeat(31))));
+        assert!(!is_paste_name(&format!("{}-a.png", "a".repeat(33))));
+        // 32 characters, but not hex.
+        assert!(!is_paste_name(&format!("{}-a.png", "z".repeat(32))));
+        // No hint at all.
+        assert!(!is_paste_name(&format!("{}-", "a".repeat(32))));
+    }
+
+    #[test]
+    fn prune_pastes_leaves_a_subdirectory_alone_and_survives_a_missing_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        // Named like a paste, so this proves the `is_file` check does the work
+        // rather than the name check accidentally covering for it.
+        let sub = dir.path().join(paste_name("looks-like-one.png"));
+        std::fs::create_dir(&sub).unwrap();
+        prune_pastes(dir.path());
+        assert!(sub.exists());
+        // The first paste on a fresh machine prunes before the directory exists.
+        prune_pastes(&dir.path().join("does-not-exist"));
     }
 }

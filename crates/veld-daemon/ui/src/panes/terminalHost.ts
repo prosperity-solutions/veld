@@ -22,7 +22,8 @@ import { inbox, isOsc9Notification, parseOsc133 } from "../inbox/inbox";
 import { ANSI_DARK, ANSI_LIGHT } from "../shared/ansi";
 import { notifyError, notifyRedirect } from "../shared/notify";
 import { terminalPrefs, type TerminalPrefs } from "../shared/settings";
-import { chromeless, layoutSlot, windowSeed } from "../shell";
+import { chromeless, layoutSlot, pathForFile, windowSeed } from "../shell";
+import { isMac } from "../shortcuts/registry";
 import {
   type PaneMount,
   parseLayouts,
@@ -32,6 +33,13 @@ import {
   terminalIds,
 } from "./model";
 import { handleKeyEvent } from "./terminalKeys";
+import {
+  clipboardImageIndex,
+  clipboardImageName,
+  isFileDrop,
+  isPastable,
+  pathPayload,
+} from "./terminalPaste";
 
 /**
  * Terminal ids this page expects to *resume*.
@@ -424,6 +432,221 @@ function playBell(): void {
   }
 }
 
+/**
+ * Most files one drop may carry.
+ *
+ * Each one costs a request the daemon buffers whole (up to `MAX_PASTE_BYTES`),
+ * and a drop is the one gesture that can hand over a whole folder by accident.
+ * Twenty is well past any deliberate drop and far short of a directory.
+ */
+const MAX_DROP_FILES = 20;
+
+/**
+ * Files a terminal pane accepts: a drop onto it, and an image pasted into it.
+ *
+ * **Both end as a path typed at the prompt**, never as bytes on the wire — a pty
+ * carries a byte stream, so there is no protocol for handing a program a
+ * picture. Every terminal emulator that "supports" dropping an image types its
+ * path, and every coding agent (Claude Code, Codex) reads an image path as an
+ * image. `terminalPaste.ts` holds the rules; this holds the listeners and the
+ * one asynchronous step.
+ *
+ * Where the path comes from differs by shell, and only here:
+ *
+ * - **Desktop, dropped file** — Electron resolves the real path
+ *   (`webUtils.getPathForFile`). Nothing is copied; the terminal points at the
+ *   file the user already has.
+ * - **Browser tab, dropped file** — the File API withholds the path by design,
+ *   so the bytes are uploaded and the daemon's copy is what gets typed.
+ * - **Either shell, pasted image** — a screenshot is bytes with no path anywhere,
+ *   so it is uploaded. A copied image *file* is the exception: it does have a
+ *   path, and in the desktop app that real path is used rather than a second
+ *   copy of something the user already has.
+ *
+ * Two corners are decided rather than handled, and named here because the review
+ * that found them will otherwise find them again:
+ *
+ * - **⌘V acts on images only**, and everything else is handed to xterm exactly as
+ *   before — whatever xterm then makes of it. Two earlier versions of this note
+ *   claimed a copied *document* pastes its name, which is a guess about what the
+ *   browser puts on the clipboard that nobody here has measured; the reviewable
+ *   fact is only that this handler does not touch it. Dropping that same file
+ *   does insert its path, so a drop is the gesture to reach for.
+ * - **A dropped directory** is typed as a path in the desktop app (which is
+ *   useful: `ls`, `cd`) and refused in a browser tab, where it has no readable
+ *   bytes and the daemon answers "empty file". The toast now carries that
+ *   message rather than a generic one.
+ *
+ * Listeners go on the session's own container, which outlives every mount: a
+ * pane moved between docks or pulled into another window keeps this without
+ * re-registering, the same property the terminal itself has.
+ *
+ * Nothing is written to the socket directly — everything goes through
+ * `term.paste`, so it reaches the pty by the same route as typing and through
+ * the same `canSend` gate. `canSend` is passed in rather than re-derived so the
+ * gesture can be *refused out loud* when the terminal cannot accept input,
+ * instead of being swallowed by that gate after the file is already on disk.
+ */
+function attachFileInput(s: Session, canSend: () => boolean): void {
+  /**
+   * Put the paths in the terminal, and say so when one of them could not be had.
+   *
+   * **`term.paste`, not `send` — and that distinction is the whole feature.** A
+   * coding agent decides whether a path is a *file it should attach* or merely
+   * text by whether it arrived as a paste: Claude Code attaches an image path
+   * pasted into its composer as `[Image #1]`, and leaves the identical characters
+   * as literal text when they are typed one at a time. Measured both ways against
+   * a real Claude Code — typing `…/red.png` shows the path, pasting it shows the
+   * image — and it is the same route cmux and iTerm2 take.
+   *
+   * `paste` is also the only correct way to send this at all: it wraps the text
+   * in bracketed-paste markers **when, and only when, the program has enabled
+   * that mode** (DECSET 2004). Emitting the markers unconditionally would spray
+   * `[200~` into any program that had not asked for them.
+   *
+   * A non-image path is unaffected either way: an agent finds no image extension
+   * and keeps the text, which is exactly what dropping a source file should do.
+   */
+  const typePaths = (paths: string[], failures: number, cause?: unknown) => {
+    const payload = pathPayload(paths);
+    if (payload) {
+      // **Refuse rather than drop it on the floor.** `term.paste` reaches the
+      // socket through the same `canSend` gate as typing, so during a scrollback
+      // replay or a reconnect the payload is silently discarded — and the file
+      // has already been uploaded and written to disk by then, so the gesture
+      // vanishes with nothing said. Two review angles found this independently.
+      if (!canSend()) {
+        notifyError(
+          "Adding a file to the terminal",
+          new Error("the terminal is not ready for input yet — try again in a moment"),
+        );
+        // Falls through rather than returning: a drop can be both un-sendable
+        // *and* have had files fail to upload, and reporting only the first
+        // would silently discard the second.
+      } else {
+        s.term.paste(payload);
+      }
+    }
+    if (failures > 0) {
+      notifyError(
+        failures === 1 ? "Adding a file to the terminal" : `Adding ${failures} files to the terminal`,
+        // The daemon's own message where there is one ("file is too large" for a
+        // dropped video, "empty file", "no such terminal session"); the generic
+        // line only when nothing threw. Discarding the real cause made the most
+        // likely failure of all — a file past the 32 MB cap — unreadable.
+        cause ?? new Error("could not be read"),
+      );
+    }
+  };
+
+  /**
+   * Resolve one dropped file to a path — the shell's own, or the daemon's copy.
+   *
+   * Returns the failure alongside rather than throwing: one unreadable file in a
+   * multi-file drop must not cost the user the others, but the reason still has
+   * to reach them. Returned rather than stashed in a shared variable, so two
+   * overlapping drops cannot clear each other's cause.
+   */
+  const resolve = async (file: File): Promise<[string | null, unknown]> => {
+    const local = pathForFile(file);
+    if (local) return [local, undefined];
+    try {
+      return [await api.ptyPasteFile(s.id, file, file.name), undefined];
+    } catch (e) {
+      console.warn("veld: could not upload a dropped file", e);
+      return [null, e];
+    }
+  };
+
+  s.container.addEventListener("dragover", (e) => {
+    if (!isFileDrop([...(e.dataTransfer?.types ?? [])])) return;
+    // Without preventDefault the browser refuses the drop outright — and in the
+    // desktop app it would then *navigate* the window to the file instead.
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
+  });
+
+  s.container.addEventListener("drop", (e) => {
+    if (!isFileDrop([...(e.dataTransfer?.types ?? [])])) return;
+    e.preventDefault();
+    // Ordered, because a multi-file drop types its paths in the order the user
+    // sees them; `Promise.all` preserves it where a race would not.
+    const files = [...(e.dataTransfer?.files ?? [])];
+    if (files.length === 0) return;
+    // **Bounded.** One `fetch` per file, each allowed 32 MB and each buffered
+    // whole on the daemon side, so a dropped folder of screenshots is the
+    // ordinary way to ask for a gigabyte at once. Nothing downstream caps the
+    // aggregate — `MAX_PASTE_BYTES` is per request and the prune is age-based.
+    if (files.length > MAX_DROP_FILES) {
+      notifyError(
+        "Adding files to the terminal",
+        new Error(`too many files at once — ${files.length} dropped, ${MAX_DROP_FILES} is the limit`),
+      );
+      return;
+    }
+    void (async () => {
+      // **One at a time.** `Promise.all` started every upload at once, so a drop
+      // of `MAX_DROP_FILES` large files asked the daemon to buffer up to
+      // 20 x 32 MB simultaneously — the per-request cap bounds a request, not a
+      // gesture. Sequential is also simpler than the bounded-concurrency version
+      // and loses nothing: the order is required anyway, since the paths are
+      // typed in the order the user dropped them.
+      const resolved: string[] = [];
+      let cause: unknown;
+      for (const file of files) {
+        const [path, err] = await resolve(file);
+        if (path !== null) resolved.push(path);
+        // The first real reason, kept per drop rather than per session: a second
+        // drop starting while this one is in flight would otherwise clear it and
+        // send this drop's toast back to the generic message.
+        else cause ??= err;
+      }
+      // A path a terminal cannot carry — a newline in the name — is dropped by
+      // `pathPayload`, so it is counted as a failure here rather than vanishing.
+      const carried = resolved.filter(isPastable);
+      typePaths(carried, files.length - carried.length, cause);
+    })();
+  });
+
+  // **Capture phase.** The event's target is xterm's own hidden textarea, which
+  // is a descendant of this container — so capturing is what runs this *before*
+  // xterm's handler rather than after it has already pasted.
+  s.container.addEventListener(
+    "paste",
+    (e) => {
+      const data = e.clipboardData;
+      if (!data) return;
+      const index = clipboardImageIndex([...data.items].map((i) => ({ kind: i.kind, type: i.type })));
+      // -1 is the overwhelmingly common case — ordinary text — and it must reach
+      // xterm untouched. Doing nothing here is what lets it.
+      if (index === -1) return;
+      const file = data.items[index].getAsFile();
+      if (!file) return;
+      e.preventDefault();
+      e.stopPropagation();
+      // **Anything that got here with a real path should use it.** A screenshot
+      // has none — it is bytes — and falls through to the upload below. A copied
+      // image *file* may have one, and uploading it would write a second copy of
+      // something the user already has and hand the agent the copy's path instead
+      // of the original's. Asking costs one call and is right either way, so this
+      // does not depend on knowing which flavours a given browser reports.
+      const local = pathForFile(file);
+      if (local) {
+        typePaths([local], 0);
+        return;
+      }
+      // A clipboard image proper has no name of its own; the daemon re-sanitises
+      // whatever it is given anyway, so this only decides readability.
+      const name = file.name || clipboardImageName(file.type);
+      void api.ptyPasteFile(s.id, file, name).then(
+        (path) => typePaths([path], 0),
+        (err) => notifyError("Pasting an image into the terminal", err),
+      );
+    },
+    true,
+  );
+}
+
 /** Create the session (idempotent) without touching the DOM. */
 function ensure(
   id: string,
@@ -543,8 +766,9 @@ function ensure(
   // Read at event time, not at construction: the preference can change while a
   // shell is open and re-attaching a handler per session would be pointless work.
   term.attachCustomKeyEventHandler((e) =>
-    handleKeyEvent(e, send, prefs().shiftEnterNewline),
+    handleKeyEvent(e, send, prefs().shiftEnterNewline, isMac()),
   );
+  attachFileInput(s, canSend);
   // `onBinary` carries already-8-bit payloads (mouse reports), one byte per
   // char code — encoding those as UTF-8 would corrupt them.
   term.onBinary((data) => {

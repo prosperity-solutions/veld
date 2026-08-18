@@ -29,6 +29,59 @@
  */
 export const SHIFT_ENTER_SEQUENCE = "\x1b\r";
 
+/**
+ * The macOS line-editing chords, and the bytes each one stands in for.
+ *
+ * **Every mac text field does this, and a terminal only does it if its emulator
+ * types the control character for it.** `⌘←` is "caret to start of line" in
+ * Cocoa; a pty has no such command, so Ghostty, iTerm2 and Terminal.app all ship
+ * a binding that sends `^A` instead — which readline, zsh's ZLE, fish, and every
+ * agent composer (Claude Code, Codex) already understand as exactly that. Veld
+ * shipped without them, so `⌘←` inside a Claude Code prompt did nothing at all.
+ *
+ * That "nothing at all" is not an accident of ours: xterm.js's key evaluator
+ * has an explicit `if (ev.metaKey) break` in its arrow-key arm, so a ⌘ arrow
+ * produces no bytes to send. `⌘⌫` is the odd one out — Backspace's arm checks
+ * only Shift and Alt, so ⌘⌫ currently sends a bare `\x7f` and deletes a single
+ * character, which is plain `⌫`'s job and no use to anyone.
+ *
+ * **⌥ is deliberately absent.** xterm already sends `\x1b[1;3D`/`\x1b[1;3C` for
+ * ⌥ arrows and `ESC DEL` for `⌥⌫`, and shells bind all three as word motions —
+ * so those work today, and re-spelling them as `ESC b`/`ESC f` would only change
+ * bytes a TUI may already have bound. Verified by the maintainer on a real mac
+ * before this shipped, not assumed.
+ *
+ * **`⌘↑`/`⌘↓` are absent too**, because there is no byte for them: Cocoa means
+ * "start/end of the document" and a shell line has no document. Sending `^A`
+ * for them would be inventing a binding rather than matching one.
+ */
+const MAC_LINE_EDIT: Record<string, string> = {
+  // ^A — start of line.
+  ArrowLeft: "\x01",
+  // ^E — end of line.
+  ArrowRight: "\x05",
+  // ^U — kill to the start of the line. This is what "delete the whole thing I
+  // just typed" means in a shell, and what `⌘⌫` means in a mac text field.
+  Backspace: "\x15",
+};
+
+/**
+ * The bytes a mac line-editing chord stands in for, or `null`.
+ *
+ * `mac` is passed rather than sniffed so this module stays DOM-free, and gates
+ * the whole family: `metaKey` off macOS is the Super/Windows key, which belongs
+ * to the window manager and means nothing like "start of line".
+ *
+ * Every other modifier is excluded rather than ignored — `⌘⇧←` is
+ * select-to-start-of-line in a text field and is a chord programs bind for
+ * themselves in a terminal, and `⌃⌘←` is a Spaces gesture. Claiming a superset
+ * of the chord the user pressed is how a handler eats somebody else's binding.
+ */
+function macLineEdit(e: KeyboardEvent, mac: boolean): string | null {
+  if (!mac || !e.metaKey || e.shiftKey || e.altKey || e.ctrlKey) return null;
+  return MAC_LINE_EDIT[e.key] ?? null;
+}
+
 /** Whether an event is the Shift+Enter chord and nothing more. */
 function isShiftEnter(e: KeyboardEvent): boolean {
   // Other modifiers excluded rather than ignored: Ctrl+Shift+Enter and
@@ -144,11 +197,19 @@ function isSettingsChord(e: KeyboardEvent): boolean {
  *   reason. Navigation is page-dispatched, so it genuinely needs this; only
  *   `⌘T`/`⌘W`/`⌘⇧W` are menu accelerators and bypass xterm on their own. Arrows
  *   are absent because they belong to the terminal: `⌘`+arrow is the caret
- *   motion Claude Code and Codex expect.
+ *   motion Claude Code and Codex expect — and since this file also *implements*
+ *   that motion (see [`MAC_LINE_EDIT`]), claiming an arrow here would now be
+ *   this handler taking a chord from itself.
  *   `Ctrl+K` (the command palette's other chord) deliberately
  *   is not among them: that one is readline's kill-to-end-of-line and
  *   belongs to the shell, so the palette is reachable from a focused
  *   terminal only via ⌘K, not Ctrl+K.
+ * - **The macOS line-editing chords** ([`MAC_LINE_EDIT`] — `⌘←`, `⌘→`, `⌘⌫`),
+ *   which this handler answers itself by sending the control character every
+ *   other mac terminal emulator sends for them. Note the difference from the
+ *   entries above: these are *not* forwarded to the window, they are
+ *   **substituted** — the terminal is where they belong, and the app binds
+ *   nothing on them.
  * - **Shift+Enter**, which this handler answers itself by sending
  *   [`SHIFT_ENTER_SEQUENCE`]. `preventDefault` here is load-bearing: without it
  *   the browser still delivers the key to xterm's hidden textarea and the shell
@@ -166,6 +227,15 @@ export function handleKeyEvent(
    * release that shipped this hardcoded.
    */
   shiftEnterNewline = true,
+  /**
+   * Whether this is a Mac, enabling the [`MAC_LINE_EDIT`] chords. Passed rather
+   * than sniffed so this module stays DOM-free; `terminalHost.ts` reads it from
+   * `isMac()` in the shortcuts registry, the same one the overview renders with.
+   *
+   * Defaults to `false` — the platform where none of these chords exist — so a
+   * caller that has not been updated keeps exactly the behaviour it had.
+   */
+  mac = false,
 ): boolean {
   if (e.type !== "keydown") {
     // Only keydown is acted on, but the matching keyup must not be handed to
@@ -176,10 +246,21 @@ export function handleKeyEvent(
     return !(
       isSettingsChord(e) ||
       isAppShortcutChord(e) ||
+      macLineEdit(e, mac) !== null ||
       (shiftEnterNewline && isShiftEnter(e))
     );
   }
   if (isSettingsChord(e) || isAppShortcutChord(e)) return false;
+  const lineEdit = macLineEdit(e, mac);
+  if (lineEdit !== null) {
+    // `preventDefault` for the same reason Shift+Enter needs it: without it the
+    // browser still delivers the key to xterm's hidden textarea. `⌘⌫` is the
+    // one that would actually misfire — xterm answers it with a bare `\x7f`, so
+    // the shell would get "kill the line" *and* "delete one character".
+    e.preventDefault();
+    send(lineEdit);
+    return false;
+  }
   if (shiftEnterNewline && isShiftEnter(e)) {
     e.preventDefault();
     send(SHIFT_ENTER_SEQUENCE);
