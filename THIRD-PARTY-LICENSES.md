@@ -9087,7 +9087,7 @@ SOFTWARE.
 
 ## MIT License
 
-Used by [h2 0.4.15](https://github.com/hyperium/h2).
+Used by [h2 0.4.16](https://github.com/hyperium/h2).
 
 ```
 Copyright (c) 2017 h2 authors
