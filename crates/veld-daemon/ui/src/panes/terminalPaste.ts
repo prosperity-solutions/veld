@@ -161,3 +161,47 @@ export function clipboardImageIndex(entries: readonly ClipboardEntry[]): number 
   if (entries.some((e) => e.kind === "string" && mime(e) === "text/plain")) return -1;
   return entries.findIndex((e) => e.kind === "file" && mime(e).startsWith("image/"));
 }
+
+/**
+ * Stop a file dropped **anywhere but a terminal pane** from navigating the page.
+ *
+ * A browser's default action for a dropped file is to open it — replacing the
+ * document. So a drop that misses the pane by a few pixels and lands on a tab
+ * strip, the rail, or the gap between them does not merely do nothing: it throws
+ * away the whole `/ide`, and with it the view of every running shell. (The
+ * sessions survive on the daemon; the page does not.)
+ *
+ * That hazard is **created by this feature**. Before it there was no reason to
+ * drag a file at Veld at all, so nobody was aiming; now the app invites the
+ * gesture, and a miss has to be free. The desktop shell blocks the navigation a
+ * second way (`will-navigate` in `windows.js`), which is exactly why the guard
+ * belongs here too — a plain browser tab has no such backstop.
+ *
+ * Registered on `window` in the **bubble** phase, so a real drop target has
+ * already had the event — and `defaultPrevented` is how this tells the two apart.
+ * That check is load-bearing rather than tidy: without it the guard would run
+ * *after* the pane's handler and overwrite the `copy` cursor it just set with
+ * `none`, so the one place a drop actually works would be the one place the
+ * pointer said it would not.
+ *
+ * Returns an unsubscribe, for symmetry with the other watchers booted beside it.
+ */
+export function guardStrayFileDrops(): () => void {
+  const swallow = (e: DragEvent) => {
+    if (!isFileDrop([...(e.dataTransfer?.types ?? [])])) return;
+    // A pane took it: leave the event, and its cursor, completely alone.
+    if (e.defaultPrevented) return;
+    e.preventDefault();
+    // Say so with the pointer. Swallowing silently would leave a `copy` cursor
+    // over the whole window promising a drop that does nothing.
+    if (e.dataTransfer) e.dataTransfer.dropEffect = "none";
+  };
+  // Both are required: without `dragover` the browser never treats the page as a
+  // drop target, and the `drop` event is then never delivered to prevent.
+  window.addEventListener("dragover", swallow);
+  window.addEventListener("drop", swallow);
+  return () => {
+    window.removeEventListener("dragover", swallow);
+    window.removeEventListener("drop", swallow);
+  };
+}
