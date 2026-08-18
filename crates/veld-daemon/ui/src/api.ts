@@ -1734,6 +1734,37 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ url }),
     }),
+  /**
+   * Write bytes the page has no path for, and get one back.
+   *
+   * A pty carries bytes, not pictures — so pasting an image into a coding agent
+   * universally means typing the *path* of an image file. A clipboard image has
+   * no path (it is bytes in the browser), and neither does a file dropped into a
+   * plain browser tab, where the File API withholds it. Both therefore have to be
+   * written next to the shell that will read them.
+   *
+   * **The desktop app never calls this for a drop.** Electron hands the renderer
+   * a real path (`window.veldDesktop.pathForFile`), and copying a file the user
+   * already has would be strictly worse than pointing at it. Only a clipboard
+   * image comes here from the desktop.
+   *
+   * Not `request()`: that helper stamps `Content-Type: application/json` on
+   * anything with a body, and this body is a `Blob`.
+   */
+  ptyPasteFile: async (sessionId: string, file: Blob, name: string): Promise<string> => {
+    const q = new URLSearchParams({ name });
+    const res = await fetch(
+      `/api/pty/sessions/${encodeURIComponent(sessionId)}/paste-file?${q}`,
+      {
+        method: "POST",
+        // CSRF gate, same as every mutating route.
+        headers: { "X-Veld-Request": "1" },
+        body: file,
+      },
+    );
+    if (!res.ok) throw new Error(await errorMessage(res));
+    return ((await res.json()) as { path: string }).path;
+  },
   stats: () => request<StatsResponse>("/api/stats"),
   /**
    * Bucketed history for one node. `windowSecs` is clamped server-side to the

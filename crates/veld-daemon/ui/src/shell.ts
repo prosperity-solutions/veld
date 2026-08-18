@@ -242,6 +242,28 @@ export const desktopWindow: DesktopWindowApi | null =
   (window as { veldDesktop?: { window?: DesktopWindowApi } }).veldDesktop?.window ?? null;
 
 /**
+ * The absolute path of a dragged-in `File`, where the shell can tell us.
+ *
+ * `null` in a browser tab — the File API withholds the path there by design, and
+ * the caller uploads the bytes instead — and `null` for any file the shell
+ * cannot resolve one for. So a caller checks the answer, never the platform.
+ *
+ * Feature-detected rather than assumed present: a shell older than this bundle
+ * has no `pathForFile`, and the honest degradation is the browser's path
+ * (upload a copy), not a `TypeError` inside a drop handler.
+ */
+export function pathForFile(file: File): string | null {
+  const bridge = (window as { veldDesktop?: { pathForFile?: (f: File) => string | null } })
+    .veldDesktop;
+  if (typeof bridge?.pathForFile !== "function") return null;
+  try {
+    return bridge.pathForFile(file) || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Mirror the window's native full-screen state onto `<body data-fullscreen>`.
  *
  * On the body rather than in React state because the thing that reads it is one

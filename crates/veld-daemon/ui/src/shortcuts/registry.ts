@@ -401,6 +401,28 @@ export const SHORTCUTS: ShortcutDef[] = [
     description: "Send a newline to the focused terminal without submitting the line.",
     combos: [{ shift: true, keys: ["Enter"] }],
   },
+  // The two rows below are macOS-only and have no chord elsewhere, because
+  // there is nothing to add there: Ctrl+A/Ctrl+E/Ctrl+U are the shell's own
+  // bindings on every platform, and ⌘ has no counterpart. `combosFor` hides a
+  // row with no combo on the reader's platform — see `ShortcutsDialog`.
+  {
+    id: "terminal-line-bounds",
+    category: "general",
+    title: "Start / end of the line in a terminal",
+    description:
+      "Sends ^A / ^E, the same substitution every other Mac terminal makes for these — so the caret moves in a shell prompt and in a coding agent's composer.",
+    combos: [
+      { mod: true, keys: ["←"], platform: "mac" },
+      { mod: true, keys: ["→"], platform: "mac" },
+    ],
+  },
+  {
+    id: "terminal-kill-line",
+    category: "general",
+    title: "Delete the line in a terminal",
+    description: "Sends ^U, which clears what has been typed back to the start of the line.",
+    combos: [{ mod: true, keys: ["⌫"], platform: "mac" }],
+  },
 ];
 
 /**

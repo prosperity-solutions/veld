@@ -24,7 +24,16 @@ export function ShortcutsDialog(props: { onClose: () => void }) {
       <ScrollArea.Autosize mah="min(70vh, 560px)" type="auto" offsetScrollbars>
         <Stack gap="lg">
           {CATEGORY_ORDER.map((category) => {
-            const rows = SHORTCUTS.filter((s) => s.category === category);
+            // Filtered by **platform as well as category**: a row can be bound
+            // on one platform and have no counterpart on the other — the
+            // terminal line-editing chords are ⌘-only, because Ctrl+A/^E/^U are
+            // already the shell's own bindings everywhere else and there is
+            // nothing to add. Rendering such a row off its platform would show a
+            // title and an empty key column, which reads as a broken shortcut
+            // rather than an absent one.
+            const rows = SHORTCUTS.filter(
+              (s) => s.category === category && combosFor(s, mac).length > 0,
+            );
             if (rows.length === 0) return null;
             return (
               <div key={category}>

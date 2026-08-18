@@ -22,7 +22,8 @@ import { inbox, isOsc9Notification, parseOsc133 } from "../inbox/inbox";
 import { ANSI_DARK, ANSI_LIGHT } from "../shared/ansi";
 import { notifyError, notifyRedirect } from "../shared/notify";
 import { terminalPrefs, type TerminalPrefs } from "../shared/settings";
-import { chromeless, layoutSlot, windowSeed } from "../shell";
+import { chromeless, layoutSlot, pathForFile, windowSeed } from "../shell";
+import { isMac } from "../shortcuts/registry";
 import {
   type PaneMount,
   parseLayouts,
@@ -32,6 +33,7 @@ import {
   terminalIds,
 } from "./model";
 import { handleKeyEvent } from "./terminalKeys";
+import { clipboardImageIndex, clipboardImageName, isFileDrop, pathPayload } from "./terminalPaste";
 
 /**
  * Terminal ids this page expects to *resume*.
@@ -425,6 +427,105 @@ function playBell(): void {
 }
 
 /** Create the session (idempotent) without touching the DOM. */
+/**
+ * Files a terminal pane accepts: a drop onto it, and an image pasted into it.
+ *
+ * **Both end as a path typed at the prompt**, never as bytes on the wire — a pty
+ * carries a byte stream, so there is no protocol for handing a program a
+ * picture. Every terminal emulator that "supports" dropping an image types its
+ * path, and every coding agent (Claude Code, Codex) reads an image path as an
+ * image. `terminalPaste.ts` holds the rules; this holds the listeners and the
+ * one asynchronous step.
+ *
+ * Where the path comes from differs by shell, and only here:
+ *
+ * - **Desktop, dropped file** — Electron resolves the real path
+ *   (`webUtils.getPathForFile`). Nothing is copied; the terminal points at the
+ *   file the user already has.
+ * - **Browser tab, dropped file** — the File API withholds the path by design,
+ *   so the bytes are uploaded and the daemon's copy is what gets typed.
+ * - **Either shell, pasted image** — a clipboard image has no path anywhere, so
+ *   it is always uploaded.
+ *
+ * Listeners go on the session's own container, which outlives every mount: a
+ * pane moved between docks or pulled into another window keeps this without
+ * re-registering, the same property the terminal itself has.
+ */
+function attachFileInput(s: Session, send: (data: string) => void): void {
+  /** Type the paths, and tell the user when one of them could not be had. */
+  const typePaths = (paths: string[], failures: number) => {
+    const payload = pathPayload(paths);
+    if (payload) send(payload);
+    if (failures > 0) {
+      notifyError(
+        failures === 1 ? "Adding a file to the terminal" : `Adding ${failures} files to the terminal`,
+        new Error("could not be read"),
+      );
+    }
+  };
+
+  /** Resolve one dropped file to a path — the shell's, or the daemon's copy. */
+  const resolve = async (file: File): Promise<string | null> => {
+    const local = pathForFile(file);
+    if (local) return local;
+    try {
+      return await api.ptyPasteFile(s.id, file, file.name);
+    } catch (e) {
+      // Logged rather than thrown: one unreadable file in a multi-file drop
+      // must not cost the user the others.
+      console.warn("veld: could not upload a dropped file", e);
+      return null;
+    }
+  };
+
+  s.container.addEventListener("dragover", (e) => {
+    if (!isFileDrop([...(e.dataTransfer?.types ?? [])])) return;
+    // Without preventDefault the browser refuses the drop outright — and in the
+    // desktop app it would then *navigate* the window to the file instead.
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
+  });
+
+  s.container.addEventListener("drop", (e) => {
+    if (!isFileDrop([...(e.dataTransfer?.types ?? [])])) return;
+    e.preventDefault();
+    // Ordered, because a multi-file drop types its paths in the order the user
+    // sees them; `Promise.all` preserves it where a race would not.
+    const files = [...(e.dataTransfer?.files ?? [])];
+    if (files.length === 0) return;
+    void Promise.all(files.map(resolve)).then((paths) => {
+      typePaths(paths.filter((p): p is string => p !== null), paths.filter((p) => p === null).length);
+    });
+  });
+
+  // **Capture phase.** The event's target is xterm's own hidden textarea, which
+  // is a descendant of this container — so capturing is what runs this *before*
+  // xterm's handler rather than after it has already pasted.
+  s.container.addEventListener(
+    "paste",
+    (e) => {
+      const data = e.clipboardData;
+      if (!data) return;
+      const index = clipboardImageIndex([...data.items].map((i) => ({ kind: i.kind, type: i.type })));
+      // -1 is the overwhelmingly common case — ordinary text — and it must reach
+      // xterm untouched. Doing nothing here is what lets it.
+      if (index === -1) return;
+      const file = data.items[index].getAsFile();
+      if (!file) return;
+      e.preventDefault();
+      e.stopPropagation();
+      // A clipboard image has no name of its own; the daemon re-sanitises
+      // whatever it is given anyway, so this only decides readability.
+      const name = file.name || clipboardImageName(file.type);
+      void api.ptyPasteFile(s.id, file, name).then(
+        (path) => typePaths([path], 0),
+        (err) => notifyError("Pasting an image into the terminal", err),
+      );
+    },
+    true,
+  );
+}
+
 function ensure(
   id: string,
   worktreeId: number,
@@ -543,8 +644,9 @@ function ensure(
   // Read at event time, not at construction: the preference can change while a
   // shell is open and re-attaching a handler per session would be pointless work.
   term.attachCustomKeyEventHandler((e) =>
-    handleKeyEvent(e, send, prefs().shiftEnterNewline),
+    handleKeyEvent(e, send, prefs().shiftEnterNewline, isMac()),
   );
+  attachFileInput(s, send);
   // `onBinary` carries already-8-bit payloads (mouse reports), one byte per
   // char code — encoding those as UTF-8 would corrupt them.
   term.onBinary((data) => {

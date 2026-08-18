@@ -311,6 +311,17 @@ pub fn routes() -> Router {
         .route("/api/pty/sessions/{id}", delete(close_session))
         .route("/api/pty/sessions/{id}/open-url", post(open_url))
         .route("/api/pty/sessions/{id}/agent-state", post(agent_state))
+        // **The one route with its own body limit.** axum's default is 2 MB, and
+        // a paste is the only thing here that carries a file — so without this
+        // the handler's own [`MAX_PASTE_BYTES`] check is unreachable and any
+        // screenshot from a modern display is refused. Worse, it is refused
+        // *mid-upload*: the client sees a connection reset rather than a status,
+        // so the UI could not even say why. Scoped to this route, so nothing
+        // else's limit moves.
+        .route(
+            "/api/pty/sessions/{id}/paste-file",
+            post(paste_file).layer(axum::extract::DefaultBodyLimit::max(MAX_PASTE_BYTES)),
+        )
 }
 
 /// Write the shim directory a terminal's `$BROWSER` points into.
@@ -2183,6 +2194,219 @@ fn project_external_origins(
             Vec::new()
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Pasting a file into a terminal
+// ---------------------------------------------------------------------------
+
+/// Largest file this endpoint will take.
+///
+/// The payload is a picture from a clipboard or a file dragged onto a pane, and
+/// both arrive fully buffered — so this is a bound on daemon memory as much as on
+/// disk. 32 MB clears a 6K screenshot several times over and refuses a video
+/// somebody dropped by accident before it is read.
+///
+/// **This number only means anything because the route carries a matching
+/// `DefaultBodyLimit`** — see [`routes`]. axum's default is 2 MB, which silently
+/// made every value above it unreachable, and refused the upload *mid-stream* so
+/// the client saw a reset connection rather than a status it could show.
+/// `paste_file_takes_a_file_larger_than_the_axum_default` is what notices if that
+/// layer ever goes away again.
+const MAX_PASTE_BYTES: usize = 32 * 1024 * 1024;
+
+/// How long a pasted file is kept.
+///
+/// It exists to be handed to the program in the terminal *now* — an agent reads
+/// it within seconds of the paste. A day is generous for the case where the
+/// conversation is resumed later, and short enough that a directory of
+/// screenshots does not accumulate for the life of the machine.
+const PASTE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Where pasted files land.
+///
+/// The **OS temp directory**, not the worktree: the alternative writes untracked
+/// files into somebody's repo, where they show up in `git status`, in a diff a
+/// reviewer reads, and in the trash confirmation when the worktree is removed.
+/// A path under `$TMPDIR` is also what every other terminal that supports this
+/// hands to the program, so an agent reading it is on a well-trodden path.
+///
+/// Not `~/.veld`: that directory holds state veld *owns* and `veld uninstall`
+/// removes, and a scratch file the OS already knows how to reap is neither.
+fn paste_dir() -> PathBuf {
+    std::env::temp_dir().join("veld-pastes")
+}
+
+/// Reduce a client-supplied filename to something that cannot escape
+/// [`paste_dir`] or surprise a shell.
+///
+/// **Whitelist, not blacklist.** The name reaches us from a page, so it is
+/// attacker-shaped input: `../../../.ssh/authorized_keys` and a name containing a
+/// NUL are both strings a `DataTransfer` can carry. Everything outside
+/// `[A-Za-z0-9._-]` becomes `_`, which leaves nothing that means "parent
+/// directory", "path separator" or "end of string" in any of them.
+///
+/// A leading dot is stripped for the same reason: it is the one remaining way a
+/// fully-legal name hides the file from the user who has to find it. And the
+/// result is capped, because a 4 KB name is an `ENAMETOOLONG` at best.
+fn sanitize_paste_name(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let cleaned = cleaned.trim_start_matches('.').to_owned();
+    // 64 bytes, and by *character* count — every retained character is ASCII, so
+    // the two are the same here and this cannot split a codepoint.
+    let capped: String = cleaned.chars().take(64).collect();
+    if capped.is_empty() {
+        "paste".to_owned()
+    } else {
+        capped
+    }
+}
+
+/// Delete pasted files older than [`PASTE_TTL`].
+///
+/// On the write path rather than in `gc.rs` deliberately: the directory only ever
+/// grows when somebody pastes, so the moment of a paste is exactly when it is
+/// worth a look, and this keeps the whole feature in one file with no timer to
+/// reason about. Failures are ignored throughout — a file that cannot be read or
+/// removed is not a reason to fail the paste the user is waiting on.
+fn prune_pastes(dir: &FsPath) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let Ok(meta) = entry.metadata() else { continue };
+        if !meta.is_file() {
+            continue;
+        }
+        let stale = meta
+            .modified()
+            .ok()
+            .and_then(|m| m.elapsed().ok())
+            .is_some_and(|age| age > PASTE_TTL);
+        if stale {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct PasteFileQuery {
+    /// The client's name for the file — a hint for readability only. See
+    /// [`sanitize_paste_name`]: it never decides where the file lands.
+    #[serde(default)]
+    name: Option<String>,
+}
+
+#[derive(Serialize)]
+struct PasteFileResponse {
+    /// Absolute path of the file just written. The caller types this into the
+    /// terminal; it does not read the file back.
+    path: String,
+}
+
+/// Write bytes the page could not give a path to, and answer with one.
+///
+/// **Why this exists at all:** a pty carries bytes, not pictures, so "paste an
+/// image into Claude Code" universally means "type the path of an image file".
+/// A clipboard image has no path — it is bytes in the browser — and neither does
+/// a file dropped into a plain browser tab, where the File API withholds it. So
+/// something has to put those bytes on the daemon's filesystem, next to the shell
+/// that will read them. A file dropped in the **desktop app** never comes here:
+/// Electron hands the renderer a real path, and copying a file the user already
+/// has would be worse than pointing at it.
+///
+/// Gated three ways, because it is a write endpoint:
+///
+/// - **CSRF**, like every mutating route here — without it a page in any browser
+///   could drop files onto the developer's disk.
+/// - **A live session id**, which a cross-origin page cannot guess: ids are
+///   client-chosen but the session must already exist in [`SESSIONS`], so this
+///   writes only for someone who already has a terminal open.
+/// - **A size cap** ([`MAX_PASTE_BYTES`]), enforced by the route's own body limit
+///   layer and re-checked here.
+///
+/// The filename is never trusted — see [`sanitize_paste_name`] — and the random
+/// prefix means two pastes of `screenshot.png` cannot collide or overwrite.
+async fn paste_file(
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Query(q): Query<PasteFileQuery>,
+    body: Bytes,
+) -> Result<Json<PasteFileResponse>, ApiError> {
+    check_csrf(&headers)
+        .map_err(|_| err(StatusCode::FORBIDDEN, "missing X-Veld-Request header"))?;
+    if !valid_session_id(&id) {
+        return Err(err(StatusCode::BAD_REQUEST, "invalid session id"));
+    }
+    if body.is_empty() {
+        return Err(err(StatusCode::BAD_REQUEST, "empty file"));
+    }
+    // Belt to the route layer's braces — the layer is what actually stops a large
+    // upload being buffered, and this is what keeps the answer a readable one if
+    // the layer is ever lost in a refactor. Same constant, so they cannot
+    // disagree about where the line is.
+    if body.len() > MAX_PASTE_BYTES {
+        return Err(err(StatusCode::PAYLOAD_TOO_LARGE, "file is too large"));
+    }
+    if !SESSIONS.lock().await.contains_key(&id) {
+        return Err(err(StatusCode::NOT_FOUND, "no such terminal session"));
+    }
+
+    let dir = paste_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| {
+        warn!("could not create {}: {e}", dir.display());
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "could not write the file",
+        )
+    })?;
+    // Owner-only, because `/tmp` is shared: the sticky bit stops another user
+    // deleting these, not reading them.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    }
+    prune_pastes(&dir);
+
+    let name = format!(
+        "{}-{}",
+        uuid::Uuid::new_v4().simple(),
+        sanitize_paste_name(q.name.as_deref().unwrap_or(""))
+    );
+    let path = dir.join(&name);
+    // Belt and braces over `sanitize_paste_name`: if the name it returned could
+    // ever contain a separator, this is what notices. A guard the compiler cannot
+    // give us, placed where the value is finally used.
+    if path.parent() != Some(dir.as_path()) {
+        return Err(err(StatusCode::BAD_REQUEST, "invalid file name"));
+    }
+    std::fs::write(&path, &body).map_err(|e| {
+        warn!("could not write {}: {e}", path.display());
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "could not write the file",
+        )
+    })?;
+    let _ = veld_core::paths::set_owner_only(&path);
+
+    debug!(
+        "wrote {} bytes to {} for terminal {id}",
+        body.len(),
+        path.display()
+    );
+    Ok(Json(PasteFileResponse {
+        path: path.display().to_string(),
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -4862,6 +5086,138 @@ mod tests {
             }
         }
 
+        /// POST a body to the paste endpoint over real HTTP.
+        ///
+        /// **Over the wire on purpose.** The bug this exists for — axum's 2 MB
+        /// default body limit truncating a paste — is invisible to a direct call
+        /// of the handler, because it lives in a layer the handler never sees.
+        /// Only a real request goes through the layer.
+        async fn post_paste(
+            addr: SocketAddr,
+            sid: &str,
+            name: &str,
+            body: Vec<u8>,
+        ) -> (reqwest::StatusCode, String) {
+            let res = reqwest::Client::new()
+                .post(format!(
+                    "http://{addr}/api/pty/sessions/{sid}/paste-file?name={name}"
+                ))
+                .header("X-Veld-Request", "1")
+                .body(body)
+                .send()
+                .await
+                .expect("request");
+            let status = res.status();
+            (status, res.text().await.unwrap_or_default())
+        }
+
+        #[tokio::test]
+        async fn paste_file_takes_a_file_larger_than_the_axum_default() {
+            // The regression: axum caps a buffered body at 2 MB unless the route
+            // says otherwise, so `MAX_PASTE_BYTES` was dead code and a screenshot
+            // from any modern display was refused *mid-upload* — the client saw a
+            // connection reset, not a status. 3 MB is the smallest size that
+            // proves the layer is present; asserting at `MAX_PASTE_BYTES` itself
+            // would cost 32 MB of allocation per run for nothing extra.
+            let addr = serve().await;
+            let dir = tempfile::tempdir().unwrap();
+            let sid = session_id();
+            let _client = open(addr, &sid, dir.path(), "").await;
+
+            let (status, body) =
+                post_paste(addr, &sid, "big.png", vec![7u8; 3 * 1024 * 1024]).await;
+            assert_eq!(status, reqwest::StatusCode::OK, "3 MB was refused: {body}");
+
+            let path = serde_json::from_str::<serde_json::Value>(&body).unwrap()["path"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            let written = std::fs::read(&path).unwrap();
+            assert_eq!(written.len(), 3 * 1024 * 1024, "the file was truncated");
+            assert!(written.iter().all(|b| *b == 7), "the bytes were mangled");
+            let _ = std::fs::remove_file(&path);
+
+            end_session(&sid, "test cleanup").await;
+        }
+
+        #[tokio::test]
+        async fn paste_file_refuses_a_body_past_the_cap() {
+            // The other side of the same layer: past the cap it must be a status
+            // the UI can show, not a reset connection. The layer answers before
+            // the handler does, so this asserts the *status*, not the message.
+            let addr = serve().await;
+            let dir = tempfile::tempdir().unwrap();
+            let sid = session_id();
+            let _client = open(addr, &sid, dir.path(), "").await;
+
+            let (status, _) =
+                post_paste(addr, &sid, "huge.bin", vec![0u8; MAX_PASTE_BYTES + 1]).await;
+            assert_eq!(status, reqwest::StatusCode::PAYLOAD_TOO_LARGE);
+
+            end_session(&sid, "test cleanup").await;
+        }
+
+        #[tokio::test]
+        async fn paste_file_writes_only_inside_the_paste_directory() {
+            // The name comes from a page, so it is attacker-shaped. Asserted on
+            // the *answer* rather than on the sanitiser, because what matters is
+            // where the bytes ended up.
+            let addr = serve().await;
+            let dir = tempfile::tempdir().unwrap();
+            let sid = session_id();
+            let _client = open(addr, &sid, dir.path(), "").await;
+
+            let (status, body) = post_paste(
+                addr,
+                &sid,
+                "..%2F..%2F..%2Fveld-escaped.png",
+                b"png".to_vec(),
+            )
+            .await;
+            assert_eq!(status, reqwest::StatusCode::OK);
+            let path = serde_json::from_str::<serde_json::Value>(&body).unwrap()["path"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            assert_eq!(
+                std::path::Path::new(&path).parent(),
+                Some(paste_dir().as_path()),
+                "a hostile name escaped the paste directory: {path}"
+            );
+            let _ = std::fs::remove_file(&path);
+
+            end_session(&sid, "test cleanup").await;
+        }
+
+        #[tokio::test]
+        async fn paste_file_refuses_a_session_that_does_not_exist() {
+            // The gate that keeps this from being a "write a file anywhere on the
+            // developer's disk" endpoint for anything that got past CSRF.
+            let addr = serve().await;
+            let (status, _) = post_paste(addr, &session_id(), "x.png", b"png".to_vec()).await;
+            assert_eq!(status, reqwest::StatusCode::NOT_FOUND);
+        }
+
+        #[tokio::test]
+        async fn paste_file_requires_the_csrf_header() {
+            let addr = serve().await;
+            let dir = tempfile::tempdir().unwrap();
+            let sid = session_id();
+            let _client = open(addr, &sid, dir.path(), "").await;
+
+            let res = reqwest::Client::new()
+                .post(format!(
+                    "http://{addr}/api/pty/sessions/{sid}/paste-file?name=x.png"
+                ))
+                .body(b"png".to_vec())
+                .send()
+                .await
+                .expect("request");
+            assert_eq!(res.status(), reqwest::StatusCode::FORBIDDEN);
+
+            end_session(&sid, "test cleanup").await;
+        }
+
         #[tokio::test]
         async fn upgrade_requires_an_allowed_origin() {
             let addr = serve().await;
@@ -6073,5 +6429,116 @@ mod tests {
             assert!(saw_idle, "an exited pane must read as idle");
             end_session(&sid, "test cleanup").await;
         }
+    }
+    // -----------------------------------------------------------------------
+    // Pasting a file into a terminal
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn sanitize_paste_name_keeps_an_ordinary_filename_readable() {
+        // The name is only ever a hint, but a hint nobody can read defeats its
+        // own purpose — the point is that the path in the terminal says what it
+        // points at.
+        assert_eq!(sanitize_paste_name("screenshot.png"), "screenshot.png");
+        assert_eq!(sanitize_paste_name("My-Report_v2.pdf"), "My-Report_v2.pdf");
+    }
+
+    #[test]
+    fn sanitize_paste_name_cannot_escape_the_paste_directory() {
+        // Attacker-shaped input: a `DataTransfer` name comes from a page.
+        for hostile in [
+            "../../../.ssh/authorized_keys",
+            "..",
+            "../",
+            "/etc/passwd",
+            "a/b/c",
+            r"a\b\c",
+        ] {
+            let safe = sanitize_paste_name(hostile);
+            assert!(!safe.contains('/'), "{hostile} kept a separator: {safe}");
+            assert!(!safe.contains('\\'), "{hostile} kept a separator: {safe}");
+            assert_ne!(safe, "..");
+            // The property that actually matters, asserted on the composed path
+            // rather than on the string: the file lands in the directory.
+            let dir = paste_dir();
+            let path = dir.join(format!("{}-{safe}", uuid::Uuid::new_v4().simple()));
+            assert_eq!(
+                path.parent(),
+                Some(dir.as_path()),
+                "{hostile} escaped: {}",
+                path.display()
+            );
+        }
+    }
+
+    #[test]
+    fn sanitize_paste_name_replaces_shell_and_control_characters() {
+        assert_eq!(sanitize_paste_name("a b;rm -rf c"), "a_b_rm_-rf_c");
+        assert_eq!(sanitize_paste_name("a\nb"), "a_b");
+        assert_eq!(sanitize_paste_name("a\0b"), "a_b");
+        assert_eq!(sanitize_paste_name("$(id).png"), "__id_.png");
+    }
+
+    #[test]
+    fn sanitize_paste_name_never_produces_a_hidden_or_empty_name() {
+        assert_eq!(sanitize_paste_name(""), "paste");
+        // Separators are *replaced*, not dropped — so a name made only of them
+        // survives as underscores rather than falling back. Ugly and safe, which
+        // is the right trade for input this shape: a real `File` hands us a
+        // basename, so a full path arriving here is the hostile case.
+        assert_eq!(sanitize_paste_name("///"), "___");
+        assert_eq!(sanitize_paste_name("/etc/passwd"), "_etc_passwd");
+        // A leading dot is the one legal spelling that hides the file from the
+        // person who has to find it. Interior dots are kept.
+        assert_eq!(sanitize_paste_name(".hidden"), "hidden");
+        assert_eq!(sanitize_paste_name("....png"), "png");
+        assert_eq!(sanitize_paste_name("a.b.png"), "a.b.png");
+    }
+
+    #[test]
+    fn sanitize_paste_name_caps_a_long_name() {
+        let long = "x".repeat(500);
+        assert_eq!(sanitize_paste_name(&long).len(), 64);
+        // Non-ASCII is replaced *before* the cap, so the cap can never split a
+        // codepoint — asserted rather than assumed, since that is what would
+        // panic rather than merely truncate.
+        let wide = "é".repeat(500);
+        assert_eq!(sanitize_paste_name(&wide).len(), 64);
+    }
+
+    #[test]
+    fn prune_pastes_removes_stale_files_and_keeps_fresh_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        let fresh = dir.path().join("fresh.png");
+        let stale = dir.path().join("stale.png");
+        std::fs::write(&fresh, b"a").unwrap();
+        std::fs::write(&stale, b"b").unwrap();
+        // Age the stale one past the TTL by rewriting its mtime. `File::set_modified`
+        // rather than the `filetime` crate: a new dependency would drag in a
+        // `Cargo.lock` change and a `THIRD-PARTY-LICENSES.md` regeneration for a
+        // one-line test helper the standard library already has.
+        let old = std::time::SystemTime::now() - (PASTE_TTL + Duration::from_secs(60));
+        std::fs::File::options()
+            .write(true)
+            .open(&stale)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+
+        prune_pastes(dir.path());
+
+        assert!(fresh.exists(), "a file inside the TTL must survive");
+        assert!(!stale.exists(), "a file past the TTL must be removed");
+    }
+
+    #[test]
+    fn prune_pastes_leaves_a_subdirectory_alone_and_survives_a_missing_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        prune_pastes(dir.path());
+        assert!(sub.exists());
+        // The first paste on a fresh machine prunes before the directory exists.
+        prune_pastes(&dir.path().join("does-not-exist"));
     }
 }

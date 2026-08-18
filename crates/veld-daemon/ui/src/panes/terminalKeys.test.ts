@@ -190,3 +190,94 @@ describe("the shiftEnterNewline preference", () => {
     expect(sent).toEqual([SHIFT_ENTER_SEQUENCE, SHIFT_ENTER_SEQUENCE]);
   });
 });
+
+/** `run`, but on a Mac. The chords below exist nowhere else. */
+function runMac(init: Parameters<typeof key>[0]) {
+  const { e, wasPrevented } = key(init);
+  const sent: string[] = [];
+  const handled = handleKeyEvent(e, (d) => sent.push(d), true, true);
+  return { handled, sent, prevented: wasPrevented() };
+}
+
+describe("the macOS line-editing chords", () => {
+  it("sends ^A for ⌘← and ^E for ⌘→, and keeps them from xterm", () => {
+    // What every mac terminal emulator binds, and what Veld sent *nothing* for
+    // before this: xterm.js's arrow arm has an explicit `if (ev.metaKey) break`.
+    const left = runMac({ code: "ArrowLeft", key: "ArrowLeft", meta: true });
+    expect(left.sent).toEqual(["\x01"]);
+    expect(left.handled).toBe(false);
+    expect(left.prevented).toBe(true);
+
+    const right = runMac({ code: "ArrowRight", key: "ArrowRight", meta: true });
+    expect(right.sent).toEqual(["\x05"]);
+    expect(right.handled).toBe(false);
+  });
+
+  it("sends ^U for ⌘⌫ — the one chord that previously did the wrong thing", () => {
+    // xterm's Backspace arm checks only Shift and Alt, so ⌘⌫ reached the shell
+    // as a bare DEL: one character, where a mac text field deletes the line.
+    // `preventDefault` is what stops the shell getting the kill *and* the DEL.
+    const r = runMac({ code: "Backspace", key: "Backspace", meta: true });
+    expect(r.sent).toEqual(["\x15"]);
+    expect(r.handled).toBe(false);
+    expect(r.prevented).toBe(true);
+  });
+
+  it("swallows the matching keyup, which xterm has no keydown for", () => {
+    const r = runMac({ code: "ArrowLeft", key: "ArrowLeft", meta: true, type: "keyup" });
+    expect(r.sent).toEqual([]);
+    expect(r.handled).toBe(false);
+  });
+
+  it("claims none of these off a Mac, where ⌘ is Super and belongs to the WM", () => {
+    for (const k of ["ArrowLeft", "ArrowRight", "Backspace"]) {
+      const r = run({ code: k, key: k, meta: true });
+      expect(r.sent, `${k} must reach xterm off a Mac`).toEqual([]);
+      expect(r.handled).toBe(true);
+    }
+  });
+
+  it("leaves every other modifier's version of the chord alone", () => {
+    // ⌘⇧← selects in a text field and is a chord programs bind for themselves;
+    // ⌃⌘← is a Spaces gesture. Claiming a superset eats somebody else's binding.
+    for (const extra of [{ shift: true }, { alt: true }, { ctrl: true }]) {
+      const r = runMac({ code: "ArrowLeft", key: "ArrowLeft", meta: true, ...extra });
+      expect(r.sent).toEqual([]);
+      expect(r.handled).toBe(true);
+    }
+  });
+
+  it("leaves ⌥ arrows and ⌥⌫ to xterm, which already sends word motions for them", () => {
+    // Verified on a real Mac before this shipped: these work today. Re-spelling
+    // them would only change bytes a TUI may already have bound.
+    for (const k of ["ArrowLeft", "ArrowRight", "Backspace"]) {
+      const r = runMac({ code: k, key: k, alt: true });
+      expect(r.sent).toEqual([]);
+      expect(r.handled).toBe(true);
+    }
+  });
+
+  it("claims no ⌘↑/⌘↓ — Cocoa means 'the document', and a shell line has none", () => {
+    for (const k of ["ArrowUp", "ArrowDown"]) {
+      const r = runMac({ code: k, key: k, meta: true });
+      expect(r.sent).toEqual([]);
+      expect(r.handled).toBe(true);
+    }
+  });
+
+  it("defaults to off, so a caller that has not been updated is unchanged", () => {
+    const sent: string[] = [];
+    // Three arguments: the signature before `mac` existed.
+    expect(
+      handleKeyEvent(key({ code: "ArrowLeft", key: "ArrowLeft", meta: true }).e, (d) => sent.push(d), true),
+    ).toBe(true);
+    expect(sent).toEqual([]);
+  });
+
+  it("does not shadow the one ⌘ chord the app claims from a terminal", () => {
+    // ⌘/ opens the Shortcuts overview and must still reach the window listener.
+    const r = runMac({ code: "Slash", key: "/", meta: true });
+    expect(r.sent).toEqual([]);
+    expect(r.handled).toBe(false);
+  });
+});
