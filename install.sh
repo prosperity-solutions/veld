@@ -130,12 +130,22 @@ CURL_PROGRESS="--progress-bar"
 # That header is exactly what a rate-limiting CDN sends, so without a cap an
 # incident turns a failed install into a half-hour stall with the app already quit.
 #
-# 30s, and the reason it does not have to cover the ~113 MB app archive: that timer
-# is reset once, before the *first* attempt, and includes transfer time — so a cap
-# only ever protects retries that happen early. It costs nothing anyway, because
-# every failure curl will retry is a status line, which arrives just as fast for a
-# 113 MB asset as for a 2 KB one; the slow-then-fail case is a dead transfer, and
-# that is exit 18/56, outside the retry set with or without a cap.
+# 30s, and be precise about what that buys and what it spends. The timer is reset
+# once, before the *first* attempt, and **includes transfer time** — so the cap only
+# ever protects retries that begin early.
+#
+# What it spends: a **timeout** is in curl's retry set, and it is by definition the
+# slow failure. This script sets no `--connect-timeout`, so a blackholed SYN (a DROP
+# firewall, a captive network) burns curl's default connect timeout on attempt one
+# and the cap then refuses the rest — one attempt where an uncapped run would make
+# four. That is accepted deliberately: four attempts at curl's default is twenty
+# minutes of an installer looking hung, which is worse than not retrying.
+#
+# What it costs nothing: asset size. The download failures curl retries by *status*
+# are status lines, and those arrive as fast for a 113 MB asset as for a 2 KB one.
+# A transfer that dies part-way is not the exception to that — it is exit 18/56,
+# outside the retry set with or without a cap (measured: one connection, no second
+# attempt).
 CURL_RETRY="--retry 3 --retry-delay 2 --retry-max-time 30"
 
 # --- Detect platform ---
@@ -215,8 +225,9 @@ else
   # `errexit` for this command, which is what lets the error message run.
   #
   # `-f` plus `pipefail` also means a 200 whose body has no `tag_name` lands here
-  # (grep exits 1), so the message below covers "did not answer" and "answered
-  # with something unparseable" alike.
+  # (grep exits 1). That case is why the message below opens cause-neutrally: GitHub
+  # *was* reached, so a first line asserting it was not would be a false statement
+  # about the one case curl said nothing about.
   if ! TAG="$(curl -fsSL $CURL_RETRY -H "Accept: application/json" "https://api.github.com/repos/${REPO}/releases/latest" | grep -o '"tag_name": *"[^"]*"' | cut -d'"' -f4)"; then
     TAG=""
   fi
@@ -224,16 +235,17 @@ else
 fi
 
 if [ -z "$VERSION" ]; then
-  # Named rather than left as a bare "could not determine": `-f` means an empty
-  # TAG is almost always a failure to reach GitHub, and during an incident that is
-  # what everybody hits at once. Anyone whose network is fine reads past it.
+  # A neutral first line and the causes underneath it as possibilities, because
+  # three unrelated failures land here and the script cannot tell which: GitHub
+  # answered an error, nothing answered at all, or something answered `200` with a
+  # body that has no `tag_name`. curl printed its own reason above for the first
+  # two and *nothing* for the third, so the lines below have to stand on their own.
   #
-  # Both causes named, because this line is reached by both and they need opposite
-  # actions. curl retries a DNS failure (measured: four attempts, 3.5s), so a
-  # laptop with no network arrives here too, after a pause, and telling it to wait
-  # for GitHub to recover would be wrong. `curl -sS` has already printed which one
-  # it was on the line above.
-  echo "Error: could not reach the GitHub API to find the latest version."
+  # The offline case is listed because curl retries a DNS failure — measured, four
+  # attempts and 6.1s with the flags above — so a laptop with no network reaches
+  # this after a pause long enough to look like GitHub being slow, and telling it
+  # to wait for GitHub to recover would send it in the wrong direction.
+  echo "Error: could not determine the latest version from the GitHub API."
   echo "  If GitHub is having an incident (https://www.githubstatus.com/), try again later."
   echo "  If this machine is offline or behind a proxy, that is the more likely cause."
   echo "  To skip this lookup entirely, pin a version: VELD_VERSION=x.y.z"

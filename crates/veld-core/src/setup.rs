@@ -3362,8 +3362,11 @@ mod tests {
     /// accepted by nobody and answered by nobody. Without this a regression would
     /// hang the suite instead of failing it.
     ///
-    /// These tests sleep the real `INSTALL_SCRIPT_RETRY_DELAY` — about 6s across the
-    /// three of them. `#[tokio::test(start_paused = true)]` would erase that, and is
+    /// Two of the four tests using this sleep the real `INSTALL_SCRIPT_RETRY_DELAY`
+    /// — 4s in `a_rate_limited_download_fails_instead_of_returning_prose` and 2s in
+    /// `a_transient_failure_is_retried_and_the_script_still_arrives`; the other two
+    /// return before any retry and cost nothing.
+    /// `#[tokio::test(start_paused = true)]` would erase those 6s, and is
     /// deliberately not used: paused time also drives reqwest's own timeout, so the
     /// guard above would fire the instant the client waited on a socket. A slow test
     /// that cannot hang beats a fast one that can.
