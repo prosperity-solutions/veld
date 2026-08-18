@@ -322,6 +322,11 @@ pub fn routes() -> Router {
             "/api/pty/sessions/{id}/paste-file",
             post(paste_file).layer(axum::extract::DefaultBodyLimit::max(MAX_PASTE_BYTES)),
         )
+        // Same limit, same reason — see the comment above.
+        .route(
+            "/api/pty/sessions/{id}/paste-image",
+            post(paste_image).layer(axum::extract::DefaultBodyLimit::max(MAX_PASTE_BYTES)),
+        )
 }
 
 /// Write the shim directory a terminal's `$BROWSER` points into.
@@ -2361,6 +2366,24 @@ async fn paste_file(
         return Err(err(StatusCode::NOT_FOUND, "no such terminal session"));
     }
 
+    let path = write_paste(q.name.as_deref().unwrap_or(""), &body)?;
+    debug!(
+        "wrote {} bytes to {} for terminal {id}",
+        body.len(),
+        path.display()
+    );
+    Ok(Json(PasteFileResponse {
+        path: path.display().to_string(),
+    }))
+}
+
+/// Write bytes into [`paste_dir`] under a name that cannot escape it, pruning
+/// stale files on the way.
+///
+/// Shared by [`paste_file`] (which answers with the path) and [`paste_image`]
+/// (which hands the path to the clipboard) so the two cannot drift on where files
+/// land, what they are named, or who may read them.
+fn write_paste(name_hint: &str, body: &[u8]) -> Result<PathBuf, ApiError> {
     let dir = paste_dir();
     std::fs::create_dir_all(&dir).map_err(|e| {
         warn!("could not create {}: {e}", dir.display());
@@ -2381,7 +2404,7 @@ async fn paste_file(
     let name = format!(
         "{}-{}",
         uuid::Uuid::new_v4().simple(),
-        sanitize_paste_name(q.name.as_deref().unwrap_or(""))
+        sanitize_paste_name(name_hint)
     );
     let path = dir.join(&name);
     // Belt and braces over `sanitize_paste_name`: if the name it returned could
@@ -2390,7 +2413,7 @@ async fn paste_file(
     if path.parent() != Some(dir.as_path()) {
         return Err(err(StatusCode::BAD_REQUEST, "invalid file name"));
     }
-    std::fs::write(&path, &body).map_err(|e| {
+    std::fs::write(&path, body).map_err(|e| {
         warn!("could not write {}: {e}", path.display());
         err(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -2398,15 +2421,275 @@ async fn paste_file(
         )
     })?;
     let _ = veld_core::paths::set_owner_only(&path);
+    Ok(path)
+}
 
-    debug!(
-        "wrote {} bytes to {} for terminal {id}",
-        body.len(),
-        path.display()
-    );
-    Ok(Json(PasteFileResponse {
-        path: path.display().to_string(),
+// ---------------------------------------------------------------------------
+// Putting an image on the clipboard, so ^V inserts it
+// ---------------------------------------------------------------------------
+
+/// Image formats this will put on a clipboard, sniffed from the bytes.
+///
+/// **Sniffed, never taken from the caller.** The MIME a `DataTransfer` reports
+/// comes from the page, and the format decides which clipboard flavour the bytes
+/// are filed under — get that wrong and the clipboard holds JPEG bytes labelled
+/// `PNG`, which is not a refusal but a *corrupt* clipboard that the next paste
+/// anywhere in the OS renders as garbage. Measured on macOS: reading a JPEG
+/// `as «class PNGf»` succeeds and files 779 JPEG bytes under the PNG flavour.
+///
+/// A closed list, so an unrecognised payload is refused rather than guessed at.
+const IMAGE_MAGIC: &[(&str, &[u8])] = &[
+    ("image/png", b"\x89PNG\r\n\x1a\n"),
+    ("image/jpeg", b"\xff\xd8\xff"),
+    ("image/gif", b"GIF8"),
+    // TIFF, both byte orders.
+    ("image/tiff", b"II*\x00"),
+    ("image/tiff", b"MM\x00*"),
+    ("image/bmp", b"BM"),
+];
+
+/// The format of an image, or `None` for anything not on the closed list.
+///
+/// WebP is checked separately because its magic is split: `RIFF`, four bytes of
+/// length, then `WEBP`.
+fn sniff_image(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        return Some("image/webp");
+    }
+    IMAGE_MAGIC
+        .iter()
+        .find(|(_, magic)| bytes.starts_with(magic))
+        .map(|(mime, _)| *mime)
+}
+
+/// The AppleScript that loads a file into the clipboard as a PNG.
+///
+/// **The path is passed in the environment, never interpolated into this
+/// string.** A dropped file's name is chosen by whoever made the file, and
+/// AppleScript can run shell commands (`do shell script`) — so building this
+/// script by concatenation would turn a filename into code. `system attribute`
+/// reads the value as data, which makes the injection impossible by construction
+/// rather than by escaping. `paste_image_ignores_applescript_in_a_filename` is
+/// the test that holds it.
+#[cfg(target_os = "macos")]
+const CLIPBOARD_SCRIPT: &str = "set the clipboard to (read (POSIX file (system attribute \"VELD_PASTE_PATH\")) as «class PNGf»)";
+
+/// Convert an image to PNG beside itself, returning the new path.
+///
+/// `sips` is part of macOS, so this needs nothing installed. Only reached for a
+/// non-PNG: normalising to one format means the AppleScript above needs one
+/// flavour rather than a class table, and a class table is exactly where the
+/// mislabelling bug above comes from.
+#[cfg(target_os = "macos")]
+async fn convert_to_png(src: &FsPath) -> Result<PathBuf, String> {
+    let out = paste_dir().join(format!("{}.png", uuid::Uuid::new_v4().simple()));
+    let status = tokio::process::Command::new("sips")
+        .args(["-s", "format", "png"])
+        .arg(src)
+        .arg("--out")
+        .arg(&out)
+        .kill_on_drop(true)
+        .output()
+        .await
+        .map_err(|e| format!("sips could not be run: {e}"))?;
+    if !status.status.success() {
+        return Err(format!(
+            "sips could not convert the image: {}",
+            String::from_utf8_lossy(&status.stderr).trim()
+        ));
+    }
+    let _ = veld_core::paths::set_owner_only(&out);
+    Ok(out)
+}
+
+/// Put an image file on this machine's clipboard.
+///
+/// Best-effort by design: the caller's fallback is to type the file's path
+/// instead, which is useful in its own right, so every failure here is a message
+/// rather than a panic. The error text reaches the UI, because "no clipboard tool
+/// on this machine" is something the user can act on and we cannot.
+#[cfg(target_os = "macos")]
+async fn load_clipboard_image(path: &FsPath, mime: &str) -> Result<(), String> {
+    let png = if mime == "image/png" {
+        path.to_path_buf()
+    } else {
+        convert_to_png(path).await?
+    };
+    let out = tokio::process::Command::new("osascript")
+        .args(["-e", CLIPBOARD_SCRIPT])
+        .env("VELD_PASTE_PATH", &png)
+        .kill_on_drop(true)
+        .output()
+        .await
+        .map_err(|e| format!("osascript could not be run: {e}"))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "osascript could not set the clipboard: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ))
+    }
+}
+
+/// The Linux half: whichever of the two clipboard tools is installed.
+///
+/// Both take the real MIME rather than converting, because both label the
+/// selection with what they are told — so passing the sniffed type is correct
+/// without a conversion step, and there is no `sips` equivalent to rely on being
+/// present anyway.
+///
+/// Wayland first: a session running `wl-copy` may have no X server at all, while
+/// `xclip` under XWayland works but writes the selection an X client sees.
+#[cfg(not(target_os = "macos"))]
+async fn load_clipboard_image(path: &FsPath, mime: &str) -> Result<(), String> {
+    let bytes = tokio::fs::read(path)
+        .await
+        .map_err(|e| format!("could not read the image: {e}"))?;
+
+    // `wl-copy` reads the image from stdin; `xclip` takes a filename.
+    let wl = tokio::process::Command::new("wl-copy")
+        .args(["--type", mime])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn();
+    if let Ok(mut child) = wl {
+        if let Some(mut stdin) = child.stdin.take() {
+            use tokio::io::AsyncWriteExt;
+            let _ = stdin.write_all(&bytes).await;
+            let _ = stdin.shutdown().await;
+        }
+        if let Ok(out) = child.wait_with_output().await {
+            if out.status.success() {
+                return Ok(());
+            }
+        }
+    }
+
+    let out = tokio::process::Command::new("xclip")
+        .args(["-selection", "clipboard", "-t", mime, "-i"])
+        .arg(path)
+        .kill_on_drop(true)
+        .output()
+        .await
+        .map_err(|_| {
+            "no clipboard tool: install wl-clipboard (Wayland) or xclip (X11)".to_owned()
+        })?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "xclip could not set the clipboard: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ))
+    }
+}
+
+#[derive(Deserialize)]
+struct PasteImageQuery {
+    /// A file already on this machine, for the desktop app — which resolves a
+    /// dropped file's real path and has no reason to upload a copy. Absent for a
+    /// browser tab, which sends the bytes in the body because the File API
+    /// withholds the path there.
+    #[serde(default)]
+    path: Option<String>,
+    /// The client's name for an uploaded image. Hint only — see
+    /// [`sanitize_paste_name`].
+    #[serde(default)]
+    name: Option<String>,
+}
+
+#[derive(Serialize)]
+struct PasteImageResponse {
+    /// What the clipboard now holds, sniffed from the bytes. Logged by the
+    /// client on failure paths; not otherwise acted on.
+    mime: String,
+}
+
+/// Load an image onto this machine's clipboard, so that a `^V` sent to the pane
+/// inserts it *as an image*.
+///
+/// **Why the clipboard and not the pty:** a pty carries a byte stream, so there
+/// is no way to hand a program a picture through it. What coding agents do
+/// instead is bind `^V` to reading the OS clipboard themselves — measured against
+/// a real Claude Code in a pty: `\x16` produces `[Image #1]`, an attachment,
+/// where typing a path produces a path. So the only route from "the user has an
+/// image" to "the agent has an image" is this machine's clipboard, and this is
+/// the endpoint that gets it there for a *dropped* file, which never went via a
+/// clipboard at all.
+///
+/// A `⌘V` needs none of this: the image is already on the clipboard, so the UI
+/// sends `^V` and nothing reaches here.
+///
+/// Gated exactly like [`paste_file`] — CSRF, a live session, a size cap — with one
+/// addition: the format is **sniffed from the bytes** and anything unrecognised is
+/// refused, because the format decides which clipboard flavour the bytes are filed
+/// under and a wrong answer corrupts the user's clipboard rather than failing.
+async fn paste_image(
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Query(q): Query<PasteImageQuery>,
+    body: Bytes,
+) -> Result<Json<PasteImageResponse>, ApiError> {
+    check_csrf(&headers)
+        .map_err(|_| err(StatusCode::FORBIDDEN, "missing X-Veld-Request header"))?;
+    if !valid_session_id(&id) {
+        return Err(err(StatusCode::BAD_REQUEST, "invalid session id"));
+    }
+    if body.len() > MAX_PASTE_BYTES {
+        return Err(err(StatusCode::PAYLOAD_TOO_LARGE, "file is too large"));
+    }
+    if !SESSIONS.lock().await.contains_key(&id) {
+        return Err(err(StatusCode::NOT_FOUND, "no such terminal session"));
+    }
+
+    // Two sources, one path onwards: a file already here, or bytes to write down
+    // first. `owned` records whether we made the file, so a client-supplied one is
+    // never deleted by our own pruning.
+    let (file, sniffed) = if let Some(given) = q.path.as_deref() {
+        if given.is_empty() {
+            return Err(err(StatusCode::BAD_REQUEST, "empty path"));
+        }
+        let path = PathBuf::from(given);
+        // Read only the head: sniffing needs 12 bytes, and this must not pull a
+        // gigabyte into memory because somebody dropped a disk image.
+        let head = read_head(&path, 16)
+            .await
+            .map_err(|_| err(StatusCode::BAD_REQUEST, "could not read that file"))?;
+        let Some(mime) = sniff_image(&head) else {
+            return Err(err(StatusCode::UNSUPPORTED_MEDIA_TYPE, "not a known image"));
+        };
+        (path, mime)
+    } else {
+        if body.is_empty() {
+            return Err(err(StatusCode::BAD_REQUEST, "empty file"));
+        }
+        let Some(mime) = sniff_image(&body) else {
+            return Err(err(StatusCode::UNSUPPORTED_MEDIA_TYPE, "not a known image"));
+        };
+        (write_paste(q.name.as_deref().unwrap_or(""), &body)?, mime)
+    };
+
+    load_clipboard_image(&file, sniffed)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    debug!("put a {sniffed} on the clipboard for terminal {id}");
+    Ok(Json(PasteImageResponse {
+        mime: sniffed.to_owned(),
     }))
+}
+
+/// The first `n` bytes of a file.
+async fn read_head(path: &FsPath, n: usize) -> std::io::Result<Vec<u8>> {
+    use tokio::io::AsyncReadExt;
+    let mut f = tokio::fs::File::open(path).await?;
+    let mut buf = vec![0u8; n];
+    let read = f.read(&mut buf).await?;
+    buf.truncate(read);
+    Ok(buf)
 }
 
 // ---------------------------------------------------------------------------
@@ -5189,6 +5472,132 @@ mod tests {
             end_session(&sid, "test cleanup").await;
         }
 
+        /// POST to the clipboard endpoint over real HTTP.
+        ///
+        /// Every case below is refused **before** the clipboard is touched, which
+        /// is what makes them safe to run: a test that reached
+        /// `load_clipboard_image` would overwrite the clipboard of whoever ran the
+        /// suite. The success path is verified by hand against a running stack —
+        /// see the PR body.
+        async fn post_image(
+            addr: SocketAddr,
+            sid: &str,
+            query: &str,
+            body: Vec<u8>,
+        ) -> (reqwest::StatusCode, String) {
+            let res = reqwest::Client::new()
+                .post(format!(
+                    "http://{addr}/api/pty/sessions/{sid}/paste-image?{query}"
+                ))
+                .header("X-Veld-Request", "1")
+                .body(body)
+                .send()
+                .await
+                .expect("request");
+            let status = res.status();
+            (status, res.text().await.unwrap_or_default())
+        }
+
+        #[tokio::test]
+        async fn paste_image_refuses_bytes_that_are_not_a_known_image() {
+            let addr = serve().await;
+            let dir = tempfile::tempdir().unwrap();
+            let sid = session_id();
+            let _client = open(addr, &sid, dir.path(), "").await;
+
+            let (status, _) = post_image(addr, &sid, "name=x.png", b"not an image".to_vec()).await;
+            assert_eq!(status, reqwest::StatusCode::UNSUPPORTED_MEDIA_TYPE);
+
+            // An empty body is a different mistake and gets a different answer.
+            let (status, _) = post_image(addr, &sid, "name=x.png", Vec::new()).await;
+            assert_eq!(status, reqwest::StatusCode::BAD_REQUEST);
+
+            end_session(&sid, "test cleanup").await;
+        }
+
+        #[tokio::test]
+        async fn paste_image_refuses_a_path_that_is_not_a_known_image() {
+            // The desktop app's branch: the daemon reads the file itself, so the
+            // sniff happens on the real bytes rather than on anything the page said.
+            let addr = serve().await;
+            let dir = tempfile::tempdir().unwrap();
+            let sid = session_id();
+            let _client = open(addr, &sid, dir.path(), "").await;
+
+            let text = dir.path().join("notes.txt");
+            std::fs::write(&text, b"just words").unwrap();
+            let (status, _) = post_image(
+                addr,
+                &sid,
+                &format!("path={}", urlencoding_lite(&text.display().to_string())),
+                Vec::new(),
+            )
+            .await;
+            assert_eq!(status, reqwest::StatusCode::UNSUPPORTED_MEDIA_TYPE);
+
+            // A path that is not there at all is the caller's mistake, not ours.
+            let (status, _) =
+                post_image(addr, &sid, "path=%2Fno%2Fsuch%2Ffile.png", Vec::new()).await;
+            assert_eq!(status, reqwest::StatusCode::BAD_REQUEST);
+
+            end_session(&sid, "test cleanup").await;
+        }
+
+        #[tokio::test]
+        async fn paste_image_is_gated_like_every_other_write() {
+            let addr = serve().await;
+
+            // No live session.
+            let (status, _) =
+                post_image(addr, &session_id(), "name=x.png", PNG_HEAD.to_vec()).await;
+            assert_eq!(status, reqwest::StatusCode::NOT_FOUND);
+
+            // No CSRF header.
+            let res = reqwest::Client::new()
+                .post(format!(
+                    "http://{addr}/api/pty/sessions/{}/paste-image?name=x.png",
+                    session_id()
+                ))
+                .body(PNG_HEAD.to_vec())
+                .send()
+                .await
+                .expect("request");
+            assert_eq!(res.status(), reqwest::StatusCode::FORBIDDEN);
+        }
+
+        #[tokio::test]
+        async fn paste_image_carries_the_same_body_limit_as_paste_file() {
+            // The layer, not the handler: axum's 2 MB default would refuse a real
+            // screenshot mid-upload. Same regression as `paste_file`'s, and it needs
+            // its own assertion because it is a second route with its own layer.
+            let addr = serve().await;
+            let dir = tempfile::tempdir().unwrap();
+            let sid = session_id();
+            let _client = open(addr, &sid, dir.path(), "").await;
+
+            // 3 MB of non-image bytes: past axum's default, inside ours. Reaching
+            // the sniff (415) rather than a 413 is what proves the layer is there.
+            let mut body = b"nope".repeat(3 * 1024 * 1024 / 4);
+            body.truncate(3 * 1024 * 1024);
+            let (status, _) = post_image(addr, &sid, "name=big.png", body).await;
+            assert_eq!(
+                status,
+                reqwest::StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "3 MB should reach the format check, not be refused as too large"
+            );
+
+            end_session(&sid, "test cleanup").await;
+        }
+
+        /// Percent-encode the handful of characters a temp path can contain that
+        /// would otherwise end the query parameter. Not a general encoder — the
+        /// paths here come from `tempfile`.
+        fn urlencoding_lite(s: &str) -> String {
+            s.replace('%', "%25")
+                .replace('&', "%26")
+                .replace('#', "%23")
+        }
+
         #[tokio::test]
         async fn paste_file_refuses_a_session_that_does_not_exist() {
             // The gate that keeps this from being a "write a file anywhere on the
@@ -6540,5 +6949,77 @@ mod tests {
         assert!(sub.exists());
         // The first paste on a fresh machine prunes before the directory exists.
         prune_pastes(&dir.path().join("does-not-exist"));
+    }
+    // -----------------------------------------------------------------------
+    // Putting an image on the clipboard
+    // -----------------------------------------------------------------------
+
+    /// Smallest real PNG: the 8-byte signature is all `sniff_image` reads.
+    const PNG_HEAD: &[u8] = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR";
+
+    #[test]
+    fn sniff_image_recognises_the_formats_on_the_list() {
+        assert_eq!(sniff_image(PNG_HEAD), Some("image/png"));
+        assert_eq!(sniff_image(b"\xff\xd8\xff\xe0JFIF"), Some("image/jpeg"));
+        assert_eq!(sniff_image(b"GIF89a...."), Some("image/gif"));
+        assert_eq!(sniff_image(b"II*\x00\x08\x00\x00\x00"), Some("image/tiff"));
+        assert_eq!(sniff_image(b"MM\x00*\x00\x00\x00\x08"), Some("image/tiff"));
+        assert_eq!(sniff_image(b"BM\x36\x00\x00\x00"), Some("image/bmp"));
+        // WebP's magic is split: RIFF, four length bytes, then WEBP.
+        assert_eq!(
+            sniff_image(b"RIFF\x24\x00\x00\x00WEBPVP8 "),
+            Some("image/webp")
+        );
+    }
+
+    #[test]
+    fn sniff_image_refuses_everything_else() {
+        // The point of sniffing rather than trusting the caller's MIME: the format
+        // decides which clipboard *flavour* the bytes are filed under, and a wrong
+        // answer corrupts the user's clipboard instead of failing. Measured on
+        // macOS: a JPEG read `as «class PNGf»` succeeds and files JPEG bytes under
+        // the PNG flavour.
+        assert_eq!(sniff_image(b""), None);
+        assert_eq!(sniff_image(b"hello"), None);
+        assert_eq!(sniff_image(b"%PDF-1.7"), None);
+        assert_eq!(
+            sniff_image(b"<svg xmlns="),
+            None,
+            "SVG is markup, not a raster"
+        );
+        // RIFF that is not WebP — a WAV file starts the same way.
+        assert_eq!(sniff_image(b"RIFF\x24\x00\x00\x00WAVEfmt "), None);
+    }
+
+    #[test]
+    fn sniff_image_does_not_panic_on_a_truncated_header() {
+        // Bytes arrive from a page and a `path=` file may be a single byte long;
+        // every magic here is longer than that, so the slicing must be bounded.
+        for n in 0..12 {
+            let _ = sniff_image(&PNG_HEAD[..n.min(PNG_HEAD.len())]);
+            let _ = sniff_image(&b"RIFF\x00\x00\x00\x00WEBP"[..n]);
+        }
+    }
+
+    /// The path must never be interpolated into the AppleScript — a filename is
+    /// chosen by whoever made the file, and AppleScript can run shell commands
+    /// (`do shell script`), so concatenation would turn a name into code.
+    ///
+    /// Structural rather than behavioural, deliberately: the behavioural version
+    /// would have to *run* `osascript`, which would overwrite the clipboard of
+    /// whoever ran the tests (and every CI box). This pins the property that makes
+    /// the injection impossible instead.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_clipboard_script_reads_its_path_from_the_environment() {
+        assert!(
+            CLIPBOARD_SCRIPT.contains("system attribute \"VELD_PASTE_PATH\""),
+            "the script must read the path as data, not carry it inline"
+        );
+        // Nothing that looks like a substitution site. A `format!` would not
+        // compile as a `const` anyway, so this is the second line of defence and a
+        // note to the next reader rather than the only one.
+        assert!(!CLIPBOARD_SCRIPT.contains('{'));
+        assert!(!CLIPBOARD_SCRIPT.contains("do shell script"));
     }
 }

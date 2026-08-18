@@ -697,6 +697,26 @@ class WorktreeInbox {
     return this.sessions.get(sessionId)?.unseen ?? null;
   }
 
+  /**
+   * Whether a coding agent is **currently** speaking for this session.
+   *
+   * `agentSource` is set the moment an agent's wrapper or hook reports anything,
+   * and — the part that makes this a live signal rather than a sticky one — it is
+   * cleared again when the agent's command ends (see the `agentCommand` branch in
+   * `classify`). So this answers "is there an agent in this pane right now", not
+   * "has there ever been one".
+   *
+   * Used by the terminal's paste handling to decide whether an image should be
+   * handed over as an image (`^V`, which only an agent understands) or written
+   * down and named by path. That decision pairs this with the pty's own
+   * foreground-process answer, because the clearing above needs
+   * `terminal.shellIntegration` to be on — see `panes/terminalPaste.ts`'s
+   * `imageAction`.
+   */
+  hasAgent(sessionId: string): boolean {
+    return this.sessions.get(sessionId)?.agentSource != null;
+  }
+
   /** Whether a session is running something. For a pane's own tab. */
   isRunning(sessionId: string): boolean {
     const session = this.sessions.get(sessionId);

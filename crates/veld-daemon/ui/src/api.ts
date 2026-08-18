@@ -1765,6 +1765,42 @@ export const api = {
     if (!res.ok) throw new Error(await errorMessage(res));
     return ((await res.json()) as { path: string }).path;
   },
+  /**
+   * Put an image on **this machine's** clipboard, so a `^V` sent to the pane
+   * inserts it as an image.
+   *
+   * The counterpart to `ptyPasteFile`, and the reason both exist: a pty cannot
+   * carry a picture, so an agent reads images off the OS clipboard instead. A
+   * `⌘V` needs nothing from here — the image is already on the clipboard — but a
+   * *dropped* file never went via one, so this is what gets it there.
+   *
+   * Two sources, because a desktop drop already has the file on this machine and
+   * copying it would be pure waste: pass `{ path }` when the shell resolved one
+   * (`window.veldDesktop.pathForFile`), `{ blob, name }` when it could not.
+   *
+   * The daemon sniffs the format from the bytes and refuses anything it does not
+   * recognise — a caller-supplied MIME decides which clipboard flavour the bytes
+   * are filed under, and a wrong answer corrupts the clipboard rather than
+   * failing. So a rejection here is a reason to fall back to typing the path.
+   */
+  ptyPasteImage: async (
+    sessionId: string,
+    source: { path: string } | { blob: Blob; name: string },
+  ): Promise<string> => {
+    const q = new URLSearchParams(
+      "path" in source ? { path: source.path } : { name: source.name },
+    );
+    const res = await fetch(
+      `/api/pty/sessions/${encodeURIComponent(sessionId)}/paste-image?${q}`,
+      {
+        method: "POST",
+        headers: { "X-Veld-Request": "1" },
+        body: "path" in source ? undefined : source.blob,
+      },
+    );
+    if (!res.ok) throw new Error(await errorMessage(res));
+    return ((await res.json()) as { mime: string }).mime;
+  },
   stats: () => request<StatsResponse>("/api/stats"),
   /**
    * Bucketed history for one node. `windowSecs` is clamped server-side to the

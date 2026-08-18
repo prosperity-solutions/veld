@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
+  CTRL_V,
   clipboardImageIndex,
   clipboardImageName,
   escapePath,
   isFileDrop,
+  imageAction,
+  isImageType,
   pathPayload,
   TAB_MIME,
 } from "./terminalPaste";
@@ -149,5 +152,70 @@ describe("clipboardImageIndex", () => {
 
   it("is -1 for an empty clipboard", () => {
     expect(clipboardImageIndex([])).toBe(-1);
+  });
+});
+
+describe("CTRL_V", () => {
+  it("is the single byte a terminal sends for Ctrl+V", () => {
+    // Pinned as a value because it is a wire fact, not a preference: this is the
+    // byte a coding agent binds to "read the OS clipboard", and it is the only
+    // route from "the user has an image" to "the agent has an image" — a pty
+    // cannot carry a picture. Measured against a real Claude Code in a pty:
+    // \x16 produces `[Image #1]`.
+    expect(CTRL_V).toBe("\x16");
+    expect(CTRL_V).toHaveLength(1);
+  });
+});
+
+describe("isImageType", () => {
+  it("recognises an image, ignoring case and parameters", () => {
+    expect(isImageType("image/png")).toBe(true);
+    expect(isImageType("IMAGE/JPEG; foo=bar")).toBe(true);
+  });
+
+  it("refuses everything else, including an empty type", () => {
+    // A drop from some sources reports no type at all; that must read as "not an
+    // image" so it takes the path branch rather than being handed to a clipboard.
+    expect(isImageType("")).toBe(false);
+    expect(isImageType("application/pdf")).toBe(false);
+    expect(isImageType("text/plain")).toBe(false);
+    // Not a prefix match on the word: `image` is not `image/`.
+    expect(isImageType("imagex/png")).toBe(false);
+  });
+});
+
+describe("imageAction", () => {
+  it("pastes only when an agent is in the pane AND something is reading the tty", () => {
+    expect(imageAction({ agent: true, foregroundApp: true })).toBe("paste");
+  });
+
+  it("types a path at a shell prompt, even with an agent flag still set", () => {
+    // The case that makes this two signals rather than one: the agent wrapper
+    // `exec`s the real binary and can never report its own exit, so the flag is
+    // cleared by the shell's OSC 133 mark — which needs shellIntegration on. With
+    // it off the flag goes stale, and `^V` at a zsh prompt corrupts the next
+    // character the user types (`^V` then `echo hi` → `eecho hi`). Measured.
+    expect(imageAction({ agent: true, foregroundApp: false })).toBe("path");
+  });
+
+  it("types a path for a full-screen program that is not an agent", () => {
+    // `vim` is the case: busy says "something is reading the tty" but `^V` there
+    // is visual-block mode, and a typed path is both harmless and useful.
+    expect(imageAction({ agent: false, foregroundApp: true })).toBe("path");
+  });
+
+  it("types a path when nothing is known", () => {
+    expect(imageAction({ agent: false, foregroundApp: false })).toBe("path");
+  });
+
+  it("never pastes unless both signals agree", () => {
+    // Stated as the property rather than as four cases, because the property is
+    // what must survive a future third signal being added.
+    for (const agent of [true, false]) {
+      for (const foregroundApp of [true, false]) {
+        const expected = agent && foregroundApp ? "paste" : "path";
+        expect(imageAction({ agent, foregroundApp }), `${agent}/${foregroundApp}`).toBe(expected);
+      }
+    }
   });
 });
