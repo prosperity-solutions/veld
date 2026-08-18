@@ -134,12 +134,14 @@ CURL_PROGRESS="--progress-bar"
 # once, before the *first* attempt, and **includes transfer time** — so the cap only
 # ever protects retries that begin early.
 #
-# What it spends: a **timeout** is in curl's retry set, and it is by definition the
-# slow failure. This script sets no `--connect-timeout`, so a blackholed SYN (a DROP
-# firewall, a captive network) burns curl's default connect timeout on attempt one
-# and the cap then refuses the rest — one attempt where an uncapped run would make
-# four. That is accepted deliberately: four attempts at curl's default is twenty
-# minutes of an installer looking hung, which is worse than not retrying.
+# What it spends: retries of a **timeout**, which is in curl's retry set and is the
+# one retryable failure that is slow by construction — so it is also the one the cap
+# can eat. Measured against a blackholed address with an explicit `--connect-timeout 2`:
+# 4 attempts and 14.4s uncapped, 1 attempt and 8.1s once a cap is in play. Accepted:
+# an installer that gives up on a network that is not answering beats one that looks
+# hung while it tries again. (How long a dead network takes to *become* a timeout is
+# left unstated on purpose — it belongs to the kernel's SYN retries, not to curl, and
+# measuring it here produced neither of the two exit codes one would predict.)
 #
 # What it costs nothing: asset size. The download failures curl retries by *status*
 # are status lines, and those arrive as fast for a 113 MB asset as for a 2 KB one.
