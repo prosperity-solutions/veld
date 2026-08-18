@@ -264,12 +264,35 @@ mod tests {
     #[test]
     fn test_available_port_is_detected() {
         let _guard = port_guard();
-        // Port 0 lets the OS pick a free port; use it to find one that's free.
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
-        // After dropping, the port should be available.
-        assert!(is_port_available(port));
+        // Port 0 lets the OS pick a free port; releasing it gives us one that
+        // *was* free a moment ago.
+        //
+        // **Retried, because "a port I just released is still free" is not
+        // something the OS promises.** The ephemeral range is shared with every
+        // other process on the machine, and the moment the listener drops, the
+        // port is a candidate the kernel may hand to the next binder — which
+        // during a full `just test` is a dozen other test binaries binding port
+        // 0 at once. Asserting on a single candidate made this test fail for a
+        // reason that had nothing to do with `is_port_available`; observed once
+        // in a workspace run, and not reproducible in isolation (0 failures in
+        // 12 runs of this crate alone), which is exactly the shape of flake that
+        // costs whoever wins the coin flip next rather than the person who
+        // introduced it.
+        //
+        // The claim in the test's name — a free port is reported free — is kept
+        // intact: one candidate surviving is enough to prove it, and needing
+        // every candidate to survive is what was never true.
+        let mut probed = 0;
+        for _ in 0..8 {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            drop(listener);
+            probed += 1;
+            if is_port_available(port) {
+                return;
+            }
+        }
+        panic!("no released ephemeral port probed as available in {probed} attempts");
     }
 
     #[test]

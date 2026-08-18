@@ -7,6 +7,7 @@ const path = require("node:path");
 const {
   MAX_SEED_BYTES,
   MAX_TAB_BYTES,
+  MAX_STRIP_TABS,
   MAX_TRANSFER_TABS,
   PANE_KINDS,
   buildSeedLayout,
@@ -18,6 +19,7 @@ const {
   safeRadius,
   safeRepoRoot,
   safeScale,
+  safeTabIds,
   safeTitle,
   safeTransferTab,
   safeTransferTabs,
@@ -348,6 +350,29 @@ test("safeTransferTab keeps a tab's own fields and refuses a non-tab", () => {
   assert.equal(safeTransferTab({ kind: "terminal" }), null);
   for (const none of [null, undefined, 42, "tab", []]) {
     assert.equal(safeTransferTab(none), null, JSON.stringify(none));
+  }
+});
+
+test("safeTabIds keeps strip order, drops junk, deduplicates and bounds", () => {
+  assert.deepEqual(safeTabIds(["a", "b", "c"]), ["a", "b", "c"], "order is the strip's");
+
+  // A repeated id would appear twice in the cycle, so the same press would land
+  // on it twice running.
+  assert.deepEqual(safeTabIds(["a", "b", "a"]), ["a", "b"]);
+
+  // The charset is the daemon's PTY session charset — a tab id is one.
+  assert.deepEqual(safeTabIds(["ok-1", "", "has space", "../../etc", 7, null, {}]), ["ok-1"]);
+
+  // Bounded by the *strip* ceiling, not the transfer one: a transfer is at most
+  // two docks of a window, a strip just accumulates. At 64 the cut was silent
+  // AND undetectable — the shell still answered, so the renderer's own fallback
+  // never ran, and the tabs past it were unreachable by keyboard for good.
+  assert.ok(MAX_STRIP_TABS > MAX_TRANSFER_TABS, "a strip is not bounded like a transfer");
+  const many = Array.from({ length: MAX_STRIP_TABS + 20 }, (_, i) => `t${i}`);
+  assert.equal(safeTabIds(many).length, MAX_STRIP_TABS);
+
+  for (const notAList of [null, undefined, "a", 7, { 0: "a" }]) {
+    assert.deepEqual(safeTabIds(notAList), []);
   }
 });
 

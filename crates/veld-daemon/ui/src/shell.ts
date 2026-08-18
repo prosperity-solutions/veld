@@ -171,6 +171,64 @@ export interface DesktopWindowApi {
    */
   focusSelf?(): Promise<boolean>;
   snapshot(payload: TabTransfer): Promise<boolean>;
+  /**
+   * This window's tab strip in drawn order — dock 0 left-to-right, then dock 1
+   * — pushed on every layout change.
+   *
+   * The shell's copy of this, across every window, *is* the cross-window cycle
+   * order; nothing else assembles one. Sent by a main window as well as a
+   * detached one, unlike [`snapshot`], because a main window's own tabs are
+   * most of the order rather than a special case of it.
+   *
+   * Ids only. A title or a URL here would put a second copy of page content in
+   * the privileged process for a feature that never reads it — and *which* tab
+   * is active is not here either, because that is only ever asked about the
+   * window that pressed the key, which sends it with [`cycleTab`].
+   *
+   * Optional: an older shell has no such channel, and cycling then falls back to
+   * this window's own tabs — which is exactly what it does in a browser tab.
+   *
+   * `worktreeId` is the **granted** worktree (`shownId`), the same id
+   * `showsWorktree` registers — the shell checks the two against each other, so
+   * reporting one this window has asked for but not been given makes cycling
+   * refuse. `null`, or an empty `tabIds`, means "this window is drawing no tab
+   * strip" and clears what the shell holds: a window in the Runs view still has
+   * a layout, and advertising it there let another window cycle into a pane area
+   * that is not mounted.
+   */
+  tabs?(payload: { worktreeId: number | null; tabIds: string[] }): Promise<boolean>;
+  /**
+   * Step to the next (`delta: 1`) or previous (`delta: -1`) tab across every
+   * window showing this worktree, wrapping at both ends.
+   *
+   * `activeId` is sent **with the call** rather than left to the last [`tabs`]
+   * push: the two are separate IPCs, so a chord pressed in the same frame as a
+   * tab change would otherwise be answered from the previous position.
+   *
+   * Resolves `{tabId}` when the answer is a tab in this window — activate it
+   * here, the same way a click would — `{focused: true}` when another window was
+   * raised and told to activate its own, and `null` when there is nothing to do.
+   *
+   * Optional: an older shell has no such channel; see [`tabs`] for what happens
+   * then.
+   */
+  cycleTab?(payload: {
+    worktreeId: number;
+    delta: 1 | -1;
+    activeId: string | null;
+  }): Promise<{ tabId?: string; focused?: boolean } | null>;
+  /**
+   * Cycling landed on this window: activate `tabId`.
+   *
+   * The shell can raise a window but cannot reach into its renderer's DOM, so
+   * which tab is active — and where real focus sits inside it — is work only
+   * this side can do. Doing it *here*, through the same path a click takes, is
+   * what makes a window cycled to indistinguishable from one clicked into;
+   * #315 tried to cover the same ground from the calling window and could not.
+   *
+   * Optional: an older shell never sends it.
+   */
+  onActivateTab?(fn: (p: { tabId: string }) => void): () => void;
   setTitle(title: string): Promise<boolean>;
   close(): Promise<boolean>;
   /** Drain the hand-back queue. Call at mount as well as on the nudge — the
@@ -241,6 +299,20 @@ export interface DesktopAppApi {
    * likely to be pressed. Returns its own unsubscribe.
    */
   onOpenSettings(fn: () => void): () => void;
+  /**
+   * A menu accelerator fired and this is the focused window: the File menu's
+   * "New Tab" (`⌘T`) or "Close Tab" (`⌘W`).
+   *
+   * Menu accelerators for the same reason `⌘,` is one, and the argument is
+   * stronger here: a browser pane swallows every keystroke, and these two are
+   * the chords most likely to be pressed while sitting in one. Unlike `⌘,`
+   * there is no fallback to another window — a tab command means the strip in
+   * front of you, so an unfocused window is never asked.
+   *
+   * Optional: an older shell has no such channel, and the two chords then do
+   * whatever the platform does with them.
+   */
+  onTabCommand?(fn: (p: { command: "new" | "close" }) => void): () => void;
   /**
    * Show a native OS notification (a terminal's OSC 9 request). `silent` — the
    * terminal bell is the sound; this is the banner. The click focuses this

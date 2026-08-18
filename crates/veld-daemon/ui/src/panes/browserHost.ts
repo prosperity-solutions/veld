@@ -185,6 +185,10 @@ interface DesktopBrowserApi {
     fn: (payload: { viewId: string; url: string; profile: BrowserProfile }) => void,
   ): () => void;
   onAccelerator(fn: (payload: { viewId: string; accelerator: string }) => void): () => void;
+  /** A pane's page took the keyboard — see [`onBrowserFocused`]. Optional: an
+   *  older shell has no such channel, and the focused dock then stays as
+   *  imprecise as it was before ⌘W had a reason to read it. */
+  onFocused?(fn: (payload: { viewId: string }) => void): () => void;
   onPointer(
     fn: (payload: { viewId: string; type: string; x: number; y: number }) => void,
   ): () => void;
@@ -559,11 +563,23 @@ function shouldShow(v: View): boolean {
  * resume, and each state event from the shell — so without the comparison a page
  * that reports progress produces a `setVisible` IPC round trip per event, all
  * saying what the shell already knows.
+ *
+ * `force` bypasses that comparison. It exists because the comparison is against
+ * `v.visible`, which is written **optimistically, before `desktop.setVisible`'s
+ * result is known** (below) — so a call that is dropped, throws, or loses a race
+ * against a later one for the same view leaves the cache claiming a visibility
+ * the shell never actually applied, and the next *unchanged* answer then goes
+ * uncorrected forever, because the comparison reads it as nothing to do. This is
+ * the same failure `createShellView`'s retry path hit for exactly this field
+ * (see its own comment). [`reassertVisibility`] is the caller that matters, and
+ * `mountBrowser` forces it too: a remount is a point this code already claims
+ * self-corrects the cache, so it should not trust the cache to decide whether
+ * that correction is needed.
  */
-function applyVisibility(v: View): void {
+function applyVisibility(v: View, force = false): void {
   if (!desktop) return;
   const next = shouldShow(v);
-  if (v.visible === next) return;
+  if (!force && v.visible === next) return;
   v.visible = next;
   // Swallowed deliberately: visibility is re-asserted by every later mount,
   // suspend and state event, so one lost call self-corrects — unlike a navigation.
@@ -867,7 +883,11 @@ export function mountBrowser(id: string, parent: HTMLElement, options: BrowserVi
   const v = ensure(id, options);
   if (v.container.parentElement !== parent) parent.appendChild(v.container);
   v.mounted = true;
-  applyVisibility(v);
+  // Forced: this reattaches an existing view (a fresh `ensure` create already
+  // starts `visible: true` truthfully), so `v.visible`'s cached answer from
+  // whatever this view was doing before is exactly the value `applyVisibility`'s
+  // own doc comment warns can be wrong — see it for why.
+  applyVisibility(v, true);
   // Observed under both backends: the native view mirrors the box, and a fitted
   // emulated viewport is scaled to it, so either way the answer changes with the
   // pane's size.
@@ -1500,6 +1520,35 @@ if (desktop) {
   window.addEventListener("resize", () => {
     for (const v of views.values()) syncGeometry(v);
   });
+  // This window regaining OS-level focus — Electron proxies that straight to the
+  // DOM `focus` event, no IPC of its own needed. See [`reassertVisibility`] for
+  // why the cache is not trusted at this moment.
+  window.addEventListener("focus", reassertVisibility);
+}
+
+/**
+ * Force every mounted view's visibility and geometry back in line with what this
+ * page believes, ignoring the cached answer.
+ *
+ * Called when this window comes to the front — either because the user raised it
+ * or because keyboard tab-cycling did (`App.tsx`'s `onActivateTab`). A window
+ * raised *programmatically* never ran through a click, a mount, or a state
+ * event, so nothing else in this file re-asserts anything for it; and a window
+ * that has been off-screen is exactly where a `setVisible` that was dropped or
+ * raced has had the longest to go unnoticed. The cost is one IPC per mounted
+ * view per raise, which is bounded by the pane budget and happens at human
+ * frequency.
+ *
+ * The alternative — trusting `v.visible` — is what leaves a pane blank after
+ * being cycled to, with the page behind it live and the cache insisting it is
+ * already showing.
+ */
+export function reassertVisibility(): void {
+  if (!desktop) return;
+  for (const v of views.values()) {
+    applyVisibility(v, true);
+    syncGeometry(v);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1573,6 +1622,22 @@ export function onBrowserAccelerator(
   fn: (payload: { viewId: string; accelerator: string }) => void,
 ): () => void {
   return desktop ? desktop.onAccelerator(fn) : () => {};
+}
+
+/**
+ * A browser pane's page took the keyboard.
+ *
+ * A native view is an OS widget outside this document, so clicking into its page
+ * fires no `focusin` here and nothing else can tell the app the focused dock
+ * moved. That mattered the moment ⌘W began closing "the focused dock's active
+ * tab": without this, clicking a pane in the right dock and pressing ⌘W closed a
+ * terminal in the left one.
+ *
+ * Optional on the shell side, and absent entirely under the iframe backend —
+ * where an `<iframe>` *is* in this document, so real `focusin` already covers it.
+ */
+export function onBrowserFocused(fn: (payload: { viewId: string }) => void): () => void {
+  return desktop?.onFocused ? desktop.onFocused(fn) : () => {};
 }
 
 // ---------------------------------------------------------------------------

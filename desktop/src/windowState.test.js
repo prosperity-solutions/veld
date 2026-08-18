@@ -5,10 +5,12 @@ const assert = require("node:assert/strict");
 const {
   MAX_WINDOWS,
   canOpenAnother,
+  cycleOrder,
   dropDelivery,
   handBackTarget,
   handBackTransfers,
   isSuffix,
+  nextInCycle,
   nextListenerState,
   nextSuffix,
   ownsWorktree,
@@ -385,6 +387,84 @@ test("ownsWorktree reads the display map for a main window and the field for a d
   // on the map alone made a detached window impossible to drop onto.
   assert.equal(ownsWorktree(dock, 8, showing), true);
   assert.equal(ownsWorktree(dock, 7, showing), false);
+});
+
+/** A window record as `cycleOrder` reads one — id, and the tab strip its
+ *  renderer last reported. Nothing else in a `WindowRecord` is looked at. */
+function win(id, worktreeId, ids, activeId = null) {
+  return { id, tabs: worktreeId === null ? null : { worktreeId, ids, activeId } };
+}
+
+test("cycleOrder is windows by record id, then each window's strip as drawn", () => {
+  // Deliberately out of id order in the input: the caller's list is whatever
+  // `allRecords()` iterates, and a Map's insertion order is not creation order
+  // once a window has been closed and another opened.
+  const order = cycleOrder([win(3, 7, ["c1"]), win(1, 7, ["a1", "a2"]), win(2, 7, ["b1"])], 7);
+  assert.deepEqual(
+    order.map((e) => e.tabId),
+    ["a1", "a2", "b1", "c1"],
+  );
+  // The record id travels with each entry — the caller needs to know whether the
+  // answer is its own tab (activate it here) or somebody else's (raise them).
+  assert.deepEqual(
+    order.map((e) => e.recordId),
+    [1, 1, 2, 3],
+  );
+});
+
+test("cycleOrder takes only the windows showing this worktree", () => {
+  const records = [
+    win(1, 7, ["a1"]),
+    win(2, 9, ["b1"]), // another worktree's dock — never in this cycle
+    win(3, null, []), // reported nothing yet: mid-load, or a settings window
+    win(4, 7, []), // showing it, but with an empty strip
+    win(5, 7, ["e1"]),
+  ];
+  assert.deepEqual(
+    cycleOrder(records, 7).map((e) => e.tabId),
+    ["a1", "e1"],
+  );
+  assert.deepEqual(cycleOrder(records, 100), [], "a worktree no window is showing");
+});
+
+test("nextInCycle steps and wraps across windows from the caller's own position", () => {
+  const order = cycleOrder([win(1, 7, ["a1", "a2"]), win(2, 7, ["b1"])], 7);
+
+  assert.deepEqual(nextInCycle(order, 1, "a1", 1), { recordId: 1, tabId: "a2" });
+  // Off the end of this window's own tabs and into the next window's.
+  assert.deepEqual(nextInCycle(order, 1, "a2", 1), { recordId: 2, tabId: "b1" });
+  // …and around, which is what makes a small fixed strip feel like a strip.
+  assert.deepEqual(nextInCycle(order, 2, "b1", 1), { recordId: 1, tabId: "a1" });
+  assert.deepEqual(nextInCycle(order, 1, "a1", -1), { recordId: 2, tabId: "b1" });
+});
+
+test("nextInCycle does not ping-pong between a tab and another window", () => {
+  // The failure that pulled #315. There, the position was remembered in the
+  // window the cycle started in, which had no way to represent "parked on a
+  // window whose tabs I cannot read" — so a second press recomputed from the
+  // same stale docked tab and landed on the same detached window again.
+  //
+  // Here the position is `(sender, activeId)`, and after the first press the
+  // *other* window has focus, so the second press arrives from it. Stepping on
+  // is then ordinary arithmetic, and the caller cannot pass a position it does
+  // not actually have.
+  const order = cycleOrder([win(1, 7, ["a1", "a2"]), win(2, 7, ["b1", "b2"])], 7);
+  assert.deepEqual(nextInCycle(order, 1, "a2", 1), { recordId: 2, tabId: "b1" });
+  assert.deepEqual(nextInCycle(order, 2, "b1", 1), { recordId: 2, tabId: "b2" });
+  assert.deepEqual(nextInCycle(order, 2, "b2", 1), { recordId: 1, tabId: "a1" });
+});
+
+test("nextInCycle starts at an end when there is no position", () => {
+  const order = cycleOrder([win(1, 7, ["a1", "a2"]), win(2, 7, ["b1"])], 7);
+  assert.deepEqual(nextInCycle(order, 1, null, 1), { recordId: 1, tabId: "a1" });
+  // The one-sided bug: `(-1 - 1) % 3` is second-from-last, not last. Backward
+  // from nothing has to be the *last* entry, so it is special-cased rather than
+  // folded into the modulo.
+  assert.deepEqual(nextInCycle(order, 1, null, -1), { recordId: 2, tabId: "b1" });
+  // An id that is real but belongs to another window is "not found" too — the
+  // match is on the pair, so one window cannot claim another's position.
+  assert.deepEqual(nextInCycle(order, 1, "b1", 1), { recordId: 1, tabId: "a1" });
+  assert.equal(nextInCycle([], 1, null, 1), null, "nothing to step to");
 });
 
 test("dropDelivery queues only for a window that said its listener is gone", () => {

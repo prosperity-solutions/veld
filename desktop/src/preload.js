@@ -226,10 +226,31 @@ contextBridge.exposeInMainWorld("veldDesktop", {
     /** What this window would hand back if it closed now. Pushed on every layout
      *  change: `close` is not a moment a renderer can be asked anything. */
     snapshot: (payload) => ipcRenderer.invoke("veld:window:snapshot", payload),
+    /** This window's tab strip in drawn order, pushed on every layout change.
+     *  Ids only — the cycle order needs nothing else, a title or a URL here
+     *  would be a second copy of page content retained in the privileged
+     *  process, and even *which* tab is active is asked only of the window that
+     *  pressed the key, which sends it with `cycleTab`. Sent by main and
+     *  detached windows alike, unlike `snapshot`. */
+    tabs: (payload) => ipcRenderer.invoke("veld:window:tabs", payload),
+    /** Step to the next/previous tab across every window showing this worktree.
+     *  `activeId` travels with the call rather than being read from the last
+     *  `tabs` push, so a chord pressed in the same frame as a tab change is
+     *  still answered from where the user actually is. Resolves `{tabId}` to
+     *  activate here, `{focused:true}` when another window was raised, or
+     *  `null`. */
+    cycleTab: (payload) => ipcRenderer.invoke("veld:window:cycle-tab", payload),
+    /** Cycling landed on this window. `show()`/`focus()` are OS-level and cannot
+     *  reach into this renderer's DOM, so the activation itself is done here —
+     *  through the very same path a click on that tab would take. */
+    onActivateTab: (fn) => on("veld:window:activate-tab", fn),
     /** A detached window's title bar — the active tab, since there is no top bar
      *  in one to say what it holds. */
     setTitle: (title) => ipcRenderer.invoke("veld:window:set-title", { title }),
-    /** Close this window (detached only): a bare dock with no tabs left in it. */
+    /** Close this window. Two callers: a detached window whose last tab was
+     *  closed (a bare dock with nothing in it), and ⌘W in any window when there
+     *  is no tab left to close — which is what stops that chord doing nothing
+     *  now that it is the tab accelerator rather than Electron's `close` role. */
     close: () => ipcRenderer.invoke("veld:window:close"),
     /** Collect tabs handed back by detached windows that have closed. Call at
      *  mount *and* on the `onAdopt` nudge: the nudge can arrive before this
@@ -249,6 +270,10 @@ contextBridge.exposeInMainWorld("veldDesktop", {
    */
   app: {
     onOpenSettings: (fn) => on("veld:app:settings", fn),
+    /** The File menu's "New Tab" / "Close Tab", as `{command: "new" | "close"}`.
+     *  Menu accelerators for the same reason ⌘, is one — and only the focused
+     *  window is told, since a tab command means the strip in front of you. */
+    onTabCommand: (fn) => on("veld:app:tab-command", fn),
     /** Show a native OS notification (terminal OSC 9); echoes the payload back
      *  on click via `onNotifyClick` so the page can focus the pane. */
     notify: (payload) => ipcRenderer.invoke("veld:app:notify", payload),
@@ -310,6 +335,10 @@ contextBridge.exposeInMainWorld("veldDesktop", {
     onOpenRequest: (fn) => on("veld:browser:open-request", fn),
     /** An app accelerator a focused view would otherwise have swallowed. */
     onAccelerator: (fn) => on("veld:browser:accelerator", fn),
+    /** A pane's page took the keyboard. A native view is outside the host
+     *  document, so this is the only way `/ide` can learn that the focused dock
+     *  moved — and ⌘W closes the focused dock's tab. */
+    onFocused: (fn) => on("veld:browser:focused", fn),
     /** Find-in-page. "start" begins a fresh search, "next"/"previous" step
      *  through the same one, "stop" clears the highlights. Always the live page,
      *  never whatever still is currently painted over a suspended view. */

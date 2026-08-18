@@ -398,6 +398,56 @@ function safeTransferTabs(raw) {
   return out;
 }
 
+/** A single tab id, as the page names one. Same charset as a view id and a
+ *  daemon PTY session id — a tab id is all three. */
+function safeTabId(raw) {
+  return typeof raw === "string" && ID_RE.test(raw) ? raw : null;
+}
+
+/**
+ * How many tabs one window's strip may report.
+ *
+ * **Not `MAX_TRANSFER_TABS`.** That one bounds a *transfer*, which is at most
+ * the two docks of a window that has hit its view budget; a strip has no such
+ * ceiling — `addTab` appends freely, and a long-lived session accumulates. At
+ * 64 the truncation was silent *and* undetectable: the shell still answered
+ * non-`null`, so the renderer's own fallback never ran, and the tabs past the
+ * cut were simply unreachable by keyboard for the life of the window.
+ *
+ * Kept as a bound rather than removed, because the list is retained in the
+ * privileged process at a page's request. 512 ids × 64 chars × 8 windows is
+ * well under a megabyte, and is far past any strip a person can read.
+ */
+const MAX_STRIP_TABS = 512;
+
+/**
+ * A window's tab ids in strip order, for the cross-window cycle order.
+ *
+ * Deduplicated and bounded like `safeTransferTabs`, and for the same two
+ * reasons: a repeated id would appear twice in the cycle and the same press
+ * would land on it twice in a row, and the list is *retained* on the record
+ * rather than consumed, so its size is a page-controlled allocation this
+ * process holds.
+ *
+ * Ids only — no titles, no URLs. Cycling needs to know what order the tabs are
+ * in and which one is active, and nothing else; carrying the rest would put a
+ * second copy of every browser pane's URL in the privileged process for a
+ * feature that never reads it.
+ */
+function safeTabIds(raw) {
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set();
+  const out = [];
+  for (const entry of raw) {
+    const id = safeTabId(entry);
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+    if (out.length >= MAX_STRIP_TABS) break;
+  }
+  return out;
+}
+
 /**
  * The layout a detached window boots with, or `null` when there is nothing to
  * seed.
@@ -458,6 +508,7 @@ function transferFromSeed(seed) {
 
 module.exports = {
   ID_RE,
+  MAX_STRIP_TABS,
   PROFILE_RE,
   PANE_KINDS,
   MAX_SEED_BYTES,
@@ -483,5 +534,7 @@ module.exports = {
   safeRepoRoot,
   safeTransferTab,
   safeTransferTabs,
+  safeTabId,
+  safeTabIds,
   buildSeedLayout,
 };
