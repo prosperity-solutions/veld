@@ -195,4 +195,28 @@ export const PROMOTIONS: Promotion[] = [
     body: "⌃Tab steps tabs, ⌥Tab steps worktrees, and Shift reverses both — from inside a terminal or a browser pane too. Press ⌘/ for the full list.",
     glyph: "panes",
   },
+  {
+    // **A new capability with daily reach, and no way to find it.** The test in
+    // this file's header is "would they otherwise find it" — and here the answer
+    // is emphatically no in a way that is worse than usual: both gestures
+    // *silently did nothing* before. Somebody who tried ⌘V with a screenshot
+    // once, or dropped a file on a pane once, learned that Veld does not do that
+    // and will never try again. A card is the only thing that reaches them.
+    //
+    // The ⌘←/⌘→/⌘⌫ half of the same change is deliberately **not** here: those
+    // are a fix — a chord that should always have worked — and this file is
+    // explicit that a fix is not promotable. They are in the Shortcuts overview,
+    // which is where somebody looks for a chord.
+    //
+    // Headline is the screenshot rather than the drop because it is the one with
+    // no workaround: a path can be typed, a picture cannot. "straight into an
+    // agent" rather than "into a terminal" for the same reason — the agent is
+    // what the reader is actually talking to.
+    id: "terminal-file-input",
+    since: "2026-08-18",
+    eyebrow: "New",
+    headline: "Paste a screenshot straight into an agent",
+    body: "⌘V pastes a clipboard image into the terminal, and dropped files type their absolute paths — so pointing an agent at something never means finding it first.",
+    glyph: "terminal",
+  },
 ];
