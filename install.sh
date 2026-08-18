@@ -130,24 +130,22 @@ CURL_PROGRESS="--progress-bar"
 # That header is exactly what a rate-limiting CDN sends, so without a cap an
 # incident turns a failed install into a half-hour stall with the app already quit.
 #
-# 30s, and be precise about what that buys and what it spends. The timer is reset
-# once, before the *first* attempt, and **includes transfer time** — so the cap only
-# ever protects retries that begin early.
+# 30s, and what that cap does is one sentence: the timer starts before the *first*
+# attempt and includes transfer time, so a retry that would begin more than 30s in
+# does not happen. Measured — a 503 that takes 5s per attempt gets three retries at
+# 30s and none at all at 3s.
 #
-# What it spends: retries of a **timeout**, which is in curl's retry set and is the
-# one retryable failure that is slow by construction — so it is also the one the cap
-# can eat. Measured against a blackholed address with an explicit `--connect-timeout 2`:
-# 4 attempts and 14.4s uncapped, 1 attempt and 8.1s once a cap is in play. Accepted:
-# an installer that gives up on a network that is not answering beats one that looks
-# hung while it tries again. (How long a dead network takes to *become* a timeout is
-# left unstated on purpose — it belongs to the kernel's SYN retries, not to curl, and
-# measuring it here produced neither of the two exit codes one would predict.)
+# For everything this script downloads, that is free. A failure curl retries by
+# *status* is a status line, and one arrives as fast for the 113 MB app archive as
+# for a 2 KB checksums file, so the retries all begin in the first second. The only
+# retryable failure slow enough for the cap to refuse one is a timeout — and how long
+# a dead network takes to become a timeout belongs to the kernel's SYN retries rather
+# than to curl, so it is not worth a number here. An installer that stops asking a
+# network that is not answering is the outcome we want anyway.
 #
-# What it costs nothing: asset size. The download failures curl retries by *status*
-# are status lines, and those arrive as fast for a 113 MB asset as for a 2 KB one.
-# A transfer that dies part-way is not the exception to that — it is exit 18/56,
-# outside the retry set with or without a cap (measured: one connection, no second
-# attempt).
+# Not the exception it looks like: a transfer that dies part-way is exit 18/56, which
+# is outside curl's retry set with or without a cap (measured: one connection, no
+# second attempt).
 CURL_RETRY="--retry 3 --retry-delay 2 --retry-max-time 30"
 
 # --- Detect platform ---
