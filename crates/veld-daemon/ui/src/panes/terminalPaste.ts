@@ -131,69 +131,6 @@ export function clipboardImageName(mime: string): string {
   return `pasted-image.${ext}`;
 }
 
-/**
- * `^V` — what a terminal sends for Ctrl+V, and the only way to hand a program an
- * *image*.
- *
- * **A pty carries bytes, not pictures.** There is no escape sequence for "here
- * is a PNG", so no terminal can deliver an image through the stream. What coding
- * agents do instead is bind `^V` to reading the OS clipboard *themselves* —
- * which is why Claude Code documents Ctrl+V for images and why ⌘V never worked:
- * the terminal emulator swallows ⌘V and sends nothing an agent can act on.
- *
- * Measured against a real Claude Code in a pty before this was built: sending
- * `\x16` produces `[Image #1]` in the composer — an attachment — where typing a
- * path produces a path.
- *
- * **This is only ever sent to a foreground application, never to a shell**, and
- * that restriction is not caution but a measured bug: `^V` is `quoted-insert` in
- * both bash and zsh, and in zsh it *corrupts the next character the user types*
- * (`^V` then `echo hi` yields `eecho hi`). See [`imageAction`].
- */
-export const CTRL_V = "\x16";
-
-/** Whether a MIME type names an image, ignoring case and any parameters. */
-export function isImageType(mime: string): boolean {
-  return mime.toLowerCase().split(";")[0].trim().startsWith("image/");
-}
-
-/**
- * What to do with an image the user handed to a pane — the one policy decision
- * this feature makes, in one place.
- *
- * `"paste"` means send [`CTRL_V`] and let the program read the clipboard;
- * `"path"` means write the file down and type where it went. **Both inputs must
- * agree before anything is pasted**, and the reason is that each one covers the
- * other's blind spot exactly:
- *
- * - **`agent`** — whether a coding agent is speaking for this pane right now
- *   (`inbox.hasAgent`, fed by the `claude`/`codex`/`pi` wrappers veld puts on the
- *   terminal's PATH). This is what tells an agent apart from any *other*
- *   full-screen program: `^V` into `vim` is visual-block mode, and typing a path
- *   there is both harmless and useful, so `vim` must not get the paste branch.
- *   Its blind spot is liveness — the wrapper `exec`s the real binary, so it can
- *   never report its own exit, and the flag is only cleared by the shell's OSC 133
- *   prompt mark, which needs `terminal.shellIntegration` on.
- * - **`foregroundApp`** — the pty's own answer to "is something other than the
- *   shell reading this terminal" (`tcgetpgrp` on the master, via `api.ptyBusy`).
- *   This is what covers that blind spot: whatever the agent flag says, a terminal
- *   sitting at a prompt is never sent `^V`. Its own blind spot is that it cannot
- *   say *which* program is in the foreground — which is what `agent` supplies.
- *
- * That second guard is not caution, it is the measured bug: `^V` is
- * `quoted-insert` in both shells, and in zsh it corrupts the next character the
- * user types (`^V` then `echo hi` yields `eecho hi`). Asking *which* program is in
- * the foreground directly would need a new holder wire frame and version
- * negotiation; these two signals are both already shipped.
- *
- * The failure direction is deliberate throughout: an unanswerable `busy` query
- * resolves to `false` at the call site, and a pane with no agent report reads as
- * no agent, so every unknown ends at `"path"` — worse, never damaging.
- */
-export function imageAction(where: { agent: boolean; foregroundApp: boolean }): "paste" | "path" {
-  return where.agent && where.foregroundApp ? "paste" : "path";
-}
-
 /** The shape of a `DataTransferItem` this module needs — so the decision below
  *  is testable without a live clipboard. */
 export interface ClipboardEntry {

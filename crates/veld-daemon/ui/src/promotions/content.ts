@@ -212,17 +212,11 @@ export const PROMOTIONS: Promotion[] = [
     // no workaround: a path can be typed, a picture cannot. "straight into an
     // agent" rather than "into a terminal" for the same reason — the agent is
     // what the reader is actually talking to.
-    //
-    // "as an image — not a path" is the load-bearing half of the body, and it is
-    // there because the first version of this feature *did* type a path and the
-    // maintainer rejected it on sight. A reader who has pasted a screenshot into
-    // a terminal before expects the path; saying which one they get is the whole
-    // news.
     id: "terminal-file-input",
     since: "2026-08-18",
     eyebrow: "New",
     headline: "Paste a screenshot straight into an agent",
-    body: "⌘V a screenshot, or drop one in, and it arrives as an image — not a path. Other files type their path, so an agent is never told where to look.",
+    body: "⌘V a screenshot, or drop one in, and the agent gets the image — not a path. Other files come in as their path, so you never go looking for one.",
     glyph: "terminal",
   },
 ];

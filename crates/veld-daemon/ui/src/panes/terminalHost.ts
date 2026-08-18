@@ -33,15 +33,7 @@ import {
   terminalIds,
 } from "./model";
 import { handleKeyEvent } from "./terminalKeys";
-import {
-  CTRL_V,
-  clipboardImageIndex,
-  clipboardImageName,
-  imageAction,
-  isFileDrop,
-  isImageType,
-  pathPayload,
-} from "./terminalPaste";
+import { clipboardImageIndex, clipboardImageName, isFileDrop, pathPayload } from "./terminalPaste";
 
 /**
  * Terminal ids this page expects to *resume*.
@@ -458,93 +450,54 @@ function playBell(): void {
  * Listeners go on the session's own container, which outlives every mount: a
  * pane moved between docks or pulled into another window keeps this without
  * re-registering, the same property the terminal itself has.
+ *
+ * Nothing is written to the socket directly — everything goes through
+ * `term.paste`, so it reaches the pty by the same route as typing and through
+ * the same `canSend` gate, which is what stops a drop landing in the middle of
+ * a scrollback replay.
  */
-function attachFileInput(s: Session, send: (data: string) => void): void {
+function attachFileInput(s: Session): void {
   /**
-   * Whether something other than the shell is reading this terminal.
+   * Put the paths in the terminal, and say so when one of them could not be had.
    *
-   * The pty's own answer (`tcgetpgrp` on the master), which is what decides
-   * between pasting and typing a path — see `imageAction`. **Asked per gesture,
-   * not cached**: the answer changes the moment an agent starts or exits, and a
-   * stale `true` is exactly the case that corrupts a shell line.
+   * **`term.paste`, not `send` — and that distinction is the whole feature.** A
+   * coding agent decides whether a path is a *file it should attach* or merely
+   * text by whether it arrived as a paste: Claude Code attaches an image path
+   * pasted into its composer as `[Image #1]`, and leaves the identical characters
+   * as literal text when they are typed one at a time. Measured both ways against
+   * a real Claude Code — typing `…/red.png` shows the path, pasting it shows the
+   * image — and it is the same route cmux and iTerm2 take.
    *
-   * Any failure resolves `false`, i.e. "type a path": an unknown state must
-   * degrade to the harmless branch.
+   * `paste` is also the only correct way to send this at all: it wraps the text
+   * in bracketed-paste markers **when, and only when, the program has enabled
+   * that mode** (DECSET 2004). Emitting the markers unconditionally would spray
+   * `[200~` into any program that had not asked for them.
+   *
+   * A non-image path is unaffected either way: an agent finds no image extension
+   * and keeps the text, which is exactly what dropping a source file should do.
    */
-  const foregroundApp = async (): Promise<boolean> => {
-    try {
-      return (await api.ptyBusy(s.id)).busy;
-    } catch {
-      return false;
-    }
-  };
-
-  /**
-   * Paste the image, or write it down and type its path — see `imageAction`.
-   *
-   * **The agent check comes first because it is free.** `inbox.hasAgent` is a map
-   * lookup in this page; `ptyBusy` is a request. Ordering them this way means an
-   * ordinary drop into an ordinary shell — the common case — costs no round trip
-   * at all, and `&&` short-circuiting is what makes the cheap signal the gate.
-   */
-  const decide = async (): Promise<"paste" | "path"> => {
-    const agent = inbox.hasAgent(s.id);
-    return imageAction({ agent, foregroundApp: agent && (await foregroundApp()) });
-  };
-
-  /** Type the paths, and say so when one of them could not be had. */
   const typePaths = (paths: string[], failures: number) => {
     const payload = pathPayload(paths);
-    if (payload) send(payload);
+    if (payload) s.term.paste(payload);
     if (failures > 0) {
       notifyError(
-        failures === 1
-          ? "Adding a file to the terminal"
-          : `Adding ${failures} files to the terminal`,
+        failures === 1 ? "Adding a file to the terminal" : `Adding ${failures} files to the terminal`,
         new Error("could not be read"),
       );
     }
   };
 
-  /** Resolve one file to a path — the shell's own, or the daemon's copy. */
-  const resolvePath = async (file: File): Promise<string | null> => {
+  /** Resolve one dropped file to a path — the shell's, or the daemon's copy. */
+  const resolve = async (file: File): Promise<string | null> => {
     const local = pathForFile(file);
     if (local) return local;
     try {
       return await api.ptyPasteFile(s.id, file, file.name);
     } catch (e) {
-      // Logged rather than thrown: one unreadable file in a multi-file drop must
-      // not cost the user the others.
+      // Logged rather than thrown: one unreadable file in a multi-file drop
+      // must not cost the user the others.
       console.warn("veld: could not upload a dropped file", e);
       return null;
-    }
-  };
-
-  /**
-   * Hand one image to the foreground app: onto this machine's clipboard, then
-   * `^V`.
-   *
-   * **Sequential per image, deliberately.** A clipboard holds one image at a
-   * time, so two of these in flight would race and the later one would win both
-   * `^V`s. Awaited in order, a three-image drop becomes `[Image #1] [Image #2]
-   * [Image #3]`.
-   *
-   * Returns false when the clipboard could not be set — no clipboard tool on this
-   * machine, or a format the daemon does not recognise — so the caller can fall
-   * back to the path, which is worse but never nothing.
-   */
-  const pasteImage = async (file: File): Promise<boolean> => {
-    const local = pathForFile(file);
-    try {
-      await api.ptyPasteImage(
-        s.id,
-        local ? { path: local } : { blob: file, name: file.name },
-      );
-      send(CTRL_V);
-      return true;
-    } catch (e) {
-      console.warn("veld: could not put the image on the clipboard", e);
-      return false;
     }
   };
 
@@ -559,29 +512,13 @@ function attachFileInput(s: Session, send: (data: string) => void): void {
   s.container.addEventListener("drop", (e) => {
     if (!isFileDrop([...(e.dataTransfer?.types ?? [])])) return;
     e.preventDefault();
+    // Ordered, because a multi-file drop types its paths in the order the user
+    // sees them; `Promise.all` preserves it where a race would not.
     const files = [...(e.dataTransfer?.files ?? [])];
     if (files.length === 0) return;
-    void (async () => {
-      // One question for the whole gesture: the user dropped these together, so
-      // splitting them across two policies because an agent happened to start
-      // mid-drop would be arbitrary.
-      const paste = (await decide()) === "paste";
-      const asPaths: File[] = [];
-      for (const file of files) {
-        // A non-image is always a path — that is what it is *for*.
-        if (paste && isImageType(file.type)) {
-          if (await pasteImage(file)) continue;
-          // The clipboard refused it; the path is the honest fallback.
-        }
-        asPaths.push(file);
-      }
-      if (asPaths.length === 0) return;
-      const paths = await Promise.all(asPaths.map(resolvePath));
-      typePaths(
-        paths.filter((x): x is string => x !== null),
-        paths.filter((x) => x === null).length,
-      );
-    })();
+    void Promise.all(files.map(resolve)).then((paths) => {
+      typePaths(paths.filter((p): p is string => p !== null), paths.filter((p) => p === null).length);
+    });
   });
 
   // **Capture phase.** The event's target is xterm's own hidden textarea, which
@@ -592,34 +529,21 @@ function attachFileInput(s: Session, send: (data: string) => void): void {
     (e) => {
       const data = e.clipboardData;
       if (!data) return;
-      const index = clipboardImageIndex(
-        [...data.items].map((i) => ({ kind: i.kind, type: i.type })),
-      );
+      const index = clipboardImageIndex([...data.items].map((i) => ({ kind: i.kind, type: i.type })));
       // -1 is the overwhelmingly common case — ordinary text — and it must reach
-      // xterm untouched. Doing nothing here is what lets it: every normal ⌘V in
-      // every pane still goes through xterm's own paste, unchanged.
+      // xterm untouched. Doing nothing here is what lets it.
       if (index === -1) return;
       const file = data.items[index].getAsFile();
       if (!file) return;
       e.preventDefault();
       e.stopPropagation();
-      void (async () => {
-        if ((await decide()) === "paste") {
-          // **Nothing is uploaded here.** The image is already on this machine's
-          // clipboard — the user just put it there — so `^V` is the whole
-          // mechanism, and it is the same keystroke Claude Code documents.
-          send(CTRL_V);
-          return;
-        }
-        // At a prompt: write it down and type where it went, which is the only
-        // useful thing a shell can do with a picture.
-        try {
-          const name = file.name || clipboardImageName(file.type);
-          typePaths([await api.ptyPasteFile(s.id, file, name)], 0);
-        } catch (err) {
-          notifyError("Pasting an image into the terminal", err);
-        }
-      })();
+      // A clipboard image has no name of its own; the daemon re-sanitises
+      // whatever it is given anyway, so this only decides readability.
+      const name = file.name || clipboardImageName(file.type);
+      void api.ptyPasteFile(s.id, file, name).then(
+        (path) => typePaths([path], 0),
+        (err) => notifyError("Pasting an image into the terminal", err),
+      );
     },
     true,
   );
@@ -745,7 +669,7 @@ function ensure(
   term.attachCustomKeyEventHandler((e) =>
     handleKeyEvent(e, send, prefs().shiftEnterNewline, isMac()),
   );
-  attachFileInput(s, send);
+  attachFileInput(s);
   // `onBinary` carries already-8-bit payloads (mouse reports), one byte per
   // char code — encoding those as UTF-8 would corrupt them.
   term.onBinary((data) => {

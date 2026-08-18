@@ -1,12 +1,12 @@
 import { describe, expect, it } from "vitest";
+// `?raw` rather than `node:fs`, matching `paneAreaContract.test.ts`: this
+// package's tsconfig carries `vite/client` and not node's types.
+import TERMINAL_HOST from "./terminalHost.ts?raw";
 import {
-  CTRL_V,
   clipboardImageIndex,
   clipboardImageName,
   escapePath,
   isFileDrop,
-  imageAction,
-  isImageType,
   pathPayload,
   TAB_MIME,
 } from "./terminalPaste";
@@ -155,67 +155,30 @@ describe("clipboardImageIndex", () => {
   });
 });
 
-describe("CTRL_V", () => {
-  it("is the single byte a terminal sends for Ctrl+V", () => {
-    // Pinned as a value because it is a wire fact, not a preference: this is the
-    // byte a coding agent binds to "read the OS clipboard", and it is the only
-    // route from "the user has an image" to "the agent has an image" — a pty
-    // cannot carry a picture. Measured against a real Claude Code in a pty:
-    // \x16 produces `[Image #1]`.
-    expect(CTRL_V).toBe("\x16");
-    expect(CTRL_V).toHaveLength(1);
-  });
-});
-
-describe("isImageType", () => {
-  it("recognises an image, ignoring case and parameters", () => {
-    expect(isImageType("image/png")).toBe(true);
-    expect(isImageType("IMAGE/JPEG; foo=bar")).toBe(true);
-  });
-
-  it("refuses everything else, including an empty type", () => {
-    // A drop from some sources reports no type at all; that must read as "not an
-    // image" so it takes the path branch rather than being handed to a clipboard.
-    expect(isImageType("")).toBe(false);
-    expect(isImageType("application/pdf")).toBe(false);
-    expect(isImageType("text/plain")).toBe(false);
-    // Not a prefix match on the word: `image` is not `image/`.
-    expect(isImageType("imagex/png")).toBe(false);
-  });
-});
-
-describe("imageAction", () => {
-  it("pastes only when an agent is in the pane AND something is reading the tty", () => {
-    expect(imageAction({ agent: true, foregroundApp: true })).toBe("paste");
+describe("the paths reach the terminal as a paste", () => {
+  // **A source-level check, and deliberately so** — the same tactic, for the same
+  // reason, as `desktop/src/preload.test.js`: the code that matters lives in
+  // `terminalHost.ts` around a live xterm `Terminal`, which cannot be constructed
+  // under this runner's `environment: "node"`, and the property is exactly "the
+  // payload goes out by this route and not that one".
+  //
+  // Why it is worth pinning at all: a coding agent decides whether a path is a
+  // file to attach or merely text by **whether it arrived as a paste**. Measured
+  // against a real Claude Code, with the identical characters both ways:
+  //
+  //     typed one at a time   -> the composer shows `/tmp/…/red.png`
+  //     sent via term.paste   -> the composer shows `[Image #1]`
+  //
+  // So `send(payload)` and `term.paste(payload)` are not two spellings of one
+  // thing; one of them silently loses the entire feature. That is not visible at
+  // the call site, and nothing else in the build would catch the swap.
+  it("hands the payload to term.paste", () => {
+    expect(TERMINAL_HOST).toContain("s.term.paste(payload)");
   });
 
-  it("types a path at a shell prompt, even with an agent flag still set", () => {
-    // The case that makes this two signals rather than one: the agent wrapper
-    // `exec`s the real binary and can never report its own exit, so the flag is
-    // cleared by the shell's OSC 133 mark — which needs shellIntegration on. With
-    // it off the flag goes stale, and `^V` at a zsh prompt corrupts the next
-    // character the user types (`^V` then `echo hi` → `eecho hi`). Measured.
-    expect(imageAction({ agent: true, foregroundApp: false })).toBe("path");
-  });
-
-  it("types a path for a full-screen program that is not an agent", () => {
-    // `vim` is the case: busy says "something is reading the tty" but `^V` there
-    // is visual-block mode, and a typed path is both harmless and useful.
-    expect(imageAction({ agent: false, foregroundApp: true })).toBe("path");
-  });
-
-  it("types a path when nothing is known", () => {
-    expect(imageAction({ agent: false, foregroundApp: false })).toBe("path");
-  });
-
-  it("never pastes unless both signals agree", () => {
-    // Stated as the property rather than as four cases, because the property is
-    // what must survive a future third signal being added.
-    for (const agent of [true, false]) {
-      for (const foregroundApp of [true, false]) {
-        const expected = agent && foregroundApp ? "paste" : "path";
-        expect(imageAction({ agent, foregroundApp }), `${agent}/${foregroundApp}`).toBe(expected);
-      }
-    }
+  it("never writes the payload straight to the socket", () => {
+    // `send(payload)` is the regression: it is what shipped first, and it typed
+    // the path instead of attaching the image.
+    expect(TERMINAL_HOST).not.toContain("send(payload)");
   });
 });
