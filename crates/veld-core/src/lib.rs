@@ -25,6 +25,7 @@ pub mod sensitive;
 pub mod setup;
 pub mod share;
 pub mod shell;
+pub mod signing;
 pub mod state;
 pub mod stats;
 #[cfg(test)]

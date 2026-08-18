@@ -4589,6 +4589,7 @@ dependencies = [
  "base64",
  "chrono",
  "dirs",
+ "ed25519-dalek 2.2.0",
  "indexmap",
  "nix 0.29.0",
  "petname",
