@@ -114,21 +114,28 @@ CURL_PROGRESS="--progress-bar"
 # the next request, and without this a blip in the middle of an install aborts a
 # run that had already closed the app and stopped nothing else.
 #
-# `--retry` alone, not `--retry-all-errors`: curl's own transient set (a timeout,
-# HTTP 408/429/500/502/503/504) is exactly the right one here, whereas retrying
-# *any* error would spend six seconds re-asking for a 404 that will stay a 404 —
-# an old release with no app archive is a supported case, not a blip.
+# `--retry` alone, not `--retry-all-errors`: curl's own transient set (a timeout, a
+# DNS resolution failure, and HTTP 408/429/500/502/503/504) is the right one here,
+# whereas retrying *any* error would spend six seconds re-asking for a 404 that will
+# stay a 404 — an old release with no app archive is a supported case, not a blip.
+# Note what that set excludes, because it decides what the cap below can cost:
+# connection-refused (exit 7) is not retried, and neither is a transfer that dies
+# part-way (exit 18/56) — measured, one connection, no second attempt.
 #
-# `--retry-max-time` is not belt-and-braces on `--retry-delay`, it is the only
-# thing bounding the wait: **curl obeys a server-sent `Retry-After` in preference
-# to `--retry-delay`, and `--max-time` does not cap it.** Measured against a local
+# `--retry-max-time` is not belt-and-braces on `--retry-delay`, it is the only thing
+# bounding the wait: **curl obeys a server-sent `Retry-After` in preference to
+# `--retry-delay`, and `--max-time` does not cap it.** Measured against a local
 # listener on curl 8.7.1 — a `429` carrying `Retry-After: 25` took 75s, not the 6s
-# the delay implies, and a `Retry-After: 600` was still sleeping past two minutes.
-# That header is exactly what a rate-limiting CDN sends, so without a cap the
-# incident case turns a failed install into a half-hour stall with the app already
-# quit. 30s: room for the ordinary three 2s waits and for retrying a large archive
-# that died part-way, while a large `Retry-After` now fails fast instead of
-# sleeping through it.
+# the delay implies, and `Retry-After: 600` was still sleeping past two minutes.
+# That header is exactly what a rate-limiting CDN sends, so without a cap an
+# incident turns a failed install into a half-hour stall with the app already quit.
+#
+# 30s, and the reason it does not have to cover the ~113 MB app archive: that timer
+# is reset once, before the *first* attempt, and includes transfer time — so a cap
+# only ever protects retries that happen early. It costs nothing anyway, because
+# every failure curl will retry is a status line, which arrives just as fast for a
+# 113 MB asset as for a 2 KB one; the slow-then-fail case is a dead transfer, and
+# that is exit 18/56, outside the retry set with or without a cap.
 CURL_RETRY="--retry 3 --retry-delay 2 --retry-max-time 30"
 
 # --- Detect platform ---
@@ -218,11 +225,18 @@ fi
 
 if [ -z "$VERSION" ]; then
   # Named rather than left as a bare "could not determine": `-f` means an empty
-  # TAG is almost always an HTTP failure, and during a GitHub incident that is
+  # TAG is almost always a failure to reach GitHub, and during an incident that is
   # what everybody hits at once. Anyone whose network is fine reads past it.
-  echo "Error: could not determine the latest version from the GitHub API."
+  #
+  # Both causes named, because this line is reached by both and they need opposite
+  # actions. curl retries a DNS failure (measured: four attempts, 3.5s), so a
+  # laptop with no network arrives here too, after a pause, and telling it to wait
+  # for GitHub to recover would be wrong. `curl -sS` has already printed which one
+  # it was on the line above.
+  echo "Error: could not reach the GitHub API to find the latest version."
   echo "  If GitHub is having an incident (https://www.githubstatus.com/), try again later."
-  echo "  Otherwise pin a version: VELD_VERSION=x.y.z"
+  echo "  If this machine is offline or behind a proxy, that is the more likely cause."
+  echo "  To skip this lookup entirely, pin a version: VELD_VERSION=x.y.z"
   exit 1
 fi
 

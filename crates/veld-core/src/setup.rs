@@ -1574,55 +1574,38 @@ pub async fn check_update() -> Result<Option<String>, anyhow::Error> {
 
     let url = format!("https://api.github.com/repos/{GITHUB_REPO}/releases/latest");
 
-    // Retried on the same terms as the install script download, and for the same
-    // reason rather than for symmetry: this is the *first* GitHub call `veld update`
-    // makes, and on the app-driven path Veld Desktop has already quit by the time it
-    // runs — so a single transient 503 here ends the update with the user's app
-    // closed and nothing installed. The download's retry would never be reached.
+    // **One attempt, deliberately — do not add a retry here.** It was tried and
+    // reverted, because the caller that dominates this function is not the one it
+    // looks like. `maybe_show_update_banner` in `main.rs` calls it on every
+    // `veld start|stop|restart|status|stats|urls|action|logs`, and it stamps
+    // `KV_UPDATE_LAST_CHECK` only after a *successful* fetch — so during a GitHub
+    // outage the check is re-attempted on every one of those commands, including the
+    // `veld action` the IDE invokes. Three attempts two seconds apart measures ~4s,
+    // which slips *under* that call site's 5s timeout and therefore gets paid in
+    // full, every command, for the length of the outage. One request costs a round
+    // trip.
     //
-    // Silent, unlike the download's: the other caller is the passive "a newer
-    // version is available" nudge in `main.rs`, which runs on ordinary commands
-    // under a 5s `tokio::time::timeout`. Narrating a retry there would put two
-    // lines of GitHub weather on every `veld` invocation during an outage. That
-    // timeout also means the nudge simply gives up mid-retry, which is the right
-    // outcome for a best-effort check and the reason the extra attempts cost it
-    // nothing — but the two are now coupled, so do not shorten either alone.
-    let mut attempt = 0u32;
-    let resp = loop {
-        attempt += 1;
-        let last = attempt >= INSTALL_SCRIPT_ATTEMPTS;
+    // The other caller loses little: `veld update` with no version pinned, where a
+    // transient failure costs one re-run and now says so. And the case that would
+    // actually hurt — the Veld Desktop handoff, app already quit — never reaches
+    // here at all: the app always passes `--target-version`
+    // (`desktop/src/updatePolicy.js`) and `resolve_target` in `update.rs` skips this
+    // call whenever a target is given, to keep the window off a second rate-limited
+    // source. `download_install_script`'s retry is the one on that path.
+    let resp = client
+        .get(&url)
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .await
+        .context("failed to fetch latest release from GitHub")?;
 
-        let resp = match client
-            .get(&url)
-            .header("Accept", "application/vnd.github+json")
-            .send()
-            .await
-        {
-            Ok(resp) => resp,
-            Err(_) if !last => {
-                tokio::time::sleep(INSTALL_SCRIPT_RETRY_DELAY).await;
-                continue;
-            }
-            Err(e) => {
-                return Err(
-                    anyhow::Error::new(e).context("failed to fetch latest release from GitHub")
-                );
-            }
-        };
-
-        let status = resp.status();
-        if status.is_success() {
-            break resp;
-        }
-        if is_transient_status(status) && !last {
-            tokio::time::sleep(INSTALL_SCRIPT_RETRY_DELAY).await;
-            continue;
-        }
+    if !resp.status().is_success() {
         anyhow::bail!(
-            "GitHub API returned status {status} when checking for updates{}",
-            github_outage_hint(status, resp.headers())
+            "GitHub API returned status {} when checking for updates{}",
+            resp.status(),
+            github_outage_hint(resp.status(), resp.headers())
         );
-    };
+    }
 
     let body: serde_json::Value = resp
         .json()
@@ -1870,9 +1853,15 @@ fn github_outage_hint(
     }
 }
 
-/// Statuses worth trying again, matching the set `curl --retry` treats as
-/// transient (408, 429, 5xx) — the same judgement `install.sh` gets from that
-/// flag, made here for the one download that does not go through curl.
+/// Statuses worth trying again: 408, 429, and **any** 5xx.
+///
+/// A deliberate superset of `curl --retry`'s set, which is the enumeration
+/// 500/502/503/504 rather than a range — measured on curl 8.7.1, a `501` and a
+/// Cloudflare `521` are both retried here and neither is retried by `install.sh`.
+/// Kept wider on purpose: this is the one download that does not go through curl,
+/// and a gateway in front of the CDN answering 52x is the same blip as a 503. The
+/// test below pins the divergence rather than the intersection, so nobody
+/// "restores parity" by narrowing it back.
 fn is_transient_status(status: reqwest::StatusCode) -> bool {
     status == reqwest::StatusCode::TOO_MANY_REQUESTS
         || status == reqwest::StatusCode::REQUEST_TIMEOUT
@@ -3206,10 +3195,12 @@ fn hang_up_terminal_holders(veld_dir: &Path) {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     use super::{
-        download_install_script, first_existing_file, github_outage_hint,
+        INSTALL_SCRIPT_ATTEMPTS, download_install_script, first_existing_file, github_outage_hint,
         init_lua_loads_veld_spoon, install_script_override_from, is_install_script_unavailable,
         is_transient_status, linux_desktop_candidates, looks_like_install_script,
         parse_launchctl_pid, parse_launchctl_program, parse_systemd_exec_start,
@@ -3248,22 +3239,34 @@ mod tests {
             "<!doctype html><title>Sign in to continue</title>"
         ));
         // A shell script that is not *this* shell script — and read the reason it
-        // fails, not the shape of it: the **only** thing asserted here is that the
-        // marker is absent. `"#!/bin/sh\nrm -rf / # VELD_VERSION\n"` passes the
-        // gate. That is not a hole being tolerated, it is what the gate is: an
-        // anti-corruption check on a body fetched over TLS, never an authenticity
-        // check. Nothing here authenticates the script — see the note on
-        // `run_install_script`.
+        // fails, not the shape of it: the **only** thing rejected here is the absent
+        // marker.
         assert!(!looks_like_install_script("#!/bin/sh\nrm -rf /\n"));
+        // Which is why the exception is asserted next to it rather than described:
+        // add the marker as a comment and the same hostile script passes. That is
+        // not a hole being tolerated, it is what the gate *is* — an anti-corruption
+        // check on a body already fetched over TLS, never an authenticity check.
+        // Nothing here authenticates the script; see the note on
+        // `run_install_script` for what is actually missing. This assertion exists
+        // so nobody can read the line above as more than it is.
+        assert!(looks_like_install_script(
+            "#!/bin/sh\nrm -rf / # VELD_VERSION\n"
+        ));
         assert!(!looks_like_install_script(""));
     }
 
-    /// The retry set, matching what `install.sh` gets from `curl --retry`. Asserted
-    /// because the two halves of the installer picking different transient sets is
-    /// exactly the kind of drift nobody notices until an incident.
+    /// The retry set. Asserted because the two halves of the installer picking
+    /// different transient sets is exactly the kind of drift nobody notices until an
+    /// incident — and because the divergence that *is* intended has to be written
+    /// down somewhere a change would trip over.
+    ///
+    /// 501 and 521 are the intended divergence: `curl --retry` takes an enumeration
+    /// (500/502/503/504), this takes the whole 5xx range, so those two are retried
+    /// here and not by `install.sh`. Verified against curl 8.7.1, which gave up on
+    /// both in 0.02s.
     #[test]
-    fn transient_statuses_match_curls_retry_set() {
-        for code in [408, 429, 500, 502, 503, 504] {
+    fn transient_statuses_are_a_deliberate_superset_of_curls_retry_set() {
+        for code in [408, 429, 500, 501, 502, 503, 504, 521] {
             assert!(
                 is_transient_status(reqwest::StatusCode::from_u16(code).unwrap()),
                 "HTTP {code} should be retried"
@@ -3319,19 +3322,28 @@ mod tests {
         assert!(github_outage_hint(reqwest::StatusCode::FORBIDDEN, &plenty).is_empty());
     }
 
-    /// Serve `responses` in order, one per connection, and return the address.
+    /// Serve `responses` in order, one per connection. Returns the URL and a live
+    /// count of connections accepted.
     ///
     /// A hand-rolled listener rather than a mock-HTTP dev-dependency: the assertion
     /// needs a *transient* status followed by a good body, which is three lines of
     /// canned bytes, and `veld-core` carries no dev-dependencies today.
-    async fn serve_in_order(responses: Vec<String>) -> String {
+    ///
+    /// The counter is what lets "this was not retried" be *asserted* rather than
+    /// inferred from an error message — inference was wrong here, because a second
+    /// attempt against a dead listener produces a transport error that this code
+    /// also retries, so the message alone cannot tell one attempt from three.
+    async fn serve_in_order(responses: Vec<String>) -> (String, Arc<AtomicUsize>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
+        let seen = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&seen);
         tokio::spawn(async move {
             for body in responses {
                 let Ok((mut stream, _)) = listener.accept().await else {
                     return;
                 };
+                counter.fetch_add(1, Ordering::SeqCst);
                 // Read the request line and headers so the client does not see a
                 // reset before it has finished writing.
                 let mut buf = [0u8; 4096];
@@ -3340,7 +3352,26 @@ mod tests {
                 let _ = tokio::io::AsyncWriteExt::shutdown(&mut stream).await;
             }
         });
-        format!("http://{addr}/get")
+        (format!("http://{addr}/get"), seen)
+    }
+
+    /// A client for these tests, with a timeout.
+    ///
+    /// The timeout is not tidiness: once the canned responses run out the listener
+    /// task ends, and a connection that lands in the kernel's backlog first is
+    /// accepted by nobody and answered by nobody. Without this a regression would
+    /// hang the suite instead of failing it.
+    ///
+    /// These tests sleep the real `INSTALL_SCRIPT_RETRY_DELAY` — about 6s across the
+    /// three of them. `#[tokio::test(start_paused = true)]` would erase that, and is
+    /// deliberately not used: paused time also drives reqwest's own timeout, so the
+    /// guard above would fire the instant the client waited on a socket. A slow test
+    /// that cannot hang beats a fast one that can.
+    fn test_client() -> reqwest::Client {
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .unwrap()
     }
 
     fn http_response(status: &str, body: &str) -> String {
@@ -3358,15 +3389,20 @@ mod tests {
     /// and this test starts returning GitHub's prose as a script to run.
     #[tokio::test]
     async fn a_rate_limited_download_fails_instead_of_returning_prose() {
-        let url = serve_in_order(vec![
+        let (url, seen) = serve_in_order(vec![
             http_response("429 Too Many Requests", GITHUB_429_BODY),
             http_response("429 Too Many Requests", GITHUB_429_BODY),
             http_response("429 Too Many Requests", GITHUB_429_BODY),
         ])
         .await;
-        let client = reqwest::Client::builder().build().unwrap();
 
-        let err = download_install_script(&client, &url).await.unwrap_err();
+        let err = download_install_script(&test_client(), &url)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            seen.load(Ordering::SeqCst),
+            INSTALL_SCRIPT_ATTEMPTS as usize
+        );
         let msg = err.to_string();
         assert!(msg.contains("429"), "{msg}");
         assert!(msg.contains("githubstatus.com"), "{msg}");
@@ -3382,14 +3418,17 @@ mod tests {
     /// not what makes it safe to run.
     #[tokio::test]
     async fn a_two_hundred_that_is_not_a_script_is_refused() {
-        let url = serve_in_order(vec![http_response(
+        let (url, seen) = serve_in_order(vec![http_response(
             "200 OK",
             "<!doctype html><title>Wi-Fi login</title>",
         )])
         .await;
-        let client = reqwest::Client::builder().build().unwrap();
 
-        let err = download_install_script(&client, &url).await.unwrap_err();
+        let err = download_install_script(&test_client(), &url)
+            .await
+            .unwrap_err();
+        // Not retried either: a served page is an answer, not a blip.
+        assert_eq!(seen.load(Ordering::SeqCst), 1);
         assert!(
             err.to_string()
                 .contains("did not return the install script"),
@@ -3401,31 +3440,33 @@ mod tests {
     /// The blip case the retry exists for: one transient failure, then the script.
     #[tokio::test]
     async fn a_transient_failure_is_retried_and_the_script_still_arrives() {
-        let url = serve_in_order(vec![
+        let (url, seen) = serve_in_order(vec![
             http_response("503 Service Unavailable", "upstream is sad"),
             http_response("200 OK", FAKE_SCRIPT),
         ])
         .await;
-        let client = reqwest::Client::builder().build().unwrap();
 
-        let body = download_install_script(&client, &url).await.unwrap();
+        let body = download_install_script(&test_client(), &url).await.unwrap();
         assert_eq!(body, FAKE_SCRIPT);
+        assert_eq!(seen.load(Ordering::SeqCst), 2);
     }
 
     /// A permanent status is *not* retried — a 404 answers the question, and
     /// re-asking it three times only makes the failure slower.
     #[tokio::test]
     async fn a_permanent_status_is_not_retried() {
-        // One response only: a second attempt would find the listener gone and
-        // fail with a transport error instead of the status, so the assertion on
-        // the message is also the assertion that no second attempt happened.
-        let url = serve_in_order(vec![http_response("404 Not Found", "nope")]).await;
-        let client = reqwest::Client::builder().build().unwrap();
+        let (url, seen) = serve_in_order(vec![http_response("404 Not Found", "nope")]).await;
 
-        let err = download_install_script(&client, &url).await.unwrap_err();
+        let err = download_install_script(&test_client(), &url)
+            .await
+            .unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("404"), "{msg}");
         assert!(!msg.contains("githubstatus.com"), "{msg}");
+        // The assertion that carries this test: exactly one request was made. The
+        // message alone could not say so — a second attempt would hit a dead
+        // listener, and a transport error is retried too.
+        assert_eq!(seen.load(Ordering::SeqCst), 1);
     }
 
     /// An unrelated error must not read as "the script never ran", or the hint
