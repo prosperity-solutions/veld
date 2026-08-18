@@ -27,16 +27,20 @@ const {
   safeRepoRoot,
   safeTitle,
   safeTransferTabs,
+  safeTabId,
+  safeTabIds,
   safeWorktreeId,
   transferFromSeed,
 } = require("./validate");
 const {
 
   canOpenAnother,
+  cycleOrder,
   dropDelivery,
 
   handBackTarget,
   handBackTransfers,
+  nextInCycle,
   nextListenerState,
   nextSuffix,
 
@@ -87,6 +91,18 @@ const {
  *   whether this window has a live listener for a cross-window drop. `unknown`
  *   until the renderer says — which an older `/ide` bundle never does, and which
  *   is why "unknown" is not "gone"; see `dropDelivery` in `windowState.js`.
+ * @property {{worktreeId: number, ids: string[]} | null} tabs
+ *   this window's tab strip, in the order it is drawn: dock 0 left-to-right,
+ *   then dock 1. Pushed by **every** window's renderer on every layout change —
+ *   unlike `snapshot`, which is detached-only and is a hand-back payload rather
+ *   than an ordering.
+ *
+ *   The sole input to the cross-window tab cycle order. Kept here, in the only
+ *   process that can see every window, rather than in a renderer's own registry
+ *   of the windows it once opened: that registry cannot learn a window closed,
+ *   cannot see a window it did not open, and has nowhere to record "the cycle is
+ *   currently parked on somebody else" — all three of which were live bugs the
+ *   first time this feature was attempted (#315).
  * @property {number | null} worktreeId
  * @property {string | null} repoRoot  which worktree a *detached* window is a
  *   dock for. Persisted and put back in its URL on restore: a bare dock has no
@@ -732,6 +748,7 @@ function openWindow(options = {}) {
     repoRoot,
     seed,
     snapshot: null,
+    tabs: null,
     pendingAdopt: [],
     dropListener: "unknown",
     closing: false,
@@ -755,6 +772,23 @@ function openWindow(options = {}) {
   // never have done — it cannot tell a reload from a close.
   win.webContents.on("did-start-navigation", (details) => {
     record.dropListener = nextListenerState(record.dropListener, details);
+    // **And the tab strip, for exactly the reason stated above.** A page
+    // navigating away takes its strip with it and gets no chance to say so, so
+    // without this the record keeps advertising tabs the window no longer draws
+    // — and cycling then raises that window and asks a renderer that isn't
+    // there to activate one, which reads as "the chord stole my focus and did
+    // nothing". A reload that fails outright (the daemon stopped, `veld update`
+    // mid-restart) leaves the stale strip there indefinitely.
+    //
+    // **`isSameDocument` matters as much as `isMainFrame`** — the same pair
+    // `nextListenerState` filters on, one line above, and for a sharper reason
+    // here. `/ide` calls `history.replaceState` on every worktree selection and
+    // every IDE/Runs switch, which fires this event without replacing anything;
+    // clearing on it drops the window from the cycle order *permanently*,
+    // because the renderer's push is deduped on the tab ids and nothing about
+    // them changed, so it never re-sends. A single rail click would have killed
+    // cycling for the rest of the session.
+    if (details.isMainFrame && !details.isSameDocument) record.tabs = null;
   });
 
   // Run URLs open in the user's real browser, never inside the shell.
@@ -1004,6 +1038,29 @@ function openSettings() {
   if (target.win.isMinimized()) target.win.restore();
   target.win.focus();
   target.win.webContents.send("veld:app:settings");
+}
+
+/**
+ * Hand a File-menu tab command (`"new"` / `"close"`) to the focused window.
+ *
+ * These are **menu accelerators rather than key handlers in the page**, for the
+ * same reason ⌘, is one: a focused `WebContentsView` swallows every keystroke, so
+ * a browser pane would be the one place in the app where ⌘W did nothing. A menu
+ * accelerator is handled before web contents see the key, so it needs no
+ * per-pane forwarding at all.
+ *
+ * Unlike `openSettings`, there is **no fallback to some other window**. A tab
+ * command is about the strip in front of you; running it against a different
+ * window because this one cannot answer would close a tab somewhere the user is
+ * not looking. Nothing focused, or a window with no page to tell, means the
+ * chord does nothing — which is what an accelerator over a native menu or a
+ * window being torn down should do.
+ */
+function tabCommand(command) {
+  const focused = BrowserWindow.getFocusedWindow();
+  const record = focused ? recordFor(focused) : null;
+  if (!record || record.closing || record.win.isDestroyed()) return;
+  record.win.webContents.send("veld:app:tab-command", { command });
 }
 
 /** Focus a main window, opening one if every window is gone (macOS keeps the
@@ -1542,6 +1599,115 @@ function registerWindowIpc(ipcMain) {
     return true;
   });
 
+  /**
+   * This window's tab strip, in drawn order — the input to `cycle-tab` below.
+   *
+   * Every window reports, main and detached alike, which is the one thing that
+   * makes a *global* order possible: a main window's own tabs are half of it.
+   * (Contrast `veld:window:shows` and `veld:window:snapshot`, both of which are
+   * deliberately one-kind-only.)
+   *
+   * Pushed on every layout change rather than asked for when a chord is pressed:
+   * a request-response per keystroke would have to reach every window's renderer
+   * and wait for all of them, and a renderer that is busy or gone would stall or
+   * silently truncate the cycle. Retained state answers instantly and degrades to
+   * "that window contributes nothing" instead.
+   */
+  ipcMain.handle("veld:window:tabs", (event, payload) => {
+    const record = recordFor(senderWindow(event));
+    if (!record) return false;
+    const worktreeId = safeWorktreeId(payload?.worktreeId);
+    const ids = safeTabIds(payload?.tabIds);
+    // **No `activeId` here, deliberately.** Which tab is active is only ever
+    // asked about the window that pressed the key, and that window sends it with
+    // the request — so a copy retained here would be state nothing reads, kept
+    // fresh by an IPC nothing depends on, and wrong in exactly the window where
+    // it mattered (the one whose push had not landed yet).
+    record.tabs = worktreeId === null || ids.length === 0 ? null : { worktreeId, ids };
+    return true;
+  });
+
+  /**
+   * Step to the next/previous tab of the worktree the calling window is showing,
+   * across **every** window showing that worktree.
+   *
+   * The order is windows by `record.id` — creation order, and never reused, so a
+   * detach-and-close cycle cannot renumber it — then each window's tabs as its
+   * strip draws them. Wraps at both ends.
+   *
+   * **Position is derived, not remembered.** It is `(the calling window, the
+   * `activeId` that window sent with this very call)`. Nothing about "where the
+   * cycle currently is" is stored anywhere, because it does not need to be: after
+   * a press lands on another window, that window has OS focus, so the *next*
+   * press is handled by its renderer and reports its own real active tab. #315
+   * kept this position in the originating renderer and needed an anchor ref to
+   * represent "parked on a window I cannot see the tabs of", which went stale and
+   * ping-ponged between one tab and one detached window. There is nothing here to
+   * go stale.
+   *
+   * `activeId` comes **in the request** rather than from `record.tabs`: the push
+   * above is a separate IPC, and a chord pressed in the same frame as a tab
+   * change would otherwise be answered from the previous position.
+   *
+   * Returns `{ tabId }` when the answer is a tab in the calling window (it
+   * activates it itself — the same path a click takes), `{ focused: true }` when
+   * another window was raised and pushed at, and `null` when there is nothing to
+   * do.
+   */
+  ipcMain.handle("veld:window:cycle-tab", (event, payload) => {
+    const sender = recordFor(senderWindow(event));
+    if (!sender) return null;
+    const worktreeId = safeWorktreeId(payload?.worktreeId);
+    if (worktreeId === null) return null;
+    const delta = payload?.delta === -1 ? -1 : payload?.delta === 1 ? 1 : null;
+    if (delta === null) return null;
+    // The sender may only cycle a worktree it is actually showing — the same
+    // check `shows`/`legacy-claim`/drop routing make, and the one thing that
+    // stops a payload naming a worktree set the caller has nothing to do with.
+    // Without it, a renderer (or a compromised main frame) picks which windows
+    // it raises by naming their worktree and sending an `activeId` that is not
+    // in the resulting order, which lands deterministically on its first or
+    // last entry. Refusing resolves to `null`, and the caller falls back to its
+    // own tabs — the same degradation as an older shell.
+    if (!ownsWorktree(sender, worktreeId, showing)) return null;
+
+    // Liveness is filtered here rather than in `cycleOrder`, which is pure —
+    // the same division `ownsWorktree` makes.
+    const live = allRecords().filter((r) => !r.closing && !r.win.isDestroyed());
+    const next = nextInCycle(
+      cycleOrder(live, worktreeId),
+      sender.id,
+      safeTabId(payload?.activeId),
+      delta,
+    );
+    if (!next) return null;
+    if (next.recordId === sender.id) return { tabId: next.tabId };
+
+    const target = live.find((r) => r.id === next.recordId);
+    // Cannot happen — `next` came out of the order built from `live` — but the
+    // alternative to checking is a crash in the privileged process on a race
+    // this code does not otherwise reason about.
+    if (!target) return null;
+    if (target.win.isMinimized()) target.win.restore();
+    target.win.show();
+    target.win.focus();
+    // **The keyboard goes to the page, not to whichever child view had it.**
+    // Raising a window restores focus to its last-focused child, and if that was
+    // a browser pane's `WebContentsView` the page never gets the keyboard —
+    // worse, the view's own `focus` event then fires and moves the layout's
+    // focused dock back to that pane, so the tab we are about to activate is
+    // active while ⌘W and the next cycle step both read the *other* dock. Same
+    // call `browserViews.js` makes before forwarding an accelerator, for the
+    // same reason.
+    target.win.webContents.focus();
+    // `show()`/`focus()` are OS-level and this process cannot reach into another
+    // renderer's DOM. Which of that window's tabs is active, and where real focus
+    // sits inside it, is state only that renderer can change — so it is told, and
+    // it runs the *same* activation a click in it would have run.
+    target.win.webContents.send("veld:window:activate-tab", { tabId: next.tabId });
+    return { focused: true };
+  });
+
   ipcMain.handle("veld:window:set-title", (event, payload) => {
     const win = senderWindow(event);
     const record = recordFor(win);
@@ -1551,11 +1717,24 @@ function registerWindowIpc(ipcMain) {
     return true;
   });
 
-  /** A detached window whose last tab was closed closes itself: a bare dock with
-   *  no dock in it is an empty box with no way to put anything back in it. */
+  /**
+   * Close the calling window.
+   *
+   * Two callers: a detached window whose last tab was closed closes itself (a
+   * bare dock with no dock in it is an empty box with no way to put anything
+   * back in it), and ⌘W in **any** window when there is no tab to close — which
+   * is what keeps that chord from silently doing nothing now that it is the tab
+   * accelerator rather than Electron's `close` role.
+   *
+   * The `kind !== "detached"` guard this used to carry is gone with the second
+   * caller, and it was never a security boundary: a window closing *itself* is
+   * something the user can do from the traffic light, the Window menu and ⌘⇧W,
+   * and `senderWindow` still pins it to the caller's own window. Closing runs
+   * the same `close` path as all of those, hand-back included.
+   */
   ipcMain.handle("veld:window:close", (event) => {
     const record = recordFor(senderWindow(event));
-    if (!record || record.kind !== "detached") return false;
+    if (!record || record.win.isDestroyed()) return false;
     record.win.close();
     return true;
   });
@@ -1626,6 +1805,7 @@ module.exports = {
   openWindow,
   focusPrimary,
   openSettings,
+  tabCommand,
   restoreWindows,
   registerWindowIpc,
   setQuitting,

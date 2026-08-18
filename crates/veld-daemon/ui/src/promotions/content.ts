@@ -170,4 +170,29 @@ export const PROMOTIONS: Promotion[] = [
     body: "This machine stays awake while you're sharing, and lets go when the share ends. Two hours on mains, half an hour on battery — both in Settings → Keep awake.",
     glyph: "device",
   },
+  {
+    // **A new way to move around**, which is the category with the clearest
+    // claim on this channel — and one nobody discovers by looking, because a
+    // keyboard shortcut has no affordance on screen to notice. The whole set
+    // earns one card, not one per chord: what changes about the reader's day is
+    // that Veld is drivable from the keyboard at all, and the individual chords
+    // are what the overview is for.
+    //
+    // The id is free despite an earlier attempt using it: that card was reverted
+    // inside its own PR (#315) and never reached a release, so no daemon has
+    // ever persisted state against it. Its copy — "Navigate faster thanks to
+    // more shortcuts" — is also the failure this file warns about: "more
+    // shortcuts" is a fact about the product, and reads as true to somebody who
+    // will never press one.
+    //
+    // ⌘/ rather than "the ⋯ menu → Shortcuts": pointing at a shortcut with a
+    // shortcut is the one place that reads as a demonstration rather than a
+    // direction, and it is the chord most worth keeping.
+    id: "keyboard-shortcuts",
+    since: "2026-08-18",
+    eyebrow: "New",
+    headline: "Drive Veld without reaching for the mouse",
+    body: "⌃Tab steps tabs, ⌥Tab steps worktrees, and Shift reverses both — from inside a terminal or a browser pane too. Press ⌘/ for the full list.",
+    glyph: "panes",
+  },
 ];

@@ -1,7 +1,14 @@
 import { Fragment } from "react";
 import { Badge, Group, Kbd, ScrollArea, Stack, Table, Text } from "@mantine/core";
 import { Modal } from "../components/dialogs";
-import { CATEGORY_ORDER, SHORTCUTS, categoryLabel, comboTokens, isMac } from "./registry";
+import {
+  CATEGORY_ORDER,
+  SHORTCUTS,
+  categoryLabel,
+  comboTokens,
+  combosFor,
+  isMac,
+} from "./registry";
 
 /**
  * The Shortcuts overview: every keyboard shortcut Veld binds — in the IDE's
@@ -33,7 +40,7 @@ export function ShortcutsDialog(props: { onClose: () => void }) {
                         </Table.Td>
                         <Table.Td style={{ whiteSpace: "nowrap", width: "24%" }}>
                           <Group gap={6} wrap="nowrap">
-                            {s.combos.map((combo, i) => (
+                            {combosFor(s, mac).map((combo, i) => (
                               <Fragment key={i}>
                                 {i > 0 && (
                                   <Text size="xs" c="dimmed">

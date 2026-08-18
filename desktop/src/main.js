@@ -28,6 +28,7 @@ const {
   setQuitting,
   windowCount,
   openSettings,
+  tabCommand,
 } = require("./windows");
 const { MAX_WINDOWS, canOpenAnother } = require("./windowState");
 const {
@@ -548,21 +549,59 @@ function buildAppMenu() {
           accelerator: "CmdOrCtrl+N",
           click: () => newWindowOrSayWhyNot(),
         },
+        // ⌘T/⌘W are menu accelerators for the same reason ⌘N and ⌘, are, and it
+        // buys more here than for either of those: a focused `WebContentsView`
+        // swallows every keystroke, so a page-level handler would leave the two
+        // most-used tab chords dead in browser panes and doing nothing there is
+        // worse than not having them. Handled before web contents see the key,
+        // so no `before-input-event` forwarding to write. See `tabCommand`.
+        {
+          label: "New Tab",
+          accelerator: "CmdOrCtrl+T",
+          click: () => tabCommand("new"),
+        },
         { type: "separator" },
-        // On macOS this lives in the app menu, where the platform expects it.
+        {
+          label: "Close Tab",
+          accelerator: "CmdOrCtrl+W",
+          click: () => tabCommand("close"),
+        },
+        // **`role: "close"` re-accelerated off its default ⌘W**, which it holds on
+        // macOS, so that ⌘W can mean "close the tab". This is Chrome's, Safari's
+        // and VS Code's arrangement, and picking it is a deliberate move of
+        // existing muscle memory rather than a free addition. Given its own entry
+        // on every platform: without one, Linux and Windows have no window-close
+        // accelerator at all (the non-mac branch below never had the role).
+        {
+          label: "Close Window",
+          accelerator: "CmdOrCtrl+Shift+W",
+          role: "close",
+        },
+        // Everything below is non-mac only, **including the separator that
+        // opens it** — on macOS this is the end of the menu, and a separator
+        // with nothing after it draws as a stray line under the last item.
+        // (Settings lives in the app menu there, where the platform expects it;
+        // so do About and Quit.)
+        //
+        // No `{ role: "close" }` anywhere down here any more — "Close Window"
+        // above is it, on every platform. Left in place it would re-register the
+        // very ⌘W this change moves, and a duplicate accelerator resolves to
+        // whichever item the menu reaches first rather than to an error.
         ...(isMac
           ? []
           : [
+              { type: "separator" },
               {
                 label: "Settings…",
                 accelerator: "CmdOrCtrl+,",
                 click: () => openSettings(),
               },
               { type: "separator" },
+              ...veldItems,
+              { type: "separator" },
+              { role: "about" },
+              { role: "quit" },
             ]),
-        ...(isMac
-          ? [{ role: "close" }]
-          : [...veldItems, { type: "separator" }, { role: "about" }, { role: "quit" }]),
       ],
     },
     {
@@ -596,7 +635,10 @@ function buildAppMenu() {
       submenu: [
         { role: "minimize" },
         { role: "zoom" },
-        ...(isMac ? [{ type: "separator" }, { role: "front" }] : [{ role: "close" }]),
+        // Same reason as the File menu's: this non-mac `close` carried the
+        // default ⌘W, which is now "Close Tab". Window-closing is one item, in
+        // File, accelerated ⌘⇧W.
+        ...(isMac ? [{ type: "separator" }, { role: "front" }] : []),
       ],
     },
   ];

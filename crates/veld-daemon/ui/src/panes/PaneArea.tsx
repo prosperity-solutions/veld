@@ -67,7 +67,16 @@ import {
   IconX,
 } from "@tabler/icons-react";
 import { useContextMenu } from "mantine-contextmenu";
-import { Fragment, useCallback, useEffect, useReducer, useRef, useState } from "react";
+import type { MutableRefObject } from "react";
+import {
+  Fragment,
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useReducer,
+  useRef,
+  useState,
+} from "react";
 import { BrowserPane, browserTabDot } from "./BrowserPane";
 import { LogsPane, NodesPane, type RunPaneContext } from "./RunPanes";
 import { BookmarksModal, PlaceList } from "./PlaceList";
@@ -94,6 +103,7 @@ import {
   dockOf,
   dockVisible,
   focusDock,
+  hasTab,
   insertTab,
   moveTab,
   moveTabToOtherDock,
@@ -257,6 +267,56 @@ function releaseForTransfer(tab: PaneTab): void {
   }
 }
 
+/**
+ * What the app can do to this pane area without a pointer.
+ *
+ * Every member is the **same call the equivalent mouse affordance makes** — the
+ * tab button's `onClick`, the tab's close button, the strip's `+`. That is the
+ * whole design: a keyboard chord and a menu accelerator get whatever a click
+ * does, by construction, rather than by a second copy of the logic in `App.tsx`
+ * that has to be kept in step with this file.
+ *
+ * The history is worth keeping. #315's tab-cycling re-derived activation in
+ * `App.tsx`, could not reproduce what a click did, and ended up dispatching a
+ * literal `.focus()` + `.click()` at the real button to get it — a workaround
+ * for a root cause never found. There was nothing to find: the tab button's
+ * handler is exactly `onLayout(activateTab(layout, id))`, so the two were the
+ * same call all along. A handle makes that identity structural instead of
+ * something to re-verify.
+ */
+export interface PaneAreaHandle {
+  /** Make `id` the active tab in its own dock and put real DOM focus on its
+   *  strip button — exactly what clicking that button does. */
+  selectTab(id: string): void;
+  /**
+   * Close the focused dock's active tab, through the same confirmation a busy
+   * terminal gets from its × button.
+   *
+   * Returns whether there *was* a tab to close. `false` is what lets ⌘W fall
+   * back to closing the window, so that the chord always does something — it
+   * used to be Electron's `close` role and closed the window from any state, and
+   * "does nothing at all" is the one outcome that trade cannot justify.
+   */
+  closeActiveTab(): boolean;
+  /** Open a `new` chooser pane in the focused dock — the strip's `+`. */
+  newTab(): void;
+  /**
+   * Put something on the other side of the dock.
+   *
+   * **Two behaviours, because "split" means two things depending on what is
+   * there.** With more than one tab in the focused half, it *moves* the active
+   * one across — what the tab's context menu and a double-click on its label do.
+   * With only one tab there is nothing to move (moving it would just swap which
+   * side the single pane sits on), so it opens a **new** pane on the other side
+   * instead — what the `+` button's "Open to the side" does.
+   *
+   * So the chord always produces a split, which is what someone pressing it
+   * wants; the alternative was a shortcut that silently did nothing in the most
+   * common starting state of all, a worktree with one tab.
+   */
+  splitActiveTab(): void;
+}
+
 export function PaneArea(props: {
   layout: PaneLayout;
   onLayout: (next: PaneLayoutUpdate) => void;
@@ -299,6 +359,29 @@ export function PaneArea(props: {
    * component that fetches it is a component that renders before it arrives.
    */
   searchUrl: string;
+  /**
+   * Filled with [`PaneAreaHandle`] — how the app drives the tab strip from a
+   * keyboard chord or a menu accelerator.
+   *
+   * A handle rather than three more props calling back up, because the point is
+   * that these are *the same functions the mouse affordances call*, not a
+   * second implementation of them living in `App.tsx`. `requestClose`'s
+   * busy-terminal confirmation, in particular, is state local to this component
+   * and cannot be reached any other way.
+   */
+  handleRef?: MutableRefObject<PaneAreaHandle | null>;
+  /**
+   * Whether this component is on screen at all.
+   *
+   * The app advertises its tab strip to the desktop shell so other windows can
+   * cycle into it, and that advertisement is only true while there is a strip
+   * being drawn. `PaneArea` is behind several conditions in `App.tsx` — the
+   * IDE/Runs view switch, `claimBlocked`, having a worktree and a layout — and
+   * re-deriving them at the push site is the drift this reports away: a window
+   * in Runs view kept advertising four tabs, so cycling raised it and asked a
+   * `PaneAreaHandle` that no longer existed to activate one.
+   */
+  onMounted?: (mounted: boolean) => void;
 }) {
   const { layout, onLayout } = props;
   const areaRef = useRef<HTMLDivElement>(null);
@@ -354,6 +437,92 @@ export function PaneArea(props: {
       })
       .catch(() => onLayout((prev) => closeTab(prev, tabId)));
   };
+
+  // Told once each way, so the app can stop advertising a tab strip the moment
+  // this stops drawing one. Depending on `onMounted` rather than on nothing is
+  // the honest spelling — a `setState` identity is stable, so it re-runs only if
+  // a caller ever passes something that is not one, which is exactly when a
+  // fixed `[]` would silently keep calling the previous callback.
+  const onMounted = props.onMounted;
+  useEffect(() => {
+    onMounted?.(true);
+    return () => onMounted?.(false);
+  }, [onMounted]);
+
+  /**
+   * The keyboard/menu entry points — see [`PaneAreaHandle`] for why they live
+   * here rather than in `App.tsx`.
+   *
+   * No dependency array: each member closes over this render's `layout`, which
+   * is what the mouse handlers beside them do too, and a stale `layout` here
+   * would activate a tab that has since moved dock or close one that has gone.
+   */
+  useImperativeHandle(props.handleRef, () => ({
+    selectTab: (id: string) => {
+      // Not just a guard against a stale id: `activateTab` returns the layout
+      // unchanged for an id it cannot find, so without this the DOM focus below
+      // would move to a button belonging to some other worktree's strip.
+      if (!hasTab(layout, id)) return;
+      // **Focus first, activate second — the order a real mouse click produces**,
+      // because the browser's default mousedown action moves focus before the
+      // `click` event fires. Doing it the other way round is not a style
+      // difference: focusing the button runs the dock's `focusin` handler, so
+      // whatever that handler writes lands *after* whatever is written here.
+      // Activation therefore has to be the last word, exactly as it is for a
+      // click. (That handler is now an updater and no longer clobbers anything,
+      // so this ordering is belt to its braces — but the braces are one edit
+      // away from being loosened again, and this is the half a reader can see.)
+      //
+      // The `:focus-within` "focused pane" border reads *real* DOM focus, not
+      // `layout.focused`, which is why the focus call is needed at all. The
+      // button already exists — the tab is in the strip being read — so nothing
+      // has to wait for a commit.
+      document.getElementById(tabElementId(id))?.focus();
+      // The updater form for the same reason the `focusin` handler above uses
+      // one: this runs from a keyboard chord and from a cross-window IPC push,
+      // neither of which is guaranteed to be the only writer in its tick.
+      onLayout((prev) => activateTab(prev, id));
+    },
+    closeActiveTab: () => {
+      const id = layout.docks[layout.focused].activeId;
+      // `requestClose`, never `closeTab`: a terminal running a foreground job
+      // gets the same confirmation from ⌘W that it gets from its × button.
+      // Closing a running agent's shell because a chord was faster than a click
+      // is the one outcome here worth being careful about.
+      if (!id) return false;
+      requestClose(id);
+      return true;
+    },
+    splitActiveTab: () => {
+      // Minted once, outside the updater, for the same reason `newTab` does it:
+      // an updater may run more than once for a single write. Unused on the move
+      // branch, which costs a discarded uuid and nothing else.
+      const fresh = newPaneTab();
+      // **Everything derived from `prev`, not from this render's `layout`.** The
+      // value form would commit a snapshot taken before any writer that landed
+      // in the same tick — a browser pane reporting a navigation, say — and
+      // persist the tab with its previous URL. That is the exact write-shape
+      // `paneAreaContract.test.ts` exists to police in this file.
+      onLayout((prev) => {
+        const id = prev.docks[prev.focused].activeId;
+        // Branch on the model's own answer: `moveTabToOtherDock` returns the
+        // *same object* when there is nothing to move, so identity is the exact
+        // test for "that tab is alone in its half" and stays correct if the rule
+        // ever changes.
+        const moved = id ? moveTabToOtherDock(prev, id) : prev;
+        if (moved !== prev) return moved;
+        return addTab(prev, (prev.focused === 0 ? 1 : 0) as DockIndex, fresh);
+      });
+    },
+    newTab: () => {
+      // Minted once, outside the updater: an updater may be invoked more than
+      // once for a single write (React re-runs them in StrictMode and on a
+      // rebase), and a fresh id each time would open a different tab than the
+      // one that ends up committed.
+      const tab = newPaneTab();
+      onLayout((prev) => addTab(prev, prev.focused, tab));
+    },
+  }));
 
   /** The terminal pending confirmation, for the dialog's label. */
   const pendingTab = pendingClose
@@ -1166,7 +1335,21 @@ function DockView(props: {
       // otherwise have to be re-derived from.
       data-dock={index}
       style={{ width: props.width }}
-      onFocus={() => onLayout(focusDock(layout, index))}
+      // **The updater form, not `focusDock(layout, index)`.** This is `focusin`,
+      // so it fires for anything focused anywhere inside the dock — including a
+      // focus moved *by code that has just written to the layout in the same
+      // tick*. A value computed from this render's `layout` would then be
+      // committed on top of that write and silently undo it, which is precisely
+      // what `PaneLayoutUpdate`'s own doc comment warns about.
+      //
+      // It cost a release. Keyboard tab-cycling activated a tab and then moved
+      // DOM focus onto it, and this handler put the pre-activation layout back:
+      // the tab took the focus outline and never opened. A mouse click is immune
+      // by accident of ordering — the browser focuses on mousedown and fires
+      // `click` after, so there the activation is the *second* write — which is
+      // why the same bug in #315 read as "a real click works, re-deriving one
+      // does not" and was shipped around rather than found.
+      onFocus={() => onLayout((prev) => focusDock(prev, index))}
       aria-label={index === 0 ? "Primary pane" : "Secondary pane"}
     >
       <div
@@ -1804,7 +1987,10 @@ function TabScroller(props: {
 }
 
 /** The DOM id of a tab's button, and of a dock's panel. Both exist only so the
- *  tab and the panel it controls can name each other. */
+ *  tab and the panel it controls can name each other. Stays private: keyboard
+ *  activation goes through `PaneAreaHandle.selectTab` in this same file, so the
+ *  id scheme has no reader outside it — which is the point, since #315 exported
+ *  it precisely so `App.tsx` could reimplement a click against it. */
 function tabElementId(tabId: string): string {
   return `pane-tab-${tabId}`;
 }

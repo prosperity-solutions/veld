@@ -142,7 +142,7 @@ import { Notifications } from "@mantine/notifications";
 import { ContextMenuProvider, useContextMenu } from "mantine-contextmenu";
 import { theme as mantineTheme } from "./theme";
 import { RunsMode } from "./runs/RunsMode";
-import { PaneArea } from "./panes/PaneArea";
+import { PaneArea, type PaneAreaHandle } from "./panes/PaneArea";
 import type { RunPaneContext } from "./panes/RunPanes";
 import { notifyDone, notifyError, notifyRedirect, notifyTerminal, showSystemNotification } from "./shared/notify";
 import {
@@ -171,6 +171,7 @@ import {
   defaultLayout,
   diagTab,
   dockOf,
+  focusDock,
   lastBlankBrowserId,
   loadLayouts,
   newTabId,
@@ -232,10 +233,12 @@ import {
 } from "./panes/terminalHost";
 import {
   onBrowserAccelerator,
+  onBrowserFocused,
   onBrowserOpenRequest,
   popBrowserSuspend,
   pruneBrowsers,
   pushBrowserSuspend,
+  reassertVisibility,
   reloadBrowser,
   setBrowserPolicy,
 } from "./panes/browserHost";
@@ -2690,38 +2693,78 @@ function AppInner(props: {
           toggleProjectColumnRef.current();
           return;
         }
-        // ⌘/Ctrl + ↑/↓/←/→ — move the rail's selection to the worktree above
-        // or below the current one (←/→ are plain aliases for ↑/↓, for anyone
-        // whose rail reads left-to-right in their head), in the order the
-        // rail actually renders them (`railGroups`, flattened — not raw
-        // `worktrees`, which is grouping-blind), wrapping past either end.
-        // Guarded like ⌘B: `mod` alone also means Cmd+Up/Down's own
-        // text-field binding on macOS (jump to the start/end of a textarea),
-        // so a focused input keeps that instead. **Not in a chromeless window**
-        // — a detached window is a satellite of the worktree its origin claimed
-        // (`selectWorktree`'s own comment), and moving its selection off that
-        // worktree is exactly the thing being a satellite means it must not do.
-        if (
-          e.key === "ArrowUp" ||
-          e.key === "ArrowDown" ||
-          e.key === "ArrowLeft" ||
-          e.key === "ArrowRight"
-        ) {
-          if (isEditableTarget(e.target) || chromeless) return;
+      }
+      /**
+       * The navigation family: `⌃Tab`/`⌃⇧Tab` steps tabs, and `⌥Tab`/`⌥⇧Tab`
+       * (macOS) or `⌘⇧B`/`⌘⇧N` (elsewhere) steps worktrees.
+       *
+       * **`preventDefault()` is the load-bearing line.** `Tab` moves DOM focus,
+       * and Chromium runs that traversal as the keydown's default action *with
+       * the modifiers still held* — so without this the chord tabs through the
+       * app's focusable elements instead of navigating. That is exactly how the
+       * first attempt at this failed.
+       *
+       * **Not an Electron menu accelerator, though it was written as one first.**
+       * An accelerator would have reached inside a focused browser pane for
+       * free, but Chromium's focus manager handles `Tab` before the menu layer,
+       * so a `Control+Tab` accelerator never consumes the key — it fires
+       * unreliably and the page tabs anyway. Verified the hard way. Panes are
+       * served by `browserViews.js` forwarding instead, and terminals by
+       * `isAppShortcutChord`.
+       *
+       * **Why Tab at all**: every modifier+arrow combination is spoken for on
+       * every platform — `⌘`+arrow is caret motion (and was a reported terminal
+       * bug), `⌘⇧`+arrow is selection, `⌥`+arrow is word motion, `⌃`+arrow is
+       * Mission Control, `⌘⌥`+arrow is Rectangle and Magnet, `Ctrl+Alt`+arrow is
+       * GNOME/KDE workspaces, `Ctrl+Shift`+arrow is word selection. `Tab`
+       * survives, and `⇧` gives the reverse direction for free.
+       */
+      if (e.key === "Tab" && !isEditableTarget(e.target)) {
+        // **Not behind an open dialog.** A menu accelerator cannot be
+        // conditional, which is why ⌘T/⌘W guard this in their own handler; these
+        // are page-dispatched and can, so they do. The release that ships these
+        // chords auto-opens a What's New card *naming them* — without this,
+        // reading that card and pressing ⌃Tab cycles the strip invisibly behind
+        // it.
+        if (dialogRef.current.kind !== "none" || promotionsOpenRef.current) return;
+        // Tabs: literal Ctrl on every platform, so the chord is the same
+        // everywhere and cannot be confused with `mod`.
+        if (e.ctrlKey && !e.metaKey && !e.altKey) {
+          // Nothing to cycle with no strip on screen — the Runs view, or a
+          // worktree still resolving. Without this the shell's order contains
+          // only *other* windows' tabs, so `nextInCycle` lands on one of those
+          // and a "next tab" press raises a detached window instead: the chord
+          // teleports the user out of the window they pressed it in.
+          if (!paneMountedRef.current) return;
           e.preventDefault();
-          stepWorktree(e.key === "ArrowUp" || e.key === "ArrowLeft" ? -1 : 1);
+          void stepTab(e.shiftKey ? -1 : 1);
+          return;
+        }
+        // Worktrees, macOS: ⌥Tab rhymes with ⌃Tab one level up and is free here
+        // (the OS switcher is ⌘Tab). Off macOS the same chord *is* the window
+        // switcher, which is why that platform uses literal Ctrl+Shift+B/N below.
+        if (e.altKey && !e.metaKey && !e.ctrlKey) {
+          // **Returned before `preventDefault`**, not after: a detached window
+          // is a satellite of one worktree and must not move the rail, and
+          // swallowing the key there too would leave ⌥Tab dead rather than
+          // merely inapplicable.
+          if (chromeless) return;
+          e.preventDefault();
+          stepWorktree(e.shiftKey ? -1 : 1);
           return;
         }
       }
-      // ⌘/Ctrl+⇧ + a letter, arrow or Enter — the run/worktree actions with no
-      // chord yet: focus mode, the IDE/Runs view switch, update main, cycling
-      // the run selector, start/stop, and restart. One guard for all of them:
-      // none means anything to a focused text field, unlike ⌘B's emacs
-      // binding or Cmd+Up/Down's caret motion above.
+
+      // ⌘/Ctrl+⇧ + a letter or Enter — the run actions: focus mode, the
+      // IDE/Runs view switch, update main, cycling the run selector,
+      // start/stop, and restart. One guard for all of them: none means anything
+      // to a focused text field, unlike ⌘B's emacs binding above.
+      //
+      // Navigation is Tab-shaped and lives a few lines up, not in this block.
       if (mod && e.shiftKey && !e.altKey && !isEditableTarget(e.target)) {
         // Focus mode is a plain settings toggle with nothing worktree- or
-        // view-specific about it, so it is the one chord in this block with no
-        // `chromeless`/`mode` guard — it means the same thing everywhere.
+        // view-specific about it, so it carries no `chromeless`/`mode` guard —
+        // it means the same thing everywhere.
         // **⌘⇧L, not ⌘⇧F.** The veld feedback overlay's own keydown listener
         // (`feedback-overlay/keyboard.ts`) binds mod+Shift+F itself (its
         // "select an element" mode) on a **capture-phase** document listener,
@@ -2732,6 +2775,40 @@ function AppInner(props: {
         if (e.key === "l" || e.key === "L") {
           e.preventDefault();
           saveSettingsRef.current({ "focus.enabled": !focusPrefsRef.current.enabled });
+          return;
+        }
+        // Worktrees, **off macOS**: `Ctrl+Shift+B`/`N` — adjacent keys, left is
+        // previous and right is next. That platform cannot use the `⌥Tab` this
+        // app prefers, because there it is the window switcher. Matched without
+        // a platform check: a Mac keyboard produces the same event, and a second
+        // way in costs nothing when the *overview* is what promises one chord
+        // per action per platform (`KeyCombo.platform`).
+        if (
+          (e.key === "b" || e.key === "B" || e.key === "n" || e.key === "N") &&
+          // **Literal Ctrl, never `mod`.** This is the *non-macOS* spelling; on
+          // a Mac the chord is ⌥Tab, and matching `mod` here would make ⌘⇧B/N a
+          // second way to do the same thing there — which the registry says
+          // does not exist and `combosFor` never shows.
+          e.ctrlKey &&
+          !e.metaKey
+        ) {
+          if (chromeless) return;
+          e.preventDefault();
+          stepWorktree(e.key.toLowerCase() === "b" ? -1 : 1);
+          return;
+        }
+        // Split: move the active tab to the other dock, which creates the split
+        // when that dock is empty. **⌘⇧D, not ⌘D**, even though ⌘D is what iTerm
+        // and Ghostty use — `mod` includes literal Ctrl, and `Ctrl+D` is EOF in
+        // every shell. Adding Shift steps around that on both platforms at once
+        // rather than needing a per-platform chord. No `chromeless` guard: a
+        // detached window is a dock and can split like any other.
+        if (e.key === "d" || e.key === "D") {
+          // Guarded like the Tab chords above, and for the same reason: moving a
+          // tab between docks behind an open modal is invisible.
+          if (dialogRef.current.kind !== "none" || promotionsOpenRef.current) return;
+          e.preventDefault();
+          paneHandleRef.current?.splitActiveTab();
           return;
         }
         // Switching view is the one worktree-scoped chord that must keep
@@ -3301,6 +3378,27 @@ function AppInner(props: {
   // the layouts that render was built from.
   layoutsRef.current = layouts;
 
+  /**
+   * The pane area's keyboard/menu entry points — see `PaneAreaHandle`.
+   *
+   * One ref for both render sites below (the chrome-less branch and the full
+   * cockpit): exactly one of them is mounted at a time, so they cannot fight
+   * over it, and a second ref would only be a second thing to keep in step.
+   */
+  const paneHandleRef = useRef<PaneAreaHandle | null>(null);
+
+  /** Whether a `PaneArea` is on screen right now — see its `onMounted`. State,
+   *  not a ref, because the tab-strip push has to re-run when it changes; the
+   *  ref beside it is for the ⌘W handler, whose effect is `[]`. */
+  const [paneMounted, setPaneMounted] = useState(false);
+  const paneMountedRef = useRef(paneMounted);
+  paneMountedRef.current = paneMounted;
+  /** Whether the What's New modal is up — a separate modal from `dialog`, and
+   *  the one the ⌘T/⌘W guard most needs, since the release adding those chords
+   *  opens it automatically to announce them. */
+  const promotionsOpenRef = useRef(false);
+  promotionsOpenRef.current = promotions.open !== null;
+
   const setLayout = useCallback(
     (next: PaneLayoutUpdate) => {
       if (!worktree) return;
@@ -3408,9 +3506,56 @@ function AppInner(props: {
         // here instead of through the window's own key handler. Same chords,
         // same meaning — see `browserViews.js`.
         else if (accelerator === "project:toggle") goToPreviousProject();
+        else if (accelerator === "tab:next") void stepTab(1);
+        else if (accelerator === "tab:previous") void stepTab(-1);
+        // Forwarded out of a focused pane, where nothing else reaches us — see
+        // `browserViews.js`. Split carries no `chromeless` guard, matching its
+        // keydown copy: a detached window is a dock and can split like any other.
+        else if (accelerator === "split") paneHandleRef.current?.splitActiveTab();
+        // The worktree pair *is* guarded, also matching its keydown copy: a
+        // detached window is a satellite of one worktree and must not move the
+        // rail's selection.
+        else if (accelerator === "worktree:next") {
+          if (!chromeless) stepWorktree(1);
+        } else if (accelerator === "worktree:previous") {
+          if (!chromeless) stepWorktree(-1);
+        }
         else if (accelerator.startsWith("project:")) {
           goToProject(Number(accelerator.slice("project:".length)));
         }
+      }),
+    [],
+  );
+
+  /**
+   * A browser pane's page took the keyboard — move the focused dock to it.
+   *
+   * A native view is an OS widget outside this document, so clicking into it
+   * fires no `focusin` and the dock `<section>`'s handler never runs. That was
+   * survivable while `layout.focused` only decided where the *next* tab opens;
+   * it stopped being survivable when ⌘W began closing the focused dock's active
+   * tab, because clicking a pane in the right dock and pressing ⌘W then closed
+   * a terminal in the left one — with no confirmation if that shell was idle.
+   *
+   * **Scoped to the worktree on screen**, not to whichever layout happens to
+   * contain the view. Layouts for other worktrees are retained in state, and
+   * their panes can still emit `focus` during a switch's visibility handoff —
+   * writing those would persist a focused-dock change (through `saveLayouts` /
+   * `syncLayouts`) for a worktree nobody is looking at.
+   */
+  useEffect(
+    () =>
+      onBrowserFocused(({ viewId }) => {
+        const id = shownRef.current;
+        if (id === null) return;
+        setLayouts((prev) => {
+          const current = prev[id];
+          if (!current) return prev;
+          const dock = dockOf(current, viewId);
+          if (dock === null) return prev;
+          const next = focusDock(current, dock);
+          return next === current ? prev : { ...prev, [id]: next };
+        });
       }),
     [],
   );
@@ -3816,6 +3961,135 @@ function AppInner(props: {
         // shells it names outlive it either way under the detach grace.
       });
   }, [chromeless, worktree?.id, layout, activeWtKey]);
+
+  /**
+   * Keep the shell's copy of this window's **tab strip** current — the input to
+   * the cross-window tab cycle order.
+   *
+   * Unlike the snapshot above, this is sent by a main window too: a main
+   * window's tabs are most of the order, not a special case of it. And unlike
+   * the snapshot, it is not gated on `activeWtKey` — the guard there exists to
+   * protect a hand-back payload from being emptied by a fallback worktree, and
+   * this is not a payload but a live description of what is on screen. A window
+   * that has switched to another worktree genuinely should stop appearing in the
+   * old one's cycle order, which is what reporting the new one achieves.
+   *
+   * Pushed rather than asked for at press time so that a chord answers from
+   * retained state instead of a fan-out to every renderer, one of which may be
+   * mid-reload.
+   */
+  const lastTabsPush = useRef("");
+  useEffect(() => {
+    if (!desktopWindow?.tabs) return;
+    // **The *granted* worktree, not the selected one** — the same id
+    // `showsWorktree` registers in the shell's display map a few effects up.
+    // The shell now checks the two against each other (`ownsWorktree` in
+    // `veld:window:cycle-tab`), so reporting a worktree this window has asked
+    // for but not been given would make it refuse. A detached window never
+    // claims and never reports there, and the shell reads its fixed
+    // `record.worktreeId` for it instead, so it reports what it shows.
+    const reportId = chromeless ? (worktree?.id ?? null) : shownId;
+    const reportLayout = reportId === null ? undefined : layouts[reportId];
+    // **Empty unless a pane area is actually drawing this strip.** `PaneArea`
+    // sits behind the view switch, `claimBlocked`, and having both a worktree
+    // and a layout; a window in Runs view still *has* `layouts[id]`, so without
+    // this it went on advertising four tabs that another window could cycle
+    // into — raising it and asking a handle that no longer exists to activate
+    // one. Reported rather than re-derived here, because re-deriving those
+    // conditions is the drift itself.
+    const tabIds = paneMounted && reportLayout ? allTabs(reportLayout).map((t) => t.id) : [];
+    // Only when the *ids* actually change. `layout` is a new object on every
+    // navigation in a browser pane and every OSC 2 title a shell sets, none of
+    // which move a tab — so keying the IPC on the layout would push an identical
+    // list on every keystroke in a terminal. The shell reads nothing else from
+    // this, so nothing is lost by staying quiet.
+    const key = `${reportId ?? 0}:${tabIds.join(",")}`;
+    if (key === lastTabsPush.current) return;
+    lastTabsPush.current = key;
+    void desktopWindow.tabs({ worktreeId: reportId, tabIds }).catch(() => {
+      // Cycling degrades to this window's own tabs, which is what it does under
+      // an older shell and in a browser tab. Nothing else reads this — but the
+      // key is rolled back so the next change retries rather than being
+      // suppressed as a duplicate of a push that never landed.
+      lastTabsPush.current = "";
+    });
+  }, [chromeless, shownId, worktree?.id, layouts, paneMounted]);
+
+  /**
+   * Cycling landed on this window — activate the tab the shell named.
+   *
+   * The same `selectTab` a local step calls, deliberately: `veld:window:focus`'s
+   * `show()`/`focus()` are OS-level operations that cannot reach into this
+   * renderer's DOM, so the half of "focus a tab" that is DOM state has to happen
+   * on this side, and it should be the *same* half — not a second re-derivation
+   * of what a click does, which is where #315 spent three of its fix rounds.
+   *
+   * `reassertVisibility` alongside it because a window raised programmatically
+   * never went through a click, a mount, or a shell state event: nothing else in
+   * `browserHost` re-asserts anything for it, and a `setVisible` that was dropped
+   * while it was off-screen has had the longest to go unnoticed. See that
+   * function's own comment.
+   */
+  useEffect(
+    () =>
+      desktopWindow?.onActivateTab?.(({ tabId }) => {
+        if (typeof tabId !== "string" || tabId === "") return;
+        paneHandleRef.current?.selectTab(tabId);
+        reassertVisibility();
+      }),
+    [],
+  );
+
+  /**
+   * The File menu's ⌘T / ⌘W.
+   *
+   * Menu accelerators rather than chords in the keydown effect above, because a
+   * focused browser pane swallows every keystroke — and those two are the chords
+   * most likely to be pressed while sitting in one. The menu is handled before
+   * web contents see the key, so this needs no per-pane forwarding at all (which
+   * is exactly what ⌘⇧-arrow cycling *does* need — see `browserViews.js`).
+   *
+   * Both go through `PaneAreaHandle`, so ⌘W gets the busy-terminal confirmation
+   * the × button gets rather than hanging up a running shell because a chord was
+   * faster than a click.
+   */
+  useEffect(
+    () =>
+      desktopApp?.onTabCommand?.(({ command }) => {
+        // **A menu accelerator cannot be made conditional, so the condition has
+        // to live here.** Every other chord in this app is behind
+        // `isEditableTarget` or a dialog check; these two are handled before the
+        // page sees the key, so without this ⌘W dismisses nothing and closes a
+        // tab *behind* the Settings modal — hanging up an idle terminal with no
+        // confirmation, on the reflex Chrome parity has just trained.
+        //
+        // **What's New is a second modal with its own state**, not part of
+        // `dialog` — and it is the one that matters most here, because the
+        // release carrying these chords opens it automatically to announce
+        // them. Guarding only `dialog` meant ⌘W closed a terminal behind the
+        // very card telling the user what ⌘W now does.
+        if (dialogRef.current.kind !== "none" || promotionsOpenRef.current) return;
+        if (command === "new") {
+          paneHandleRef.current?.newTab();
+          return;
+        }
+        if (command !== "close") return;
+        if (paneHandleRef.current?.closeActiveTab()) return;
+        // **The last tab is gone → the window goes**, which is what a browser
+        // does and what a detached window already did on its own.
+        //
+        // Gated on a pane area actually being mounted, and that gate is the
+        // whole care here: `paneHandleRef` is also null on the `claimBlocked`
+        // screen, in the moment a rail click waits for `readLayout`, and in the
+        // Runs view — states where the window is full of work and ⌘W closing
+        // *the entire window, rail and all* would be the worst outcome in this
+        // diff. There, the chord does nothing and ⌘⇧W is the way out, which is
+        // the lesser of the two evils: a chord that no-ops is recoverable, a
+        // window that vanished is not.
+        if (paneMountedRef.current) void desktopWindow?.close?.().catch(() => {});
+      }),
+    [],
+  );
 
   /**
    * A detached window's title bar and its lifetime.
@@ -5083,6 +5357,89 @@ function AppInner(props: {
     if (next) void selectWorktreeRef.current(next);
   }
 
+  /**
+   * Focus the next (`delta: 1`) or previous (`delta: -1`) tab of the selected
+   * worktree, across every window showing it, wrapping at both ends.
+   *
+   * **The shell owns the order, this side owns the activation.** The Electron
+   * main process is the only place that can see every window, so it assembles
+   * the list (`veld:window:cycle-tab`) and, when the answer is in a *different*
+   * window, raises that window and tells its renderer to activate its own tab.
+   * All this function ever does is `selectTab` in the pane area it has — the
+   * same call a click makes — whether that was asked for locally or pushed from
+   * the shell (see `onActivateTab` below, which lands in the same place).
+   *
+   * #315 put the ordering here instead, in a renderer-side registry of the
+   * detached windows this one happened to open. That registry could not learn a
+   * window had closed (so it pruned on a failed `focus`), could not see a window
+   * it had not opened, and had nowhere to record "the cycle is parked on a
+   * window whose tabs I cannot read" — which needed an anchor ref that went
+   * stale and ping-ponged. None of those questions exist for the process that
+   * owns the windows.
+   *
+   * **No shell, a shell too old to have the channel, or a shell with no answer:**
+   * fall back to this window's own tabs. That is also exactly right in a plain
+   * browser tab, where there is one window by definition. The one answer never
+   * second-guessed is `focused` — the shell has already raised another window,
+   * and stepping locally on top of that would fight it.
+   */
+  const cyclingRef = useRef(false);
+  async function stepTab(delta: 1 | -1) {
+    // **The granted claim, not the selection** — the same id the tab-strip push
+    // reports and `showsWorktree` registers, because the shell now checks a
+    // cycle request against that map. They are equal in the steady state, but
+    // the selection is restored from `?wt=`/storage while the claim is still
+    // waiting out other clients' yields (see the layout-fetch effect's own
+    // comment, which states the rule), so keying this on the selection made the
+    // chord refuse its own window's request for the length of that wait. A
+    // detached window never claims and the shell reads its fixed
+    // `record.worktreeId` instead, so there the selection is the answer.
+    const wtId = chromeless ? (worktreeRef.current?.id ?? null) : shownRef.current;
+    if (wtId === null || wtId === undefined) return;
+    const layout = layoutsRef.current[wtId];
+    if (!layout) return;
+    // **One press at a time.** `layoutsRef` is assigned during render, so it
+    // does not reflect a `selectTab` until React has committed it — and this
+    // function awaits an IPC in between. A second press landing inside that
+    // window would read the *pre-press* active tab and compute the same
+    // destination again, so a held key would stall on one pair of tabs instead
+    // of advancing. Ordinary key repeat (~33 ms) is far slower than the round
+    // trip, so this only bites when the main process is busy; dropping a step
+    // there is much better than appearing not to move, which is precisely the
+    // "learn to distrust it" failure this feature was pulled for once.
+    if (cyclingRef.current) return;
+    const activeId = layout.docks[layout.focused].activeId;
+    const local = () => {
+      const order = allTabs(layout).map((t) => t.id);
+      if (order.length === 0) return;
+      const at = activeId ? order.indexOf(activeId) : -1;
+      paneHandleRef.current?.selectTab(order[nextIndex(at, delta, order.length)]);
+    };
+    if (!desktopWindow?.cycleTab) {
+      local();
+      return;
+    }
+    cyclingRef.current = true;
+    try {
+      // `activeId` travels with the call rather than being read from the last
+      // `veld:window:tabs` push: those are separate IPCs, so a chord pressed in
+      // the same frame as a tab change would be answered from the old position.
+      const result = await desktopWindow
+        .cycleTab({ worktreeId: wtId, delta, activeId })
+        .catch(() => null);
+      if (result?.focused) return;
+      if (result?.tabId) paneHandleRef.current?.selectTab(result.tabId);
+      // `null` — the shell had nothing to step to, which means no window has
+      // reported tabs for this worktree yet (a push that failed, or a chord
+      // pressed in the frame before the first one landed). This window's own
+      // tabs are a strictly better answer than doing nothing, and cannot fight
+      // the shell: nothing was raised.
+      else local();
+    } finally {
+      cyclingRef.current = false;
+    }
+  }
+
   /** Step the run selector to the next entry — "select preset" from the
    *  keyboard. Live runs only, the same default the selector itself opens
    *  with before "show ended" is clicked. Forward only: the one caller
@@ -5208,6 +5565,8 @@ function AppInner(props: {
       <div className="frame chromeless">
         {worktree && layout && (
           <PaneArea
+            handleRef={paneHandleRef}
+            onMounted={setPaneMounted}
             layout={layout}
             onLayout={setLayout}
             worktreeId={worktree.id}
@@ -5474,6 +5833,8 @@ function AppInner(props: {
             </div>
           ) : worktree && layout ? (
             <PaneArea
+              handleRef={paneHandleRef}
+              onMounted={setPaneMounted}
               layout={layout}
               onLayout={setLayout}
               worktreeId={worktree.id}

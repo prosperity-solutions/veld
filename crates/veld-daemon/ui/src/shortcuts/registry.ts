@@ -21,18 +21,89 @@
  * which is what lets the chord reach the window listener at all while a
  * terminal pane has focus (xterm otherwise consumes it first). Skip that
  * third one and the shortcut silently does nothing in the pane most users
- * spend the most time in. `registry.test.ts` only checks this file's own
- * shape (unique kebab-case ids, every combo non-empty), not that the other
- * two still agree with it, so keeping all three in sync is a habit the docs
- * ask for (see `AGENTS.md`'s documentation checklist and
- * `.claude/skills/ship/SKILL.md`), not a guarantee the type system gives you.
+ * spend the most time in. **`registry.test.ts` now gates that third one** —
+ * every page-dispatched mod+shift row here must be accepted by
+ * `isAppShortcutChord`, and the test names the file to edit when it fails. It
+ * still cannot see `App.tsx`'s dispatch, so a row with no handler at all
+ * remains a habit the docs ask for (see `AGENTS.md`'s documentation checklist
+ * and `.claude/skills/ship/SKILL.md`) rather than something the type system
+ * gives you.
  *
  * **Not every row dispatches from `App.tsx`'s keydown effect.** A handful of
  * shortcuts are real, shipped, and worth listing here for discoverability even
- * though a different mechanism owns them: `find-in-page` and `new-window` are
- * Electron menu accelerators (`desktop/src/main.js`, `browserViews.js`), and
- * `insert-newline` is `terminalKeys.ts`'s Shift+Enter substitution. The
- * dialog's claim to be a complete list depends on those staying here too.
+ * though a different mechanism owns them: `find-in-page`, `new-window`,
+ * `new-tab`, `close-tab` and `close-window` are Electron menu accelerators
+ * (`desktop/src/main.js`, `browserViews.js`), and `insert-newline` is
+ * `terminalKeys.ts`'s Shift+Enter substitution. The dialog's claim to be a
+ * complete list depends on those staying here too — `close-window` is the
+ * standing proof, having existed as the `close` role's default accelerator
+ * through several releases with no row to be discovered in.
+ *
+ * **A menu accelerator cannot be made conditional, and that is what picks every
+ * chord below.** It is resolved before any web contents sees the key, which
+ * makes it the only mechanism that survives a focused browser pane *and* a
+ * focused terminal — but it fires in text fields too, so it may only carry a
+ * chord that means nothing in one.
+ *
+ * **The entire arrow space fails that test.** On macOS `⌘`+arrow is
+ * caret-to-line-bounds in every Cocoa text field *and* the `^A`/`^E` a terminal
+ * maps for Claude Code and Codex — veld claimed it for a release and that was a
+ * reported bug, not a trade. `⌘⇧`+arrow extends a selection, `⌥`+arrow is word
+ * motion in fields and shells alike, `⌃`+arrow is Mission Control, `⌘⌥`+arrow is
+ * Rectangle's and Magnet's window tiling, `⌘⌃`+arrow risks macOS's own tiling.
+ * There is no arrow chord left, which is why the search kept failing.
+ *
+ * So the **navigation family is Tab-shaped**: `⌃Tab`/`⌃⇧Tab` steps tabs, and
+ * `⌥Tab`/`⌥⇧Tab` steps worktrees on macOS — the same shape one level up. `Tab`
+ * is more
+ * than the last survivor: `⇧` gives the reverse direction for free, so the pair
+ * is *felt* rather than memorised, which is the one property no letter chord
+ * has.
+ *
+ * **They are page-dispatched, not menu accelerators, and that was measured
+ * rather than chosen.** A `Control+Tab` accelerator does not work: Chromium's
+ * focus manager handles `Tab` before the menu layer, so the accelerator never
+ * consumes the key and the page tabs through its focusable elements anyway. So
+ * these take the ordinary three-place route — `App.tsx`'s keydown effect (with
+ * a load-bearing `preventDefault` to stop that traversal), `isAppShortcutChord`
+ * for terminals, and `browserViews.js` forwarding for a focused pane. They are
+ * `desktopOnly` because every browser claims `⌃Tab` for its own tab strip.
+ *
+ * The forwarding is affordable here in a way `⌘⇧`+arrow's never was: `⌃Tab` is
+ * browser-reserved, so a guest page never receives it anyway, and `⌥Tab` merely
+ * duplicates plain `Tab`'s focus traversal, which the page keeps. A forwarded
+ * chord has to leave the page something, and these do.
+ *
+ * **The worktree pair is the app's one per-platform binding.** `⌥Tab` is free on
+ * macOS (the OS switcher there is `⌘Tab`) and *is* the window switcher
+ * everywhere else — and every other Tab variant is claimed off macOS too
+ * (`Ctrl+Alt+Tab` is the persistent task switcher, `Super+Tab` is GNOME's). So
+ * Linux and Windows get `Ctrl+Shift+B`/`Ctrl+Shift+N`: adjacent keys, left is
+ * previous, right is next. That is safe there because readline sees
+ * `Ctrl`+letter and not `Ctrl+Shift`+letter, and the usual owner of
+ * `Ctrl+Shift`+letter is the terminal emulator's own copy/paste — but veld is
+ * its own emulator.
+ *
+ * Still **one action, one shortcut**: `combosFor` shows a reader only their own
+ * platform's, and `registry.test.ts` enforces the cap per platform rather than
+ * per row. The dispatch matches the non-mac pair on *literal* Ctrl rather than
+ * on `mod`, so a Mac is never offered both — `⌘⇧B`/`⌘⇧N` do nothing there. A Mac
+ * keyboard can still physically produce literal `⌃⇧B`, which works; that is an
+ * incidental spelling nothing advertises, not a second binding.
+ *
+ * **The rejected candidates, because the search otherwise repeats.**
+ * `⌘⇧`+arrow shipped first and was additionally forwarded out of browser panes;
+ * that forwarding took select-to-line-start from every guest page
+ * unconditionally — a `WebContentsView` has no `isEditableTarget` equivalent —
+ * and was reverted. `⌘`+arrow reads beautifully (the arrow points at the thing)
+ * and is exactly what the terminal bug was. A user-rebindable system was
+ * designed and dropped: a partial one confuses, and a full one needs a
+ * table-driven matcher replacing a hand-tuned dispatcher whose `e.code`-vs-
+ * `e.key` policy is contradictory by design.
+ *
+ * `⌘F` remains the sole chord forwarded out of a pane (`browserViews.js`), and
+ * it earns that by *substituting* the pane's own find bar; a chord with no
+ * substitute does not qualify.
  */
 
 export type ShortcutCategory = "navigation" | "layout" | "run" | "general";
@@ -42,9 +113,10 @@ export type ShortcutCategory = "navigation" | "layout" | "run" | "general";
  *
  * `mod` is the cross-platform accelerator every chord in the app uses (⌘ on
  * macOS, Ctrl elsewhere — `e.metaKey || e.ctrlKey` in the keydown effect).
- * `ctrl` is different: the *literal* Ctrl key on every platform, for a chord
- * where macOS itself already claims Cmd for something else — no row uses it
- * today, but the field stays for the chord that eventually needs it.
+ * `ctrl` is the **literal** Ctrl key on every platform, not the cross-platform
+ * accelerator. The navigation family uses it (`⌃Tab`) precisely because Ctrl
+ * is the same physical key everywhere and means nothing in a text field; `alt`
+ * is the same idea one level up (`⌥Tab`, macOS only — see the header).
  */
 export interface KeyCombo {
   mod?: boolean;
@@ -53,6 +125,21 @@ export interface KeyCombo {
   alt?: boolean;
   /** The key token(s) after the modifiers, rendered as their own `Kbd`s. */
   keys: string[];
+  /**
+   * Which platform this combo is bound on, when the two differ.
+   *
+   * Omit for the overwhelming majority: `mod` already expresses ⌘-or-Ctrl, so a
+   * chord only needs this when the *chord itself* differs rather than the
+   * modifier's name. Worktree navigation is the one such row — `⌥Tab` on macOS,
+   * `Ctrl+Shift+B/N` elsewhere — because `⌥Tab` is free on macOS and is the
+   * window switcher everywhere else, and every other Tab variant is claimed off
+   * macOS too.
+   *
+   * **Still one action, one shortcut**: a reader only ever sees the combos for
+   * the platform they are on (`combosFor`), so the overview never offers two
+   * ways to do one thing. `registry.test.ts` enforces that per platform.
+   */
+  platform?: "mac" | "other";
 }
 
 export interface ShortcutDef {
@@ -101,15 +188,30 @@ export const SHORTCUTS: ShortcutDef[] = [
   {
     id: "navigate-worktrees",
     category: "navigation",
-    title: "Navigate worktrees",
+    title: "Previous / next worktree",
     description:
-      "Move the rail's selection to the worktree above or below, wrapping at either end. ←/→ are aliases for ↑/↓.",
+      "Step the rail's selection, wrapping at either end. Same shape as the tab chord, one level up.",
     combos: [
-      { mod: true, keys: ["↑"] },
-      { mod: true, keys: ["↓"] },
-      { mod: true, keys: ["←"] },
-      { mod: true, keys: ["→"] },
+      // macOS: rhymes with the ⌃Tab that steps tabs one level down, and ⌥Tab is
+      // genuinely free there (the OS switcher is ⌘Tab).
+      { alt: true, keys: ["Tab"], platform: "mac" },
+      { alt: true, shift: true, keys: ["Tab"], platform: "mac" },
+      // Elsewhere ⌥Tab *is* the window switcher, and every other Tab variant is
+      // claimed too — so adjacent letters, left is previous and right is next.
+      { ctrl: true, shift: true, keys: ["B"], platform: "other" },
+      { ctrl: true, shift: true, keys: ["N"], platform: "other" },
     ],
+    // Page-dispatched, and reaches a focused terminal and browser pane through
+    // `isAppShortcutChord` and `browserViews.js` forwarding — see the header for
+    // why a Tab chord cannot be a menu accelerator.
+    //
+    // `desktopOnly` is the conservative call rather than a precise one, because
+    // the flag is per row and the two halves differ: `Ctrl+Shift+N` opens a
+    // private window in a browser, so the non-mac chord genuinely is unreachable
+    // there — while `⌥Tab` on macOS would in fact work in a tab, since the
+    // handler `preventDefault`s the focus traversal. Under-promising beats a row
+    // that silently does nothing for half its readers.
+    desktopOnly: true,
   },
   {
     id: "switch-project",
@@ -118,6 +220,21 @@ export const SHORTCUTS: ShortcutDef[] = [
     combos: [{ mod: true, keys: ["1…9"] }],
     // Chrome and Safari reserve ⌘1…⌘9 for their own tab strip — see the
     // matching comment in App.tsx's digit-shortcut handler.
+    desktopOnly: true,
+  },
+  {
+    id: "cycle-tabs",
+    category: "navigation",
+    title: "Next / previous tab",
+    description:
+      "Step through this worktree's tabs — left dock then right, continuing into its detached windows and wrapping at both ends.",
+    combos: [
+      { ctrl: true, keys: ["Tab"] },
+      { ctrl: true, shift: true, keys: ["Tab"] },
+    ],
+    // Every browser claims ⌃Tab for its own tab strip, so it never reaches a
+    // page — the row would otherwise promise something that silently does
+    // nothing for someone running Veld in a tab.
     desktopOnly: true,
   },
   {
@@ -132,6 +249,50 @@ export const SHORTCUTS: ShortcutDef[] = [
     category: "layout",
     title: "Toggle project column",
     combos: [{ mod: true, keys: ["B"] }],
+  },
+  {
+    id: "split-dock",
+    category: "layout",
+    title: "Open to the side",
+    description:
+      "Move the active tab to the other half of the dock — or, when it is the only tab there, open a new pane on that side instead.",
+    // ⌘⇧D, not the ⌘D iTerm and Ghostty use: `mod` covers literal Ctrl, and
+    // Ctrl+D is EOF in every shell. Shift steps around that on both platforms.
+    combos: [{ mod: true, shift: true, keys: ["D"] }],
+    // Chrome and Firefox bind ⌘⇧D to "bookmark all tabs", so it does not reach
+    // a page either.
+    desktopOnly: true,
+  },
+  {
+    id: "new-tab",
+    category: "layout",
+    title: "New tab",
+    description: "Open a new pane in the focused half of the dock.",
+    combos: [{ mod: true, keys: ["T"] }],
+    // An Electron menu accelerator (File → New Tab), so a focused browser pane
+    // cannot swallow it. Every mainstream browser claims ⌘T for a tab of its
+    // own, so there is nothing to list for someone using Veld in one.
+    desktopOnly: true,
+  },
+  {
+    id: "close-tab",
+    category: "layout",
+    title: "Close tab",
+    description: "Close the focused half's active tab. A busy terminal asks first.",
+    combos: [{ mod: true, keys: ["W"] }],
+    // Menu accelerator, and claimed by every browser, exactly as ⌘T above.
+    desktopOnly: true,
+  },
+  {
+    id: "close-window",
+    category: "layout",
+    title: "Close window",
+    // ⌘⇧W rather than ⌘W — the Chrome/Safari/VS Code arrangement, which is what
+    // frees ⌘W for the tab. Listed for the first time here even though window
+    // closing is not new: it was the Electron `close` role's default
+    // accelerator, so it had no row of its own to be found in.
+    combos: [{ mod: true, shift: true, keys: ["W"] }],
+    desktopOnly: true,
   },
   {
     id: "switch-view",
@@ -257,6 +418,18 @@ export function isMac(): boolean {
 }
 
 /** A combo's tokens in display order, platform-aware. */
+/**
+ * The combos of a shortcut that actually exist on this platform.
+ *
+ * Everything with no `platform` applies everywhere; a tagged combo shows only on
+ * its own platform. Every reader of `SHORTCUTS` that renders keys must go
+ * through this, or a macOS user is shown a Linux chord as if it were a second
+ * way to do the same thing.
+ */
+export function combosFor(shortcut: ShortcutDef, mac: boolean): KeyCombo[] {
+  return shortcut.combos.filter((c) => !c.platform || c.platform === (mac ? "mac" : "other"));
+}
+
 export function comboTokens(combo: KeyCombo, mac: boolean): string[] {
   const tokens: string[] = [];
   if (combo.mod) tokens.push(mac ? "⌘" : "Ctrl");

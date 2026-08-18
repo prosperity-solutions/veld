@@ -535,12 +535,36 @@ function attachListeners(window, viewId, entry) {
   // is the same trade a real browser tab already makes: Chrome's own find bar
   // owns `Ctrl/⌘+F` unconditionally too, so a page cannot claim it there
   // either — this pane behaving the same way is consistent with that, not a
-  // new risk this diff introduces. Every other window-level shortcut
-  // (worktree navigation, tab-cycling, focus mode, the view switch, update
-  // main, run cycling, start/stop, restart, and opening the Shortcuts
-  // overview) is not forwarded from here — a follow-up, not an oversight;
-  // clicking back into the rail or top bar reaches them same as before this
-  // pane existed.
+  // new risk this diff introduces. No other window-level shortcut is forwarded
+  // from here, and the reasons differ. **Tab cycling is a settled decision, not
+  // a candidate** — see the note in the handler below; forwarding it takes a
+  // text-selection chord from every guest page, which is the cost `⌘F` is
+  // allowed only because it hands back an equivalent. The rest (worktree
+  // navigation, focus mode, the view switch, update main, run cycling,
+  // start/stop, restart, opening the Shortcuts overview) are open follow-ups
+  // rather than oversights; clicking back into the rail or top bar reaches them
+  // same as before this pane existed.
+  //
+  // `⌘T`/`⌘W`/`⌘⇧W` need nothing here at all: they are *menu* accelerators
+  // (`main.js`), which are handled before web contents see the key.
+  //
+  // (That preamble documents `before-input-event`, two statements below — not
+  // the focus listener immediately after this line.)
+
+  // This pane's page took the keyboard.
+  //
+  // A `WebContentsView` is an OS-level widget outside the host document, so
+  // clicking into its page fires no `focusin` in `/ide` and the layout's
+  // `focused` dock silently keeps whatever it was — which was harmless while
+  // nothing destructive read it, and stopped being harmless when ⌘W started
+  // closing "the focused dock's active tab". Clicking a browser pane in the
+  // right dock and pressing ⌘W would close a terminal in the left one, with no
+  // confirmation if that shell happened to be idle.
+  //
+  // Reported rather than inferred: only this process can see the native focus,
+  // and the renderer resolves the view id back to the dock its tab sits in.
+  wc.on("focus", () => send(window, "veld:browser:focused", { viewId }));
+
   wc.on("before-input-event", (event, input) => {
     if (input.type !== "keyDown") return;
     if (
@@ -556,6 +580,63 @@ function attachListeners(window, viewId, entry) {
       window.webContents.focus();
       send(window, "veld:browser:accelerator", { viewId, accelerator: "find" });
       return;
+    }
+    // **The navigation family, forwarded**: `⌃Tab`/`⌃⇧Tab` steps tabs and
+    // `⌥Tab`/`⌥⇧Tab` steps worktrees. This is the only way they reach a focused
+    // pane — a `Tab` menu accelerator does not work, because Chromium's focus
+    // manager handles `Tab` before the menu layer and the page tabs anyway.
+    //
+    // **What this costs the guest page, stated accurately.** An earlier draft
+    // of this comment claimed `⌃Tab` is browser-reserved so a page never sees
+    // it — that is false here. A `WebContentsView` has no tab strip, so Ctrl+Tab
+    // *is* delivered to the guest renderer, and a web IDE in a pane
+    // (code-server, VS Code for the Web, Jupyter) really does lose its
+    // editor-tab chord. `⌥Tab` is the cheap half: it only duplicates plain
+    // `Tab`'s focus traversal, which the page keeps.
+    //
+    // Taken anyway, deliberately: navigating *out of* a pane is the case this
+    // whole family exists for, and a page-dispatched chord cannot reach a
+    // focused pane at all. It is still a smaller loss than `⌘⇧`+arrow, which was
+    // forwarded, shipped and reverted for eating live text selection in *every*
+    // page rather than an editor chord in a rare one — but it is a loss, not a
+    // free lunch, and the next person weighing a forwarded chord should read it
+    // that way.
+    if (input.key === "Tab" && !input.meta) {
+      const ctrlOnly = input.control && !input.alt;
+      const altOnly = input.alt && !input.control;
+      if (ctrlOnly || altOnly) {
+        event.preventDefault();
+        // The keyboard goes back to the page, as it does for ⌘F above: the pane
+        // being navigated away from must not keep the next keystroke.
+        window.webContents.focus();
+        send(window, "veld:browser:accelerator", {
+          viewId,
+          accelerator: `${ctrlOnly ? "tab" : "worktree"}:${input.shift ? "previous" : "next"}`,
+        });
+        return;
+      }
+    }
+    // Splitting the dock (`⌘⇧D`), and worktrees off macOS (`Ctrl+Shift+B`/`N`).
+    // Same trade as the Tab chords: nothing a guest page can meaningfully use.
+    if ((input.control || input.meta) && input.shift && !input.alt) {
+      if ((input.key || "").toLowerCase() === "d") {
+        event.preventDefault();
+        window.webContents.focus();
+        send(window, "veld:browser:accelerator", { viewId, accelerator: "split" });
+        return;
+      }
+    }
+    if (input.control && input.shift && !input.alt && !input.meta) {
+      const letter = (input.key || "").toLowerCase();
+      if (letter === "b" || letter === "n") {
+        event.preventDefault();
+        window.webContents.focus();
+        send(window, "veld:browser:accelerator", {
+          viewId,
+          accelerator: `worktree:${letter === "b" ? "previous" : "next"}`,
+        });
+        return;
+      }
     }
     // Project switching: `Ctrl/⌘+1`…`9` and `Ctrl/⌘+\``. Forwarded rather than made
     // menu accelerators because the main process does not know the project list —

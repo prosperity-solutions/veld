@@ -46,11 +46,19 @@ function isShiftEnter(e: KeyboardEvent): boolean {
 /**
  * The window-level shortcuts added alongside the Shortcuts overview — focus
  * mode, the IDE/Runs switch, update main, cycling the run selector,
- * start/stop, restart, worktree navigation (incl. the ←/→ aliases), and
- * opening the overview itself — all of which must reach `App.tsx`'s keydown
- * effect from a focused terminal for the same reason `isSettingsChord` below
- * does: xterm cancels every key it handles, and a focused terminal would
- * otherwise swallow these before the window listener ever saw them.
+ * start/stop, restart, and opening the overview itself — all of which must reach
+ * `App.tsx`'s keydown effect from a focused terminal for the same reason
+ * `isSettingsChord` below does: xterm cancels every key it handles, and a
+ * focused terminal would otherwise swallow these before the window listener
+ * ever saw them.
+ *
+ * `⌘T`/`⌘W`/`⌘⇧W` are deliberately **not** here: they are Electron *menu*
+ * accelerators (`desktop/src/main.js`), handled before web contents — xterm
+ * included — ever see the key. The navigation family **is** here, because a
+ * `Tab` accelerator does not work: Chromium's focus manager handles `Tab`
+ * before the menu layer, so a `Control+Tab` accelerator never consumes the key
+ * and the page tabs through its focusable elements anyway. Measured, not
+ * assumed.
  *
  * `l`/`x`, not `f`/`v`: the veld feedback overlay claims mod+Shift+F and
  * mod+Shift+V for its own bindings, so `App.tsx` moved focus mode and the
@@ -76,14 +84,30 @@ function isShiftEnter(e: KeyboardEvent): boolean {
 function isAppShortcutChord(e: KeyboardEvent): boolean {
   const mod = e.ctrlKey || e.metaKey;
   if (mod && e.shiftKey && !e.altKey) {
-    if (["l", "x", "u", "o", "k"].includes(e.key.toLowerCase())) return true;
+    if (["l", "x", "u", "o", "k", "d"].includes(e.key.toLowerCase())) return true;
     if (e.key === "Enter") return true;
   }
-  if (mod && !e.shiftKey && !e.altKey) {
-    if (e.key === "ArrowUp" || e.key === "ArrowDown" || e.key === "ArrowLeft" || e.key === "ArrowRight") {
-      return true;
-    }
+  // **The navigation family**: `⌃Tab`/`⌃⇧Tab` (tabs) and `⌥Tab`/`⌥⇧Tab` or
+  // `mod+⇧+B/N` (worktrees). A terminal is where most tabs live, so this is the
+  // pane in which a dead "next tab" is noticed first.
+  if (e.key === "Tab" && !e.metaKey) {
+    if (e.ctrlKey && !e.altKey) return true;
+    if (e.altKey && !e.ctrlKey) return true;
   }
+  // Literal Ctrl: this is the non-macOS worktree chord — see `App.tsx`.
+  if (e.ctrlKey && !e.metaKey && e.shiftKey && !e.altKey && ["b", "n"].includes(e.key.toLowerCase()))
+    return true;
+
+  // **No arrow chord is claimed, deliberately, and that is a bug fix.**
+  //
+  // Worktree navigation shipped on `mod`+arrow and this function returned true
+  // for it, so xterm never saw the key — which meant `⌘←`/`⌘→` inside a terminal
+  // running Claude Code, Codex or anything else expecting iTerm/cmux line
+  // editing moved the *rail* instead of the caret. Reported by a user, and
+  // correct: `⌘`+arrow is caret-to-line-bounds in every Cocoa text field and is
+  // mapped to `^A`/`^E` by every terminal that emulates it. Veld taking it was
+  // the anomaly. The whole arrow space now goes back to the terminal and to text
+  // fields, which is why the navigation chords above are Tab-shaped.
   if (e.metaKey && !e.altKey && (e.key === "/" || (e.shiftKey && e.code === "Digit7"))) return true;
   return false;
 }
@@ -115,8 +139,12 @@ function isSettingsChord(e: KeyboardEvent): boolean {
  *   (`preventDefault` + `stopPropagation` on its own textarea), so a focused
  *   terminal would otherwise swallow anything the app binds.
  * - **Every window-level shortcut** (`isAppShortcutChord`) — focus mode, the
- *   view switch, update main, run cycling, start/stop, restart, worktree
- *   navigation, and opening the Shortcuts overview — for the same reason.
+ *   view switch, update main, run cycling, start/stop, restart, and opening the
+ *   Shortcuts overview, **and the Tab-shaped navigation family** — for the same
+ *   reason. Navigation is page-dispatched, so it genuinely needs this; only
+ *   `⌘T`/`⌘W`/`⌘⇧W` are menu accelerators and bypass xterm on their own. Arrows
+ *   are absent because they belong to the terminal: `⌘`+arrow is the caret
+ *   motion Claude Code and Codex expect.
  *   `Ctrl+K` (the command palette's other chord) deliberately
  *   is not among them: that one is readline's kill-to-end-of-line and
  *   belongs to the shell, so the palette is reachable from a focused

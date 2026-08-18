@@ -101,20 +101,18 @@ describe("handleKeyEvent", () => {
         run({ code: "Enter", key: "Enter", shift: true, [mod]: true }).handled,
         `${mod}+shift+Enter must pass through (not the Shift+Enter substitution)`,
       ).toBe(false);
-      expect(
-        run({ code: "ArrowUp", key: "ArrowUp", [mod]: true }).handled,
-        `${mod}+ArrowUp must pass through`,
-      ).toBe(false);
-      expect(
-        run({ code: "ArrowDown", key: "ArrowDown", [mod]: true }).handled,
-        `${mod}+ArrowDown must pass through`,
-      ).toBe(false);
-      // ←/→ alias worktree-nav's ↑/↓.
-      for (const arrowKey of ["ArrowLeft", "ArrowRight"]) {
-        expect(
-          run({ code: arrowKey, key: arrowKey, [mod]: true }).handled,
-          `${mod}+${arrowKey} must pass through`,
-        ).toBe(false);
+      // **Every arrow chord belongs to the terminal now.** Worktree navigation
+      // shipped on `mod`+arrow and was let past xterm here, so `⌘←`/`⌘→` moved
+      // the rail instead of the caret inside Claude Code and Codex — a reported
+      // bug. Navigation is `⌃Tab`/`⌥Tab` now, asserted just above — it is
+      // page-dispatched, so it does need this function.
+      for (const arrowKey of ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"]) {
+        for (const extra of [{}, { shift: true }, { alt: true }]) {
+          expect(
+            run({ code: arrowKey, key: arrowKey, [mod]: true, ...extra }).handled,
+            `${mod}+${Object.keys(extra).join("+")}${arrowKey} belongs to the terminal`,
+          ).toBe(true);
+        }
       }
     }
     // Plain Tab (no modifier) is unrelated typing and must stay untouched.

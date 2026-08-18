@@ -321,6 +321,65 @@ function dropDelivery(dropListener) {
 }
 
 /**
+ * Every tab of one worktree, across every window showing it, in the order
+ * keyboard cycling walks them.
+ *
+ * Windows by `record.id` — creation order, and **never reused**, unlike a
+ * suffix (see `WindowRecord.originId`), so detaching and closing windows cannot
+ * renumber the order under the user. Then each window's own tabs exactly as its
+ * strip draws them: dock 0 left-to-right, then dock 1. The renderer reports that
+ * flattening (`allTabs` in `panes/model.ts`); this side never reconstructs it.
+ *
+ * `records` is expected to be pre-filtered for liveness by the caller, which is
+ * where `isDestroyed()` and `closing` live — the same division `ownsWorktree`
+ * makes above and for the same reason.
+ *
+ * Pure so that the ordering is testable on its own. That is not decoration: the
+ * cross-window half of this feature was attempted once (#315) and pulled after
+ * four rounds, each fix breaking in the next round, with none of the ordering or
+ * position logic under test at any point.
+ */
+function cycleOrder(records, worktreeId) {
+  const out = [];
+  for (const record of [...records].sort((a, b) => a.id - b.id)) {
+    if (!record.tabs || record.tabs.worktreeId !== worktreeId) continue;
+    for (const tabId of record.tabs.ids) out.push({ recordId: record.id, tabId });
+  }
+  return out;
+}
+
+/**
+ * Where one press lands: `delta` steps from `activeId` in the calling window,
+ * wrapping at both ends.
+ *
+ * **Position is a parameter, not state.** The pair `(senderId, activeId)` is
+ * everything, and both come from the window that received the keystroke — which
+ * is the whole reason this cannot get lost. After a press moves focus to another
+ * window, that window has OS focus, so the next press arrives from *its*
+ * renderer carrying *its* active tab. #315 instead remembered the position in the
+ * window the cycle started in, could not represent "parked on a window whose tabs
+ * I cannot read", and ping-ponged between one tab and one detached window.
+ *
+ * `-1` for "not found" — no active tab, or one that belongs to a window that has
+ * since stopped reporting — steps to the first entry going forward and the last
+ * going backward. Not folded into the modulo: `(-1 - 1) % n` lands
+ * second-from-last rather than last, which makes the bug one-sided and easy to
+ * miss. The renderer's `nextIndex` (`shortcuts/registry.ts`) carries the same
+ * special case for the same reason; this is a second copy because the two
+ * processes share no code, and both are tested.
+ *
+ * Returns `null` for an empty order.
+ */
+function nextInCycle(order, senderId, activeId, delta) {
+  if (order.length === 0) return null;
+  const at = activeId
+    ? order.findIndex((e) => e.recordId === senderId && e.tabId === activeId)
+    : -1;
+  if (at === -1) return delta > 0 ? order[0] : order[order.length - 1];
+  return order[(((at + delta) % order.length) + order.length) % order.length];
+}
+
+/**
  * What one of a window's listener states becomes when its page navigates.
  *
  * One listener now (the drop listener); it was two, and the yield listener went
@@ -447,7 +506,9 @@ module.exports = {
   slotFor,
   nextSuffix,
   canOpenAnother,
+  cycleOrder,
   dropDelivery,
+  nextInCycle,
   handBackTarget,
   handBackTransfers,
   nextListenerState,
