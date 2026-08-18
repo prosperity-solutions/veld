@@ -8,6 +8,7 @@ import {
   comboTokens,
   combosFor,
   isMac,
+  visibleShortcuts,
 } from "./registry";
 
 /**
@@ -24,15 +25,10 @@ export function ShortcutsDialog(props: { onClose: () => void }) {
       <ScrollArea.Autosize mah="min(70vh, 560px)" type="auto" offsetScrollbars>
         <Stack gap="lg">
           {CATEGORY_ORDER.map((category) => {
-            // Filtered by **platform as well as category**: a row can be bound
-            // on one platform and have no counterpart on the other — the
-            // terminal line-editing chords are ⌘-only, because Ctrl+A/^E/^U are
-            // already the shell's own bindings everywhere else and there is
-            // nothing to add. Rendering such a row off its platform would show a
-            // title and an empty key column, which reads as a broken shortcut
-            // rather than an absent one.
-            const rows = SHORTCUTS.filter(
-              (s) => s.category === category && combosFor(s, mac).length > 0,
+            // Filtered by **platform as well as category** — see
+            // `visibleShortcuts`, which is shared with the test that pins this.
+            const rows = visibleShortcuts(SHORTCUTS, mac).filter(
+              (s) => s.category === category,
             );
             if (rows.length === 0) return null;
             return (

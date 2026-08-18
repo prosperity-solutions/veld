@@ -33,7 +33,13 @@ import {
   terminalIds,
 } from "./model";
 import { handleKeyEvent } from "./terminalKeys";
-import { clipboardImageIndex, clipboardImageName, isFileDrop, pathPayload } from "./terminalPaste";
+import {
+  clipboardImageIndex,
+  clipboardImageName,
+  isFileDrop,
+  isPastable,
+  pathPayload,
+} from "./terminalPaste";
 
 /**
  * Terminal ids this page expects to *resume*.
@@ -426,7 +432,15 @@ function playBell(): void {
   }
 }
 
-/** Create the session (idempotent) without touching the DOM. */
+/**
+ * Most files one drop may carry.
+ *
+ * Each one costs a request the daemon buffers whole (up to `MAX_PASTE_BYTES`),
+ * and a drop is the one gesture that can hand over a whole folder by accident.
+ * Twenty is well past any deliberate drop and far short of a directory.
+ */
+const MAX_DROP_FILES = 20;
+
 /**
  * Files a terminal pane accepts: a drop onto it, and an image pasted into it.
  *
@@ -447,16 +461,29 @@ function playBell(): void {
  * - **Either shell, pasted image** — a clipboard image has no path anywhere, so
  *   it is always uploaded.
  *
+ * Two corners are decided rather than handled, and named here because the review
+ * that found them will otherwise find them again:
+ *
+ * - **⌘V handles images only.** A *file* copied in Finder is left to xterm's own
+ *   text paste, because the clipboard carries its name as text too and pasting
+ *   text is what ⌘V means. Dropping that same file does insert its path — the
+ *   asymmetry is deliberate, not an oversight.
+ * - **A dropped directory** is typed as a path in the desktop app (which is
+ *   useful: `ls`, `cd`) and refused in a browser tab, where it has no readable
+ *   bytes and the daemon answers "empty file". The toast now carries that
+ *   message rather than a generic one.
+ *
  * Listeners go on the session's own container, which outlives every mount: a
  * pane moved between docks or pulled into another window keeps this without
  * re-registering, the same property the terminal itself has.
  *
  * Nothing is written to the socket directly — everything goes through
  * `term.paste`, so it reaches the pty by the same route as typing and through
- * the same `canSend` gate, which is what stops a drop landing in the middle of
- * a scrollback replay.
+ * the same `canSend` gate. `canSend` is passed in rather than re-derived so the
+ * gesture can be *refused out loud* when the terminal cannot accept input,
+ * instead of being swallowed by that gate after the file is already on disk.
  */
-function attachFileInput(s: Session): void {
+function attachFileInput(s: Session, canSend: () => boolean): void {
   /**
    * Put the paths in the terminal, and say so when one of them could not be had.
    *
@@ -476,16 +503,37 @@ function attachFileInput(s: Session): void {
    * A non-image path is unaffected either way: an agent finds no image extension
    * and keeps the text, which is exactly what dropping a source file should do.
    */
-  const typePaths = (paths: string[], failures: number) => {
+  const typePaths = (paths: string[], failures: number, cause?: unknown) => {
     const payload = pathPayload(paths);
-    if (payload) s.term.paste(payload);
+    if (payload) {
+      // **Refuse rather than drop it on the floor.** `term.paste` reaches the
+      // socket through the same `canSend` gate as typing, so during a scrollback
+      // replay or a reconnect the payload is silently discarded — and the file
+      // has already been uploaded and written to disk by then, so the gesture
+      // vanishes with nothing said. Two review angles found this independently.
+      if (!canSend()) {
+        notifyError(
+          "Adding a file to the terminal",
+          new Error("the terminal is not ready for input yet — try again in a moment"),
+        );
+        return;
+      }
+      s.term.paste(payload);
+    }
     if (failures > 0) {
       notifyError(
         failures === 1 ? "Adding a file to the terminal" : `Adding ${failures} files to the terminal`,
-        new Error("could not be read"),
+        // The daemon's own message where there is one ("file is too large" for a
+        // dropped video, "empty file", "no such terminal session"); the generic
+        // line only when nothing threw. Discarding the real cause made the most
+        // likely failure of all — a file past the 32 MB cap — unreadable.
+        cause ?? new Error("could not be read"),
       );
     }
   };
+
+  /** The first real failure in a drop, so the toast can name it. */
+  let lastCause: unknown;
 
   /** Resolve one dropped file to a path — the shell's, or the daemon's copy. */
   const resolve = async (file: File): Promise<string | null> => {
@@ -494,8 +542,9 @@ function attachFileInput(s: Session): void {
     try {
       return await api.ptyPasteFile(s.id, file, file.name);
     } catch (e) {
-      // Logged rather than thrown: one unreadable file in a multi-file drop
-      // must not cost the user the others.
+      // Kept rather than thrown: one unreadable file in a multi-file drop must
+      // not cost the user the others — but the reason still has to reach them.
+      lastCause ??= e;
       console.warn("veld: could not upload a dropped file", e);
       return null;
     }
@@ -516,8 +565,24 @@ function attachFileInput(s: Session): void {
     // sees them; `Promise.all` preserves it where a race would not.
     const files = [...(e.dataTransfer?.files ?? [])];
     if (files.length === 0) return;
+    // **Bounded.** One `fetch` per file, each allowed 32 MB and each buffered
+    // whole on the daemon side, so a dropped folder of screenshots is the
+    // ordinary way to ask for a gigabyte at once. Nothing downstream caps the
+    // aggregate — `MAX_PASTE_BYTES` is per request and the prune is age-based.
+    if (files.length > MAX_DROP_FILES) {
+      notifyError(
+        "Adding files to the terminal",
+        new Error(`too many files at once — ${files.length} dropped, ${MAX_DROP_FILES} is the limit`),
+      );
+      return;
+    }
+    lastCause = undefined;
     void Promise.all(files.map(resolve)).then((paths) => {
-      typePaths(paths.filter((p): p is string => p !== null), paths.filter((p) => p === null).length);
+      const resolved = paths.filter((p): p is string => p !== null);
+      // A path a terminal cannot carry — a newline in the name — is dropped by
+      // `pathPayload`, so it is counted as a failure here rather than vanishing.
+      const carried = resolved.filter(isPastable);
+      typePaths(carried, files.length - carried.length, lastCause);
     });
   });
 
@@ -549,6 +614,7 @@ function attachFileInput(s: Session): void {
   );
 }
 
+/** Create the session (idempotent) without touching the DOM. */
 function ensure(
   id: string,
   worktreeId: number,
@@ -669,7 +735,7 @@ function ensure(
   term.attachCustomKeyEventHandler((e) =>
     handleKeyEvent(e, send, prefs().shiftEnterNewline, isMac()),
   );
-  attachFileInput(s);
+  attachFileInput(s, canSend);
   // `onBinary` carries already-8-bit payloads (mouse reports), one byte per
   // char code — encoding those as UTF-8 would corrupt them.
   term.onBinary((data) => {

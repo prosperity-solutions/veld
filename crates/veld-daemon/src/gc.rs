@@ -49,6 +49,11 @@ pub async fn run_gc_scheduler(share_manager: Arc<ShareManager>) {
         interval.tick().await;
         info!("running scheduled garbage collection");
 
+        // Files a terminal paste or drop wrote. Swept here as well as on the
+        // write path, because the write path only runs when somebody pastes —
+        // which for most users is rarely, and the documented TTL is a day.
+        crate::feedback_server::pty::prune_pastes_now();
+
         match run_gc().await {
             Ok(summary) => {
                 info!(

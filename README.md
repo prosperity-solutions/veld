@@ -474,7 +474,7 @@ It has **terminal panes**: real shells in the selected worktree's directory, in 
 
 Sessions outlive the page. Reloading (or Electron reloading its window) reattaches to the same shells with their scrollback intact, and output produced while you were away is replayed — a build keeps running and keeps logging. `Shift+Enter` inserts a newline instead of submitting, which is what Claude Code and other coding agents read as a line break in their input box.
 
-**A pane behaves like the terminal you came from.** `Shift+Enter` inserts a newline instead of submitting, which is what Claude Code and other coding agents read as a line break in their input box. On macOS, `⌘←`/`⌘→` move to the start and end of the line and `⌘⌫` deletes it, the same substitution Ghostty and iTerm2 make (`⌥`+arrows already move by word).
+**A pane behaves like the terminal you came from.** On macOS, `⌘←`/`⌘→` move to the start and end of the line and `⌘⌫` deletes it, the same substitution Ghostty and iTerm2 make (`⌥`+arrows already move by word).
 
 **Drop files onto a pane, or `⌘V` a screenshot.** Files arrive as their absolute paths, shell-escaped, several files giving several paths — which is how you point an agent at something without going to look up where it lives. An **image** arrives as an image: a coding agent shows it as an attachment (`[Image #1]` in Claude Code), not as a path you then have to hope it reads. Screenshot, `⌘V`, ask about it.
 

@@ -4,8 +4,10 @@ import {
   combosFor,
   duplicateShortcutIds,
   nextIndex,
+  type ShortcutDef,
   SHORTCUTS,
   shortcutProblems,
+  visibleShortcuts,
 } from "./registry";
 import { handleKeyEvent } from "../panes/terminalKeys";
 
@@ -279,16 +281,31 @@ describe("one action, one shortcut", () => {
     }
   });
 
-  it("has the dialog hide a row that is not bound on the reader's platform", () => {
-    // The pairing this asserts is the dialog's filter, which is what keeps a
-    // one-platform row from rendering as a title with no keys beside it. There
-    // is no compiler check tying the two together — see `ShortcutsDialog`.
+  it("hides a row that is not bound on the reader's platform", () => {
+    // **Against `visibleShortcuts`, the predicate the dialog itself calls.** The
+    // first version of this test filtered by `combosFor(...).length > 0` and then
+    // asserted that same expression on what it had just filtered — a tautology
+    // that stayed green with the dialog's filter deleted, i.e. it pinned nothing.
+    // A fixture row is what gives it teeth: a mac-only shortcut must be absent
+    // for a non-mac reader.
+    const macOnly: ShortcutDef = {
+      id: "fixture-mac-only",
+      category: "general",
+      title: "Mac only",
+      combos: [{ mod: true, keys: ["\u2190"], platform: "mac" }],
+    };
+    const all = [...SHORTCUTS, macOnly];
+    expect(visibleShortcuts(all, true).map((s) => s.id)).toContain("fixture-mac-only");
+    expect(visibleShortcuts(all, false).map((s) => s.id)).not.toContain("fixture-mac-only");
+
+    // And the property that matters for every real row: nothing reaches the
+    // dialog with an empty key column.
     for (const mac of [true, false]) {
-      const shown = SHORTCUTS.filter((s) => combosFor(s, mac).length > 0);
+      const shown = visibleShortcuts(SHORTCUTS, mac);
+      expect(shown.length, `nothing at all is shown on ${mac ? "mac" : "other"}`).toBeGreaterThan(0);
       for (const s of shown) {
         expect(combosFor(s, mac).length, `${s.id} would render with no keys`).toBeGreaterThan(0);
       }
-      expect(shown.length, `nothing at all is shown on ${mac ? "mac" : "other"}`).toBeGreaterThan(0);
     }
   });
 });

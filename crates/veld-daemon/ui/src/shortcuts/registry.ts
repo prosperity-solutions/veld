@@ -439,6 +439,22 @@ export function isMac(): boolean {
   return /mac/i.test(platform) || /mac/i.test(navigator.userAgent);
 }
 
+/**
+ * The rows a reader on this platform should actually be shown.
+ *
+ * **Exported so the dialog and its test share one predicate**, which is the only
+ * thing that makes the test mean anything: the first version filtered by
+ * `combosFor(...).length > 0` and then asserted that same expression, so deleting
+ * the dialog's filter left it green. A row bound on one platform only is
+ * legitimate (the terminal line-editing chords are ⌘-only — Ctrl+A/^E/^U are the
+ * shell's own bindings everywhere else), and rendering one off its platform shows
+ * a title with an empty key column, which reads as a broken shortcut rather than
+ * an absent one.
+ */
+export function visibleShortcuts(shortcuts: readonly ShortcutDef[], mac: boolean): ShortcutDef[] {
+  return shortcuts.filter((s) => combosFor(s, mac).length > 0);
+}
+
 /** A combo's tokens in display order, platform-aware. */
 /**
  * The combos of a shortcut that actually exist on this platform.

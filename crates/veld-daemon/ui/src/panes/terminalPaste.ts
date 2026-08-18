@@ -48,21 +48,10 @@ function isSafePathChar(ch: string): boolean {
  * form, so matching it is the difference between a dropped `My Photo.png`
  * working and arriving as two arguments.
  *
- * **A newline is the one character backslashing cannot carry**: `\` followed by
- * a newline is a line continuation in every POSIX shell, which *deletes* both
- * characters rather than quoting one — so a filename containing one would paste
- * as a different, shorter path, and (worse) submit the line early. Those fall
- * back to single quotes, where a newline is literal. Single-quoting everything
- * was the tempting simplification and is rejected: a quoted path is not what a
- * composer expecting a drag-and-drop path is looking at.
+ * **A newline cannot be carried at all**, in any quoting — see [`isPastable`],
+ * which is why one never reaches this function.
  */
 export function escapePath(path: string): string {
-  if (path.includes("\n") || path.includes("\r")) {
-    // POSIX single-quoting: everything is literal inside, and the only sequence
-    // that can end the quote is a quote — spelled `'\''` (close, escaped quote,
-    // reopen).
-    return `'${path.replaceAll("'", "'\\''")}'`;
-  }
   let out = "";
   for (const ch of path) {
     if (!isSafePathChar(ch)) out += "\\";
@@ -82,9 +71,31 @@ export function escapePath(path: string): string {
  *
  * Empty in, empty out, so a caller need not special-case a drop that resolved to
  * nothing (a directory the browser could not read, an upload that failed).
+ *
+ * Paths a terminal cannot carry are dropped here too — see [`isPastable`].
+ */
+export function isPastable(path: string): boolean {
+  return path.length > 0 && !path.includes("\n") && !path.includes("\r");
+}
+
+/**
+ * Why a newline is refused rather than quoted.
+ *
+ * The first version single-quoted such a path, reasoning that `\` + newline is a
+ * shell line continuation which would delete both characters and submit early.
+ * That reasoning was **false for this send path**: the payload goes out through
+ * `term.paste`, and xterm's `prepareTextForTerminal`
+ * (`node_modules/@xterm/xterm/src/browser/Clipboard.ts:14`) runs
+ * `text.replace(/\r?\n/g, '\r')` *before* it brackets anything. So the newline
+ * never arrives as a newline in any quoting — it arrives as a carriage return,
+ * i.e. a submit, and inside the quotes that is worse than the case the quoting
+ * was added to prevent.
+ *
+ * There is no spelling that survives, so the honest answer is to drop the file
+ * and tell the user, which is what the caller does with the count.
  */
 export function pathPayload(paths: readonly string[]): string {
-  const usable = paths.filter((p) => p.length > 0);
+  const usable = paths.filter(isPastable);
   if (usable.length === 0) return "";
   return `${usable.map(escapePath).join(" ")} `;
 }
@@ -186,11 +197,18 @@ export function clipboardImageIndex(entries: readonly ClipboardEntry[]): number 
  *
  * Returns an unsubscribe, for symmetry with the other watchers booted beside it.
  */
+export function shouldSwallowDrop(types: readonly string[], defaultPrevented: boolean): boolean {
+  // Not a file drag at all (a pane tab, a text selection): not ours to touch.
+  if (!isFileDrop(types)) return false;
+  // A pane already took it. Deferring here is what keeps the guard from running
+  // last and repainting the one working target's `copy` cursor as `none`.
+  if (defaultPrevented) return false;
+  return true;
+}
+
 export function guardStrayFileDrops(): () => void {
   const swallow = (e: DragEvent) => {
-    if (!isFileDrop([...(e.dataTransfer?.types ?? [])])) return;
-    // A pane took it: leave the event, and its cursor, completely alone.
-    if (e.defaultPrevented) return;
+    if (!shouldSwallowDrop([...(e.dataTransfer?.types ?? [])], e.defaultPrevented)) return;
     e.preventDefault();
     // Say so with the pointer. Swallowing silently would leave a `copy` cursor
     // over the whole window promising a drop that does nothing.

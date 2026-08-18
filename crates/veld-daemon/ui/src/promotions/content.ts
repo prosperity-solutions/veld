@@ -203,11 +203,6 @@ export const PROMOTIONS: Promotion[] = [
     // once, or dropped a file on a pane once, learned that Veld does not do that
     // and will never try again. A card is the only thing that reaches them.
     //
-    // The ⌘←/⌘→/⌘⌫ half of the same change is deliberately **not** here: those
-    // are a fix — a chord that should always have worked — and this file is
-    // explicit that a fix is not promotable. They are in the Shortcuts overview,
-    // which is where somebody looks for a chord.
-    //
     // **Scope is the whole ⌘ family, not just the image.** The line-editing chords
     // on their own are a fix — a chord that should always have worked — and a fix
     // is not promotable. Bundled with the paste and the drop they stop being a fix

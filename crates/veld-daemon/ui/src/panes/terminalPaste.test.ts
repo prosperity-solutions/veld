@@ -7,7 +7,9 @@ import {
   clipboardImageName,
   escapePath,
   isFileDrop,
+  isPastable,
   pathPayload,
+  shouldSwallowDrop,
   TAB_MIME,
 } from "./terminalPaste";
 
@@ -39,18 +41,7 @@ describe("escapePath", () => {
     expect(escapePath("/Users/josé/日本語/写真.png")).toBe("/Users/josé/日本語/写真.png");
   });
 
-  it("single-quotes a path containing a newline, because backslash-newline deletes it", () => {
-    // The failure this prevents: `\` + LF is a line continuation, so the
-    // backslash form would paste a *different, shorter* path and submit early.
-    expect(escapePath("/tmp/two\nlines.png")).toBe("'/tmp/two\nlines.png'");
-    expect(escapePath("/tmp/cr\rname")).toBe("'/tmp/cr\rname'");
-  });
-
-  it("closes and reopens the quote around an embedded single quote", () => {
-    expect(escapePath("/tmp/it's\nhere")).toBe("'/tmp/it'\\''s\nhere'");
-  });
-
-  it("backslashes an apostrophe when there is no newline forcing quotes", () => {
+  it("backslashes an apostrophe", () => {
     expect(escapePath("/tmp/it's here")).toBe("/tmp/it\\'s\\ here");
   });
 });
@@ -180,5 +171,62 @@ describe("the paths reach the terminal as a paste", () => {
     // `send(payload)` is the regression: it is what shipped first, and it typed
     // the path instead of attaching the image.
     expect(TERMINAL_HOST).not.toContain("send(payload)");
+  });
+});
+
+describe("isPastable", () => {
+  it("refuses a path carrying a newline or carriage return", () => {
+    // **No quoting saves these.** The payload goes out through `term.paste`, and
+    // xterm's `prepareTextForTerminal` runs `text.replace(/\r?\n/g, '\r')` BEFORE
+    // it brackets anything — so a newline arrives as a carriage return, i.e. a
+    // submit, whatever it was wrapped in. The first version single-quoted such a
+    // path on the stated grounds that backslash-newline is a line continuation;
+    // that reasoning never applied to this send path.
+    expect(isPastable("/tmp/two\nlines.png")).toBe(false);
+    expect(isPastable("/tmp/cr\rname.png")).toBe(false);
+  });
+
+  it("accepts an ordinary path, spaces and quotes included", () => {
+    expect(isPastable("/tmp/a.png")).toBe(true);
+    expect(isPastable("/tmp/My Photo.png")).toBe(true);
+    expect(isPastable("/tmp/it's here.png")).toBe(true);
+  });
+
+  it("refuses an empty path", () => {
+    expect(isPastable("")).toBe(false);
+  });
+});
+
+describe("pathPayload drops what a terminal cannot carry", () => {
+  it("omits a newline path and keeps the rest", () => {
+    expect(pathPayload(["/tmp/a.png", "/tmp/b\nc.png"])).toBe("/tmp/a.png ");
+  });
+
+  it("is empty when every path is unusable, so the caller reports a failure", () => {
+    expect(pathPayload(["/tmp/b\nc.png"])).toBe("");
+  });
+});
+
+describe("shouldSwallowDrop", () => {
+  // The window-level guard's whole decision. Extracted precisely because its
+  // failure is the expensive one: a file dropped a few pixels off a pane would
+  // otherwise navigate the browser away and take the whole /ide view with it.
+  it("swallows a stray file drop nothing else claimed", () => {
+    expect(shouldSwallowDrop(["Files"], false)).toBe(true);
+  });
+
+  it("defers to a pane that already claimed the drop", () => {
+    // Load-bearing: the guard runs LAST in the bubble phase, so without this it
+    // would repaint the one target that works with a `no drop` cursor.
+    expect(shouldSwallowDrop(["Files"], true)).toBe(false);
+  });
+
+  it("ignores a drag that is not files at all", () => {
+    expect(shouldSwallowDrop(["text/plain"], false)).toBe(false);
+    expect(shouldSwallowDrop([], false)).toBe(false);
+  });
+
+  it("ignores a pane tab being dragged, which PaneArea owns", () => {
+    expect(shouldSwallowDrop([TAB_MIME, "Files"], false)).toBe(false);
   });
 });
