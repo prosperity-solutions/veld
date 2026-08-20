@@ -54,6 +54,20 @@ export function describeBrowserError(err: BrowserError): BrowserErrorCopy {
       hint: `Its renderer stopped (${err.text}). Reloading starts a fresh one.`,
     };
   }
+  // The one certificate failure that is not a trust-store problem, and the one
+  // this copy used to send people down the wrong path for: the leaf expired.
+  // Caddy issues and renews these itself, and veld's helper restarts Caddy once
+  // renewal is overdue — two bad probes a minute apart, so a couple of minutes
+  // (`veld-helper`'s `ensure_cert_healthy`). The answer is therefore "reload in a
+  // moment, then look at the log", never "install the CA", which is what the
+  // branch below would have said.
+  if (err.code === NET.CERT_DATE_INVALID) {
+    return {
+      kind: "cert",
+      title: "The certificate has expired",
+      hint: "Veld restarts Caddy to renew it, usually within a couple of minutes — reload then. If it persists, `veld doctor` reports the certificate and names Caddy's log.",
+    };
+  }
   if (
     err.kind === "cert" ||
     (err.code !== null && err.code <= NET.CERT_COMMON_NAME_INVALID && err.code >= -299)

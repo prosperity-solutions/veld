@@ -44,6 +44,12 @@ rusqlite = { version = "0.37", features = ["bundled"] }
 # one's (and signalled, fruitlessly, with EPERM).
 nix = { version = "0.29", features = ["signal", "process", "net", "fs", "user"] }
 reqwest = { version = "0.12", features = ["rustls-tls", "json"], default-features = false }
+# Reading the validity dates off the certificate Caddy serves (`veld_core::tls_health`).
+# RustCrypto's `der`/`spki`/`const-oid`/`pem-rfc7468` are already in the tree, so what is
+# actually built is x509-cert plus `der_derive` (a proc macro) and `flagset`. Cargo.lock also
+# gains `tls_codec`/`tls_codec_derive` entries: they are optional deps of x509-cert that no
+# enabled feature turns on, so they are recorded but never compiled or linked.
+x509-cert = { version = "0.3", default-features = false, features = ["std"] }
 sha2 = "0.10"
 base64 = "0.22"
 petname = "2"
