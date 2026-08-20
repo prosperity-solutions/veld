@@ -92,12 +92,17 @@ pub async fn run(tool: Option<String>, session: Option<String>, args: Vec<String
         return 127;
     }
     if depth > 0 {
+        // Before `decide()`, so this cannot know whether the argument was a URL or a
+        // path — but it knows which shim ran, which is the closest honest answer:
+        // `$BROWSER` is a browser by convention, while `open`/`xdg-open` send an
+        // argument wherever its kind is registered. Flagged by two independent angles
+        // as the one call site the `Fallback` split did not reach.
         return passthrough(
             tool,
             &args,
             depth,
             Some("recursion guard"),
-            Fallback::Browser,
+            fallback_for(tool),
         );
     }
 
@@ -162,9 +167,10 @@ async fn open_path(
     // for this at all" — not policy, so answering it locally does not split the policy
     // owner: the daemon still decides everything a setting can change.
     //
-    // Without this, `open archive.zip` and `open installer.dmg` each cost a POST with a
-    // five-second timeout before falling through, on a command people run dozens of
-    // times a day.
+    // Without this, `open archive.zip` and `open installer.dmg` each cost a POST before
+    // falling through, on a command people run dozens of times a day. (That POST is now
+    // capped at one second rather than the URL path's five — see `ask_daemon_file` — but
+    // not paying it at all is still the right answer for a kind veld can never show.)
     if veld_core::files::servable_type(&path).is_none() {
         return passthrough(tool, args, depth, None, Fallback::Opener);
     }
@@ -339,6 +345,21 @@ fn child_browser(original: Option<std::ffi::OsString>) -> ChildBrowser {
 enum Fallback {
     Browser,
     Opener,
+}
+
+/// Where a shim's real tool sends things when the argument's kind is not known.
+///
+/// A free function rather than a method: [`Tool`] belongs to `veld-core`, and this
+/// noun is only about the sentence *this* binary prints.
+///
+/// `$BROWSER`'s entire convention is "a command that takes a URL", so a browser is the
+/// right noun there. `open`/`xdg-open` take anything, and a path that reaches them
+/// without being classified is as likely to be a file as a URL.
+fn fallback_for(tool: Tool) -> Fallback {
+    match tool {
+        Tool::Browser => Fallback::Browser,
+        Tool::Open | Tool::XdgOpen => Fallback::Opener,
+    }
 }
 
 impl Fallback {

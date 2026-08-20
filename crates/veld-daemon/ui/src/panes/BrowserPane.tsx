@@ -483,7 +483,14 @@ export function BrowserPane(props: {
    * safety property is unchanged — Enter can still only ever open the row the user
    * actually arrowed to — and it now holds across a poll.
    */
-  const placeKey = places.map((p) => p.url).join(" ");
+  // The action row's *presence* is part of the key, not just the places. It shifts
+  // every place's index by one, so a flip while a row is arrowed would leave the stale
+  // index naming a different place. Typing already resets the row, which covers the
+  // common case; this covers the uncommon one — `browser.searchUrl` arriving from a
+  // settings sync changes whether a typed query resolves to an action at all.
+  const placeKey = `${suggestions.action ? "a|" : ""}${places
+    .map((p) => p.url)
+    .join(" ")}`;
   const [highlight, setHighlight] = useState<{
     key: string;
     row: number;
