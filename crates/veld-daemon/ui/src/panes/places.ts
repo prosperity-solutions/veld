@@ -251,6 +251,19 @@ export function stepIndex(count: number, current: number, delta: number): number
   return (current + delta + count) % count;
 }
 
+/**
+ * Where a place with this URL sits in the current suggestions, or `-1`.
+ *
+ * Exists so a highlighted row can be *followed* across a list that changed rather than
+ * dropped. Shares the action-row offset with [`pickSuggestion`], which is the whole
+ * reason it is here and not inline in the component: that `+1` is the arithmetic most
+ * likely to be silently wrong, and a test can only reach it from this module.
+ */
+export function indexOfPlaceUrl(s: Suggestions, url: string): number {
+  const at = s.places.findIndex((p) => p.url === url);
+  return at < 0 ? -1 : (s.action ? 1 : 0) + at;
+}
+
 /** What opening row `index` means, or null when the index selects nothing. */
 export function pickSuggestion(
   s: Suggestions,

@@ -1217,21 +1217,26 @@ export function focusBrowser(id: string): void {
  * another), and the first fix for it only made the manual toggle per-file, which is a
  * different thing. Keyed by pane id and dropped with the view.
  */
-const shownFileMtimes = new Map<string, number>();
+const shownFileMtimes = new Map<string, { path: string; mtimeMs: number }>();
 
-/** What this pane is showing, if a watcher has established it. */
-export function shownFileMtime(id: string): number | null {
-  return shownFileMtimes.get(id) ?? null;
+/**
+ * What this pane is showing, if a watcher has established it **for this file**.
+ *
+ * The path is part of the value rather than something a caller has to clear. The first
+ * version keyed on the pane alone and exported a `forgetShownFileMtime` that nothing
+ * ever called, so navigating a pane from file A to file B inherited A's timestamp — and
+ * the effect's first poll saw a difference and reloaded a page that had only just
+ * loaded. A mismatched path now reads as "no baseline", which is the same
+ * staleness-as-a-value shape as `PaneTab.file` itself.
+ */
+export function shownFileMtime(id: string, path: string): number | null {
+  const seen = shownFileMtimes.get(id);
+  return seen && seen.path === path ? seen.mtimeMs : null;
 }
 
 /** Record what this pane is now showing. */
-export function noteShownFileMtime(id: string, mtimeMs: number): void {
-  shownFileMtimes.set(id, mtimeMs);
-}
-
-/** Forget it — the pane navigated somewhere that is not this file. */
-export function forgetShownFileMtime(id: string): void {
-  shownFileMtimes.delete(id);
+export function noteShownFileMtime(id: string, path: string, mtimeMs: number): void {
+  shownFileMtimes.set(id, { path, mtimeMs });
 }
 
 export function disposeBrowser(id: string): void {

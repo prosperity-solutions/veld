@@ -3,6 +3,7 @@ import {
   INLINE_FILES_MAX_AGE_MS,
   fileDir,
   fileKindOf,
+  indexOfPlaceUrl,
   filterPlaces,
   inlineFiles,
   pickSuggestion,
@@ -408,5 +409,52 @@ describe("what a full-size screen actually renders", () => {
     const stale = [file("deck.html", 24 * 30)];
     const typed = suggestionsFor(placesFor([], LINKS, stale), "deck", ENGINE);
     expect(typed.places.map((p) => p.name)).toEqual(["deck.html"]);
+  });
+});
+
+describe("following a highlighted row across a changed list", () => {
+  // The list now churns on its own — the app refetches recent files every 20s — so a
+  // highlight has to be findable again rather than abandoned.
+  it("shares the action-row offset with pickSuggestion", () => {
+    const places = placesFor(URLS, LINKS);
+    // Untyped: no action row, so the index is the place's own position.
+    const untyped = suggestionsFor(places, "", ENGINE);
+    expect(untyped.action).toBeNull();
+    expect(indexOfPlaceUrl(untyped, "https://web.dev.veld.localhost/")).toBe(1);
+    expect(pickSuggestion(untyped, 1)?.url).toBe("https://web.dev.veld.localhost/");
+
+    // Typed: an action row takes index 0, so every place shifts by one — and the two
+    // functions must agree about that, which is the bug this pairing prevents.
+    const typed = suggestionsFor(places, "web", ENGINE);
+    expect(typed.action).not.toBeNull();
+    const at = indexOfPlaceUrl(typed, "https://web.dev.veld.localhost/");
+    expect(at).toBe(1);
+    expect(pickSuggestion(typed, at)?.url).toBe("https://web.dev.veld.localhost/");
+  });
+
+  it("reports -1 for a URL the list no longer offers", () => {
+    const s = suggestionsFor(placesFor(URLS, LINKS), "", ENGINE);
+    expect(indexOfPlaceUrl(s, "https://gone.example/")).toBe(-1);
+    expect(indexOfPlaceUrl(suggestionsFor([], "", ENGINE), "https://a/")).toBe(-1);
+  });
+
+  it("follows a row that moved because a newer file arrived above it", () => {
+    const older = {
+      name: "report.html",
+      url: "https://files.veld.localhost/g/report.html",
+      mtimeMs: 200,
+    };
+    const before = suggestionsFor(placesFor([], [], [older]), "", ENGINE);
+    expect(indexOfPlaceUrl(before, older.url)).toBe(0);
+
+    // A poll lands and a newer file takes the top row; the highlighted one is still
+    // offered, one position down.
+    const newer = {
+      name: "deck.html",
+      url: "https://files.veld.localhost/g/deck.html",
+      mtimeMs: 300,
+    };
+    const after = suggestionsFor(placesFor([], [], [newer, older]), "", ENGINE);
+    expect(indexOfPlaceUrl(after, older.url)).toBe(1);
   });
 });

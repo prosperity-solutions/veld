@@ -120,6 +120,14 @@ pub enum Decision {
     /// The overwhelmingly common values here are `.` and a directory name, which
     /// resolve to [`Decision::Passthrough`] one step later. That is why this
     /// variant may never print anything on its own.
+    ///
+    /// **`_tool` is ignored, so this reaches `$BROWSER` too**, and that is a real
+    /// behaviour change rather than a side effect: `$BROWSER ./htmlcov/index.html` —
+    /// Python's `webbrowser`, `git web--browse`, a coverage tool opening its own report
+    /// — used to reach the system browser and now lands in a pane. It is wanted (that
+    /// report is exactly what this feature is for) and it is bounded by the same two
+    /// gates as the shims: the path must be inside the session's worktree, and the file
+    /// must be one the view policy accepts.
     Path(String),
     /// Not a plain web page: hand the original argv to the real tool.
     Passthrough,

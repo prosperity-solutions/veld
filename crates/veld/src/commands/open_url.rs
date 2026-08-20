@@ -222,7 +222,13 @@ struct OpenUrlResponse {
 /// timeout, because a wedged daemon must not hold up a browser: the fallback is the
 /// system browser, which is where the URL would have gone anyway.
 async fn ask_daemon(session: &str, url: &str) -> Result<Answer, String> {
-    let answer = ask(session, "open-url", serde_json::json!({ "url": url })).await?;
+    let answer = ask(
+        session,
+        "open-url",
+        serde_json::json!({ "url": url }),
+        std::time::Duration::from_secs(5),
+    )
+    .await?;
     // A URL always gets a sentence. The daemon attaches one to every `system`
     // answer here, and the fallback exists so an older daemon that did not cannot
     // produce a silent redirect to the system browser.
@@ -237,7 +243,20 @@ async fn ask_daemon(session: &str, url: &str) -> Result<Answer, String> {
 /// Ask the daemon to show a local file. Reasons are passed through as they arrive —
 /// most of them are absent on purpose. See [`open_path`].
 async fn ask_daemon_file(session: &str, path: &str) -> Result<Answer, String> {
-    ask(session, "open-file", serde_json::json!({ "path": path })).await
+    ask(
+        session,
+        "open-file",
+        serde_json::json!({ "path": path }),
+        // A *second*, not the URL path's five. The two differ in what waiting buys: a
+        // URL that falls through opens somewhere the user did not want, so it is worth
+        // waiting for the daemon's answer. A file that falls through opens in the app
+        // that kind is registered to, which is what would have happened before veld
+        // existed — so the cost of waiting is pure, and it is paid on every `open
+        // README.md` and `open app.js`, since those are servable (so the local
+        // pre-filter passes them) but not viewable under the shipped defaults.
+        std::time::Duration::from_secs(1),
+    )
+    .await
 }
 
 /// One request, one reply shape, for both of the above.
@@ -245,10 +264,15 @@ async fn ask_daemon_file(session: &str, path: &str) -> Result<Answer, String> {
 /// Split out when the file route arrived: two copies of the timeout, the CSRF header
 /// and the error wording would be two things to keep in step, and the reply type is
 /// identical by design.
-async fn ask(session: &str, action: &str, body: serde_json::Value) -> Result<Answer, String> {
+async fn ask(
+    session: &str,
+    action: &str,
+    body: serde_json::Value,
+    timeout: std::time::Duration,
+) -> Result<Answer, String> {
     let base = veld_core::instance::daemon_base();
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
+        .timeout(timeout)
         .build()
         .map_err(|e| format!("could not reach the daemon: {e}"))?;
     let resp = client

@@ -350,7 +350,14 @@ async fn main() -> Result<()> {
     // (`instance::files_port`), which is what makes the leftover benign rather than a
     // hostname another process can inherit — this removes it anyway, because the
     // cheapest time to not need that argument is now.
-    if let Ok(helper) = veld_core::helper::HelperClient::connect().await {
+    // Gated on having actually registered one, like the management route above is
+    // gated on having a management host. Ungated, a daemon that never registered —
+    // not an addressable instance, or the port was squatted — still connects to the
+    // helper and issues a DELETE that Caddy refuses, taking its reload lock and
+    // logging an error for a route nobody made.
+    if feedback_server::files::is_ready()
+        && let Ok(helper) = veld_core::helper::HelperClient::connect().await
+    {
         let _ = helper
             .remove_route(&veld_core::instance::files_route_id())
             .await;

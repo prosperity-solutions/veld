@@ -69,6 +69,7 @@ import {
   PlaceList,
 } from "./PlaceList";
 import {
+  indexOfPlaceUrl,
   inlineFiles,
   pickSuggestion,
   placesFor,
@@ -468,11 +469,40 @@ export function BrowserPane(props: {
    * from; a render whose list no longer matches reads the row as "none" without any
    * ordering having to be won. `-1` is also what Enter reads as "go to whatever is
    * typed" rather than "open the highlighted row".
+   *
+   * **The row also carries its URL, which is what survives the list changing.** With
+   * files in `places`, the list now churns on its own: the app refetches every 20
+   * seconds and an agent writing a file is the premise of the feature, so "the list
+   * changed" went from *never happens mid-typing* to *happens while you are arrowing*.
+   * Dropping the highlight was the right answer when a change meant a service came up;
+   * it is the wrong answer when a change means an unrelated file was saved, because
+   * Enter then silently navigates the typed text instead of the ringed row.
+   *
+   * So a changed list is re-checked rather than abandoned: if the URL that was
+   * highlighted is still present, the highlight moves to wherever it now is. The
+   * safety property is unchanged — Enter can still only ever open the row the user
+   * actually arrowed to — and it now holds across a poll.
    */
   const placeKey = places.map((p) => p.url).join(" ");
-  const [highlight, setHighlight] = useState({ key: placeKey, row: -1 });
-  const activeRow = highlight.key === placeKey ? highlight.row : -1;
-  const setActiveRow = (row: number) => setHighlight({ key: placeKey, row });
+  const [highlight, setHighlight] = useState<{
+    key: string;
+    row: number;
+    url: string | null;
+  }>({ key: placeKey, row: -1, url: null });
+  const activeRow = (() => {
+    if (highlight.row < 0) return -1;
+    if (highlight.key === placeKey) return highlight.row;
+    // The list moved. Follow the URL if it is still offered, otherwise no row.
+    if (highlight.url === null) return -1;
+    return indexOfPlaceUrl(suggestions, highlight.url);
+  })();
+  const setActiveRow = (row: number) => {
+    // The URL of the row being highlighted, so a later render can find it again.
+    // Indexes here are `Suggestions`-relative, with the action row first.
+    const offset = suggestions.action ? 1 : 0;
+    const place = row >= offset ? suggestions.places[row - offset] : undefined;
+    setHighlight({ key: placeKey, row, url: place?.url ?? null });
+  };
   /**
    * The row Enter would open, which is not the same as the row the arrows have moved
    * to.
@@ -910,9 +940,9 @@ export function BrowserPane(props: {
         // re-seeded on every remount — and a file rewritten while the tab sat in the
         // background was never noticed. Absent means "no baseline yet", which is how
         // arriving on a file avoids reloading it immediately.
-        const shown = shownFileMtime(id);
+        const shown = shownFileMtime(id, file.path);
         if (shown !== null && stat.mtimeMs !== shown) reloadBrowser(id);
-        noteShownFileMtime(id, stat.mtimeMs);
+        noteShownFileMtime(id, file.path, stat.mtimeMs);
       } catch {
         // A file mid-write, deleted, or a daemon restarting. Silent on purpose:
         // this runs on a timer, and a toast per second is worse than a pane that
