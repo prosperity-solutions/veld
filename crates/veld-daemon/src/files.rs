@@ -63,6 +63,30 @@ use veld_core::files;
 /// without seeking beats a 404.
 const MAX_FILE_BYTES: u64 = 256 * 1024 * 1024;
 
+/// How many whole-file reads may be in flight at once.
+///
+/// [`MAX_FILE_BYTES`] bounds *one* read; this bounds the product, which is the number
+/// that actually decides whether the daemon survives. Without it, a page served from
+/// this origin — agent-authored, i.e. the prompt-injectable thing the module docs are
+/// about — can same-origin `fetch` a large sibling on ~100 concurrent HTTP/2 streams,
+/// and the buffered reads add up until the OS kills a process that owns every
+/// terminal holder on the machine.
+///
+/// Four, not forty: the requests this serves are a person opening a document, and a
+/// deck's subresources are small and sequential. Excess requests queue rather than
+/// failing, so nothing breaks — it just waits.
+///
+/// The honest fix is to stream the body instead of buffering it, which would also
+/// remove the no-`Range` caveat above. That needs `tokio-util` as a direct dependency
+/// (it is only transitive today), and a lockfile change drags
+/// `THIRD-PARTY-LICENSES.md` with it — so it is a named follow-up rather than a
+/// smuggled-in dependency bump.
+const MAX_CONCURRENT_READS: usize = 4;
+
+/// See [`MAX_CONCURRENT_READS`].
+static READ_SLOTS: std::sync::LazyLock<tokio::sync::Semaphore> =
+    std::sync::LazyLock::new(|| tokio::sync::Semaphore::new(MAX_CONCURRENT_READS));
+
 /// Whether the Caddy route was registered, so file URLs actually resolve.
 ///
 /// Read by the callers that can still do something useful when it is false: the
@@ -436,6 +460,13 @@ async fn read_file(grant: &str, path: &str) -> Result<(Vec<u8>, &'static str), S
     if meta.len() > MAX_FILE_BYTES {
         return Err(StatusCode::PAYLOAD_TOO_LARGE);
     }
+    // Held across the read only — the `stat` above is cheap and the permit is about
+    // memory, not about disk. `acquire` fails only once the semaphore is closed, which
+    // nothing here does.
+    let _slot = READ_SLOTS
+        .acquire()
+        .await
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
     let bytes = tokio::fs::read(&full)
         .await
         .map_err(|_| StatusCode::NOT_FOUND)?;
@@ -507,6 +538,35 @@ fn resolve_servable(root: &Path, path: &str) -> Option<(PathBuf, &'static str)> 
     Some((full, content_type))
 }
 
+/// Whether this daemon is an instance a person can actually reach by hostname.
+///
+/// **This exists because `cargo test` was editing the developer's Caddy config.**
+/// `veld-daemon/tests/pty_recovery.rs` starts real daemons on random high ports, and
+/// `start` below asked the *developer's* helper to register a route for each one. Every
+/// test run left another `files-<ephemeral>.veld.localhost` behind, and the helper
+/// persists routes across reboots — seven of them had accumulated before this was
+/// noticed. That is the same class as the shim directory escaping into `~/.veld`, which
+/// this repo has a confinement test for.
+///
+/// Guarded by construction rather than by an opt-out variable a future test would
+/// forget to set: all three signals below are things a *real* instance has and a test
+/// daemon does not.
+///
+/// - the installed daemon runs on [`DEFAULT_DAEMON_PORT`](veld_core::instance::DEFAULT_DAEMON_PORT);
+/// - the bootstrap dev tier sets `VELD_MANAGEMENT_HOST`;
+/// - a dev instance started as a veld run gets `VELD_URL`/`VELD_PROXY_ORIGINS`, which
+///   is what `dev_trusted_origins` reads.
+///
+/// A test daemon sets `VELD_DB_PATH`, `VELD_PTY_DIR` and a random port, and none of
+/// these. `VELD_PTY_DIR` is deliberately *not* the signal: `veld doctor` tells real
+/// users to set it when their socket path is too long, and gating on it would switch
+/// the feature off for them silently.
+fn instance_is_addressable() -> bool {
+    veld_core::instance::daemon_port() == veld_core::instance::DEFAULT_DAEMON_PORT
+        || veld_core::instance::management_host().is_some()
+        || !veld_core::instance::dev_trusted_origins().is_empty()
+}
+
 /// Start the file origin: bind a loopback listener, serve it, register its Caddy
 /// route.
 ///
@@ -515,17 +575,25 @@ fn resolve_servable(root: &Path, path: &str) -> Option<(PathBuf, &'static str)> 
 /// sets [`READY`], so every caller degrades to the behaviour it had before this
 /// feature existed.
 pub async fn start() {
-    let listener = match tokio::net::TcpListener::bind(("127.0.0.1", 0)).await {
+    if !instance_is_addressable() {
+        // A daemon nobody can reach by hostname has no business owning one. See the
+        // function's own docs — this is the guard that stops `cargo test` editing the
+        // developer's Caddy configuration.
+        tracing::debug!("file serving off: this daemon is not an addressable instance");
+        return;
+    }
+    let port = veld_core::instance::files_port();
+    let listener = match tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
         Ok(l) => l,
         Err(e) => {
-            warn!("file serving disabled: could not bind a loopback port ({e})");
-            return;
-        }
-    };
-    let port = match listener.local_addr() {
-        Ok(addr) => addr.port(),
-        Err(e) => {
-            warn!("file serving disabled: no local address ({e})");
+            // Loud, and not fatal. A fixed port can be squatted; every caller then
+            // degrades to the behaviour it had before this feature existed, which is
+            // strictly better than the ephemeral-port alternative this replaced (see
+            // `instance::files_port` — a persisted route pointing at a recycled port).
+            warn!(
+                "local files will not open in a pane: port {port} is in use ({e}). \
+                 `open <file>` falls through to your system opener."
+            );
             return;
         }
     };
@@ -723,6 +791,44 @@ mod tests {
             !names.iter().any(|n| n.ends_with("buried.html")),
             "a file past the depth bound must not be returned: {names:?}"
         );
+    }
+
+    /// The file origin must never grow a CORS header.
+    ///
+    /// The whole reason agent-authored HTML is tolerable here is that a page served on
+    /// this origin cannot *read* anything from the management API: there is no CORS
+    /// layer anywhere in the daemon, so a cross-origin `fetch` gets an opaque response
+    /// and the header-presence CSRF check holds. That is an argument about an absence,
+    /// and an absence is what nobody notices removing.
+    ///
+    /// The natural wrong fix — a contributor sees a cross-origin console error and adds
+    /// `CorsLayer::permissive()` — would pass clippy, fmt and every other test in this
+    /// crate. This is the one that fails.
+    #[tokio::test]
+    async fn the_file_origin_serves_no_cors_header() {
+        use tower::ServiceExt;
+        // A 404 is fine: the header would be added by a layer, so it is present or
+        // absent on every response regardless of the route's own answer. Using a
+        // request that needs no database keeps this a test about the layer stack.
+        let res = origin_routes()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(format!("/{}/deck.html", "a".repeat(32)))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        for header in [
+            "access-control-allow-origin",
+            "access-control-allow-credentials",
+            "access-control-allow-headers",
+        ] {
+            assert!(
+                res.headers().get(header).is_none(),
+                "{header} would let a served page read the management API"
+            );
+        }
     }
 
     /// The file origin must never be allowed to open a terminal or IDE socket.

@@ -124,6 +124,38 @@ pub fn files_host() -> String {
     }
 }
 
+/// The loopback port the file origin listens on, for *this* instance.
+///
+/// # Why a fixed port rather than an ephemeral one
+///
+/// The first version bound `127.0.0.1:0` and let Caddy's route hold the upstream, on
+/// the reasoning that the *public* URL is what has to stay stable. That is true and it
+/// is still not safe: the helper **persists** its routes and replays them after a
+/// Caddy restart or a reboot (`veld-helper/src/caddy.rs`), and nothing deregisters
+/// this one when the daemon dies without a clean shutdown. A stale route whose
+/// upstream is a recycled ephemeral port hands `https://files.veld.localhost` — with
+/// Veld's trusted certificate — to whichever local process next binds that number, and
+/// a restored file pane loads from it without a click.
+///
+/// A fixed port cannot be recycled that way: it is derived from the instance's daemon
+/// port, and [`crate::port`] excludes it from the allocator, so nothing veld starts can
+/// take it either. The cost is that an unrelated process squatting it disables file
+/// serving for that instance — which is loud (the daemon logs it and every caller
+/// degrades to the system opener) rather than silent and cross-wired.
+/// **Below [`crate::port::PORT_RANGE_START`], deliberately.** The first attempt at a
+/// fixed port used `daemon_port() + 1` and broke the dev stack on the first restart:
+/// the port allocator runs in the **CLI's** process, where `daemon_port()` is the
+/// installed instance's, so a dev daemon's neighbour port is invisible to it — and it
+/// had already handed 19002 to a node. Reserving a number the allocator cannot see is
+/// not reserving it.
+///
+/// So the file listener lives in a band the allocator never touches at all (it starts
+/// at 19000), keyed off the instance's own port so two instances differ. A collision
+/// now needs two daemon ports congruent modulo 1000, and it fails loudly at bind.
+pub fn files_port() -> u16 {
+    17000 + (daemon_port() % 1000)
+}
+
 /// The Caddy route id this instance's file host is registered under.
 ///
 /// Port-keyed for the same reason [`files_host`] is: a shared id means whichever

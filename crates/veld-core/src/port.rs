@@ -30,6 +30,11 @@ pub const PORT_RANGE_END: u16 = 29999;
 ///
 /// Both this instance's port and the default are excluded: a dev instance's
 /// port is equally not a node's to take.
+///
+/// The file origin's listener needs no entry here, and trying to give it one is how
+/// that was learned: this function runs in whichever process is *allocating*, so it
+/// cannot see a dev daemon's derived port. `instance::files_port` therefore sits below
+/// [`PORT_RANGE_START`], outside everything this allocator can hand out.
 fn infrastructure_ports() -> [u16; 2] {
     [
         crate::instance::DEFAULT_DAEMON_PORT,

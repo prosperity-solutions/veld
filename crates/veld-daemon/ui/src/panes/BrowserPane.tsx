@@ -135,7 +135,9 @@ import {
   originOf,
   paneCovers,
   previewBrowserResize,
+  noteShownFileMtime,
   reloadBrowser,
+  shownFileMtime,
   requestPermissionSettings,
   setBrowserEmulation,
   setBrowserMedia,
@@ -898,15 +900,19 @@ export function BrowserPane(props: {
   useEffect(() => {
     if (!watching || !file) return;
     let cancelled = false;
-    // The timestamp this pane is already showing. Seeded from the first poll rather
-    // than from zero, so arriving on a file does not immediately reload it.
-    let shown: number | null = null;
     const check = async () => {
       try {
         const stat = await api.fileStat(props.worktreeId, file.path);
         if (cancelled) return;
+        // The baseline lives in `browserHost`, beside the view it describes, **not** in
+        // this effect. This component unmounts whenever its tab is not the active one
+        // in its dock while the view keeps its page, so an effect-local baseline was
+        // re-seeded on every remount — and a file rewritten while the tab sat in the
+        // background was never noticed. Absent means "no baseline yet", which is how
+        // arriving on a file avoids reloading it immediately.
+        const shown = shownFileMtime(id);
         if (shown !== null && stat.mtimeMs !== shown) reloadBrowser(id);
-        shown = stat.mtimeMs;
+        noteShownFileMtime(id, stat.mtimeMs);
       } catch {
         // A file mid-write, deleted, or a daemon restarting. Silent on purpose:
         // this runs on a timer, and a toast per second is worse than a pane that

@@ -343,6 +343,19 @@ async fn main() -> Result<()> {
         }
     }
 
+    // And the file origin's route, for a stronger reason than the one above. The
+    // helper persists routes and replays them after a Caddy restart or a reboot, so
+    // one left behind keeps `files.veld.localhost` pointing at a port this process no
+    // longer holds. The listener's port is fixed and reserved
+    // (`instance::files_port`), which is what makes the leftover benign rather than a
+    // hostname another process can inherit — this removes it anyway, because the
+    // cheapest time to not need that argument is now.
+    if let Ok(helper) = veld_core::helper::HelperClient::connect().await {
+        let _ = helper
+            .remove_route(&veld_core::instance::files_route_id())
+            .await;
+    }
+
     // Terminal shells are deliberately **left running**. Their PTYs belong to
     // holder processes rather than to this one, so a shutdown is invisible to them
     // and the next daemon adopts them — which is what makes `veld update` safe to

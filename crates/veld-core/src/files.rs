@@ -193,7 +193,15 @@ pub fn is_sensitive(rel_path: &str) -> bool {
             || segment.starts_with(".env.")
             || segment == ".npmrc"
             || segment == ".netrc"
+            // `credentials` alone could never fire on a *servable* path: an
+            // extensionless file has no content type, so it is already a 404. The
+            // spelling that is servable is `credentials.json` — the standard OAuth
+            // client-secret filename — which is `application/json` and would otherwise
+            // be fetchable by any page served from the same grant.
             || segment == "credentials"
+            || segment.starts_with("credentials.")
+            || segment.starts_with("secrets.")
+            || segment.starts_with("service-account")
             || segment.starts_with("id_rsa")
             || segment.starts_with("id_ed25519")
             || segment.ends_with(".pem")
@@ -464,6 +472,32 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The deny list has to name shapes that are *servable*, or it is decoration.
+    ///
+    /// `credentials` matched only an extensionless file, which the closed type table
+    /// already refuses — so the arm could never fire on anything reachable, while
+    /// `credentials.json` sailed through as `application/json`. The lesson generalises:
+    /// an entry here is only load-bearing if `servable_type` says yes to it.
+    #[test]
+    fn the_deny_list_covers_the_servable_spellings() {
+        for path in [
+            "credentials.json",
+            "config/credentials.json",
+            "secrets.json",
+            "service-account.json",
+            "service-account-key.json",
+        ] {
+            assert!(
+                servable_type(path).is_some(),
+                "{path} is servable, so the deny list is what has to stop it"
+            );
+            assert!(is_sensitive(path), "{path}");
+        }
+        // Not over-broad: an ordinary file whose name merely starts similarly is fine.
+        assert!(!is_sensitive("credential-report.html"));
+        assert!(!is_sensitive("secretsanta.html"));
     }
 
     #[test]

@@ -1202,6 +1202,38 @@ export function focusBrowser(id: string): void {
   else v.iframe?.focus();
 }
 
+/**
+ * The mtime of the file each pane is currently *showing*.
+ *
+ * Module-level for exactly the reason this whole file is: the view outlives the React
+ * component. `BrowserPane` unmounts whenever its tab is not the active one in its dock
+ * (`PaneArea` renders only the active tab), while its `WebContentsView` keeps the page
+ * it had. So a baseline kept in the watch effect's own scope is re-seeded from the
+ * *current* mtime on every remount — and a file rewritten while its tab sat in the
+ * background is never noticed, because the first poll after returning reads the new
+ * timestamp and calls it the starting point.
+ *
+ * That is the feature's headline case (watch a terminal in one tab, the deck in
+ * another), and the first fix for it only made the manual toggle per-file, which is a
+ * different thing. Keyed by pane id and dropped with the view.
+ */
+const shownFileMtimes = new Map<string, number>();
+
+/** What this pane is showing, if a watcher has established it. */
+export function shownFileMtime(id: string): number | null {
+  return shownFileMtimes.get(id) ?? null;
+}
+
+/** Record what this pane is now showing. */
+export function noteShownFileMtime(id: string, mtimeMs: number): void {
+  shownFileMtimes.set(id, mtimeMs);
+}
+
+/** Forget it — the pane navigated somewhere that is not this file. */
+export function forgetShownFileMtime(id: string): void {
+  shownFileMtimes.delete(id);
+}
+
 export function disposeBrowser(id: string): void {
   const v = views.get(id);
   if (!v) return;
@@ -1209,6 +1241,7 @@ export function disposeBrowser(id: string): void {
   v.container.remove();
   v.listeners.clear();
   views.delete(id);
+  shownFileMtimes.delete(id);
   v.shellHasView = false;
   if (desktop) void desktop.destroy(id).catch(() => {});
 }
