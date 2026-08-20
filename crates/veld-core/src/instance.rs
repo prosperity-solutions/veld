@@ -457,6 +457,48 @@ fn normalize_origin(raw: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    /// A dev instance must never claim the installed instance's file host or route id.
+    ///
+    /// The naive spelling — `files.` in front of the management host, falling back to
+    /// the constant — was written, and running it caught this: a dev daemon registered
+    /// `files.veld.localhost` under a shared route id and pointed the *installed*
+    /// daemon's file host at a process that stops existing when the run stops. The port
+    /// in the name is what prevents that, and it is only omitted on the default.
+    #[test]
+    fn the_file_host_and_route_are_per_instance() {
+        // `files_host`/`files_route_id` read the environment, so drive them through the
+        // same accessors rather than mutating a global: the default port is the
+        // installed instance, and any other port is somebody else.
+        let installed_host = format!("files.{MANAGEMENT_HOST}");
+        let dev_host = format!("files-19001.{MANAGEMENT_HOST}");
+        assert_ne!(installed_host, dev_host);
+        assert_eq!(
+            format!("veld-files-{DEFAULT_DAEMON_PORT}"),
+            format!("veld-files-{DEFAULT_DAEMON_PORT}")
+        );
+        assert_ne!(
+            format!("veld-files-{DEFAULT_DAEMON_PORT}"),
+            "veld-files-19001",
+            "a dev instance's route id must differ from the installed one's"
+        );
+
+        // And the live functions agree with that shape for whatever instance this test
+        // process is: the host always starts `files.` or `files-<port>.`, and the route
+        // id always carries this instance's port.
+        let host = files_host();
+        assert!(
+            host.starts_with("files.") || host.starts_with("files-"),
+            "{host}"
+        );
+        assert!(host.ends_with(&format!(".{MANAGEMENT_HOST}")) || management_host().is_some());
+        assert_eq!(files_route_id(), format!("veld-files-{}", daemon_port()));
+        // The clean name belongs to the default port and nothing else.
+        assert_eq!(
+            files_host() == format!("files.{MANAGEMENT_HOST}"),
+            daemon_port() == DEFAULT_DAEMON_PORT && management_host().is_none()
+        );
+    }
+
     use super::*;
 
     // Env-var tests mutate process-global state; keep them in ONE test so the

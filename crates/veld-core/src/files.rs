@@ -5,6 +5,8 @@
 //! - **Viewable** — would the user want this *opened* in a pane? That is policy,
 //!   answered from settings ([`ViewPolicy`]), and it gates the two places a file
 //!   becomes a pane: the `open` shim's interception and the recently-edited list.
+//!   Viewable is a **subset** of servable: a `files.viewPatterns` entry chooses among
+//!   the types below, it cannot add one — see [`is_viewable`].
 //! - **Servable** — may these bytes be sent at all? That is a much wider set,
 //!   because a slide deck's `<link>`, `<script src>`, fonts and images have to load
 //!   or the deck renders as unstyled text. It is gated by [`servable_type`] alone.
@@ -87,6 +89,22 @@ pub fn is_viewable(rel_path: &str, policy: &ViewPolicy) -> bool {
     };
     if by_group {
         return true;
+    }
+    // **A pattern selects among servable types; it cannot invent one.** Without this
+    // gate a pattern for an extension the table has never heard of (`*.mmd`) made a
+    // file *viewable* that `servable_type` then refused — so the row was silently
+    // dropped from the list, and `open chart.mmd` reported that the file-serving route
+    // was not registered, blaming the helper for a decision this table made.
+    //
+    // The alternative was a fallback content type for pattern-matched files, which
+    // would let the setting name any extension. Rejected for one reason: it moves the
+    // closed-table property (an unlisted extension is a 404, never a download) behind a
+    // user setting, and that property is load-bearing for a server whose whole job is
+    // handing bytes to a browser. What remains is the useful half — a pattern scopes by
+    // *location* (`reports/*.xml`) or opts one extension in without its whole group
+    // (`*.log` with plain text off).
+    if servable_type(rel_path).is_none() {
+        return false;
     }
     policy
         .patterns
@@ -214,19 +232,89 @@ pub const SKIP_DIRS: &[&str] = &[
     ".veld",
 ];
 
-/// Whether a glob matches a relative path.
+/// One element of a compiled pattern.
 ///
-/// A deliberately small grammar, because the setting it serves is an escape hatch
-/// and not a query language:
+/// Compiled rather than walked as bytes so the matcher below can index tokens by
+/// position — which is what makes a table possible, and a table is what makes the
+/// cost bounded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Tok {
+    /// `*` — any run within one path segment. `**` when `crosses`.
+    Star {
+        crosses: bool,
+    },
+    /// `?` — one character, never `/`.
+    Any,
+    Lit(u8),
+}
+
+fn compile(pattern: &[u8]) -> Vec<Tok> {
+    let mut out = Vec::with_capacity(pattern.len());
+    let mut i = 0;
+    while i < pattern.len() {
+        match pattern[i] {
+            b'*' => {
+                let crosses = pattern.get(i + 1) == Some(&b'*');
+                // Any further run of `*` adds nothing, and collapsing it here is what
+                // keeps `****` from being four table rows.
+                while pattern.get(i) == Some(&b'*') {
+                    i += 1;
+                }
+                out.push(Tok::Star { crosses });
+            }
+            b'?' => {
+                out.push(Tok::Any);
+                i += 1;
+            }
+            c => {
+                out.push(Tok::Lit(c));
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
+/// Glob match, in time proportional to pattern length times subject length.
+///
+/// The glob grammar `files.viewPatterns` speaks, deliberately small — it is an escape
+/// hatch, not a query language:
 ///
 /// - `?` — one character, never `/`.
 /// - `*` — any run of characters, never crossing `/`.
 /// - `**` — any run, including `/`.
-/// - a pattern with **no** `/` matches against the file name alone, so `*.mmd`
-///   finds one at any depth. A pattern containing `/` matches the whole relative
-///   path, so `reports/*.xml` means what it looks like.
+/// - a pattern with **no** `/` matches against the file name alone, so `*.log` finds
+///   one at any depth. A pattern containing `/` matches the whole relative path, so
+///   `reports/*.xml` means what it looks like.
 ///
 /// Case-insensitive, matching the extension groups beside it.
+///
+/// **A pattern reaches only what the walk reaches.** `SKIP_DIRS` is applied before a
+/// directory is descended into, so no pattern can name anything under `target`,
+/// `node_modules`, `dist`, `build` or `vendor` — `target/doc/**/*.html` matches
+/// nothing, however well-formed it looks. That asymmetry is deliberate (those trees
+/// are where a scan's time goes) and is stated here because a location-shaped example
+/// invites exactly that pattern.
+///
+/// # Why this is a table and not the obvious recursion
+///
+/// The first version recursed on `*`, trying each split in turn. That is the textbook
+/// implementation and it backtracks **combinatorially**: measured on this exact
+/// grammar with subject `"a" * 64`, one added `*` multiplied the work by ~7.3 —
+/// 5 stars 0.08s, 6 stars 0.78s, 7 stars 6.2s, 8 stars 53.8s, 9 stars 319s
+/// (4.3e10 calls), in release. `files.viewPatterns` accepts 64 patterns of
+/// 256 bytes, so ~85 stars was
+/// reachable, and `is_viewable` runs every pattern against every candidate in a scan.
+/// The daemon's scan bounds could not save it: they are checked *between* directory
+/// entries, never inside a match, so one pattern pinned a blocking thread for as long
+/// as it liked and `open-file` hung with it.
+///
+/// The table has no such cliff: `tokens × (subject + 1)` booleans, filled once. The
+/// worst case a setting can now express is ~256 × ~4096 ≈ 1M steps, which is a
+/// millisecond — so the scan's own budget is once again the thing that bounds a scan.
+///
+/// Rows are filled from the end, and a `Star` row reads *itself* at `j + 1` (that is
+/// the "consume one more character" case), which is why `j` descends.
 #[must_use]
 pub fn glob_matches(pattern: &str, rel_path: &str) -> bool {
     if pattern.is_empty() {
@@ -239,42 +327,38 @@ pub fn glob_matches(pattern: &str, rel_path: &str) -> bool {
     };
     let pattern = pattern.to_ascii_lowercase();
     let subject = subject.to_ascii_lowercase();
-    glob_here(pattern.as_bytes(), subject.as_bytes())
-}
+    let toks = compile(pattern.as_bytes());
+    let s = subject.as_bytes();
+    let n = s.len();
 
-/// Backtracking glob match over bytes.
-///
-/// Recursive on `*` only, and the recursion is bounded by the subject's length
-/// because each step consumes at least one byte of it.
-fn glob_here(pattern: &[u8], subject: &[u8]) -> bool {
-    match pattern.first() {
-        None => subject.is_empty(),
-        Some(b'*') => {
-            // `**` crosses separators; a single `*` stops at one.
-            let (rest, crosses) = match pattern.get(1) {
-                Some(b'*') => (&pattern[2..], true),
-                _ => (&pattern[1..], false),
-            };
-            // Try the shortest expansion first, growing one byte at a time.
-            for taken in 0..=subject.len() {
-                if !crosses && subject[..taken].contains(&b'/') {
-                    break;
-                }
-                if glob_here(rest, &subject[taken..]) {
-                    return true;
+    // `next[j]` = "the tokens after this one match `s[j..]`". Seeded with the empty
+    // pattern, which matches only the empty remainder.
+    let mut next: Vec<bool> = (0..=n).map(|j| j == n).collect();
+    let mut cur: Vec<bool> = vec![false; n + 1];
+
+    for tok in toks.iter().rev() {
+        match *tok {
+            Tok::Star { crosses } => {
+                for j in (0..=n).rev() {
+                    // Consume nothing, or one more character and stay on this token.
+                    let more = j < n && (crosses || s[j] != b'/') && cur[j + 1];
+                    cur[j] = next[j] || more;
                 }
             }
-            false
+            Tok::Any => {
+                for j in 0..=n {
+                    cur[j] = j < n && s[j] != b'/' && next[j + 1];
+                }
+            }
+            Tok::Lit(c) => {
+                for j in 0..=n {
+                    cur[j] = j < n && s[j] == c && next[j + 1];
+                }
+            }
         }
-        Some(b'?') => match subject.first() {
-            Some(&c) if c != b'/' => glob_here(&pattern[1..], &subject[1..]),
-            _ => false,
-        },
-        Some(&p) => match subject.first() {
-            Some(&c) if c == p => glob_here(&pattern[1..], &subject[1..]),
-            _ => false,
-        },
+        std::mem::swap(&mut cur, &mut next);
     }
+    next[0]
 }
 
 #[cfg(test)]
@@ -328,22 +412,58 @@ mod tests {
         assert!(!is_viewable("styles.css", &p));
     }
 
+    /// A pattern scopes by location, or opts one extension in without its group.
     #[test]
-    fn a_custom_pattern_reaches_what_no_group_covers() {
+    fn a_custom_pattern_selects_among_servable_types() {
         let mut p = policy();
-        p.patterns = vec!["*.mmd".to_owned(), "reports/*.xml".to_owned()];
-        assert!(is_viewable("chart.mmd", &p));
+        // Plain text is off, so `.xml` and `.log` are not viewable by group…
+        assert!(!is_viewable("reports/q3.xml", &p));
+        assert!(!is_viewable("run.log", &p));
+        // …and a pattern brings back exactly the ones asked for.
+        p.patterns = vec!["reports/*.xml".to_owned(), "*.log".to_owned()];
+        assert!(is_viewable("reports/q3.xml", &p));
+        assert!(is_viewable("run.log", &p));
         assert!(
-            is_viewable("deep/nested/chart.mmd", &p),
+            is_viewable("deep/nested/run.log", &p),
             "bare name, any depth"
         );
-        assert!(is_viewable("reports/q3.xml", &p));
         // The pattern has a slash, so it means that location and not any other.
         assert!(!is_viewable("other/q3.xml", &p));
         assert!(
             !is_viewable("reports/deep/q3.xml", &p),
             "* stops at a slash"
         );
+    }
+
+    /// A pattern cannot make a file viewable that the server would not serve.
+    ///
+    /// This is the pairing that was broken: `is_viewable` said yes, `servable_type`
+    /// said no, and the caller then reported the *route* as unregistered. Whatever the
+    /// two answer, they must agree in this direction — viewable implies servable.
+    #[test]
+    fn a_pattern_cannot_invent_a_servable_type() {
+        let mut p = policy();
+        p.patterns = vec!["*.mmd".to_owned(), "*.bin".to_owned(), "**".to_owned()];
+        for unservable in ["chart.mmd", "blob.bin", "Makefile", "db.sqlite", "id_rsa"] {
+            assert!(!is_viewable(unservable, &p), "{unservable}");
+            assert!(servable_type(unservable).is_none(), "{unservable}");
+        }
+        // The invariant, over the whole surface rather than one example.
+        for path in [
+            "deck.html",
+            "a/b.pdf",
+            "x.png",
+            "notes.md",
+            "chart.mmd",
+            "z.bin",
+        ] {
+            if is_viewable(path, &p) {
+                assert!(
+                    servable_type(path).is_some(),
+                    "{path} is viewable but not servable"
+                );
+            }
+        }
     }
 
     #[test]
@@ -364,8 +484,8 @@ mod tests {
             assert!(!is_viewable(secret, &p), "{secret}");
             assert!(is_sensitive(secret), "{secret}");
         }
-        // …while an ordinary file under the same pattern is still reachable.
-        assert!(is_viewable("anything.bin", &p));
+        // …while an ordinary *servable* file under the same pattern is reachable.
+        assert!(is_viewable("anything.html", &p));
     }
 
     #[test]
@@ -402,11 +522,43 @@ mod tests {
         assert!(glob_matches("*.HTML", "Deck.html"));
     }
 
-    /// A `*`-heavy pattern must not blow the stack on a long path.
+    /// A `*`-heavy pattern must cost time proportional to its size, not exponential.
+    ///
+    /// **This test used to be the bug.** It ran the old backtracking matcher on nine
+    /// stars against 64 characters, which takes 319 seconds in release and longer in
+    /// debug — so `cargo test --workspace` (which CI runs with no `timeout-minutes`)
+    /// hung on it, and every local run of this crate's suite took ten minutes for a
+    /// reason nobody had attributed correctly.
+    ///
+    /// It is now sixteen stars against a longer subject — far past where the old
+    /// implementation stopped finishing at all — and it completes in microseconds. The
+    /// wall-clock assertion is deliberately loose (a second, against a real cost of
+    /// well under a millisecond): it exists to fail if the exponential shape ever comes
+    /// back, not to measure this machine.
     #[test]
-    fn a_pathological_pattern_terminates() {
-        let pattern = "*a*a*a*a*a*a*a*a*b";
-        let subject = "a".repeat(64);
-        assert!(!glob_matches(pattern, &subject));
+    fn a_pathological_pattern_costs_no_more_than_its_size() {
+        let subject = format!("{}b", "a".repeat(200));
+        let pattern = format!("{}b", "*a".repeat(16));
+        let started = std::time::Instant::now();
+        // Matches: every `*a` finds an `a`, and the final `b` lands on the last byte.
+        assert!(glob_matches(&pattern, &subject));
+        // And the non-matching case, which is the one that used to explode — the
+        // matcher has to prove no arrangement works.
+        let no_match = format!("{}c", "*a".repeat(16));
+        assert!(!glob_matches(&no_match, &subject));
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "glob matching took {elapsed:?} — the exponential backtracker is back"
+        );
+    }
+
+    /// `**` collapses, so a run of stars cannot multiply the table's rows.
+    #[test]
+    fn a_run_of_stars_is_one_token() {
+        assert!(glob_matches("****.html", "deck.html"));
+        assert!(glob_matches("a/****/b.html", "a/x/y/b.html"), "**/ crosses");
+        // A single `*` still stops at a separator even when doubled up oddly.
+        assert!(!glob_matches("docs/*.html", "docs/a/b.html"));
     }
 }

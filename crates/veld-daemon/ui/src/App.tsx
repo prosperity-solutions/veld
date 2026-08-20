@@ -1006,6 +1006,8 @@ function AppInner(props: {
   const [filesFor, setFilesFor] = useState<{
     worktreeId: number;
     files: ViewableFile[];
+    /** The daemon's own answer about whether it can serve files at all. */
+    serving: boolean;
   } | null>(null);
   // Which settings the scan's answer depends on, as a stable string. A dependency on
   // the settings *document* would refetch on every unrelated preference write; a
@@ -1031,14 +1033,18 @@ function AppInner(props: {
         .then((res) => {
           // Stamped with the worktree it is about, so a response that arrives after
           // the selection moved on is ignored by the render rather than shown.
-          if (live) setFilesFor({ worktreeId: id, files: res.files });
+          if (live)
+            setFilesFor({ worktreeId: id, files: res.files, serving: res.ready });
         })
         // An empty list for *this* worktree, silently. The surfaces that show it
         // have their own empty hint, and a toast for a list nobody asked for is
         // noise. Still stamped: a failure is an answer, and leaving the previous
         // worktree's answer in place is the bug this whole shape prevents.
         .catch(() => {
-          if (live) setFilesFor({ worktreeId: id, files: [] });
+          // `serving: true` on a failed request, deliberately: the daemon never
+          // answered, so "veld cannot serve files" would be a claim about something
+          // this client did not learn. An unreachable daemon has louder surfaces.
+          if (live) setFilesFor({ worktreeId: id, files: [], serving: true });
         });
     };
     load();
@@ -1076,6 +1082,9 @@ function AppInner(props: {
   const filesReady = filesFor !== null && filesFor.worktreeId === worktree?.id;
   const viewableFiles = filesReady ? filesFor.files : [];
   const viewableFilesLoading = worktree !== null && !filesReady;
+  // Assumed available until the daemon says otherwise, so a list that is merely still
+  // loading never accuses the helper of being down.
+  const viewableFilesServing = filesReady ? filesFor.serving : true;
 
   // Refetched when the selection changes, and cleared first so a pane in the
   // new worktree can never be judged against the previous one's tokens — that
@@ -5678,6 +5687,7 @@ function AppInner(props: {
             quicklinks={worktree.ide.quicklinks}
             files={viewableFiles}
             filesLoading={viewableFilesLoading}
+            filesServing={viewableFilesServing}
             watchFilesByDefault={watchFilesByDefault}
             panes={worktree.ide.panes}
             paneSessions={paneSessions}
@@ -5949,6 +5959,7 @@ function AppInner(props: {
               quicklinks={worktree.ide.quicklinks}
               files={viewableFiles}
               filesLoading={viewableFilesLoading}
+              filesServing={viewableFilesServing}
               watchFilesByDefault={watchFilesByDefault}
               panes={worktree.ide.panes}
               paneSessions={paneSessions}

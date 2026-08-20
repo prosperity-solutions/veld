@@ -2845,6 +2845,72 @@ mod tests {
         assert!(!db.terminal_open_urls_in_app());
     }
 
+    /// The view-pattern list is normalised the way its cited precedent is.
+    ///
+    /// Mirrors `browser.externalOrigins`' own test, which this validator names as the
+    /// shape it follows — the difference being that a blank line here is *dropped*
+    /// rather than refused, because a text-list control produces one for every stray
+    /// newline and refusing the whole patch over that is a field that fights its author.
+    #[test]
+    fn view_patterns_are_normalised_and_bounded() {
+        let (_dir, db) = test_db();
+        assert_eq!(
+            db.settings().unwrap()["files.viewPatterns"],
+            Value::Array(Vec::new()),
+            "veld ships no guess about somebody's file layout"
+        );
+
+        // Trimmed, de-duplicated, and blank entries dropped rather than refused.
+        db.patch_settings(&patch(&[(
+            "files.viewPatterns",
+            Value::Array(vec![
+                Value::from("  reports/*.xml  "),
+                Value::from(""),
+                Value::from("   "),
+                Value::from("reports/*.xml"),
+                Value::from("*.log"),
+            ]),
+        )]))
+        .unwrap();
+        assert_eq!(
+            db.settings().unwrap()["files.viewPatterns"],
+            Value::Array(vec![Value::from("reports/*.xml"), Value::from("*.log")])
+        );
+
+        // Refused: a pattern that is not a string, one too long, one carrying a control
+        // character, and one with a `..` segment. `..` cannot escape anything (a grant
+        // confines every read), so this is the same defence-in-depth `worktree.storageDir`
+        // applies — refuse the shape where somebody chose it.
+        for bad in [
+            Value::Array(vec![Value::from(7)]),
+            Value::Array(vec![Value::from("x".repeat(300))]),
+            Value::Array(vec![Value::from("a\nb.html")]),
+            Value::Array(vec![Value::from("../outside/*.html")]),
+            Value::Array(vec![Value::from("a/../b/*.html")]),
+            Value::from("reports/*.xml"),
+        ] {
+            assert!(
+                db.patch_settings(&patch(&[("files.viewPatterns", bad.clone())]))
+                    .is_err(),
+                "{bad:?} must be refused"
+            );
+        }
+        // …and a refusal leaves the stored value alone.
+        assert_eq!(
+            db.settings().unwrap()["files.viewPatterns"],
+            Value::Array(vec![Value::from("reports/*.xml"), Value::from("*.log")])
+        );
+
+        // More patterns than the cap.
+        let many: Vec<Value> = (0..MAX_VIEW_PATTERNS + 1)
+            .map(|i| Value::from(format!("*.x{i}")))
+            .collect();
+        assert!(
+            db.patch_settings(&patch(&[("files.viewPatterns", Value::Array(many))]))
+                .is_err()
+        );
+    }
+
     #[test]
     fn the_search_template_ships_an_engine_and_refuses_an_unnavigable_one() {
         let (_dir, db) = test_db();

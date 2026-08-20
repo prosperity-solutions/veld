@@ -329,6 +329,9 @@ export function PaneArea(props: {
    *  "empty": switching worktrees must not render the previous one's files, so the
    *  app reports not-yet rather than handing over a stale list. */
   filesLoading: boolean;
+  /** Whether the daemon can serve local files at all — false when its Caddy route is
+   *  not registered. Distinguishes "nothing here" from "nothing can be here". */
+  filesServing: boolean;
   /** `files.watchByDefault` — whether a pane opened on a file starts watching it. */
   watchFilesByDefault: boolean;
   /** Pane types the project declares in `ide.panes`. */
@@ -989,6 +992,7 @@ export function PaneArea(props: {
           quicklinks={props.quicklinks}
           files={props.files}
           filesLoading={props.filesLoading}
+          filesServing={props.filesServing}
           panes={props.panes}
           urlsEmptyHint={props.urlsEmptyHint}
           searchUrl={props.searchUrl}
@@ -1058,6 +1062,7 @@ export function PaneArea(props: {
               quicklinks={props.quicklinks}
               files={props.files}
               filesLoading={props.filesLoading}
+            filesServing={props.filesServing}
               watchFilesByDefault={props.watchFilesByDefault}
               panes={props.panes}
               paneSessions={props.paneSessions}
@@ -1165,6 +1170,9 @@ function DockView(props: {
    *  "empty": switching worktrees must not render the previous one's files, so the
    *  app reports not-yet rather than handing over a stale list. */
   filesLoading: boolean;
+  /** Whether the daemon can serve local files at all — false when its Caddy route is
+   *  not registered. Distinguishes "nothing here" from "nothing can be here". */
+  filesServing: boolean;
   /** `files.watchByDefault` — whether a pane opened on a file starts watching it. */
   watchFilesByDefault: boolean;
   /** Pane types the project declares in `ide.panes`. */
@@ -1602,6 +1610,7 @@ function DockView(props: {
             quicklinks={props.quicklinks}
             files={props.files}
             filesLoading={props.filesLoading}
+            filesServing={props.filesServing}
             panes={props.panes}
             urlsEmptyHint={props.urlsEmptyHint}
             searchUrl={props.searchUrl}
@@ -1625,6 +1634,7 @@ function DockView(props: {
             quicklinks={props.quicklinks}
             files={props.files}
             filesLoading={props.filesLoading}
+            filesServing={props.filesServing}
             worktreeId={props.worktreeId}
             watchFilesByDefault={props.watchFilesByDefault}
             urlsEmptyHint={props.urlsEmptyHint}
@@ -1698,6 +1708,9 @@ function PaneChooser(props: {
    *  "empty": switching worktrees must not render the previous one's files, so the
    *  app reports not-yet rather than handing over a stale list. */
   filesLoading: boolean;
+  /** Whether the daemon can serve local files at all — false when its Caddy route is
+   *  not registered. Distinguishes "nothing here" from "nothing can be here". */
+  filesServing: boolean;
   /** Pane types the project declares in `ide.panes`. */
   panes: PaneSpec[];
   urlsEmptyHint: string;
@@ -1837,6 +1850,7 @@ function PaneChooser(props: {
       </section>
       <FilesModal
         files={fileplaces}
+        serving={props.filesServing}
         opened={filesOpen}
         onClose={() => setFilesOpen(false)}
         onOpen={(url, title, path) => {

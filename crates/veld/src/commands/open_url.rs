@@ -143,6 +143,17 @@ async fn open_path(
     let Some(path) = canonical_file(raw) else {
         return passthrough(tool, args, depth, None);
     };
+    // Filtered here, before the round trip, for the kinds no setting could ever make
+    // viewable. `servable_type` is a *capability* question — "is there a content type
+    // for this at all" — not policy, so answering it locally does not split the policy
+    // owner: the daemon still decides everything a setting can change.
+    //
+    // Without this, `open archive.zip` and `open installer.dmg` each cost a POST with a
+    // five-second timeout before falling through, on a command people run dozens of
+    // times a day.
+    if veld_core::files::servable_type(&path).is_none() {
+        return passthrough(tool, args, depth, None);
+    }
     // `--session` wins over the environment, exactly as it does for a URL: it is how
     // the flag is testable and how a caller outside a terminal names one.
     let Some(session) = session.or_else(session_id) else {

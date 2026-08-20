@@ -1761,7 +1761,13 @@ export const api = {
    * "what is worth opening" is answered here so this page can read the answer.
    */
   viewableFiles: (worktreeId: number) =>
-    request<ViewableFiles>(`/api/worktrees/${worktreeId}/viewable-files`),
+    request<ViewableFiles>(`/api/worktrees/${worktreeId}/viewable-files`, {
+      // Explicit, because `request` only adds this for mutations. Both file routes
+      // check it even though they are GETs: the listing writes (it mints a grant) and
+      // walks a worktree, so it must not be reachable from a page the user merely
+      // visited. See `list_viewable` in veld-daemon/src/files.rs.
+      headers: { "X-Veld-Request": "1" },
+    }),
   /**
    * A watched file's timestamp — what a file pane polls to decide it should reload.
    *
@@ -1771,6 +1777,7 @@ export const api = {
   fileStat: (worktreeId: number, path: string) =>
     request<FileStat>(
       `/api/worktrees/${worktreeId}/file-stat?path=${encodeURIComponent(path)}`,
+      { headers: { "X-Veld-Request": "1" } },
     ),
   ptyOpenUrl: (sessionId: string, url: string) =>
     request<PtyOpenUrl>(`/api/pty/sessions/${encodeURIComponent(sessionId)}/open-url`, {

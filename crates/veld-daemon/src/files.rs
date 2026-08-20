@@ -51,10 +51,16 @@ use veld_core::files;
 /// Biggest file this will read into memory and hand back.
 ///
 /// It reads whole rather than streaming, which is the honest simplification for a
-/// local viewer: the cost is memory proportional to one file, and the benefit is no
-/// `Range` state machine. The cap exists so a stray multi-gigabyte artefact is a
-/// refusal rather than a daemon the OS kills. Large media that needs seeking is a
-/// named follow-up, not a thing this quietly half-does.
+/// local viewer: no `Range` state machine, at the cost of memory proportional to one
+/// file *per in-flight request* — there is no concurrency limit here, so k parallel
+/// reads cost k times this. The cap exists so a stray multi-gigabyte artefact is a
+/// refusal rather than a daemon the OS kills.
+///
+/// **What that costs, stated rather than disclaimed:** `servable_type` does list
+/// `mp4`/`webm`/`ogg`/`mp3`/`wav`, and no `Range` support means such a file plays from
+/// the start and **cannot be seeked** — a short clip embedded in a deck works, a long
+/// one is frustrating. Ranges are a named follow-up. The rows stay because playing
+/// without seeking beats a 404.
 const MAX_FILE_BYTES: u64 = 256 * 1024 * 1024;
 
 /// Whether the Caddy route was registered, so file URLs actually resolve.
@@ -203,8 +209,19 @@ struct ViewableFile {
 /// the honest UI for that is a note explaining why the list is empty, not a failed
 /// request the user cannot act on.
 async fn list_viewable(
+    headers: axum::http::HeaderMap,
     axum::extract::Path(id): axum::extract::Path<i64>,
 ) -> Result<axum::Json<serde_json::Value>, super::desktop::ApiError> {
+    // Gated despite being a GET, for two reasons that both bite. It *writes*: a grant
+    // is minted and persisted on first use for this root. And it costs a blocking
+    // thread for up to `SCAN_BUDGET` of disk walking, on a worktree id that is a small
+    // enumerable integer — so ungated, any page in any browser could fire these in
+    // bulk at `veld.localhost` and saturate the pool the rest of the daemon shares. It
+    // could never *read* the answer (no `Access-Control-Allow-Origin` anywhere), which
+    // is why this was medium rather than critical, but a side-effecting GET with a
+    // 1.5-second cost has no business being reachable from a drive-by page.
+    super::management::check_csrf(&headers)
+        .map_err(|_| super::desktop::err(StatusCode::FORBIDDEN, "missing X-Veld-Request header"))?;
     let db = super::management::open_db().map_err(|_| {
         super::desktop::err(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable")
     })?;
@@ -263,8 +280,17 @@ fn scan(root: &Path, policy: &files::ViewPolicy) -> Vec<(String, i64)> {
     let mut stack = vec![(root.to_path_buf(), 0usize)];
 
     while let Some((dir, depth)) = stack.pop() {
-        if depth > MAX_SCAN_DEPTH || seen >= MAX_SCAN_ENTRIES || started.elapsed() > SCAN_BUDGET {
+        // **`break` for the budgets, `continue` for the depth.** These are not the same
+        // kind of bound and the first version treated them as one: a single directory
+        // popped at depth 13 abandoned every entry still on the stack, silently
+        // truncating the list for the whole worktree. Running out of time or entries is
+        // a reason to stop walking; one branch being too deep is a reason to skip that
+        // branch.
+        if seen >= MAX_SCAN_ENTRIES || started.elapsed() > SCAN_BUDGET {
             break;
+        }
+        if depth > MAX_SCAN_DEPTH {
+            continue;
         }
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
@@ -281,8 +307,9 @@ fn scan(root: &Path, policy: &files::ViewPolicy) -> Vec<(String, i64)> {
             // `file_type` rather than `metadata`: it does not follow symlinks, so a
             // link pointing at its own ancestor is skipped instead of walked. A
             // symlinked *file* is skipped too, which is the conservative half of
-            // the same rule — `confine` would refuse it at serve time anyway if it
-            // pointed outside.
+            // the same rule — `resolve_servable` judges the link's *target* at serve
+            // time, so listing one would offer a row whose identity is not what the
+            // row says.
             let Ok(kind) = entry.file_type() else {
                 continue;
             };
@@ -334,9 +361,14 @@ struct StatQuery {
 /// moves. Same-origin, so the body is readable; confined by the same rules as a
 /// read, so it is not a stat oracle for the rest of the disk.
 async fn file_stat(
+    headers: axum::http::HeaderMap,
     axum::extract::Path(id): axum::extract::Path<i64>,
     axum::extract::Query(q): axum::extract::Query<StatQuery>,
 ) -> Result<axum::Json<serde_json::Value>, super::desktop::ApiError> {
+    // Gated for the same reason as its neighbour, plus one of its own: ungated it is a
+    // mtime-and-size probe for any path a caller cares to name, one request at a time.
+    super::management::check_csrf(&headers)
+        .map_err(|_| super::desktop::err(StatusCode::FORBIDDEN, "missing X-Veld-Request header"))?;
     let db = super::management::open_db().map_err(|_| {
         super::desktop::err(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable")
     })?;
@@ -344,15 +376,9 @@ async fn file_stat(
         .get_worktree(id)
         .map_err(super::desktop::db_err)?
         .ok_or_else(|| super::desktop::err(StatusCode::NOT_FOUND, "no such worktree"))?;
-    let rel = normalize_relative(&q.path)
-        .ok_or_else(|| super::desktop::err(StatusCode::BAD_REQUEST, "not a relative path"))?;
-    if files::servable_type(&rel).is_none() || files::is_sensitive(&rel) {
-        return Err(super::desktop::err(
-            StatusCode::NOT_FOUND,
-            "not a file veld serves",
-        ));
-    }
-    let full = confine(Path::new(&worktree.path), &rel)
+    // The same resolution the read path uses, so a symlink cannot turn this into an
+    // mtime-and-size oracle for a file the read path would refuse.
+    let (full, _) = resolve_servable(Path::new(&worktree.path), &q.path)
         .ok_or_else(|| super::desktop::err(StatusCode::NOT_FOUND, "no such file"))?;
     let meta = tokio::fs::metadata(&full)
         .await
@@ -398,13 +424,8 @@ async fn serve(UrlPath((grant, path)): UrlPath<(String, String)>) -> Response {
 
 /// Resolve, confine, and read. Every failure is a status, never a message.
 async fn read_file(grant: &str, path: &str) -> Result<(Vec<u8>, &'static str), StatusCode> {
-    let rel = normalize_relative(path).ok_or(StatusCode::NOT_FOUND)?;
-    let content_type = files::servable_type(&rel).ok_or(StatusCode::NOT_FOUND)?;
-    if files::is_sensitive(&rel) {
-        return Err(StatusCode::NOT_FOUND);
-    }
     let root = root_for_grant(grant).ok_or(StatusCode::NOT_FOUND)?;
-    let full = confine(&root, &rel).ok_or(StatusCode::NOT_FOUND)?;
+    let (full, content_type) = resolve_servable(&root, path).ok_or(StatusCode::NOT_FOUND)?;
 
     let meta = tokio::fs::metadata(&full)
         .await
@@ -443,21 +464,47 @@ fn root_for_grant(grant: &str) -> Option<PathBuf> {
 
 /// Whether a string is shaped like a grant, checked before it reaches the database.
 ///
-/// A simple-form UUID: 32 lowercase hex characters. Cheap, and it keeps a path
-/// segment full of anything else from becoming a query.
+/// A simple-form UUID's shape: 32 hex characters. Deliberately checked with
+/// `is_ascii_hexdigit`, which also accepts uppercase — a mixed-case spelling is not a
+/// grant this daemon ever minted, so it falls through to the lookup and 404s there
+/// rather than being rejected twice. Cheap, and it keeps a path segment full of
+/// anything else from becoming a database query.
 fn is_grant_shaped(grant: &str) -> bool {
     grant.len() == 32 && grant.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-/// Join `rel` onto `root` and prove the result is still inside it.
+/// A requested path resolved to a real file inside `root`, with the type to serve it
+/// as — or `None` for every refusal.
 ///
-/// [`normalize_relative`] has already refused `..`, so this exists for the case it
-/// cannot see: a **symlink** inside the worktree pointing out of it. Both sides are
-/// canonicalised and compared, which resolves every link on the way.
-fn confine(root: &Path, rel: &str) -> Option<PathBuf> {
+/// **The guards run on the resolved path, not the requested one, and that ordering is
+/// the whole point of this function.** The first version checked `servable_type` and
+/// `is_sensitive` against the string the client sent and only then resolved it, which
+/// a single symlink defeated: `deck2.html -> .env`, *inside* the worktree, passed the
+/// extension table (`.html`), passed the deny list (the segment is `deck2.html`), and
+/// passed confinement (the target really is under the root) — so `.env` was served, as
+/// `text/html`, to whatever asked. Reproduced before this was written.
+///
+/// That attacker needs no code execution: git carries symlinks, so checking out a
+/// repository, a tarball or a dependency tree is enough to plant one — which is
+/// exactly the case `veld_core::files::is_sensitive` documents itself as existing for.
+///
+/// So: normalise, resolve, prove it is inside the root, then re-derive the relative
+/// path *from the resolved one* and judge that. A symlink to a sibling `.html` still
+/// works, because after resolution it is an `.html` inside the worktree — which is the
+/// honest answer.
+fn resolve_servable(root: &Path, path: &str) -> Option<(PathBuf, &'static str)> {
+    let rel = normalize_relative(path)?;
+    // Cheap pre-check on the requested path. Not the guard — the one below is — but it
+    // refuses the overwhelmingly common junk without touching the filesystem.
+    files::servable_type(&rel)?;
     let root = root.canonicalize().ok()?;
-    let full = root.join(rel).canonicalize().ok()?;
-    full.starts_with(&root).then_some(full)
+    let full = root.join(&rel).canonicalize().ok()?;
+    let resolved = full.strip_prefix(&root).ok()?.to_str()?;
+    let content_type = files::servable_type(resolved)?;
+    if files::is_sensitive(resolved) {
+        return None;
+    }
+    Some((full, content_type))
 }
 
 /// Start the file origin: bind a loopback listener, serve it, register its Caddy
@@ -571,14 +618,110 @@ mod tests {
         std::os::unix::fs::symlink(&secret, root.path().join("escape.html")).unwrap();
 
         assert!(
-            confine(root.path(), "ok.html").is_some(),
+            resolve_servable(root.path(), "ok.html").is_some(),
             "a file in the worktree resolves"
         );
         #[cfg(unix)]
-        assert_eq!(
-            confine(root.path(), "escape.html"),
-            None,
+        assert!(
+            resolve_servable(root.path(), "escape.html").is_none(),
             "a symlink pointing out of the worktree is refused"
+        );
+    }
+
+    /// A symlink *inside* the worktree cannot launder a refused file into a served one.
+    ///
+    /// The bug this pins was live and reproduced: the extension table and the deny list
+    /// were evaluated on the path the client asked for, so `deck.html -> .env` satisfied
+    /// both (`.html`, and a segment that is not `.env`) and confinement too — the target
+    /// genuinely is inside the root. `.env` was then served as `text/html`.
+    ///
+    /// Planting one needs no code execution: git carries symlinks, so a checked-out
+    /// repository or an unpacked dependency is enough. Every case below is a *different*
+    /// guard being laundered, which is why they are not one assertion.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_inside_the_worktree_cannot_launder_a_refused_file() {
+        let root = tempfile::TempDir::new().unwrap();
+        let at = |p: &str| root.path().join(p);
+        std::fs::write(at(".env"), "SECRET=hunter2").unwrap();
+        std::fs::create_dir_all(at(".git")).unwrap();
+        std::fs::write(at(".git/config"), "[remote]").unwrap();
+        std::fs::write(at("deploy.pem"), "-----BEGIN").unwrap();
+        std::fs::write(at("db.sqlite"), "SQLite format 3").unwrap();
+        std::fs::write(at("real.html"), "<h1>fine</h1>").unwrap();
+
+        // Each of these is a `.html` request — so the extension table always says yes —
+        // pointing at something a different guard is supposed to refuse.
+        for (link, target, why) in [
+            ("a.html", ".env", "the deny list"),
+            (
+                "b.html",
+                ".git/config",
+                "the deny list, via a directory segment",
+            ),
+            ("c.html", "deploy.pem", "the deny list, by suffix"),
+            ("d.html", "db.sqlite", "the closed extension table"),
+        ] {
+            std::os::unix::fs::symlink(target, at(link)).unwrap();
+            assert!(
+                resolve_servable(root.path(), link).is_none(),
+                "{link} -> {target} laundered past {why}"
+            );
+        }
+
+        // …and the legitimate case still works: a link to a servable sibling resolves to
+        // a servable file inside the worktree, which is the honest answer.
+        std::os::unix::fs::symlink("real.html", at("alias.html")).unwrap();
+        assert!(
+            resolve_servable(root.path(), "alias.html").is_some(),
+            "a symlink to a servable sibling is still served"
+        );
+    }
+
+    /// A branch too deep to walk must not cost the rest of the worktree.
+    ///
+    /// The bug this pins shipped in the first version: the depth bound shared a `break`
+    /// with the two budget bounds, so popping one over-deep directory abandoned every
+    /// entry still on the stack — every sibling directory not yet visited.
+    ///
+    /// **Why the many siblings.** Only unexplored *stack* entries are lost, and whether
+    /// the deep branch is popped before them depends on `read_dir` order, which no test
+    /// can pin. With thirty siblings the buggy walk drops some of them unless the deep
+    /// branch happens to be popped last — so this is deterministic-green on correct code
+    /// (the property holds for every order) and catches the regression with probability
+    /// ~30/31. Verified by re-introducing the `break` and watching it fail.
+    #[test]
+    fn one_branch_being_too_deep_does_not_truncate_the_walk() {
+        let root = tempfile::TempDir::new().unwrap();
+        for i in 0..30 {
+            let dir = root.path().join(format!("s{i:02}"));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("page.html"), "<h1>hi</h1>").unwrap();
+        }
+        // One chain far past the bound, whose pop must skip that branch and nothing else.
+        let mut deep = root.path().join("deep");
+        for i in 0..(MAX_SCAN_DEPTH + 4) {
+            deep = deep.join(format!("d{i}"));
+        }
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::write(deep.join("buried.html"), "<h1>deep</h1>").unwrap();
+
+        let policy = veld_core::files::ViewPolicy {
+            web_pages: true,
+            ..Default::default()
+        };
+        let found = scan(root.path(), &policy);
+        let names: Vec<&str> = found.iter().map(|(rel, _)| rel.as_str()).collect();
+        assert_eq!(
+            names.iter().filter(|n| n.ends_with("page.html")).count(),
+            30,
+            "the deep branch swallowed siblings: {names:?}"
+        );
+        // The buried one is past the bound, so it is legitimately absent — the branch is
+        // skipped, not walked.
+        assert!(
+            !names.iter().any(|n| n.ends_with("buried.html")),
+            "a file past the depth bound must not be returned: {names:?}"
         );
     }
 

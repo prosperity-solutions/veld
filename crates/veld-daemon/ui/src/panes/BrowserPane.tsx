@@ -280,6 +280,8 @@ export function BrowserPane(props: {
   files: ViewableFile[];
   /** Whether that list is still being fetched for this worktree. */
   filesLoading: boolean;
+  /** Whether the daemon can serve local files at all. */
+  filesServing: boolean;
   /** Which worktree this pane belongs to — the file-stat route is scoped to it. */
   worktreeId: number;
   /** `files.watchByDefault`: whether a pane opened on a file starts out watching
@@ -870,14 +872,28 @@ export function BrowserPane(props: {
    */
   const file = tab.file && tab.file.url === tab.url ? tab.file : null;
   /**
-   * This pane's own answer, overriding the setting.
+   * This pane's own answer, overriding the setting — **for one file**.
    *
    * `null` means "whatever the setting says". Not persisted: it answers "not right
    * now, I am presenting this", which is about the next few minutes rather than a
-   * preference — and a stored override would silently outlive the reason for it.
+   * preference, and a stored override would silently outlive the reason for it.
+   *
+   * It carries the path it was chosen for, and a mismatch reads as no override. What
+   * it overrides is per-*file*, so a pane-scoped flag was wrong in a way nothing
+   * announced: turn watching off for deck A, open deck B in the same pane, and B was
+   * silently unwatched with the setting on. Same staleness-as-a-value shape as
+   * `PaneTab.file` itself — no effect resets this, because an effect that resets state
+   * runs a frame after the render that used the stale value.
    */
-  const [watchOverride, setWatchOverride] = useState<boolean | null>(null);
-  const watching = file !== null && (watchOverride ?? props.watchFilesByDefault);
+  const [watchOverride, setWatchOverride] = useState<{
+    path: string;
+    on: boolean;
+  } | null>(null);
+  const override =
+    watchOverride && file && watchOverride.path === file.path
+      ? watchOverride.on
+      : null;
+  const watching = file !== null && (override ?? props.watchFilesByDefault);
 
   useEffect(() => {
     if (!watching || !file) return;
@@ -1233,7 +1249,9 @@ export function BrowserPane(props: {
                   : "Reload when the file changes"
               }
               aria-pressed={watching}
-              onClick={() => setWatchOverride(!watching)}
+              onClick={() =>
+                file && setWatchOverride({ path: file.path, on: !watching })
+              }
             >
               <IconLivePhoto size={14} />
             </ActionIcon>
@@ -2491,9 +2509,10 @@ export function BrowserPane(props: {
                   corner and icon-only for the same reason. No blank-pane button
                   beside them: this pane already *is* one.
 
-                  This screen keeps the panel's longer file list rather than the
-                  chooser's three: the chooser is competing with five other sections
-                  for the same screen, and this one has nothing else on it. */}
+                  This screen offers the same three-from-the-last-day list the chooser
+                  does — see `startPlaces` above. An earlier round had it keep the
+                  panel's longer list; that is no longer true and the note said so for
+                  one round too long. */}
               {/* Wrapped, because `.start-head` is `space-between` over its children:
                   with one button that put it at the far edge, and with two it put the
                   slack *between them*. The chooser's heading already solved this the
@@ -2642,6 +2661,7 @@ export function BrowserPane(props: {
           from `places`, which has the run's URLs and the bookmarks mixed in. */}
       <FilesModal
         files={placesFor([], [], props.files)}
+        serving={props.filesServing}
         opened={filesOpen}
         onClose={() => setFilesOpen(false)}
         onOpen={(url, title, path) => {

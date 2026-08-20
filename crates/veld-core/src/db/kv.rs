@@ -362,6 +362,40 @@ impl Db {
 
 #[cfg(test)]
 mod tests {
+    /// A grant is stable for a root, and keyed on the *path* rather than a row id.
+    ///
+    /// Both halves matter. Stability: the grant is the first path segment of every file
+    /// URL, and those URLs are persisted in the client's pane layout — a grant that
+    /// changed per call would break every restored pane. Path-keying: worktree row ids
+    /// are reused when one is deleted and another created, so a grant keyed on the id
+    /// would hand a persisted URL a *different* project's files after the swap.
+    #[test]
+    fn a_file_grant_is_stable_and_keyed_on_the_path() {
+        let (_dir, db) = test_db();
+
+        let a = db.file_grant_for_root("/repos/alpha").unwrap();
+        assert_eq!(a.len(), 32, "a simple-form uuid");
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+        // Asked twice, same answer — this is what a persisted URL depends on.
+        assert_eq!(db.file_grant_for_root("/repos/alpha").unwrap(), a);
+
+        // A different root is a different grant, however similar the path.
+        let b = db.file_grant_for_root("/repos/beta").unwrap();
+        assert_ne!(a, b);
+
+        // Both resolve back, and only to their own root.
+        assert_eq!(
+            db.file_grant_root(&a).unwrap().as_deref(),
+            Some("/repos/alpha")
+        );
+        assert_eq!(
+            db.file_grant_root(&b).unwrap().as_deref(),
+            Some("/repos/beta")
+        );
+        // An id nobody minted resolves to nothing rather than to the first row.
+        assert_eq!(db.file_grant_root(&"f".repeat(32)).unwrap(), None);
+    }
+
     use crate::db::test_db;
 
     #[test]

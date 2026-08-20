@@ -346,6 +346,9 @@ export function BookmarksModal(props: {
  */
 export function FilesModal(props: {
   files: Place[];
+  /** Whether the daemon can serve local files at all. `false` makes the empty state a
+   *  different sentence — see below. */
+  serving: boolean;
   opened: boolean;
   onClose: () => void;
   onOpen: (url: string, title?: string, path?: string) => void;
@@ -374,7 +377,18 @@ export function FilesModal(props: {
         aria-label="Search recently edited files"
       />
       <div className="place-list bookmarks-modal-list">
-        {props.files.length === 0 ? (
+        {props.files.length === 0 && !props.serving ? (
+          // The list is empty *because nothing can be served*, which is a different
+          // fact from "you have not written any files" and needs a different sentence.
+          // Saying the cheerful one here was actively misleading: it promised files
+          // would appear, in the one state where they never will.
+          <p className="faint place-nomatch">
+            Veld cannot serve local files right now — its <code>files.*</code> route is
+            not registered. Check <code>veld doctor</code>; the helper may not be
+            running. <code>open&nbsp;&lt;file&gt;</code> falls through to your system
+            opener until it is.
+          </p>
+        ) : props.files.length === 0 ? (
           <p className="faint place-nomatch">
             Nothing here yet. Files an agent writes into this worktree show up as soon
             as they are saved — web pages and PDFs by default, more under Settings →

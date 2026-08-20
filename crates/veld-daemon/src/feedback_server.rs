@@ -193,8 +193,12 @@ pub async fn run_feedback_server(share_manager: Arc<crate::share::manager::Share
         // What local files are worth opening, and whether a watched one changed.
         // Only the *questions* are here — the bytes are served on their own origin
         // (see files.rs), and these two are same-origin precisely so the `/ide`
-        // bundle can read their bodies. Both are GETs with no side effects, so
-        // neither needs a CSRF check.
+        // bundle can read their bodies.
+        //
+        // Both check CSRF despite being GETs, which is the exception to the rule
+        // elsewhere in this file. This comment used to claim they had no side effects;
+        // that was wrong twice over — the listing mints and persists a grant, and it
+        // spends a bounded but real amount of disk walking per call. See `list_viewable`.
         .merge(files::api_routes())
         // Keep-awake. Same reasoning as settings — machine-wide rather than
         // desktop-specific, and its mutating handlers call `check_csrf`

@@ -1334,9 +1334,13 @@ impl SettingKey {
             ),
             Self::FilesViewPatterns => Spec {
                 title: "Also treat these as viewable",
-                help: "One glob per line, for the kinds the switches above do not cover — \
-                       `*.mmd`, `reports/*.xml`. `*` matches within one path segment and `**` \
-                       across them; a pattern with no `/` matches a file name at any depth. \
+                help: "One glob per line, to reach files the switches above leave out — \
+                       `reports/*.xml` for one folder, `*.log` without turning on all plain \
+                       text. `*` matches within one path segment and `**` across them; a \
+                       pattern with no `/` matches a file name at any depth. A pattern \
+                       *chooses among* the kinds Veld can display and cannot invent one, so \
+                       `*.mmd` matches nothing — and it cannot reach into `node_modules`, \
+                       `target`, `dist`, `build` or `vendor`, which are never scanned. \
                        Secrets are never served whatever you write here: `.git`, `.env*`, \
                        `*.pem`, `*.key` and their neighbours are refused first.",
                 group: Browser,
