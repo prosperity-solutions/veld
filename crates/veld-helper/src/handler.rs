@@ -73,6 +73,23 @@ impl State {
         }
     }
 
+    /// One certificate-watchdog iteration: check that the certificate Caddy
+    /// serves is one a browser accepts, and restart Caddy if renewal has stopped.
+    /// Same "is Caddy meant to be running" gate as [`Self::caddy_watchdog_tick`]
+    /// — a fresh install with no runs has no HTTPS port to probe.
+    pub async fn caddy_cert_watchdog_tick(&self) {
+        let should_run =
+            self.caddy.pid().await.is_some() || self.caddy.stored_route_count().await > 0;
+        if !should_run {
+            return;
+        }
+        match self.caddy.ensure_cert_healthy().await {
+            Ok(true) => info!("watchdog restarted caddy to renew its certificates"),
+            Ok(false) => {}
+            Err(e) => warn!(error = %format!("{e:#}"), "watchdog caddy certificate restart failed"),
+        }
+    }
+
     /// Parse and dispatch a single JSON request line.
     pub async fn handle_request(&self, line: &str) -> Handled {
         let request: Request = match serde_json::from_str(line) {

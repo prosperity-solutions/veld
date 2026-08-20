@@ -47,12 +47,26 @@ struct Diagnostics {
     /// row exists so that "check the daemon log" is a followable instruction,
     /// and the moment someone needs it is the moment they are already stuck.
     daemon_log: String,
+    /// Where Caddy's own log goes. Same reasoning as `daemon_log`, and one step
+    /// more load-bearing: certificate issuance and renewal happen entirely
+    /// inside Caddy, veld cannot report on them, and this file is the only place
+    /// they are written down.
+    caddy_log: String,
 
     // Services
     helper_status: String,
     daemon_status: String,
     caddy_status: String,
     ca_status: String,
+    /// The certificate a browser actually gets from the HTTPS port, and how long
+    /// it is still good for.
+    ///
+    /// The `ca_status` line above answers a different question — whether this
+    /// machine *trusts* veld's CA — and answering only that is what let a Caddy
+    /// serving a leaf certificate two weeks past its expiry report all-green
+    /// while Chrome refused every veld URL with `ERR_CERT_DATE_INVALID`. Empty
+    /// when there was no HTTPS port to ask.
+    cert_status: String,
     /// Whether anything is keeping this machine awake, and why.
     ///
     /// The helper line above already reports the *privileged* half, and that was
@@ -181,6 +195,22 @@ impl Diagnostics {
 
         // Read after the mode, because the repair it suggests names it.
         self.daemon_log = daemon_log_row(&daemon_bin, &self.config_mode);
+
+        // Caddy's own log. Unlike the daemon's, no service manager captures it:
+        // the helper spawns Caddy with its output discarded and Caddy writes this
+        // file itself, so it simply does not exist until a Caddy new enough to be
+        // configured for it has run. The path comes from `veld_core::paths` rather
+        // than being derived here, so this row cannot name a different file from
+        // the one the helper configured.
+        let caddy_log = veld_core::paths::caddy_log_path();
+        self.caddy_log = if caddy_log.exists() {
+            tilde_path(&caddy_log)
+        } else {
+            format!(
+                "{} (not written yet — restart Caddy to start it)",
+                tilde_path(&caddy_log)
+            )
+        };
     }
 
     // -- Services ------------------------------------------------------------
@@ -520,7 +550,28 @@ impl Diagnostics {
             },
         });
 
-        // 5. Feedback server responding. Name the port so a contributor
+        // 5. The certificate a browser would be handed.
+        //
+        // Only worth asking when something is listening — otherwise this would
+        // spend the probe's connect timeout to restate the red row above. Every
+        // other TLS check veld had was about the *CA*: whether this machine
+        // trusts the authority that signs the leaves. None of them looked at a
+        // leaf, which is how a Caddy serving one that expired a day earlier
+        // passed `veld doctor` while Chrome refused every URL it serves.
+        if https_ok {
+            let cert = veld_core::tls_health::probe(https_port).await;
+            self.cert_status = describe_cert(&cert);
+            self.checks.push(Check {
+                // Green means both halves: a browser loads the page today, *and*
+                // renewal is still on schedule. A certificate deep in its
+                // renewal window is still servable and is already proof that
+                // renewal stopped — see `TlsHealth::renewal_is_overdue`.
+                pass: cert.serves_browsers() && !cert.renewal_is_overdue(),
+                label: cert_check_label(veld_core::instance::MANAGEMENT_HOST, &cert),
+            });
+        }
+
+        // 6. Feedback server responding. Name the port so a contributor
         // running a dev instance (VELD_DAEMON_PORT) can tell WHICH daemon
         // this green/red check is about.
         let daemon_port = veld_core::instance::daemon_port();
@@ -539,7 +590,7 @@ impl Diagnostics {
             },
         });
 
-        // 6. .localhost DNS resolves
+        // 7. .localhost DNS resolves
         let dns_ok = resolve_localhost_dns();
         self.checks.push(Check {
             pass: dns_ok,
@@ -550,7 +601,7 @@ impl Diagnostics {
             },
         });
 
-        // 7. No stale system install
+        // 8. No stale system install
         let stale_path = Path::new("/usr/local/lib/veld");
         let lib = veld_core::paths::lib_dir();
         // Only warn if the system dir exists AND it's not the active lib dir
@@ -564,7 +615,7 @@ impl Diagnostics {
             },
         });
 
-        // 8. No stale binaries next to CLI (e.g. ~/.local/bin/veld-daemon
+        // 9. No stale binaries next to CLI (e.g. ~/.local/bin/veld-daemon
         //    left over from manual testing while lib dir has the real copy)
         if let Ok(cli_path) = std::env::current_exe() {
             if let Some(cli_dir) = cli_path.parent() {
@@ -598,7 +649,7 @@ impl Diagnostics {
             }
         }
 
-        // 9. Terminal holder processes.
+        // 10. Terminal holder processes.
         //
         // Each open terminal in `/ide` has a process of its own holding its PTY,
         // which is what lets a shell survive `veld update`. They are invisible to
@@ -608,7 +659,7 @@ impl Diagnostics {
         // and gets swept at the next daemon start.
         self.checks.push(self.terminal_holders_check(feedback_ok));
 
-        // 10. The terminal-URL shims.
+        // 11. The terminal-URL shims.
         //
         // Same reason as the row above: this is a feature whose failure mode is
         // *silence*. The daemon writes these once at startup and logs a single
@@ -1008,6 +1059,7 @@ impl Diagnostics {
         println!("    {:<14}{}", "Lib dir:", self.lib_dir);
         println!("    {:<14}{}", "Config:", self.config_path);
         println!("    {:<14}{}", "Daemon log:", self.daemon_log);
+        println!("    {:<14}{}", "Caddy log:", self.caddy_log);
         println!();
 
         // Mode (prominent)
@@ -1073,6 +1125,13 @@ impl Diagnostics {
             colorize_status(&self.caddy_status)
         );
         println!("    {:<14}{}", "CA:", colorize_status(&self.ca_status));
+        if !self.cert_status.is_empty() {
+            println!(
+                "    {:<14}{}",
+                "Certificate:",
+                colorize_status(&self.cert_status)
+            );
+        }
         println!();
 
         // Checks
@@ -1119,12 +1178,16 @@ impl Diagnostics {
                 "config_path": self.config_path,
                 "config_mode": self.config_mode,
                 "daemon_log": self.daemon_log,
+                "caddy_log": self.caddy_log,
             },
             "services": {
                 "helper": self.helper_status,
                 "daemon": self.daemon_status,
                 "caddy": self.caddy_status,
                 "ca": self.ca_status,
+                // Empty string when there was no HTTPS port to ask, for the
+                // same reason as `keep_awake` above.
+                "certificate": self.cert_status,
                 // Empty string rather than null when nothing is held: this is a
                 // human-readable phrase, and a consumer branching on it wants
                 // "is there one" rather than a shape to destructure.
@@ -1376,17 +1439,110 @@ async fn check_keep_awake() -> String {
     format!("held awake — {why}{left}{lid}{how}")
 }
 
-/// `"3h 12m"` / `"12m"` / `"under a minute"`. Mirrors `veld share`'s own.
+/// `"2d 3h"` / `"3h 12m"` / `"12m"` / `"under a minute"`. Mirrors `veld share`'s
+/// own, plus a day branch: certificate lifetimes are measured in days, and
+/// `"167h"` is a number a reader has to convert before it means anything.
 fn humanize_secs(seconds: i64) -> String {
     if seconds < 60 {
         return "under a minute".to_owned();
     }
-    let hours = seconds / 3600;
+    let days = seconds / 86_400;
+    let hours = (seconds % 86_400) / 3600;
+    if days > 0 {
+        return match hours {
+            0 => format!("{days}d"),
+            h => format!("{days}d {h}h"),
+        };
+    }
     let minutes = (seconds % 3600) / 60;
     match (hours, minutes) {
         (0, m) => format!("{m}m"),
         (h, 0) => format!("{h}h"),
         (h, m) => format!("{h}h {m}m"),
+    }
+}
+
+/// The Services-block line for the certificate the HTTPS port is serving.
+fn describe_cert(health: &veld_core::tls_health::TlsHealth) -> String {
+    use veld_core::tls_health::TlsHealth;
+    match health {
+        // The overdue case first, and phrased so it neither starts with "valid"
+        // nor claims health: `colorize_status` matches on the first word, so
+        // without this the Services row printed a green "valid, expires in 20h"
+        // directly above the red check built from the very same verdict.
+        TlsHealth::Valid { expires_in, .. } if health.renewal_is_overdue() => format!(
+            "RENEWAL OVERDUE — still valid for {}, but Caddy should have replaced it",
+            humanize_secs(expires_in.as_secs() as i64)
+        ),
+        TlsHealth::Valid { expires_in, .. } => format!(
+            "valid, expires in {}",
+            humanize_secs(expires_in.as_secs() as i64)
+        ),
+        TlsHealth::Expired { expired_for } => format!(
+            "EXPIRED {} ago",
+            humanize_secs(expired_for.as_secs() as i64)
+        ),
+        TlsHealth::NotYetValid { valid_in } => format!(
+            "NOT VALID for another {} — this machine's clock is behind",
+            humanize_secs(valid_in.as_secs() as i64)
+        ),
+        TlsHealth::Unreachable { detail } => format!("no TLS answer ({detail})"),
+        TlsHealth::Unreadable { detail } => format!("unreadable ({detail})"),
+    }
+}
+
+/// The Checks-block line: the same verdict, plus what to do about it.
+///
+/// The repair named is a Caddy *restart*, not a reload, and that is not a
+/// simplification — Caddy will not re-examine a certificate it already holds in
+/// its cache, so reloading its config (which veld does on every route change)
+/// cannot renew an expired one. Only a new process can.
+/// `host` is named in every line, because this row measures **one** hostname and
+/// each run URL carries a certificate of its own. A green row that read as a
+/// verdict on every veld URL would be the same over-claiming this change exists to
+/// remove. The helper's watchdog does check them all, once a minute.
+fn cert_check_label(host: &str, health: &veld_core::tls_health::TlsHealth) -> String {
+    use veld_core::tls_health::TlsHealth;
+    match health {
+        TlsHealth::Valid { expires_in, .. } if !health.renewal_is_overdue() => {
+            format!(
+                "HTTPS certificate for {host} valid (expires in {})",
+                humanize_secs(expires_in.as_secs() as i64)
+            )
+        }
+        // "tries", not "will": the helper restarts Caddy at most a few times before
+        // it stops, and it stops precisely when restarting is not working — a state
+        // this process cannot see, because the counter lives in the helper's
+        // memory. Promising an imminent restart there would be the same kind of
+        // confident wrong answer this whole check exists to replace.
+        TlsHealth::Valid { expires_in, .. } => format!(
+            "HTTPS certificate for {host} expires in {} and Caddy has not renewed it — \
+             veld restarts Caddy to try to renew it, a few times, a couple of minutes apart. \
+             If it persists, the reason is in the Caddy log",
+            humanize_secs(expires_in.as_secs() as i64)
+        ),
+        TlsHealth::Expired { expired_for } => format!(
+            "HTTPS certificate for {host} EXPIRED {} ago — browsers refuse veld URLs. \
+             veld restarts Caddy to try to renew it, a few times, a couple of minutes apart. \
+             If it persists, the reason is in the Caddy log",
+            humanize_secs(expired_for.as_secs() as i64)
+        ),
+        TlsHealth::NotYetValid { valid_in } => format!(
+            "HTTPS certificate for {host} is not valid for another {} — browsers refuse veld URLs \
+             until this machine's clock is right, and restarting Caddy cannot fix a clock",
+            humanize_secs(valid_in.as_secs() as i64)
+        ),
+        // Neutral about *why* nothing answered: `Unreachable` covers a port with
+        // nothing listening as well as a Caddy that took the connection and never
+        // replied, and `describe_cert` above says so. Asserting one of the two
+        // here would make two lines of the same report disagree.
+        TlsHealth::Unreachable { detail } => format!(
+            "No TLS answer for {host} on the HTTPS port ({detail}) — Caddy may be failing to \
+             issue a certificate at all; the reason is in the Caddy log"
+        ),
+        TlsHealth::Unreadable { detail } => {
+            format!("HTTPS certificate for {host} could not be read ({detail}) — see the Caddy log")
+        }
     }
 }
 
@@ -1780,11 +1936,19 @@ fn resolve_localhost_dns() -> bool {
 
 /// Colorize service status strings.
 fn colorize_status(status: &str) -> String {
-    if status.starts_with("running") || status.starts_with("trusted") {
+    if status.starts_with("running") || status.starts_with("trusted") || status.starts_with("valid")
+    {
         output::green(status)
     } else if status.starts_with("not running")
         || status.starts_with("not found")
         || status.starts_with("not trusted")
+        || status.starts_with("EXPIRED")
+        // A certificate the clock rejects is refused by browsers exactly as an
+        // expired one is. Yellow would invite a shrug at a total outage.
+        || status.starts_with("NOT VALID")
+        // Still servable, already proof that renewal stopped: the row has to
+        // agree with the check below it, which is red.
+        || status.starts_with("RENEWAL OVERDUE")
     {
         output::red(status)
     } else {
@@ -1795,6 +1959,131 @@ fn colorize_status(status: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+    use veld_core::tls_health::TlsHealth;
+
+    /// A week, as veld now asks Caddy to issue.
+    const WEEK: Duration = Duration::from_secs(7 * 24 * 3600);
+
+    /// Certificate lifetimes are days, and `"167h"` is a number the reader has
+    /// to convert before it says anything. Sub-day values keep the shape the
+    /// keep-awake and share rows already print.
+    #[test]
+    fn durations_read_in_the_largest_useful_unit() {
+        assert_eq!(humanize_secs(30), "under a minute");
+        assert_eq!(humanize_secs(12 * 60), "12m");
+        assert_eq!(humanize_secs(3 * 3600), "3h");
+        assert_eq!(humanize_secs(3 * 3600 + 12 * 60), "3h 12m");
+        assert_eq!(humanize_secs(2 * 86_400), "2d");
+        assert_eq!(humanize_secs(6 * 86_400 + 23 * 3600), "6d 23h");
+        // The boundary itself: a hair under a day is still hours.
+        assert_eq!(humanize_secs(86_399), "23h 59m");
+    }
+
+    /// A certificate deep in its renewal window is still served, so a reader
+    /// looking only at "does it work" would call it fine. The row has to say the
+    /// other thing — that renewal stopped — because that is what breaks next.
+    #[test]
+    fn the_certificate_row_fails_before_the_certificate_does() {
+        // A week-long leaf with a day left: Caddy should have replaced it two
+        // days ago.
+        let overdue = TlsHealth::Valid {
+            expires_in: Duration::from_secs(20 * 3600),
+            lifetime: WEEK,
+        };
+        assert!(overdue.serves_browsers());
+        assert!(overdue.renewal_is_overdue());
+        let label = cert_check_label("veld.localhost", &overdue);
+        assert!(label.contains("has not renewed"));
+        // Never an unconditional promise: the helper gives up after a few
+        // fruitless restarts, and this process cannot tell whether it already has.
+        assert!(label.contains("try to renew"));
+        assert!(!label.contains("within about two minutes to"));
+
+        let fine = TlsHealth::Valid {
+            expires_in: Duration::from_secs(6 * 86_400),
+            lifetime: WEEK,
+        };
+        assert_eq!(
+            cert_check_label("veld.localhost", &fine),
+            "HTTPS certificate for veld.localhost valid (expires in 6d)"
+        );
+        assert_eq!(describe_cert(&fine), "valid, expires in 6d");
+    }
+
+    /// The Services row and the Checks row are built from one verdict, so they
+    /// must not disagree. A certificate deep in its renewal window is still
+    /// servable — which is exactly why the row used to print a green "valid,
+    /// expires in 20h" above a red "has not renewed" check.
+    #[test]
+    fn an_overdue_certificate_does_not_read_as_healthy_in_the_services_row() {
+        let overdue = TlsHealth::Valid {
+            expires_in: Duration::from_secs(20 * 3600),
+            lifetime: WEEK,
+        };
+        assert!(overdue.renewal_is_overdue());
+        let line = describe_cert(&overdue);
+        assert!(
+            !line.starts_with("valid"),
+            "must not read as health: {line}"
+        );
+        assert!(
+            colorize_status(&line).contains(&output::red(&line)),
+            "the row must be as red as the check it sits above: {line}"
+        );
+    }
+
+    /// The row names the hostname it measured. Each run URL has a certificate of
+    /// its own, so a row that read as a verdict on all of them would over-claim
+    /// exactly the way the all-green `veld doctor` in the original report did.
+    #[test]
+    fn the_certificate_row_names_the_host_it_checked() {
+        let fine = TlsHealth::Valid {
+            expires_in: Duration::from_secs(6 * 86_400),
+            lifetime: WEEK,
+        };
+        assert!(cert_check_label("veld.localhost", &fine).contains("for veld.localhost"));
+        let expired = TlsHealth::Expired {
+            expired_for: Duration::from_secs(60),
+        };
+        assert!(cert_check_label("veld.localhost", &expired).contains("for veld.localhost"));
+    }
+
+    /// The Services line is what `colorize_status` colours, so its first word
+    /// decides whether an expired certificate is printed in red.
+    #[test]
+    fn an_expired_certificate_reads_as_red() {
+        let expired = TlsHealth::Expired {
+            expired_for: Duration::from_secs(29 * 3600),
+        };
+        let line = describe_cert(&expired);
+        assert_eq!(line, "EXPIRED 1d 5h ago");
+        assert!(colorize_status(&line).contains(&output::red(&line)));
+        assert!(cert_check_label("veld.localhost", &expired).contains("browsers refuse veld URLs"));
+    }
+
+    /// A clock behind the certificate's `notBefore` breaks browsers exactly as an
+    /// expired one does, and the remedy is different: restarting Caddy reissues a
+    /// certificate the clock rejects just the same. Both lines have to say so —
+    /// and the Services row has to be **red**, because `colorize_status` matches on
+    /// the first word and yellow would invite a shrug at a total outage.
+    #[test]
+    fn a_future_dated_certificate_blames_the_clock_and_still_reads_as_red() {
+        let early = TlsHealth::NotYetValid {
+            valid_in: Duration::from_secs(3 * 3600),
+        };
+        assert!(!early.serves_browsers());
+        assert!(!early.renewal_is_overdue());
+        let line = describe_cert(&early);
+        assert!(line.contains("clock"));
+        assert!(
+            colorize_status(&line).contains(&output::red(&line)),
+            "a certificate browsers refuse must not render as a warning: {line}"
+        );
+        let label = cert_check_label("veld.localhost", &early);
+        assert!(label.contains("clock"));
+        assert!(!label.contains("veld restarts Caddy"));
+    }
 
     /// `veld doctor` must not knock on a holder that has a daemon attached.
     ///

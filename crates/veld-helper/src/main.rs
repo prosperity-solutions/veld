@@ -18,6 +18,19 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// How often the watchdog checks that Caddy is alive and serving.
 const WATCHDOG_INTERVAL: Duration = Duration::from_secs(15);
 
+/// How often the watchdog checks that the certificate Caddy serves is one a
+/// browser accepts.
+///
+/// Slower than [`WATCHDOG_INTERVAL`] because it costs a TLS handshake per
+/// hostname and because it is watching something that changes on the scale of
+/// days — but fast enough that a certificate which does expire is served broken
+/// for about a minute, not for the day and a half it took a user to report it.
+/// The handshakes run concurrently, so the tick is bounded by the slowest single
+/// probe (`tls_health`'s own timeout) rather than by their sum; a serial loop over
+/// twenty routes against a wedged Caddy would overrun this interval three times
+/// over.
+const CERT_WATCHDOG_INTERVAL: Duration = Duration::from_secs(60);
+
 /// How often to check whether the helper's own binary changed on disk.
 const BINARY_WATCH_INTERVAL: Duration = Duration::from_secs(10);
 
@@ -220,6 +233,21 @@ async fn main() -> Result<()> {
         loop {
             interval.tick().await;
             watchdog_state.caddy_watchdog_tick().await;
+        }
+    });
+
+    // Certificate watchdog: a Caddy that answers the tick above can still be
+    // serving a certificate no browser accepts, because its certificate
+    // maintenance is a separate goroutine that can stop on its own. Its own task
+    // rather than a slower branch of the loop above: this one does a TLS
+    // handshake and may restart Caddy, and liveness must not queue behind it.
+    let cert_state = Arc::clone(&state);
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(CERT_WATCHDOG_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            cert_state.caddy_cert_watchdog_tick().await;
         }
     });
 

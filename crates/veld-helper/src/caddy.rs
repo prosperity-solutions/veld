@@ -29,6 +29,58 @@ const CADDY_ADMIN_TIMEOUT: Duration = Duration::from_secs(10);
 /// Connect timeout for the Caddy admin API (localhost, so fast).
 const CADDY_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 
+/// How long a leaf certificate Caddy issues is good for.
+///
+/// Caddy's own default is 12 hours, which veld took silently — and a 12-hour
+/// leaf makes *one* missed renewal a broken browser by the next morning. It is
+/// the whole blast radius of a certificate-maintenance loop that stops: whatever
+/// stops it, veld has until the current leaf expires to notice and act. A week
+/// buys that time; nothing about a local development CA needs the certificate to
+/// be short-lived.
+///
+/// **Do not shorten this to a handful of minutes.** Measured against Caddy
+/// 2.11.4: a `1m` lifetime makes issuance fail outright — smallstep answers
+/// `createCertificateRequest 'lifetime' cannot be 0` and Caddy serves no
+/// certificate at all, which is a harder failure than the one this constant
+/// exists to soften. `168h` was verified end to end: a real Caddy issued 7-day
+/// leaves for both the management host and a run hostname.
+const LEAF_LIFETIME: &str = "168h";
+
+/// How long the local CA's *intermediate* is good for.
+///
+/// Raised together with [`LEAF_LIFETIME`] and never below it: Caddy clamps an
+/// issued leaf to its issuer's `NotAfter` (with a warning, not an error), so a
+/// 7-day leaf under Caddy's default 7-day intermediate would silently shrink to
+/// whatever was left of the intermediate. Must stay under the root's remaining
+/// lifetime, which Caddy generates for 10 years.
+const INTERMEDIATE_LIFETIME: &str = "720h";
+
+/// Consecutive overdue certificate probes before Caddy is restarted. The remedy
+/// drops live connections, so one probe is not enough to earn it.
+const CERT_STRIKES_BEFORE_RESTART: u32 = 2;
+
+/// Minimum gap between two certificate-driven restarts. A restarted Caddy
+/// renews in the background, so it legitimately serves the old certificate for a
+/// moment; without this, "still broken" would mean "restart again", forever.
+const CERT_RESTART_COOLDOWN: Duration = Duration::from_secs(10 * 60);
+
+/// How many restarts veld will spend before concluding that restarting is not
+/// the answer. The cooldown alone bounds the *rate*, not the total: a fault a new
+/// process cannot fix would otherwise have root killing Caddy 144 times a day,
+/// every one of them dropping every live connection on the machine.
+const CERT_RESTART_ATTEMPTS: u32 = 3;
+
+/// Cap on Caddy's own log file before it rolls, and how many rolls to keep.
+///
+/// Caddy is spawned with its stdout and stderr discarded, which is why the one
+/// log line that would have named this whole class of fault —
+/// certmagic's `renewing managed certificates` error — went nowhere. Caddy's
+/// `file` writer keeps it instead, bounded by construction: no access logs are
+/// configured for the server, so this file carries only lifecycle and error
+/// lines and rolls long before it can matter.
+const LOG_ROLL_SIZE_MB: u32 = 4;
+const LOG_ROLL_KEEP: u32 = 2;
+
 /// Manages the Caddy process and its routes.
 #[derive(Debug)]
 pub struct CaddyManager {
@@ -38,6 +90,10 @@ pub struct CaddyManager {
     /// Caddy itself keeps routes only in memory, so the helper is the durable
     /// source of truth and replays them on every (re)load.
     routes: Arc<Mutex<RouteStore>>,
+    /// Serialises `reload`, so no `/load` can apply a snapshot older than one
+    /// already applied. See [`CaddyManager::reload`]; it exists separately from
+    /// `routes` so a reload in flight does not block a reader of the store.
+    reload_lock: Arc<Mutex<()>>,
     client: reqwest::Client,
     https_port: u16,
     http_port: u16,
@@ -49,6 +105,117 @@ pub struct CaddyManager {
 struct CaddyState {
     /// PID of the managed Caddy process, if running.
     child_pid: Option<u32>,
+    /// Whether an overdue certificate has earned a restart yet.
+    cert_gate: CertGate,
+}
+
+/// The policy half of the certificate watchdog: how many bad probes, and how
+/// often, justify restarting Caddy.
+///
+/// Separate from the restart itself so the arithmetic is testable — the remedy
+/// drops every live connection, and "one probe too eager" and "restarts forever"
+/// are both faults that would only ever show up on a user's machine.
+#[derive(Debug, Default)]
+struct CertGate {
+    /// Consecutive probes that found renewal overdue.
+    strikes: u32,
+    /// When the last certificate-driven restart happened.
+    last_restart: Option<std::time::Instant>,
+    /// Restarts since the last time the certificate came back healthy. The
+    /// remedy is only a remedy while it works; see [`CERT_RESTART_ATTEMPTS`].
+    restarts_without_recovery: u32,
+}
+
+/// What [`CertGate::weigh`] concluded about one probe.
+#[derive(Debug, PartialEq, Eq)]
+enum CertVerdict {
+    /// Nothing to do — healthy, or a probe that learned nothing.
+    Fine,
+    /// Overdue, but not yet enough to restart Caddy for.
+    Overdue { strikes: u32 },
+    /// Overdue, and restarting Caddy is now the right move.
+    Restart,
+    /// The certificate is healthy again after having been overdue.
+    Recovered,
+    /// Overdue, restarts have not helped, and veld has stopped restarting.
+    GaveUp,
+}
+
+impl CertGate {
+    /// `all_healthy` is the *set's* verdict, not something derivable from
+    /// `health`: `health` is the worst of many hostnames, and the worst verdict is
+    /// `Unreachable` for as long as any single hostname cannot be issued at all.
+    /// Reading recovery out of it would leave a helper that had once given up
+    /// stuck there for the rest of its uptime — see `tls_health::all_healthy`.
+    fn weigh(
+        &mut self,
+        health: &veld_core::tls_health::TlsHealth,
+        all_healthy: bool,
+        now: std::time::Instant,
+    ) -> CertVerdict {
+        // Only a certificate a browser would actually accept re-arms anything.
+        // `!renewal_is_overdue()` is *not* that test: it is also false for a
+        // probe that reached nothing (`Unreachable`), one that could not read
+        // what it got (`Unreadable`), and a certificate the clock rejects
+        // (`NotYetValid`). Resetting on those would (a) log "healthy again" about
+        // a certificate that was never read, in the one log this whole change
+        // exists to make trustworthy, and (b) hand back the give-up cap below on
+        // every restart, because the probe taken while the new Caddy is still
+        // starting reads `Unreachable` — Expired, Expired, restart, Unreachable,
+        // repeat, one root-driven restart every cooldown for as long as the
+        // machine is up. Which is exactly what the cap exists to stop.
+        if all_healthy {
+            let recovered = self.strikes > 0 || self.restarts_without_recovery > 0;
+            self.strikes = 0;
+            self.restarts_without_recovery = 0;
+            return if recovered {
+                CertVerdict::Recovered
+            } else {
+                CertVerdict::Fine
+            };
+        }
+
+        // A probe that learned nothing changes nothing: it neither counts
+        // towards a restart nor clears what earlier probes established. The
+        // certificate did not change while veld failed to look at it.
+        if !health.renewal_is_overdue() {
+            return CertVerdict::Fine;
+        }
+
+        // Restarting is only worth its cost — every live TLS connection on the
+        // machine, dropped — while it is actually fixing something. Some
+        // certificate faults a new process cannot touch: an unwritable storage
+        // tree, a CA whose key is gone, an intermediate clamped to nothing. Past
+        // this many restarts with no healthy probe in between, veld says so and
+        // leaves Caddy alone; the state is still red in `veld doctor` and the
+        // reason is in Caddy's own log.
+        if self.restarts_without_recovery >= CERT_RESTART_ATTEMPTS {
+            return CertVerdict::GaveUp;
+        }
+
+        self.strikes = self.strikes.saturating_add(1);
+        if self.strikes < CERT_STRIKES_BEFORE_RESTART {
+            return CertVerdict::Overdue {
+                strikes: self.strikes,
+            };
+        }
+        // A Caddy that was just restarted renews in the background, so it
+        // legitimately still serves the old certificate for a moment. Without
+        // this, "still broken" would mean "restart again", every minute, forever.
+        if let Some(last) = self.last_restart {
+            if now.duration_since(last) < CERT_RESTART_COOLDOWN {
+                return CertVerdict::Overdue {
+                    strikes: self.strikes,
+                };
+            }
+        }
+        // Cleared before the restart, not after: the probes taken while the new
+        // Caddy is still renewing must not count towards the next one.
+        self.strikes = 0;
+        self.last_restart = Some(now);
+        self.restarts_without_recovery = self.restarts_without_recovery.saturating_add(1);
+        CertVerdict::Restart
+    }
 }
 
 /// Durable store of the Caddy routes this helper has been asked to serve.
@@ -75,11 +242,15 @@ impl CaddyManager {
             write_route_store_blocking(&store_path, &routes);
         }
         Self {
-            inner: Arc::new(Mutex::new(CaddyState { child_pid: None })),
+            inner: Arc::new(Mutex::new(CaddyState {
+                child_pid: None,
+                cert_gate: CertGate::default(),
+            })),
             routes: Arc::new(Mutex::new(RouteStore {
                 routes,
                 path: store_path,
             })),
+            reload_lock: Arc::new(Mutex::new(())),
             client: reqwest::Client::builder()
                 .connect_timeout(CADDY_CONNECT_TIMEOUT)
                 .timeout(CADDY_ADMIN_TIMEOUT)
@@ -237,14 +408,36 @@ impl CaddyManager {
     /// every reload — the exact bug that made URLs die after a helper/Caddy
     /// restart. Splicing the stored routes back in makes reload idempotent and
     /// self-healing.
+    /// **Serialised.** The snapshot of the route store and the `/load` that
+    /// carries it have to be one critical section, because `/load` *replaces*
+    /// Caddy's whole configuration: two reloads racing can apply out of order,
+    /// and the one that arrives last wins even if its snapshot is older. That
+    /// loses a route — Caddy stops serving a hostname the durable store still
+    /// lists, with no error anywhere, until something reloads again.
+    ///
+    /// It was a narrow race before (only a re-added route id reloaded); making
+    /// every `add_route` reload put it on the path two runs starting at the same
+    /// time take. The lock is held across the network call deliberately: what
+    /// needs ordering is the *application* of the config, not just the read of
+    /// the store. It is its own lock rather than the route store's so that the
+    /// certificate watchdog can still read hostnames while a reload is in flight.
     pub async fn reload(&self) -> Result<()> {
+        let _ordering = self.reload_lock.lock().await;
         let load_url = format!("{CADDY_ADMIN_API}/load");
         let stored = self.routes.lock().await.routes.clone();
+        // Prepared here, not inside the builder: this is the one path that is
+        // about to hand the config to a real Caddy, so it is the only one with
+        // any business creating files. A log that cannot be prepared is left out
+        // of the config entirely — naming an unopenable log makes Caddy reject
+        // every route with it.
+        let log_path = caddy_log_path(&self.caddy_bin_override);
+        let log_path = prepare_caddy_log(&log_path).then_some(log_path);
         let config = build_full_config(
             self.https_port,
             self.http_port,
             &self.caddy_bin_override,
             &stored,
+            log_path.as_deref(),
         );
 
         let resp = self
@@ -277,39 +470,72 @@ impl CaddyManager {
         let route = build_route_json(route_id, hostname, upstream, feedback, proxy);
 
         // Record in the durable store first (and persist) so the route is
-        // replayed on any future reload/restart even if the live POST below
+        // replayed on any future reload/restart even if the live reload below
         // fails or Caddy later dies. The store is the source of truth.
-        let existed = self.store_route(route_id, route.clone()).await;
+        let existed = self.store_route(route_id, route).await;
 
-        // If this id was already present, a bare POST would create a duplicate
-        // `@id`. Reload the whole config (base + store) to reconcile instead —
-        // no dependency on Caddy's specific error wording.
-        if existed {
-            info!(route_id, "route id already present, reconciling via reload");
-            return self.reload().await;
-        }
-
-        let url = format!("{CADDY_ADMIN_API}/config/apps/http/servers/veld/routes",);
-        let resp = self
-            .client
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .body(serde_json::to_string(&route)?)
-            .send()
-            .await
-            .context("adding route to caddy")?;
-
-        if !resp.status().is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            anyhow::bail!("caddy add route returned error: {body}");
-        }
-
-        info!(route_id, hostname, upstream, "caddy route added");
-        Ok(())
+        // Reload the whole config rather than POSTing the one route.
+        //
+        // Not a simplification of the old fast path — a requirement of it. A
+        // route carries a hostname, and a hostname only gets veld's certificate
+        // lifetime if it is named in the certificate policy (see
+        // `cert_subjects_mut`), which means the config that adds the route and
+        // the config that names it have to be the same config. Posting the route
+        // alone would leave Caddy issuing this hostname a 12-hour certificate
+        // under a policy of its own making, and by the time any later reload
+        // named it, that certificate would already be cached and not reissued
+        // until it expired.
+        //
+        // Measured at ~30ms for a config with 20 routes, and this path already
+        // reloaded whenever a route id was re-added (every restart of a run), so
+        // it is a well-travelled one rather than a new risk.
+        // `existed` is kept in the line because it was a distinguishable signal
+        // before this path stopped branching on it: a route id that is already in
+        // the store means a run restarting under a reused id, and a log that
+        // cannot tell that from a first start is a log that lost something.
+        info!(
+            route_id,
+            hostname,
+            upstream,
+            replacing = existed,
+            "adding caddy route"
+        );
+        self.reload().await
     }
 
     /// Remove a route by its `@id` via the Caddy admin API.
+    ///
+    /// Deliberately *not* a reload, unlike [`Self::add_route`]: this leaves the
+    /// removed hostname named in the live certificate policy's `subjects` until
+    /// something else reloads. That is inert, and measured to be — certificate
+    /// management follows the server's own hostnames, so a subject with no route
+    /// has nothing issued or renewed for it. The asymmetry is on purpose: adding a
+    /// hostname must name it in the same config or it gets the wrong lifetime,
+    /// while un-naming one buys nothing and a full reload would drop live
+    /// connections for a route that is going away anyway.
     pub async fn remove_route(&self, route_id: &str) -> Result<()> {
+        // Under the same lock a reload takes, because the two mutate Caddy's live
+        // config through different doors. A reload that snapshotted the store
+        // before this call, and lands after it, replays the route this DELETE just
+        // removed — resurrecting a stopped run's hostname, still proxying to a
+        // dead upstream, with nothing anywhere saying so. That is reachable the
+        // moment one run stops while another starts, which is ordinary.
+        let _ordering = self.reload_lock.lock().await;
+        self.remove_route_locked(route_id).await
+    }
+
+    /// [`Self::remove_route`] for a caller that already holds the ordering lock.
+    ///
+    /// This split is not tidiness. `tokio::sync::Mutex` is **not** reentrant, so
+    /// the version that takes the lock cannot be called from inside a critical
+    /// section that already holds it — and `remove_routes_by_prefix` does exactly
+    /// that, in a loop. Nesting them deadlocked the helper on its first matching
+    /// route: the task waits on a lock it is itself holding, and because
+    /// `ensure_healthy` reaches `reload` while holding `inner`, the next liveness
+    /// tick then wedges `inner` too — no pid query, no start, no stop, no route
+    /// added, until the helper is killed. `veld-daemon` purges `veld-join-*`
+    /// routes on startup, so it was reachable on an ordinary boot.
+    async fn remove_route_locked(&self, route_id: &str) -> Result<()> {
         // Drop from the durable store first so it is not replayed on reload.
         self.forget_route(route_id).await;
 
@@ -334,6 +560,9 @@ impl CaddyManager {
     /// Remove every route whose `@id` starts with `prefix`. Returns how many were
     /// removed. Used to purge orphaned `veld-join-*` routes on daemon startup.
     pub async fn remove_routes_by_prefix(&self, prefix: &str) -> Result<usize> {
+        // Same ordering lock as `remove_route` and `reload`, for the same reason:
+        // a reload carrying an older snapshot would put these routes back.
+        let _ordering = self.reload_lock.lock().await;
         // Drop matching routes from the durable store first so they are not
         // replayed on the next reload.
         self.forget_routes_by_prefix(prefix).await;
@@ -353,7 +582,9 @@ impl CaddyManager {
         let ids = filter_route_ids_by_prefix(&routes, prefix);
         let mut removed = 0;
         for id in ids {
-            if self.remove_route(&id).await.is_ok() {
+            // The `_locked` form: this loop already holds the ordering lock, and
+            // the lock is not reentrant. See `remove_route_locked`.
+            if self.remove_route_locked(&id).await.is_ok() {
                 removed += 1;
             }
         }
@@ -404,6 +635,136 @@ impl CaddyManager {
             .await
             .context("failed to restart caddy during recovery")?;
         info!("caddy recovered");
+        Ok(true)
+    }
+
+    /// Ensure the certificate Caddy serves is one a browser accepts, restarting
+    /// Caddy when renewal has provably stopped. Returns `true` if it restarted.
+    ///
+    /// **A restart, not a reload** — this is the whole reason this exists next to
+    /// [`Self::ensure_healthy`] rather than inside it. Caddy answering its admin
+    /// API says nothing about its certificate maintenance, which is one
+    /// goroutine on one ticker: whatever stalls it, Caddy keeps serving the leaf
+    /// it already has, forever, and every route veld adds or removes reloads a
+    /// config that cannot fix it. certmagic's `manageOne` returns early for any
+    /// name already cached as managed ("maintenance will continue"), so a reload
+    /// never re-examines an expired certificate. Only a new process, whose cache
+    /// starts empty and is filled from storage, renews it.
+    ///
+    /// Deliberately conservative: it acts only on a certificate verdict (never
+    /// on an unreachable or unreadable probe — [`ensure_healthy`] owns that
+    /// failure), only after [`CERT_STRIKES_BEFORE_RESTART`] consecutive bad
+    /// probes, at most once per [`CERT_RESTART_COOLDOWN`], and at most
+    /// [`CERT_RESTART_ATTEMPTS`] times before it gives up and says so.
+    ///
+    /// **Every hostname veld serves is probed, not just the management host.**
+    /// Each one carries its own leaf, issued when its run first started, so a run
+    /// URL can be expired while `veld.localhost` is still valid — and a watchdog
+    /// that only asked the canary would sit out exactly that outage. The worst
+    /// verdict wins, so one hostname that answers nothing cannot hide another's
+    /// expired certificate.
+    ///
+    /// [`ensure_healthy`]: Self::ensure_healthy
+    pub async fn ensure_cert_healthy(&self) -> Result<bool> {
+        // The pid this verdict is about. The liveness watchdog runs on its own
+        // (faster) tick and may replace Caddy while the probes below are in
+        // flight; restarting on a verdict about the process it already replaced
+        // would tear down a fresh, renewing Caddy — the mistake `ensure_healthy`
+        // documents at its own re-check.
+        let probed_pid = self.pid().await;
+
+        let mut hosts: Vec<String> = vec![MANAGEMENT_HOST.to_owned()];
+        hosts.extend(self.routes.lock().await.hostnames());
+        hosts.sort();
+        hosts.dedup();
+
+        // Concurrently, because these are bounded by a timeout rather than by
+        // work: a wedged Caddy that accepts connections and never answers costs
+        // `REQUEST_TIMEOUT` *per host*, so a machine with twenty routes would
+        // have taken three and a half minutes to finish one 60-second tick — and
+        // the pid re-check below would then usually throw the result away.
+        let mut probes = tokio::task::JoinSet::new();
+        for host in hosts {
+            let port = self.https_port;
+            probes.spawn(async move {
+                let health = veld_core::tls_health::probe_host(&host, port).await;
+                (host, health)
+            });
+        }
+        let mut verdicts = Vec::new();
+        while let Some(joined) = probes.join_next().await {
+            match joined {
+                Ok(verdict) => verdicts.push(verdict),
+                // A probe task that panicked has told us nothing about a
+                // certificate; the remaining hosts still have.
+                Err(e) => warn!(error = %e, "a certificate probe task failed"),
+            }
+        }
+        let all_healthy = veld_core::tls_health::all_healthy(&verdicts);
+        let Some((host, health)) = veld_core::tls_health::worst(verdicts) else {
+            return Ok(false);
+        };
+
+        let mut state = self.inner.lock().await;
+        // Before weighing, not after: a verdict about a process that no longer
+        // exists must not spend a strike or stamp a restart the gate would then
+        // count against the next real one.
+        if state.child_pid != probed_pid {
+            info!(
+                "caddy was replaced while its certificate was being probed; re-checking next tick"
+            );
+            return Ok(false);
+        }
+
+        match state
+            .cert_gate
+            .weigh(&health, all_healthy, std::time::Instant::now())
+        {
+            CertVerdict::Fine => return Ok(false),
+            CertVerdict::Recovered => {
+                // Deliberately *not* logging `host`/`health` here. Those come from
+                // `worst()`, and the state this arm newly covers is "the
+                // certificates are fine again even though one hostname still
+                // answers nothing" — so the fields would have read
+                // `healthy again host=never.localhost health=Unreachable`, a line
+                // that argues with itself in the one log this change exists to
+                // make trustworthy. The worst verdict is already logged, every
+                // tick it is not healthy, by the arms below.
+                info!("caddy certificates are healthy again");
+                return Ok(false);
+            }
+            CertVerdict::Overdue { strikes } => {
+                warn!(
+                    host,
+                    ?health,
+                    strikes,
+                    "caddy is serving a certificate its renewal should have replaced"
+                );
+                return Ok(false);
+            }
+            CertVerdict::GaveUp => {
+                warn!(
+                    host,
+                    ?health,
+                    attempts = CERT_RESTART_ATTEMPTS,
+                    "restarting caddy has not renewed its certificate; leaving it alone — \
+                     see caddy's own log for why issuance is failing"
+                );
+                return Ok(false);
+            }
+            CertVerdict::Restart => {}
+        }
+
+        warn!(
+            host,
+            ?health,
+            "restarting caddy to renew the certificate its own maintenance did not"
+        );
+        let _ = self.stop_locked(&mut state).await;
+        self.start_locked(&mut state)
+            .await
+            .context("failed to restart caddy to renew its certificates")?;
+        info!("caddy restarted for certificate renewal");
         Ok(true)
     }
 
@@ -468,6 +829,18 @@ impl CaddyManager {
 }
 
 impl RouteStore {
+    /// Every hostname this helper is serving, as the stored routes name it.
+    ///
+    /// The same source `build_full_config` names in the certificate policy, so
+    /// what the watchdog probes and what veld asked Caddy to certify cannot
+    /// disagree.
+    fn hostnames(&self) -> Vec<String> {
+        self.routes
+            .values()
+            .filter_map(|route| stored_route_hostname(route).map(str::to_ascii_lowercase))
+            .collect()
+    }
+
     /// Clone the routes + path for persisting outside the lock.
     fn snapshot(&self) -> RouteSnapshot {
         RouteSnapshot {
@@ -498,6 +871,100 @@ pub(crate) fn caddy_data_dir(caddy_bin_override: &Option<PathBuf>) -> PathBuf {
 /// Where the persisted route store lives.
 fn routes_store_path(caddy_bin_override: &Option<PathBuf>) -> PathBuf {
     caddy_data_dir(caddy_bin_override).join("veld-routes.json")
+}
+
+/// Where Caddy writes its own log — inside its data directory. See
+/// [`veld_core::paths::caddy_log_path`] for why that directory and not the one
+/// the other service logs live in.
+pub(crate) fn caddy_log_path(caddy_bin_override: &Option<PathBuf>) -> PathBuf {
+    caddy_data_dir(caddy_bin_override).join(veld_core::paths::CADDY_LOG_FILENAME)
+}
+
+/// Open `path` for appending, creating it, and **never** following a symlink.
+///
+/// Extracted from [`prepare_caddy_log`] so the part that actually closes the
+/// symlink door has something a test can point at: the `symlink_metadata` check
+/// in the caller refuses a link that is already there, so it alone accounts for
+/// every assertion a test of the caller can make, and deleting the flag here
+/// would not have failed any of them.
+fn open_log_for_append(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.append(true).create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(nix::libc::O_NOFOLLOW);
+    }
+    options.open(path)
+}
+
+/// Make `path` a file Caddy can open for appending, and say whether it is.
+///
+/// **A missing log must never cost the user their routes.** Configuring the
+/// `logging` app makes the whole config all-or-nothing on this one file: Caddy's
+/// `provisionCommon` fails the *entire* `/load` — every route with it — when the
+/// default log's writer cannot be opened. A root-owned `0600` `caddy.log` left
+/// behind by a privileged install, met by an unprivileged one, is exactly that
+/// file, and this repo has already paid for the lesson once in `prepare_daemon_log`.
+/// So the helper proves the path is usable *before* naming it in a config, and the
+/// caller omits the `logging` block when it is not.
+///
+/// Also refuses a symlink rather than following one: Caddy opens its log with
+/// `O_CREATE` and no `O_NOFOLLOW`, so in privileged mode a symlink here is root
+/// appending to a file somebody else chose. The containing directory is
+/// root-owned, which is what makes this a belt-and-braces check rather than the
+/// only defence.
+fn prepare_caddy_log(path: &Path) -> bool {
+    if let Some(parent) = path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            warn!(error = %e, path = %parent.display(), "cannot create caddy log directory — caddy will run without a log");
+            return false;
+        }
+    }
+
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            warn!(
+                path = %path.display(),
+                "caddy log path is a symlink; refusing to let caddy write through it"
+            );
+            return false;
+        }
+        Ok(meta) if !meta.is_file() => {
+            warn!(path = %path.display(), "caddy log path is not a regular file");
+            return false;
+        }
+        _ => {}
+    }
+
+    // Create it ourselves, world-readable, so the person the docs send here can
+    // actually read it: Caddy would create it `0600`, and in privileged mode that
+    // means root-owned and unreadable to the user who needs it. Setting Caddy's
+    // own `mode` key instead would make Caddy `chmod` the path on every load, and
+    // `chmod` follows symlinks.
+    //
+    // `O_NOFOLLOW` and `fchmod` — not the check above — are what actually close
+    // that door. The `symlink_metadata` check is check-then-use: a symlink
+    // planted between it and this open would be followed, and a *path*-based
+    // `set_permissions` would then chmod whatever it points at. Opening with
+    // `O_NOFOLLOW` fails instead of following, and permissions go through the
+    // descriptor already open, which nothing can redirect afterwards.
+    match open_log_for_append(path) {
+        Ok(file) => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if let Err(e) = file.set_permissions(std::fs::Permissions::from_mode(0o644)) {
+                    debug!(error = %e, "could not relax caddy log permissions");
+                }
+            }
+            true
+        }
+        Err(e) => {
+            warn!(error = %e, path = %path.display(), "caddy log is not writable — caddy will run without a log");
+            false
+        }
+    }
 }
 
 /// Where the managed Caddy's pid is recorded, so a restarted helper can
@@ -816,8 +1283,9 @@ fn build_full_config(
     http_port: u16,
     caddy_bin_override: &Option<std::path::PathBuf>,
     stored: &HashMap<String, serde_json::Value>,
+    log_path: Option<&Path>,
 ) -> serde_json::Value {
-    let mut config = build_base_config(https_port, http_port, caddy_bin_override);
+    let mut config = build_base_config(https_port, http_port, caddy_bin_override, log_path);
 
     let mut entries: Vec<_> = stored.values().cloned().collect();
     entries.sort_by(|a, b| {
@@ -830,14 +1298,79 @@ fn build_full_config(
             routes.extend(entries);
         }
     }
+
+    // Every hostname veld serves has to be *named* in the certificate policy, or
+    // it does not get veld's certificate lifetime. See `cert_subjects_mut`.
+    //
+    // **Deduplicated across the whole list, management host included.** Caddy
+    // rejects a config that names one host in more than one policy — and its
+    // check is a single `hostSet` map, so it catches a repeat *within* one policy
+    // too (`caddytls/tls.go`'s `Validate`): `cannot apply more than one
+    // automation policy to host`. A `veld.json` is free to template a hostname
+    // that comes out as `veld.localhost`, and the route is persisted before the
+    // reload, so an un-deduplicated list would make every later `/load` fail —
+    // leaving Caddy with no config at all, no working URL on the machine, and the
+    // liveness watchdog respawning it forever. Measured against Caddy 2.11.4: a
+    // duplicated subject fails `caddy validate` outright.
+    // Lowercased, because Caddy normalises the two sides of this differently: a
+    // host *matcher* is lowercased when it is provisioned, while an automation
+    // policy's subjects are only IDNA-encoded — and autohttps excludes a name
+    // from its own 12-hour issuer on an exact string compare. So one capital
+    // letter in a project's URL template means the subject never matches its own
+    // route, and that hostname silently gets the short certificate this list
+    // exists to prevent. `url::run_route_id` already lowercases; the hostname
+    // itself reaches the store unnormalised.
+    let mut hostnames: Vec<String> = std::iter::once(MANAGEMENT_HOST.to_ascii_lowercase())
+        .chain(
+            stored
+                .values()
+                .filter_map(|route| stored_route_hostname(route).map(str::to_ascii_lowercase)),
+        )
+        .collect();
+    hostnames.sort();
+    hostnames.dedup();
+    if let Some(subjects) = cert_subjects_mut(&mut config) {
+        *subjects = hostnames
+            .into_iter()
+            .map(serde_json::Value::String)
+            .collect();
+    }
     config
 }
 
+/// The `subjects` array of the certificate policy that carries veld's lifetimes.
+///
+/// **Naming every hostname is load-bearing, not documentation.** Caddy's
+/// automatic HTTPS collects the hostnames a server serves and, for any of them
+/// that cannot hold a public certificate — which is every `*.localhost`, i.e.
+/// nearly every veld URL — builds a *fresh* internal issuer of its own and
+/// overwrites whatever the matching policy configured, "bypassing the
+/// JSON-unmarshaling step" (`caddyhttp/autohttps.go`). The one escape is an
+/// automation policy that lists the name: a hostname is left alone only when it
+/// matches some policy's subject **exactly** — no wildcards, a string compare.
+/// So `"lifetime": "168h"` on a catch-all policy is silently ignored for
+/// `*.localhost` and every such certificate is issued with Caddy's 12-hour
+/// default. Measured, not deduced: with the name listed a leaf comes back 7
+/// days, without it 12 hours, same config otherwise.
+///
+/// A subject with no route is inert — also measured: certificate management
+/// follows the *server's* hostnames, so a name left here after its run stopped
+/// has no certificate issued or renewed for it.
+fn cert_subjects_mut(config: &mut serde_json::Value) -> Option<&mut Vec<serde_json::Value>> {
+    config["apps"]["tls"]["automation"]["policies"][0]["subjects"].as_array_mut()
+}
+
 /// Build a minimal base Caddy config with a server block for Veld.
+/// `log_path` is `Some` only when the caller has already proved the file is one
+/// Caddy can open — see [`prepare_caddy_log`]. Passed in rather than derived here
+/// so that building a config stays a pure function: it used to prepare the file
+/// itself, which meant every test that built a config wrote into the developer's
+/// real install, and which branch the test took depended on that machine.
 fn build_base_config(
     https_port: u16,
     http_port: u16,
     caddy_bin_override: &Option<std::path::PathBuf>,
+    log_path: Option<&Path>,
 ) -> serde_json::Value {
     // If caddy_bin was overridden, derive data_dir from its parent (sibling "caddy-data").
     let data_dir = caddy_bin_override
@@ -852,7 +1385,7 @@ fn build_base_config(
     let http_listen = format!(":{http_port}");
     let management_upstream = format!("127.0.0.1:{DAEMON_HTTP_PORT}");
 
-    serde_json::json!({
+    let mut config = serde_json::json!({
         "storage": {
             "module": "file_system",
             "root": data_dir.to_string_lossy()
@@ -863,6 +1396,20 @@ fn build_base_config(
                     "veld": {
                         "listen": [https_listen, http_listen],
                         "routes": [
+                            // First, and on every hostname: the one route Caddy
+                            // answers entirely by itself. Anything checking
+                            // "is Caddy serving?" — `veld doctor`, the TLS
+                            // health probe — gets an answer that does not
+                            // depend on the daemon being up, which it would if
+                            // the management route below (host-matched and
+                            // terminal, so it wins for `MANAGEMENT_HOST`) got
+                            // to this path first.
+                            {
+                                "@id": "veld-sentinel",
+                                "match": [{"path": ["/__veld_sentinel__"]}],
+                                "handle": [{"handler": "static_response", "body": "veld"}],
+                                "terminal": true
+                            },
                             {
                                 "@id": "veld-management",
                                 "match": [{"host": [MANAGEMENT_HOST]}],
@@ -870,12 +1417,6 @@ fn build_base_config(
                                     "handler": "reverse_proxy",
                                     "upstreams": [{"dial": management_upstream}]
                                 }],
-                                "terminal": true
-                            },
-                            {
-                                "@id": "veld-sentinel",
-                                "match": [{"path": ["/__veld_sentinel__"]}],
-                                "handle": [{"handler": "static_response", "body": "veld"}],
                                 "terminal": true
                             }
                         ]
@@ -885,21 +1426,65 @@ fn build_base_config(
             "pki": {
                 "certificate_authorities": {
                     "local": {
-                        "name": "Veld Local CA"
+                        "name": "Veld Local CA",
+                        "intermediate_lifetime": INTERMEDIATE_LIFETIME
                     }
                 }
             },
             "tls": {
                 "automation": {
-                    "policies": [{
-                        "issuers": [{
-                            "module": "internal"
-                        }]
-                    }]
+                    "policies": [
+                        // Veld's own hostnames, named one by one because that is
+                        // the only way the lifetime below survives Caddy's
+                        // automatic HTTPS — see `cert_subjects_mut`.
+                        {
+                            "subjects": [MANAGEMENT_HOST],
+                            "issuers": [{
+                                "module": "internal",
+                                "lifetime": LEAF_LIFETIME
+                            }]
+                        },
+                        // The catch-all, which must stay: without a policy of
+                        // its own, a hostname that *does* qualify for a public
+                        // certificate (a project serving `*.dev.example.com`
+                        // locally) is handed Caddy's default ACME issuer, and
+                        // veld would try to get a real certificate from Let's
+                        // Encrypt for a local development URL.
+                        {
+                            "issuers": [{
+                                "module": "internal",
+                                "lifetime": LEAF_LIFETIME
+                            }]
+                        }
+                    ]
                 }
             }
         }
-    })
+    });
+
+    // Caddy writes its own log, because the process we spawn has stdout and
+    // stderr pointed at /dev/null, and certificate issuance and renewal — the
+    // part of Caddy veld depends on completely and cannot do anything about — is
+    // only ever reported there. Added **only** once the file has been proven
+    // openable: naming an unopenable log makes Caddy reject the entire config,
+    // routes included. See `prepare_caddy_log`.
+    if let Some(log_path) = log_path {
+        config["logging"] = serde_json::json!({
+            "logs": {
+                "default": {
+                    "level": "INFO",
+                    "encoder": {"format": "console"},
+                    "writer": {
+                        "output": "file",
+                        "filename": log_path.to_string_lossy(),
+                        "roll_size_mb": LOG_ROLL_SIZE_MB,
+                        "roll_keep": LOG_ROLL_KEEP
+                    }
+                }
+            }
+        });
+    }
+    config
 }
 
 /// Build a single route entry with hostname matching, TLS, and reverse proxy.
@@ -1589,14 +2174,14 @@ mod tests {
             ),
         );
 
-        let config = build_full_config(443, 80, &None, &stored);
+        let config = build_full_config(443, 80, &None, &stored, None);
         let routes = config["apps"]["http"]["servers"]["veld"]["routes"]
             .as_array()
             .unwrap();
-        // Base management + sentinel, then the two stored routes sorted by id.
+        // Base sentinel + management, then the two stored routes sorted by id.
         assert_eq!(routes.len(), 4);
-        assert_eq!(routes[0]["@id"], "veld-management");
-        assert_eq!(routes[1]["@id"], "veld-sentinel");
+        assert_eq!(routes[0]["@id"], "veld-sentinel");
+        assert_eq!(routes[1]["@id"], "veld-management");
         assert_eq!(routes[2]["@id"], "veld-run-a");
         assert_eq!(routes[3]["@id"], "veld-run-b");
     }
@@ -1604,7 +2189,7 @@ mod tests {
     #[test]
     fn test_build_full_config_empty_store_is_base_only() {
         let stored = HashMap::new();
-        let config = build_full_config(443, 80, &None, &stored);
+        let config = build_full_config(443, 80, &None, &stored, None);
         let routes = config["apps"]["http"]["servers"]["veld"]["routes"]
             .as_array()
             .unwrap();
@@ -1901,7 +2486,7 @@ mod tests {
 
     #[test]
     fn test_build_base_config() {
-        let config = build_base_config(443, 80, &None);
+        let config = build_base_config(443, 80, &None, None);
         assert!(config["apps"]["http"]["servers"]["veld"].is_object());
         let listen = config["apps"]["http"]["servers"]["veld"]["listen"]
             .as_array()
@@ -1912,14 +2497,641 @@ mod tests {
             .as_array()
             .unwrap();
         assert_eq!(routes.len(), 2);
-        assert_eq!(routes[0]["@id"], "veld-management");
-        assert_eq!(routes[0]["match"][0]["host"][0], MANAGEMENT_HOST);
-        assert_eq!(routes[1]["@id"], "veld-sentinel");
+        // The sentinel outranks the management route deliberately: both are
+        // terminal, so whichever comes first wins for `MANAGEMENT_HOST`, and a
+        // probe of "is Caddy serving?" must not be answered by the daemon.
+        assert_eq!(routes[0]["@id"], "veld-sentinel");
+        assert_eq!(routes[1]["@id"], "veld-management");
+        assert_eq!(routes[1]["match"][0]["host"][0], MANAGEMENT_HOST);
+    }
+
+    /// Certificate lifetimes are veld's, not Caddy's defaults — a 12-hour leaf
+    /// (Caddy's own default, which veld used to inherit by saying nothing) makes
+    /// one missed renewal a broken browser the same day. The intermediate must
+    /// outlive the leaf, because Caddy silently clamps a leaf to its issuer's
+    /// expiry.
+    #[test]
+    fn base_config_asks_for_week_long_leaves_under_a_longer_intermediate() {
+        let config = build_base_config(443, 80, &None, None);
+        let issuer = &config["apps"]["tls"]["automation"]["policies"][0]["issuers"][0];
+        assert_eq!(issuer["module"], "internal");
+        assert_eq!(issuer["lifetime"], "168h");
+        let ca = &config["apps"]["pki"]["certificate_authorities"]["local"];
+        assert_eq!(ca["intermediate_lifetime"], "720h");
+        assert!(
+            parse_hours(LEAF_LIFETIME) < parse_hours(INTERMEDIATE_LIFETIME),
+            "a leaf longer than its intermediate is silently shortened by Caddy"
+        );
+    }
+
+    /// The lifetime above is only honoured for a hostname the policy *names*;
+    /// Caddy overrides the issuer for any unnamed internal name, silently, and
+    /// the certificate comes back with its 12-hour default. So the management
+    /// host is in the base config's subjects, and every stored route's hostname
+    /// joins it in the full config.
+    #[test]
+    fn every_served_hostname_is_named_in_the_certificate_policy() {
+        let base = build_base_config(443, 80, &None, None);
+        assert_eq!(
+            base["apps"]["tls"]["automation"]["policies"][0]["subjects"],
+            serde_json::json!([MANAGEMENT_HOST])
+        );
+
+        let mut stored = HashMap::new();
+        for (id, host) in [
+            ("veld-run-a", "a.dev.localhost"),
+            ("veld-run-b", "b.dev.localhost"),
+        ] {
+            stored.insert(
+                id.to_string(),
+                build_route_json(
+                    id,
+                    host,
+                    "localhost:3000",
+                    None,
+                    &veld_core::config::ResolvedProxy::default(),
+                ),
+            );
+        }
+        let full = build_full_config(443, 80, &None, &stored, None);
+        assert_eq!(
+            full["apps"]["tls"]["automation"]["policies"][0]["subjects"],
+            serde_json::json!(["a.dev.localhost", "b.dev.localhost", MANAGEMENT_HOST])
+        );
+    }
+
+    /// A hostname a project templates as `veld.localhost` would otherwise appear
+    /// twice — once from the base config, once from its own route — and Caddy
+    /// rejects a config that names a host in more than one policy, *including*
+    /// twice in one policy (`caddytls/tls.go`'s `Validate`, one `hostSet` map).
+    /// The route is persisted before the reload, so an un-deduplicated list would
+    /// make every later `/load` fail: Caddy left with no config, no URL on the
+    /// machine, and the liveness watchdog respawning it forever. Measured against
+    /// Caddy 2.11.4 — a duplicated subject fails `caddy validate` outright.
+    #[test]
+    fn a_route_claiming_the_management_hostname_does_not_duplicate_a_subject() {
+        let mut stored = HashMap::new();
+        stored.insert(
+            "veld-run-collides".to_string(),
+            build_route_json(
+                "veld-run-collides",
+                MANAGEMENT_HOST,
+                "localhost:3000",
+                None,
+                &veld_core::config::ResolvedProxy::default(),
+            ),
+        );
+        // ...and the same hostname twice over from two stored routes, which is
+        // just as fatal and just as reachable (two projects, one URL template).
+        stored.insert(
+            "veld-run-twin-a".to_string(),
+            build_route_json(
+                "veld-run-twin-a",
+                "twin.dev.localhost",
+                "localhost:3001",
+                None,
+                &veld_core::config::ResolvedProxy::default(),
+            ),
+        );
+        stored.insert(
+            "veld-run-twin-b".to_string(),
+            build_route_json(
+                "veld-run-twin-b",
+                "twin.dev.localhost",
+                "localhost:3002",
+                None,
+                &veld_core::config::ResolvedProxy::default(),
+            ),
+        );
+
+        let config = build_full_config(443, 80, &None, &stored, None);
+        let subjects: Vec<&str> = config["apps"]["tls"]["automation"]["policies"][0]["subjects"]
+            .as_array()
+            .expect("subjects is an array")
+            .iter()
+            .map(|s| s.as_str().expect("subjects are strings"))
+            .collect();
+        assert_eq!(subjects, vec!["twin.dev.localhost", MANAGEMENT_HOST]);
+    }
+
+    /// The second, subject-less policy is what keeps a hostname that *would*
+    /// qualify for a public certificate on the local CA. Drop it and Caddy hands
+    /// such a name its default ACME issuer, i.e. veld asks Let's Encrypt for a
+    /// certificate for someone's local development URL.
+    #[test]
+    fn a_catch_all_policy_keeps_public_looking_hostnames_off_acme() {
+        let config = build_base_config(443, 80, &None, None);
+        let policies = config["apps"]["tls"]["automation"]["policies"]
+            .as_array()
+            .expect("policies is an array");
+        let catch_all = policies
+            .iter()
+            .find(|p| p.get("subjects").is_none())
+            .expect("a policy with no subjects must exist");
+        assert_eq!(catch_all["issuers"][0]["module"], "internal");
+    }
+
+    /// Caddy's stdout and stderr go to /dev/null, so its own log file is the
+    /// only place a renewal failure is ever recorded. Exercises the real sequence
+    /// `reload` performs — prepare the file, then name it — under a temporary
+    /// caddy-bin override, so it never touches the developer's installed tree.
+    #[test]
+    fn a_prepared_log_is_named_in_the_config_as_a_rolling_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let over = Some(dir.path().join("caddy"));
+        let log = caddy_log_path(&over);
+        assert!(prepare_caddy_log(&log), "a fresh path must be preparable");
+
+        let config = build_base_config(443, 80, &over, Some(&log));
+        let writer = &config["logging"]["logs"]["default"]["writer"];
+        assert_eq!(writer["output"], "file");
+        assert_eq!(
+            writer["filename"].as_str().expect("a filename"),
+            log.to_string_lossy()
+        );
+        assert!(writer["roll_size_mb"].as_u64().unwrap() > 0);
+        // `mode` is deliberately absent: Caddy chmods an existing file when it is
+        // set, and chmod follows symlinks. The helper creates the file itself.
+        assert!(writer.get("mode").is_none());
+
+        // The directory is pinned independently of `caddy_log_path`, so moving the
+        // log back beside the other service logs — where a user-owned directory
+        // makes it a root-append primitive — fails here rather than in the field.
+        // Asserting `== caddy_log_path(..)` alone would pass for any path that
+        // function returned, including the wrong one.
+        assert_eq!(
+            log.parent().expect("a parent"),
+            caddy_data_dir(&over),
+            "the log belongs in caddy's own data directory"
+        );
+        assert_eq!(log.file_name().expect("a filename"), "caddy.log");
+
+        assert!(log.is_file(), "the helper must create the log it names");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&log).expect("stat").permissions().mode();
+            assert_eq!(mode & 0o777, 0o644, "log must be readable by its user");
+        }
+    }
+
+    /// Naming a log Caddy cannot open fails the **entire** config — every route
+    /// with it. A log is never worth a user's URLs, so the block is omitted.
+    #[test]
+    fn an_unusable_log_path_costs_the_log_and_not_the_config() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let over = Some(dir.path().join("caddy"));
+        // A directory where the log file belongs: openable as a file, never.
+        let log = caddy_log_path(&over);
+        std::fs::create_dir_all(&log).expect("plant a directory");
+
+        assert!(!prepare_caddy_log(&log));
+        let config = build_base_config(443, 80, &over, None);
+        assert!(
+            config.get("logging").is_none(),
+            "an unopenable log must not be named in the config"
+        );
+        // The rest of the config is intact — this is the whole point.
+        assert!(config["apps"]["http"]["servers"]["veld"]["routes"].is_array());
+    }
+
+    /// In privileged mode Caddy is root and this log's directory is not reliably
+    /// root-owned (nothing chowns it, so an unprivileged-first install leaves it
+    /// to the user). A symlink planted at the log path would have root append
+    /// wherever it points, so the helper refuses it rather than following it.
+    /// The open itself refuses a symlink, which is the defence that survives a
+    /// link planted *after* the caller's `symlink_metadata` check — the window the
+    /// caller cannot close. Tested directly because that check would otherwise
+    /// account for every assertion, and deleting `O_NOFOLLOW` would pass.
+    #[cfg(unix)]
+    #[test]
+    fn the_log_open_refuses_a_symlink_even_with_no_prior_check() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("somebody-elses-file");
+        std::fs::write(&target, b"untouched").expect("write target");
+        let link = dir.path().join("caddy.log");
+        std::os::unix::fs::symlink(&target, &link).expect("plant symlink");
+
+        // Erroring at all is what pins the flag: without `O_NOFOLLOW` this open
+        // *succeeds*, through the link. The errno is checked loosely on purpose —
+        // POSIX says `ELOOP` and both CI platforms give it, but the BSDs answer
+        // `EMLINK`, and a test that fails on a correct refusal is worse than one
+        // that accepts two spellings of it.
+        let err = open_log_for_append(&link).expect_err("must not follow the link");
+        assert!(
+            matches!(
+                err.raw_os_error(),
+                Some(nix::libc::ELOOP) | Some(nix::libc::EMLINK)
+            ),
+            "expected a refusal-to-follow errno, got {err}"
+        );
+        assert_eq!(
+            std::fs::read(&target).expect("read target"),
+            b"untouched",
+            "the target must be untouched"
+        );
+
+        // ...and a plain path still opens, so the flag has not broken the normal case.
+        let plain = dir.path().join("plain.log");
+        assert!(open_log_for_append(&plain).is_ok());
+        assert!(plain.is_file());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_log_path_that_is_already_a_symlink_is_refused_before_opening() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let over = Some(dir.path().join("caddy"));
+        let log = caddy_log_path(&over);
+        let target = dir.path().join("somebody-elses-file");
+        std::fs::write(&target, b"untouched").expect("write target");
+        // Tightened first, because 0644 is what `fs::write` produces anyway:
+        // asserting the target is *not* 0644 could not tell a chmod that followed
+        // the link from a file that was born that way. 0600 is a mode only the
+        // helper's own `set_permissions` would move.
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600))
+            .expect("tighten target");
+        std::fs::create_dir_all(log.parent().expect("parent")).expect("mkdir");
+        std::os::unix::fs::symlink(&target, &log).expect("plant symlink");
+
+        assert!(!prepare_caddy_log(&log), "a symlink must not be prepared");
+        assert_eq!(
+            std::fs::read(&target).expect("read target"),
+            b"untouched",
+            "the symlink target must not be written through"
+        );
+        let mode = std::fs::metadata(&target)
+            .expect("stat")
+            .permissions()
+            .mode();
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            "chmod must not have followed the link either"
+        );
+    }
+
+    /// A route's hostname only gets veld's certificate lifetime if the config
+    /// that adds the route also *names* it in the certificate policy, which is why
+    /// `add_route` reloads the whole config instead of POSTing the one route. That
+    /// is invisible in a diff and expensive to rediscover: POST the route alone and
+    /// Caddy issues that hostname a 12-hour certificate under a policy of its own,
+    /// cached until it expires — a bug that surfaces days later, in a browser, as
+    /// the very failure this change exists to fix. There is no test that can call
+    /// `add_route` without a live Caddy, so this pins the shape instead. Same idiom
+    /// as `veld-daemon`'s `only_one_function_runs_git_worktree_remove`.
+    #[test]
+    fn adding_a_route_reloads_rather_than_posting_one_route() {
+        let src = include_str!("caddy.rs");
+        let body = src
+            .split_once("pub async fn add_route(")
+            .expect("add_route exists")
+            .1
+            .split_once("\n    /// Remove a route")
+            .expect("add_route is followed by remove_route")
+            .0;
+        assert!(
+            body.contains("self.reload().await"),
+            "add_route must reload the whole config: the config that adds a hostname \
+             has to be the one that names it in the certificate policy"
+        );
+        assert!(
+            !body.contains("/config/apps/http/servers/veld/routes"),
+            "posting the single route leaves the new hostname unnamed in the \
+             certificate policy, so Caddy issues it a 12-hour certificate"
+        );
+    }
+
+    /// Every path that mutates Caddy's live configuration takes the same ordering
+    /// lock — otherwise a reload carrying an older snapshot of the store can
+    /// resurrect a route a `DELETE` has just removed, leaving a stopped run's
+    /// hostname proxying to a dead upstream with nothing to say so. Reachable
+    /// whenever one run stops while another starts.
+    #[test]
+    fn every_live_config_mutation_takes_the_ordering_lock() {
+        let src = include_str!("caddy.rs");
+        for name in [
+            "pub async fn reload(&self) -> Result<()> {",
+            "pub async fn remove_route(&self, route_id: &str) -> Result<()> {",
+            "pub async fn remove_routes_by_prefix(&self, prefix: &str) -> Result<usize> {",
+        ] {
+            let body = src.split_once(name).expect(name).1;
+            let head: String = body.chars().take(600).collect();
+            assert!(
+                head.contains("self.reload_lock.lock()"),
+                "{name} mutates caddy's live config and must take the ordering lock"
+            );
+        }
+        // `add_route` reaches Caddy only through `reload`, so it inherits the lock
+        // rather than taking it twice — tokio's mutex is not reentrant, and taking
+        // it here as well would deadlock on the first route added.
+        let add = src
+            .split_once("pub async fn add_route(")
+            .expect("add_route exists")
+            .1
+            .split_once("\n    /// Remove a route")
+            .expect("add_route is followed by remove_route")
+            .0;
+        assert!(!add.contains("self.reload_lock.lock()"));
+
+        // And nothing inside a critical section may call a *lock-taking* sibling.
+        // Stating the rule in a comment is what this test was doing when the rule
+        // was broken one function below it: `remove_routes_by_prefix` held the
+        // lock and called `remove_route`, which takes it, deadlocking the helper
+        // on an ordinary daemon startup. So the check is now on the code.
+        let by_prefix = src
+            .split_once("pub async fn remove_routes_by_prefix(")
+            .expect("remove_routes_by_prefix exists")
+            .1
+            .split_once("\n    /// Check whether caddy is running")
+            .expect("remove_routes_by_prefix is followed by is_running")
+            .0;
+        assert!(
+            !by_prefix.contains("self.remove_route(&"),
+            "a holder of the ordering lock must call the `_locked` form: \
+             tokio's mutex is not reentrant, and this deadlocks the helper"
+        );
+        assert!(by_prefix.contains("self.remove_route_locked(&"));
+    }
+
+    /// `/load` replaces Caddy's entire configuration, so two reloads racing can
+    /// apply out of order and the older snapshot wins — dropping a route Caddy
+    /// should be serving with no error anywhere. Two runs starting at once is the
+    /// ordinary way to reach that. The ordering lock cannot be exercised without a
+    /// live admin API, so this pins its presence: the lock must be taken *before*
+    /// the store is snapshotted, or the window is still open.
+    #[test]
+    fn reloading_is_serialised_before_the_store_is_snapshotted() {
+        let src = include_str!("caddy.rs");
+        let body = src
+            .split_once("pub async fn reload(&self) -> Result<()> {")
+            .expect("reload exists")
+            .1
+            .split_once("\n    /// Add a reverse-proxy route")
+            .expect("reload is followed by add_route")
+            .0;
+        let lock_at = body
+            .find("self.reload_lock.lock()")
+            .expect("reload must serialise itself");
+        let snapshot_at = body
+            .find("self.routes.lock()")
+            .expect("reload must snapshot the store");
+        assert!(
+            lock_at < snapshot_at,
+            "the ordering lock must be held before the snapshot is taken, or a \
+             stale config can still overwrite a newer one"
+        );
+    }
+
+    /// Building a config must not touch the filesystem: it used to prepare the
+    /// log itself, which meant every test that built one wrote into whatever
+    /// `VELD_LIB_DIR` pointed at — the developer's real install — and which branch
+    /// the test took depended on that machine's directory permissions.
+    #[test]
+    fn building_a_config_creates_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let over = Some(dir.path().join("caddy"));
+        let _ = build_full_config(443, 80, &over, &HashMap::new(), None);
+        assert!(
+            !caddy_log_path(&over).exists(),
+            "the builder must not create a log"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Certificate watchdog policy
+    // -----------------------------------------------------------------------
+
+    fn expired() -> veld_core::tls_health::TlsHealth {
+        veld_core::tls_health::TlsHealth::Expired {
+            expired_for: Duration::from_secs(3600),
+        }
+    }
+
+    fn healthy() -> veld_core::tls_health::TlsHealth {
+        veld_core::tls_health::TlsHealth::Valid {
+            expires_in: Duration::from_secs(6 * 24 * 3600),
+            lifetime: Duration::from_secs(7 * 24 * 3600),
+        }
+    }
+
+    #[test]
+    fn one_overdue_probe_does_not_restart_caddy() {
+        let mut gate = CertGate::default();
+        let now = std::time::Instant::now();
+        assert_eq!(
+            gate.weigh(&expired(), false, now),
+            CertVerdict::Overdue { strikes: 1 }
+        );
+    }
+
+    #[test]
+    fn two_overdue_probes_in_a_row_restart_caddy() {
+        let mut gate = CertGate::default();
+        let now = std::time::Instant::now();
+        gate.weigh(&expired(), false, now);
+        assert_eq!(
+            gate.weigh(&expired(), false, now + Duration::from_secs(60)),
+            CertVerdict::Restart
+        );
+    }
+
+    #[test]
+    fn a_healthy_probe_in_between_clears_the_strike() {
+        let mut gate = CertGate::default();
+        let now = std::time::Instant::now();
+        gate.weigh(&expired(), false, now);
+        assert_eq!(
+            gate.weigh(&healthy(), true, now + Duration::from_secs(60)),
+            CertVerdict::Recovered
+        );
+        // Back to one strike, not two: the pair has to be consecutive.
+        assert_eq!(
+            gate.weigh(&expired(), false, now + Duration::from_secs(120)),
+            CertVerdict::Overdue { strikes: 1 }
+        );
+    }
+
+    /// The restarted Caddy renews in the background, so it keeps serving the old
+    /// certificate for a moment — a window in which nothing must restart it again.
+    #[test]
+    fn the_cooldown_blocks_a_second_restart() {
+        let mut gate = CertGate::default();
+        let start = std::time::Instant::now();
+        gate.weigh(&expired(), false, start);
+        assert_eq!(
+            gate.weigh(&expired(), false, start + Duration::from_secs(60)),
+            CertVerdict::Restart
+        );
+        // Two more bad probes inside the cooldown: enough strikes, too soon.
+        gate.weigh(&expired(), false, start + Duration::from_secs(120));
+        assert_eq!(
+            gate.weigh(&expired(), false, start + Duration::from_secs(180)),
+            CertVerdict::Overdue { strikes: 2 }
+        );
+        // Past it, the remedy is available again.
+        let past_cooldown = start + CERT_RESTART_COOLDOWN + Duration::from_secs(1);
+        gate.weigh(&expired(), false, past_cooldown);
+        assert_eq!(
+            gate.weigh(&expired(), false, past_cooldown + Duration::from_secs(60)),
+            CertVerdict::Restart
+        );
+    }
+
+    /// Restarting is a remedy only while it remedies something. A fault a new
+    /// process cannot fix — an unwritable storage tree, a CA with no key — would
+    /// otherwise have root killing Caddy every cooldown for as long as the
+    /// machine is up, each time dropping every live connection on it.
+    #[test]
+    fn veld_stops_restarting_once_restarts_stop_helping() {
+        let mut gate = CertGate::default();
+        let mut now = std::time::Instant::now();
+        let mut restarts = 0;
+        // Far more rounds than the cap, all of them overdue and none recovering.
+        for _ in 0..40 {
+            if gate.weigh(&expired(), false, now) == CertVerdict::Restart {
+                restarts += 1;
+            }
+            now += Duration::from_secs(5 * 60);
+        }
+        assert_eq!(restarts, CERT_RESTART_ATTEMPTS);
+        assert_eq!(gate.weigh(&expired(), false, now), CertVerdict::GaveUp);
+    }
+
+    /// ...and a certificate that does come back healthy re-arms it, so a machine
+    /// that hits the cap once is not left unprotected for the rest of its uptime.
+    #[test]
+    fn recovery_re_arms_the_remedy_after_it_gave_up() {
+        let mut gate = CertGate::default();
+        let mut now = std::time::Instant::now();
+        for _ in 0..40 {
+            gate.weigh(&expired(), false, now);
+            now += Duration::from_secs(5 * 60);
+        }
+        assert_eq!(gate.weigh(&expired(), false, now), CertVerdict::GaveUp);
+
+        assert_eq!(gate.weigh(&healthy(), true, now), CertVerdict::Recovered);
+        gate.weigh(&expired(), false, now + Duration::from_secs(60));
+        assert_eq!(
+            gate.weigh(&expired(), false, now + Duration::from_secs(120)),
+            CertVerdict::Restart
+        );
+    }
+
+    /// The give-up state has to stay escapable. Recovery is judged over the whole
+    /// probe set, not from the worst verdict, because the worst verdict is
+    /// `Unreachable` for as long as *any* one hostname cannot be issued — so a
+    /// gate that read recovery from it would sit in `GaveUp` for the rest of the
+    /// helper's uptime, through a later expiry it should have acted on. That is
+    /// the shape this asserts: still-unreachable somewhere, healthy overall.
+    #[test]
+    fn giving_up_is_escapable_even_while_one_hostname_stays_unreachable() {
+        let mut gate = CertGate::default();
+        let mut now = std::time::Instant::now();
+        for _ in 0..40 {
+            gate.weigh(&expired(), false, now);
+            now += Duration::from_secs(5 * 60);
+        }
+        assert_eq!(gate.weigh(&expired(), false, now), CertVerdict::GaveUp);
+
+        // The certificates are fine again, but one hostname still answers
+        // nothing, so `worst()` is still `Unreachable` — recovery must not depend
+        // on that.
+        let unreachable = veld_core::tls_health::TlsHealth::Unreachable {
+            detail: "no certificate for this name".to_owned(),
+        };
+        assert_eq!(
+            gate.weigh(&unreachable, true, now),
+            CertVerdict::Recovered,
+            "a set that is healthy overall must clear the give-up state"
+        );
+        // ...and the remedy is armed again for the next real fault.
+        gate.weigh(&expired(), false, now + Duration::from_secs(60));
+        assert_eq!(
+            gate.weigh(&expired(), false, now + Duration::from_secs(120)),
+            CertVerdict::Restart
+        );
+    }
+
+    /// A probe that could not reach Caddy says nothing about its certificate.
+    /// Restarting for it would hand the liveness watchdog's job to the one
+    /// watchdog that cannot tell whether Caddy is even meant to be up.
+    #[test]
+    fn an_unreachable_probe_never_restarts_caddy() {
+        let mut gate = CertGate::default();
+        let now = std::time::Instant::now();
+        let unreachable = veld_core::tls_health::TlsHealth::Unreachable {
+            detail: "connection refused".to_owned(),
+        };
+        for i in 0..5 {
+            assert_eq!(
+                gate.weigh(&unreachable, false, now + Duration::from_secs(60 * i)),
+                CertVerdict::Fine
+            );
+        }
+    }
+
+    /// ...and it must not *clear* what real probes established either. A probe
+    /// taken while a just-restarted Caddy is still coming up reads `Unreachable`,
+    /// so counting that as recovery would return the give-up cap to zero on every
+    /// single restart — a root-driven restart every cooldown, forever, which is
+    /// the failure the cap was added to prevent. Two angles of the review found
+    /// this in the fix that added the cap; a gate that has already restarted is
+    /// the only state that shows it, which is why this test starts from one.
+    #[test]
+    fn a_probe_that_learned_nothing_does_not_re_arm_the_give_up_cap() {
+        let mut gate = CertGate::default();
+        let mut now = std::time::Instant::now();
+        let unreachable = veld_core::tls_health::TlsHealth::Unreachable {
+            detail: "connection refused".to_owned(),
+        };
+
+        let mut restarts = 0;
+        for _ in 0..40 {
+            // The shape a restart actually produces: bad, bad, restart, then a
+            // probe against a Caddy that has not finished starting.
+            if gate.weigh(&expired(), false, now) == CertVerdict::Restart {
+                restarts += 1;
+            }
+            now += Duration::from_secs(60);
+            assert_eq!(gate.weigh(&unreachable, false, now), CertVerdict::Fine);
+            now += Duration::from_secs(5 * 60);
+        }
+        assert_eq!(
+            restarts, CERT_RESTART_ATTEMPTS,
+            "an unreachable probe between restarts must not reset the cap"
+        );
+
+        // And `NotYetValid` — a clock behind the certificate — is the same kind
+        // of nothing: not a renewal fault, not a recovery.
+        let mut gate = CertGate::default();
+        let now = std::time::Instant::now();
+        gate.weigh(&expired(), false, now);
+        assert_eq!(
+            gate.weigh(
+                &veld_core::tls_health::TlsHealth::NotYetValid {
+                    valid_in: Duration::from_secs(3600)
+                },
+                false,
+                now + Duration::from_secs(60)
+            ),
+            CertVerdict::Fine,
+            "a clock fault is not the certificate becoming healthy"
+        );
+    }
+
+    fn parse_hours(lifetime: &str) -> u64 {
+        lifetime
+            .strip_suffix('h')
+            .expect("lifetimes are written in hours")
+            .parse()
+            .expect("lifetimes are a whole number of hours")
     }
 
     #[test]
     fn test_build_base_config_custom_ports() {
-        let config = build_base_config(18443, 18080, &None);
+        let config = build_base_config(18443, 18080, &None, None);
         let listen = config["apps"]["http"]["servers"]["veld"]["listen"]
             .as_array()
             .unwrap();

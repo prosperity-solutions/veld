@@ -21,9 +21,7 @@ describe("describeBrowserError", () => {
     expect(describeBrowserError(load(-106)).kind).toBe("dns");
   });
 
-  it("treats every certificate error as the trust-store problem it is", () => {
-    // The -2xx block is all certificate validation, and for a veld URL the answer
-    // is always the same: Caddy's local CA is not trusted.
+  it("routes the whole -2xx block to the certificate copy", () => {
     for (const code of [-200, -201, -202, -299]) {
       expect(describeBrowserError(load(code)).kind).toBe("cert");
     }
@@ -31,6 +29,18 @@ describe("describeBrowserError", () => {
     // Just outside the block, so it must not be swallowed by the range test.
     expect(describeBrowserError(load(-199)).kind).not.toBe("cert");
     expect(describeBrowserError(load(-300)).kind).not.toBe("cert");
+  });
+
+  it("tells an expired certificate apart from an untrusted one", () => {
+    // Not a nicety: a user whose leaf expired was told to check the system trust
+    // store, which is the one thing that is fine in that state. Caddy renews the
+    // leaf and veld restarts it when renewal stops, so the two need different copy.
+    const expired = describeBrowserError(load(-201));
+    const untrusted = describeBrowserError(load(-202));
+    expect(expired.title).not.toBe(untrusted.title);
+    expect(expired.title.toLowerCase()).toContain("expired");
+    expect(untrusted.hint).toContain("trust store");
+    expect(expired.hint).not.toContain("trust store");
   });
 
   it("names timeouts and crashes as themselves", () => {

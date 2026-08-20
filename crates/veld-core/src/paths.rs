@@ -180,6 +180,36 @@ pub fn dnsmasq_conf_dir() -> PathBuf {
     lib_dir().join("dnsmasq.d")
 }
 
+/// Filename of the log Caddy writes for itself. Shared so the helper that
+/// configures it and `veld doctor` that reports it cannot drift apart.
+pub const CADDY_LOG_FILENAME: &str = "caddy.log";
+
+/// Where Caddy writes its own log.
+///
+/// Inside [`caddy_data_dir`] rather than beside the other service logs in
+/// [`lib_dir`], and that is a filing choice with a security *preference*, not a
+/// security guarantee — the guarantee is elsewhere, so read on before relying on
+/// this.
+///
+/// In privileged mode Caddy runs as **root** while `lib_dir` is **user-owned**,
+/// and Caddy opens its log with `O_CREATE` and no `O_NOFOLLOW`: a symlink planted
+/// at a user-writable path is root appending to a file of somebody else's
+/// choosing. `caddy-data` is *usually* root-owned, because the privileged helper
+/// is what creates it, which makes it the better of the two directories; and it
+/// is the directory Caddy must already be able to write for certificate storage,
+/// which couples the log's fate to the thing it is a log about.
+///
+/// **But it is not reliably root-owned.** Nothing chowns it: an
+/// unprivileged-first install creates it as the user, and `veld setup privileged`
+/// afterwards does not change that. So the actual defence against the symlink is
+/// the helper opening this path with `O_NOFOLLOW` and setting permissions through
+/// the descriptor (`prepare_caddy_log`), not the directory's ownership. The
+/// reasoning `sleep_marker_dir` documents is why a *user-owned* tree cannot be
+/// trusted for this at all.
+pub fn caddy_log_path() -> PathBuf {
+    caddy_data_dir().join(CADDY_LOG_FILENAME)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
