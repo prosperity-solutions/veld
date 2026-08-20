@@ -518,6 +518,18 @@ pub const MAX_EXTERNAL_ORIGINS: usize = 64;
 /// scheme and port add a dozen; past that it is not an origin.
 const MAX_ORIGIN_LEN: usize = 280;
 
+/// Most entries `files.viewPatterns` may hold, and the longest one pattern may be.
+///
+/// Same reasoning as the exempt list above — this document is re-read by every
+/// client on every window focus — with one addition specific to globs: each pattern
+/// is matched against every candidate path in a recency scan, so the cap bounds
+/// that product rather than only the document's size.
+pub const MAX_VIEW_PATTERNS: usize = 64;
+/// See [`MAX_VIEW_PATTERNS`]. A path is 4096 bytes on Linux and 1024 on macOS; a
+/// *pattern* long enough to need more than a quarter of the smaller one is not a
+/// pattern, it is a path someone pasted.
+const MAX_VIEW_PATTERN_LEN: usize = 256;
+
 /// Where a browser pane sends words that are not an address.
 ///
 /// A pane's address bar takes http(s) URLs and nothing else
@@ -669,6 +681,12 @@ pub enum SettingKey {
     BrowserQuickSwitchColorScheme,
     BrowserExternalOrigins,
     BrowserSearchUrl,
+    FilesViewWebPages,
+    FilesViewImages,
+    FilesViewPdfs,
+    FilesViewPlainText,
+    FilesViewPatterns,
+    FilesWatchByDefault,
     UiHideDisabledActions,
     UiShowProjectNews,
     UiShowProjectColumn,
@@ -784,6 +802,15 @@ impl SettingKey {
         Self::BrowserQuickSwitchResponsive,
         Self::BrowserQuickSwitchColorScheme,
         Self::BrowserSearchUrl,
+        // ── Browser panes › Local files ──────────────────────────────────────
+        // The four groups in the order a reader meets them: the case the feature
+        // exists for first, the escape hatch last.
+        Self::FilesViewWebPages,
+        Self::FilesViewImages,
+        Self::FilesViewPdfs,
+        Self::FilesViewPlainText,
+        Self::FilesViewPatterns,
+        Self::FilesWatchByDefault,
     ];
 
     pub fn as_str(&self) -> &str {
@@ -821,6 +848,12 @@ impl SettingKey {
             Self::BrowserQuickSwitchColorScheme => "browser.quickSwitch.colorScheme",
             Self::BrowserExternalOrigins => "browser.externalOrigins",
             Self::BrowserSearchUrl => "browser.searchUrl",
+            Self::FilesViewWebPages => "files.viewWebPages",
+            Self::FilesViewImages => "files.viewImages",
+            Self::FilesViewPdfs => "files.viewPdfs",
+            Self::FilesViewPlainText => "files.viewPlainText",
+            Self::FilesViewPatterns => "files.viewPatterns",
+            Self::FilesWatchByDefault => "files.watchByDefault",
             Self::UiHideDisabledActions => "ui.hideDisabledActions",
             Self::UiShowProjectNews => "ui.showProjectNews",
             Self::UiShowProjectColumn => "ui.showProjectColumn",
@@ -882,6 +915,12 @@ impl SettingKey {
             "browser.quickSwitch.colorScheme" => Self::BrowserQuickSwitchColorScheme,
             "browser.externalOrigins" => Self::BrowserExternalOrigins,
             "browser.searchUrl" => Self::BrowserSearchUrl,
+            "files.viewWebPages" => Self::FilesViewWebPages,
+            "files.viewImages" => Self::FilesViewImages,
+            "files.viewPdfs" => Self::FilesViewPdfs,
+            "files.viewPlainText" => Self::FilesViewPlainText,
+            "files.viewPatterns" => Self::FilesViewPatterns,
+            "files.watchByDefault" => Self::FilesWatchByDefault,
             "ui.hideDisabledActions" => Self::UiHideDisabledActions,
             "ui.showProjectNews" => Self::UiShowProjectNews,
             "ui.showProjectColumn" => Self::UiShowProjectColumn,
@@ -1011,7 +1050,12 @@ impl SettingKey {
             | Self::KeepAwakeSharingOnPower
             | Self::KeepAwakeSharingOnBattery
             | Self::KeepAwakeManualOnBattery
-            | Self::BackupEnabled => Value::from(value.as_bool().ok_or_else(bad)?),
+            | Self::BackupEnabled
+            | Self::FilesViewWebPages
+            | Self::FilesViewImages
+            | Self::FilesViewPdfs
+            | Self::FilesViewPlainText
+            | Self::FilesWatchByDefault => Value::from(value.as_bool().ok_or_else(bad)?),
             // Clamped like every other duration here. The daemon acts on this one
             // — it is the period of its own timer — so it is normalised at the
             // store rather than trusted from the wire.
@@ -1137,6 +1181,49 @@ impl SettingKey {
             Self::BrowserSearchUrl => {
                 let s = value.as_str().ok_or_else(bad)?;
                 Value::from(parse_search_template(s).map_err(because)?)
+            }
+            // Extra globs naming files a pane may open. Validated by shape only:
+            // there is no such thing as an unparseable glob in
+            // `veld_core::files::glob_matches` — every byte that is not `*` or `?`
+            // matches itself — so the failures worth refusing are a pattern that is
+            // *too big to be one* and a pattern that cannot match anything.
+            //
+            // Empty entries are dropped rather than refused. A text-list control
+            // produces one for every stray blank line, and refusing the whole patch
+            // over a blank line is a text field that fights its author.
+            //
+            // `..` is refused as defence in depth, exactly as in
+            // `worktree.storageDir` below: a grant already confines every read to
+            // one worktree root, so a `..` here cannot escape — but a *stored*
+            // pattern has no legitimate need for one, and catching the shape where
+            // somebody chose it beats catching it only where it is used.
+            Self::FilesViewPatterns => {
+                let items = value.as_array().ok_or_else(bad)?;
+                if items.len() > MAX_VIEW_PATTERNS {
+                    return Err(because(format!("more than {MAX_VIEW_PATTERNS} patterns")));
+                }
+                let mut out = Vec::with_capacity(items.len());
+                for item in items {
+                    let raw = item.as_str().ok_or_else(bad)?.trim();
+                    if raw.is_empty() {
+                        continue;
+                    }
+                    if raw.len() > MAX_VIEW_PATTERN_LEN {
+                        return Err(because(format!(
+                            "{raw:?} is longer than {MAX_VIEW_PATTERN_LEN} bytes"
+                        )));
+                    }
+                    if raw.chars().any(char::is_control) {
+                        return Err(because(format!("{raw:?} contains a control character")));
+                    }
+                    if raw.split('/').any(|seg| seg == "..") {
+                        return Err(because(format!("{raw:?} must not contain ..")));
+                    }
+                    if !out.iter().any(|v| v == &Value::from(raw)) {
+                        out.push(Value::from(raw));
+                    }
+                }
+                Value::Array(out)
             }
             Self::TerminalCursorStyle => one_of(value, CURSOR_STYLES).ok_or_else(bad)?,
             // Which shell a terminal opens. Validated by **shape** — `"auto"` or an
@@ -1655,6 +1742,31 @@ pub fn defaults() -> BTreeMap<String, Value> {
         // Empty: veld ships no opinion about which hosts need the real browser.
         // A default entry would be a guess about someone else's SSO provider.
         (SettingKey::BrowserExternalOrigins, Value::Array(Vec::new())),
+        // **Web pages only, and everything else off.** The list is ordered by
+        // recency and lives on a screen with a handful of rows, so its value comes
+        // entirely from being short: the file you want is the one an agent wrote a
+        // moment ago, and every other candidate pushes it down. A repository has
+        // vastly more images, PDFs and text files than generated documents — a
+        // checked-in logo, a vendored diagram, every `README.md` — and none of them
+        // are what somebody opens a pane for.
+        //
+        // So the default is the two groups a *generated document* arrives as, and
+        // the other two are one switch away. This started with images on as well,
+        // and a real repository answered it: the list filled with `website/logo.svg`
+        // and a vendored diagram while the report that had just been written sat
+        // below them. An image is nearly always a committed asset; an HTML file or a
+        // PDF at the top of a recency list is nearly always something just made.
+        (SettingKey::FilesViewWebPages, Value::from(true)),
+        (SettingKey::FilesViewImages, Value::from(false)),
+        (SettingKey::FilesViewPdfs, Value::from(true)),
+        (SettingKey::FilesViewPlainText, Value::from(false)),
+        // Empty for the same reason as the exempt list above: a default pattern is
+        // a guess about a file type veld has never seen.
+        (SettingKey::FilesViewPatterns, Value::Array(Vec::new())),
+        // On: a pane opened on a file is nearly always a pane you are about to
+        // watch an agent rewrite, and a stale deck that silently does not reload is
+        // worse than a poll nobody notices.
+        (SettingKey::FilesWatchByDefault, Value::from(true)),
         // An engine *is* shipped, unlike the exempt list above, and the difference is
         // which way the empty default fails. An empty exempt list works — every host
         // opens in a pane, which is the feature. An empty search template makes a
@@ -2283,6 +2395,55 @@ impl Db {
             .filter_map(|v| v.as_str())
             .filter_map(|raw| crate::ide::parse_origin(raw).ok())
             .collect()
+    }
+
+    /// Which local files a browser pane may be pointed at.
+    ///
+    /// One accessor rather than six reads because this is a *policy*, and every
+    /// consumer needs all of it: the `open` shim's interception, the
+    /// recently-edited list, and the `open-file` route each answer the same
+    /// question. The daemon is the only reader — see `veld_core::files` for why
+    /// the pure predicate does not read a database itself.
+    ///
+    /// Each key falls back to its shipped default rather than to `false`, so a
+    /// row a newer build wrote as something unparseable degrades to "behaves as
+    /// documented" instead of silently switching the feature off.
+    pub fn view_policy(&self) -> crate::files::ViewPolicy {
+        let flag = |key: SettingKey, default: bool| {
+            self.setting(&key)
+                .ok()
+                .flatten()
+                .and_then(|v| v.as_bool())
+                .unwrap_or(default)
+        };
+        crate::files::ViewPolicy {
+            web_pages: flag(SettingKey::FilesViewWebPages, true),
+            images: flag(SettingKey::FilesViewImages, false),
+            pdfs: flag(SettingKey::FilesViewPdfs, true),
+            plain_text: flag(SettingKey::FilesViewPlainText, false),
+            patterns: self
+                .setting(&SettingKey::FilesViewPatterns)
+                .ok()
+                .flatten()
+                .and_then(|v| match v {
+                    Value::Array(items) => Some(items),
+                    _ => None,
+                })
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|v| v.as_str())
+                .map(str::to_owned)
+                .collect(),
+        }
+    }
+
+    /// Whether a pane opened on a file watches it for changes unless told not to.
+    pub fn files_watch_by_default(&self) -> bool {
+        self.setting(&SettingKey::FilesWatchByDefault)
+            .ok()
+            .flatten()
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true)
     }
 
     /// Which zone a log timestamp is rendered in — read by `veld logs`,

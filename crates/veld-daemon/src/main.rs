@@ -238,6 +238,11 @@ async fn main() -> Result<()> {
         });
     }
 
+    // Local files, on their own listener and their own origin — see
+    // `feedback_server::files`. Spawned rather than awaited: registering its Caddy
+    // route retries with backoff, and nothing else here waits on the helper.
+    tokio::spawn(feedback_server::files::start());
+
     // Collect stderr captures left by a previous daemon that was killed between
     // spawning a `veld` command and reaping it.
     feedback_server::management::sweep_spawn_logs();

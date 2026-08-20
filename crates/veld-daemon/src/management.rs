@@ -26,7 +26,7 @@ const DASHBOARD_HTML: &str = include_str!("../assets/management-ui.html");
 const IDE_HTML: &str = include_str!(concat!(env!("OUT_DIR"), "/management-ui-ide.html"));
 
 /// Open the central database, mapping failures to a 500.
-pub(super) fn open_db() -> Result<Db, StatusCode> {
+pub(crate) fn open_db() -> Result<Db, StatusCode> {
     Db::open().map_err(|e| {
         warn!("failed to open veld database: {e}");
         StatusCode::INTERNAL_SERVER_ERROR

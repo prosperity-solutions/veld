@@ -17,8 +17,10 @@ import {
   type StatsResponse,
   type Worktree,
   type WorktreeGitStatus,
+  type ViewableFile,
 } from "./api";
 import {
+  filesWatchByDefault,
   gitCreateFrom,
   hideDisabledActions,
   logsTimeZone,
@@ -282,6 +284,16 @@ import {
 } from "./shell";
 
 const POLL_MS = 5000;
+
+/**
+ * How often the recently-edited file list is refetched while the window is visible.
+ *
+ * Four times slower than [`POLL_MS`] on purpose: that one drives run health, where a
+ * service going down should show up promptly, while this one answers "what did I just
+ * make" — a list twenty seconds behind reads as current, and the scan behind it walks
+ * a worktree. Paused while the document is hidden, and `focus` refreshes on the spot.
+ */
+const VIEWABLE_FILES_POLL_MS = 20_000;
 
 /**
  * How this client is described to the others when it is holding a worktree they
@@ -790,6 +802,10 @@ function AppInner(props: {
   // which only needs to know whether searching is possible at all.
   const searchTemplate = searchUrl(settings ?? {});
 
+  // Whether a pane opened on a local file watches it. Threaded for the same reason
+  // as the two above.
+  const watchFilesByDefault = filesWatchByDefault(settings ?? {});
+
   // Which zone the logs views spell a line's timestamp in. Read here and threaded for
   // the same reason as the two above, and it is the same key `veld logs` reads — so the
   // two agree on the *policy*.
@@ -973,6 +989,93 @@ function AppInner(props: {
     selectable.find((w) => w.is_main) ??
     selectable[0] ??
     null;
+
+
+  // ---- The worktree's recently-edited files -------------------------------
+  //
+  // Fetched here and threaded, like the quick switches and the search template: the
+  // list feeds a pane's address bar, a blank pane's start page and the new-pane
+  // chooser, and a fetch per surface would be three scans of the same worktree.
+  // **Carried with the worktree it is about, never as a bare list.** A bare list
+  // plus a refetch effect renders the *previous* worktree's files for the frame
+  // between the switch and the response — which is exactly what happened: selecting
+  // another worktree showed the one before it. An effect cannot fix that, because an
+  // effect runs after the commit and that frame has already been painted; the
+  // staleness has to be a property of the value. Same shape, and the same reason, as
+  // `paneSessions` below.
+  const [filesFor, setFilesFor] = useState<{
+    worktreeId: number;
+    files: ViewableFile[];
+  } | null>(null);
+  // Which settings the scan's answer depends on, as a stable string. A dependency on
+  // the settings *document* would refetch on every unrelated preference write; a
+  // dependency on nothing would leave the list stale after somebody switches plain
+  // text on and goes looking for the README they just enabled.
+  const filePolicyKey = JSON.stringify([
+    settings?.["files.viewWebPages"],
+    settings?.["files.viewImages"],
+    settings?.["files.viewPdfs"],
+    settings?.["files.viewPlainText"],
+    settings?.["files.viewPatterns"],
+  ]);
+  useEffect(() => {
+    const id = worktree?.id ?? null;
+    if (id === null) {
+      setFilesFor(null);
+      return;
+    }
+    let live = true;
+    const load = () => {
+      api
+        .viewableFiles(id)
+        .then((res) => {
+          // Stamped with the worktree it is about, so a response that arrives after
+          // the selection moved on is ignored by the render rather than shown.
+          if (live) setFilesFor({ worktreeId: id, files: res.files });
+        })
+        // An empty list for *this* worktree, silently. The surfaces that show it
+        // have their own empty hint, and a toast for a list nobody asked for is
+        // noise. Still stamped: a failure is an answer, and leaving the previous
+        // worktree's answer in place is the bug this whole shape prevents.
+        .catch(() => {
+          if (live) setFilesFor({ worktreeId: id, files: [] });
+        });
+    };
+    load();
+    // Three triggers, because an agent writes files while nobody is clicking
+    // anything and a list that only refreshes on interaction is a list that is
+    // wrong exactly when it matters.
+    //
+    // Coming back to the window is the cheapest one — it is usually the moment an
+    // agent has just finished. The interval covers the case that motivated the
+    // feature: sitting in the IDE, watching a terminal, while files appear beside
+    // it. Twenty seconds because the scan is bounded and cheap (a pruned walk of
+    // this repo measures ~14ms) and because the list is "what did I just make" —
+    // being up to twenty seconds stale is invisible, and polling faster buys
+    // nothing a person would notice.
+    //
+    // Skipped entirely while the document is hidden: a background tab or a
+    // minimised window scanning a worktree every twenty seconds is pure waste, and
+    // `focus` re-runs it the instant anyone looks again.
+    const tick = () => {
+      if (!document.hidden) load();
+    };
+    window.addEventListener("focus", load);
+    const timer = window.setInterval(tick, VIEWABLE_FILES_POLL_MS);
+    return () => {
+      live = false;
+      window.removeEventListener("focus", load);
+      window.clearInterval(timer);
+    };
+  }, [worktree?.id, filePolicyKey]);
+
+  // Read during render, compared against the worktree being rendered. A list that
+  // is about another worktree is **not** data — it is "not answered yet", which is
+  // why the surfaces get a loading flag rather than an empty list they would render
+  // as "no files here".
+  const filesReady = filesFor !== null && filesFor.worktreeId === worktree?.id;
+  const viewableFiles = filesReady ? filesFor.files : [];
+  const viewableFilesLoading = worktree !== null && !filesReady;
 
   // Refetched when the selection changes, and cleared first so a pane in the
   // new worktree can never be judged against the previous one's tokens — that
@@ -5573,6 +5676,9 @@ function AppInner(props: {
             repoRoot={worktree.repo_root}
             serviceUrls={urls}
             quicklinks={worktree.ide.quicklinks}
+            files={viewableFiles}
+            filesLoading={viewableFilesLoading}
+            watchFilesByDefault={watchFilesByDefault}
             panes={worktree.ide.panes}
             paneSessions={paneSessions}
             urlsEmptyHint={
@@ -5841,6 +5947,9 @@ function AppInner(props: {
               repoRoot={worktree.repo_root}
               serviceUrls={urls}
               quicklinks={worktree.ide.quicklinks}
+              files={viewableFiles}
+              filesLoading={viewableFilesLoading}
+              watchFilesByDefault={watchFilesByDefault}
               panes={worktree.ide.panes}
               paneSessions={paneSessions}
               urlsEmptyHint={

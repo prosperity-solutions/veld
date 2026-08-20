@@ -14,10 +14,16 @@
 //! `open` on macOS is not a browser launcher. It opens files, directories,
 //! applications and `-a`/`-R`/`-t` forms that have nothing to do with the web, and
 //! a wrapper that swallowed those would break a command people use dozens of times
-//! a day for a feature about URLs. So the rule is deliberately narrow: **exactly
-//! one argument, and it is an `http(s)` URL.** Everything else is
-//! [`Decision::Passthrough`], and the caller `exec`s the real tool with the
-//! original argv untouched.
+//! a day. So the rule is deliberately narrow: **exactly one argument, carrying no
+//! flag and no non-web URI scheme.** Everything else is [`Decision::Passthrough`],
+//! and the caller `exec`s the real tool with the original argv untouched.
+//!
+//! Such an argument is an `http(s)` URL ([`Decision::Url`]) or a candidate path
+//! ([`Decision::Path`]). The second is a *question*, not a verdict — most of them
+//! are `.` — and it is answered in two further steps: by the CLI (does this name a
+//! regular file?) and then by the daemon (is this a file the user wants in a pane?).
+//! Every step answering "no" lands back on the untouched-argv passthrough, so the
+//! guarantee above survives the widening.
 //!
 //! # Two mechanisms, because one is not enough
 //!
@@ -102,19 +108,39 @@ pub enum Decision {
     /// A single web page. Veld may route it — subject to the exempt list, which is
     /// the daemon's call, not this module's.
     Url(String),
+    /// A single bare argument that could name a file a pane can show.
+    ///
+    /// Deliberately *not* a verdict. Whether the string names an existing regular
+    /// file is a filesystem question, and whether that file is one the user wants
+    /// opened in a pane is a policy question answered from settings — so this
+    /// module, which is pure and is compiled into both the daemon and the CLI,
+    /// answers neither. It reports only "one argument, no flag, no URI scheme",
+    /// and both remaining questions are asked downstream, in that order.
+    ///
+    /// The overwhelmingly common values here are `.` and a directory name, which
+    /// resolve to [`Decision::Passthrough`] one step later. That is why this
+    /// variant may never print anything on its own.
+    Path(String),
     /// Not a plain web page: hand the original argv to the real tool.
     Passthrough,
 }
 
-/// Whether an invocation is a plain "open this web page".
+/// What an invocation is: a web page, something that might be a viewable file, or
+/// none of Veld's business.
 ///
-/// Narrow on purpose — see the module docs. Note what is *not* accepted:
+/// Narrow on purpose — see the module docs. Note what is *never* either of the
+/// first two:
 ///
 /// - more than one argument (`open a.pdf b.pdf`, `open -a Safari url`),
 /// - anything beginning with `-` (a flag, which changes what `open` does),
-/// - a scheme other than `http`/`https` (`vscode://`, `file://`, `slack://`): a
-///   pane cannot show those, and handing them anywhere but the OS would break a
-///   deep link.
+/// - anything carrying a URI scheme that is not `http`/`https` (`vscode://`,
+///   `file://`, `slack://`, `mailto:`): a pane cannot show those, and handing them
+///   anywhere but the OS would break a deep link.
+///
+/// `file://` stays a passthrough even though the bytes behind it are exactly what
+/// [`Decision::Path`] is about. Accepting it would widen what the shim swallows for
+/// a spelling nobody types by hand, and `open file:///…` already does the right
+/// thing without Veld in the picture.
 ///
 /// A lone `--` is dropped first, because that is how the generated shims pass an
 /// argument list that may begin with a dash.
@@ -129,10 +155,30 @@ pub fn decide<S: AsRef<str>>(_tool: Tool, args: &[S]) -> Decision {
         return Decision::Passthrough;
     };
     if is_web_url(only) {
-        Decision::Url((*only).to_owned())
-    } else {
-        Decision::Passthrough
+        return Decision::Url((*only).to_owned());
     }
+    if only.starts_with('-') || only.is_empty() || has_uri_scheme(only) {
+        return Decision::Passthrough;
+    }
+    Decision::Path((*only).to_owned())
+}
+
+/// Whether a string starts with something a URL parser would read as a scheme.
+///
+/// The grammar is RFC 3986's: an ASCII letter, then letters, digits, `+`, `-`, `.`,
+/// then a colon. Used only to keep a deep link (`vscode://file/x`, `slack://`,
+/// `mailto:a@b`) out of [`Decision::Path`], so it errs toward calling something a
+/// scheme: a relative path containing a colon before its first `/` is legal on Unix
+/// and vanishingly rare, and the cost of misjudging it is that `open` behaves
+/// exactly as it did before Veld existed.
+fn has_uri_scheme(s: &str) -> bool {
+    let Some(colon) = s.find(':') else {
+        return false;
+    };
+    let (scheme, _) = s.split_at(colon);
+    let mut chars = scheme.chars();
+    chars.next().is_some_and(|c| c.is_ascii_alphabetic())
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '-' || c == '.')
 }
 
 /// Whether a string is an `http(s)` URL — the only thing a browser pane accepts.
@@ -239,11 +285,12 @@ mod tests {
                 "{tool:?}"
             );
 
-            // Everything a wrapper must not swallow.
+            // Everything a wrapper must not swallow. Note what is *not* in this
+            // list any more: a lone bare word. `report.pdf` and `.` are now
+            // `Path`, and it is the CLI's `stat` and the daemon's policy that send
+            // them back here — see the case below.
             for args in [
                 vec![],
-                vec!["."],
-                vec!["report.pdf"],
                 vec!["-a", "Safari", "https://example.com"],
                 vec!["-R", "/tmp/x"],
                 vec!["--args"],
@@ -252,7 +299,6 @@ mod tests {
                 vec!["vscode://file/tmp/x"],
                 vec!["slack://channel"],
                 vec!["mailto:a@b.c"],
-                vec!["example.com"],
                 vec!["http://"],
                 vec!["-"],
             ] {
@@ -262,6 +308,66 @@ mod tests {
                     "{tool:?} {args:?} must reach the real tool untouched"
                 );
             }
+        }
+    }
+
+    /// A lone bare argument is *offered* as a path — not accepted as one.
+    ///
+    /// The distinction is the whole point of the variant: `.` and `example.com` are
+    /// both `Path` here and both end up at the real tool, because neither names a
+    /// regular file. This test pins the classification, not the outcome.
+    #[test]
+    fn a_lone_bare_argument_is_offered_as_a_path() {
+        for tool in Tool::ALL.iter().copied() {
+            for arg in [
+                "report.pdf",
+                "./deck.html",
+                "docs/slides.html",
+                "/tmp/analysis.html",
+                "~/notes/deck.html",
+                // Not a file, and not this module's job to know that.
+                ".",
+                "example.com",
+                // A colon that is not a scheme: no letter before it.
+                "9:30.html",
+            ] {
+                assert_eq!(
+                    decide(tool, &[arg]),
+                    Decision::Path(arg.to_owned()),
+                    "{tool:?} {arg:?}"
+                );
+            }
+            // The shims' separator is dropped here too, so a path beginning with a
+            // dash still arrives as one argument.
+            assert_eq!(
+                decide(tool, &["--", "weird-name.html"]),
+                Decision::Path("weird-name.html".to_owned()),
+                "{tool:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_uri_scheme_is_never_mistaken_for_a_path() {
+        for s in [
+            "vscode://file/tmp/x",
+            "mailto:a@b.c",
+            "file:///etc/passwd",
+            "slack://channel",
+            "x-devonthink-item://abc",
+            "a+b.c-d:whatever",
+        ] {
+            assert!(has_uri_scheme(s), "{s:?} carries a scheme");
+        }
+        for s in [
+            "report.pdf",
+            "./deck.html",
+            "/tmp/x",
+            "9:30.html",
+            ":leading-colon",
+            "",
+        ] {
+            assert!(!has_uri_scheme(s), "{s:?} carries no scheme");
         }
     }
 

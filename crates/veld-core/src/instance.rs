@@ -90,6 +90,49 @@ pub fn daemon_upstream() -> String {
     format!("localhost:{}", daemon_port())
 }
 
+/// Hostname local files are served on, for *this* instance.
+///
+/// **A distinct host, not a path under the dashboard**, and that is the whole point
+/// of the function: a path would share an origin with the management API, which
+/// would put agent-authored HTML same-origin with every route under `/api`. See
+/// `veld-daemon/src/files.rs`.
+///
+/// `.localhost` names need no DNS entry (RFC 6761), so this costs one Caddy route
+/// and nothing else.
+///
+/// # Why the port is in the name
+///
+/// The obvious spelling — `files.` in front of [`management_host`], falling back to
+/// [`MANAGEMENT_HOST`] — is wrong here, and running it caught it. This repo's own
+/// `dev-daemon` node **deliberately does not set** `VELD_MANAGEMENT_HOST` (veld
+/// already routes that node, and two route ids for one hostname has no defined
+/// winner), so every dev instance would fall through to `files.veld.localhost` and
+/// register it under a shared route id — pointing the *installed* daemon's file host
+/// at a dev daemon that stops existing when you stop the run.
+///
+/// So the instance's own port is the disambiguator, and it is omitted only on the
+/// default: the installed instance keeps the clean `files.veld.localhost`, and a dev
+/// instance gets `files-19001.veld.localhost`, which cannot collide with it or with
+/// another dev instance.
+pub fn files_host() -> String {
+    let base = management_host().unwrap_or_else(|| MANAGEMENT_HOST.to_owned());
+    let port = daemon_port();
+    if port == DEFAULT_DAEMON_PORT {
+        format!("files.{base}")
+    } else {
+        format!("files-{port}.{base}")
+    }
+}
+
+/// The Caddy route id this instance's file host is registered under.
+///
+/// Port-keyed for the same reason [`files_host`] is: a shared id means whichever
+/// daemon started last owns the route, and the loser is usually the installed one
+/// that a person is actually using.
+pub fn files_route_id() -> String {
+    format!("veld-files-{}", daemon_port())
+}
+
 /// Daemon Unix socket path: `VELD_DAEMON_SOCK` or `~/.veld/daemon.sock`.
 pub fn daemon_socket() -> PathBuf {
     if let Some(p) = env_nonempty("VELD_DAEMON_SOCK") {

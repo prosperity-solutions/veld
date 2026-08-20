@@ -481,6 +481,7 @@ const FOCUS_MODE: Option<&str> = Some("Focus mode");
 const WHILE_SHARING: Option<&str> = Some("While you're sharing");
 const WHEN_YOU_ASK: Option<&str> = Some("When you ask");
 const SHARE_LINKS_EXPIRE: Option<&str> = Some("Share links expire after");
+const LOCAL_FILES: Option<&str> = Some("Local files");
 
 /// A plain on/off setting in a group with no headings — the commonest shape, and
 /// the one worth not repeating forty times.
@@ -1292,6 +1293,67 @@ impl SettingKey {
                 choices: Choices::Free,
                 requires: None,
             },
+
+            // ── Browser panes › Local files ──────────────────────────────────
+            // Four switches rather than one, because "which files" is the question
+            // a user actually has and an extension list is not an answer to it.
+            // Each one names its own extensions in the help, so the row is
+            // self-describing without a docs trip.
+            Self::FilesViewWebPages => toggle_in(
+                "Web pages",
+                "`.html` and `.htm` — a slide deck or a report an agent wrote, opened in a pane \
+                 instead of in your other browser. Served over http from a Veld-only origin, so \
+                 module scripts and `fetch` work, which they do not for a file opened directly.",
+                Browser,
+                LOCAL_FILES,
+            ),
+            Self::FilesViewImages => toggle_in(
+                "Images",
+                "`.png`, `.jpg`, `.gif`, `.webp`, `.avif`, `.svg`, `.ico`, `.bmp` — a diagram or \
+                 a screenshot, at full size, without leaving the window. Off by default, unlike \
+                 web pages and PDFs: a repository's images are overwhelmingly committed assets, \
+                 so switching them on puts a logo and a vendored diagram above the report an \
+                 agent wrote a minute ago.",
+                Browser,
+                LOCAL_FILES,
+            ),
+            Self::FilesViewPdfs => toggle_in(
+                "PDFs",
+                "`.pdf`, in the viewer the pane already has.",
+                Browser,
+                LOCAL_FILES,
+            ),
+            Self::FilesViewPlainText => toggle_in(
+                "Plain text",
+                "`.txt`, `.log`, `.md`, `.json`, `.csv`, `.tsv`, `.yaml`, `.toml`, `.xml`, shown \
+                 verbatim rather than rendered. Off by default because text files outnumber \
+                 everything else in a repository — switching them on means every `README.md` is \
+                 a candidate, and the recently-edited list stops being a short one.",
+                Browser,
+                LOCAL_FILES,
+            ),
+            Self::FilesViewPatterns => Spec {
+                title: "Also treat these as viewable",
+                help: "One glob per line, for the kinds the switches above do not cover — \
+                       `*.mmd`, `reports/*.xml`. `*` matches within one path segment and `**` \
+                       across them; a pattern with no `/` matches a file name at any depth. \
+                       Secrets are never served whatever you write here: `.git`, `.env*`, \
+                       `*.pem`, `*.key` and their neighbours are refused first.",
+                group: Browser,
+                section: LOCAL_FILES,
+                shape: ValueShape::TextList,
+                choices: Choices::Free,
+                requires: None,
+            },
+            Self::FilesWatchByDefault => toggle_in(
+                "Reload a file pane when the file changes",
+                "For the loop this feature exists for: an agent rewrites the deck and the pane \
+                 shows the new one without being asked. Veld watches the file's timestamp and \
+                 reloads the view — nothing is injected into the page, so what you present is \
+                 what is on disk. Each pane's toolbar can override this for itself.",
+                Browser,
+                LOCAL_FILES,
+            ),
 
             // A preference this build is preserving, not describing.
             Self::Unknown(_) => return None,

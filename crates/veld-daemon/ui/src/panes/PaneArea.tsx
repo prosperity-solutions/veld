@@ -79,8 +79,8 @@ import {
 } from "react";
 import { BrowserPane, browserTabDot } from "./BrowserPane";
 import { LogsPane, NodesPane, type RunPaneContext } from "./RunPanes";
-import { BookmarksModal, PlaceList } from "./PlaceList";
-import { placesFor, suggestionsFor } from "./places";
+import { BookmarksModal, FilesButton, FilesModal, PlaceList } from "./PlaceList";
+import { inlineFiles, placesFor, suggestionsFor } from "./places";
 import { popBrowserSuspend, pushBrowserSuspend, reloadBrowser } from "./browserHost";
 import {
   type BrowserProfile,
@@ -102,6 +102,7 @@ import {
   diagTab,
   dockOf,
   dockVisible,
+  fileLabel,
   focusDock,
   hasTab,
   insertTab,
@@ -123,7 +124,7 @@ import { HEADLINE, PaneActivityIcon } from "../inbox/InboxIcon";
 import { useInbox } from "../inbox/useInbox";
 import { notifyError } from "../shared/notify";
 import type { QuickSwitchPrefs } from "../shared/settings";
-import type { PaneSpec, Quicklink } from "../api";
+import type { PaneSpec, Quicklink, ViewableFile } from "../api";
 import { api } from "../api";
 import { paneIcon } from "./paneIcons";
 import { desktopWindow } from "../shell";
@@ -322,6 +323,14 @@ export function PaneArea(props: {
   serviceUrls: Array<[string, string]>;
   /** The project's own links from `ide.quicklinks`, shown beside the veld URLs. */
   quicklinks: Quicklink[];
+  /** The worktree's recently-edited viewable files, newest first. */
+  files: ViewableFile[];
+  /** Whether that list is still being fetched **for this worktree**. Distinct from
+   *  "empty": switching worktrees must not render the previous one's files, so the
+   *  app reports not-yet rather than handing over a stale list. */
+  filesLoading: boolean;
+  /** `files.watchByDefault` — whether a pane opened on a file starts watching it. */
+  watchFilesByDefault: boolean;
   /** Pane types the project declares in `ide.panes`. */
   panes: PaneSpec[];
   /** Which of a worktree's config panes the daemon has a token for, **carrying
@@ -978,6 +987,8 @@ export function PaneArea(props: {
         <PaneChooser
           serviceUrls={props.serviceUrls}
           quicklinks={props.quicklinks}
+          files={props.files}
+          filesLoading={props.filesLoading}
           panes={props.panes}
           urlsEmptyHint={props.urlsEmptyHint}
           searchUrl={props.searchUrl}
@@ -1045,6 +1056,9 @@ export function PaneArea(props: {
               worktreeId={props.worktreeId}
               serviceUrls={props.serviceUrls}
               quicklinks={props.quicklinks}
+              files={props.files}
+              filesLoading={props.filesLoading}
+              watchFilesByDefault={props.watchFilesByDefault}
               panes={props.panes}
               paneSessions={props.paneSessions}
               urlsEmptyHint={props.urlsEmptyHint}
@@ -1145,6 +1159,14 @@ function DockView(props: {
   serviceUrls: Array<[string, string]>;
   /** The project's own links from `ide.quicklinks`, shown beside the veld URLs. */
   quicklinks: Quicklink[];
+  /** The worktree's recently-edited viewable files, newest first. */
+  files: ViewableFile[];
+  /** Whether that list is still being fetched **for this worktree**. Distinct from
+   *  "empty": switching worktrees must not render the previous one's files, so the
+   *  app reports not-yet rather than handing over a stale list. */
+  filesLoading: boolean;
+  /** `files.watchByDefault` — whether a pane opened on a file starts watching it. */
+  watchFilesByDefault: boolean;
   /** Pane types the project declares in `ide.panes`. */
   panes: PaneSpec[];
   /** Which of a worktree's config panes the daemon has a token for, **carrying
@@ -1578,6 +1600,8 @@ function DockView(props: {
           <PaneChooser
             serviceUrls={props.serviceUrls}
             quicklinks={props.quicklinks}
+            files={props.files}
+            filesLoading={props.filesLoading}
             panes={props.panes}
             urlsEmptyHint={props.urlsEmptyHint}
             searchUrl={props.searchUrl}
@@ -1599,6 +1623,10 @@ function DockView(props: {
             tab={active}
             serviceUrls={props.serviceUrls}
             quicklinks={props.quicklinks}
+            files={props.files}
+            filesLoading={props.filesLoading}
+            worktreeId={props.worktreeId}
+            watchFilesByDefault={props.watchFilesByDefault}
             urlsEmptyHint={props.urlsEmptyHint}
             sessions={props.sessions}
             onAddSession={
@@ -1664,6 +1692,12 @@ function PaneChooser(props: {
   serviceUrls: Array<[string, string]>;
   /** The project's own links from `ide.quicklinks`, shown beside the veld URLs. */
   quicklinks: Quicklink[];
+  /** The worktree's recently-edited viewable files, newest first. */
+  files: ViewableFile[];
+  /** Whether that list is still being fetched **for this worktree**. Distinct from
+   *  "empty": switching worktrees must not render the previous one's files, so the
+   *  app reports not-yet rather than handing over a stale list. */
+  filesLoading: boolean;
   /** Pane types the project declares in `ide.panes`. */
   panes: PaneSpec[];
   urlsEmptyHint: string;
@@ -1675,7 +1709,23 @@ function PaneChooser(props: {
   onDiag: (kind: DiagKind) => void;
 }) {
   const [bookmarksOpen, setBookmarksOpen] = useState(false);
-  const places = placesFor(props.serviceUrls, props.quicklinks);
+  const [filesOpen, setFilesOpen] = useState(false);
+  // **Two lists, deliberately.** `places` is what the screen shows unprompted, so
+  // its files are the handful `inlineFiles` allows — at most three, from the last
+  // day, and none at all while the run is serving URLs of its own. `filePlaces` is
+  // every file, for the modal behind the Files button, which is where the search
+  // field lives. Building the inline list from the full one would have made the
+  // screen a directory listing; building the modal from the inline one would have
+  // made the search field a lie.
+  const places = placesFor(
+    props.serviceUrls,
+    props.quicklinks,
+    inlineFiles(props.files, {
+      hasRunUrls: props.serviceUrls.length > 0,
+      now: Date.now(),
+    }),
+  );
+  const fileplaces = placesFor([], [], props.files);
   // No query here — the chooser has no field of its own, so the list is always the
   // run's URLs and the bookmarks are always the ones behind the button.
   const suggestions = suggestionsFor(places, "", props.searchUrl);
@@ -1726,19 +1776,31 @@ function PaneChooser(props: {
             <IconWorld size={16} /> Open a page
           </h3>
           <div className="chooser-head-actions">
-            <Button
-              size="compact-xs"
-              variant="default"
-              leftSection={<IconBookmark size={13} />}
-              // Never disabled, even with none declared. A disabled button dispatches
-              // no pointer events, so its tooltip can never open (#205) — and the
-              // modal's own empty state is where `ide.quicklinks` gets explained,
-              // which is the one thing a user who has no bookmarks needs to read.
-              title="Every address this project declares"
-              onClick={() => setBookmarksOpen(true)}
+            {/* Icon-only, both of these. They are peers — "files this worktree has"
+                and "addresses this project declared" — and a heading row with two
+                labelled buttons plus Blank browser had no room left for the third.
+                Never disabled, even with none to show: a disabled button dispatches
+                no pointer events, so its tooltip can never open (#205), and each
+                modal's own empty state is where the absence gets explained. */}
+            <FilesButton
+              count={props.files.length}
+              loading={props.filesLoading}
+              onOpen={() => setFilesOpen(true)}
+            />
+            <Tooltip
+              label="Every address this project declares"
+              openDelay={250}
+              withArrow
             >
-              Bookmarks
-            </Button>
+              <ActionIcon
+                variant="default"
+                size="sm"
+                aria-label={`Project bookmarks (${bookmarks.length})`}
+                onClick={() => setBookmarksOpen(true)}
+              >
+                <IconBookmark size={13} />
+              </ActionIcon>
+            </Tooltip>
             <Button
               size="compact-xs"
               variant="default"
@@ -1757,9 +1819,33 @@ function PaneChooser(props: {
         <PlaceList
           suggestions={suggestions}
           emptyHint={props.urlsEmptyHint}
-          onOpen={(url, title) => props.onBrowser(browserTab({ url, title }))}
+          onOpen={(url, title, path) =>
+            props.onBrowser(
+              browserTab({ url, title: path ? fileLabel(path) : title, path }),
+            )
+          }
         />
+        {/* Said out loud, and only where the answer is the main content of this part
+            of the screen — with a run serving URLs there are rows above and the
+            heading's spinner is enough. This exists because the same frame used to
+            render the *previous* worktree's files: they are now correctly absent, and
+            absent-because-not-answered has to look different from absent-because-none
+            or a switch reads as "this worktree has nothing". */}
+        {props.filesLoading && props.serviceUrls.length === 0 && (
+          <p className="faint place-nomatch">Looking for recently edited files…</p>
+        )}
       </section>
+      <FilesModal
+        files={fileplaces}
+        opened={filesOpen}
+        onClose={() => setFilesOpen(false)}
+        onOpen={(url, title, path) => {
+          setFilesOpen(false);
+          props.onBrowser(
+            browserTab({ url, title: path ? fileLabel(path) : title, path }),
+          );
+        }}
+      />
       <BookmarksModal
         bookmarks={bookmarks}
         opened={bookmarksOpen}

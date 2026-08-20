@@ -7,12 +7,14 @@
 //! dependency shared between the CLI, the daemon, the privileged helper and the
 //! gateway is not free.
 //!
-//! **One function, two callers, deliberately.** `veld settings` encodes a setting
-//! key into a `DELETE` path and its database path into `X-Veld-Db`; the daemon
-//! encodes *its own* database path to compare against that header. Two encoders
-//! that agree today are two encoders that disagree after somebody "fixes" one, and
-//! the failure would be a settings guard that silently stops guarding — which is
-//! the bug this module was extracted during.
+//! **One function, however many callers, deliberately.** `veld settings` encodes a
+//! setting key into a `DELETE` path and its database path into `X-Veld-Db`; the
+//! daemon encodes *its own* database path to compare against that header, and
+//! encodes each segment of a relative path into a file-serving URL
+//! (`veld-daemon/src/files.rs`). Two encoders that agree today are two encoders that
+//! disagree after somebody "fixes" one, and the failure would be a settings guard
+//! that silently stops guarding — which is the bug this module was extracted during.
+//! Adding a caller is fine; adding a second encoder is the thing to refuse.
 
 /// Percent-encode a string so it is safe as a URL path segment **and** as an HTTP
 /// header value.

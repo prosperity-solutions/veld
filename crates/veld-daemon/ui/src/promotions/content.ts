@@ -223,4 +223,28 @@ export const PROMOTIONS: Promotion[] = [
     body: "⌘←/⌘→/⌘⌫ edit the line the way they do everywhere else, and ⌘V or a dropped file hands an agent the picture or the path itself.",
     glyph: "terminal",
   },
+  {
+    // **A new capability, and the reader has no way to discover it.** Before this,
+    // reading a file an agent wrote meant leaving for Chrome — so the habit people
+    // have is "switch apps", and nothing in the IDE would ever tell them to stop.
+    // That is the "would they otherwise find it" test answered no.
+    //
+    // **The headline names the capability, at the maintainer's direction, with this
+    // file's own outcome-first rule on the table and overruled deliberately.** By
+    // that rule it should read as something the reader can stop doing ("Stop
+    // leaving Veld to read a file", which is what this card said first). The
+    // objection to the version that shipped is the documented one: it would read as
+    // true to somebody who will never use the feature, so it describes the product
+    // rather than the reader's day, and the body carries the whole informational
+    // load. Recorded because the next person to write a card here will read these
+    // as examples — this is a judgment call, like `terminal-file-input` above, not
+    // the pattern to copy.
+    id: "local-files-in-panes",
+    since: "2026-08-20",
+    eyebrow: "New",
+    headline: "Open local HTML files in a browser pane",
+    body:
+      "The deck or report your agent just wrote opens beside the terminal: run open deck.html, or pick it from the recent list. It reloads when the file changes.",
+    glyph: "panes",
+  },
 ];

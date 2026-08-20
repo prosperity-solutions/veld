@@ -25,19 +25,34 @@
  * here as a footer row, the two full-size screens as a control in their heading.
  */
 
-import { ActionIcon, Modal, Tooltip } from "@mantine/core";
+import { ActionIcon, Modal, TextInput, Tooltip } from "@mantine/core";
 import {
   IconBookmark,
   IconCheck,
   IconCopy,
   IconExternalLink,
+  IconFile,
+  IconFileDescription,
+  IconFileText,
+  IconFileTypeHtml,
+  IconFileTypePdf,
+  IconPhoto,
   IconSearch,
   IconWorld,
   IconWorldOff,
 } from "@tabler/icons-react";
 import { useState } from "react";
 import type { Target } from "./model";
-import type { Place, PlaceKind, Suggestions } from "./places";
+import {
+  fileDir,
+  fileKindOf,
+  filterPlaces,
+  type FileKind,
+  type Place,
+  type PlaceKind,
+  type Suggestions,
+  timeAgo,
+} from "./places";
 
 /**
  * What each kind of place looks like — its group heading and its row glyph.
@@ -64,7 +79,63 @@ const PLACE_KINDS: Record<PlaceKind, { heading: string; glyph: React.ReactNode }
     heading: "Project bookmarks",
     glyph: <IconBookmark size={13} className="place-glyph" />,
   },
+  // No live dot here either, and for the same reason as a bookmark: veld knows the
+  // file was on disk when it scanned, which is not the same claim as "this is up".
+  // The heading says *recently* edited because recency is the ordering — a row's
+  // position is the information, so the heading has to name it or the order looks
+  // arbitrary.
+  file: {
+    heading: "Recently edited",
+    // Only the heading is read for a file: `placeGlyph` sends this kind to
+    // `FILE_GLYPHS` instead, so the row shows its own type. Kept because the
+    // `Record` requires it, and it is the honest fallback if that ever changes.
+    glyph: <IconFileDescription size={13} className="place-glyph" />,
+  },
 };
+
+/**
+ * Which glyph a file kind gets. A `Record`, so a new [`FileKind`] is a compile error
+ * here rather than a kind that silently renders as the generic file.
+ *
+ * Literal file-type glyphs, at the maintainer's pick, over a set that named the
+ * *content* (`IconCode` for markup, `IconAlignLeft` for text): in a list where every
+ * row is a file, the file-shaped outline is the thing the eye groups by, and the
+ * distinguishing mark inside it is what it is scanning for.
+ */
+const FILE_GLYPHS: Record<FileKind, React.ReactNode> = {
+  html: <IconFileTypeHtml size={15} className="place-glyph" />,
+  pdf: <IconFileTypePdf size={15} className="place-glyph" />,
+  image: <IconPhoto size={15} className="place-glyph" />,
+  text: <IconFileText size={15} className="place-glyph" />,
+  other: <IconFile size={15} className="place-glyph" />,
+};
+
+/** The glyph for one row: a file's own type, or its kind's. */
+function placeGlyph(place: Place): React.ReactNode {
+  return place.kind === "file"
+    ? FILE_GLYPHS[fileKindOf(place.path ?? place.name)]
+    : PLACE_KINDS[place.kind].glyph;
+}
+
+/** A row's first line: a file's own name, or the place's label. */
+function fileTitle(place: Place): string {
+  if (place.kind !== "file") return place.name;
+  const path = place.path ?? place.name;
+  return path.split("/").filter(Boolean).pop() ?? path;
+}
+
+/**
+ * A row's second line.
+ *
+ * The **path** for a file and the URL for everything else. A file's URL is an
+ * opaque grant plus a percent-encoded path — it identifies the bytes to Chromium
+ * and says nothing to the person reading the row, while the directory is the whole
+ * answer to "which of my three `index.html`s is this".
+ */
+function placeSubtitle(place: Place): string {
+  if (place.kind !== "file") return place.url;
+  return fileDir(place.path ?? place.name) ?? "worktree root";
+}
 
 export function PlaceList(props: {
   /** Rows and the optional action row, from `suggestionsFor`. */
@@ -74,8 +145,14 @@ export function PlaceList(props: {
    * first — so it is the same arithmetic `pickSuggestion` does.
    */
   activeIndex?: number;
-  /** Open this place, in the pane the list is being shown in. */
-  onOpen: (url: string, title?: string) => void;
+  /**
+   * Open this place, in the pane the list is being shown in.
+   *
+   * `path` travels only for a local file, and it is what lets the opened pane watch
+   * that file — see `PaneTab.file`. A caller that ignores it gets a pane that shows
+   * the file and does not reload it, which is a degradation rather than a break.
+   */
+  onOpen: (url: string, title?: string, path?: string) => void;
   /** Why there are no places, which only the app knows (no run, or no veld.json). */
   emptyHint: string;
   /**
@@ -144,7 +221,7 @@ export function PlaceList(props: {
               active={activeIndex === index}
               id={rowId(index)}
               asOption={listboxId !== undefined}
-              onOpen={() => props.onOpen(place.url, place.name)}
+              onOpen={() => props.onOpen(place.url, place.name, place.path)}
             />
           </div>
         );
@@ -255,6 +332,102 @@ export function BookmarksModal(props: {
 }
 
 /**
+ * Every recently-edited file, in a modal, with a search field.
+ *
+ * The unbounded counterpart to the three rows a full-size screen offers unprompted
+ * ([`inlineFiles`]). The split is the point: the screen holds a *hint*, and this
+ * holds the list — which is why this one has a search field and that one does not.
+ *
+ * The search is the same substring rule the address bar uses, over the path, so
+ * `notes/` and `deck` both narrow it and neither is a syntax anyone has to learn.
+ * Ordering stays the daemon's recency, never re-ranked by match quality: a row that
+ * moves for a reason the reader cannot see is the thing `filterPlaces` was written
+ * to avoid.
+ */
+export function FilesModal(props: {
+  files: Place[];
+  opened: boolean;
+  onClose: () => void;
+  onOpen: (url: string, title?: string, path?: string) => void;
+}) {
+  const [query, setQuery] = useState("");
+  const shown = filterPlaces(props.files, query);
+  return (
+    <Modal
+      opened={props.opened}
+      onClose={props.onClose}
+      title="Recently edited files"
+      size="lg"
+      centered
+    >
+      {/* `data-autofocus` is Mantine's own hook for "focus this when the modal
+          opens" — the field is the reason this modal exists rather than a longer
+          inline list, and a search dialog that needs a click first is one that gets
+          scrolled instead. */}
+      <TextInput
+        data-autofocus
+        value={query}
+        onChange={(e) => setQuery(e.currentTarget.value)}
+        placeholder="Search by name or folder"
+        leftSection={<IconSearch size={14} />}
+        mb="sm"
+        aria-label="Search recently edited files"
+      />
+      <div className="place-list bookmarks-modal-list">
+        {props.files.length === 0 ? (
+          <p className="faint place-nomatch">
+            Nothing here yet. Files an agent writes into this worktree show up as soon
+            as they are saved — web pages and PDFs by default, more under Settings →
+            Browser panes.
+          </p>
+        ) : shown.length === 0 ? (
+          <p className="faint place-nomatch">No file matches {query}.</p>
+        ) : (
+          shown.map((place) => (
+            <PlaceRow
+              key={place.path ?? place.url}
+              place={place}
+              active={false}
+              onOpen={() => props.onOpen(place.url, place.name, place.path)}
+            />
+          ))
+        )}
+      </div>
+    </Modal>
+  );
+}
+
+/**
+ * The Files control for a full-size screen's heading, beside Bookmarks.
+ *
+ * Icon-and-count like its neighbour, and for the same reason: the two are peers —
+ * "addresses this project declared" and "files this worktree has" — and a label on
+ * one but not the other would read as a hierarchy.
+ */
+export function FilesButton(props: {
+  count: number;
+  loading?: boolean;
+  onOpen: () => void;
+}) {
+  const label = props.loading
+    ? "Loading recently edited files"
+    : `Recently edited files (${props.count})`;
+  return (
+    <Tooltip label={label} openDelay={250} withArrow>
+      <ActionIcon
+        variant="default"
+        size="sm"
+        aria-label={label}
+        loading={props.loading}
+        onClick={props.onOpen}
+      >
+        <IconFileDescription size={13} />
+      </ActionIcon>
+    </Tooltip>
+  );
+}
+
+/**
  * The literal thing typed, as the first row.
  *
  * Named for what it will *do* rather than echoing the text back: "Search for react
@@ -339,12 +512,24 @@ function PlaceRow(props: {
             silently inherit the bookmark's glyph and its "someone wrote this in a
             config" framing. See `PLACE_KINDS`. The slot is fixed-width so a 7px dot
             and a 13px bookmark glyph leave their names on the same line. */}
-        <span className="place-mark">{PLACE_KINDS[place.kind].glyph}</span>
+        <span className="place-mark">{placeGlyph(place)}</span>
+        {/* A file's identity is its name and where it lives; a run URL's and a
+            bookmark's is the address. So the second line is the *path* for a file and
+            the URL for everything else — a file's URL is a grant and a percent-encoded
+            path, which tells the reader nothing they wanted and pushed the part that
+            matters out of the row. */}
         <span className="link-text">
-          <span className="name">{place.name}</span>
-          <span className="url">{place.url}</span>
+          <span className="name">{fileTitle(place)}</span>
+          <span className="url">{placeSubtitle(place)}</span>
         </span>
       </button>
+      {/* Why this row is where it is in the list. Only a file has it: the ordering
+          is recency, so without the age the order reads as arbitrary. */}
+      {place.mtimeMs !== undefined && (
+        <span className="place-age" title={new Date(place.mtimeMs).toLocaleString()}>
+          {timeAgo(place.mtimeMs, Date.now())}
+        </span>
+      )}
       <Tooltip label={copied ? "Copied" : "Copy URL"} openDelay={250} withArrow>
         <ActionIcon
           size="sm"

@@ -51,6 +51,12 @@ mod config_vars;
 #[path = "promotions.rs"]
 mod promotions;
 
+/// Local files served to a browser pane, on an origin of their own.
+#[path = "files.rs"]
+// `pub(crate)` so `main.rs` can start the second listener, and the `open` shim's
+// route can ask whether file serving is up before promising a pane.
+pub(crate) mod files;
+
 /// Serialises the tests that point `VELD_DB_PATH` at a temp database.
 ///
 /// **Pre-existing flake, fixed here because it reddens CI at random.** Two modules
@@ -184,6 +190,12 @@ pub async fn run_feedback_server(share_manager: Arc<crate::share::manager::Share
         // and its handlers call `check_csrf` themselves rather than relying on
         // that router's blanket layer.
         .merge(promotions::routes())
+        // What local files are worth opening, and whether a watched one changed.
+        // Only the *questions* are here — the bytes are served on their own origin
+        // (see files.rs), and these two are same-origin precisely so the `/ide`
+        // bundle can read their bodies. Both are GETs with no side effects, so
+        // neither needs a CSRF check.
+        .merge(files::api_routes())
         // Keep-awake. Same reasoning as settings — machine-wide rather than
         // desktop-specific, and its mutating handlers call `check_csrf`
         // themselves rather than relying on that router's blanket layer.
