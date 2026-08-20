@@ -4,6 +4,7 @@ pub use uuid;
 pub mod console;
 pub mod db;
 pub mod feedback;
+pub mod files;
 pub mod graph;
 pub mod health;
 pub mod helper;

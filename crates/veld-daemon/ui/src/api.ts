@@ -910,6 +910,31 @@ export type LayoutSaveResult =
   | { ok: true; doc: PaneLayoutDoc }
   | { ok: false; conflict: PaneLayoutDoc };
 
+/** One local file a pane can be pointed at. See `api.viewableFiles`. */
+export interface ViewableFile {
+  /** Worktree-relative path — the row's label, and what `fileStat` takes. */
+  name: string;
+  /** Absolute URL on the file origin, which is **not** this page's origin: the
+   *  bytes are served from a host the management API is not on, so a `fetch` of
+   *  this URL from here is opaque by design. Only a pane ever loads it. */
+  url: string;
+  /** Modification time, milliseconds. The list is already sorted by it. */
+  mtimeMs: number;
+}
+
+export interface ViewableFiles {
+  /** False when the daemon cannot serve files (its Caddy route is not up). The
+   *  list is then empty for a reason worth showing rather than an empty state. */
+  ready: boolean;
+  files: ViewableFile[];
+}
+
+/** A watched file's timestamp. See `api.fileStat`. */
+export interface FileStat {
+  mtimeMs: number;
+  size: number;
+}
+
 /** Where a URL from a terminal is going. See `api.ptyOpenUrl`. */
 export interface PtyOpenUrl {
   target: "pane" | "system";
@@ -1729,6 +1754,31 @@ export const api = {
    * session's socket — the pane is opened by the frame handler, not by the caller.
    * `system` means this page should open it externally, and `reason` says why.
    */
+  /**
+   * The worktree's viewable files, newest first.
+   *
+   * Same-origin on purpose: the *bytes* live on another host, but the question
+   * "what is worth opening" is answered here so this page can read the answer.
+   */
+  viewableFiles: (worktreeId: number) =>
+    request<ViewableFiles>(`/api/worktrees/${worktreeId}/viewable-files`, {
+      // Explicit, because `request` only adds this for mutations. Both file routes
+      // check it even though they are GETs: the listing writes (it mints a grant) and
+      // walks a worktree, so it must not be reachable from a page the user merely
+      // visited. See `list_viewable` in veld-daemon/src/files.rs.
+      headers: { "X-Veld-Request": "1" },
+    }),
+  /**
+   * A watched file's timestamp — what a file pane polls to decide it should reload.
+   *
+   * `path` is worktree-relative; the daemon confines it to that worktree again, so
+   * this cannot be used to stat the rest of the disk.
+   */
+  fileStat: (worktreeId: number, path: string) =>
+    request<FileStat>(
+      `/api/worktrees/${worktreeId}/file-stat?path=${encodeURIComponent(path)}`,
+      { headers: { "X-Veld-Request": "1" } },
+    ),
   ptyOpenUrl: (sessionId: string, url: string) =>
     request<PtyOpenUrl>(`/api/pty/sessions/${encodeURIComponent(sessionId)}/open-url`, {
       method: "POST",

@@ -35,6 +35,7 @@ import {
   IconMoon,
   IconPlugConnectedX,
   IconPlus,
+  IconLivePhoto,
   IconRefresh,
   IconRestore,
   IconRotateClockwise,
@@ -55,12 +56,26 @@ import {
   MAX_EXTRA_SESSIONS,
   type PaneTab,
   browserProfileLabel,
+  fileLabel,
   resolveAddress,
   urlForProfile,
   urlLabel,
 } from "./model";
-import { BookmarksButton, BookmarksModal, PlaceList } from "./PlaceList";
-import { pickSuggestion, placesFor, stepIndex, suggestionsFor } from "./places";
+import {
+  BookmarksButton,
+  BookmarksModal,
+  FilesButton,
+  FilesModal,
+  PlaceList,
+} from "./PlaceList";
+import {
+  indexOfPlaceUrl,
+  inlineFiles,
+  pickSuggestion,
+  placesFor,
+  stepIndex,
+  suggestionsFor,
+} from "./places";
 import {
   DEFAULT_ZOOM,
   DEVICE_GROUPS,
@@ -121,7 +136,9 @@ import {
   originOf,
   paneCovers,
   previewBrowserResize,
+  noteShownFileMtime,
   reloadBrowser,
+  shownFileMtime,
   requestPermissionSettings,
   setBrowserEmulation,
   setBrowserMedia,
@@ -142,7 +159,7 @@ import {
   permissionSentence,
   userChoice,
 } from "./permissions";
-import type { Quicklink } from "../api";
+import { api, type Quicklink, type ViewableFile } from "../api";
 import type { QuickSwitchPrefs } from "../shared/settings";
 
 /**
@@ -220,6 +237,16 @@ function schemeName(value: string | undefined): string {
   return MEDIA_LABELS["prefers-color-scheme"].values[value] ?? value;
 }
 
+/**
+ * How often a watched file's timestamp is checked.
+ *
+ * A second is fast enough that a rewritten deck feels immediate and slow enough
+ * that the cost is invisible — the request is a `stat` on one path, and only the
+ * *focused* pane runs it, because an inactive tab's `BrowserPane` is unmounted
+ * (its view lives on in `browserHost`, but this component does not).
+ */
+const FILE_WATCH_INTERVAL_MS = 1000;
+
 /** The suggestion panel's DOM id, which the address bar's `aria-controls` names. */
 function suggestId(paneId: string): string {
   return `suggest-${paneId}`;
@@ -252,6 +279,17 @@ export function BrowserPane(props: {
   serviceUrls: Array<[string, string]>;
   /** The project's own links from `ide.quicklinks`, shown beside the veld URLs. */
   quicklinks: Quicklink[];
+  /** The worktree's recently-edited viewable files, newest first. */
+  files: ViewableFile[];
+  /** Whether that list is still being fetched for this worktree. */
+  filesLoading: boolean;
+  /** Whether the daemon can serve local files at all. */
+  filesServing: boolean;
+  /** Which worktree this pane belongs to — the file-stat route is scoped to it. */
+  worktreeId: number;
+  /** `files.watchByDefault`: whether a pane opened on a file starts out watching
+   *  it. Each pane can override this for itself. */
+  watchFilesByDefault: boolean;
   /** Why there are none — only the app knows (no run, or no veld.json). */
   urlsEmptyHint: string;
   /** Which one-click toggles the chrome shows, from the settings store. */
@@ -361,19 +399,16 @@ export function BrowserPane(props: {
     if (!editing) setDraft(state.url || tab.url || "");
   }, [state.url, editing]);
 
-  // Suggestions: the run's URLs, the project's bookmarks, and what has been typed.
-  // The same list the new-pane chooser shows, so picking and typing are not two
-  // different ways of naming the same places.
-  const places = placesFor(props.serviceUrls, props.quicklinks);
-  /**
-   * What the bookmarks modal shows: **every** bookmark, never the filtered set.
-   *
-   * `suggestions.bookmarks` is the ones currently collapsed *out of the list*, which
-   * is the right thing to count on a button and the wrong thing to put in the modal —
-   * with text typed it is empty, and the modal is "every address this project
-   * declares" rather than a second view of the same filter.
-   */
-  const allBookmarks = places.filter((p) => p.kind === "bookmark");
+  // Which screen stands in for the page. `paneCovers` is the *same* predicate that
+  // hides the native view in browserHost — shared rather than restated, because the
+  // two disagreeing means either a screen painted under a live page or a pane that
+  // stays blank, and neither is visible in the browser build.
+  const covered = paneCovers(state, tab.url);
+  const failure = state.error ? describeBrowserError(state.error) : null;
+  // Veld's own UI, refused. Ranks above the others: nothing failed and nothing is
+  // loading, so neither of those screens applies.
+  const nested = state.nested;
+  const chooser = covered && !failure && !nested && !state.url && !tab.url;
   /**
    * Whether the draft is something the user typed.
    *
@@ -383,6 +418,41 @@ export function BrowserPane(props: {
    * keystroke, the panel is the unfiltered list of places.
    */
   const [typed, setTyped] = useState(false);
+
+  // Suggestions: the run's URLs, the project's bookmarks, and what has been typed.
+  // The same list the new-pane chooser shows, so picking and typing are not two
+  // different ways of naming the same places.
+  //
+  // **Two lists and one visible one.** `allPlaces` is everything, which is what
+  // typing searches. `startPlaces` is what the blank-pane start page offers
+  // unprompted — the same three-from-the-last-day rule the chooser uses, because
+  // that screen answers the same question and a longer list there was a directory
+  // listing under a "Where to?" heading.
+  //
+  // They collapse to one `places` rather than being rendered separately, and that is
+  // not tidiness: `placeKey`, `suggestions`, the arrow keys and what Enter opens are
+  // all derived from this, so two lists would mean the keyboard indexing one and the
+  // screen showing the other. The panel and the start page are mutually exclusive
+  // (`suggesting && !chooser` below), so exactly one of these is ever on screen.
+  const allPlaces = placesFor(props.serviceUrls, props.quicklinks, props.files);
+  const startPlaces = placesFor(
+    props.serviceUrls,
+    props.quicklinks,
+    inlineFiles(props.files, {
+      hasRunUrls: props.serviceUrls.length > 0,
+      now: Date.now(),
+    }),
+  );
+  const places = chooser && !typed ? startPlaces : allPlaces;
+  /**
+   * What the bookmarks modal shows: **every** bookmark, never the filtered set.
+   *
+   * `suggestions.bookmarks` is the ones currently collapsed *out of the list*, which
+   * is the right thing to count on a button and the wrong thing to put in the modal —
+   * with text typed it is empty, and the modal is "every address this project
+   * declares" rather than a second view of the same filter.
+   */
+  const allBookmarks = allPlaces.filter((p) => p.kind === "bookmark");
   const suggestions = suggestionsFor(places, typed ? draft : "", props.searchUrl);
   /**
    * Which row the arrows are on — **carrying the list it was chosen from**.
@@ -399,11 +469,47 @@ export function BrowserPane(props: {
    * from; a render whose list no longer matches reads the row as "none" without any
    * ordering having to be won. `-1` is also what Enter reads as "go to whatever is
    * typed" rather than "open the highlighted row".
+   *
+   * **The row also carries its URL, which is what survives the list changing.** With
+   * files in `places`, the list now churns on its own: the app refetches every 20
+   * seconds and an agent writing a file is the premise of the feature, so "the list
+   * changed" went from *never happens mid-typing* to *happens while you are arrowing*.
+   * Dropping the highlight was the right answer when a change meant a service came up;
+   * it is the wrong answer when a change means an unrelated file was saved, because
+   * Enter then silently navigates the typed text instead of the ringed row.
+   *
+   * So a changed list is re-checked rather than abandoned: if the URL that was
+   * highlighted is still present, the highlight moves to wherever it now is. The
+   * safety property is unchanged — Enter can still only ever open the row the user
+   * actually arrowed to — and it now holds across a poll.
    */
-  const placeKey = places.map((p) => p.url).join(" ");
-  const [highlight, setHighlight] = useState({ key: placeKey, row: -1 });
-  const activeRow = highlight.key === placeKey ? highlight.row : -1;
-  const setActiveRow = (row: number) => setHighlight({ key: placeKey, row });
+  // The action row's *presence* is part of the key, not just the places. It shifts
+  // every place's index by one, so a flip while a row is arrowed would leave the stale
+  // index naming a different place. Typing already resets the row, which covers the
+  // common case; this covers the uncommon one — `browser.searchUrl` arriving from a
+  // settings sync changes whether a typed query resolves to an action at all.
+  const placeKey = `${suggestions.action ? "a|" : ""}${places
+    .map((p) => p.url)
+    .join(" ")}`;
+  const [highlight, setHighlight] = useState<{
+    key: string;
+    row: number;
+    url: string | null;
+  }>({ key: placeKey, row: -1, url: null });
+  const activeRow = (() => {
+    if (highlight.row < 0) return -1;
+    if (highlight.key === placeKey) return highlight.row;
+    // The list moved. Follow the URL if it is still offered, otherwise no row.
+    if (highlight.url === null) return -1;
+    return indexOfPlaceUrl(suggestions, highlight.url);
+  })();
+  const setActiveRow = (row: number) => {
+    // The URL of the row being highlighted, so a later render can find it again.
+    // Indexes here are `Suggestions`-relative, with the action row first.
+    const offset = suggestions.action ? 1 : 0;
+    const place = row >= offset ? suggestions.places[row - offset] : undefined;
+    setHighlight({ key: placeKey, row, url: place?.url ?? null });
+  };
   /**
    * The row Enter would open, which is not the same as the row the arrows have moved
    * to.
@@ -422,16 +528,6 @@ export function BrowserPane(props: {
   const external = state.url || tab.url || "";
   const canStop = state.loading && !iframeBackend;
 
-  // Which screen stands in for the page. `paneCovers` is the *same* predicate that
-  // hides the native view in browserHost — shared rather than restated, because the
-  // two disagreeing means either a screen painted under a live page or a pane that
-  // stays blank, and neither is visible in the browser build.
-  const covered = paneCovers(state, tab.url);
-  const failure = state.error ? describeBrowserError(state.error) : null;
-  // Veld's own UI, refused. Ranks above the others: nothing failed and nothing is
-  // loading, so neither of those screens applies.
-  const nested = state.nested;
-  const chooser = covered && !failure && !nested && !state.url && !tab.url;
   const opening = covered && !failure && !nested && !chooser;
   const color = BROWSER_PROFILE_COLORS[profile];
 
@@ -455,6 +551,7 @@ export function BrowserPane(props: {
 
   /** Every project bookmark, which is no longer inline on any surface. */
   const [bookmarksOpen, setBookmarksOpen] = useState(false);
+  const [filesOpen, setFilesOpen] = useState(false);
 
   /**
    * The panel is an overlay over a *frozen* page, so the native view has to go.
@@ -745,13 +842,25 @@ export function BrowserPane(props: {
   };
 
   /** Navigate, and record where the pane ended up. */
-  const go = (raw: string, opts: { force?: boolean; title?: string } = {}) => {
+  const go = (
+    raw: string,
+    opts: { force?: boolean; title?: string; path?: string } = {},
+  ) => {
     const target = navigateBrowser(id, raw, opts);
     if (target) {
       setDraft(target);
       // The title only when the caller has one — a picked place knows its service
       // name, which beats the hostname the page will report.
-      onTab(opts.title ? { url: target, title: opts.title } : { url: target });
+      //
+      // `file` is written on every navigation, as a value rather than only when
+      // there is one: going *from* a file *to* an ordinary page has to clear the
+      // marker, and a conditional write would leave the pane watching a file it no
+      // longer shows. `undefined` is the cleared state — see `PaneTab.file`.
+      onTab({
+        url: target,
+        ...(opts.title ? { title: opts.title } : {}),
+        file: opts.path ? { path: opts.path, url: target } : undefined,
+      });
     }
     // Whatever happened, the panel's work is done: on success the page is loading,
     // and on a refusal the error screen is what has to be readable.
@@ -777,7 +886,10 @@ export function BrowserPane(props: {
   const submit = () => {
     const picked = pickSuggestion(suggestions, active);
     if (picked) {
-      go(picked.url, { title: picked.title });
+      go(picked.url, {
+        title: picked.path ? fileLabel(picked.path) : picked.title,
+        path: picked.path,
+      });
       return;
     }
     const resolved = resolveAddress(draft, props.searchUrl);
@@ -786,6 +898,72 @@ export function BrowserPane(props: {
     // cannot end up silently doing nothing.
     go(resolved.kind === "invalid" ? draft : resolved.url);
   };
+
+  // ---- Watching a local file ---------------------------------------------
+
+  /**
+   * The local file this pane is showing, or `null`.
+   *
+   * The `url` comparison is the whole staleness check: click a link inside a deck
+   * and `did-navigate` writes the new `url` without touching `file`, so the marker
+   * stops matching and the watcher stops — no effect, no cleanup step, nothing to
+   * forget. See `PaneTab.file`.
+   */
+  const file = tab.file && tab.file.url === tab.url ? tab.file : null;
+  /**
+   * This pane's own answer, overriding the setting — **for one file**.
+   *
+   * `null` means "whatever the setting says". Not persisted: it answers "not right
+   * now, I am presenting this", which is about the next few minutes rather than a
+   * preference, and a stored override would silently outlive the reason for it.
+   *
+   * It carries the path it was chosen for, and a mismatch reads as no override. What
+   * it overrides is per-*file*, so a pane-scoped flag was wrong in a way nothing
+   * announced: turn watching off for deck A, open deck B in the same pane, and B was
+   * silently unwatched with the setting on. Same staleness-as-a-value shape as
+   * `PaneTab.file` itself — no effect resets this, because an effect that resets state
+   * runs a frame after the render that used the stale value.
+   */
+  const [watchOverride, setWatchOverride] = useState<{
+    path: string;
+    on: boolean;
+  } | null>(null);
+  const override =
+    watchOverride && file && watchOverride.path === file.path
+      ? watchOverride.on
+      : null;
+  const watching = file !== null && (override ?? props.watchFilesByDefault);
+
+  useEffect(() => {
+    if (!watching || !file) return;
+    let cancelled = false;
+    const check = async () => {
+      try {
+        const stat = await api.fileStat(props.worktreeId, file.path);
+        if (cancelled) return;
+        // The baseline lives in `browserHost`, beside the view it describes, **not** in
+        // this effect. This component unmounts whenever its tab is not the active one
+        // in its dock while the view keeps its page, so an effect-local baseline was
+        // re-seeded on every remount — and a file rewritten while the tab sat in the
+        // background was never noticed. Absent means "no baseline yet", which is how
+        // arriving on a file avoids reloading it immediately.
+        const shown = shownFileMtime(id, file.path);
+        if (shown !== null && stat.mtimeMs !== shown) reloadBrowser(id);
+        noteShownFileMtime(id, file.path, stat.mtimeMs);
+      } catch {
+        // A file mid-write, deleted, or a daemon restarting. Silent on purpose:
+        // this runs on a timer, and a toast per second is worse than a pane that
+        // reloads a moment late.
+      }
+    };
+    void check();
+    const timer = setInterval(check, FILE_WATCH_INTERVAL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+    // `file.path` rather than `file`: the object is rebuilt on every render.
+  }, [watching, file?.path, props.worktreeId, id]);
 
   // ---- Device emulation and zoom -----------------------------------------
   //
@@ -1091,6 +1269,37 @@ export function BrowserPane(props: {
             {canStop ? <IconX size={14} /> : <IconRefresh size={14} />}
           </ActionIcon>
         </Tooltip>
+
+        {/* Only for a pane showing a local file, and only then: on every other page
+            there is nothing to watch, and a permanently disabled button would be
+            four pixels of explanation on every pane in the app. */}
+        {file && (
+          <Tooltip
+            {...TIP}
+            label={
+              watching
+                ? "Reloading when the file changes — click to stop"
+                : "Reload when the file changes"
+            }
+          >
+            <ActionIcon
+              size="sm"
+              variant={watching ? "light" : "subtle"}
+              color={watching ? undefined : "gray"}
+              aria-label={
+                watching
+                  ? "Stop reloading when the file changes"
+                  : "Reload when the file changes"
+              }
+              aria-pressed={watching}
+              onClick={() =>
+                file && setWatchOverride({ path: file.path, on: !watching })
+              }
+            >
+              <IconLivePhoto size={14} />
+            </ActionIcon>
+          </Tooltip>
+        )}
 
         {/* Find in page: Electron only, for the same reason the bar itself is —
             an iframe cannot search cross-origin content it cannot read — and
@@ -2235,7 +2444,9 @@ export function BrowserPane(props: {
                 activeIndex={active}
                 listboxId={suggestId(id)}
                 emptyHint={props.urlsEmptyHint}
-                onOpen={(url, title) => go(url, { title })}
+                onOpen={(url, title, path) =>
+                go(url, { title: path ? fileLabel(path) : title, path })
+              }
               />
               {/* A sibling of the list, never a child of it: that list is the listbox
                   the address bar names through `aria-controls`, and a listbox may own
@@ -2337,18 +2548,39 @@ export function BrowserPane(props: {
                     : "Type an address in the bar above, search the web from it, or pick one below."}
                 </p>
               </div>
-              {/* The same control the chooser's heading carries, in the same corner —
-                  this screen's heading is where it belongs here. No blank-pane button
-                  beside it: this pane already *is* one. */}
-              <Button
-                size="compact-xs"
-                variant="default"
-                leftSection={<IconBookmark size={13} />}
-                title="Every address this project declares"
-                onClick={() => setBookmarksOpen(true)}
+              {/* The same two controls the chooser's heading carries, in the same
+                  corner and icon-only for the same reason. No blank-pane button
+                  beside them: this pane already *is* one.
+
+                  This screen offers the same three-from-the-last-day list the chooser
+                  does — see `startPlaces` above. An earlier round had it keep the
+                  panel's longer list; that is no longer true and the note said so for
+                  one round too long. */}
+              {/* Wrapped, because `.start-head` is `space-between` over its children:
+                  with one button that put it at the far edge, and with two it put the
+                  slack *between them*. The chooser's heading already solved this the
+                  same way — one actions group is one flex child. */}
+              <div className="start-head-actions">
+              <FilesButton
+                count={props.files.length}
+                loading={props.filesLoading}
+                onOpen={() => setFilesOpen(true)}
+              />
+              <Tooltip
+                label="Every address this project declares"
+                openDelay={250}
+                withArrow
               >
-                Bookmarks
-              </Button>
+                <ActionIcon
+                  variant="default"
+                  size="sm"
+                  aria-label={`Project bookmarks (${allBookmarks.length})`}
+                  onClick={() => setBookmarksOpen(true)}
+                >
+                  <IconBookmark size={13} />
+                </ActionIcon>
+              </Tooltip>
+              </div>
             </div>
             {/* Swallows `mousedown`, exactly as the suggestion panel does, and for the
                 same reason: a click on a row must not blur the address bar first. This
@@ -2371,7 +2603,9 @@ export function BrowserPane(props: {
                 suggestions={suggestions}
                 activeIndex={active}
                 emptyHint={props.urlsEmptyHint}
-                onOpen={(url, title) => go(url, { title })}
+                onOpen={(url, title, path) =>
+                go(url, { title: path ? fileLabel(path) : title, path })
+              }
               />
             </div>
           </div>
@@ -2463,6 +2697,19 @@ export function BrowserPane(props: {
         onOpen={(url, title) => {
           setBookmarksOpen(false);
           go(url, { title });
+        }}
+      />
+      {/* Every file, not the panel's capped rows — the modal is the unbounded view
+          and its search field is why. Built from `props.files` directly rather than
+          from `places`, which has the run's URLs and the bookmarks mixed in. */}
+      <FilesModal
+        files={placesFor([], [], props.files)}
+        serving={props.filesServing}
+        opened={filesOpen}
+        onClose={() => setFilesOpen(false)}
+        onOpen={(url, title, path) => {
+          setFilesOpen(false);
+          go(url, { title: path ? fileLabel(path) : title, path });
         }}
       />
 

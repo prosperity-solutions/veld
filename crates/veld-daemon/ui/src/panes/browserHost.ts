@@ -1202,6 +1202,43 @@ export function focusBrowser(id: string): void {
   else v.iframe?.focus();
 }
 
+/**
+ * The mtime of the file each pane is currently *showing*.
+ *
+ * Module-level for exactly the reason this whole file is: the view outlives the React
+ * component. `BrowserPane` unmounts whenever its tab is not the active one in its dock
+ * (`PaneArea` renders only the active tab), while its `WebContentsView` keeps the page
+ * it had. So a baseline kept in the watch effect's own scope is re-seeded from the
+ * *current* mtime on every remount — and a file rewritten while its tab sat in the
+ * background is never noticed, because the first poll after returning reads the new
+ * timestamp and calls it the starting point.
+ *
+ * That is the feature's headline case (watch a terminal in one tab, the deck in
+ * another), and the first fix for it only made the manual toggle per-file, which is a
+ * different thing. Keyed by pane id and dropped with the view.
+ */
+const shownFileMtimes = new Map<string, { path: string; mtimeMs: number }>();
+
+/**
+ * What this pane is showing, if a watcher has established it **for this file**.
+ *
+ * The path is part of the value rather than something a caller has to clear. The first
+ * version keyed on the pane alone and exported a `forgetShownFileMtime` that nothing
+ * ever called, so navigating a pane from file A to file B inherited A's timestamp — and
+ * the effect's first poll saw a difference and reloaded a page that had only just
+ * loaded. A mismatched path now reads as "no baseline", which is the same
+ * staleness-as-a-value shape as `PaneTab.file` itself.
+ */
+export function shownFileMtime(id: string, path: string): number | null {
+  const seen = shownFileMtimes.get(id);
+  return seen && seen.path === path ? seen.mtimeMs : null;
+}
+
+/** Record what this pane is now showing. */
+export function noteShownFileMtime(id: string, path: string, mtimeMs: number): void {
+  shownFileMtimes.set(id, { path, mtimeMs });
+}
+
 export function disposeBrowser(id: string): void {
   const v = views.get(id);
   if (!v) return;
@@ -1209,6 +1246,7 @@ export function disposeBrowser(id: string): void {
   v.container.remove();
   v.listeners.clear();
   views.delete(id);
+  shownFileMtimes.delete(id);
   v.shellHasView = false;
   if (desktop) void desktop.destroy(id).catch(() => {});
 }

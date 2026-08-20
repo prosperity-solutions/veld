@@ -92,38 +92,127 @@ pub async fn run(tool: Option<String>, session: Option<String>, args: Vec<String
         return 127;
     }
     if depth > 0 {
-        return passthrough(tool, &args, depth, Some("recursion guard"));
+        // Before `decide()`, so this cannot know whether the argument was a URL or a
+        // path — but it knows which shim ran, which is the closest honest answer:
+        // `$BROWSER` is a browser by convention, while `open`/`xdg-open` send an
+        // argument wherever its kind is registered. Flagged by two independent angles
+        // as the one call site the `Fallback` split did not reach.
+        return passthrough(
+            tool,
+            &args,
+            depth,
+            Some("recursion guard"),
+            fallback_for(tool),
+        );
     }
 
     let url = match veld_core::opener::decide(tool, &args) {
         Decision::Url(url) => url,
+        // A bare argument that might name a viewable file. Answering that is the
+        // filesystem's job and then the daemon's — see `Decision::Path`.
+        Decision::Path(raw) => {
+            return open_path(tool, &args, depth, &raw, session.clone()).await;
+        }
         // Not a web page. This is the common case for the `open` shim and it must
         // be silent — a note on stderr for every `open .` would be noise in
         // somebody's shell.
-        Decision::Passthrough => return passthrough(tool, &args, depth, None),
+        Decision::Passthrough => return passthrough(tool, &args, depth, None, Fallback::Browser),
     };
 
-    let Some(session) = session.or_else(|| {
-        std::env::var("VELD_PTY_SESSION")
-            .ok()
-            .filter(|s| !s.is_empty())
-    }) else {
+    let Some(session) = session.or_else(session_id) else {
         // Run outside a Veld terminal — a plain shell, or a tool that scrubbed its
         // children's environment. There is no window to attribute the URL to, so
         // the system browser is the only honest answer.
-        return passthrough(tool, &args, depth, Some("not inside a Veld terminal"));
+        return passthrough(
+            tool,
+            &args,
+            depth,
+            Some("not inside a Veld terminal"),
+            Fallback::Browser,
+        );
     };
 
     match ask_daemon(&session, &url).await {
         Ok(Answer::Pane) => 0,
-        Ok(Answer::System(reason)) => passthrough(tool, &args, depth, Some(&reason)),
-        Err(e) => passthrough(tool, &args, depth, Some(&e)),
+        Ok(Answer::System(reason)) => {
+            passthrough(tool, &args, depth, reason.as_deref(), Fallback::Browser)
+        }
+        Err(e) => passthrough(tool, &args, depth, Some(&e), Fallback::Browser),
     }
+}
+
+/// A lone bare argument: show it in a pane if it is a file Veld can show.
+///
+/// **Silent in every failure path**, which is the difference from the URL case above.
+/// The shim asks about every bare word somebody types — `open .`, `open notes.zip`,
+/// `open some-directory` — so anything printed here is printed constantly. Only the
+/// daemon can say a sentence is warranted, and it does that by attaching a reason;
+/// see `open_file` in `veld-daemon/src/pty.rs`.
+///
+/// The `stat` happens here rather than in the daemon because this process is the one
+/// standing in the terminal's working directory: `./deck.html` is meaningless by the
+/// time the request arrives, so what travels is always an absolute, canonical path.
+async fn open_path(
+    tool: Tool,
+    args: &[String],
+    depth: u32,
+    raw: &str,
+    session: Option<String>,
+) -> i32 {
+    let Some(path) = canonical_file(raw) else {
+        return passthrough(tool, args, depth, None, Fallback::Opener);
+    };
+    // Filtered here, before the round trip, for the kinds no setting could ever make
+    // viewable. `servable_type` is a *capability* question — "is there a content type
+    // for this at all" — not policy, so answering it locally does not split the policy
+    // owner: the daemon still decides everything a setting can change.
+    //
+    // Without this, `open archive.zip` and `open installer.dmg` each cost a POST before
+    // falling through, on a command people run dozens of times a day. (That POST is now
+    // capped at one second rather than the URL path's five — see `ask_daemon_file` — but
+    // not paying it at all is still the right answer for a kind veld can never show.)
+    if veld_core::files::servable_type(&path).is_none() {
+        return passthrough(tool, args, depth, None, Fallback::Opener);
+    }
+    // `--session` wins over the environment, exactly as it does for a URL: it is how
+    // the flag is testable and how a caller outside a terminal names one.
+    let Some(session) = session.or_else(session_id) else {
+        return passthrough(tool, args, depth, None, Fallback::Opener);
+    };
+    match ask_daemon_file(&session, &path).await {
+        Ok(Answer::Pane) => 0,
+        Ok(Answer::System(reason)) => {
+            passthrough(tool, args, depth, reason.as_deref(), Fallback::Opener)
+        }
+        // A daemon that is down, wedged or answering nonsense is not something to
+        // narrate on a command people run dozens of times a day. The file opens the
+        // way it did before veld existed.
+        Err(_) => passthrough(tool, args, depth, None, Fallback::Opener),
+    }
+}
+
+/// The absolute, canonical path of `raw`, if it names a regular file.
+///
+/// A directory is deliberately `None`: `open .` is the single most common invocation
+/// of this shim and it must reach the real tool untouched.
+fn canonical_file(raw: &str) -> Option<String> {
+    let path = std::fs::canonicalize(raw).ok()?;
+    path.is_file().then(|| path.to_string_lossy().into_owned())
+}
+
+/// The terminal session this process is running inside, if any.
+fn session_id() -> Option<String> {
+    std::env::var("VELD_PTY_SESSION")
+        .ok()
+        .filter(|s| !s.is_empty())
 }
 
 enum Answer {
     Pane,
-    System(String),
+    /// Open it yourself. The reason is `Some` only when there is something worth
+    /// telling the user — see [`passthrough`], which prints it, and `open_path`,
+    /// which is silent by default.
+    System(Option<String>),
 }
 
 #[derive(serde::Deserialize)]
@@ -139,15 +228,63 @@ struct OpenUrlResponse {
 /// timeout, because a wedged daemon must not hold up a browser: the fallback is the
 /// system browser, which is where the URL would have gone anyway.
 async fn ask_daemon(session: &str, url: &str) -> Result<Answer, String> {
+    let answer = ask(
+        session,
+        "open-url",
+        serde_json::json!({ "url": url }),
+        std::time::Duration::from_secs(5),
+    )
+    .await?;
+    // A URL always gets a sentence. The daemon attaches one to every `system`
+    // answer here, and the fallback exists so an older daemon that did not cannot
+    // produce a silent redirect to the system browser.
+    Ok(match answer {
+        Answer::System(reason) => Answer::System(Some(
+            reason.unwrap_or_else(|| "not routed to a pane".to_owned()),
+        )),
+        pane => pane,
+    })
+}
+
+/// Ask the daemon to show a local file. Reasons are passed through as they arrive —
+/// most of them are absent on purpose. See [`open_path`].
+async fn ask_daemon_file(session: &str, path: &str) -> Result<Answer, String> {
+    ask(
+        session,
+        "open-file",
+        serde_json::json!({ "path": path }),
+        // A *second*, not the URL path's five. The two differ in what waiting buys: a
+        // URL that falls through opens somewhere the user did not want, so it is worth
+        // waiting for the daemon's answer. A file that falls through opens in the app
+        // that kind is registered to, which is what would have happened before veld
+        // existed — so the cost of waiting is pure, and it is paid on every `open
+        // README.md` and `open app.js`, since those are servable (so the local
+        // pre-filter passes them) but not viewable under the shipped defaults.
+        std::time::Duration::from_secs(1),
+    )
+    .await
+}
+
+/// One request, one reply shape, for both of the above.
+///
+/// Split out when the file route arrived: two copies of the timeout, the CSRF header
+/// and the error wording would be two things to keep in step, and the reply type is
+/// identical by design.
+async fn ask(
+    session: &str,
+    action: &str,
+    body: serde_json::Value,
+    timeout: std::time::Duration,
+) -> Result<Answer, String> {
     let base = veld_core::instance::daemon_base();
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
+        .timeout(timeout)
         .build()
         .map_err(|e| format!("could not reach the daemon: {e}"))?;
     let resp = client
-        .post(format!("{base}/api/pty/sessions/{session}/open-url"))
+        .post(format!("{base}/api/pty/sessions/{session}/{action}"))
         .header("X-Veld-Request", "1")
-        .json(&serde_json::json!({ "url": url }))
+        .json(&body)
         .send()
         .await
         .map_err(|e| format!("could not reach the daemon: {e}"))?;
@@ -160,14 +297,10 @@ async fn ask_daemon(session: &str, url: &str) -> Result<Answer, String> {
         .json()
         .await
         .map_err(|e| format!("could not read the daemon's answer: {e}"))?;
-    match parsed.target {
-        veld_core::ide::UrlTarget::Pane => Ok(Answer::Pane),
-        veld_core::ide::UrlTarget::System => Ok(Answer::System(
-            parsed
-                .reason
-                .unwrap_or_else(|| "not routed to a pane".to_owned()),
-        )),
-    }
+    Ok(match parsed.target {
+        veld_core::ide::UrlTarget::Pane => Answer::Pane,
+        veld_core::ide::UrlTarget::System => Answer::System(parsed.reason),
+    })
 }
 
 /// The argv the real tool should receive: the original, minus the shims' separator.
@@ -202,10 +335,52 @@ fn child_browser(original: Option<std::ffi::OsString>) -> ChildBrowser {
     }
 }
 
+/// What the real tool will do with the argument, for the one sentence this prints.
+///
+/// A URL handed to `/usr/bin/open` opens a browser; a file handed to the same binary
+/// opens whatever that kind is registered to — an editor for `.md`, Preview for a PDF.
+/// One noun for both was wrong for whichever path it was not written for, and it is a
+/// user-facing string, so it gets a type rather than a guess.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Fallback {
+    Browser,
+    Opener,
+}
+
+/// Where a shim's real tool sends things when the argument's kind is not known.
+///
+/// A free function rather than a method: [`Tool`] belongs to `veld-core`, and this
+/// noun is only about the sentence *this* binary prints.
+///
+/// `$BROWSER`'s entire convention is "a command that takes a URL", so a browser is the
+/// right noun there. `open`/`xdg-open` take anything, and a path that reaches them
+/// without being classified is as likely to be a file as a URL.
+fn fallback_for(tool: Tool) -> Fallback {
+    match tool {
+        Tool::Browser => Fallback::Browser,
+        Tool::Open | Tool::XdgOpen => Fallback::Opener,
+    }
+}
+
+impl Fallback {
+    fn noun(self) -> &'static str {
+        match self {
+            Self::Browser => "system browser",
+            Self::Opener => "system opener",
+        }
+    }
+}
+
 /// Hand the original arguments to the real tool, replacing this process.
 ///
 /// Returns only on failure — on success this process *is* the real tool.
-fn passthrough(tool: Tool, args: &[String], depth: u32, reason: Option<&str>) -> i32 {
+fn passthrough(
+    tool: Tool,
+    args: &[String],
+    depth: u32,
+    reason: Option<&str>,
+    fallback: Fallback,
+) -> i32 {
     let args = real_argv(args);
     let shim_dir = std::env::var_os("VELD_SHIM_DIR").map(std::path::PathBuf::from);
     let Some(real) = real_opener(tool, shim_dir.as_deref()) else {
@@ -219,7 +394,7 @@ fn passthrough(tool: Tool, args: &[String], depth: u32, reason: Option<&str>) ->
         // On stderr, and only when there is something to explain: "why did that
         // open in Safari" is otherwise unanswerable. Never on stdout — a shim runs
         // inside other tools' pipelines (AGENTS.md).
-        eprintln!("veld: opening in the system browser ({reason})");
+        eprintln!("veld: opening in the {} ({reason})", fallback.noun());
     }
 
     let mut cmd = std::process::Command::new(&real);

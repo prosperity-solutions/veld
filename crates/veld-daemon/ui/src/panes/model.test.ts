@@ -21,6 +21,7 @@ import {
   browserProfileLabel,
   browserTab,
   configPaneTab,
+  fileLabel,
   paneAnswerFor,
   startPlanFor,
   takePendingStart,
@@ -1950,5 +1951,95 @@ describe("revealDiagPane", () => {
     const both = revealDiagPane(withLogs, "nodes");
     expect(allTabs(both).filter((t) => t.kind === "logs").length).toBe(1);
     expect(allTabs(both).filter((t) => t.kind === "nodes").length).toBe(1);
+  });
+});
+
+describe("a pane opened on a local file", () => {
+  const URL = "https://files.veld.localhost/abc/notes/deck.html";
+
+  it("is named after the file, not the host or the path", () => {
+    // `urlLabel` would call every file pane `files.veld.localhost`, and the
+    // relative path does not fit a tab strip. The row shows the path; the tab
+    // shows the name.
+    expect(fileLabel("notes/deck.html")).toBe("deck.html");
+    expect(fileLabel("deck.html")).toBe("deck.html");
+    expect(fileLabel("a/b/c/slides.pdf")).toBe("slides.pdf");
+    // Total on junk rather than throwing — this labels a tab.
+    expect(fileLabel("")).toBe("");
+    expect(fileLabel("trailing/")).toBe("trailing");
+  });
+
+  it("records the marker with the URL it was opened at", () => {
+    const tab = browserTab({ url: URL, title: "deck.html", path: "notes/deck.html" });
+    expect(tab.file).toEqual({ path: "notes/deck.html", url: URL });
+  });
+
+  it("has no marker without a path, and none without a usable URL", () => {
+    expect(browserTab({ url: URL }).file).toBeUndefined();
+    // A refused URL leaves no `url` on the tab, so a marker would point at
+    // nothing — `sanitizeFile` would then refuse it on the way back in anyway.
+    expect(browserTab({ url: "javascript:alert(1)", path: "x.html" }).file)
+      .toBeUndefined();
+  });
+
+  it("survives a round trip through storage", () => {
+    let l = twoDock(0.5);
+    l = addTab(l, 0, browserTab({ url: URL, path: "notes/deck.html" }));
+    const back = parseLayouts(serializeLayouts({ 3: l }));
+    expect(back[3]).toEqual(l);
+  });
+
+  it("drops a restored marker that does not match the tab's URL", () => {
+    // The staleness rule, at the storage boundary: a marker for another page is a
+    // pane that would poll about a file it is not showing. Same check the watcher
+    // makes at runtime, so a hand-edited layout cannot get in under it.
+    const layout = {
+      docks: [
+        {
+          tabs: [
+            {
+              id: "a",
+              kind: "browser",
+              title: "deck.html",
+              url: URL,
+              file: { path: "notes/deck.html", url: "https://elsewhere.example/" },
+            },
+          ],
+          activeId: "a",
+        },
+        { tabs: [], activeId: null },
+      ],
+      ratio: 0.5,
+      focused: 0,
+    };
+    const back = parseLayouts(JSON.stringify({ 1: layout }));
+    expect(back[1]?.docks[0].tabs[0]?.url).toBe(URL);
+    expect(back[1]?.docks[0].tabs[0]?.file).toBeUndefined();
+  });
+
+  it("refuses a restored path that could escape the worktree", () => {
+    const withPath = (path: string) =>
+      parseLayouts(
+        JSON.stringify({
+          1: {
+            docks: [
+              {
+                tabs: [
+                  { id: "a", kind: "browser", title: "t", url: URL, file: { path, url: URL } },
+                ],
+                activeId: "a",
+              },
+              { tabs: [], activeId: null },
+            ],
+            ratio: 0.5,
+            focused: 0,
+          },
+        }),
+      )[1]?.docks[0].tabs[0]?.file;
+
+    expect(withPath("notes/deck.html")?.path).toBe("notes/deck.html");
+    for (const bad of ["../outside.html", "a/../../outside.html", "/etc/passwd", ""]) {
+      expect(withPath(bad), bad).toBeUndefined();
+    }
   });
 });

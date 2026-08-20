@@ -33,6 +33,12 @@ const PROMOTIONS_STATE_KEY: &str = "promotions.state";
 /// [`Db::promotions_first_use`].
 const PROMOTIONS_FIRST_USE_KEY: &str = "promotions.firstUse";
 
+/// Worktree root → its file-serving grant. See [`Db::file_grant_for_root`].
+const FILE_GRANT_PREFIX: &str = "files.grant:";
+/// Grant → the worktree root it stands for. The reverse of the above, stored so a
+/// request resolves in one row read.
+const FILE_ROOT_PREFIX: &str = "files.root:";
+
 /// Parse the stored state map. **An unparseable value reads as empty**, and that
 /// direction is chosen deliberately: the alternative — treating garbage as
 /// "everything read" — would silently switch the feature off for a user with no
@@ -131,6 +137,47 @@ impl Db {
         )?;
         tx.commit()?;
         Ok(true)
+    }
+
+    // -----------------------------------------------------------------------
+    // File-serving grants — the unguessable stand-in for a worktree root
+    // -----------------------------------------------------------------------
+
+    /// This worktree root's grant, minting one the first time it is asked for.
+    ///
+    /// A grant is the first path segment of every file URL a pane loads, and it is
+    /// what the daemon resolves back into a directory — so the client never names a
+    /// path, the way a PTY ticket already carries its worktree dir. Random rather
+    /// than derived: a random value needs no key management and no hand-rolled MAC,
+    /// and the property wanted here is only unguessability.
+    ///
+    /// **Keyed on the root path, never on the worktree row id.** Row ids are reused
+    /// when a worktree is deleted and another created, so a grant keyed on one would
+    /// silently start serving a *different* project's files to a pane URL persisted
+    /// in `veld.panes.v1` before the swap.
+    ///
+    /// Stored in both directions so the reverse lookup at request time is one row
+    /// read rather than a scan of every worktree.
+    pub fn file_grant_for_root(&self, root: &str) -> Result<String, DbError> {
+        let forward = format!("{FILE_GRANT_PREFIX}{root}");
+        if let Some(existing) = self.kv_get(&forward)? {
+            if !existing.is_empty() {
+                return Ok(existing);
+            }
+        }
+        let grant = uuid::Uuid::new_v4().simple().to_string();
+        self.kv_set(&forward, &grant)?;
+        self.kv_set(&format!("{FILE_ROOT_PREFIX}{grant}"), root)?;
+        Ok(grant)
+    }
+
+    /// The worktree root a grant stands for, if this daemon ever minted it.
+    ///
+    /// Answering this does **not** mean the directory may be served: the caller
+    /// still has to confirm the root is a live worktree and confine the path to it.
+    /// This is the lookup, not the authorisation.
+    pub fn file_grant_root(&self, grant: &str) -> Result<Option<String>, DbError> {
+        self.kv_get(&format!("{FILE_ROOT_PREFIX}{grant}"))
     }
 
     // -----------------------------------------------------------------------
@@ -315,6 +362,40 @@ impl Db {
 
 #[cfg(test)]
 mod tests {
+    /// A grant is stable for a root, and keyed on the *path* rather than a row id.
+    ///
+    /// Both halves matter. Stability: the grant is the first path segment of every file
+    /// URL, and those URLs are persisted in the client's pane layout — a grant that
+    /// changed per call would break every restored pane. Path-keying: worktree row ids
+    /// are reused when one is deleted and another created, so a grant keyed on the id
+    /// would hand a persisted URL a *different* project's files after the swap.
+    #[test]
+    fn a_file_grant_is_stable_and_keyed_on_the_path() {
+        let (_dir, db) = test_db();
+
+        let a = db.file_grant_for_root("/repos/alpha").unwrap();
+        assert_eq!(a.len(), 32, "a simple-form uuid");
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+        // Asked twice, same answer — this is what a persisted URL depends on.
+        assert_eq!(db.file_grant_for_root("/repos/alpha").unwrap(), a);
+
+        // A different root is a different grant, however similar the path.
+        let b = db.file_grant_for_root("/repos/beta").unwrap();
+        assert_ne!(a, b);
+
+        // Both resolve back, and only to their own root.
+        assert_eq!(
+            db.file_grant_root(&a).unwrap().as_deref(),
+            Some("/repos/alpha")
+        );
+        assert_eq!(
+            db.file_grant_root(&b).unwrap().as_deref(),
+            Some("/repos/beta")
+        );
+        // An id nobody minted resolves to nothing rather than to the first row.
+        assert_eq!(db.file_grant_root(&"f".repeat(32)).unwrap(), None);
+    }
+
     use crate::db::test_db;
 
     #[test]

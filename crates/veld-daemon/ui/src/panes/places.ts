@@ -8,48 +8,143 @@
  * button in a different group, which is why users clicked the button and never
  * connected it to the URLs five rows below.
  *
- * Two kinds of place, and the distinction is the point rather than a label: a run
+ * Three kinds of place, and the distinctions are the point rather than labels: a run
  * URL is something veld started and is serving *now*, a bookmark is a string in the
- * project's config that nobody has probed. They were previously the same row under
- * two captions, which is exactly the pair a first-time user could not tell apart.
+ * project's config that nobody has probed, and a file is something on disk that
+ * changed recently. The first two were previously the same row under two captions,
+ * which is exactly the pair a first-time user could not tell apart.
  *
  * Pure and dependency-free (beyond the address rules) so `vitest`'s node
  * environment can test the filtering and keyboard arithmetic — the two things a
  * component test cannot check without a DOM.
  */
 
-import type { Quicklink } from "../api";
+import type { Quicklink, ViewableFile } from "../api";
 import { type Target, resolveAddress } from "./model";
 
-export type PlaceKind = "run" | "bookmark";
+export type PlaceKind = "run" | "bookmark" | "file";
 
 export interface Place {
   kind: PlaceKind;
-  /** Service name for a run URL, the configured label for a bookmark. */
+  /** Service name for a run URL, the configured label for a bookmark, the
+   *  worktree-relative path for a file. */
   name: string;
   url: string;
+  /** `file` only: the worktree-relative path. Also `name`, because that is what a
+   *  row is matched against — but carried separately so opening a row does not
+   *  have to re-derive it from a label. */
+  path?: string;
+  /** `file` only: when it was last written, milliseconds. Rendered as "2 min ago",
+   *  which is the field that explains why the row is where it is in the list. */
+  mtimeMs?: number;
 }
 
 /**
- * The run's URLs and the project's bookmarks, as one ordered list.
+ * The run's URLs, the worktree's recent files, and the project's bookmarks, as one
+ * ordered list.
  *
- * Run URLs first, always: they are why the pane is open. Both keep the order they
- * arrive in — the run's are already service-name-sorted by `sortedUrls`, and a
- * project's bookmarks are in the order the config declares, which is the only
- * ordering their author controls.
+ * Run URLs first, always: they are why the pane is open. All three keep the order
+ * they arrive in — the run's are already service-name-sorted by `sortedUrls`, files
+ * are newest-first from the daemon's scan, and a project's bookmarks are in the
+ * order the config declares, which is the only ordering their author controls.
  */
 export function placesFor(
   urls: Array<[string, string]>,
   quicklinks: Quicklink[],
+  files: ViewableFile[] = [],
 ): Place[] {
   return [
     ...urls.map(([name, url]): Place => ({ kind: "run", name, url })),
+    // Between the two, and that ordering is the argument for the whole feature:
+    // more immediate than an address somebody wrote in a config once, less
+    // immediate than the servers running right now. Already newest-first from the
+    // daemon — the scan sorts, so this must not re-sort and must not re-order.
+    ...files.map((f): Place => ({
+      kind: "file",
+      name: f.name,
+      url: f.url,
+      path: f.name,
+      mtimeMs: f.mtimeMs,
+    })),
     ...quicklinks.map((link): Place => ({
       kind: "bookmark",
       name: link.label,
       url: link.url,
     })),
   ];
+}
+
+/**
+ * How many recent files a full-size screen offers unprompted, and how recent they
+ * have to be.
+ *
+ * Three, from the last day, and only when the run has no URLs of its own — see
+ * [`inlineFiles`]. The daemon returns up to a hundred; the surface these land on is
+ * a screen whose whole job is the four or five things you might do next, so the list
+ * is a *hint* rather than the file manager. Everything else is one click away in the
+ * Files dialog, which has a search field precisely because it is the unbounded view.
+ */
+export const INLINE_FILES_SHOWN = 3;
+/** How old a file can be and still be offered unprompted: one day. */
+export const INLINE_FILES_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * The recent files a full-size screen shows without being asked.
+ *
+ * Three rules, and each answers a way the first version was wrong on a real
+ * repository:
+ *
+ * - **Nothing when the run has URLs.** A running dev server is why the pane is
+ *   open, and a list of files under it competes with the thing the person came for.
+ *   With no run there is nothing else on that part of the screen, and a recent file
+ *   is the most useful thing Veld can offer.
+ * - **At most three.** Enough to catch "the thing I just made"; short enough not to
+ *   become a directory listing.
+ * - **Nothing older than a day.** A file from last week is not news, and offering it
+ *   unprompted makes the list look arbitrary rather than recent.
+ *
+ * `now` is passed in rather than read from the clock, so this stays pure and the
+ * age boundary is testable without freezing time.
+ */
+export function inlineFiles(
+  files: ViewableFile[],
+  opts: { hasRunUrls: boolean; now: number },
+): ViewableFile[] {
+  if (opts.hasRunUrls) return [];
+  return files
+    .filter((f) => opts.now - f.mtimeMs <= INLINE_FILES_MAX_AGE_MS)
+    .slice(0, INLINE_FILES_SHOWN);
+}
+
+/**
+ * How many recent files the address bar's panel offers while nothing is typed.
+ *
+ * Larger than the full-size screens' three, and deliberately a different number
+ * for a different question: the panel opens *because* somebody is choosing where to
+ * go, so a slightly longer list is the answer rather than a distraction. Typing
+ * lifts the cap entirely.
+ */
+const RECENT_FILES_SHOWN = 8;
+
+/**
+ * The rows shown when nothing has been typed: the run, plus the newest few files.
+ *
+ * Bookmarks are dropped here rather than capped — they come back as their own
+ * button, which is the arrangement a user test settled (see `PlaceList`). Files are
+ * capped rather than dropped, because unlike a bookmark a recent file *is* the
+ * answer often enough to earn a row without being asked for.
+ *
+ * Order is preserved, never re-sorted: the daemon's newest-first ordering is the
+ * point of the list, and `filterPlaces` keeps it.
+ */
+function untypedRows(matched: Place[]): Place[] {
+  let files = 0;
+  return matched.filter((p) => {
+    if (p.kind === "bookmark") return false;
+    if (p.kind !== "file") return true;
+    files += 1;
+    return files <= RECENT_FILES_SHOWN;
+  });
 }
 
 /**
@@ -126,7 +221,7 @@ export function suggestionsFor(
 ): Suggestions {
   const narrowed = query.trim() !== "";
   const matched = filterPlaces(places, query);
-  const shown = narrowed ? matched : matched.filter((p) => p.kind === "run");
+  const shown = narrowed ? matched : untypedRows(matched);
   const bookmarks = narrowed ? [] : matched.filter((p) => p.kind === "bookmark");
   const resolved = narrowed ? resolveAddress(query, searchUrl) : null;
   const action = resolved && resolved.kind !== "invalid" ? resolved : null;
@@ -156,17 +251,111 @@ export function stepIndex(count: number, current: number, delta: number): number
   return (current + delta + count) % count;
 }
 
+/**
+ * Where a place with this URL sits in the current suggestions, or `-1`.
+ *
+ * Exists so a highlighted row can be *followed* across a list that changed rather than
+ * dropped. Shares the action-row offset with [`pickSuggestion`], which is the whole
+ * reason it is here and not inline in the component: that `+1` is the arithmetic most
+ * likely to be silently wrong, and a test can only reach it from this module.
+ */
+export function indexOfPlaceUrl(s: Suggestions, url: string): number {
+  const at = s.places.findIndex((p) => p.url === url);
+  return at < 0 ? -1 : (s.action ? 1 : 0) + at;
+}
+
 /** What opening row `index` means, or null when the index selects nothing. */
 export function pickSuggestion(
   s: Suggestions,
   index: number,
-): { url: string; title?: string } | null {
+): { url: string; title?: string; path?: string } | null {
   if (index < 0 || index >= s.count) return null;
   if (s.action) {
     if (index === 0) return { url: s.action.url };
     const place = s.places[index - 1];
-    return place ? { url: place.url, title: place.name } : null;
+    return place ? picked(place) : null;
   }
   const place = s.places[index];
-  return place ? { url: place.url, title: place.name } : null;
+  return place ? picked(place) : null;
+}
+
+/**
+ * One place, as the thing a pane needs to open it.
+ *
+ * The `path` only travels for a file, because it is only meaningful for one: it is
+ * what the pane watches for changes, and a `path` on a run URL would be a field
+ * nothing could use and something would eventually trust.
+ */
+function picked(place: Place): { url: string; title?: string; path?: string } {
+  return place.kind === "file"
+    ? { url: place.url, title: place.name, path: place.path }
+    : { url: place.url, title: place.name };
+}
+
+/**
+ * Which broad kind of file a path is, for picking a glyph.
+ *
+ * Deliberately coarser than the daemon's extension table and **not** derived from
+ * it: that table answers "may these bytes be served" and has thirty entries, while
+ * this answers "which of five icons" and must stay total for an extension nobody
+ * listed. Keeping them separate means adding a servable type never silently changes
+ * an icon, and a pattern-matched file with an unknown extension still renders.
+ */
+export type FileKind = "html" | "pdf" | "image" | "text" | "other";
+
+const HTML_EXTS = ["html", "htm"];
+const IMAGE_EXTS = ["png", "jpg", "jpeg", "gif", "webp", "avif", "svg", "ico", "bmp"];
+const TEXT_EXTS = ["txt", "log", "md", "json", "csv", "tsv", "yaml", "yml", "toml", "xml"];
+
+export function fileKindOf(path: string): FileKind {
+  const name = path.split("/").pop() ?? path;
+  const dot = name.lastIndexOf(".");
+  // No extension, or a dotfile whose only dot is its first character.
+  if (dot <= 0) return "other";
+  const ext = name.slice(dot + 1).toLowerCase();
+  if (HTML_EXTS.includes(ext)) return "html";
+  if (ext === "pdf") return "pdf";
+  if (IMAGE_EXTS.includes(ext)) return "image";
+  if (TEXT_EXTS.includes(ext)) return "text";
+  return "other";
+}
+
+/**
+ * The directory a file sits in, or `null` at the worktree root.
+ *
+ * `null` rather than `""` so a caller has to decide what the root reads as, instead
+ * of rendering an empty line that looks like a missing value.
+ */
+export function fileDir(path: string): string | null {
+  const cut = path.lastIndexOf("/");
+  return cut <= 0 ? null : path.slice(0, cut);
+}
+
+/**
+ * How long ago, in the shortest form that is still true.
+ *
+ * Rounded **down** at every step, and that is the point: a file written 119 seconds
+ * ago reads as "1 min ago", never "2 min ago", so the number never claims the file
+ * is older than it is. Anything under a minute is "just now" — a seconds count on a
+ * row that re-renders on its own schedule is a number that is wrong as often as it
+ * is right.
+ *
+ * `now` is a parameter so this is pure. A negative difference (a file written in the
+ * future, which a bad clock or a copied mtime produces) also reads as "just now"
+ * rather than as a negative age.
+ */
+export function timeAgo(mtimeMs: number, now: number): string {
+  const seconds = Math.floor((now - mtimeMs) / 1000);
+  if (seconds < 60) return "just now";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} h ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 7) return `${days} d ago`;
+  const weeks = Math.floor(days / 7);
+  if (weeks < 5) return `${weeks} w ago`;
+  const months = Math.floor(days / 30);
+  if (months < 12) return `${months} mo ago`;
+  return `${Math.floor(days / 365)} y ago`;
 }

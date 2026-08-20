@@ -88,6 +88,10 @@ const FALLBACK = {
   detachGraceMinutes: 30,
   quickSwitchResponsive: true,
   quickSwitchColorScheme: true,
+  // The `quickSwitch*` exception above, same reasoning: a pane whose toolbar shows a
+  // lit watch button must actually be watching, so a daemon too old to know the key
+  // has to agree with the shipped default rather than with the release before it.
+  filesWatchByDefault: true,
   // Keep until emptied. Matches the Rust default, and the direction to err in if it
   // ever drifts: the value that cannot delete anybody's checkout.
   trashRetentionDays: 0,
@@ -372,6 +376,17 @@ export function quickSwitchPrefs(doc: SettingsDoc): QuickSwitchPrefs {
       FALLBACK.quickSwitchColorScheme,
     ),
   };
+}
+
+/**
+ * Whether a pane opened on a local file watches it and reloads on a change.
+ *
+ * The default only — each pane's toolbar overrides it for itself, and that override
+ * is deliberately not stored: it answers "not right now, I am presenting this",
+ * which is a statement about the next few minutes rather than a preference.
+ */
+export function filesWatchByDefault(doc: SettingsDoc): boolean {
+  return bool(doc, "files.watchByDefault", FALLBACK.filesWatchByDefault);
 }
 
 /**

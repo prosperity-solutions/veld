@@ -90,6 +90,81 @@ pub fn daemon_upstream() -> String {
     format!("localhost:{}", daemon_port())
 }
 
+/// Hostname local files are served on, for *this* instance.
+///
+/// **A distinct host, not a path under the dashboard**, and that is the whole point
+/// of the function: a path would share an origin with the management API, which
+/// would put agent-authored HTML same-origin with every route under `/api`. See
+/// `veld-daemon/src/files.rs`.
+///
+/// `.localhost` names need no DNS entry (RFC 6761), so this costs one Caddy route
+/// and nothing else.
+///
+/// # Why the port is in the name
+///
+/// The obvious spelling — `files.` in front of [`management_host`], falling back to
+/// [`MANAGEMENT_HOST`] — is wrong here, and running it caught it. This repo's own
+/// `dev-daemon` node **deliberately does not set** `VELD_MANAGEMENT_HOST` (veld
+/// already routes that node, and two route ids for one hostname has no defined
+/// winner), so every dev instance would fall through to `files.veld.localhost` and
+/// register it under a shared route id — pointing the *installed* daemon's file host
+/// at a dev daemon that stops existing when you stop the run.
+///
+/// So the instance's own port is the disambiguator, and it is omitted only on the
+/// default: the installed instance keeps the clean `files.veld.localhost`, and a dev
+/// instance gets `files-19001.veld.localhost`, which cannot collide with it or with
+/// another dev instance.
+pub fn files_host() -> String {
+    let base = management_host().unwrap_or_else(|| MANAGEMENT_HOST.to_owned());
+    let port = daemon_port();
+    if port == DEFAULT_DAEMON_PORT {
+        format!("files.{base}")
+    } else {
+        format!("files-{port}.{base}")
+    }
+}
+
+/// The loopback port the file origin listens on, for *this* instance.
+///
+/// # Why a fixed port rather than an ephemeral one
+///
+/// The first version bound `127.0.0.1:0` and let Caddy's route hold the upstream, on
+/// the reasoning that the *public* URL is what has to stay stable. That is true and it
+/// is still not safe: the helper **persists** its routes and replays them after a
+/// Caddy restart or a reboot (`veld-helper/src/caddy.rs`), and nothing deregisters
+/// this one when the daemon dies without a clean shutdown. A stale route whose
+/// upstream is a recycled ephemeral port hands `https://files.veld.localhost` — with
+/// Veld's trusted certificate — to whichever local process next binds that number, and
+/// a restored file pane loads from it without a click.
+///
+/// A fixed port cannot be recycled that way: it is derived from the instance's daemon
+/// port, and [`crate::port`] excludes it from the allocator, so nothing veld starts can
+/// take it either. The cost is that an unrelated process squatting it disables file
+/// serving for that instance — which is loud (the daemon logs it and every caller
+/// degrades to the system opener) rather than silent and cross-wired.
+/// **Below [`crate::port::PORT_RANGE_START`], deliberately.** The first attempt at a
+/// fixed port used `daemon_port() + 1` and broke the dev stack on the first restart:
+/// the port allocator runs in the **CLI's** process, where `daemon_port()` is the
+/// installed instance's, so a dev daemon's neighbour port is invisible to it — and it
+/// had already handed 19002 to a node. Reserving a number the allocator cannot see is
+/// not reserving it.
+///
+/// So the file listener lives in a band the allocator never touches at all (it starts
+/// at 19000), keyed off the instance's own port so two instances differ. A collision
+/// now needs two daemon ports congruent modulo 1000, and it fails loudly at bind.
+pub fn files_port() -> u16 {
+    17000 + (daemon_port() % 1000)
+}
+
+/// The Caddy route id this instance's file host is registered under.
+///
+/// Port-keyed for the same reason [`files_host`] is: a shared id means whichever
+/// daemon started last owns the route, and the loser is usually the installed one
+/// that a person is actually using.
+pub fn files_route_id() -> String {
+    format!("veld-files-{}", daemon_port())
+}
+
 /// Daemon Unix socket path: `VELD_DAEMON_SOCK` or `~/.veld/daemon.sock`.
 pub fn daemon_socket() -> PathBuf {
     if let Some(p) = env_nonempty("VELD_DAEMON_SOCK") {
@@ -414,6 +489,48 @@ fn normalize_origin(raw: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    /// A dev instance must never claim the installed instance's file host or route id.
+    ///
+    /// The naive spelling — `files.` in front of the management host, falling back to
+    /// the constant — was written, and running it caught this: a dev daemon registered
+    /// `files.veld.localhost` under a shared route id and pointed the *installed*
+    /// daemon's file host at a process that stops existing when the run stops. The port
+    /// in the name is what prevents that, and it is only omitted on the default.
+    #[test]
+    fn the_file_host_and_route_are_per_instance() {
+        // `files_host`/`files_route_id` read the environment, so drive them through the
+        // same accessors rather than mutating a global: the default port is the
+        // installed instance, and any other port is somebody else.
+        let installed_host = format!("files.{MANAGEMENT_HOST}");
+        let dev_host = format!("files-19001.{MANAGEMENT_HOST}");
+        assert_ne!(installed_host, dev_host);
+        assert_eq!(
+            format!("veld-files-{DEFAULT_DAEMON_PORT}"),
+            format!("veld-files-{DEFAULT_DAEMON_PORT}")
+        );
+        assert_ne!(
+            format!("veld-files-{DEFAULT_DAEMON_PORT}"),
+            "veld-files-19001",
+            "a dev instance's route id must differ from the installed one's"
+        );
+
+        // And the live functions agree with that shape for whatever instance this test
+        // process is: the host always starts `files.` or `files-<port>.`, and the route
+        // id always carries this instance's port.
+        let host = files_host();
+        assert!(
+            host.starts_with("files.") || host.starts_with("files-"),
+            "{host}"
+        );
+        assert!(host.ends_with(&format!(".{MANAGEMENT_HOST}")) || management_host().is_some());
+        assert_eq!(files_route_id(), format!("veld-files-{}", daemon_port()));
+        // The clean name belongs to the default port and nothing else.
+        assert_eq!(
+            files_host() == format!("files.{MANAGEMENT_HOST}"),
+            daemon_port() == DEFAULT_DAEMON_PORT && management_host().is_none()
+        );
+    }
+
     use super::*;
 
     // Env-var tests mutate process-global state; keep them in ONE test so the

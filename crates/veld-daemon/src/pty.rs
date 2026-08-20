@@ -310,6 +310,10 @@ pub fn routes() -> Router {
         .route("/api/pty/sessions/{id}/busy", get(session_busy_status))
         .route("/api/pty/sessions/{id}", delete(close_session))
         .route("/api/pty/sessions/{id}/open-url", post(open_url))
+        // Its sibling for a path rather than a URL. Beside it deliberately: the two
+        // answer the same question from the same shim, and share the reply shape and
+        // the pane-push tail.
+        .route("/api/pty/sessions/{id}/open-file", post(open_file))
         .route("/api/pty/sessions/{id}/agent-state", post(agent_state))
         // **The one route with its own body limit.** axum's default is 2 MB, and
         // a paste is the only thing here that carries a file — so without this
@@ -2059,44 +2063,163 @@ async fn open_url(
                 .to_owned(),
             ),
         })),
-        veld_core::ide::UrlTarget::Pane => {
-            // Nobody is looking at this terminal — the page was closed, or the
-            // session is between attaches. Answering `pane` would drop the URL: the
-            // frame is not queued for a future attach, deliberately, because a login
-            // page that arrives ten minutes late is worse than one that opened in the
-            // wrong browser.
-            //
-            // The **detach clock**, not `control.receiver_count()`. A displaced socket
-            // is still a subscriber until it notices the takeover, so the count can be
-            // non-zero while every subscriber will discard the frame on the epoch check
-            // in `serve_socket` — answering `pane` there drops the URL silently, which
-            // is the exact failure this branch exists to prevent. `detached_since` is
-            // `None` only while a socket owns the session, and `serve_socket`
-            // subscribes before it claims the epoch, so `None` implies a live
-            // subscriber.
-            let attached = session
-                .detached_since
-                .lock()
-                .expect("detach clock poisoned")
-                .is_none();
-            if !attached {
-                return Ok(Json(OpenUrlResponse {
-                    target: veld_core::ide::UrlTarget::System,
-                    reason: Some(
-                        "no Veld window is attached to this terminal right now".to_owned(),
-                    ),
-                }));
-            }
-            let _ = session
-                .control
-                .send(ServerControl::OpenUrl { url: web.canonical });
-            debug!(session = %id, "routed a URL to a browser pane");
-            Ok(Json(OpenUrlResponse {
-                target: veld_core::ide::UrlTarget::Pane,
-                reason: None,
-            }))
-        }
+        veld_core::ide::UrlTarget::Pane => Ok(Json(push_to_pane(&session, &id, web.canonical))),
     }
+}
+
+/// Put a URL on the session's socket, or say why it could not be.
+///
+/// Shared by [`open_url`] and [`open_file`] so the detach reasoning below exists
+/// once. Two copies of it would drift, and the way it fails is a URL that silently
+/// goes nowhere.
+fn push_to_pane(session: &Session, id: &str, url: veld_core::ide::CanonicalUrl) -> OpenUrlResponse {
+    // Nobody is looking at this terminal — the page was closed, or the session is
+    // between attaches. Answering `pane` would drop the URL: the frame is not queued
+    // for a future attach, deliberately, because a login page that arrives ten
+    // minutes late is worse than one that opened in the wrong browser.
+    //
+    // The **detach clock**, not `control.receiver_count()`. A displaced socket is
+    // still a subscriber until it notices the takeover, so the count can be non-zero
+    // while every subscriber will discard the frame on the epoch check in
+    // `serve_socket` — answering `pane` there drops the URL silently, which is the
+    // exact failure this branch exists to prevent. `detached_since` is `None` only
+    // while a socket owns the session, and `serve_socket` subscribes before it claims
+    // the epoch, so `None` implies a live subscriber.
+    let attached = session
+        .detached_since
+        .lock()
+        .expect("detach clock poisoned")
+        .is_none();
+    if !attached {
+        return OpenUrlResponse {
+            target: veld_core::ide::UrlTarget::System,
+            reason: Some("no Veld window is attached to this terminal right now".to_owned()),
+        };
+    }
+    let _ = session.control.send(ServerControl::OpenUrl { url });
+    debug!(session = %id, "routed a URL to a browser pane");
+    OpenUrlResponse {
+        target: veld_core::ide::UrlTarget::Pane,
+        reason: None,
+    }
+}
+
+/// What the `open` shim sends when its argument was a path rather than a URL.
+#[derive(Debug, serde::Deserialize)]
+struct OpenFileRequest {
+    /// An **absolute** path, already canonicalised by the CLI — it is the side that
+    /// knows the terminal's working directory, and `./deck.html` means nothing here.
+    path: String,
+}
+
+/// Longest path this accepts. `PATH_MAX` is 4096 on Linux and 1024 on macOS; the
+/// larger of the two is the only bound worth applying to a string that will be
+/// compared against a real path.
+const MAX_PATH_LEN: usize = 4096;
+
+/// `POST /api/pty/sessions/{id}/open-file` — show a local file in this terminal's
+/// window.
+///
+/// The sibling of [`open_url`], and deliberately *not* a widening of it. Nothing in
+/// the http(s)-only chain changes: this route turns a path into an ordinary
+/// `https://` URL on the file origin (see `files::url_for`) and hands that to the
+/// same [`push_to_pane`], so the frame on the socket still carries a
+/// [`veld_core::ide::CanonicalUrl`] and every guard downstream still sees a web URL.
+///
+/// # What the reply means, and when it stays quiet
+///
+/// `system` with **no reason** is the common answer and must print nothing: the shim
+/// asks about every bare argument somebody types, so `open notes.zip` and `open .`
+/// arrive here constantly. A reason is attached only when the file *was* one Veld
+/// would have shown and something stopped it — file serving not up, no window
+/// attached — because that is the case where a user is expecting a pane and needs to
+/// know why they got a browser.
+///
+/// CSRF-gated for the same reason [`open_url`] is: without it, any page could push a
+/// file of its choosing into a pane on the developer's machine.
+async fn open_file(
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<OpenFileRequest>,
+) -> Result<Json<OpenUrlResponse>, ApiError> {
+    check_csrf(&headers)
+        .map_err(|_| err(StatusCode::FORBIDDEN, "missing X-Veld-Request header"))?;
+    if !valid_session_id(&id) {
+        return Err(err(StatusCode::BAD_REQUEST, "invalid session id"));
+    }
+    if body.path.len() > MAX_PATH_LEN {
+        return Err(err(StatusCode::PAYLOAD_TOO_LARGE, "path is too long"));
+    }
+    let quiet = || {
+        Ok(Json(OpenUrlResponse {
+            target: veld_core::ide::UrlTarget::System,
+            reason: None,
+        }))
+    };
+
+    let session = SESSIONS
+        .lock()
+        .await
+        .get(&id)
+        .cloned()
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "no such terminal session"))?;
+    let db = open_db().map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "database error"))?;
+
+    // The worktree this terminal belongs to is the only root its files may come
+    // from. The session decides that, never the request — the same property the PTY
+    // ticket has, and what stops one project's terminal opening another's files.
+    let Some(worktree) = db
+        .get_worktree(session.worktree_id)
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?
+    else {
+        return quiet();
+    };
+    let Some(rel) = relative_within(&worktree.path, &body.path) else {
+        // Outside the worktree — a file in ~/Downloads, or another project's. The
+        // system opener is the honest answer and needs no explanation.
+        return quiet();
+    };
+    if !veld_core::files::is_viewable(&rel, &db.view_policy()) {
+        return quiet();
+    }
+    // Viewable, so from here on a failure is worth a sentence.
+    let Some(url) = super::files::url_for(&db, &worktree.path, &rel) else {
+        return Ok(Json(OpenUrlResponse {
+            target: veld_core::ide::UrlTarget::System,
+            reason: Some(
+                "veld cannot serve local files right now (the files.* route is not \
+                 registered — is the helper running?)"
+                    .to_owned(),
+            ),
+        }));
+    };
+    // Parsed rather than trusted, so the frame carries a `CanonicalUrl` built the
+    // one way that type can be built. A URL veld just composed failing this check
+    // is a bug in `url_for`, not a caller's problem, hence the 500.
+    let Some(web) = veld_core::ide::parse_web_url(&url) else {
+        return Err(err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "composed an unusable file URL",
+        ));
+    };
+    Ok(Json(push_to_pane(&session, &id, web.canonical)))
+}
+
+/// `path` expressed relative to `root`, or `None` if it is not inside it.
+///
+/// Both sides are canonicalised first, so a symlinked worktree path and a symlink
+/// *into* the worktree both resolve to the comparison that matters. A path that does
+/// not exist is `None` — the CLI has already confirmed it is a regular file, and a
+/// race that deletes it between the two is a file that cannot be shown either way.
+fn relative_within(root: &str, path: &str) -> Option<String> {
+    let root = std::path::Path::new(root).canonicalize().ok()?;
+    let full = std::path::Path::new(path).canonicalize().ok()?;
+    if !full.is_file() {
+        return None;
+    }
+    let rel = full.strip_prefix(&root).ok()?;
+    let rel = rel.to_str()?;
+    (!rel.is_empty()).then(|| rel.to_owned())
 }
 
 // ---------------------------------------------------------------------------
@@ -2739,7 +2862,7 @@ pub async fn track_helper_ports() {
 /// the privileged LaunchDaemon is down, which `veld doctor` has a check for. The
 /// mode is the fallback for the window before the first status lands, and for a
 /// daemon running with no helper at all.
-fn dashboard_ports() -> (u16, u16) {
+pub(crate) fn dashboard_ports() -> (u16, u16) {
     if let Some(ports) = *HELPER_WEB_PORTS.read().expect("helper ports poisoned") {
         return ports;
     }
@@ -2849,7 +2972,7 @@ fn management_origins_for(host: &str, ports: &[(&str, u16)]) -> Vec<String> {
 /// Built per request rather than cached: it is a handful of `format!`s on a
 /// path that already spawns a process, and the daemon's instance identity
 /// (port, management host) is read from the environment.
-fn allowed_origins() -> Vec<String> {
+pub(crate) fn allowed_origins() -> Vec<String> {
     allowed_origins_with(veld_core::instance::dev_trusted_origins())
 }
 
@@ -4067,6 +4190,62 @@ fn clamp_dimension(v: Option<u16>, default: u16) -> u16 {
 
 #[cfg(test)]
 mod tests {
+    /// A path is only a candidate if it is genuinely inside the session's worktree.
+    ///
+    /// The symlink case is the one worth a test: `..` never appears, so nothing
+    /// lexical catches it, and the canonicalisation on both sides is the whole guard.
+    #[test]
+    fn only_a_file_inside_the_worktree_becomes_a_relative_path() {
+        let root = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(root.path().join("notes")).unwrap();
+        std::fs::write(root.path().join("notes/deck.html"), "<h1>hi</h1>").unwrap();
+        let root_str = root.path().to_str().unwrap();
+
+        assert_eq!(
+            super::relative_within(
+                root_str,
+                root.path().join("notes/deck.html").to_str().unwrap()
+            )
+            .as_deref(),
+            Some("notes/deck.html")
+        );
+
+        // A directory is not a file to show — `open .` must reach the real tool.
+        assert_eq!(super::relative_within(root_str, root_str), None);
+        assert_eq!(
+            super::relative_within(root_str, root.path().join("notes").to_str().unwrap()),
+            None
+        );
+
+        // Somewhere else entirely: another project, or ~/Downloads.
+        let outside = tempfile::TempDir::new().unwrap();
+        let secret = outside.path().join("secret.html");
+        std::fs::write(&secret, "<h1>not yours</h1>").unwrap();
+        assert_eq!(
+            super::relative_within(root_str, secret.to_str().unwrap()),
+            None
+        );
+
+        // …and the same file reached through a symlink *inside* the worktree, which
+        // has no `..` in it at all.
+        #[cfg(unix)]
+        {
+            let link = root.path().join("escape.html");
+            std::os::unix::fs::symlink(&secret, &link).unwrap();
+            assert_eq!(
+                super::relative_within(root_str, link.to_str().unwrap()),
+                None,
+                "a symlink out of the worktree is not inside it"
+            );
+        }
+
+        // A path that does not exist at all.
+        assert_eq!(
+            super::relative_within(root_str, root.path().join("gone.html").to_str().unwrap()),
+            None
+        );
+    }
+
     /// The shell these fixtures spawn.
     ///
     /// **Deliberately not the machine's.** These are plumbing tests — sockets,

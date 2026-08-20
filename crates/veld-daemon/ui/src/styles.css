@@ -1924,6 +1924,10 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
    container's min-content, so at `MIN_RATIO` (a 15% dock) the pair overflowed the line
    the parent's wrap had just given it — and `.pane-chooser`'s `overflow-y: auto` forces
    `overflow-x: auto`, so that became a horizontal scrollbar across the whole chooser. */
+/* One flex child holding the heading's buttons, on both full-size screens. The
+   parent is `space-between`, so without this the *buttons* absorb the slack between
+   them instead of sitting together at the edge. */
+.start-head-actions,
 .chooser-head-actions {
   display: flex;
   flex-wrap: wrap;
@@ -3039,6 +3043,20 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
   border-radius: 9px;
   border: 1px solid var(--border);
   background: var(--panel2);
+}
+
+/* How long ago a file was last written, at the right-hand end of its row.
+   `flex-shrink: 0` and `white-space: nowrap` because this is the one part of the row
+   that must never be the thing that wraps or gets ellipsised: the path above it
+   already truncates, and an age reading "2 m…" is worse than no age at all.
+   Only a file row has one, so nothing else's layout moves. */
+.place-age {
+  flex: 0 0 auto;
+  white-space: nowrap;
+  font-size: 10.5px;
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
+  padding-inline: 2px;
 }
 
 .link-row:hover {

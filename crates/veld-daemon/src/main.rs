@@ -238,6 +238,11 @@ async fn main() -> Result<()> {
         });
     }
 
+    // Local files, on their own listener and their own origin — see
+    // `feedback_server::files`. Spawned rather than awaited: registering its Caddy
+    // route retries with backoff, and nothing else here waits on the helper.
+    tokio::spawn(feedback_server::files::start());
+
     // Collect stderr captures left by a previous daemon that was killed between
     // spawning a `veld` command and reaping it.
     feedback_server::management::sweep_spawn_logs();
@@ -336,6 +341,26 @@ async fn main() -> Result<()> {
         if let Ok(helper) = veld_core::helper::HelperClient::connect().await {
             let _ = helper.remove_route(&format!("veld-mgmt-{host}")).await;
         }
+    }
+
+    // And the file origin's route, for a stronger reason than the one above. The
+    // helper persists routes and replays them after a Caddy restart or a reboot, so
+    // one left behind keeps `files.veld.localhost` pointing at a port this process no
+    // longer holds. The listener's port is fixed and reserved
+    // (`instance::files_port`), which is what makes the leftover benign rather than a
+    // hostname another process can inherit — this removes it anyway, because the
+    // cheapest time to not need that argument is now.
+    // Gated on having actually registered one, like the management route above is
+    // gated on having a management host. Ungated, a daemon that never registered —
+    // not an addressable instance, or the port was squatted — still connects to the
+    // helper and issues a DELETE that Caddy refuses, taking its reload lock and
+    // logging an error for a route nobody made.
+    if feedback_server::files::is_ready()
+        && let Ok(helper) = veld_core::helper::HelperClient::connect().await
+    {
+        let _ = helper
+            .remove_route(&veld_core::instance::files_route_id())
+            .await;
     }
 
     // Terminal shells are deliberately **left running**. Their PTYs belong to
