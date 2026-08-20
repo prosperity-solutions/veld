@@ -625,7 +625,7 @@ pub async fn start() {
     }
     warn!(
         "local files will not open in a pane: could not register the {host} route \
-         (helper unreachable). `open <file>` falls through to your system browser."
+         (helper unreachable). `open <file>` falls through to your system opener."
     );
 }
 

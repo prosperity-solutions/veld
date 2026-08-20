@@ -92,7 +92,13 @@ pub async fn run(tool: Option<String>, session: Option<String>, args: Vec<String
         return 127;
     }
     if depth > 0 {
-        return passthrough(tool, &args, depth, Some("recursion guard"));
+        return passthrough(
+            tool,
+            &args,
+            depth,
+            Some("recursion guard"),
+            Fallback::Browser,
+        );
     }
 
     let url = match veld_core::opener::decide(tool, &args) {
@@ -105,20 +111,28 @@ pub async fn run(tool: Option<String>, session: Option<String>, args: Vec<String
         // Not a web page. This is the common case for the `open` shim and it must
         // be silent — a note on stderr for every `open .` would be noise in
         // somebody's shell.
-        Decision::Passthrough => return passthrough(tool, &args, depth, None),
+        Decision::Passthrough => return passthrough(tool, &args, depth, None, Fallback::Browser),
     };
 
     let Some(session) = session.or_else(session_id) else {
         // Run outside a Veld terminal — a plain shell, or a tool that scrubbed its
         // children's environment. There is no window to attribute the URL to, so
         // the system browser is the only honest answer.
-        return passthrough(tool, &args, depth, Some("not inside a Veld terminal"));
+        return passthrough(
+            tool,
+            &args,
+            depth,
+            Some("not inside a Veld terminal"),
+            Fallback::Browser,
+        );
     };
 
     match ask_daemon(&session, &url).await {
         Ok(Answer::Pane) => 0,
-        Ok(Answer::System(reason)) => passthrough(tool, &args, depth, reason.as_deref()),
-        Err(e) => passthrough(tool, &args, depth, Some(&e)),
+        Ok(Answer::System(reason)) => {
+            passthrough(tool, &args, depth, reason.as_deref(), Fallback::Browser)
+        }
+        Err(e) => passthrough(tool, &args, depth, Some(&e), Fallback::Browser),
     }
 }
 
@@ -141,7 +155,7 @@ async fn open_path(
     session: Option<String>,
 ) -> i32 {
     let Some(path) = canonical_file(raw) else {
-        return passthrough(tool, args, depth, None);
+        return passthrough(tool, args, depth, None, Fallback::Opener);
     };
     // Filtered here, before the round trip, for the kinds no setting could ever make
     // viewable. `servable_type` is a *capability* question — "is there a content type
@@ -152,20 +166,22 @@ async fn open_path(
     // five-second timeout before falling through, on a command people run dozens of
     // times a day.
     if veld_core::files::servable_type(&path).is_none() {
-        return passthrough(tool, args, depth, None);
+        return passthrough(tool, args, depth, None, Fallback::Opener);
     }
     // `--session` wins over the environment, exactly as it does for a URL: it is how
     // the flag is testable and how a caller outside a terminal names one.
     let Some(session) = session.or_else(session_id) else {
-        return passthrough(tool, args, depth, None);
+        return passthrough(tool, args, depth, None, Fallback::Opener);
     };
     match ask_daemon_file(&session, &path).await {
         Ok(Answer::Pane) => 0,
-        Ok(Answer::System(reason)) => passthrough(tool, args, depth, reason.as_deref()),
+        Ok(Answer::System(reason)) => {
+            passthrough(tool, args, depth, reason.as_deref(), Fallback::Opener)
+        }
         // A daemon that is down, wedged or answering nonsense is not something to
         // narrate on a command people run dozens of times a day. The file opens the
         // way it did before veld existed.
-        Err(_) => passthrough(tool, args, depth, None),
+        Err(_) => passthrough(tool, args, depth, None, Fallback::Opener),
     }
 }
 
@@ -289,10 +305,37 @@ fn child_browser(original: Option<std::ffi::OsString>) -> ChildBrowser {
     }
 }
 
+/// What the real tool will do with the argument, for the one sentence this prints.
+///
+/// A URL handed to `/usr/bin/open` opens a browser; a file handed to the same binary
+/// opens whatever that kind is registered to — an editor for `.md`, Preview for a PDF.
+/// One noun for both was wrong for whichever path it was not written for, and it is a
+/// user-facing string, so it gets a type rather than a guess.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Fallback {
+    Browser,
+    Opener,
+}
+
+impl Fallback {
+    fn noun(self) -> &'static str {
+        match self {
+            Self::Browser => "system browser",
+            Self::Opener => "system opener",
+        }
+    }
+}
+
 /// Hand the original arguments to the real tool, replacing this process.
 ///
 /// Returns only on failure — on success this process *is* the real tool.
-fn passthrough(tool: Tool, args: &[String], depth: u32, reason: Option<&str>) -> i32 {
+fn passthrough(
+    tool: Tool,
+    args: &[String],
+    depth: u32,
+    reason: Option<&str>,
+    fallback: Fallback,
+) -> i32 {
     let args = real_argv(args);
     let shim_dir = std::env::var_os("VELD_SHIM_DIR").map(std::path::PathBuf::from);
     let Some(real) = real_opener(tool, shim_dir.as_deref()) else {
@@ -306,7 +349,7 @@ fn passthrough(tool: Tool, args: &[String], depth: u32, reason: Option<&str>) ->
         // On stderr, and only when there is something to explain: "why did that
         // open in Safari" is otherwise unanswerable. Never on stdout — a shim runs
         // inside other tools' pipelines (AGENTS.md).
-        eprintln!("veld: opening in the system browser ({reason})");
+        eprintln!("veld: opening in the {} ({reason})", fallback.noun());
     }
 
     let mut cmd = std::process::Command::new(&real);
