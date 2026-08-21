@@ -126,6 +126,18 @@ pub fn url_for(db: &Db, root: &str, rel_path: &str) -> Option<String> {
     url_in(&origin(), &grant, rel_path)
 }
 
+/// The prefix every URL under one grant shares — `<origin>/<grant>/`.
+///
+/// One function rather than two `format!`s for the reason
+/// [`veld_core::percent::encode_component`] is one encoder: [`list_viewable`] reports
+/// this to the client as `root`, the client strips it back off to recover the path
+/// (`filePathIn` in `panes/model.ts`), and [`url_in`] builds the URLs it has to be a
+/// prefix of. Two spellings that agree today are two spellings that disagree after
+/// somebody edits one, and the failure is panes that silently stop watching.
+fn root_url(origin: &str, grant: &str) -> String {
+    format!("{origin}/{grant}/")
+}
+
 /// [`url_for`] with the origin and grant already resolved.
 ///
 /// Split out because a list of a hundred files needs both exactly once, and the
@@ -143,7 +155,7 @@ fn url_in(origin: &str, grant: &str, rel_path: &str) -> Option<String> {
         .map(veld_core::percent::encode_component)
         .collect::<Vec<_>>()
         .join("/");
-    Some(format!("{origin}/{grant}/{encoded}"))
+    Some(format!("{}{encoded}", root_url(origin, grant)))
 }
 
 /// A client-supplied relative path, reduced to a form safe to join.
@@ -237,8 +249,18 @@ struct ViewableFile {
 /// under. That is what lets a pane recognise a file URL it was *not* handed a path
 /// for — a relative link followed inside a deck, or a file opened by the `open` shim
 /// — and watch it. The client cannot derive it: the grant is opaque and the origin is
-/// not the one the bundle is served from. Nothing is disclosed by saying it out loud
-/// that the URLs in the same body do not already say.
+/// not the one the bundle is served from.
+///
+/// **This does hand the grant to a caller a row would not have.** A body with an
+/// empty `files` carried no grant before — an ordinary answer for a worktree with
+/// nothing viewable, or with `viewImages`/`viewPlainText` off — and the grant reaches
+/// more than the list does: rows are filtered by [`files::is_viewable`], while a read
+/// is only checked against `servable_type` and [`files::is_sensitive`], so it also
+/// fetches the `*.css`/`*.png`/`*.md` no row offers. It is disclosed anyway because
+/// reaching this route already means being a same-origin caller with the CSRF header,
+/// i.e. holding the whole management API — including `open-file`, which pushes a file
+/// of the caller's choosing into a pane. There is no `Access-Control-Allow-Origin`
+/// anywhere on this listener, so a page from another origin cannot read the body.
 async fn list_viewable(
     headers: axum::http::HeaderMap,
     axum::extract::Path(id): axum::extract::Path<i64>,
@@ -289,7 +311,7 @@ async fn list_viewable(
         })
         .collect();
     Ok(axum::Json(
-        serde_json::json!({ "ready": true, "files": files, "root": format!("{origin}/{grant}/") }),
+        serde_json::json!({ "ready": true, "files": files, "root": root_url(&origin, &grant) }),
     ))
 }
 
@@ -667,17 +689,18 @@ mod tests {
 
     #[test]
     fn every_url_starts_with_the_root_the_client_is_told() {
-        // `list_viewable` answers `root: "<origin>/<grant>/"`, and the pane decides
-        // "is this a local file, and which one" by stripping exactly that prefix
-        // (`filePathIn` in panes/model.ts). So the prefix has to be one URLs in the
-        // same body actually start with, and what is left has to be the path.
+        // `list_viewable` answers `root`, and the pane decides "is this a local file,
+        // and which one" by stripping exactly that prefix (`filePathIn` in
+        // panes/model.ts). So the prefix has to be one URLs in the same body actually
+        // start with, and what is left has to be the path.
         //
-        // Nothing ties those two spellings together but this test: change the shape
-        // `url_in` builds and panes stop watching — silently, because a URL that no
-        // longer matches simply reads as an ordinary web page.
+        // `root_url` is the only spelling of the prefix, so the handler and `url_in`
+        // cannot drift apart; what this pins is the other half — that a URL really is
+        // that prefix plus the path, and not the prefix plus something the client
+        // would have to know more to undo.
         let origin = "https://files.veld.localhost:18443";
         let grant = "a".repeat(32);
-        let root = format!("{origin}/{grant}/");
+        let root = root_url(origin, &grant);
         for rel in ["deck.html", "notes/deck.html", "a/b/c/slides.pdf"] {
             let url = url_in(origin, &grant, rel).expect("servable");
             let rest = url

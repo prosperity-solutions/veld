@@ -1980,7 +1980,7 @@ describe("a pane showing a local file", () => {
     expect(filePathIn(ROOT, `${ROOT}sibling.html`)).toBe("sibling.html");
     expect(filePathIn(ROOT, `${ROOT}a/b/c/slides.pdf`)).toBe("a/b/c/slides.pdf");
     // Percent-encoded per segment on the way out (`percent::encode_component`), so
-    // per segment on the way back in. `/` is encoded, so it cannot be smuggled.
+    // per segment on the way back in.
     expect(filePathIn(ROOT, `${ROOT}my%20notes/caf%C3%A9%20deck.html`)).toBe(
       "my notes/café deck.html",
     );
@@ -2011,7 +2011,18 @@ describe("a pane showing a local file", () => {
     // The daemon confines the path again, so this is defence in depth — but a
     // browser resolves `..` away before it reaches the wire, so anything that
     // arrives here spelling one is not a link somebody followed.
-    for (const bad of ["../outside.html", "a/../outside.html", "a//b.html", "%zz.html"]) {
+    for (const bad of [
+      "../outside.html",
+      "a/../outside.html",
+      "a//b.html",
+      "%zz.html",
+      // A percent-encoded separator hides a whole second path inside one segment,
+      // so the `..` check has to run on something that cannot contain one. These
+      // three returned "../outside.html", "/etc/passwd" and "a/../b.html".
+      "%2E%2E%2Foutside.html",
+      "%2Fetc%2Fpasswd",
+      "a%2F..%2Fb.html",
+    ]) {
       expect(filePathIn(ROOT, ROOT + bad), bad).toBeNull();
     }
   });

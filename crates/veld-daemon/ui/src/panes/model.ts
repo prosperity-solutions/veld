@@ -1027,10 +1027,13 @@ export function fileLabel(path: string): string {
  * - not under `root` — an ordinary web page, or another worktree's grant;
  * - nothing after the prefix, or a trailing `/` — a directory, which this origin
  *   does not serve;
- * - a segment that does not decode, or decodes to `..` or an empty string. The
- *   daemon confines the path again, so this is defence in depth — but a browser
- *   resolves `..` away before it ever reaches the wire, so any that survives here
- *   is not a link somebody followed.
+ * - a segment that does not decode, or decodes to `..`, to an empty string, or to
+ *   anything containing a `/`. The daemon confines the path again, so this is
+ *   defence in depth — but the `/` clause is what makes the `..` clause mean
+ *   anything: `%2E%2E%2Foutside.html` is one segment to `split("/")` and decodes
+ *   to `../outside.html`, so checking the decoded segment against `".."` alone
+ *   refused nothing. A browser resolves `..` away before it reaches the wire, so
+ *   whatever spells one here did not come from a link somebody followed.
  */
 export function filePathIn(
   root: string | null | undefined,
@@ -1050,6 +1053,8 @@ export function filePathIn(
       return null;
     }
     if (segment === "" || segment === "." || segment === "..") return null;
+    // A decoded separator is a second path inside one segment — see the docstring.
+    if (segment.includes("/")) return null;
     segments.push(segment);
   }
   return segments.join("/");

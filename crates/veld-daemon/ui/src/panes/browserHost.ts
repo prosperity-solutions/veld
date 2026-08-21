@@ -1226,8 +1226,9 @@ const shownFileMtimes = new Map<string, { path: string; mtimeMs: number }>();
  * version keyed on the pane alone and exported a `forgetShownFileMtime` that nothing
  * ever called, so navigating a pane from file A to file B inherited A's timestamp — and
  * the effect's first poll saw a difference and reloaded a page that had only just
- * loaded. A mismatched path now reads as "no baseline", which is the same
- * staleness-as-a-value shape as `PaneTab.file` itself.
+ * loaded. A mismatched path now reads as "no baseline" — which is what makes
+ * following a link safe, since the path a pane is watching is read out of its URL
+ * (`filePathIn` in `model.ts`) and changes without anything being cleared.
  */
 export function shownFileMtime(id: string, path: string): number | null {
   const seen = shownFileMtimes.get(id);

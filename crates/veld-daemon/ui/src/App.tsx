@@ -1053,8 +1053,20 @@ function AppInner(props: {
           // `serving: true` on a failed request, deliberately: the daemon never
           // answered, so "veld cannot serve files" would be a claim about something
           // this client did not learn. An unreachable daemon has louder surfaces.
+          //
+          // The root this worktree already answered is kept for the same reason, and
+          // it matters more: it is what a file pane watches by, and dropping it stops
+          // the reload loop until a later poll succeeds — which, with polling skipped
+          // while the document is hidden, can be a long time with nothing on screen
+          // saying so. A grant is per worktree and persisted, so a remembered root
+          // cannot go stale under the worktree it was answered for.
           if (live)
-            setFilesFor({ worktreeId: id, files: [], serving: true, root: null });
+            setFilesFor((prev) => ({
+              worktreeId: id,
+              files: [],
+              serving: true,
+              root: prev?.worktreeId === id ? prev.root : null,
+            }));
         });
     };
     load();

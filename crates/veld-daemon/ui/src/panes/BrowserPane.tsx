@@ -292,8 +292,8 @@ export function BrowserPane(props: {
    *  says a URL in this pane is a local file, and turns it back into a path. Null
    *  while the list is still loading, or when the daemon cannot serve files. */
   filesRoot: string | null;
-  /** `files.watchByDefault`: whether a pane opened on a file starts out watching
-   *  it. Each pane can override this for itself. */
+  /** `files.watchByDefault`: whether a pane showing a local file watches it.
+   *  Each pane can override this for itself. */
   watchFilesByDefault: boolean;
   /** Why there are none — only the app knows (no run, or no veld.json). */
   urlsEmptyHint: string;
@@ -851,6 +851,11 @@ export function BrowserPane(props: {
     const target = navigateBrowser(id, raw, opts);
     if (target) {
       setDraft(target);
+      // A destination the user chose retires this pane's watch override: it answers
+      // "not this file, not right now", and the answer does not carry to a file they
+      // then went and picked. A *link* followed inside the page does not come through
+      // here, which is exactly the difference that matters.
+      setWatchOverride(null);
       // The title only when the caller has one — a picked place knows its service
       // name, which beats the hostname the page will report.
       onTab({
@@ -909,33 +914,46 @@ export function BrowserPane(props: {
    */
   const file = filePathIn(props.filesRoot, tab.url);
   /**
-   * This pane's own answer, overriding the setting — **for one file**.
+   * This pane's own answer, overriding the setting. `null` defers to the setting.
    *
-   * `null` means "whatever the setting says". Not persisted: it answers "not right
-   * now, I am presenting this", which is about the next few minutes rather than a
-   * preference, and a stored override would silently outlive the reason for it.
+   * Not persisted: it answers "not right now, I am presenting this", which is about
+   * the next few minutes rather than a preference, and a stored override would
+   * silently outlive the reason for it.
    *
-   * It carries the path it was chosen for, and a mismatch reads as no override. What
-   * it overrides is per-*file*, so a pane-scoped flag was wrong in a way nothing
-   * announced: turn watching off for deck A, open deck B in the same pane, and B was
-   * silently unwatched with the setting on. Staleness as a value, the same shape
-   * `file` above has — no effect resets this, because an effect that resets state runs
-   * a frame after the render that used the stale value.
+   * **Cleared by a deliberate open, not by arriving at a different file.** It used to
+   * carry the path it was chosen for, so any file but that one read as no override —
+   * correct while picking a file was the only way to change one, and wrong the moment
+   * the watch started following links: turning watching off and clicking through to
+   * the next deck re-armed it at the default and reloaded the deck under the
+   * presenter. Clearing it in {@link go} instead keeps the case that reasoning was
+   * written for (pick deck B in this pane and it is watched again, setting willing)
+   * without breaking the one the override exists for. That reset is a value written
+   * in the same event as the navigation, never an effect — an effect that resets
+   * state runs a frame after the render that used the stale value.
    */
-  const [watchOverride, setWatchOverride] = useState<{
-    path: string;
-    on: boolean;
-  } | null>(null);
-  const override =
-    watchOverride && file && watchOverride.path === file
-      ? watchOverride.on
-      : null;
-  const watching = file !== null && (override ?? props.watchFilesByDefault);
+  const [watchOverride, setWatchOverride] = useState<boolean | null>(null);
+  const watching = file !== null && (watchOverride ?? props.watchFilesByDefault);
+
+  /**
+   * When the last poll went out, so a page cannot set the poll rate.
+   *
+   * The path comes out of the URL now, and a page served from the file origin is
+   * agent-authored HTML — the prompt-injectable content this whole feature's
+   * threat model is about (`veld-daemon/src/files.rs`). It is same-origin with
+   * itself, so `history.pushState` lets it rename its own URL as fast as it likes,
+   * and every *new* path restarts the effect below with an immediate poll. The
+   * requests stay confined (the daemon resolves and re-checks every path), but the
+   * rate would be the page's to choose. This makes the leading-edge poll wait out
+   * the remainder of the interval instead, which costs nothing when a person opens
+   * a file: the first poll only establishes the baseline.
+   */
+  const lastPoll = useRef(0);
 
   useEffect(() => {
     if (!watching || !file) return;
     let cancelled = false;
     const check = async () => {
+      lastPoll.current = Date.now();
       try {
         const stat = await api.fileStat(props.worktreeId, file);
         if (cancelled) return;
@@ -954,10 +972,12 @@ export function BrowserPane(props: {
         // reloads a moment late.
       }
     };
-    void check();
+    const wait = Math.max(0, FILE_WATCH_INTERVAL_MS - (Date.now() - lastPoll.current));
+    const first = window.setTimeout(check, wait);
     const timer = setInterval(check, FILE_WATCH_INTERVAL_MS);
     return () => {
       cancelled = true;
+      window.clearTimeout(first);
       clearInterval(timer);
     };
   }, [watching, file, props.worktreeId, id]);
@@ -1290,7 +1310,7 @@ export function BrowserPane(props: {
               }
               aria-pressed={watching}
               onClick={() =>
-                file && setWatchOverride({ path: file, on: !watching })
+                file && setWatchOverride(!watching)
               }
             >
               <IconLivePhoto size={14} />

@@ -936,6 +936,11 @@ export interface ViewableFiles {
    * turn it back into the worktree-relative path `fileStat` takes. It cannot be
    * derived here: the grant is opaque and the file origin is not this page's. See
    * `filePathIn` in `panes/model.ts`.
+   *
+   * It is a capability, not a label: it reads every *servable* file in the worktree,
+   * which is more than the rows above (they are filtered to the *viewable* kinds).
+   * Why that is disclosed to a caller of this route is argued where it is answered,
+   * in `list_viewable` (`veld-daemon/src/files.rs`).
    */
   root: string | null;
 }

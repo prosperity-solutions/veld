@@ -335,7 +335,7 @@ export function PaneArea(props: {
   /** `ViewableFiles.root`: the `<origin>/<grant>/` prefix that identifies this
    *  worktree's file URLs, so a pane can watch whichever file it is showing. */
   filesRoot: string | null;
-  /** `files.watchByDefault` — whether a pane opened on a file starts watching it. */
+  /** `files.watchByDefault` — whether a pane showing a local file watches it. */
   watchFilesByDefault: boolean;
   /** Pane types the project declares in `ide.panes`. */
   panes: PaneSpec[];
@@ -1180,7 +1180,7 @@ function DockView(props: {
   /** `ViewableFiles.root`: the `<origin>/<grant>/` prefix that identifies this
    *  worktree's file URLs, so a pane can watch whichever file it is showing. */
   filesRoot: string | null;
-  /** `files.watchByDefault` — whether a pane opened on a file starts watching it. */
+  /** `files.watchByDefault` — whether a pane showing a local file watches it. */
   watchFilesByDefault: boolean;
   /** Pane types the project declares in `ide.panes`. */
   panes: PaneSpec[];

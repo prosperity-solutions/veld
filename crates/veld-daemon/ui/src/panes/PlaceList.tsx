@@ -148,9 +148,11 @@ export function PlaceList(props: {
   /**
    * Open this place, in the pane the list is being shown in.
    *
-   * `path` travels only for a local file, and it is what lets the opened pane watch
-   * that file — see `PaneTab.file`. A caller that ignores it gets a pane that shows
-   * the file and does not reload it, which is a degradation rather than a break.
+   * `path` travels only for a local file, and it is the row's *label* source
+   * (`fileLabel`) — the file's name beats the hostname a file URL would otherwise be
+   * named after. It is no longer what makes the pane watch the file: that is read
+   * back out of the pane's URL (`filePathIn`), so a caller that ignores `path` gets a
+   * pane that watches correctly under a worse name.
    */
   onOpen: (url: string, title?: string, path?: string) => void;
   /** Why there are no places, which only the app knows (no run, or no veld.json). */
