@@ -1008,6 +1008,10 @@ function AppInner(props: {
     files: ViewableFile[];
     /** The daemon's own answer about whether it can serve files at all. */
     serving: boolean;
+    /** The `<origin>/<grant>/` prefix this worktree's file URLs are under, or null
+     *  when the daemon cannot serve files. A pane needs it to recognise the file it
+     *  is showing — see `filePathIn`. */
+    root: string | null;
   } | null>(null);
   // Which settings the scan's answer depends on, as a stable string. A dependency on
   // the settings *document* would refetch on every unrelated preference write; a
@@ -1034,7 +1038,12 @@ function AppInner(props: {
           // Stamped with the worktree it is about, so a response that arrives after
           // the selection moved on is ignored by the render rather than shown.
           if (live)
-            setFilesFor({ worktreeId: id, files: res.files, serving: res.ready });
+            setFilesFor({
+              worktreeId: id,
+              files: res.files,
+              serving: res.ready,
+              root: res.root,
+            });
         })
         // An empty list for *this* worktree, silently. The surfaces that show it
         // have their own empty hint, and a toast for a list nobody asked for is
@@ -1044,7 +1053,24 @@ function AppInner(props: {
           // `serving: true` on a failed request, deliberately: the daemon never
           // answered, so "veld cannot serve files" would be a claim about something
           // this client did not learn. An unreachable daemon has louder surfaces.
-          if (live) setFilesFor({ worktreeId: id, files: [], serving: true });
+          //
+          // The root this worktree already answered is kept for the same reason, and
+          // it matters more: it is what a file pane watches by, and dropping it stops
+          // the reload loop until a later poll succeeds — which, with polling skipped
+          // while the document is hidden, can be a long time with nothing on screen
+          // saying so. Best-effort, and only that: the id compared here is the row's,
+          // and row ids are reused when a worktree is deleted and another created
+          // (`db/kv.rs`), while the grant is keyed on the worktree's *path*. The
+          // window needs a delete of the selected worktree, and `file-stat` confines
+          // every path to the row's own worktree server-side, so the worst outcome is
+          // a 404 until the next poll answers.
+          if (live)
+            setFilesFor((prev) => ({
+              worktreeId: id,
+              files: [],
+              serving: true,
+              root: prev?.worktreeId === id ? prev.root : null,
+            }));
         });
     };
     load();
@@ -1085,6 +1111,12 @@ function AppInner(props: {
   // Assumed available until the daemon says otherwise, so a list that is merely still
   // loading never accuses the helper of being down.
   const viewableFilesServing = filesReady ? filesFor.serving : true;
+  // Null until this worktree's list has answered, which is the honest state: a pane
+  // showing a file is simply not watching it for the first moment after a restore,
+  // and the poll starts as soon as the root arrives. Not carried over from the
+  // previous worktree — a grant is per worktree, and the wrong one would make a
+  // pane's URL look like an ordinary web page.
+  const viewableFilesRoot = filesReady ? filesFor.root : null;
 
   // Refetched when the selection changes, and cleared first so a pane in the
   // new worktree can never be judged against the previous one's tokens — that
@@ -5688,6 +5720,7 @@ function AppInner(props: {
             files={viewableFiles}
             filesLoading={viewableFilesLoading}
             filesServing={viewableFilesServing}
+            filesRoot={viewableFilesRoot}
             watchFilesByDefault={watchFilesByDefault}
             panes={worktree.ide.panes}
             paneSessions={paneSessions}
@@ -5960,6 +5993,7 @@ function AppInner(props: {
               files={viewableFiles}
               filesLoading={viewableFilesLoading}
               filesServing={viewableFilesServing}
+              filesRoot={viewableFilesRoot}
               watchFilesByDefault={watchFilesByDefault}
               panes={worktree.ide.panes}
               paneSessions={paneSessions}

@@ -57,6 +57,7 @@ import {
   type PaneTab,
   browserProfileLabel,
   fileLabel,
+  filePathIn,
   resolveAddress,
   urlForProfile,
   urlLabel,
@@ -138,7 +139,9 @@ import {
   previewBrowserResize,
   noteShownFileMtime,
   reloadBrowser,
+  setWatchOverride,
   shownFileMtime,
+  watchOverride,
   requestPermissionSettings,
   setBrowserEmulation,
   setBrowserMedia,
@@ -287,8 +290,12 @@ export function BrowserPane(props: {
   filesServing: boolean;
   /** Which worktree this pane belongs to — the file-stat route is scoped to it. */
   worktreeId: number;
-  /** `files.watchByDefault`: whether a pane opened on a file starts out watching
-   *  it. Each pane can override this for itself. */
+  /** `ViewableFiles.root` for this worktree: the `<origin>/<grant>/` prefix that
+   *  says a URL in this pane is a local file, and turns it back into a path. Null
+   *  while the list is still loading, or when the daemon cannot serve files. */
+  filesRoot: string | null;
+  /** `files.watchByDefault`: whether a pane showing a local file watches it.
+   *  Each pane can override this for itself. */
   watchFilesByDefault: boolean;
   /** Why there are none — only the app knows (no run, or no veld.json). */
   urlsEmptyHint: string;
@@ -842,24 +849,20 @@ export function BrowserPane(props: {
   };
 
   /** Navigate, and record where the pane ended up. */
-  const go = (
-    raw: string,
-    opts: { force?: boolean; title?: string; path?: string } = {},
-  ) => {
+  const go = (raw: string, opts: { force?: boolean; title?: string } = {}) => {
     const target = navigateBrowser(id, raw, opts);
     if (target) {
       setDraft(target);
+      // A destination the user chose retires this pane's watch override: it answers
+      // "not this file, not right now", and the answer does not carry to a file they
+      // then went and picked. A *link* followed inside the page does not come through
+      // here, which is exactly the difference that matters.
+      setWatchOverride(id, null);
       // The title only when the caller has one — a picked place knows its service
       // name, which beats the hostname the page will report.
-      //
-      // `file` is written on every navigation, as a value rather than only when
-      // there is one: going *from* a file *to* an ordinary page has to clear the
-      // marker, and a conditional write would leave the pane watching a file it no
-      // longer shows. `undefined` is the cleared state — see `PaneTab.file`.
       onTab({
         url: target,
         ...(opts.title ? { title: opts.title } : {}),
-        file: opts.path ? { path: opts.path, url: target } : undefined,
       });
     }
     // Whatever happened, the panel's work is done: on success the page is loading,
@@ -888,7 +891,6 @@ export function BrowserPane(props: {
     if (picked) {
       go(picked.url, {
         title: picked.path ? fileLabel(picked.path) : picked.title,
-        path: picked.path,
       });
       return;
     }
@@ -902,44 +904,63 @@ export function BrowserPane(props: {
   // ---- Watching a local file ---------------------------------------------
 
   /**
-   * The local file this pane is showing, or `null`.
+   * The worktree-relative path this pane is showing, or `null` for anything that
+   * is not a local file.
    *
-   * The `url` comparison is the whole staleness check: click a link inside a deck
-   * and `did-navigate` writes the new `url` without touching `file`, so the marker
-   * stops matching and the watcher stops — no effect, no cleanup step, nothing to
-   * forget. See `PaneTab.file`.
+   * Read out of the URL rather than remembered from how the pane was opened
+   * (`filePathIn`), which is what makes a *linked* file watchable: click through
+   * from one deck to the next and this follows, with nothing written on navigation
+   * and nothing to clear. `tab.url` and not `state.url` because that is the field
+   * the persistence effect above keeps — and the one a restored pane has before
+   * its view has reported anything.
    */
-  const file = tab.file && tab.file.url === tab.url ? tab.file : null;
+  const file = filePathIn(props.filesRoot, tab.url);
   /**
-   * This pane's own answer, overriding the setting — **for one file**.
+   * This pane's own answer, overriding the setting. `null` defers to the setting.
    *
-   * `null` means "whatever the setting says". Not persisted: it answers "not right
-   * now, I am presenting this", which is about the next few minutes rather than a
-   * preference, and a stored override would silently outlive the reason for it.
+   * Lives in `browserHost` beside the view it belongs to, not in state — see
+   * `watchOverride` there for why a remount must not drop it.
    *
-   * It carries the path it was chosen for, and a mismatch reads as no override. What
-   * it overrides is per-*file*, so a pane-scoped flag was wrong in a way nothing
-   * announced: turn watching off for deck A, open deck B in the same pane, and B was
-   * silently unwatched with the setting on. Same staleness-as-a-value shape as
-   * `PaneTab.file` itself — no effect resets this, because an effect that resets state
+   * **Retired by a deliberate open, not by arriving at a different file.** It used to
+   * carry the path it was chosen for, so any file but that one read as no override —
+   * correct while picking a file was the only way to change one, and wrong the moment
+   * the watch started following links: turning watching off and clicking through to
+   * the next deck re-armed it at the default and reloaded the deck under the
+   * presenter. Retiring it in {@link go} instead keeps the case that reasoning was
+   * written for (pick deck B in this pane and it is watched again, setting willing)
+   * without breaking the one the override exists for. That reset is written in the
+   * same event as the navigation, never in an effect — an effect that resets state
    * runs a frame after the render that used the stale value.
    */
-  const [watchOverride, setWatchOverride] = useState<{
-    path: string;
-    on: boolean;
-  } | null>(null);
-  const override =
-    watchOverride && file && watchOverride.path === file.path
-      ? watchOverride.on
-      : null;
+  const override = watchOverride(id);
   const watching = file !== null && (override ?? props.watchFilesByDefault);
+
+  /**
+   * When the last poll went out, so a page cannot set the poll rate.
+   *
+   * The path comes out of the URL now, and a page served from the file origin is
+   * agent-authored HTML — the prompt-injectable content this whole feature's
+   * threat model is about (`veld-daemon/src/files.rs`). It is same-origin with
+   * itself, so `history.pushState` lets it rename its own URL as fast as it likes,
+   * and every *new* path restarts the effect below with an immediate poll. The
+   * requests stay confined (the daemon resolves and re-checks every path), but the
+   * rate would be the page's to choose. This makes the leading-edge poll wait out
+   * the remainder of the interval instead, which costs nothing when a person opens
+   * a file: the first poll only establishes the baseline.
+   *
+   * Per mount, not per pane — a tab switch re-grants an immediate poll. That is a
+   * person clicking, which no page can make happen, so the bound still holds against
+   * the thing it is for.
+   */
+  const lastPoll = useRef(0);
 
   useEffect(() => {
     if (!watching || !file) return;
     let cancelled = false;
     const check = async () => {
+      lastPoll.current = Date.now();
       try {
-        const stat = await api.fileStat(props.worktreeId, file.path);
+        const stat = await api.fileStat(props.worktreeId, file);
         if (cancelled) return;
         // The baseline lives in `browserHost`, beside the view it describes, **not** in
         // this effect. This component unmounts whenever its tab is not the active one
@@ -947,23 +968,31 @@ export function BrowserPane(props: {
         // re-seeded on every remount — and a file rewritten while the tab sat in the
         // background was never noticed. Absent means "no baseline yet", which is how
         // arriving on a file avoids reloading it immediately.
-        const shown = shownFileMtime(id, file.path);
+        const shown = shownFileMtime(id, file);
         if (shown !== null && stat.mtimeMs !== shown) reloadBrowser(id);
-        noteShownFileMtime(id, file.path, stat.mtimeMs);
+        noteShownFileMtime(id, file, stat.mtimeMs);
       } catch {
         // A file mid-write, deleted, or a daemon restarting. Silent on purpose:
         // this runs on a timer, and a toast per second is worse than a pane that
         // reloads a moment late.
       }
     };
-    void check();
-    const timer = setInterval(check, FILE_WATCH_INTERVAL_MS);
+    // One schedule, not two: the interval starts *after* the leading poll, so the
+    // gap between any two polls is the interval. Starting it beside the timeout
+    // anchored it at effect-setup time instead, and the two could then fire a
+    // millisecond apart — twice the rate the comment above claims to bound.
+    const wait = Math.max(0, FILE_WATCH_INTERVAL_MS - (Date.now() - lastPoll.current));
+    let timer = 0;
+    const first = window.setTimeout(() => {
+      void check();
+      timer = window.setInterval(check, FILE_WATCH_INTERVAL_MS);
+    }, wait);
     return () => {
       cancelled = true;
-      clearInterval(timer);
+      window.clearTimeout(first);
+      window.clearInterval(timer);
     };
-    // `file.path` rather than `file`: the object is rebuilt on every render.
-  }, [watching, file?.path, props.worktreeId, id]);
+  }, [watching, file, props.worktreeId, id]);
 
   // ---- Device emulation and zoom -----------------------------------------
   //
@@ -1293,7 +1322,7 @@ export function BrowserPane(props: {
               }
               aria-pressed={watching}
               onClick={() =>
-                file && setWatchOverride({ path: file.path, on: !watching })
+                file && (setWatchOverride(id, !watching), bump())
               }
             >
               <IconLivePhoto size={14} />
@@ -2445,7 +2474,7 @@ export function BrowserPane(props: {
                 listboxId={suggestId(id)}
                 emptyHint={props.urlsEmptyHint}
                 onOpen={(url, title, path) =>
-                go(url, { title: path ? fileLabel(path) : title, path })
+                go(url, { title: path ? fileLabel(path) : title })
               }
               />
               {/* A sibling of the list, never a child of it: that list is the listbox
@@ -2604,7 +2633,7 @@ export function BrowserPane(props: {
                 activeIndex={active}
                 emptyHint={props.urlsEmptyHint}
                 onOpen={(url, title, path) =>
-                go(url, { title: path ? fileLabel(path) : title, path })
+                go(url, { title: path ? fileLabel(path) : title })
               }
               />
             </div>
@@ -2709,7 +2738,7 @@ export function BrowserPane(props: {
         onClose={() => setFilesOpen(false)}
         onOpen={(url, title, path) => {
           setFilesOpen(false);
-          go(url, { title: path ? fileLabel(path) : title, path });
+          go(url, { title: path ? fileLabel(path) : title });
         }}
       />
 

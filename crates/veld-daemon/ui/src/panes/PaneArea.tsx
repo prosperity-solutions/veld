@@ -332,7 +332,10 @@ export function PaneArea(props: {
   /** Whether the daemon can serve local files at all — false when its Caddy route is
    *  not registered. Distinguishes "nothing here" from "nothing can be here". */
   filesServing: boolean;
-  /** `files.watchByDefault` — whether a pane opened on a file starts watching it. */
+  /** `ViewableFiles.root`: the `<origin>/<grant>/` prefix that identifies this
+   *  worktree's file URLs, so a pane can watch whichever file it is showing. */
+  filesRoot: string | null;
+  /** `files.watchByDefault` — whether a pane showing a local file watches it. */
   watchFilesByDefault: boolean;
   /** Pane types the project declares in `ide.panes`. */
   panes: PaneSpec[];
@@ -1063,6 +1066,7 @@ export function PaneArea(props: {
               files={props.files}
               filesLoading={props.filesLoading}
             filesServing={props.filesServing}
+              filesRoot={props.filesRoot}
               watchFilesByDefault={props.watchFilesByDefault}
               panes={props.panes}
               paneSessions={props.paneSessions}
@@ -1173,7 +1177,10 @@ function DockView(props: {
   /** Whether the daemon can serve local files at all — false when its Caddy route is
    *  not registered. Distinguishes "nothing here" from "nothing can be here". */
   filesServing: boolean;
-  /** `files.watchByDefault` — whether a pane opened on a file starts watching it. */
+  /** `ViewableFiles.root`: the `<origin>/<grant>/` prefix that identifies this
+   *  worktree's file URLs, so a pane can watch whichever file it is showing. */
+  filesRoot: string | null;
+  /** `files.watchByDefault` — whether a pane showing a local file watches it. */
   watchFilesByDefault: boolean;
   /** Pane types the project declares in `ide.panes`. */
   panes: PaneSpec[];
@@ -1635,6 +1642,7 @@ function DockView(props: {
             files={props.files}
             filesLoading={props.filesLoading}
             filesServing={props.filesServing}
+            filesRoot={props.filesRoot}
             worktreeId={props.worktreeId}
             watchFilesByDefault={props.watchFilesByDefault}
             urlsEmptyHint={props.urlsEmptyHint}
@@ -1834,7 +1842,7 @@ function PaneChooser(props: {
           emptyHint={props.urlsEmptyHint}
           onOpen={(url, title, path) =>
             props.onBrowser(
-              browserTab({ url, title: path ? fileLabel(path) : title, path }),
+              browserTab({ url, title: path ? fileLabel(path) : title }),
             )
           }
         />
@@ -1856,7 +1864,7 @@ function PaneChooser(props: {
         onOpen={(url, title, path) => {
           setFilesOpen(false);
           props.onBrowser(
-            browserTab({ url, title: path ? fileLabel(path) : title, path }),
+            browserTab({ url, title: path ? fileLabel(path) : title }),
           );
         }}
       />

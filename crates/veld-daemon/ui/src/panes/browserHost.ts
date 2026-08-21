@@ -1226,8 +1226,9 @@ const shownFileMtimes = new Map<string, { path: string; mtimeMs: number }>();
  * version keyed on the pane alone and exported a `forgetShownFileMtime` that nothing
  * ever called, so navigating a pane from file A to file B inherited A's timestamp — and
  * the effect's first poll saw a difference and reloaded a page that had only just
- * loaded. A mismatched path now reads as "no baseline", which is the same
- * staleness-as-a-value shape as `PaneTab.file` itself.
+ * loaded. A mismatched path now reads as "no baseline" — which is what makes
+ * following a link safe, since the path a pane is watching is read out of its URL
+ * (`filePathIn` in `model.ts`) and changes without anything being cleared.
  */
 export function shownFileMtime(id: string, path: string): number | null {
   const seen = shownFileMtimes.get(id);
@@ -1239,6 +1240,33 @@ export function noteShownFileMtime(id: string, path: string, mtimeMs: number): v
   shownFileMtimes.set(id, { path, mtimeMs });
 }
 
+/**
+ * Panes whose own answer overrides `files.watchByDefault`, by pane id.
+ *
+ * Out here for the same reason the baseline above is: `BrowserPane` unmounts
+ * whenever its tab is not the active one in its dock, while the view keeps its
+ * page. In component state this answered "not right now, I am presenting this"
+ * only until you looked at the neighbouring tab and back — after which watching
+ * re-armed at the default and the deck reloaded under the presenter, which is the
+ * whole thing the override exists to prevent.
+ *
+ * Not persisted, deliberately: it is a statement about the next few minutes, and a
+ * stored one would outlive the reason for it. Dropped with the view in
+ * `disposeBrowser`, which is what "this pane" means.
+ */
+const watchOverrides = new Map<string, boolean>();
+
+/** This pane's own watch answer, or `null` to defer to the setting. */
+export function watchOverride(id: string): boolean | null {
+  return watchOverrides.get(id) ?? null;
+}
+
+/** Set or (with `null`) retire this pane's own watch answer. */
+export function setWatchOverride(id: string, on: boolean | null): void {
+  if (on === null) watchOverrides.delete(id);
+  else watchOverrides.set(id, on);
+}
+
 export function disposeBrowser(id: string): void {
   const v = views.get(id);
   if (!v) return;
@@ -1247,6 +1275,7 @@ export function disposeBrowser(id: string): void {
   v.listeners.clear();
   views.delete(id);
   shownFileMtimes.delete(id);
+  watchOverrides.delete(id);
   v.shellHasView = false;
   if (desktop) void desktop.destroy(id).catch(() => {});
 }
