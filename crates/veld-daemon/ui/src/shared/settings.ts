@@ -379,7 +379,7 @@ export function quickSwitchPrefs(doc: SettingsDoc): QuickSwitchPrefs {
 }
 
 /**
- * Whether a pane opened on a local file watches it and reloads on a change.
+ * Whether a pane showing a local file watches it and reloads on a change.
  *
  * The default only — each pane's toolbar overrides it for itself, and that override
  * is deliberately not stored: it answers "not right now, I am presenting this",

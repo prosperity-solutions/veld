@@ -22,6 +22,7 @@ import {
   browserTab,
   configPaneTab,
   fileLabel,
+  filePathIn,
   paneAnswerFor,
   startPlanFor,
   takePendingStart,
@@ -1954,8 +1955,10 @@ describe("revealDiagPane", () => {
   });
 });
 
-describe("a pane opened on a local file", () => {
-  const URL = "https://files.veld.localhost/abc/notes/deck.html";
+describe("a pane showing a local file", () => {
+  /** What the daemon reports as `ViewableFiles.root` — origin plus grant. */
+  const ROOT = "https://files.veld.localhost/abc/";
+  const URL = `${ROOT}notes/deck.html`;
 
   it("is named after the file, not the host or the path", () => {
     // `urlLabel` would call every file pane `files.veld.localhost`, and the
@@ -1969,77 +1972,87 @@ describe("a pane opened on a local file", () => {
     expect(fileLabel("trailing/")).toBe("trailing");
   });
 
-  it("records the marker with the URL it was opened at", () => {
-    const tab = browserTab({ url: URL, title: "deck.html", path: "notes/deck.html" });
-    expect(tab.file).toEqual({ path: "notes/deck.html", url: URL });
+  it("is the file it is showing, read out of the URL", () => {
+    // The whole point: a pane watches whichever file it is *at*, so following a
+    // relative link from one deck to the next moves the watch with it. Nothing is
+    // written on navigation, so there is nothing to leave stale.
+    expect(filePathIn(ROOT, URL)).toBe("notes/deck.html");
+    expect(filePathIn(ROOT, `${ROOT}sibling.html`)).toBe("sibling.html");
+    expect(filePathIn(ROOT, `${ROOT}a/b/c/slides.pdf`)).toBe("a/b/c/slides.pdf");
+    // Percent-encoded per segment on the way out (`percent::encode_component`), so
+    // per segment on the way back in. `/` is encoded, so it cannot be smuggled.
+    expect(filePathIn(ROOT, `${ROOT}my%20notes/caf%C3%A9%20deck.html`)).toBe(
+      "my notes/café deck.html",
+    );
   });
 
-  it("has no marker without a path, and none without a usable URL", () => {
-    expect(browserTab({ url: URL }).file).toBeUndefined();
-    // A refused URL leaves no `url` on the tab, so a marker would point at
-    // nothing — `sanitizeFile` would then refuse it on the way back in anyway.
-    expect(browserTab({ url: "javascript:alert(1)", path: "x.html" }).file)
-      .toBeUndefined();
+  it("stays on the same file across a query or a fragment", () => {
+    // A deck that routes slides through the hash reports a new URL for every
+    // slide. That is the same bytes on disk, and a watch that stopped there would
+    // stop the moment somebody started presenting.
+    expect(filePathIn(ROOT, `${URL}#/3`)).toBe("notes/deck.html");
+    expect(filePathIn(ROOT, `${URL}?print-pdf`)).toBe("notes/deck.html");
+    expect(filePathIn(ROOT, `${URL}?v=2#slide-1`)).toBe("notes/deck.html");
   });
 
-  it("survives a round trip through storage", () => {
+  it("is nothing for a URL that is not a file this worktree serves", () => {
+    // An ordinary page, another worktree's grant, and the prefix itself.
+    expect(filePathIn(ROOT, "https://app.dev.veld.localhost/")).toBeNull();
+    expect(filePathIn(ROOT, "https://files.veld.localhost/other/deck.html")).toBeNull();
+    expect(filePathIn(ROOT, ROOT)).toBeNull();
+    // A directory: this origin serves files, and there is no index to watch.
+    expect(filePathIn(ROOT, `${ROOT}notes/`)).toBeNull();
+    // No root yet (the list has not answered) and no URL yet (a fresh pane).
+    expect(filePathIn(null, URL)).toBeNull();
+    expect(filePathIn(ROOT, undefined)).toBeNull();
+  });
+
+  it("refuses a path that could escape the worktree", () => {
+    // The daemon confines the path again, so this is defence in depth — but a
+    // browser resolves `..` away before it reaches the wire, so anything that
+    // arrives here spelling one is not a link somebody followed.
+    for (const bad of ["../outside.html", "a/../outside.html", "a//b.html", "%zz.html"]) {
+      expect(filePathIn(ROOT, ROOT + bad), bad).toBeNull();
+    }
+  });
+
+  it("keeps no marker of its own in the layout", () => {
+    // The path used to be stored beside the URL it was opened at. Deriving it from
+    // the URL deleted that field — and with it the "clear this on navigation" step
+    // and the restore-time staleness check the field needed.
+    const tab = browserTab({ url: URL, title: "deck.html" });
+    expect(tab).not.toHaveProperty("file");
     let l = twoDock(0.5);
-    l = addTab(l, 0, browserTab({ url: URL, path: "notes/deck.html" }));
+    l = addTab(l, 0, tab);
     const back = parseLayouts(serializeLayouts({ 3: l }));
     expect(back[3]).toEqual(l);
-  });
-
-  it("drops a restored marker that does not match the tab's URL", () => {
-    // The staleness rule, at the storage boundary: a marker for another page is a
-    // pane that would poll about a file it is not showing. Same check the watcher
-    // makes at runtime, so a hand-edited layout cannot get in under it.
-    const layout = {
-      docks: [
-        {
-          tabs: [
+    // A stored marker from a layout written before this change is simply dropped;
+    // the pane still watches, because the URL is what answers the question now.
+    const legacy = parseLayouts(
+      JSON.stringify({
+        1: {
+          docks: [
             {
-              id: "a",
-              kind: "browser",
-              title: "deck.html",
-              url: URL,
-              file: { path: "notes/deck.html", url: "https://elsewhere.example/" },
+              tabs: [
+                {
+                  id: "a",
+                  kind: "browser",
+                  title: "deck.html",
+                  url: URL,
+                  file: { path: "notes/deck.html", url: URL },
+                },
+              ],
+              activeId: "a",
             },
+            { tabs: [], activeId: null },
           ],
-          activeId: "a",
+          ratio: 0.5,
+          focused: 0,
         },
-        { tabs: [], activeId: null },
-      ],
-      ratio: 0.5,
-      focused: 0,
-    };
-    const back = parseLayouts(JSON.stringify({ 1: layout }));
-    expect(back[1]?.docks[0].tabs[0]?.url).toBe(URL);
-    expect(back[1]?.docks[0].tabs[0]?.file).toBeUndefined();
-  });
-
-  it("refuses a restored path that could escape the worktree", () => {
-    const withPath = (path: string) =>
-      parseLayouts(
-        JSON.stringify({
-          1: {
-            docks: [
-              {
-                tabs: [
-                  { id: "a", kind: "browser", title: "t", url: URL, file: { path, url: URL } },
-                ],
-                activeId: "a",
-              },
-              { tabs: [], activeId: null },
-            ],
-            ratio: 0.5,
-            focused: 0,
-          },
-        }),
-      )[1]?.docks[0].tabs[0]?.file;
-
-    expect(withPath("notes/deck.html")?.path).toBe("notes/deck.html");
-    for (const bad of ["../outside.html", "a/../../outside.html", "/etc/passwd", ""]) {
-      expect(withPath(bad), bad).toBeUndefined();
-    }
+      }),
+    );
+    expect(legacy[1]?.docks[0].tabs[0]?.url).toBe(URL);
+    expect(legacy[1]?.docks[0].tabs[0]).not.toHaveProperty("file");
+    expect(filePathIn(ROOT, legacy[1]?.docks[0].tabs[0]?.url)).toBe("notes/deck.html");
   });
 });

@@ -213,30 +213,6 @@ export interface PaneTab {
    * at and the pane's own setting has to be re-asserted over it.
    */
   zoom?: number;
-  /**
-   * `browser` only: the local file this pane was opened on, when it was.
-   *
-   * Exists so the pane can watch that file and reload when it changes — the loop
-   * the whole feature is for, an agent rewriting a deck while you look at it.
-   * Watching needs the worktree-relative *path*, which the URL cannot give back:
-   * its first segment is an opaque grant, and the bundle deliberately does not
-   * know the file origin (see `veld-daemon/src/files.rs`).
-   *
-   * `url` here is the URL this path was opened at, and it is what makes the field
-   * self-invalidating: the watcher compares it against the pane's current `url`
-   * and stops as soon as they differ, so a pane the user has navigated away from
-   * is not still polling for a file it is no longer showing. No separate "clear
-   * this on navigation" step, which is the version that would have gone stale.
-   */
-  file?: PaneFile;
-}
-
-/** The local file a browser pane is showing. See {@link PaneTab.file}. */
-export interface PaneFile {
-  /** Worktree-relative path, as the daemon's `file-stat` route expects it. */
-  path: string;
-  /** The URL `path` was opened at — the staleness check. */
-  url: string;
 }
 
 export interface Dock {
@@ -1028,16 +1004,63 @@ export function fileLabel(path: string): string {
   return path.split("/").filter(Boolean).pop() ?? path;
 }
 
+/**
+ * The worktree-relative path a pane is showing, or `null` if it is not showing a
+ * local file at all.
+ *
+ * `root` is the `<origin>/<grant>/` prefix the daemon reports alongside the file
+ * list (`ViewableFiles.root`) — the one thing this bundle cannot work out for
+ * itself, since the grant is opaque and the file origin is not this page's.
+ * Everything after it is the path, which is exactly what the `file-stat` route
+ * takes.
+ *
+ * **A function of the URL, not of how the pane got there.** This is what makes a
+ * *linked* file watchable: click through from one deck to the next and the answer
+ * changes to the new file, with nothing to write on navigation and nothing to
+ * clear. It also picks up the two entry points that never carried a path at all —
+ * the `open` shim's `OpenUrl` frame, and back/forward — and it stops a `#slide-3`
+ * fragment from reading as "no longer a file", which is what a marker compared
+ * against the tab's URL did.
+ *
+ * Refusals, all of them about a URL that is not a file this route can stat:
+ *
+ * - not under `root` — an ordinary web page, or another worktree's grant;
+ * - nothing after the prefix, or a trailing `/` — a directory, which this origin
+ *   does not serve;
+ * - a segment that does not decode, or decodes to `..` or an empty string. The
+ *   daemon confines the path again, so this is defence in depth — but a browser
+ *   resolves `..` away before it ever reaches the wire, so any that survives here
+ *   is not a link somebody followed.
+ */
+export function filePathIn(
+  root: string | null | undefined,
+  url: string | null | undefined,
+): string | null {
+  if (!root || !url || !url.startsWith(root)) return null;
+  // Query and fragment belong to the page, not to the file: a deck that routes
+  // slides through the hash is still the same bytes on disk.
+  const rest = url.slice(root.length).split(/[?#]/)[0];
+  if (rest === "" || rest.endsWith("/")) return null;
+  const segments: string[] = [];
+  for (const raw of rest.split("/")) {
+    let segment: string;
+    try {
+      segment = decodeURIComponent(raw);
+    } catch {
+      return null;
+    }
+    if (segment === "" || segment === "." || segment === "..") return null;
+    segments.push(segment);
+  }
+  return segments.join("/");
+}
+
 /** A new browser tab. `url` is normalised here so no caller can seed a pane
  *  with a scheme the view would refuse. */
 export function browserTab(opts: {
   url?: string;
   title?: string;
   profile?: BrowserProfile;
-  /** Worktree-relative path, when this pane is being opened on a local file. Kept
-   *  only if the URL survived normalisation — a marker whose `url` does not match
-   *  the tab's is one `sanitizeFile` would refuse on the way back in. */
-  path?: string;
 }): PaneTab {
   const url = opts.url ? (normalizeBrowserUrl(opts.url) ?? undefined) : undefined;
   return {
@@ -1045,7 +1068,6 @@ export function browserTab(opts: {
     kind: "browser",
     title: opts.title || urlLabel(url),
     ...(url ? { url } : {}),
-    ...(url && opts.path ? { file: { path: opts.path, url } } : {}),
     profile: opts.profile ?? "default",
   };
 }
@@ -1622,36 +1644,8 @@ function parseTab(value: unknown): PaneTab | null {
     if (media) tab.media = media;
     const zoom = sanitizeZoom(t.zoom);
     if (zoom !== null) tab.zoom = zoom;
-    const file = sanitizeFile(t.file, tab.url);
-    if (file) tab.file = file;
   }
   return tab;
-}
-
-/**
- * The stored local-file marker, or `null`.
- *
- * Three refusals, and each one is about a hand-edited or stale layout rather than
- * about ordinary use:
- *
- * - the path must be relative and free of `..`, because it is sent to the
- *   `file-stat` route as a query parameter. That route confines it again, so this
- *   is defence in depth — but a stored `..` has no legitimate spelling and there
- *   is no reason to carry one to the point of use;
- * - its `url` must be the URL the *tab* is currently at. A marker for some other
- *   page is a watcher polling about a file the pane is not showing, which is the
- *   exact staleness the field's design avoids at runtime — so it must not be
- *   possible to restore into it either;
- * - both fields must be present. Half a marker is not a marker.
- */
-function sanitizeFile(value: unknown, url: string | undefined): PaneFile | null {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
-  const f = value as Record<string, unknown>;
-  if (typeof f.path !== "string" || f.path === "") return null;
-  if (typeof f.url !== "string" || f.url === "") return null;
-  if (f.path.startsWith("/") || f.path.split("/").includes("..")) return null;
-  if (!url || f.url !== url) return null;
-  return { path: f.path, url: f.url };
 }
 
 function parseDock(value: unknown): Dock {

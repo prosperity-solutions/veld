@@ -927,6 +927,17 @@ export interface ViewableFiles {
    *  list is then empty for a reason worth showing rather than an empty state. */
   ready: boolean;
   files: ViewableFile[];
+  /**
+   * The `<origin>/<grant>/` prefix every `url` above is under, or `null` when
+   * `ready` is false.
+   *
+   * This is what lets a pane recognise a file URL it was never handed a path for —
+   * a relative link followed inside a deck, or a file the `open` shim pushed — and
+   * turn it back into the worktree-relative path `fileStat` takes. It cannot be
+   * derived here: the grant is opaque and the file origin is not this page's. See
+   * `filePathIn` in `panes/model.ts`.
+   */
+  root: string | null;
 }
 
 /** A watched file's timestamp. See `api.fileStat`. */

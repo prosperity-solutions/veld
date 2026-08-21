@@ -232,6 +232,13 @@ struct ViewableFile {
 /// Reports `ready: false` rather than an error when file serving is not up, because
 /// the honest UI for that is a note explaining why the list is empty, not a failed
 /// request the user cannot act on.
+///
+/// It also answers `root`: the `<origin>/<grant>/` prefix every URL in the list is
+/// under. That is what lets a pane recognise a file URL it was *not* handed a path
+/// for — a relative link followed inside a deck, or a file opened by the `open` shim
+/// — and watch it. The client cannot derive it: the grant is opaque and the origin is
+/// not the one the bundle is served from. Nothing is disclosed by saying it out loud
+/// that the URLs in the same body do not already say.
 async fn list_viewable(
     headers: axum::http::HeaderMap,
     axum::extract::Path(id): axum::extract::Path<i64>,
@@ -255,7 +262,7 @@ async fn list_viewable(
         .ok_or_else(|| super::desktop::err(StatusCode::NOT_FOUND, "no such worktree"))?;
     if !is_ready() {
         return Ok(axum::Json(
-            serde_json::json!({ "ready": false, "files": [] }),
+            serde_json::json!({ "ready": false, "files": [], "root": null }),
         ));
     }
     let policy = db.view_policy();
@@ -282,7 +289,7 @@ async fn list_viewable(
         })
         .collect();
     Ok(axum::Json(
-        serde_json::json!({ "ready": true, "files": files }),
+        serde_json::json!({ "ready": true, "files": files, "root": format!("{origin}/{grant}/") }),
     ))
 }
 
@@ -656,6 +663,35 @@ mod tests {
         ] {
             assert_eq!(normalize_relative(bad), None, "{bad:?}");
         }
+    }
+
+    #[test]
+    fn every_url_starts_with_the_root_the_client_is_told() {
+        // `list_viewable` answers `root: "<origin>/<grant>/"`, and the pane decides
+        // "is this a local file, and which one" by stripping exactly that prefix
+        // (`filePathIn` in panes/model.ts). So the prefix has to be one URLs in the
+        // same body actually start with, and what is left has to be the path.
+        //
+        // Nothing ties those two spellings together but this test: change the shape
+        // `url_in` builds and panes stop watching — silently, because a URL that no
+        // longer matches simply reads as an ordinary web page.
+        let origin = "https://files.veld.localhost:18443";
+        let grant = "a".repeat(32);
+        let root = format!("{origin}/{grant}/");
+        for rel in ["deck.html", "notes/deck.html", "a/b/c/slides.pdf"] {
+            let url = url_in(origin, &grant, rel).expect("servable");
+            let rest = url
+                .strip_prefix(&root)
+                .unwrap_or_else(|| panic!("{url} is not under {root}"));
+            assert_eq!(rest, rel, "what is left of {url} has to be the path");
+        }
+        // A percent-encoded segment survives the round trip the client makes with
+        // `decodeURIComponent`, which is the other half of the same contract.
+        let url = url_in(origin, &grant, "my notes/café deck.html").expect("servable");
+        assert_eq!(
+            url.strip_prefix(&root),
+            Some("my%20notes/caf%C3%A9%20deck.html")
+        );
     }
 
     #[test]
