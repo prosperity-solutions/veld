@@ -2019,10 +2019,15 @@ describe("a pane showing a local file", () => {
     // The daemon confines the path again, so all of this is defence in depth. The
     // two halves get there differently, which is the whole point of the second one.
     for (const bad of [
-      // Spelled literally: a browser resolves these away before they reach the
-      // wire, so one arriving here did not come from a link somebody followed.
+      // Resolved away before a request is ever made: dot-segment removal is part of
+      // turning an href into a URL, so one of these arriving here did not come from
+      // a link somebody followed.
       "../outside.html",
       "a/../outside.html",
+      // Not resolved away at all — a browser neither collapses a repeated `/` nor
+      // repairs a malformed escape, so `href="a//b.html"` and `href="%zz.html"`
+      // arrive verbatim. They are refused for their own reasons: an empty
+      // component, and a segment that does not decode.
       "a//b.html",
       "%zz.html",
       // Spelled percent-encoded: a browser does *not* resolve these, so they can
