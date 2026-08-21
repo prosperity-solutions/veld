@@ -139,7 +139,9 @@ import {
   previewBrowserResize,
   noteShownFileMtime,
   reloadBrowser,
+  setWatchOverride,
   shownFileMtime,
+  watchOverride,
   requestPermissionSettings,
   setBrowserEmulation,
   setBrowserMedia,
@@ -855,7 +857,7 @@ export function BrowserPane(props: {
       // "not this file, not right now", and the answer does not carry to a file they
       // then went and picked. A *link* followed inside the page does not come through
       // here, which is exactly the difference that matters.
-      setWatchOverride(null);
+      setWatchOverride(id, null);
       // The title only when the caller has one — a picked place knows its service
       // name, which beats the hostname the page will report.
       onTab({
@@ -916,23 +918,22 @@ export function BrowserPane(props: {
   /**
    * This pane's own answer, overriding the setting. `null` defers to the setting.
    *
-   * Not persisted: it answers "not right now, I am presenting this", which is about
-   * the next few minutes rather than a preference, and a stored override would
-   * silently outlive the reason for it.
+   * Lives in `browserHost` beside the view it belongs to, not in state — see
+   * `watchOverride` there for why a remount must not drop it.
    *
-   * **Cleared by a deliberate open, not by arriving at a different file.** It used to
+   * **Retired by a deliberate open, not by arriving at a different file.** It used to
    * carry the path it was chosen for, so any file but that one read as no override —
    * correct while picking a file was the only way to change one, and wrong the moment
    * the watch started following links: turning watching off and clicking through to
    * the next deck re-armed it at the default and reloaded the deck under the
-   * presenter. Clearing it in {@link go} instead keeps the case that reasoning was
+   * presenter. Retiring it in {@link go} instead keeps the case that reasoning was
    * written for (pick deck B in this pane and it is watched again, setting willing)
-   * without breaking the one the override exists for. That reset is a value written
-   * in the same event as the navigation, never an effect — an effect that resets
-   * state runs a frame after the render that used the stale value.
+   * without breaking the one the override exists for. That reset is written in the
+   * same event as the navigation, never in an effect — an effect that resets state
+   * runs a frame after the render that used the stale value.
    */
-  const [watchOverride, setWatchOverride] = useState<boolean | null>(null);
-  const watching = file !== null && (watchOverride ?? props.watchFilesByDefault);
+  const override = watchOverride(id);
+  const watching = file !== null && (override ?? props.watchFilesByDefault);
 
   /**
    * When the last poll went out, so a page cannot set the poll rate.
@@ -946,6 +947,10 @@ export function BrowserPane(props: {
    * rate would be the page's to choose. This makes the leading-edge poll wait out
    * the remainder of the interval instead, which costs nothing when a person opens
    * a file: the first poll only establishes the baseline.
+   *
+   * Per mount, not per pane — a tab switch re-grants an immediate poll. That is a
+   * person clicking, which no page can make happen, so the bound still holds against
+   * the thing it is for.
    */
   const lastPoll = useRef(0);
 
@@ -972,13 +977,20 @@ export function BrowserPane(props: {
         // reloads a moment late.
       }
     };
+    // One schedule, not two: the interval starts *after* the leading poll, so the
+    // gap between any two polls is the interval. Starting it beside the timeout
+    // anchored it at effect-setup time instead, and the two could then fire a
+    // millisecond apart — twice the rate the comment above claims to bound.
     const wait = Math.max(0, FILE_WATCH_INTERVAL_MS - (Date.now() - lastPoll.current));
-    const first = window.setTimeout(check, wait);
-    const timer = setInterval(check, FILE_WATCH_INTERVAL_MS);
+    let timer = 0;
+    const first = window.setTimeout(() => {
+      void check();
+      timer = window.setInterval(check, FILE_WATCH_INTERVAL_MS);
+    }, wait);
     return () => {
       cancelled = true;
       window.clearTimeout(first);
-      clearInterval(timer);
+      window.clearInterval(timer);
     };
   }, [watching, file, props.worktreeId, id]);
 
@@ -1310,7 +1322,7 @@ export function BrowserPane(props: {
               }
               aria-pressed={watching}
               onClick={() =>
-                file && setWatchOverride(!watching)
+                file && (setWatchOverride(id, !watching), bump())
               }
             >
               <IconLivePhoto size={14} />

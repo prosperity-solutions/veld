@@ -1027,13 +1027,18 @@ export function fileLabel(path: string): string {
  * - not under `root` — an ordinary web page, or another worktree's grant;
  * - nothing after the prefix, or a trailing `/` — a directory, which this origin
  *   does not serve;
- * - a segment that does not decode, or decodes to `..`, to an empty string, or to
- *   anything containing a `/`. The daemon confines the path again, so this is
- *   defence in depth — but the `/` clause is what makes the `..` clause mean
- *   anything: `%2E%2E%2Foutside.html` is one segment to `split("/")` and decodes
- *   to `../outside.html`, so checking the decoded segment against `".."` alone
- *   refused nothing. A browser resolves `..` away before it reaches the wire, so
- *   whatever spells one here did not come from a link somebody followed.
+ * - a segment that does not decode, or that decodes to a `.`, a `..` or an empty
+ *   component. Decoding happens *before* the components are counted, which is the
+ *   only reading that matches the server: axum percent-decodes the `{*path}`
+ *   capture and `normalize_relative` walks components of the result, so
+ *   `a%2Fb.html` is served as `a/b.html` — and refusing any decoded `/` outright
+ *   would have left such a pane showing a file it had silently stopped watching.
+ *   Splitting the decoded text is also what makes the `..` refusal mean anything:
+ *   `%2E%2E%2Foutside.html` is one segment to `split("/")` and decodes to
+ *   `../outside.html`, so testing the decoded segment against `".."` refused
+ *   nothing. The daemon confines the path again either way — this is defence in
+ *   depth, and a browser resolves a *literal* `..` away before it reaches the
+ *   wire, so only the encoded spellings can arrive from a link at all.
  */
 export function filePathIn(
   root: string | null | undefined,
@@ -1046,16 +1051,17 @@ export function filePathIn(
   if (rest === "" || rest.endsWith("/")) return null;
   const segments: string[] = [];
   for (const raw of rest.split("/")) {
-    let segment: string;
+    let decoded: string;
     try {
-      segment = decodeURIComponent(raw);
+      decoded = decodeURIComponent(raw);
     } catch {
       return null;
     }
-    if (segment === "" || segment === "." || segment === "..") return null;
-    // A decoded separator is a second path inside one segment — see the docstring.
-    if (segment.includes("/")) return null;
-    segments.push(segment);
+    // Split again: one encoded segment can carry several components.
+    for (const segment of decoded.split("/")) {
+      if (segment === "" || segment === "." || segment === "..") return null;
+      segments.push(segment);
+    }
   }
   return segments.join("/");
 }

@@ -1986,6 +1986,14 @@ describe("a pane showing a local file", () => {
     );
   });
 
+  it("reads an encoded separator the way the server does", () => {
+    // axum decodes the `{*path}` capture before `normalize_relative` walks it, so
+    // `sub%2Fdeck.html` is served as `sub/deck.html`. Refusing every decoded `/`
+    // would leave that pane showing a file it had stopped watching — the failure
+    // this feature exists to remove, arrived at from the other side.
+    expect(filePathIn(ROOT, `${ROOT}sub%2Fdeck.html`)).toBe("sub/deck.html");
+  });
+
   it("stays on the same file across a query or a fragment", () => {
     // A deck that routes slides through the hash reports a new URL for every
     // slide. That is the same bytes on disk, and a watch that stopped there would
@@ -2008,17 +2016,20 @@ describe("a pane showing a local file", () => {
   });
 
   it("refuses a path that could escape the worktree", () => {
-    // The daemon confines the path again, so this is defence in depth — but a
-    // browser resolves `..` away before it reaches the wire, so anything that
-    // arrives here spelling one is not a link somebody followed.
+    // The daemon confines the path again, so all of this is defence in depth. The
+    // two halves get there differently, which is the whole point of the second one.
     for (const bad of [
+      // Spelled literally: a browser resolves these away before they reach the
+      // wire, so one arriving here did not come from a link somebody followed.
       "../outside.html",
       "a/../outside.html",
       "a//b.html",
       "%zz.html",
-      // A percent-encoded separator hides a whole second path inside one segment,
-      // so the `..` check has to run on something that cannot contain one. These
-      // three returned "../outside.html", "/etc/passwd" and "a/../b.html".
+      // Spelled percent-encoded: a browser does *not* resolve these, so they can
+      // arrive from a link, and each hides a whole second path inside one segment
+      // — which is why the components have to be counted after decoding rather
+      // than before. These three returned "../outside.html", "/etc/passwd" and
+      // "a/../b.html" while the check ran on the pre-decode split.
       "%2E%2E%2Foutside.html",
       "%2Fetc%2Fpasswd",
       "a%2F..%2Fb.html",

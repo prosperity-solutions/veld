@@ -1354,8 +1354,10 @@ impl SettingKey {
                 "For the loop this feature exists for: an agent rewrites the deck and the pane \
                  shows the new one without being asked. Veld watches the file's timestamp and \
                  reloads the view — nothing is injected into the page, so what you present is \
-                 what is on disk. It follows the pane: a deck you reached by a link is watched \
-                 like the one you opened. Each pane's toolbar can override this for itself.",
+                 what is on disk. In the desktop app it follows the pane: a deck you reached by a \
+                 link is watched like the one you opened; a pane in a browser tab cannot \
+                 see that navigation, so there it keeps watching the file it was opened \
+                 on. Each pane's toolbar can override this for itself.",
                 Browser,
                 LOCAL_FILES,
             ),

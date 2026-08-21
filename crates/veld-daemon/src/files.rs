@@ -698,9 +698,16 @@ mod tests {
         // cannot drift apart; what this pins is the other half — that a URL really is
         // that prefix plus the path, and not the prefix plus something the client
         // would have to know more to undo.
+        //
+        // Written out longhand rather than as `strip_prefix(&root_url(..))`: the two
+        // sides sharing one function is what makes *that* comparison hold for any
+        // `root_url` at all, including one missing its trailing `/` — which the router
+        // `/{grant}/{*path}` never matches, so every file URL would 404 with this test
+        // still green.
         let origin = "https://files.veld.localhost:18443";
         let grant = "a".repeat(32);
-        let root = root_url(origin, &grant);
+        let root = format!("{origin}/{grant}/");
+        assert_eq!(root_url(origin, &grant), root);
         for rel in ["deck.html", "notes/deck.html", "a/b/c/slides.pdf"] {
             let url = url_in(origin, &grant, rel).expect("servable");
             let rest = url

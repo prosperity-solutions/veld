@@ -1058,8 +1058,12 @@ function AppInner(props: {
           // it matters more: it is what a file pane watches by, and dropping it stops
           // the reload loop until a later poll succeeds — which, with polling skipped
           // while the document is hidden, can be a long time with nothing on screen
-          // saying so. A grant is per worktree and persisted, so a remembered root
-          // cannot go stale under the worktree it was answered for.
+          // saying so. Best-effort, and only that: the id compared here is the row's,
+          // and row ids are reused when a worktree is deleted and another created
+          // (`db/kv.rs`), while the grant is keyed on the worktree's *path*. The
+          // window needs a delete of the selected worktree, and `file-stat` confines
+          // every path to the row's own worktree server-side, so the worst outcome is
+          // a 404 until the next poll answers.
           if (live)
             setFilesFor((prev) => ({
               worktreeId: id,
