@@ -506,9 +506,11 @@ async fn serve(cfg: &HolderConfig, listener: UnixListener) -> anyhow::Result<()>
                 }
                 Cmd::Frame(seq, frame) => {
                     // A probationary peer that *speaks* has proved itself sooner
-                    // than the window could: only a daemon sends input or a resize,
-                    // and the probes the window exists to survive send nothing at
-                    // all. Promoting here rather than making it wait is what keeps
+                    // than the window could: only a daemon sends input, a resize or
+                    // a redraw, and the probes the window exists to survive send
+                    // nothing at all. (`REDRAW` earns its place here defensively
+                    // rather than because anything reaches it as a first frame
+                    // today — see the drop-exemption list further down.) Promoting here rather than making it wait is what keeps
                     // a takeover prompt — this very frame is then acted on below
                     // instead of being dropped as a displaced peer's, and the
                     // output it missed while waiting was teed to it by the PTY
@@ -613,15 +615,25 @@ async fn serve(cfg: &HolderConfig, listener: UnixListener) -> anyhow::Result<()>
                     // except that it is not a peer worth promoting.
                     else if pending.as_ref().is_some_and(|c| c.generation == seq)
                         && !frame.is_ignorable()
-                        // `REDRAW` here is defensive and, as the lists stand, unreachable:
-                        // the promotion arm above matches the same three kinds and does
-                        // `pending.take()`, so a probationary peer's `REDRAW` has already
-                        // become the writer before control gets here. The listing that is
-                        // actually load-bearing is that one — the daemon sends `REDRAW`
-                        // immediately after an attach, which is exactly when a peer is
-                        // still probationary, and dropping it from up there costs the
-                        // repaint on every adoption with no log to say so. Kept in step
-                        // with it so the two cannot disagree if either is edited.
+                        // `REDRAW` is in both this list and the promotion one above, and in
+                        // *neither* does it change what happens today: no path in
+                        // `serve_socket` reaches its `redraw_session` without having already
+                        // awaited `resize_session`, and both frames ride this one ordered
+                        // channel, so that `RESIZE` promotes a probationary peer before its
+                        // `REDRAW` is ever read. Which is also what makes this arm
+                        // unreachable for a `REDRAW` — promotion took `pending`.
+                        //
+                        // Both entries are insurance against precisely the cleanup this
+                        // module's own docs invite. The `RESIZE` they lean on carries the
+                        // size the pty already has, and `redraw_nudge` argues at length that
+                        // such a resize signals nothing — so somebody will eventually delete
+                        // it as dead work, and on that day a `REDRAW` becomes an adopted
+                        // peer's first frame. With the promotion entry it still works;
+                        // without it the repaint is lost in silence; without either, the
+                        // peer loses its takeover too. The promotion half is pinned by
+                        // `a_peer_whose_only_frame_is_a_redraw_takes_the_session_over_at_once`
+                        // so the insurance cannot be quietly removed; this entry is kept in
+                        // step with it.
                         && !matches!(frame.kind, wire::INPUT | wire::RESIZE | wire::REDRAW)
                     {
                         warn!(
