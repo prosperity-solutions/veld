@@ -2429,10 +2429,12 @@ pub async fn quit_desktop_app(bundle: &std::path::Path, timeout: Duration) -> Qu
 /// Close Veld Desktop and delete its bundle.
 ///
 /// The one destructive act in the app half of veld, so it is written once and
-/// shared: `veld desktop uninstall` runs it, and so does `install.sh` (through
-/// that command) when somebody answers "no" on a machine that already has the
-/// app. A second copy of this in bash was the alternative, racing this one for
-/// the same directory.
+/// every caller goes through it: `veld desktop uninstall`, `veld uninstall`
+/// (below), and `install.sh` — via that first command — when somebody answers
+/// "no" on a machine that already has the app. A second copy of this in bash was
+/// the alternative, racing this one for the same directory; a second copy in
+/// `uninstall` was the *actual* state of this file until a review pointed out
+/// that the paragraph below was false one screen away from itself.
 ///
 /// **Quit first, always.** `remove_dir_all` on a running app succeeds — macOS
 /// unlinks a bundle out from under a live process quite happily — and leaves an
@@ -2696,20 +2698,29 @@ pub async fn uninstall() -> Result<(), anyhow::Error> {
 
     // Remove Veld Desktop.
     //
-    // The installer puts it there by default now, so an uninstall that left it
-    // behind would leave the most *visible* half of veld on the machine — a Dock
-    // icon whose daemon no longer exists — after promising to remove everything.
-    // Best-effort: `/Applications` is group-writable by `admin`, so an admin user
-    // succeeds without sudo and anyone else keeps an app they can drag to the
-    // trash, which is not worth failing an uninstall over.
+    // Whether the installer put it there is now the user's answer rather than a
+    // default (`crate::desktop_pref`), but that changes nothing here: an
+    // uninstall that left an installed app behind would leave the most *visible*
+    // half of veld on the machine — a Dock icon whose daemon no longer exists —
+    // after promising to remove everything. The preference itself goes with the
+    // rest of `~/.veld` further down, which is right: `veld uninstall` is not an
+    // opt-out, it is a removal, and a later re-install deserves to ask again.
     if std::env::consts::OS == "macos" {
         if let Some((path, _)) = desktop_app_status() {
-            match std::fs::remove_dir_all(&path) {
+            // Through `remove_desktop_app`, which quits the app first. This used
+            // to be a bare `remove_dir_all`, and macOS unlinks a bundle out from
+            // under a live process quite happily — so uninstalling with the app
+            // open left an Electron app whose own resources had gone, i.e. a
+            // crash rather than an uninstall. Still best-effort: `/Applications`
+            // is group-writable by `admin`, so an admin user succeeds without
+            // sudo and anyone else keeps an app they can drag to the trash, which
+            // is not worth failing an uninstall over.
+            match remove_desktop_app(&path).await {
                 // stderr, like every other human status line here: stdout is
                 // reserved for machine-readable output (AGENTS.md).
                 Ok(()) => eprintln!("Removed {}", path.display()),
                 Err(e) => eprintln!(
-                    "Could not remove {} ({e}). Drag it to the Trash to finish.",
+                    "Could not remove {} ({e:#}). Drag it to the Trash to finish.",
                     path.display()
                 ),
             }

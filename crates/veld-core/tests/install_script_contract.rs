@@ -450,6 +450,32 @@ fn the_desktop_preference_means_the_same_thing_in_both_languages() {
         );
         assert_eq!(veld_core::desktop_pref::read_in(home), None, "{junk:?}");
     }
+
+    // A later key does not change the answer on either side — this is what lets
+    // the format grow a field without a flag day.
+    std::fs::write(&file, "{\"wanted\":false,\"asked_by\":\"install.sh\"}").unwrap();
+    assert_eq!(run_shell_function("desktop_preference", &[], home), "no");
+    assert_eq!(
+        veld_core::desktop_pref::read_in(home),
+        Some(veld_core::desktop_pref::DesktopChoice::Unwanted)
+    );
+
+    // **The literal must not be readable out of another key's string value.** An
+    // unanchored `*'"wanted":true'*` in the script read this as "yes" while serde
+    // read the real field and answered "unwanted" — the two parsers disagreeing
+    // about the file that gates a 113 MB download and, on one path, deleting an
+    // application. The script's answer is now "unanswered", which is the only
+    // direction a mismatch may fail in: it asks again.
+    std::fs::write(&file, "{\"wanted\":false,\"note\":\"\\\"wanted\\\":true\"}").unwrap();
+    assert_ne!(
+        run_shell_function("desktop_preference", &[], home),
+        "yes",
+        "install.sh read `yes` out of a string value belonging to another key",
+    );
+    assert_eq!(
+        veld_core::desktop_pref::read_in(home),
+        Some(veld_core::desktop_pref::DesktopChoice::Unwanted)
+    );
 }
 
 /// Both halves must name the same log file.

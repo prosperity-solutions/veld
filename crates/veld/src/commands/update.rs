@@ -295,7 +295,7 @@ async fn run_locked(
         }
     }
 
-    let plan = plan_desktop(app_dir, handoff, relaunch).await;
+    let plan = plan_desktop(app_dir, handoff, relaunch, desktop_pref::read()).await;
     let outcome = perform(&plan, target_version.as_deref(), guard.as_mut(), verbose).await;
 
     // Written before the app is reopened, and that ordering is load-bearing for
@@ -375,7 +375,17 @@ fn desktop_gate(recorded: Option<DesktopChoice>, installed: bool, may_ask: bool)
 ///
 /// `handoff` means the app spawned this and has already quit itself — there is
 /// nobody at a terminal to ask, and nothing to ask about.
-async fn plan_desktop(app_dir: Option<PathBuf>, handoff: bool, relaunch: bool) -> DesktopPlan {
+/// `recorded` is the preference, passed in rather than read here — the only
+/// injection point this function has. Without it every test of the branches below
+/// would read the maintainer's own `~/.veld/desktop.json` and report on the
+/// machine it ran on, which is why the one existing test could only ever exercise
+/// the `VELD_DESKTOP=0` return above them.
+async fn plan_desktop(
+    app_dir: Option<PathBuf>,
+    handoff: bool,
+    relaunch: bool,
+    recorded: Option<DesktopChoice>,
+) -> DesktopPlan {
     // **First, before any early return.** `relaunch` means an app quit for this
     // and is owed a window back, and that debt does not depend on whether veld
     // then decides to update it. Setting it further down — after the platform
@@ -423,11 +433,7 @@ async fn plan_desktop(app_dir: Option<PathBuf>, handoff: bool, relaunch: bool) -
     // answer: a user who drives veld purely as an orchestrator was paying for the
     // IDE app on every single update.
     let path_of = |s: &Option<(PathBuf, Option<String>)>| s.as_ref().map(|(p, _)| p.clone());
-    match desktop_gate(
-        desktop_pref::read(),
-        status.is_some(),
-        !handoff && attended(),
-    ) {
+    match desktop_gate(recorded, status.is_some(), !handoff && attended()) {
         // Answered yes, or answered nothing while already owning the app: today's
         // behaviour, unchanged, all the way down.
         DesktopGate::Proceed => {}
@@ -500,8 +506,11 @@ async fn plan_desktop(app_dir: Option<PathBuf>, handoff: bool, relaunch: bool) -
                 }
                 return plan;
             }
-            // Nothing was recorded — EOF, or a keystroke that is not an answer. The
-            // question stays open, and this run does what the unasked case does.
+            // Nothing was recorded — EOF, or a keystroke that is not an answer.
+            // The question stays open and this run takes the same *decision* as
+            // the unasked case (keep an app that is here, fetch nothing that is
+            // not) without repeating its message: telling somebody who was just
+            // asked that there was nobody to ask is the wrong sentence.
             None if status.is_none() => return plan,
             None => {}
         },
@@ -1923,11 +1932,59 @@ mod tests {
     }
 
     fn plan(relaunch: bool) -> DesktopPlan {
+        plan_with(true, relaunch, None)
+    }
+
+    /// `recorded` is a parameter rather than a file this reads, so nothing here
+    /// depends on the maintainer's own `~/.veld/desktop.json`.
+    fn plan_with(handoff: bool, relaunch: bool, recorded: Option<DesktopChoice>) -> DesktopPlan {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap()
-            .block_on(plan_desktop(None, true, relaunch))
+            .block_on(plan_desktop(None, handoff, relaunch, recorded))
+    }
+
+    /// An opted-out app half must reach the app's **report**, not just be skipped.
+    ///
+    /// The failure this pins is the silent one: the app quits itself to hand the
+    /// update over and reads `desktop-update.json` on the way back up, showing a
+    /// dialog only when the report says something went wrong. So an `OptedOut`
+    /// path that returned with `skipped: None` would have the app reopen on its
+    /// old version having been told nothing — the same class of bug the
+    /// `VELD_DESKTOP=0` test below exists for, and the reason `plan_desktop` takes
+    /// the preference as an argument at all.
+    #[test]
+    fn an_opted_out_app_half_is_reported_to_the_app_that_quit_for_it() {
+        let _guard = env_lock();
+        // SAFETY: the lock above is held for the duration of this test. Cleared
+        // rather than set: this asserts the *preference* path, and an ambient
+        // `VELD_DESKTOP` would return above it and pass for the wrong reason.
+        unsafe { std::env::remove_var("VELD_DESKTOP") };
+
+        let opted_out = plan_with(true, true, Some(DesktopChoice::Unwanted));
+        assert!(!opted_out.update, "an opted-out run must not move the app");
+        assert!(
+            opted_out.reopen,
+            "an app that handed off and quit is owed a window back even when veld will \
+             not update it",
+        );
+
+        // macOS only, for the same reason the neighbouring test scopes its
+        // assertion: off macOS `plan_desktop` returns at the platform check
+        // *above* the preference gate, so there is no opt-out to report.
+        #[cfg(target_os = "macos")]
+        assert!(
+            opted_out.skipped.is_some(),
+            "an opted-out app half must reach desktop-update.json, or the app reopens on \
+             the old version having said nothing",
+        );
+
+        // And a terminal run owes no report — the reason was printed where the
+        // user is looking. `skipped` exists only for the handoff channel.
+        let from_a_terminal = plan_with(false, false, Some(DesktopChoice::Unwanted));
+        assert!(!from_a_terminal.update);
+        assert!(from_a_terminal.skipped.is_none());
     }
 
     /// The invariant three review angles found broken independently: an app that

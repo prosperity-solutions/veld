@@ -454,13 +454,23 @@ find_desktop_app() {
 # What it does *not* survive is a renamed or nested key — see
 # `crates/veld-core/tests/install_script_contract.rs`, which runs this very
 # function against a file the Rust half wrote.
+#
+# **Anchored at `{`, not floating.** An unanchored `*'"wanted":true'*` matched the
+# literal *anywhere*, including inside another key's string value — so a
+# hand-written `{"wanted":false,"note":"\"wanted\":true"}` read as **yes** here
+# and as **unwanted** in `desktop_pref::read_in`, a two-parser disagreement on the
+# file that gates a 113 MB download and, on one path, a deletion. Anchoring costs
+# one thing and it is the right thing to pay: a file whose *first* key is not
+# `wanted` reads as unanswered here while Rust still reads the answer. Nothing
+# writes that shape, and the divergence only ever asks the question again — which
+# is the one direction a parser mismatch is allowed to fail in.
 desktop_preference() {
   local file="$HOME/.veld/desktop.json" body
   [ -f "$file" ] || return 0
   body="$(tr -d ' \t\r\n' < "$file" 2>/dev/null)" || return 0
   case "$body" in
-    *'"wanted":true'*)  echo "yes" ;;
-    *'"wanted":false'*) echo "no" ;;
+    '{"wanted":true'*)  echo "yes" ;;
+    '{"wanted":false'*) echo "no" ;;
   esac
 }
 
@@ -486,12 +496,20 @@ record_desktop_preference() {
 # watching" and is set by every veld-driven run, so a `veld update` never reaches
 # a prompt in here (the CLI owns that question — see `plan_desktop` in
 # `crates/veld/src/commands/update.rs`).
+#
+# **The tty test is on fd 2, because that is where the question is printed.**
+# `ask_desktop_preference` writes every line of the prompt to stderr — it has to,
+# since its stdout is captured by the caller's `$( )` — so `[ -t 1 ]` was asking
+# about the wrong file descriptor in both directions: `curl … | bash 2>err.log`
+# would have put an *invisible* question up and then taken the default from a user
+# who saw nothing, and `curl … | bash >install.log` would have refused to ask
+# even though the terminal it would have asked on was right there. The rule is
+# "only ask if the human can see the question", so test the descriptor the
+# question goes to.
 desktop_can_ask() {
   [ -z "${VELD_NON_INTERACTIVE:-}" ] || return 1
   [ -r /dev/tty ] || return 1
-  # A readable `/dev/tty` that is not a terminal is a redirected one; asking
-  # there would block a CI job forever on a question nobody can see.
-  [ -t 1 ] || return 1
+  [ -t 2 ] || return 1
 }
 
 # Ask, once, and record the answer. Echoes `yes`/`no`; empty when nobody
@@ -546,29 +564,71 @@ ask_desktop_preference() {
   fi
   # A bare Enter *is* the default: `read` succeeded, the user chose the offer.
   answer="${answer:-$default}"
+  # **The answer is echoed whether or not it could be persisted.** It used to be
+  # `record_desktop_preference yes && echo "yes"`, which coupled acting on the
+  # answer to storing it and was wrong twice over on an unwritable `~/.veld` (a
+  # root-owned `desktop.json` from an old `sudo curl | bash`, a full disk): the
+  # caller saw an empty answer, so a user who typed *n* got the app installed
+  # anyway and a user who typed *y* was told "nobody to ask" — and, because a
+  # failing `&&` chain is this function's exit status, `set -e` aborted the whole
+  # installer at the assignment, after the binaries were in place and before the
+  # PATH advice and the summary. The Rust half already states the rule
+  # (`remember` in `crates/veld/src/commands/desktop.rs`): a caller that cannot
+  # persist the choice still has to act on the answer it was just given, and the
+  # cost of the failed write is being asked once more.
   case "$(printf '%s' "$answer" | tr '[:upper:]' '[:lower:]')" in
-    y|yes) record_desktop_preference yes && echo "yes" ;;
-    n|no)  record_desktop_preference no  && echo "no" ;;
+    y|yes) record_desktop_preference yes || warn_unrecorded; echo "yes" ;;
+    n|no)  record_desktop_preference no  || warn_unrecorded; echo "no" ;;
     # Anything else is not an answer. Left unrecorded so the next run asks
     # again, rather than reading a typo as a decision about a GUI app.
     *) ;;
   esac
+  # Explicit, so this function's status can never be a `case` arm's. Nothing
+  # above may fail the installer.
+  return 0
 }
 
-# Bring the machine in line with a "no" that arrived while the app was installed.
+# Said out loud rather than swallowed: "I answered this last week" is otherwise a
+# mystery when the next run asks again.
+warn_unrecorded() {
+  echo "Warning: could not record your answer in ${HOME}/.veld/desktop.json — you may be asked again." >&2
+}
+
+# Bring the machine in line with a "no" the user gave **on this run**, while the
+# app was installed.
 #
 # Delegated to the CLI rather than done with an `rm -rf` here, and that is the
-# whole reason this function is three lines: deleting an app bundle is the one
+# whole reason this function is short: deleting an app bundle is the one
 # destructive act in this script, `veld desktop uninstall` already has to do it
-# (it is the command a user runs by hand), and one implementation that quits a
-# running app first is worth more than two that race it. The binary in use is the
-# one this run just installed, so the subcommand exists — except when
-# `VELD_VERSION` pinned an older release, which is why the failure is a warning
-# with a manual instruction rather than an abort.
+# (it is the command a user runs by hand), and one implementation that quits the
+# running app before unlinking its bundle is worth more than two that race it.
+#
+# Two ways the subcommand can be missing from the binary this run just installed,
+# and neither is exotic. `VELD_VERSION` can pin a release older than the feature —
+# and, more likely in practice, **this script is served from `main`** (see the
+# header), so between merging and the next release the newest release itself has
+# no `veld desktop uninstall`. Both surface as clap's exit 2, which is why every
+# failure here is a warning with a manual instruction rather than an abort, and
+# why the caller does not promise anything about future updates until this has
+# actually succeeded.
 remove_desktop_app_via_cli() {
-  local cli="${INSTALL_DIR}/veld"
+  local cli="${INSTALL_DIR}/veld" rc=0
   [ -x "$cli" ] || return 1
-  "$cli" desktop uninstall --yes || return 1
+  # stderr is dropped and re-stated by the caller: an older binary answers with
+  # clap's "unrecognized subcommand 'uninstall'" usage dump, which is noise in
+  # front of a message that explains the situation properly.
+  "$cli" desktop uninstall --yes 2>/dev/null || rc=$?
+  [ "$rc" -eq 0 ] && return 0
+  # 75 is EX_TEMPFAIL: `veld desktop uninstall` is on the list of commands an
+  # in-flight `veld update` refuses (`command_survives_an_update` in
+  # crates/veld/src/main.rs), because it would delete the bundle that update is
+  # swapping. Named separately because it is the one failure here that is neither
+  # the user's problem nor permanent.
+  if [ "$rc" -eq 75 ]; then
+    echo "  Another veld update is running, so the app was left in place."
+    echo "  Run 'veld desktop uninstall' once it has finished."
+  fi
+  return 1
 }
 
 # Give the CLI, daemon and helper the app's icon.
@@ -1325,8 +1385,18 @@ if [ "$OS" = "macos" ]; then
   find_desktop_app
 fi
 if [ -n "$WANT_DESKTOP" ]; then
+  # **Where the answer came from is part of the answer**, and conflating the two
+  # was a critical bug that three independent review angles found: a *stored* "no"
+  # must never delete anything, while a "no" typed on this run must. Without
+  # `DESKTOP_ASKED`, someone who opted out and later re-installed the app by hand
+  # (the `.dmg` route the README documents) had it deleted, with no prompt, by the
+  # next `curl … | bash`. `plan_desktop` in crates/veld/src/commands/update.rs
+  # holds the same invariant and the two must not drift — the truth table below is
+  # `desktop_gate`'s, cell for cell.
   DESKTOP_WANTED="$(desktop_preference)"
+  DESKTOP_ASKED=""
   if [ -z "$DESKTOP_WANTED" ] && desktop_can_ask; then
+    DESKTOP_ASKED="1"
     DESKTOP_WANTED="$(ask_desktop_preference)"
   fi
   case "$DESKTOP_WANTED" in
@@ -1335,19 +1405,35 @@ if [ -n "$WANT_DESKTOP" ]; then
       ;;
     no)
       DESKTOP_DECLINED="1"
-      if [ -n "$DESKTOP_APP" ]; then
-        echo "Removing ${DESKTOP_APP} — veld will not install it again."
+      if [ -z "$DESKTOP_APP" ]; then
+        : # Nothing here and nothing wanted. The common opted-out run: silent.
+      elif [ -n "$DESKTOP_ASKED" ]; then
+        # Authorised by the answer just given. The success line comes *after* the
+        # removal, not before it: on the failure branch the old wording promised
+        # "veld will not install it again", which an installer whose CLI is too
+        # old to have the subcommand cannot deliver.
         if remove_desktop_app_via_cli; then
+          echo "Removed ${DESKTOP_APP} — veld will not install it again."
           DESKTOP_APP=""
         else
           echo "Warning: could not remove ${DESKTOP_APP}."
-          echo "  Run 'veld desktop uninstall' to finish, or drag it to the Trash."
+          echo "  Your answer is recorded. Run 'veld desktop uninstall' to finish, or drag it to the Trash."
         fi
+      else
+        # A stored "no" and a bundle that is here anyway — dragged from a .dmg,
+        # or left behind by a removal that failed. Left alone and named, because
+        # a recent manual install is a better signal than an old answer.
+        echo "Veld Desktop is at ${DESKTOP_APP} but you opted out, so it was left alone."
+        echo "  'veld desktop install' opts back in; 'veld desktop uninstall' removes it."
       fi
       ;;
     *)
       if [ -n "$DESKTOP_APP" ]; then
         install_desktop_app || DESKTOP_FAILED="1"
+      elif [ -n "$DESKTOP_ASKED" ]; then
+        # Asked, and the answer was not yes or no. Saying "nobody to ask" to
+        # somebody who was just asked is the wrong sentence.
+        say "No answer, so Veld Desktop was not installed. Run 'veld desktop install' when you want it."
       else
         say "Skipping Veld Desktop — nobody to ask. Run 'veld desktop install' to add it."
       fi

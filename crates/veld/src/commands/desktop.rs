@@ -300,9 +300,17 @@ fn confirm_removal(path: &Path) -> bool {
 /// than swallowed, because "I answered this last week" is otherwise a mystery.
 fn remember(choice: DesktopChoice) {
     if let Err(e) = desktop_pref::write(choice) {
+        // Names the file, which is the whole reason `desktop_pref::path()` is
+        // public: on the failures that actually happen — a root-owned
+        // `desktop.json` left by an old `sudo curl | bash`, an unwritable
+        // `~/.veld` — the path *is* the fix, and without it the reader has an
+        // errno and nowhere to point it.
+        let at = desktop_pref::path()
+            .map(|p| format!(" at {}", p.display()))
+            .unwrap_or_default();
         output::print_error(
             &format!(
-                "Could not record your Veld Desktop preference ({e}) — you may be asked again."
+                "Could not record your Veld Desktop preference{at} ({e}) — you may be asked again."
             ),
             false,
         );

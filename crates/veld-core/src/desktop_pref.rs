@@ -71,8 +71,18 @@ impl DesktopChoice {
 
 /// `~/.veld/desktop.json`, or `None` when there is no home directory to put it
 /// in (which is also the only way the reader and writer below can be unavailable).
+///
+/// The location has exactly one definition — [`file_in`] — and this is it applied
+/// to the real home directory. Anything that needs to *name* the file to a human
+/// (the "could not record your preference" error) asks here rather than
+/// rebuilding the path, which is how the two can never disagree.
 pub fn path() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".veld").join(FILE_NAME))
+    Some(file_in(&home()?))
+}
+
+/// The file, under an arbitrary home directory. The single source of the location.
+fn file_in(home: &Path) -> PathBuf {
+    home.join(".veld").join(FILE_NAME)
 }
 
 /// The recorded answer, or `None` for "nobody has been asked yet".
@@ -107,7 +117,7 @@ fn home() -> Option<PathBuf> {
 /// the real `~/.veld/desktop.json` would report on the machine it runs on, and a
 /// test that *wrote* it would answer the maintainer's own prompt for them.
 pub fn read_in(home: &Path) -> Option<DesktopChoice> {
-    let text = std::fs::read_to_string(home.join(".veld").join(FILE_NAME)).ok()?;
+    let text = std::fs::read_to_string(file_in(home)).ok()?;
     let value: serde_json::Value = serde_json::from_str(&text).ok()?;
     match value.get("wanted")?.as_bool()? {
         true => Some(DesktopChoice::Wanted),
@@ -121,12 +131,11 @@ pub fn read_in(home: &Path) -> Option<DesktopChoice> {
 /// tested against. `~/.veld` is created if it is not there yet: on a fresh
 /// install this can be the first thing that ever writes to it.
 pub fn write_in(home: &Path, choice: DesktopChoice) -> Result<(), std::io::Error> {
-    let dir = home.join(".veld");
-    std::fs::create_dir_all(&dir)?;
-    std::fs::write(
-        dir.join(FILE_NAME),
-        format!("{{\"wanted\":{}}}\n", choice.wanted()),
-    )
+    let file = file_in(home);
+    if let Some(dir) = file.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(&file, format!("{{\"wanted\":{}}}\n", choice.wanted()))
 }
 
 #[cfg(test)]
