@@ -105,6 +105,49 @@ const OUTPUT_SEND_TIMEOUT: Duration = Duration::from_secs(10);
 /// magnitude longer than a probe's connection lives.
 const TAKEOVER_PROBATION: Duration = Duration::from_secs(1);
 
+/// How long [`redraw`] leaves the terminal one row short before restoring it.
+///
+/// Standard signals coalesce, so two `TIOCSWINSZ` calls with no gap wake a
+/// program once and it reads only the final size — for a renderer that diffs its
+/// own output, an identical frame and nothing written. Measured through the real
+/// daemon against such a renderer: a 0 ms gap redrew 0 frames, 5 ms redrew 2.
+/// This is that floor with margin, and it is the whole visible cost of a
+/// reattach — one stale bottom row, once, which is imperceptible anywhere in this
+/// range.
+///
+/// **Best-effort, and it cannot be otherwise.** The gap only works if the program
+/// is scheduled and renders inside it, so a machine loaded enough to starve it for
+/// this long collapses back into the 0 ms case: both signals coalesce, the program
+/// reads only the final size, and the repaint silently does not happen. There is
+/// no retry and no verification — the daemon cannot tell a program that ignored
+/// the signal from one that had nothing to redraw. The value below is chosen for
+/// margin against scheduler latency, not because it is a *bound* on it, and the
+/// failure mode is the pre-existing one (a screen that needs a manual resize), not
+/// a worse one. Raise it before suspecting anything subtler if the repaint starts
+/// missing under load.
+///
+/// Bounded, and that is what makes awaiting it in the control loop acceptable
+/// where the output path needs [`OUTPUT_SEND_TIMEOUT`]: the hazard there is a peer
+/// that never reads, i.e. *unbounded* parking, which would take `HANGUP` handling
+/// down with it. This is one fixed gap, once per resumed attach.
+///
+/// Deliberately not restated as a figure anywhere above: a comment that repeats
+/// the value drifts from it silently, and this one already had. The number lives on
+/// the line below and nowhere else.
+///
+/// It parks the whole `select!` for that window, not just the next daemon frame —
+/// the PTY-read branch included, so the repaint the nudge provokes waits in the
+/// kernel buffer until the restore is done. That is harmless at this size and is
+/// worth knowing before adding a second blocking step nearby.
+///
+/// Parking is also what makes the window *safe* rather than merely tolerable: a
+/// client resize arriving mid-nudge cannot race the restore, because it queues on
+/// `to_holder` and is applied strictly after it. Measured — a resize sent inside
+/// the window left the pty at the client's size, not the restored one. Moving this
+/// sleep off the control loop would turn that into a real race and could leave a
+/// terminal permanently one row short.
+const REDRAW_NUDGE: Duration = Duration::from_millis(80);
+
 /// How long the holder waits, after handing a daemon the exit code, for that
 /// daemon to close the connection.
 ///
@@ -463,9 +506,11 @@ async fn serve(cfg: &HolderConfig, listener: UnixListener) -> anyhow::Result<()>
                 }
                 Cmd::Frame(seq, frame) => {
                     // A probationary peer that *speaks* has proved itself sooner
-                    // than the window could: only a daemon sends input or a resize,
-                    // and the probes the window exists to survive send nothing at
-                    // all. Promoting here rather than making it wait is what keeps
+                    // than the window could: only a daemon sends input, a resize or
+                    // a redraw, and the probes the window exists to survive send
+                    // nothing at all. (`REDRAW` earns its place here defensively
+                    // rather than because anything reaches it as a first frame
+                    // today — see the drop-exemption list further down.) Promoting here rather than making it wait is what keeps
                     // a takeover prompt — this very frame is then acted on below
                     // instead of being dropped as a displaced peer's, and the
                     // output it missed while waiting was teed to it by the PTY
@@ -474,7 +519,7 @@ async fn serve(cfg: &HolderConfig, listener: UnixListener) -> anyhow::Result<()>
                     // writing to it, and its whole contract is that it works
                     // without being anybody's writer.
                     if pending.as_ref().is_some_and(|c| c.generation == seq)
-                        && matches!(frame.kind, wire::INPUT | wire::RESIZE)
+                        && matches!(frame.kind, wire::INPUT | wire::RESIZE | wire::REDRAW)
                     {
                         info!(session = %cfg.session_id, "a second daemon took the session over");
                         conn = pending.take();
@@ -509,6 +554,16 @@ async fn serve(cfg: &HolderConfig, listener: UnixListener) -> anyhow::Result<()>
                                 Some((cols, rows)) => resize(master.as_ref(), cols, rows),
                                 None => warn!("ignoring a malformed resize frame"),
                             },
+                            wire::REDRAW => {
+                                // Two calls with a gap between them, not one: the
+                                // gap is what makes the change observable (see
+                                // `redraw_nudge`), and the borrow of `master`
+                                // cannot span the await.
+                                if let Some(size) = redraw_nudge(master.as_ref()) {
+                                    tokio::time::sleep(REDRAW_NUDGE).await;
+                                    resize(master.as_ref(), size.cols, size.rows);
+                                }
+                            }
                             wire::QUERY_BUSY => {
                                 // The answer rides the *current* connection's out
                                 // queue; the daemon that asked is the one attached
@@ -560,7 +615,26 @@ async fn serve(cfg: &HolderConfig, listener: UnixListener) -> anyhow::Result<()>
                     // except that it is not a peer worth promoting.
                     else if pending.as_ref().is_some_and(|c| c.generation == seq)
                         && !frame.is_ignorable()
-                        && !matches!(frame.kind, wire::INPUT | wire::RESIZE)
+                        // `REDRAW` is in both this list and the promotion one above, and in
+                        // *neither* does it change what happens today: no path in
+                        // `serve_socket` reaches its `redraw_session` without having already
+                        // awaited `resize_session`, and both frames ride this one ordered
+                        // channel, so that `RESIZE` promotes a probationary peer before its
+                        // `REDRAW` is ever read. Which is also what makes this arm
+                        // unreachable for a `REDRAW` — promotion took `pending`.
+                        //
+                        // Both entries are insurance against precisely the cleanup this
+                        // module's own docs invite. The `RESIZE` they lean on carries the
+                        // size the pty already has, and `redraw_nudge` argues at length that
+                        // such a resize signals nothing — so somebody will eventually delete
+                        // it as dead work, and on that day a `REDRAW` becomes an adopted
+                        // peer's first frame. With the promotion entry it still works;
+                        // without it the repaint is lost in silence; without either, the
+                        // peer loses its takeover too. The promotion half is pinned by
+                        // `a_peer_whose_only_frame_is_a_redraw_takes_the_session_over_at_once`
+                        // so the insurance cannot be quietly removed; this entry is kept in
+                        // step with it.
+                        && !matches!(frame.kind, wire::INPUT | wire::RESIZE | wire::REDRAW)
                     {
                         warn!(
                             "dropping a probationary connection: unsupported frame {:#x}",
@@ -910,6 +984,9 @@ async fn attach(
         // This build answers QUERY_BUSY; an older holder that cannot would
         // drop the connection if asked, so the daemon gates on this flag.
         supports_busy: true,
+        // This build acts on REDRAW; an older holder that cannot would drop the
+        // connection if asked, so the daemon gates on this flag.
+        supports_redraw: true,
         // Measured from *this* holder's clock, not the daemon's: the daemon that
         // is connecting may never have seen this session before.
         detached_secs: disconnected_since
@@ -1141,6 +1218,81 @@ fn resize(master: &dyn MasterPty, cols: u16, rows: u16) {
     if let Err(e) = master.resize(size) {
         debug!("terminal resize failed: {e}");
     }
+}
+
+/// Make the foreground program repaint its screen.
+///
+/// A full-screen program — a coding agent, vim, a pager — owns every cell it
+/// draws and only redraws when something tells it to. Nothing does, when a
+/// browser reattaches to a shell that never stopped: the replayed scrollback
+/// lands on top of whatever the screen already held, and the program has no
+/// idea, so the mixture stays until the user happens to drag the pane and the
+/// resize repaints it. That drag is the whole bug report.
+///
+/// # Why a size change and not a bare `SIGWINCH`
+///
+/// The drag delivers `SIGWINCH`, so sending one directly is the obvious fix, and
+/// it is not enough. A renderer that *diffs* — ink/`log-update`, which is what a
+/// coding agent's TUI is built on, and `ratatui`'s `Terminal::autoresize` — takes
+/// the signal, recomputes its frame from the size it reads, finds it byte-identical
+/// to the frame it last wrote, and writes **nothing**. Measured through the real
+/// daemon against a renderer of that shape: a bare same-size signal produced zero
+/// bytes, while `rows - 1` then `rows` produced two full repaints. Only programs
+/// that repaint unconditionally (vim) are woken by the signal alone, so the bare
+/// version fixes the case nobody reported and misses the case everybody did.
+///
+/// So this changes the size and puts it back — the redraw method `dtach` and
+/// `abduco` settled on for the same reason. Re-sending the *same* size cannot
+/// work either: [`resize`] issues `TIOCSWINSZ` unconditionally, but Linux
+/// (`tty_do_resize`) and XNU (`ttioctl_locked`) compare the new `winsize` with
+/// the old and skip the signal when they match, which is every reattach at an
+/// unchanged pane size.
+///
+/// # Why the gap is load-bearing
+///
+/// [`REDRAW_NUDGE`] is not padding. Standard signals coalesce, so with the two
+/// `ioctl`s back to back the program is woken once and reads only the *final*
+/// size — identical frame, nothing written. Measured, one variable, same probe:
+/// a 0 ms gap redrew **0** frames while 5 ms redrew 2. The value here is that
+/// floor plus margin for an event loop busy rendering.
+///
+/// Signalling is left to the kernel rather than done here with `killpg`. That is
+/// not only simpler: the kernel signals the foreground process group under the
+/// tty lock, holding the group itself, whereas reading a pgid with `tcgetpgrp`
+/// and then signalling that *number* can land on a group that was reaped and its
+/// id reused in between — and it would have been this module's only `killpg` at a
+/// group it neither owns nor reaps, against the rule its own header sets out.
+///
+/// Split across the gap rather than written as one `async fn` because a
+/// `&dyn MasterPty` is not `Send` and this runs inside a spawned task, so the
+/// borrow must not span the await. This half applies the nudge and hands back the
+/// size to restore; the caller sleeps and restores it.
+fn redraw_nudge(master: &dyn MasterPty) -> Option<PtySize> {
+    // The size the pty actually has, read back rather than tracked: the daemon is
+    // free to have resized since, and a remembered value would restore a stale one.
+    let size = match master.get_size() {
+        Ok(size) => size,
+        Err(e) => {
+            debug!("skipping a redraw: the terminal size could not be read: {e}");
+            return None;
+        }
+    };
+    // Down a row, not up: a program that draws one row short leaves the bottom
+    // line stale for the length of the gap, while one that draws a row *past* the
+    // screen scrolls the display and moves everything the user was looking at.
+    //
+    // The `else` is for a one-row terminal, which can only be nudged upwards. It is
+    // deliberately not claimed to cover `rows == 0`: that is unreachable — the spawn
+    // size and every `resize` run through `clamp_dimension`, which maps 0 to the
+    // default — and it would not work if it were, because the restore below goes
+    // through that same clamp and would set 24 rows rather than putting 0 back.
+    let nudged = if size.rows > 1 {
+        size.rows - 1
+    } else {
+        size.rows + 1
+    };
+    resize(master, size.cols, nudged);
+    Some(size)
 }
 
 /// Duplicate a descriptor, mark it non-blocking, and hand it to tokio's
@@ -1414,6 +1566,160 @@ mod tests {
             text.contains("[veld] Probe exited (0)") && !text.contains("shell exited"),
             "the exit notice must name the pane, not claim a shell ran: {text:?}"
         );
+    }
+
+    /// [`wire::REDRAW`] gives the foreground program a real size *change*, and a
+    /// same-size [`wire::RESIZE`] gives it nothing.
+    ///
+    /// Three properties, and each one is a bug that was actually built:
+    ///
+    /// 1. **A same-size resize signals nothing.** The obvious fix — resend the
+    ///    size on reattach — does nothing, because Linux (`tty_do_resize`) and XNU
+    ///    (`ttioctl_locked`) compare the new `winsize` with the old and skip the
+    ///    `SIGWINCH` when they match. Asserting only the REDRAW half would leave
+    ///    that premise untested, and it is the premise that makes the whole frame
+    ///    necessary rather than redundant.
+    /// 2. **REDRAW changes the size, it does not merely signal.** The first version
+    ///    of this delivered a bare `SIGWINCH` via `killpg`, and that is not enough:
+    ///    a renderer that diffs its own output recomputes the same frame from the
+    ///    same size and writes nothing. So the assertion is on the *sizes the
+    ///    program observed* — `rows - 1` and then `rows` — which a bare-signal
+    ///    implementation cannot produce.
+    /// 3. **And it puts the size back.** Nudging without restoring leaves every
+    ///    reattached terminal one row short, which no assertion on "did it repaint"
+    ///    would catch.
+    ///
+    /// The probe reports through `stty size` rather than a literal, so the trap
+    /// body cannot satisfy the assertion by being echoed. It busy-loops instead of
+    /// sleeping because a POSIX shell defers a trap until the foreground command it
+    /// is waiting on returns, and a `sleep`-based loop would put a whole `sleep` of
+    /// latency between signal and output — long enough for property 1 to pass by
+    /// simply not having waited.
+    #[tokio::test]
+    async fn a_redraw_changes_the_size_and_restores_it_while_a_same_size_resize_does_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("w.sock");
+        let cfg = HolderConfig {
+            session_id: "winchprobe".to_owned(),
+            worktree_id: 1,
+            label: "test".to_owned(),
+            cwd: dir.path().to_path_buf(),
+            cols: 80,
+            rows: 24,
+            socket: socket.clone(),
+            // A backstop: this probe holds the CPU, so it must never outlive the
+            // test even if the explicit hangup below is lost.
+            orphan_grace_secs: 5,
+            shell_argv: None,
+            // 28 is `SIGWINCH` on both Linux and Darwin; the numeric form is what
+            // every POSIX shell accepts, `WINCH` is not.
+            argv: Some(vec![
+                "sh".to_owned(),
+                "-c".to_owned(),
+                "trap 'stty size' 28; printf \"VELDR%sY\" EAD; while :; do :; done".to_owned(),
+            ]),
+            env: std::collections::BTreeMap::from([(
+                "PATH".to_owned(),
+                "/usr/bin:/bin".to_owned(),
+            )]),
+            pane_label: Some("Probe".to_owned()),
+        };
+        tokio::spawn(run(cfg));
+
+        let mut stream = loop {
+            match tokio::net::UnixStream::connect(&socket).await {
+                Ok(s) => break s,
+                Err(_) => tokio::time::sleep(Duration::from_millis(20)).await,
+            }
+        };
+
+        let mut seen = Vec::new();
+        let mut pid = 0;
+        // Read frames until `needle` shows up in the pty output.
+        //
+        // The bound is around the *read*, not only between reads: this probe prints
+        // nothing unasked, so a missing signal means no frame ever arrives and a
+        // deadline checked between whole frames is never reached — the first shape
+        // of this helper turned a failure into a ten-minute hang. Cancelling a
+        // `read_frame` mid-frame desyncs the stream, which is why the timeout is
+        // fatal rather than retried.
+        macro_rules! read_until {
+            ($needle:expr) => {{
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+                loop {
+                    let text = String::from_utf8_lossy(&seen).to_string();
+                    if text.contains($needle) {
+                        break text;
+                    }
+                    let read = tokio::time::timeout_at(deadline, wire::read_frame(&mut stream));
+                    let Ok(framed) = read.await else {
+                        panic!("never saw {:?}; saw {text:?}", $needle);
+                    };
+                    let Some(frame) = framed.unwrap() else {
+                        panic!("the holder closed before {:?}; saw {text:?}", $needle);
+                    };
+                    match frame.kind {
+                        wire::OUTPUT | wire::SCROLLBACK => seen.extend_from_slice(&frame.payload),
+                        wire::HELLO => {
+                            pid = serde_json::from_slice::<wire::Hello>(&frame.payload)
+                                .unwrap()
+                                .pid;
+                        }
+                        _ => {}
+                    }
+                }
+            }};
+        }
+
+        read_until!("VELDREADY");
+
+        // Property 1: the size the holder already spawned with. Nothing comes back.
+        wire::write_frame(&mut stream, wire::RESIZE, &wire::encode_size(80, 24))
+            .await
+            .unwrap();
+        // Deliberately *not* reading during the wait, so nothing is cancelled: any
+        // frame the resize produced queues in the socket and is read below, and the
+        // pty is one ordered stream, so output provoked here cannot arrive after the
+        // echo of a marker sent after it.
+        tokio::time::sleep(REDRAW_NUDGE * 5).await;
+        // The line discipline echoes input whether or not the child reads it, which
+        // is what makes the marker observable against a probe that never reads stdin.
+        wire::write_frame(&mut stream, wire::INPUT, b"MARK\r")
+            .await
+            .unwrap();
+        let text = read_until!("MARK");
+        assert!(
+            !text.contains("24 80") && !text.contains("23 80"),
+            "a resize to the size the pty already has must not signal anything — if \
+             this starts passing trivially, the frame under test is unnecessary: {text:?}"
+        );
+
+        // Properties 2 and 3: a real change, then back.
+        wire::write_frame(&mut stream, wire::REDRAW, &[])
+            .await
+            .unwrap();
+        let text = read_until!("24 80");
+        let nudged = text.find("23 80").expect(
+            "REDRAW must give the program a size it has not already rendered at — a bare \
+             SIGWINCH at the unchanged size leaves a diffing renderer writing nothing",
+        );
+        assert!(
+            nudged < text.find("24 80").unwrap(),
+            "the nudge must come first and the true size last, or every reattached \
+             terminal is left a row short: {text:?}"
+        );
+
+        // The probe holds a core; end it rather than leaving it to the grace.
+        wire::write_frame(&mut stream, wire::HANGUP, &[])
+            .await
+            .unwrap();
+        assert!(pid > 0, "the greeting must have carried the probe's pid");
+        let deadline = Instant::now() + Duration::from_secs(20);
+        // SAFETY: signal 0 performs the permission/existence check only.
+        while unsafe { libc::kill(pid, 0) } == 0 {
+            assert!(Instant::now() < deadline, "the probe outlived its hangup");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
     }
 
     /// An ordinary terminal opens the shell the **daemon** chose, not this
@@ -1736,6 +2042,54 @@ mod tests {
         })
         .await;
         assert!(closed.is_ok(), "the displaced connection must be dropped");
+    }
+
+    /// A peer whose **only** frame is a `REDRAW` gets the session at once, the same
+    /// as one that sends `INPUT` or `RESIZE`.
+    ///
+    /// This is the promotion list at the top of the `Cmd::Frame` arm, and it needs a
+    /// test of its own because the code works without it. The daemon sends a
+    /// same-size `RESIZE` immediately before every `REDRAW` (`resize_session` then
+    /// `redraw_session` in `serve_socket`), and that `RESIZE` promotes the peer, so
+    /// deleting `REDRAW` from the promotion list leaves every other test in this
+    /// file green while the repaint is silently dropped on exactly the adoption
+    /// race the comment there claims to cover. Worse, the resize it depends on is
+    /// one this module's own docs argue is useless — a same-size resize signals
+    /// nothing — so the natural cleanup is what would break it.
+    ///
+    /// **The vacuity trap:** a silent peer is promoted anyway once
+    /// [`TAKEOVER_PROBATION`] elapses, so "the incumbent was eventually dropped"
+    /// would pass with no promotion arm at all. The assertion is therefore that the
+    /// handover beats that timer — promotion by frame is a channel send and a loop
+    /// turn, i.e. milliseconds, while the timer cannot fire before a full second.
+    #[tokio::test]
+    async fn a_peer_whose_only_frame_is_a_redraw_takes_the_session_over_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = echo_holder(dir.path(), "redrawtakeover").await;
+        let mut first = greet(&socket).await;
+        assert!(echoes_back(&mut first, "FIRST").await);
+
+        let mut second = greet(&socket).await;
+        // The only frame this peer ever sends. No `RESIZE` ahead of it, which is
+        // what makes the promotion attributable to `REDRAW` alone.
+        wire::write_frame(&mut second, wire::REDRAW, &[])
+            .await
+            .unwrap();
+
+        // The displaced connection ending is the only signal the protocol has for a
+        // completed handover. Bounded well under the probation so the timer cannot
+        // be what produced it.
+        let closed = tokio::time::timeout(TAKEOVER_PROBATION * 4 / 5, async {
+            while let Ok(Some(_)) = wire::read_frame(&mut first).await {}
+        })
+        .await;
+        assert!(
+            closed.is_ok(),
+            "a REDRAW must promote a probationary peer by itself — waiting for the \
+             probation timer instead means the repaint is dropped on every adoption"
+        );
+        // And it really owns the session: its input reaches the PTY.
+        assert!(echoes_back(&mut second, "OWNS-IT").await);
     }
 
     #[test]

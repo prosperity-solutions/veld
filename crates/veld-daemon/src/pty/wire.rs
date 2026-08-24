@@ -96,6 +96,24 @@ pub const HANGUP: u8 = 0x83;
 /// an older holder that does not know the kind would drop the connection
 /// rather than ignore it, which is the one outcome that must never happen.
 pub const QUERY_BUSY: u8 = 0x84;
+/// Make the foreground program repaint, by giving it a real `winsize` change —
+/// one row shorter, a gap, then the true size — so the *kernel* signals the PTY's
+/// foreground process group.
+///
+/// Empty payload — the size is not part of this frame, deliberately. The holder
+/// reads the pty's current size itself, because the daemon asks for a repaint
+/// precisely when the size has *not* changed, which is the case [`RESIZE`] cannot
+/// cover: both Linux (`tty_do_resize`) and XNU (`ttioctl_locked`) skip the
+/// `SIGWINCH` when the new `winsize` equals the old one, so re-sending the size a
+/// shell already has reaches nothing. A bare signal is not enough either — a
+/// renderer that diffs its own output recomputes an identical frame and writes
+/// nothing — which is why this is a change and not a notification. See
+/// `redraw_nudge` in the holder.
+///
+/// Sent only to a holder that advertised [`Hello::supports_redraw`], for the
+/// same reason [`QUERY_BUSY`] is gated: an older holder drops the connection on
+/// a daemon-numbered frame it does not know ([`Frame::is_ignorable`]).
+pub const REDRAW: u8 = 0x85;
 
 /// Cap on one frame's payload, matching the WebSocket frame cap the daemon
 /// applies on the other side of the bridge. The largest legitimate frame is a
@@ -162,6 +180,15 @@ pub struct Hello {
     /// an update defaults to false and its sessions simply report as idle.
     #[serde(default)]
     pub supports_busy: bool,
+    /// Whether this holder acts on [`REDRAW`].
+    ///
+    /// `#[serde(default)]` for the same reason [`Self::supports_busy`] is, and
+    /// gated for the same reason: an older holder adopted after an update would
+    /// drop the connection rather than ignore the frame. Defaulting to false
+    /// costs such a session nothing but the repaint — it reattaches exactly as
+    /// it did before this existed.
+    #[serde(default)]
+    pub supports_redraw: bool,
     /// `Some(code)` if the shell has already exited.
     pub exited: Option<u32>,
     /// Seconds since a daemon was last connected, or `None` if one is attached
@@ -446,7 +473,7 @@ mod tests {
         // An instruction the holder cannot carry out must fail the connection,
         // not be skipped: a silently-dropped resize is a terminal stuck at the
         // wrong size with nothing in any log.
-        for kind in [INPUT, RESIZE, HANGUP, QUERY_BUSY, 0x99] {
+        for kind in [INPUT, RESIZE, HANGUP, QUERY_BUSY, REDRAW, 0x99] {
             assert!(
                 !Frame {
                     kind,
@@ -483,6 +510,7 @@ mod tests {
             ("RESIZE", RESIZE),
             ("HANGUP", HANGUP),
             ("QUERY_BUSY", QUERY_BUSY),
+            ("REDRAW", REDRAW),
         ];
         let unique: std::collections::HashSet<u8> = kinds.iter().map(|(_, k)| *k).collect();
         assert_eq!(
@@ -508,6 +536,36 @@ mod tests {
         // strands shells behind daemons that cannot ask them to stop.
         assert_eq!(HANGUP, 0x83);
         assert_eq!(PROTOCOL, 1);
+    }
+
+    /// A greeting from a holder that predates a capability flag must default it
+    /// to false, not fail to parse.
+    ///
+    /// This is the `veld update` path, and it is the whole reason both flags
+    /// exist: after an update the daemon is the new binary while every holder
+    /// still runs the old one, so the *old* greeting is what the *new* daemon
+    /// reads. A field without `#[serde(default)]` makes that greeting
+    /// undeserializable — and the daemon cannot even report it as a version
+    /// problem, because it never got as far as reading the version. It would
+    /// hang up every surviving terminal instead.
+    ///
+    /// Both flags are asserted rather than only the new one: the failure is a
+    /// property of the struct, so the test has to be the thing that notices the
+    /// next field added without a default.
+    #[test]
+    fn a_greeting_without_the_capability_flags_still_parses() {
+        // Exactly the fields an older holder sends, and nothing this build added.
+        let old = r#"{"protocol":1,"session_id":"s","worktree_id":1,"label":"l",
+                      "cwd":"/tmp","pid":42,"exited":null}"#;
+        let hello: Hello = serde_json::from_str(old).expect("an old greeting must still parse");
+        assert_eq!(hello.protocol, PROTOCOL);
+        assert!(
+            !hello.supports_redraw,
+            "an old holder must not be sent REDRAW: it would drop the connection \
+             on a daemon-numbered frame it cannot ignore, costing a live terminal"
+        );
+        assert!(!hello.supports_busy, "same for QUERY_BUSY");
+        assert_eq!(hello.detached_secs, None);
     }
 
     #[test]
