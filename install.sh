@@ -467,7 +467,13 @@ find_desktop_app() {
 desktop_preference() {
   local file="$HOME/.veld/desktop.json" body
   [ -f "$file" ] || return 0
-  body="$(tr -d ' \t\r\n' < "$file" 2>/dev/null)" || return 0
+  # `2>/dev/null` **before** the input redirection: bash applies redirections
+  # left to right, so with `< "$file" 2>/dev/null` the failure to open the file is
+  # reported through the still-unredirected stderr — an unreadable `desktop.json`
+  # (root-owned by an old `sudo curl | bash`, the exact case the CLI's own error
+  # message anticipates) printed a raw "Permission denied" into the middle of an
+  # install that then carried on silently. Measured both orders.
+  body="$(tr -d ' \t\r\n' 2>/dev/null < "$file")" || return 0
   case "$body" in
     '{"wanted":true'*)  echo "yes" ;;
     '{"wanted":false'*) echo "no" ;;
@@ -618,7 +624,13 @@ remove_desktop_app_via_cli() {
   # clap's "unrecognized subcommand 'uninstall'" usage dump, which is noise in
   # front of a message that explains the situation properly.
   "$cli" desktop uninstall --yes 2>/dev/null || rc=$?
-  [ "$rc" -eq 0 ] && return 0
+  # An `if`, not `[ … ] && return 0`: under `set -e` that compound *is* the
+  # statement's exit status, so the non-zero case would abort the installer if
+  # this function were ever called outside an `if`. Same hazard this file's
+  # QUIET/`say` block already documents.
+  if [ "$rc" -eq 0 ]; then
+    return 0
+  fi
   # 75 is EX_TEMPFAIL: `veld desktop uninstall` is on the list of commands an
   # in-flight `veld update` refuses (`command_survives_an_update` in
   # crates/veld/src/main.rs), because it would delete the bundle that update is
@@ -907,6 +919,22 @@ install_desktop_app() {
   return 1
 }
 
+# **This path deliberately does not consult `desktop_preference`**, and that is
+# worth stating because the gate further down does. `VELD_DESKTOP_ONLY=1` is only
+# ever set by a caller that has *already* answered the question: `veld desktop
+# install|update` records "wanted" before spawning this script, and `veld update`
+# reaches its app half only after `plan_desktop` has consulted the recorded
+# answer. Checking again here would not be a second line of defence, it would be
+# a contradiction — the preference write is deliberately best-effort (see
+# `remember` in crates/veld/src/commands/desktop.rs), so on a machine where it
+# fails a `veld desktop install` typed by hand would be refused by a stale "no"
+# it could not overwrite.
+#
+# The one thing that follows and cannot be fixed here: a veld binary older than
+# the preference reads no `desktop.json` at all, so its `veld update` still moves
+# the app half through this path. It self-heals on the next update, and this
+# script cannot tell the difference — the caller's version is not something a
+# child process gets to audit.
 if [ -n "$DESKTOP_ONLY" ]; then
   if ! install_desktop_app; then
     echo ""

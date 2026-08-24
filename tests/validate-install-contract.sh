@@ -215,6 +215,10 @@ fi
 # crates/veld/src/commands/update.rs — that is the same decision in a second
 # language, with no compiler between them.
 GATE_DIR="$(mktemp -d)"
+# Exported rather than passed as an assignment prefix: the driver reads it, and
+# `GATE_DIR="$GATE_DIR" bash …` is the shape shellcheck refuses (SC2097/SC2098)
+# because the expansion on the same line reads the outer value, not the prefix.
+export GATE_DIR
 trap 'rm -rf "$STUB" "$GATE_DIR"' EXIT
 
 # Bounded by its two column-zero anchors rather than by a `sed` range ending at
@@ -254,6 +258,11 @@ DRIVER
   #
   # A 5th argument means a human was asked this run; pass `junk` for "asked and
   # said nothing usable". Omit it for a run with nobody to ask.
+  # `WANT` is install.sh's `WANT_DESKTOP` — 1 unless a cell is testing the
+  # `VELD_DESKTOP=0` override. Passed explicitly rather than as an assignment
+  # prefix on `cell`: bash leaks such an assignment past a *function* call, so the
+  # override would silently apply to every cell added after it.
+  WANT=1
   cell() {
     local what="$1" expect="$2" pref="$3" app="$4"
     local home="$GATE_DIR/home" out got
@@ -262,9 +271,9 @@ DRIVER
     if [ "$#" -ge 5 ]; then
       local answer="$5"
       [ "$answer" != "junk" ] || answer=""
-      out="$(HOME="$home" GATE_DIR="$GATE_DIR" FAKE_APP="$app" ASK_ANSWER="$answer" bash "$GATE_DIR/drive.sh" 2>&1)"
+      out="$(HOME="$home" FAKE_APP="$app" WANT_DESKTOP="$WANT" ASK_ANSWER="$answer" bash "$GATE_DIR/drive.sh" 2>&1)"
     else
-      out="$(HOME="$home" GATE_DIR="$GATE_DIR" FAKE_APP="$app" bash "$GATE_DIR/drive.sh" 2>&1)"
+      out="$(HOME="$home" FAKE_APP="$app" WANT_DESKTOP="$WANT" bash "$GATE_DIR/drive.sh" 2>&1)"
     fi
     got="$(printf '%s' "$out" | grep -o 'ACTION=[a-z]*' | head -1)"
     got="${got#ACTION=}"
@@ -293,7 +302,8 @@ DRIVER
   cell "asked + junk answer + app present" install unset /A/Veld.app junk
   cell "asked + junk answer + no app"      none    unset ""          junk
   # VELD_DESKTOP=0 is a per-run override and outranks a stored yes.
-  WANT_DESKTOP="" cell "VELD_DESKTOP=0 + wanted + app" none true /A/Veld.app
+  WANT="" cell "VELD_DESKTOP=0 + wanted + app" none true /A/Veld.app
+  WANT=1
 fi
 
 echo

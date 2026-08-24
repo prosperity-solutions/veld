@@ -1721,6 +1721,18 @@ pub struct DesktopInstall {
 /// the script skips the CLI tarball, the binary swap, the sudo negotiation, the
 /// service restarts and the PATH edits entirely. Without it, updating an app
 /// bounced the daemon and could prompt for a password.
+///
+/// **Two callers, and a new one owes the preference a write.** `veld desktop
+/// install|update` (which records [`crate::desktop_pref::DesktopChoice::Wanted`]
+/// before calling — running the command *is* the answer) and `veld update`'s
+/// `run_desktop_step`, which is reached only once `plan_desktop` has consulted
+/// the recorded answer. Since the app is optional, putting it on disk without
+/// recording that somebody asked for it leaves the machine in the one state
+/// nothing else produces: an installed app with no answer on record, which the
+/// next interactive run then asks about as though veld had not just installed it.
+/// A third caller — a future `repair` or `reinstall` — must either record the
+/// choice or go through a path that already has. The mirror of this list is on
+/// [`remove_desktop_app`].
 pub async fn install_desktop(version: &str, opts: &DesktopInstall) -> Result<(), anyhow::Error> {
     let mut env: Vec<(String, String)> = vec![
         ("VELD_DESKTOP".into(), "1".into()),

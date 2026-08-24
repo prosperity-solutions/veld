@@ -14,6 +14,7 @@
 //! and — when the app handed its own update over and quit — making sure the user
 //! ends up with a window and an explanation rather than neither.
 
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
 use veld_core::desktop_pref::{self, DesktopChoice};
@@ -207,7 +208,18 @@ pub async fn uninstall(assume_yes: bool) -> i32 {
     let installed = veld_core::setup::desktop_app_status().map(|(path, _)| path);
 
     if let Some(path) = &installed {
-        if !assume_yes && output::is_tty() && !confirm_removal(path) {
+        // **The descriptors the question actually uses**, not `output::is_tty()`
+        // — which reads *stdout*, while `confirm_removal` prints to stderr and
+        // reads stdin. That mismatch cut both ways in front of an irreversible
+        // `remove_dir_all`: `veld desktop uninstall > log` from a terminal
+        // skipped the confirmation entirely and deleted the bundle unasked,
+        // while `veld desktop uninstall < /dev/null` in a pty answered its own
+        // prompt with EOF and refused a caller who meant it. Same defect the
+        // bash half had (`[ -t 1 ]` where the prompt goes to fd 2) and the same
+        // rule fixes both: ask only when the human can see the question *and*
+        // answer it.
+        let can_ask = std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
+        if !assume_yes && can_ask && !confirm_removal(path) {
             output::print_info("Cancelled — nothing was removed and nothing was remembered.");
             return 1;
         }
