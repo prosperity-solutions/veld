@@ -20,12 +20,26 @@
 //!   the answer is read by the process doing the migrating.
 //!
 //! The shape is deliberately trivial — `{"wanted":true}` on one line — because it
-//! is parsed in two languages. Rust reads it with serde and writes it
-//! canonically; `install.sh`'s `desktop_preference` strips whitespace and looks
-//! for `"wanted":true`/`"wanted":false`, which is why pretty-printing here would
-//! still work but nothing may rename the key or nest it.
+//! is parsed in two languages, and only one of them has a JSON parser. Rust reads
+//! it with serde and writes it canonically; `install.sh`'s `desktop_preference`
+//! strips whitespace and then matches the body against `{"wanted":true` /
+//! `{"wanted":false` **anchored at the opening brace**, so:
+//!
+//! - pretty-printing from this side stays readable there (the whitespace strip
+//!   collapses `{ "wanted": true }` onto the anchored literal),
+//! - extra keys are fine as long as they come *after* `wanted`,
+//! - and `wanted` must be the **first** key for the script to see an answer at
+//!   all. Nothing writes any other shape, and the divergence only ever costs a
+//!   re-ask — which is the one direction a two-parser mismatch may fail in.
+//!
+//! The anchor is not cosmetic: an unanchored search matched the literal inside
+//! *another key's string value*, so a file saying `wanted: false` with a
+//! `"note":"\"wanted\":true"` read as yes in bash and no in Rust — two parsers
+//! disagreeing about a file that gates a download and, on one path, a deletion.
+//!
 //! `crates/veld-core/tests/install_script_contract.rs` runs the script's own
-//! reader against a file this module wrote, because a rename on either side is
+//! reader against a file this module wrote, in both directions and including that
+//! injection case, because a rename or a loosened glob on either side is
 //! otherwise invisible: the app would simply stop being installed, or start being
 //! installed again, with every suite green.
 //!
@@ -160,9 +174,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_in(dir.path(), DesktopChoice::Wanted).unwrap();
         let raw = std::fs::read_to_string(dir.path().join(".veld").join(FILE_NAME)).unwrap();
-        // `install.sh` strips whitespace and greps for this literal. Pinned here
-        // as well as in the cross-language contract test, because this is the
-        // half a Rust-only edit can break.
+        // `install.sh` strips whitespace and matches this literal anchored at the
+        // opening brace, so the key order here is part of the contract rather
+        // than a formatting choice. Pinned here as well as in the cross-language
+        // contract test, because this is the half a Rust-only edit can break.
         assert_eq!(raw, "{\"wanted\":true}\n");
 
         write_in(dir.path(), DesktopChoice::Unwanted).unwrap();

@@ -2333,11 +2333,12 @@ fn pids_running_from(ps_output: &str, bundle: &std::path::Path, uid: u32) -> Vec
 /// Every path that runs out of this budget leaves the bundle alone rather than
 /// forcing the issue.
 ///
-/// Lives here rather than in `veld update` because three commands now close the
-/// app — `veld update`, the app's own handoff, and `veld desktop uninstall` — and
-/// two of them are about to do something irreversible to the bundle afterwards. A
-/// second constant that drifted shorter would have one of them start deleting
-/// while the app was still on its way out.
+/// Lives here rather than in `veld update` because **four** commands now close
+/// the app — `veld update` (to swap the bundle, or to honour a "no" just typed),
+/// the app's own handoff, `veld desktop uninstall`, and `veld uninstall` — and
+/// three of those go on to delete or replace the bundle. A second constant that
+/// drifted shorter would have one of them start deleting while the app was still
+/// on its way out.
 pub const DESKTOP_QUIT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How [`quit_desktop_app`] went.
@@ -2441,12 +2442,22 @@ pub async fn quit_desktop_app(bundle: &std::path::Path, timeout: Duration) -> Qu
 /// Close Veld Desktop and delete its bundle.
 ///
 /// The one destructive act in the app half of veld, so it is written once and
-/// every caller goes through it: `veld desktop uninstall`, `veld uninstall`
-/// (below), and `install.sh` — via that first command — when somebody answers
-/// "no" on a machine that already has the app. A second copy of this in bash was
-/// the alternative, racing this one for the same directory; a second copy in
-/// `uninstall` was the *actual* state of this file until a review pointed out
-/// that the paragraph below was false one screen away from itself.
+/// every caller goes through it. **Three call sites, and a `grep` for this
+/// function's name is the way to check this list is still complete** — an
+/// enumeration in prose goes stale silently, and this one already did once:
+///
+/// - `veld desktop uninstall` (`crates/veld/src/commands/desktop.rs`), which is
+///   also how `install.sh` removes the app — it shells out to that command rather
+///   than carrying its own `rm -rf`.
+/// - `veld update` (`plan_desktop`'s fresh-"no" arm in
+///   `crates/veld/src/commands/update.rs`), the one place an *update* removes the
+///   app, authorised by an answer given on that run.
+/// - `veld uninstall` (below), a different command from the first one.
+///
+/// A second copy of this in bash was the alternative, racing this one for the
+/// same directory; a second copy in `uninstall` was the *actual* state of this
+/// file until a review pointed out that the paragraph below was false one screen
+/// away from itself.
 ///
 /// **Quit first, always.** `remove_dir_all` on a running app succeeds — macOS
 /// unlinks a bundle out from under a live process quite happily — and leaves an

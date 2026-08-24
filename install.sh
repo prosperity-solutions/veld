@@ -521,11 +521,14 @@ desktop_can_ask() {
 # Ask, once, and record the answer. Echoes `yes`/`no`; empty when nobody
 # answered, which stays "not recorded" rather than becoming a decision.
 #
-# Two wordings, because the two audiences are different questions. Someone
-# installing veld for the first time is choosing whether to add an app. Someone
-# who has been running veld for months already *has* it — earlier releases
-# brought it along with the CLI without asking — so their prompt has to say so,
-# and say what "no" will do, before it can be a fair question.
+# Three wordings, because these are three different questions. Someone who has
+# been running veld for months already *has* the app — earlier releases brought it
+# along with the CLI without asking — so their prompt has to say so, and say what
+# "no" will do, before it can be a fair question. An existing veld user *without*
+# the app is being offered a download they have so far managed without. And a
+# genuinely fresh install is choosing what veld is for them in the first place, so
+# it gets the fullest description. (The Rust sibling `ask_desktop_choice` has two:
+# it is never the thing a first-time user meets.)
 #
 # The default (bare Enter) is whatever the machine already looks like: keep an app
 # that is there, do not fetch one that is not — except on a first install, where
