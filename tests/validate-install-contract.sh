@@ -219,10 +219,17 @@ if VELD_NON_INTERACTIVE=1 desktop_can_ask; then echo "NONINT=yes"; else echo "NO
   if [ -z "$PTY" ]; then
     echo "  skip no usable \`script\` for a pty — the two text checks above still ran"
   else
+    # Via a file, not an inlined `-c` string. util-linux's `script` takes the
+    # command as **one** argument, so inlining meant nesting `bash -c '…'` inside
+    # it and escaping the gate's own quotes — unverifiable on a macOS machine,
+    # and a mistake there would surface as a spurious CI *failure* rather than a
+    # skip. A file has no quoting to get wrong and both flavours run it the same
+    # way. `$STUB` comes from `mktemp -d`, so the path has no spaces.
+    printf '%s\n%s\n' "$gate" "$probe" > "$STUB/gate-probe.sh"
     if [ "$PTY" = "util-linux" ]; then
-      pty_out="$(script -q -c "bash -c '${gate//\'/\'\\\'\'}${probe//\'/\'\\\'\'}'" /dev/null </dev/null 2>&1 || true)"
+      pty_out="$(script -q -c "bash $STUB/gate-probe.sh" /dev/null </dev/null 2>&1 || true)"
     else
-      pty_out="$(script -q /dev/null bash -c "${gate}${probe}" </dev/null 2>&1 || true)"
+      pty_out="$(script -q /dev/null bash "$STUB/gate-probe.sh" </dev/null 2>&1 || true)"
     fi
     pty_out="$(printf '%s' "$pty_out" | tr -d '\r')"
     while IFS='|' read -r key expect what; do

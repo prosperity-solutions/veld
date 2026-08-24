@@ -1522,13 +1522,20 @@ if [ -n "$WANT_DESKTOP" ]; then
       ;;
     *)
       if [ -n "$DESKTOP_APP" ]; then
-        install_desktop_app || DESKTOP_FAILED="1"
         # Said once, on the one path that moves the app with no answer on record.
         # A run piped through `tee`, or one where the question was not answered,
         # keeps the app in step and would otherwise never mention that there was a
         # choice — which for the user this whole change is about is the difference
         # between paying the download forever and knowing they need not.
-        say "Veld Desktop was kept up to date. 'veld desktop uninstall' removes it and stops that; 'veld desktop install' records that you want it."
+        #
+        # Only on success, and that is not pedantry: on failure the caller prints
+        # "Run 'veld desktop install' to retry the app on its own", and "was kept
+        # up to date" immediately above it is a straight contradiction.
+        if install_desktop_app; then
+          say "Veld Desktop was kept up to date. 'veld desktop uninstall' removes it and stops that; 'veld desktop install' records that you want it."
+        else
+          DESKTOP_FAILED="1"
+        fi
       elif [ -n "$DESKTOP_ASKED" ]; then
         # Asked, and the answer was not yes or no. Saying "nobody to ask" to
         # somebody who was just asked is the wrong sentence.
