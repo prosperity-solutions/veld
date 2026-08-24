@@ -165,20 +165,33 @@ impl Diagnostics {
         self.config_path = tilde_path(&config_path);
         self.config_mode = read_mode(&config_path);
 
-        // Veld Desktop. Installed by default on macOS now, updated by
-        // `veld update`, and able to be stale in a way nothing else here would
-        // show — the app half can lag while every binary above is current.
-        // Doctor is where a user is sent when something is wrong, so a stale
-        // app belongs in the list rather than only in `veld desktop status`.
+        // Veld Desktop. Optional on macOS, updated by `veld update` when the user
+        // wants it, and able to be stale in a way nothing else here would show —
+        // the app half can lag while every binary above is current. Doctor is
+        // where a user is sent when something is wrong, so a stale app belongs in
+        // the list rather than only in `veld desktop status`.
+        //
+        // The recorded preference is part of the row rather than a separate one,
+        // because "the app is old" and "the app is old *because you opted out*"
+        // are the same fact with and without its explanation — and without it a
+        // reader chases a stale app that is stale on purpose.
+        let opted_out = veld_core::desktop_pref::read()
+            == Some(veld_core::desktop_pref::DesktopChoice::Unwanted);
         self.desktop_app = match veld_core::setup::desktop_app_status() {
             Some((path, version)) => {
                 let version = version.unwrap_or_else(|| "unknown version".to_string());
-                let suffix = if version == cli_version {
+                let suffix = if opted_out {
+                    " — you opted out, so veld leaves it alone ('veld desktop install' to opt in)"
+                        .to_string()
+                } else if version == cli_version {
                     String::new()
                 } else {
                     format!(" — CLI is {cli_version}, run 'veld desktop update'")
                 };
                 format!("{} ({version}){suffix}", tilde_path(&path))
+            }
+            None if std::env::consts::OS == "macos" && opted_out => {
+                "not installed — you opted out ('veld desktop install' to opt in)".to_string()
             }
             None if std::env::consts::OS == "macos" => {
                 "not installed ('veld desktop install')".to_string()

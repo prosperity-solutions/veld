@@ -150,7 +150,12 @@ for needle in \
   'install_desktop_app' \
   'desktop_lock' \
   'apply_binary_icons' \
-  'find_desktop_app'
+  'find_desktop_app' \
+  'desktop_preference' \
+  'record_desktop_preference' \
+  'desktop_can_ask' \
+  'ask_desktop_preference' \
+  'remove_desktop_app_via_cli'
 do
   if grep -q "^${needle}()" "$SCRIPT"; then
     ok "install.sh defines ${needle}"
@@ -158,6 +163,39 @@ do
     bad "install.sh no longer defines ${needle}"
   fi
 done
+
+# --- 4. A run nobody is watching never reaches a prompt --------------------
+#
+# `desktop_can_ask` is the gate in front of the only question this script asks,
+# and every veld-driven run sets VELD_NON_INTERACTIVE=1 (pinned in
+# `crates/veld-core/tests/install_script_contract.rs`). If the gate stops
+# honouring it, `veld update` blocks forever on a prompt written to a terminal
+# nobody is at — and on the app's own handoff there is no terminal at all, so the
+# update would hang with the app already quit. `bash -n` sees nothing wrong with
+# that.
+#
+# The function is lifted out and run on its own, because the script itself
+# installs veld. Same technique as the Rust half's `shell_function`.
+gate="$(sed -n '/^desktop_can_ask() {/,/^}/p' "$SCRIPT")"
+if [ -z "$gate" ]; then
+  bad "could not extract desktop_can_ask() from install.sh"
+else
+  if VELD_NON_INTERACTIVE=1 bash -c "${gate}
+desktop_can_ask"; then
+    bad "desktop_can_ask says yes under VELD_NON_INTERACTIVE=1"
+  else
+    ok "desktop_can_ask refuses under VELD_NON_INTERACTIVE=1"
+  fi
+  # And with stdout redirected — which is what a piped or logged run looks like,
+  # and is how the app's detached handoff runs. `/dev/tty` can still be readable
+  # there, so the tty test alone is not enough.
+  if bash -c "${gate}
+desktop_can_ask" > /dev/null; then
+    bad "desktop_can_ask says yes with stdout redirected"
+  else
+    ok "desktop_can_ask refuses with stdout redirected"
+  fi
+fi
 
 echo
 if [ "$fail" -eq 0 ]; then

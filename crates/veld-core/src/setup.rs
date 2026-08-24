@@ -2313,6 +2313,21 @@ fn pids_running_from(ps_output: &str, bundle: &std::path::Path, uid: u32) -> Vec
         .collect()
 }
 
+/// How long Veld Desktop gets to quit — whether it was asked over an Apple
+/// Event, sent a `SIGTERM`, or told us its own pid and quit on its own.
+///
+/// Generous on purpose: `before-quit` persists window layout and hands back a
+/// detached window's tabs, and a machine under load can take seconds over it.
+/// Every path that runs out of this budget leaves the bundle alone rather than
+/// forcing the issue.
+///
+/// Lives here rather than in `veld update` because three commands now close the
+/// app — `veld update`, the app's own handoff, and `veld desktop uninstall` — and
+/// two of them are about to do something irreversible to the bundle afterwards. A
+/// second constant that drifted shorter would have one of them start deleting
+/// while the app was still on its way out.
+pub const DESKTOP_QUIT_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// How [`quit_desktop_app`] went.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QuitOutcome {
@@ -2409,6 +2424,31 @@ pub async fn quit_desktop_app(bundle: &std::path::Path, timeout: Duration) -> Qu
     } else {
         QuitOutcome::Refused
     }
+}
+
+/// Close Veld Desktop and delete its bundle.
+///
+/// The one destructive act in the app half of veld, so it is written once and
+/// shared: `veld desktop uninstall` runs it, and so does `install.sh` (through
+/// that command) when somebody answers "no" on a machine that already has the
+/// app. A second copy of this in bash was the alternative, racing this one for
+/// the same directory.
+///
+/// **Quit first, always.** `remove_dir_all` on a running app succeeds — macOS
+/// unlinks a bundle out from under a live process quite happily — and leaves an
+/// Electron app whose own resources have gone, which is a crash rather than an
+/// uninstall. An app that refuses to quit is therefore an error here, not a
+/// force: something on screen is unanswered.
+pub async fn remove_desktop_app(bundle: &std::path::Path) -> Result<(), anyhow::Error> {
+    match quit_desktop_app(bundle, DESKTOP_QUIT_TIMEOUT).await {
+        QuitOutcome::Quit | QuitOutcome::NotRunning => {}
+        QuitOutcome::Refused => anyhow::bail!(
+            "Veld Desktop did not quit, so it was left in place — it may be showing a dialog. \
+             Quit it and try again."
+        ),
+    }
+    std::fs::remove_dir_all(bundle)
+        .with_context(|| format!("could not remove {}", bundle.display()))
 }
 
 /// Poll until nothing runs from `bundle`, or the budget is spent.

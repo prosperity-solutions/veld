@@ -2,20 +2,12 @@ use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use veld_core::setup::QuitOutcome;
+use veld_core::desktop_pref::{self, DesktopChoice};
+use veld_core::setup::{DESKTOP_QUIT_TIMEOUT as QUIT_TIMEOUT, QuitOutcome};
 use veld_core::state::RunStatus;
 use veld_core::update_lock::{self, Acquired, Origin, Phase, UpdateGuard};
 
 use crate::output;
-
-/// How long the app gets to quit — whether it was asked over an Apple Event, sent
-/// a `SIGTERM`, or told us its own pid and quit on its own.
-///
-/// Generous on purpose: `before-quit` persists window layout and hands back a
-/// detached window's tabs, and a machine under load can take seconds over it.
-/// Every path that runs out of this budget leaves the bundle alone rather than
-/// forcing the issue.
-const QUIT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How long `--console` waits for the window it opened to prove it exists.
 ///
@@ -339,6 +331,46 @@ async fn run_locked(
     outcome.code
 }
 
+/// What the *recorded preference* means for this run — the whole decision, with
+/// no I/O in it.
+///
+/// Pure and separate because it is a four-way answer to three inputs and every
+/// wrong cell is a user-visible bug: one of them downloads a 113 MB app onto a CI
+/// box, another strands an IDE user on a stale app, another deletes an app nobody
+/// asked to lose. A predicate written inline in `plan_desktop` could only be
+/// tested by reading the maintainer's own `~/.veld/desktop.json` and whatever
+/// happens to be in `/Applications`, i.e. by reporting on the machine it ran on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DesktopGate {
+    /// Install or update the app as this release requires.
+    Proceed,
+    /// The user said no. Leave the app half alone entirely.
+    OptedOut,
+    /// Nobody has answered, nobody can be asked, and there is no app here. Do not
+    /// fetch one.
+    SkipUnasked,
+    /// Nobody has answered and this run may put the question.
+    Ask,
+}
+
+/// The truth table, stated once.
+///
+/// The load-bearing asymmetry is in the unanswered row, and it is the difference
+/// between two users veld cannot tell apart from a preference file: someone who
+/// **has** the app is running the IDE and is entitled to have `veld update` keep
+/// it in step, answer or no answer. Someone who does **not** have it has been
+/// managing without it, so an update that cannot ask must not decide for them by
+/// downloading it.
+fn desktop_gate(recorded: Option<DesktopChoice>, installed: bool, may_ask: bool) -> DesktopGate {
+    match recorded {
+        Some(DesktopChoice::Wanted) => DesktopGate::Proceed,
+        Some(DesktopChoice::Unwanted) => DesktopGate::OptedOut,
+        None if may_ask => DesktopGate::Ask,
+        None if installed => DesktopGate::Proceed,
+        None => DesktopGate::SkipUnasked,
+    }
+}
+
 /// Decide what happens to the app, and close it if it is in the way.
 ///
 /// `handoff` means the app spawned this and has already quit itself — there is
@@ -384,6 +416,96 @@ async fn plan_desktop(app_dir: Option<PathBuf>, handoff: bool, relaunch: bool) -
     }
 
     let status = veld_core::setup::desktop_app_status_in(plan.app_dir.as_deref());
+
+    // **Does this machine want the app at all?** Settled before anything about
+    // *this* release is considered, because the answer decides whether the
+    // ~113 MB download happens at all — which is the complaint this exists to
+    // answer: a user who drives veld purely as an orchestrator was paying for the
+    // IDE app on every single update.
+    let path_of = |s: &Option<(PathBuf, Option<String>)>| s.as_ref().map(|(p, _)| p.clone());
+    match desktop_gate(
+        desktop_pref::read(),
+        status.is_some(),
+        !handoff && attended(),
+    ) {
+        // Answered yes, or answered nothing while already owning the app: today's
+        // behaviour, unchanged, all the way down.
+        DesktopGate::Proceed => {}
+        DesktopGate::OptedOut => {
+            // Deliberately **not** a removal. The recorded answer stops veld
+            // fetching and updating the app; it does not license deleting a bundle
+            // the user may have put there by hand since — a `.dmg` drag is a more
+            // recent signal than an old "no", and silently deleting an app is not
+            // a thing `veld update` may do. Named rather than silent, so the state
+            // is discoverable from the run that acts on it.
+            if let Some(path) = path_of(&status) {
+                output::print_info(&format!(
+                    "Veld Desktop is at {} but you opted out, so the app was left alone.",
+                    path.display()
+                ));
+                println!(
+                    "  {}",
+                    output::dim(
+                        "'veld desktop install' keeps it updated again; 'veld desktop uninstall' \
+                         removes it."
+                    )
+                );
+            }
+            if handoff {
+                // The app quit for this and is about to reopen on its old version.
+                // Silence would read as success.
+                plan.skipped = Some(
+                    "you opted out of Veld Desktop, so the app was not updated — run \
+                     `veld desktop install` to opt back in"
+                        .to_string(),
+                );
+            }
+            return plan;
+        }
+        DesktopGate::SkipUnasked => {
+            // No app, no answer, nobody to ask. This is the case that used to hand
+            // a CI box and an agent-driven update a GUI app nobody wanted.
+            output::print_info(
+                "Veld Desktop is not installed and this run cannot ask — skipping the app. \
+                 Run `veld desktop install` to add it.",
+            );
+            return plan;
+        }
+        DesktopGate::Ask => match super::desktop::ask_desktop_choice(path_of(&status).as_deref()) {
+            Some(DesktopChoice::Wanted) => {}
+            Some(DesktopChoice::Unwanted) => {
+                // The one place `veld update` removes the app, and it is
+                // authorised by the answer that was *just* given rather than by a
+                // stored one — which is the difference between reconciling the
+                // machine and deleting somebody's app behind their back.
+                //
+                // Nothing to undo for `reopen`: this arm is only reachable with
+                // `!handoff`, and `honour_relaunch` makes `relaunch` false without
+                // a pid, so no app quit for this run and none is owed a window.
+                if let Some(path) = path_of(&status) {
+                    output::print_info(&format!("Removing {}...", path.display()));
+                    match veld_core::setup::remove_desktop_app(&path).await {
+                        Ok(()) => output::print_info("Removed. The CLI update continues."),
+                        Err(e) => {
+                            output::print_error(&format!("{e:#}"), false);
+                            println!(
+                                "  {}",
+                                output::dim(
+                                    "veld will not install it again either way — run \
+                                     'veld desktop uninstall' once it has quit."
+                                )
+                            );
+                        }
+                    }
+                }
+                return plan;
+            }
+            // Nothing was recorded — EOF, or a keystroke that is not an answer. The
+            // question stays open, and this run does what the unasked case does.
+            None if status.is_none() => return plan,
+            None => {}
+        },
+    }
 
     // Nothing installed: the app half of this release is a fresh install, and
     // there is no window to close.
@@ -1746,7 +1868,51 @@ async fn wait_for_helper_version(
 
 #[cfg(test)]
 mod tests {
-    use super::{DesktopPlan, consent, honour_relaunch, plan_desktop};
+    use super::{
+        DesktopChoice, DesktopGate, DesktopPlan, consent, desktop_gate, honour_relaunch,
+        plan_desktop,
+    };
+
+    /// The whole optional-app decision, cell by cell.
+    ///
+    /// Every row is a user, and three of the eight cells were the bug being fixed
+    /// or a bug a fix could introduce: an orchestrator-only user downloading the
+    /// app on every update, an IDE user stranded on a stale app by a run that
+    /// could not ask, and an app deleted from under somebody who never said no.
+    #[test]
+    fn the_recorded_answer_decides_the_app_half() {
+        use DesktopChoice::{Unwanted, Wanted};
+
+        // A recorded answer is obeyed whatever else is true — including on a run
+        // that could have asked. Asking somebody who has already answered is the
+        // nag this feature exists to avoid.
+        for installed in [true, false] {
+            for may_ask in [true, false] {
+                assert_eq!(
+                    desktop_gate(Some(Wanted), installed, may_ask),
+                    DesktopGate::Proceed,
+                    "wanted/{installed}/{may_ask}"
+                );
+                assert_eq!(
+                    desktop_gate(Some(Unwanted), installed, may_ask),
+                    DesktopGate::OptedOut,
+                    "unwanted/{installed}/{may_ask}"
+                );
+            }
+        }
+
+        // Never asked, and there is somebody to ask: ask. This is where every
+        // existing user lands on their first interactive `veld update` — with the
+        // app installed, having never chosen it.
+        assert_eq!(desktop_gate(None, true, true), DesktopGate::Ask);
+        assert_eq!(desktop_gate(None, false, true), DesktopGate::Ask);
+
+        // Never asked and nobody to ask — an agent-driven update, a CI box, the
+        // app's own handoff. The app they already have is kept in step; one they
+        // have never had is not downloaded.
+        assert_eq!(desktop_gate(None, true, false), DesktopGate::Proceed);
+        assert_eq!(desktop_gate(None, false, false), DesktopGate::SkipUnasked);
+    }
 
     /// `plan_desktop` reads the process environment, which is global.
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {
