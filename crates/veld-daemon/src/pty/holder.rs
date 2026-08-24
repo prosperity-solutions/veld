@@ -509,6 +509,7 @@ async fn serve(cfg: &HolderConfig, listener: UnixListener) -> anyhow::Result<()>
                                 Some((cols, rows)) => resize(master.as_ref(), cols, rows),
                                 None => warn!("ignoring a malformed resize frame"),
                             },
+                            wire::REDRAW => redraw(master.as_ref()),
                             wire::QUERY_BUSY => {
                                 // The answer rides the *current* connection's out
                                 // queue; the daemon that asked is the one attached
@@ -560,7 +561,12 @@ async fn serve(cfg: &HolderConfig, listener: UnixListener) -> anyhow::Result<()>
                     // except that it is not a peer worth promoting.
                     else if pending.as_ref().is_some_and(|c| c.generation == seq)
                         && !frame.is_ignorable()
-                        && !matches!(frame.kind, wire::INPUT | wire::RESIZE)
+                        // `REDRAW` belongs beside `INPUT`/`RESIZE` rather than in the
+                        // drop-the-probation bucket, and load-bearingly so: the daemon
+                        // sends it immediately after an attach, which is exactly when a
+                        // peer is still probationary. Left out, the new right thing would
+                        // cost a peer its probation.
+                        && !matches!(frame.kind, wire::INPUT | wire::RESIZE | wire::REDRAW)
                     {
                         warn!(
                             "dropping a probationary connection: unsupported frame {:#x}",
@@ -910,6 +916,9 @@ async fn attach(
         // This build answers QUERY_BUSY; an older holder that cannot would
         // drop the connection if asked, so the daemon gates on this flag.
         supports_busy: true,
+        // This build acts on REDRAW; an older holder that cannot would drop the
+        // connection if asked, so the daemon gates on this flag.
+        supports_redraw: true,
         // Measured from *this* holder's clock, not the daemon's: the daemon that
         // is connecting may never have seen this session before.
         detached_secs: disconnected_since
@@ -1141,6 +1150,40 @@ fn resize(master: &dyn MasterPty, cols: u16, rows: u16) {
     if let Err(e) = master.resize(size) {
         debug!("terminal resize failed: {e}");
     }
+}
+
+/// Make the foreground program repaint its screen.
+///
+/// A full-screen program — Claude Code, vim, top — owns every cell it draws and
+/// only redraws when something tells it to. Nothing does, when a browser
+/// reattaches to a shell that never stopped: the replayed scrollback lands on
+/// top of whatever the screen already held, and the program has no idea, so the
+/// mixture stays on screen until the user happens to drag the pane and the
+/// resize repaints it. That drag is the whole bug report.
+///
+/// `SIGWINCH` is what the drag actually delivers, so this delivers it directly.
+/// The one thing that cannot work is re-sending the size: [`resize`] issues
+/// `TIOCSWINSZ` unconditionally, but both Linux and XNU compare the new
+/// `winsize` with the old one and skip the signal when they match — which is
+/// every reattach at an unchanged pane size.
+///
+/// Signalled to the **foreground** process group, read from the terminal via
+/// `tcgetpgrp`, not to the shell's: an interactive shell puts each job in its
+/// own group, so `killpg(shell_pid, …)` would reach the shell — which ignores
+/// `SIGWINCH` — and never the program actually holding the screen. The
+/// foreground group is also exactly who the kernel signals on a real resize, so
+/// this is the same delivery by the same rule.
+fn redraw(master: &dyn MasterPty) {
+    let Some(fd) = master.as_raw_fd() else {
+        return;
+    };
+    // -1 when there is no foreground group yet (or the fd is gone). Nothing is
+    // holding the screen in that case, so there is nothing to repaint.
+    let fg = unsafe { libc::tcgetpgrp(fd) };
+    if fg <= 0 {
+        return;
+    }
+    signal_group(fg, libc::SIGWINCH);
 }
 
 /// Duplicate a descriptor, mark it non-blocking, and hand it to tokio's
@@ -1414,6 +1457,141 @@ mod tests {
             text.contains("[veld] Probe exited (0)") && !text.contains("shell exited"),
             "the exit notice must name the pane, not claim a shell ran: {text:?}"
         );
+    }
+
+    /// [`wire::REDRAW`] reaches the foreground program, and a same-size
+    /// [`wire::RESIZE`] does not.
+    ///
+    /// Both halves are the point, and the *negative* one is the reason the frame
+    /// exists at all: re-sending the size a shell already has looks like it must
+    /// wake a full-screen program up, and it does nothing, because Linux
+    /// (`tty_do_resize`) and XNU (`ttioctl_locked`) both compare the new
+    /// `winsize` with the old and skip the `SIGWINCH` when they match. Asserting
+    /// only the `REDRAW` half would leave that premise untested — and it is the
+    /// premise that makes a "just resend the resize on reattach" fix, the obvious
+    /// one, silently ineffective.
+    ///
+    /// The probe busy-loops rather than sleeping between trap checks on purpose:
+    /// a POSIX shell defers a trap until the foreground command it is waiting on
+    /// returns, so a `sleep`-based loop would put up to a whole `sleep` of
+    /// latency between the signal and the `@WINCH@`, and the no-signal half of
+    /// this test would pass by simply not having waited long enough.
+    #[tokio::test]
+    async fn a_redraw_signals_the_foreground_program_and_a_same_size_resize_does_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("w.sock");
+        let cfg = HolderConfig {
+            session_id: "winchprobe".to_owned(),
+            worktree_id: 1,
+            label: "test".to_owned(),
+            cwd: dir.path().to_path_buf(),
+            cols: 80,
+            rows: 24,
+            socket: socket.clone(),
+            // A backstop: this probe holds the CPU, so it must never outlive the
+            // test even if the explicit hangup below is lost.
+            orphan_grace_secs: 5,
+            shell_argv: None,
+            // 28 is `SIGWINCH` on both Linux and Darwin; the numeric form is what
+            // every POSIX shell accepts, `WINCH` is not.
+            argv: Some(vec![
+                "sh".to_owned(),
+                "-c".to_owned(),
+                "trap 'printf @WINCH@' 28; printf @READY@; while :; do :; done".to_owned(),
+            ]),
+            env: std::collections::BTreeMap::from([(
+                "PATH".to_owned(),
+                "/usr/bin:/bin".to_owned(),
+            )]),
+            pane_label: Some("Probe".to_owned()),
+        };
+        tokio::spawn(run(cfg));
+
+        let mut stream = loop {
+            match tokio::net::UnixStream::connect(&socket).await {
+                Ok(s) => break s,
+                Err(_) => tokio::time::sleep(Duration::from_millis(20)).await,
+            }
+        };
+
+        let mut seen = Vec::new();
+        let mut pid = 0;
+        // Read frames until `needle` shows up in the pty output.
+        //
+        // The bound is around the *read*, not only between reads: this probe
+        // busy-loops and prints nothing unasked, so a missing signal means no
+        // frame ever arrives and a deadline checked between whole frames is never
+        // reached — the earlier shape of this helper turned a failure into a
+        // ten-minute hang. Cancelling a `read_frame` mid-frame desyncs the
+        // stream, which is why the timeout is fatal rather than retried.
+        macro_rules! read_until {
+            ($needle:expr) => {{
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+                loop {
+                    let text = String::from_utf8_lossy(&seen).to_string();
+                    if text.contains($needle) {
+                        break text;
+                    }
+                    let read = tokio::time::timeout_at(deadline, wire::read_frame(&mut stream));
+                    let Ok(framed) = read.await else {
+                        panic!("never saw {:?}; saw {text:?}", $needle);
+                    };
+                    let Some(frame) = framed.unwrap() else {
+                        panic!("the holder closed before {:?}; saw {text:?}", $needle);
+                    };
+                    match frame.kind {
+                        wire::OUTPUT | wire::SCROLLBACK => seen.extend_from_slice(&frame.payload),
+                        wire::HELLO => {
+                            pid = serde_json::from_slice::<wire::Hello>(&frame.payload)
+                                .unwrap()
+                                .pid;
+                        }
+                        _ => {}
+                    }
+                }
+            }};
+        }
+
+        read_until!("@READY@");
+
+        // The size the holder already spawned with. Nothing must come back.
+        wire::write_frame(&mut stream, wire::RESIZE, &wire::encode_size(80, 24))
+            .await
+            .unwrap();
+        // Deliberately *not* reading during the wait, so nothing is cancelled: any
+        // frame the resize produced queues in the socket and is read below, and the
+        // pty is one ordered stream, so a `@WINCH@` provoked here cannot arrive
+        // after the echo of the marker sent after it.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        // The line discipline echoes input whether or not the child reads it, which
+        // is what makes the marker observable against a probe that never reads stdin.
+        wire::write_frame(&mut stream, wire::INPUT, b"MARK\r")
+            .await
+            .unwrap();
+        let text = read_until!("MARK");
+        assert!(
+            !text.contains("@WINCH@"),
+            "a resize to the size the pty already has must not signal anything — \
+             if this starts passing trivially, the frame under test is unnecessary: \
+             {text:?}"
+        );
+
+        wire::write_frame(&mut stream, wire::REDRAW, &[])
+            .await
+            .unwrap();
+        read_until!("@WINCH@");
+
+        // The probe holds a core; end it rather than leaving it to the grace.
+        wire::write_frame(&mut stream, wire::HANGUP, &[])
+            .await
+            .unwrap();
+        assert!(pid > 0, "the greeting must have carried the probe's pid");
+        let deadline = Instant::now() + Duration::from_secs(20);
+        // SAFETY: signal 0 performs the permission/existence check only.
+        while unsafe { libc::kill(pid, 0) } == 0 {
+            assert!(Instant::now() < deadline, "the probe outlived its hangup");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
     }
 
     /// An ordinary terminal opens the shell the **daemon** chose, not this

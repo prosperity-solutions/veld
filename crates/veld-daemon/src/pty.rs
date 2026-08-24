@@ -525,6 +525,10 @@ struct Session {
     /// never sends that frame to an older holder that would drop the connection
     /// rather than ignore it.
     busy_supported: bool,
+    /// Whether the holder acts on a [`wire::REDRAW`]. Held for the same reason
+    /// [`Self::busy_supported`] is: an older holder, adopted across an update,
+    /// drops the connection on a daemon-numbered frame it does not know.
+    redraw_supported: bool,
     /// Slot for one in-flight busy query: the handler stores a oneshot sender
     /// here before sending [`wire::QUERY_BUSY`], and [`pump_holder`] completes it
     /// with the [`wire::BUSY`] reply. Serialised by [`Session::busy_lock`], so
@@ -3504,6 +3508,7 @@ fn register(
         released,
         pid: hello.pid,
         busy_supported: hello.supports_busy,
+        redraw_supported: hello.supports_redraw,
         busy_query: Mutex::new(None),
         busy_lock: tokio::sync::Mutex::new(()),
         _slot: slot,
@@ -3980,6 +3985,23 @@ async fn serve_socket(socket: WebSocket, session: Arc<Session>, size: PtySize, r
         return;
     }
 
+    // A resumed shell very likely has a full-screen program on it (a coding
+    // agent, vim, top) that has drawn a screen and will not draw it again on its
+    // own. The replay above just wrote a snapshot of that program's own output
+    // stream over whatever the client's terminal already held, and the program
+    // cannot know — which is the "it comes back mixed up until I drag the pane"
+    // report. Ask it to repaint.
+    //
+    // **After the replay, deliberately.** Frame order on this socket is the order
+    // the client parses in, so a repaint sent first would be overwritten by the
+    // very snapshot it was meant to correct.
+    //
+    // Only on `resumed`: a shell spawned by this attach has printed nothing yet
+    // and has no foreground program to ask.
+    if resumed {
+        redraw_session(&session).await;
+    }
+
     // Input runs in its own task: if it shared this one, a shell that stops
     // reading (`yes` filling the input buffer while flooding output) would
     // block the loop that is supposed to be draining that output — a deadlock
@@ -4132,6 +4154,30 @@ async fn resize_session(session: &Session, cols: u16, rows: u16) {
         .is_err()
     {
         debug!(session = %session.id, "resize dropped: the holder is gone");
+    }
+}
+
+/// Ask the holder to make the foreground program repaint.
+///
+/// Not a resize, and it cannot be done with one: [`resize_session`] above is
+/// already called on every attach with the client's current size, and when that
+/// size matches what the shell already has — every reattach into an unchanged
+/// pane — the kernel suppresses the `SIGWINCH` and the frame reaches nothing.
+/// See [`wire::REDRAW`] and the holder's `redraw`.
+///
+/// Silently a no-op against a holder from before the frame existed, which is a
+/// session that reattaches exactly as it used to.
+async fn redraw_session(session: &Session) {
+    if !session.redraw_supported {
+        return;
+    }
+    if session
+        .to_holder
+        .send((wire::REDRAW, Vec::new()))
+        .await
+        .is_err()
+    {
+        debug!(session = %session.id, "redraw dropped: the holder is gone");
     }
 }
 
@@ -6022,6 +6068,61 @@ mod tests {
                 .await
                 .unwrap();
             read_until(&mut again, "mark=kept").await;
+            end_session(&sid, "test cleanup").await;
+        }
+
+        /// Reattaching at the size the shell already has must still make the
+        /// foreground program repaint.
+        ///
+        /// The whole bug, end to end: a coding agent or a pager owns every cell
+        /// it drew and redraws only when something asks it to. On a reattach
+        /// nothing did — the replay wrote a snapshot of that program's own output
+        /// over whatever the terminal held, and the program never heard about it —
+        /// so the mixture sat there until the user dragged the pane and the
+        /// resize repainted it.
+        ///
+        /// Pinned at the *same* size on purpose. A reattach that changes the size
+        /// was never broken: the kernel signals on a changed `winsize` and the
+        /// program repaints on its own. `90x30` twice is the case that produced
+        /// no signal at all, and it is the overwhelmingly common one — coming back
+        /// to a window nobody moved.
+        ///
+        /// The markers are assembled by `printf` rather than written literally
+        /// because the terminal echoes what is typed into it *and the replay
+        /// replays that echo*: a literal `VELDWINCH` in the command would be
+        /// matched out of the replayed echo of the command itself, and the test
+        /// would pass without any signal ever being delivered.
+        #[tokio::test]
+        async fn a_reattach_at_the_same_size_makes_the_foreground_program_repaint() {
+            let addr = serve().await;
+            let dir = tempfile::tempdir().unwrap();
+            let sid = session_id();
+
+            let mut ws = open(addr, &sid, dir.path(), "&cols=90&rows=30").await;
+            read_control(&mut ws, "ready").await;
+            // Stands in for a full-screen program: something on this terminal that
+            // reacts to SIGWINCH and to nothing else. 28 is SIGWINCH on both Linux
+            // and Darwin, and the numeric form is what every shell accepts.
+            ws.send(WsMessage::Binary(
+                b"trap 'printf \"VELDW%sH\" INC' 28; printf \"VELDR%sY\" EAD\n"
+                    .to_vec()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+            read_until(&mut ws, "VELDREADY").await;
+
+            // Drop the socket the way waking a laptop does — no close frame.
+            drop(ws);
+
+            let mut again = open(addr, &sid, dir.path(), "&cols=90&rows=30").await;
+            assert_eq!(
+                read_control(&mut again, "ready").await["resumed"],
+                true,
+                "the reattach must be a resume; a fresh shell would carry no trap \
+                 and this test would be asserting nothing"
+            );
+            read_until(&mut again, "VELDWINCH").await;
             end_session(&sid, "test cleanup").await;
         }
 
