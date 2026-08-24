@@ -503,18 +503,28 @@ record_desktop_preference() {
 # a prompt in here (the CLI owns that question — see `plan_desktop` in
 # `crates/veld/src/commands/update.rs`).
 #
-# **The tty test is on fd 2, because that is where the question is printed.**
-# `ask_desktop_preference` writes every line of the prompt to stderr — it has to,
-# since its stdout is captured by the caller's `$( )` — so `[ -t 1 ]` was asking
-# about the wrong file descriptor in both directions: `curl … | bash 2>err.log`
-# would have put an *invisible* question up and then taken the default from a user
-# who saw nothing, and `curl … | bash >install.log` would have refused to ask
-# even though the terminal it would have asked on was right there. The rule is
-# "only ask if the human can see the question", so test the descriptor the
-# question goes to.
+# **Both output descriptors, and the conjunction is the point.**
+# `ask_desktop_preference` writes the prompt to stderr — it has to, since its
+# stdout is captured by the caller's `$( )` — while every *consequence* of the
+# answer ("Removed …", the failure warning, the recovery instruction) is an
+# ordinary `echo` to stdout. So the two descriptors answer two halves of one
+# question, and testing either alone breaks the other half:
+#
+# - `[ -t 1 ]` alone (the original) put an **invisible** question up under
+#   `curl … | bash 2>err.log` and then took the default from a user who saw
+#   nothing.
+# - `[ -t 2 ]` alone (the first fix) let `curl … | bash >install.log` ask on the
+#   terminal, delete a bundle, and file the outcome in the log — and it bought
+#   that case nothing, since the whole script's output was going to the log
+#   anyway.
+#
+# One token restores the coupling the first version had by accident. The rule is
+# that a question may only be asked when the human can see it *and* see what it
+# did.
 desktop_can_ask() {
   [ -z "${VELD_NON_INTERACTIVE:-}" ] || return 1
   [ -r /dev/tty ] || return 1
+  [ -t 1 ] || return 1
   [ -t 2 ] || return 1
 }
 
@@ -621,12 +631,20 @@ warn_unrecorded() {
 # why the caller does not promise anything about future updates until this has
 # actually succeeded.
 remove_desktop_app_via_cli() {
-  local cli="${INSTALL_DIR}/veld" rc=0
+  local cli="${INSTALL_DIR}/veld" rc=0 err=""
   [ -x "$cli" ] || return 1
-  # stderr is dropped and re-stated by the caller: an older binary answers with
-  # clap's "unrecognized subcommand 'uninstall'" usage dump, which is noise in
-  # front of a message that explains the situation properly.
-  "$cli" desktop uninstall --yes 2>/dev/null || rc=$?
+  # stderr is **captured, not discarded**, and only clap's usage dump is thrown
+  # away. Suppressing all of it — the first version of this — cost the two
+  # diagnostics that are the whole reason a removal failed: "Veld Desktop did not
+  # quit … it may be showing a dialog" and "could not remove <path>: Permission
+  # denied". Without them the caller's "run 'veld desktop uninstall' to finish"
+  # sends the user at a command that will fail the same way with no reason given.
+  # An unknown subcommand (exit 2, an older binary — see above) is the one case
+  # where the child's output really is noise in front of a better explanation.
+  err="$("$cli" desktop uninstall --yes 2>&1 >/dev/null)" || rc=$?
+  if [ "$rc" -ne 0 ] && [ "$rc" -ne 2 ] && [ -n "$err" ]; then
+    printf '%s\n' "$err" >&2
+  fi
   # An `if`, not `[ … ] && return 0`: under `set -e` that compound *is* the
   # statement's exit status, so the non-zero case would abort the installer if
   # this function were ever called outside an `if`. Same hazard this file's
@@ -923,21 +941,31 @@ install_desktop_app() {
 }
 
 # **This path deliberately does not consult `desktop_preference`**, and that is
-# worth stating because the gate further down does. `VELD_DESKTOP_ONLY=1` is only
-# ever set by a caller that has *already* answered the question: `veld desktop
-# install|update` records "wanted" before spawning this script, and `veld update`
-# reaches its app half only after `plan_desktop` has consulted the recorded
-# answer. Checking again here would not be a second line of defence, it would be
-# a contradiction — the preference write is deliberately best-effort (see
-# `remember` in crates/veld/src/commands/desktop.rs), so on a machine where it
-# fails a `veld desktop install` typed by hand would be refused by a stale "no"
-# it could not overwrite.
+# worth stating because the gate further down does. Every caller has already
+# **decided** — which is a weaker and more accurate claim than "already answered",
+# the one an earlier version of this comment made and two review angles refuted:
 #
-# The one thing that follows and cannot be fixed here: a veld binary older than
-# the preference reads no `desktop.json` at all, so its `veld update` still moves
-# the app half through this path. It self-heals on the next update, and this
-# script cannot tell the difference — the caller's version is not something a
-# child process gets to audit.
+# - `veld desktop install|update` records "wanted" before spawning this script.
+# - `veld update` reaches its app half only through `plan_desktop`, which either
+#   read a recorded "yes" *or* took the "an app is already installed and nobody
+#   could be asked, so keep it in step" default (`desktop_gate`'s `None if
+#   installed` arm). Nothing is recorded on that second route, and that is
+#   deliberate — see `crates/veld/src/commands/update.rs`.
+#
+# Re-checking here would not be a second line of defence, it would be a
+# contradiction: the preference write is deliberately best-effort (see `remember`
+# in crates/veld/src/commands/desktop.rs), so on a machine where it fails a
+# `veld desktop install` typed by hand would be refused by a stale "no" it could
+# not overwrite.
+#
+# Two consequences this script cannot fix, both stated rather than papered over.
+# A veld binary older than the preference reads no `desktop.json` at all, so its
+# `veld update` still moves the app half through here — self-healing on the next
+# update, and the caller's version is not something a child process gets to audit.
+# And `VELD_DESKTOP_ONLY=1` is a documented variable (see the header), so a human
+# who sets it by hand installs the app without recording that they wanted it; the
+# machine then says so on every `veld update` ("… but you opted out, so the app
+# was left alone") rather than silently disagreeing with itself.
 if [ -n "$DESKTOP_ONLY" ]; then
   if ! install_desktop_app; then
     echo ""
@@ -1443,12 +1471,31 @@ if [ -n "$WANT_DESKTOP" ]; then
         # removal, not before it: on the failure branch the old wording promised
         # "veld will not install it again", which an installer whose CLI is too
         # old to have the subcommand cannot deliver.
+        #
+        # **Re-read rather than assume the answer is on disk.**
+        # `ask_desktop_preference` deliberately returns the answer even when it
+        # could not be written — that is what stops a failed write inverting it —
+        # so "veld will not install it again" is a promise only the *file* can
+        # keep. Without this check a single run could print `warn_unrecorded`'s
+        # "you may be asked again" and then that promise, in that order.
+        DESKTOP_RECORDED=""
+        if [ "$(desktop_preference)" = no ]; then
+          DESKTOP_RECORDED="1"
+        fi
         if remove_desktop_app_via_cli; then
-          echo "Removed ${DESKTOP_APP} — veld will not install it again."
+          if [ -n "$DESKTOP_RECORDED" ]; then
+            echo "Removed ${DESKTOP_APP} — veld will not install it again."
+          else
+            echo "Removed ${DESKTOP_APP}. Your answer was not saved, so you may be asked again."
+          fi
           DESKTOP_APP=""
         else
           echo "Warning: could not remove ${DESKTOP_APP}."
-          echo "  Your answer is recorded. Run 'veld desktop uninstall' to finish, or drag it to the Trash."
+          if [ -n "$DESKTOP_RECORDED" ]; then
+            echo "  Your answer is recorded. Run 'veld desktop uninstall' to finish, or drag it to the Trash."
+          else
+            echo "  Run 'veld desktop uninstall' to finish, or drag it to the Trash."
+          fi
         fi
       else
         # A stored "no" and a bundle that is here anyway — dragged from a .dmg,

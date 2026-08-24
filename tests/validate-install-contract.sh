@@ -192,11 +192,21 @@ desktop_can_ask"; then
   # version of this) meant `curl … | bash 2>err.log` put an invisible question up
   # and then took the default from a user who never saw it. The rule is "only ask
   # if the human can see the question".
+  # Both output descriptors, because they answer two halves of one question: the
+  # prompt goes to stderr, every consequence of the answer goes to stdout. Gating
+  # on fd 1 alone asked an invisible question under `2>err.log`; gating on fd 2
+  # alone deleted a bundle and filed the outcome in `install.log`.
   if bash -c "${gate}
 desktop_can_ask" 2>/dev/null; then
     bad "desktop_can_ask says yes with stderr — where the prompt goes — redirected"
   else
     ok "desktop_can_ask refuses with stderr redirected"
+  fi
+  if bash -c "${gate}
+desktop_can_ask" >/dev/null; then
+    bad "desktop_can_ask says yes with stdout — where the outcome goes — redirected"
+  else
+    ok "desktop_can_ask refuses with stdout redirected"
   fi
 fi
 
@@ -249,7 +259,14 @@ remove_desktop_app_via_cli() { echo "ACTION=remove"; return 0; }
 # isolates the *branching* — and in particular lets a stored answer and a
 # just-typed one be told apart, which is the distinction that was broken.
 desktop_can_ask() { [ -n "${ASK_ANSWER+set}" ]; }
-ask_desktop_preference() { [ -z "${ASK_ANSWER:-}" ] || echo "$ASK_ANSWER"; }
+# Records as well as echoing, because the real one does — the `no` arm now
+# re-reads the file to decide whether it may promise "veld will not install it
+# again", so a stub that only echoed would exercise the wrong branch.
+ask_desktop_preference() {
+  [ -n "${ASK_ANSWER:-}" ] || return 0
+  record_desktop_preference "$ASK_ANSWER" || true
+  echo "$ASK_ANSWER"
+}
 . "$GATE_DIR/gate.sh"
 echo "END app=[$DESKTOP_APP] declined=[$DESKTOP_DECLINED]"
 DRIVER
@@ -259,9 +276,12 @@ DRIVER
   # A 5th argument means a human was asked this run; pass `junk` for "asked and
   # said nothing usable". Omit it for a run with nobody to ask.
   # `WANT` is install.sh's `WANT_DESKTOP` — 1 unless a cell is testing the
-  # `VELD_DESKTOP=0` override. Passed explicitly rather than as an assignment
-  # prefix on `cell`: bash leaks such an assignment past a *function* call, so the
-  # override would silently apply to every cell added after it.
+  # `VELD_DESKTOP=0` override, which one cell below sets as an assignment prefix.
+  # That prefix is scoped to the call: measured on this repo's two bashes (3.2.57
+  # and 5.3.3), `X=1; X=2 f; echo $X` prints 1, so the override cannot leak into a
+  # cell added after it. (An earlier version of this comment claimed the opposite
+  # and added a manual reset to defend against it — both were wrong, in the file
+  # whose job is pinning behaviour.)
   WANT=1
   cell() {
     local what="$1" expect="$2" pref="$3" app="$4"
@@ -303,7 +323,46 @@ DRIVER
   cell "asked + junk answer + no app"      none    unset ""          junk
   # VELD_DESKTOP=0 is a per-run override and outranks a stored yes.
   WANT="" cell "VELD_DESKTOP=0 + wanted + app" none true /A/Veld.app
-  WANT=1
+
+  # The `no` arm's three branches print three different things, and a message on
+  # the wrong branch is the failure a truth table cannot see. "veld will not
+  # install it again" is a promise only the *file* can keep, so it must not be
+  # printed when the answer could not be written.
+  says() { # says <description> <pref> <app> <answer|-> <substring>
+    local what="$1" pref="$2" app="$3" answer="$4" want="$5"
+    local home="$GATE_DIR/home" out
+    rm -rf "$home"; mkdir -p "$home/.veld"
+    [ "$pref" = "unset" ] || printf '{"wanted":%s}\n' "$pref" > "$home/.veld/desktop.json"
+    if [ "$answer" = "-" ]; then
+      out="$(HOME="$home" FAKE_APP="$app" WANT_DESKTOP=1 bash "$GATE_DIR/drive.sh" 2>&1)"
+    else
+      out="$(HOME="$home" FAKE_APP="$app" WANT_DESKTOP=1 ASK_ANSWER="$answer" bash "$GATE_DIR/drive.sh" 2>&1)"
+    fi
+    if printf '%s' "$out" | grep -qF "$want"; then
+      ok "$what says \"$want\""
+    else
+      bad "$what did not say \"$want\": $(printf '%s' "$out" | tr '\n' '|')"
+    fi
+  }
+
+  says "a fresh no with a writable home" unset /A/Veld.app no "veld will not install it again"
+  says "a stored no with the app still there" false /A/Veld.app - "you opted out, so it was left alone"
+
+  # And the same fresh "no" on a home it cannot write must NOT make that promise.
+  #
+  # The `.veld` directory has to **exist and be unwritable**: pointing HOME at a
+  # path that simply does not exist proves nothing, because
+  # `record_desktop_preference` starts with `mkdir -p` and the write then
+  # succeeds. That was this check's first shape, and it failed by asserting the
+  # promise was absent on a run that had legitimately recorded the answer.
+  rm -rf "$GATE_DIR/ro"; mkdir -p "$GATE_DIR/ro/.veld"; chmod 500 "$GATE_DIR/ro/.veld"
+  out="$(HOME="$GATE_DIR/ro" FAKE_APP=/A/Veld.app WANT_DESKTOP=1 ASK_ANSWER=no bash "$GATE_DIR/drive.sh" 2>&1)" || true
+  chmod 700 "$GATE_DIR/ro/.veld"
+  if printf '%s' "$out" | grep -qF "will not install it again"; then
+    bad "an unrecorded answer still promised permanence: $(printf '%s' "$out" | tr '\n' '|')"
+  else
+    ok "an answer that could not be written makes no permanence promise"
+  fi
 fi
 
 echo
