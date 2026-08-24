@@ -1721,6 +1721,18 @@ pub struct DesktopInstall {
 /// the script skips the CLI tarball, the binary swap, the sudo negotiation, the
 /// service restarts and the PATH edits entirely. Without it, updating an app
 /// bounced the daemon and could prompt for a password.
+///
+/// **Two callers, and a new one owes the preference a write.** `veld desktop
+/// install|update` (which records [`crate::desktop_pref::DesktopChoice::Wanted`]
+/// before calling — running the command *is* the answer) and `veld update`'s
+/// `run_desktop_step`, which is reached only once `plan_desktop` has consulted
+/// the recorded answer. Since the app is optional, putting it on disk without
+/// recording that somebody asked for it leaves the machine in the one state
+/// nothing else produces: an installed app with no answer on record, which the
+/// next interactive run then asks about as though veld had not just installed it.
+/// A third caller — a future `repair` or `reinstall` — must either record the
+/// choice or go through a path that already has. The mirror of this list is on
+/// [`remove_desktop_app`].
 pub async fn install_desktop(version: &str, opts: &DesktopInstall) -> Result<(), anyhow::Error> {
     let mut env: Vec<(String, String)> = vec![
         ("VELD_DESKTOP".into(), "1".into()),
@@ -2313,6 +2325,22 @@ fn pids_running_from(ps_output: &str, bundle: &std::path::Path, uid: u32) -> Vec
         .collect()
 }
 
+/// How long Veld Desktop gets to quit — whether it was asked over an Apple
+/// Event, sent a `SIGTERM`, or told us its own pid and quit on its own.
+///
+/// Generous on purpose: `before-quit` persists window layout and hands back a
+/// detached window's tabs, and a machine under load can take seconds over it.
+/// Every path that runs out of this budget leaves the bundle alone rather than
+/// forcing the issue.
+///
+/// Lives here rather than in `veld update` because **four** commands now close
+/// the app — `veld update` (to swap the bundle, or to honour a "no" just typed),
+/// the app's own handoff, `veld desktop uninstall`, and `veld uninstall` — and
+/// three of those go on to delete or replace the bundle. A second constant that
+/// drifted shorter would have one of them start deleting while the app was still
+/// on its way out.
+pub const DESKTOP_QUIT_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// How [`quit_desktop_app`] went.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QuitOutcome {
@@ -2409,6 +2437,43 @@ pub async fn quit_desktop_app(bundle: &std::path::Path, timeout: Duration) -> Qu
     } else {
         QuitOutcome::Refused
     }
+}
+
+/// Close Veld Desktop and delete its bundle.
+///
+/// The one destructive act in the app half of veld, so it is written once and
+/// every caller goes through it. **Three call sites, and a `grep` for this
+/// function's name is the way to check this list is still complete** — an
+/// enumeration in prose goes stale silently, and this one already did once:
+///
+/// - `veld desktop uninstall` (`crates/veld/src/commands/desktop.rs`), which is
+///   also how `install.sh` removes the app — it shells out to that command rather
+///   than carrying its own `rm -rf`.
+/// - `veld update` (`plan_desktop`'s fresh-"no" arm in
+///   `crates/veld/src/commands/update.rs`), the one place an *update* removes the
+///   app, authorised by an answer given on that run.
+/// - `veld uninstall` (below), a different command from the first one.
+///
+/// A second copy of this in bash was the alternative, racing this one for the
+/// same directory; a second copy in `uninstall` was the *actual* state of this
+/// file until a review pointed out that the paragraph below was false one screen
+/// away from itself.
+///
+/// **Quit first, always.** `remove_dir_all` on a running app succeeds — macOS
+/// unlinks a bundle out from under a live process quite happily — and leaves an
+/// Electron app whose own resources have gone, which is a crash rather than an
+/// uninstall. An app that refuses to quit is therefore an error here, not a
+/// force: something on screen is unanswered.
+pub async fn remove_desktop_app(bundle: &std::path::Path) -> Result<(), anyhow::Error> {
+    match quit_desktop_app(bundle, DESKTOP_QUIT_TIMEOUT).await {
+        QuitOutcome::Quit | QuitOutcome::NotRunning => {}
+        QuitOutcome::Refused => anyhow::bail!(
+            "Veld Desktop did not quit, so it was left in place — it may be showing a dialog. \
+             Quit it and try again."
+        ),
+    }
+    std::fs::remove_dir_all(bundle)
+        .with_context(|| format!("could not remove {}", bundle.display()))
 }
 
 /// Poll until nothing runs from `bundle`, or the budget is spent.
@@ -2656,20 +2721,29 @@ pub async fn uninstall() -> Result<(), anyhow::Error> {
 
     // Remove Veld Desktop.
     //
-    // The installer puts it there by default now, so an uninstall that left it
-    // behind would leave the most *visible* half of veld on the machine — a Dock
-    // icon whose daemon no longer exists — after promising to remove everything.
-    // Best-effort: `/Applications` is group-writable by `admin`, so an admin user
-    // succeeds without sudo and anyone else keeps an app they can drag to the
-    // trash, which is not worth failing an uninstall over.
+    // Whether the installer put it there is now the user's answer rather than a
+    // default (`crate::desktop_pref`), but that changes nothing here: an
+    // uninstall that left an installed app behind would leave the most *visible*
+    // half of veld on the machine — a Dock icon whose daemon no longer exists —
+    // after promising to remove everything. The preference itself goes with the
+    // rest of `~/.veld` further down, which is right: `veld uninstall` is not an
+    // opt-out, it is a removal, and a later re-install deserves to ask again.
     if std::env::consts::OS == "macos" {
         if let Some((path, _)) = desktop_app_status() {
-            match std::fs::remove_dir_all(&path) {
+            // Through `remove_desktop_app`, which quits the app first. This used
+            // to be a bare `remove_dir_all`, and macOS unlinks a bundle out from
+            // under a live process quite happily — so uninstalling with the app
+            // open left an Electron app whose own resources had gone, i.e. a
+            // crash rather than an uninstall. Still best-effort: `/Applications`
+            // is group-writable by `admin`, so an admin user succeeds without
+            // sudo and anyone else keeps an app they can drag to the trash, which
+            // is not worth failing an uninstall over.
+            match remove_desktop_app(&path).await {
                 // stderr, like every other human status line here: stdout is
                 // reserved for machine-readable output (AGENTS.md).
                 Ok(()) => eprintln!("Removed {}", path.display()),
                 Err(e) => eprintln!(
-                    "Could not remove {} ({e}). Drag it to the Trash to finish.",
+                    "Could not remove {} ({e:#}). Drag it to the Trash to finish.",
                     path.display()
                 ),
             }

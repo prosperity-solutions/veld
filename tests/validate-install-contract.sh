@@ -150,7 +150,12 @@ for needle in \
   'install_desktop_app' \
   'desktop_lock' \
   'apply_binary_icons' \
-  'find_desktop_app'
+  'find_desktop_app' \
+  'desktop_preference' \
+  'record_desktop_preference' \
+  'desktop_can_ask' \
+  'ask_desktop_preference' \
+  'remove_desktop_app_via_cli'
 do
   if grep -q "^${needle}()" "$SCRIPT"; then
     ok "install.sh defines ${needle}"
@@ -158,6 +163,244 @@ do
     bad "install.sh no longer defines ${needle}"
   fi
 done
+
+# --- 4. The prompt gate's truth table, under a real pty ----------------------
+#
+# `desktop_can_ask` is the gate in front of the only question this script asks.
+# Two descriptors decide it, because they answer two halves of one question: the
+# prompt is printed to stderr (its stdout is captured by the caller's `$( )`) and
+# every consequence of the answer is `echo`ed to stdout. Delete either check and
+# a real user is harmed — `2>err.log` asks an invisible question and takes the
+# default; `>install.log` deletes a bundle and files the outcome in the log.
+#
+# **This section used to be vacuous and that is the point of its shape now.** It
+# asserted only *refusals*, and this harness's own stdout and stderr are pipes in
+# CI — so every check passed on the round-1 gate it was added to reject, on the
+# original one-descriptor gate, on a gate ignoring VELD_NON_INTERACTIVE, and on a
+# gate hard-coded to `return 1`, which would silence the question entirely. A test
+# that passes on the bug is not a test. So the gate is now driven under a **pty**,
+# with a positive control first: it must say *yes* when both descriptors are
+# terminals, and only then do the refusals mean anything.
+gate="$(sed -n '/^desktop_can_ask() {/,/^}/p' "$SCRIPT")"
+if [ -z "$gate" ]; then
+  bad "could not extract desktop_can_ask() from install.sh"
+else
+  # Cheap, portable, and independent of any pty: the two descriptor checks must
+  # both still be there. This is what catches the regression that actually
+  # happened (one of them deleted) even on a runner with no pty to be had.
+  case "$gate" in
+    *'[ -t 1 ]'*) ok "desktop_can_ask still tests fd 1 (where the outcome goes)" ;;
+    *) bad "desktop_can_ask no longer tests fd 1 — a redirected stdout would ask and then log the outcome" ;;
+  esac
+  case "$gate" in
+    *'[ -t 2 ]'*) ok "desktop_can_ask still tests fd 2 (where the prompt goes)" ;;
+    *) bad "desktop_can_ask no longer tests fd 2 — an invisible question would take the default" ;;
+  esac
+
+  # `script`'s argument order differs between util-linux (Linux CI) and BSD
+  # (macOS), so the flavour is probed rather than assumed. Neither available is
+  # reported as a skip, never as a pass.
+  PTY=""
+  if script -q -c 'true' /dev/null </dev/null >/dev/null 2>&1; then
+    PTY="util-linux"
+  elif script -q /dev/null true </dev/null >/dev/null 2>&1; then
+    PTY="bsd"
+  fi
+
+  # The redirection is applied to the `desktop_can_ask` call itself, not to the
+  # `echo` that reports it — so the function sees a redirected descriptor while
+  # its verdict still reaches the pty.
+  probe='
+if desktop_can_ask; then echo "BOTH=yes"; else echo "BOTH=no"; fi
+if desktop_can_ask >/dev/null; then echo "NOOUT=yes"; else echo "NOOUT=no"; fi
+if desktop_can_ask 2>/dev/null; then echo "NOERR=yes"; else echo "NOERR=no"; fi
+if VELD_NON_INTERACTIVE=1 desktop_can_ask; then echo "NONINT=yes"; else echo "NONINT=no"; fi
+'
+  if [ -z "$PTY" ]; then
+    echo "  skip no usable \`script\` for a pty — the two text checks above still ran"
+  else
+    # Via a file, not an inlined `-c` string. util-linux's `script` takes the
+    # command as **one** argument, so inlining meant nesting `bash -c '…'` inside
+    # it and escaping the gate's own quotes — unverifiable on a macOS machine,
+    # and a mistake there would surface as a spurious CI *failure* rather than a
+    # skip. A file has no quoting to get wrong and both flavours run it the same
+    # way. `$STUB` comes from `mktemp -d`, so the path has no spaces.
+    printf '%s\n%s\n' "$gate" "$probe" > "$STUB/gate-probe.sh"
+    if [ "$PTY" = "util-linux" ]; then
+      pty_out="$(script -q -c "bash $STUB/gate-probe.sh" /dev/null </dev/null 2>&1 || true)"
+    else
+      pty_out="$(script -q /dev/null bash "$STUB/gate-probe.sh" </dev/null 2>&1 || true)"
+    fi
+    pty_out="$(printf '%s' "$pty_out" | tr -d '\r')"
+    while IFS='|' read -r key expect what; do
+      [ -n "$key" ] || continue
+      case "$pty_out" in
+        *"${key}=${expect}"*) ok "$what" ;;
+        *) bad "$what — pty said: $(printf '%s' "$pty_out" | grep -o "${key}=[a-z]*" | head -1)" ;;
+      esac
+    done <<'CELLS'
+BOTH|yes|the positive control: it asks when both descriptors are terminals
+NOOUT|no|it refuses when stdout — where the outcome goes — is redirected
+NOERR|no|it refuses when stderr — where the prompt goes — is redirected
+NONINT|no|it refuses under VELD_NON_INTERACTIVE=1
+CELLS
+  fi
+fi
+
+# --- 5. The desktop gate's truth table ---------------------------------------
+#
+# The block that decides whether a ~113 MB app is downloaded, left alone, or
+# **deleted**. It had no test, and the defect that hid there is the reason this
+# section exists: the `no)` arm could not tell a *stored* answer from one just
+# typed, so a user who opted out and later re-installed the app by hand had it
+# deleted, with no prompt, by their next `curl … | bash`. Three review angles
+# found it independently and no automated check would have.
+#
+# The region is extracted and driven with the four side-effecting functions
+# stubbed, so nothing is downloaded, nothing is removed, and no network is
+# touched. Every cell must agree with `desktop_gate` in
+# crates/veld/src/commands/update.rs — that is the same decision in a second
+# language, with no compiler between them.
+GATE_DIR="$(mktemp -d)"
+# Exported rather than passed as an assignment prefix: the driver reads it, and
+# `GATE_DIR="$GATE_DIR" bash …` is the shape shellcheck refuses (SC2097/SC2098)
+# because the expansion on the same line reads the outer value, not the prefix.
+export GATE_DIR
+trap 'rm -rf "$STUB" "$GATE_DIR"' EXIT
+
+# Bounded by its two column-zero anchors rather than by a `sed` range ending at
+# `/^fi$/` — the block contains two `fi`s of its own, so a range would have
+# stopped at the first one and silently extracted a third of the logic.
+awk '/^DESKTOP_FAILED=""$/{on=1} /^if \[ -n "\$DESKTOP_FAILED" \]/{on=0} on' \
+  "$SCRIPT" > "$GATE_DIR/gate.sh"
+sed -n '/^desktop_preference() {/,/^}/p;/^record_desktop_preference() {/,/^}/p;/^desktop_can_ask() {/,/^}/p' "$SCRIPT" > "$GATE_DIR/fns.sh"
+
+if [ ! -s "$GATE_DIR/gate.sh" ] || ! grep -q 'DESKTOP_ASKED' "$GATE_DIR/gate.sh"; then
+  bad "could not extract the desktop gate block from install.sh (has it moved, or lost DESKTOP_ASKED?)"
+else
+  cat > "$GATE_DIR/drive.sh" <<'DRIVER'
+set -uo pipefail
+. "$GATE_DIR/fns.sh"
+OS=macos
+INSTALL_DIR=/nonexistent
+WANT_DESKTOP="${WANT_DESKTOP-1}"
+DESKTOP_APP=""
+say() { echo "$@"; }
+find_desktop_app() { DESKTOP_APP="$FAKE_APP"; }
+install_desktop_app() { echo "ACTION=install"; DESKTOP_APP="$FAKE_APP"; return 0; }
+remove_desktop_app_via_cli() { echo "ACTION=remove"; return 0; }
+# `ASK_ANSWER` set (even to empty) means "a human was at the terminal this run";
+# its value is what they typed, with empty standing for junk or EOF. That is the
+# seam this section needs: `desktop_can_ask`'s own tty and
+# `VELD_NON_INTERACTIVE` behaviour is pinned in section 4, so stubbing it here
+# isolates the *branching* — and in particular lets a stored answer and a
+# just-typed one be told apart, which is the distinction that was broken.
+desktop_can_ask() { [ -n "${ASK_ANSWER+set}" ]; }
+# Records as well as echoing, because the real one does — the `no` arm now
+# re-reads the file to decide whether it may promise "veld will not install it
+# again", so a stub that only echoed would exercise the wrong branch.
+ask_desktop_preference() {
+  [ -n "${ASK_ANSWER:-}" ] || return 0
+  record_desktop_preference "$ASK_ANSWER" || true
+  echo "$ASK_ANSWER"
+}
+. "$GATE_DIR/gate.sh"
+echo "END app=[$DESKTOP_APP] declined=[$DESKTOP_DECLINED]"
+DRIVER
+
+  # cell <description> <expected ACTION or none> <pref: true|false|unset> <app: path or empty> [answer]
+  #
+  # A 5th argument means a human was asked this run; pass `junk` for "asked and
+  # said nothing usable". Omit it for a run with nobody to ask.
+  # `WANT` is install.sh's `WANT_DESKTOP` — 1 unless a cell is testing the
+  # `VELD_DESKTOP=0` override, which one cell below sets as an assignment prefix.
+  # That prefix is scoped to the call: measured on this repo's two bashes (3.2.57
+  # and 5.3.3), `X=1; X=2 f; echo $X` prints 1, so the override cannot leak into a
+  # cell added after it. (An earlier version of this comment claimed the opposite
+  # and added a manual reset to defend against it — both were wrong, in the file
+  # whose job is pinning behaviour.)
+  WANT=1
+  cell() {
+    local what="$1" expect="$2" pref="$3" app="$4"
+    local home="$GATE_DIR/home" out got
+    rm -rf "$home"; mkdir -p "$home/.veld"
+    [ "$pref" = "unset" ] || printf '{"wanted":%s}\n' "$pref" > "$home/.veld/desktop.json"
+    if [ "$#" -ge 5 ]; then
+      local answer="$5"
+      [ "$answer" != "junk" ] || answer=""
+      out="$(HOME="$home" FAKE_APP="$app" WANT_DESKTOP="$WANT" ASK_ANSWER="$answer" bash "$GATE_DIR/drive.sh" 2>&1)"
+    else
+      out="$(HOME="$home" FAKE_APP="$app" WANT_DESKTOP="$WANT" bash "$GATE_DIR/drive.sh" 2>&1)"
+    fi
+    got="$(printf '%s' "$out" | grep -o 'ACTION=[a-z]*' | head -1)"
+    got="${got#ACTION=}"
+    got="${got:-none}"
+    if [ "$got" = "$expect" ]; then
+      ok "$what → $expect"
+    else
+      bad "$what → expected ${expect}, got ${got}: $(printf '%s' "$out" | tr '\n' '|')"
+    fi
+  }
+
+  cell "wanted + app present"              install true  /A/Veld.app
+  cell "wanted + no app"                   install true  ""
+  # **The critical pair.** A stored no must never delete; only an answer given on
+  # this run may. Getting these two the same way round was the defect.
+  cell "STORED no + app present"           none    false /A/Veld.app
+  cell "FRESH no + app present"            remove  unset /A/Veld.app no
+  cell "stored no + no app"                none    false ""
+  cell "fresh yes + no app"                install unset ""         yes
+  cell "fresh yes + app present"           install unset /A/Veld.app yes
+  # Never asked and nobody to ask: keep what is there, never fetch what is not.
+  cell "unasked + app present"             install unset /A/Veld.app
+  cell "unasked + no app"                  none    unset ""
+  # Asked, but the answer was neither yes nor no. Must behave like unasked —
+  # never delete, never fetch — because nothing was recorded.
+  cell "asked + junk answer + app present" install unset /A/Veld.app junk
+  cell "asked + junk answer + no app"      none    unset ""          junk
+  # VELD_DESKTOP=0 is a per-run override and outranks a stored yes.
+  WANT="" cell "VELD_DESKTOP=0 + wanted + app" none true /A/Veld.app
+
+  # The `no` arm's three branches print three different things, and a message on
+  # the wrong branch is the failure a truth table cannot see. "veld will not
+  # install it again" is a promise only the *file* can keep, so it must not be
+  # printed when the answer could not be written.
+  says() { # says <description> <pref> <app> <answer|-> <substring>
+    local what="$1" pref="$2" app="$3" answer="$4" want="$5"
+    local home="$GATE_DIR/home" out
+    rm -rf "$home"; mkdir -p "$home/.veld"
+    [ "$pref" = "unset" ] || printf '{"wanted":%s}\n' "$pref" > "$home/.veld/desktop.json"
+    if [ "$answer" = "-" ]; then
+      out="$(HOME="$home" FAKE_APP="$app" WANT_DESKTOP=1 bash "$GATE_DIR/drive.sh" 2>&1)"
+    else
+      out="$(HOME="$home" FAKE_APP="$app" WANT_DESKTOP=1 ASK_ANSWER="$answer" bash "$GATE_DIR/drive.sh" 2>&1)"
+    fi
+    if printf '%s' "$out" | grep -qF "$want"; then
+      ok "$what says \"$want\""
+    else
+      bad "$what did not say \"$want\": $(printf '%s' "$out" | tr '\n' '|')"
+    fi
+  }
+
+  says "a fresh no with a writable home" unset /A/Veld.app no "veld will not install it again"
+  says "a stored no with the app still there" false /A/Veld.app - "you opted out, so it was left alone"
+
+  # And the same fresh "no" on a home it cannot write must NOT make that promise.
+  #
+  # The `.veld` directory has to **exist and be unwritable**: pointing HOME at a
+  # path that simply does not exist proves nothing, because
+  # `record_desktop_preference` starts with `mkdir -p` and the write then
+  # succeeds. That was this check's first shape, and it failed by asserting the
+  # promise was absent on a run that had legitimately recorded the answer.
+  rm -rf "$GATE_DIR/ro"; mkdir -p "$GATE_DIR/ro/.veld"; chmod 500 "$GATE_DIR/ro/.veld"
+  out="$(HOME="$GATE_DIR/ro" FAKE_APP=/A/Veld.app WANT_DESKTOP=1 ASK_ANSWER=no bash "$GATE_DIR/drive.sh" 2>&1)" || true
+  chmod 700 "$GATE_DIR/ro/.veld"
+  if printf '%s' "$out" | grep -qF "will not install it again"; then
+    bad "an unrecorded answer still promised permanence: $(printf '%s' "$out" | tr '\n' '|')"
+  else
+    ok "an answer that could not be written makes no permanence promise"
+  fi
+fi
 
 echo
 if [ "$fail" -eq 0 ]; then

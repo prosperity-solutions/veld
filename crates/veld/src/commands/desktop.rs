@@ -14,7 +14,10 @@
 //! and — when the app handed its own update over and quit — making sure the user
 //! ends up with a window and an explanation rather than neither.
 
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
+
+use veld_core::desktop_pref::{self, DesktopChoice};
 
 use crate::output;
 
@@ -37,6 +40,18 @@ pub async fn install(
         );
         return 1;
     }
+
+    // **Running this command is the answer to "do you want the app?".** Recorded
+    // before the download rather than after it, and that ordering is deliberate:
+    // a failed install is a network problem, not a change of mind, and the
+    // preference is what stops the *next* `veld update` from asking again or
+    // skipping the app they just asked for. It overwrites an earlier "no" for the
+    // same reason — this command is how somebody changes their mind.
+    //
+    // Includes the app's own handoff (`--wait-pid`), which looks non-interactive
+    // and is not: it is a human clicking *Update* inside Veld Desktop, which is
+    // about as explicit a "yes, I use this app" as exists.
+    remember(DesktopChoice::Wanted);
 
     // Defaults to this binary's version, because the app and the CLI ship from one
     // tag. The app passes an explicit one when it was offered a release the CLI has
@@ -165,6 +180,255 @@ pub async fn install(
             }
             1
         }
+    }
+}
+
+/// `veld desktop uninstall` — remove the app and stop veld reinstalling it.
+///
+/// The other half of making the app optional, and the reason it is a command
+/// rather than only a prompt: someone who answered "yes" once, or who was never
+/// asked because they installed veld before this existed, needs a way to change
+/// their mind that does not involve dragging a bundle to the Trash and then
+/// watching the next `veld update` put it back.
+///
+/// **The preference is recorded even when there is no bundle to remove.** That is
+/// not a degenerate case, it is a supported one: an orchestrator-only user who has
+/// never had the app can say so up front, and every future install and update then
+/// skips it without asking.
+pub async fn uninstall(assume_yes: bool) -> i32 {
+    if std::env::consts::OS != "macos" {
+        output::print_error(
+            "veld does not manage Veld Desktop on this platform — remove the AppImage, or use \
+             your package manager for the .deb.",
+            false,
+        );
+        return 1;
+    }
+
+    let installed = veld_core::setup::desktop_app_status().map(|(path, _)| path);
+
+    if let Some(path) = &installed {
+        // **The descriptors the question actually uses**, not `output::is_tty()`
+        // — which reads *stdout*, while `confirm_removal` prints to stderr and
+        // reads stdin. That mismatch cut both ways in front of an irreversible
+        // `remove_dir_all`: `veld desktop uninstall > log` from a terminal
+        // skipped the confirmation entirely and deleted the bundle unasked,
+        // while `veld desktop uninstall < /dev/null` in a pty answered its own
+        // prompt with EOF and refused a caller who meant it. Same defect the
+        // bash half had (`[ -t 1 ]` where the prompt goes to fd 2) and the same
+        // rule fixes both: ask only when the human can see the question *and*
+        // answer it.
+        let can_ask = std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
+        if !assume_yes && can_ask && !confirm_removal(path) {
+            output::print_info("Cancelled — nothing was removed and nothing was remembered.");
+            return 1;
+        }
+    }
+
+    // Before the removal, not after it. If deleting the bundle fails — a
+    // `/Applications` this user cannot write, an app that will not quit — the
+    // answer they just gave is still their answer, and the thing that actually
+    // ends the complaint is veld not downloading the app again. Recording only on
+    // success would leave the next `veld update` re-fetching an app the user has
+    // explicitly refused.
+    remember(DesktopChoice::Unwanted);
+
+    let Some(path) = installed else {
+        output::print_success(
+            "Veld Desktop will not be installed — `veld update` skips the app half from now on.",
+        );
+        println!(
+            "  {}",
+            output::dim("Run 'veld desktop install' if you want it after all.")
+        );
+        return 0;
+    };
+
+    match veld_core::setup::remove_desktop_app(&path).await {
+        Ok(()) => {
+            output::print_success(&format!("Removed {}", path.display()));
+            println!(
+                "  {}",
+                output::dim(
+                    "`veld update` skips the app half from now on. Run 'veld desktop install' if \
+                     you want it back."
+                )
+            );
+            0
+        }
+        Err(e) => {
+            // The preference is already recorded, so say that too: otherwise the
+            // user reads a bare failure and reasonably assumes nothing happened.
+            output::print_error(&format!("{e:#}"), false);
+            println!(
+                "  {}",
+                output::dim(
+                    "veld will not install it again either way — drag it to the Trash to finish, \
+                     or re-run this once the app has quit."
+                )
+            );
+            1
+        }
+    }
+}
+
+/// The confirmation in front of deleting the bundle.
+///
+/// `[y/N]` and unrecognised-means-no, unlike the preference prompt below: this one
+/// guards an irreversible act, so it takes agreement rather than the absence of
+/// refusal. Names what is *not* affected, because "uninstall" next to the word
+/// veld reads as if it might take the daemon and the environments with it.
+fn confirm_removal(path: &Path) -> bool {
+    use std::io::{BufRead, Write};
+
+    eprintln!(
+        "{} This removes {} and stops veld installing it again.",
+        output::yellow("Warning:"),
+        path.display()
+    );
+    eprintln!(
+        "  {}",
+        output::dim(
+            "The CLI, the daemon and your running environments are untouched — so are terminal \
+             sessions, which belong to the daemon rather than to the app window."
+        )
+    );
+    eprint!("Continue? [y/N] ");
+    let _ = std::io::stderr().flush();
+
+    let mut line = String::new();
+    if std::io::stdin().lock().read_line(&mut line).unwrap_or(0) == 0 {
+        eprintln!();
+        return false;
+    }
+    matches!(line.trim().to_lowercase().as_str(), "y" | "yes")
+}
+
+/// Persist an answer, and never fail the command over it.
+///
+/// A machine with no writable home directory still has to *act* on the answer it
+/// was just given; the cost of not recording it is being asked once more, which is
+/// not worth turning a working install into a failed one. Said out loud rather
+/// than swallowed, because "I answered this last week" is otherwise a mystery.
+fn remember(choice: DesktopChoice) {
+    if let Err(e) = desktop_pref::write(choice) {
+        // Names the file, which is the whole reason `desktop_pref::path()` is
+        // public: on the failures that actually happen — a root-owned
+        // `desktop.json` left by an old `sudo curl | bash`, an unwritable
+        // `~/.veld` — the path *is* the fix, and without it the reader has an
+        // errno and nowhere to point it.
+        let at = desktop_pref::path()
+            .map(|p| format!(" at {}", p.display()))
+            .unwrap_or_default();
+        output::print_error(
+            &format!(
+                "Could not record your Veld Desktop preference{at} ({e}) — you may be asked again."
+            ),
+            false,
+        );
+    }
+}
+
+/// Ask whether this machine wants Veld Desktop, and remember the answer.
+///
+/// Shared with `veld update`, which is where most existing users meet it: they
+/// have the app because every release before this one installed it for them, and
+/// this is the one time they are asked whether they wanted it.
+///
+/// Two wordings, because they are two different questions. Somebody who already
+/// has the app is being asked whether to *keep* something — so the prompt has to
+/// name where it is, say plainly that it arrived without them choosing it, and say
+/// what each answer will do to it. Somebody who does not have it is being offered
+/// a download.
+///
+/// The default (a bare Enter) is whatever the machine already looks like: keep the
+/// app that is there, do not fetch one that is not. Returns `None` when nobody
+/// answered — EOF, or something that is not yes or no — and `None` is deliberately
+/// **not** recorded: an unparsed keystroke must not decide this, and the next run
+/// asking again costs one prompt.
+pub(crate) fn ask_desktop_choice(installed: Option<&Path>) -> Option<DesktopChoice> {
+    use std::io::{BufRead, Write};
+
+    println!();
+    let default_yes = installed.is_some();
+    match installed {
+        Some(path) => {
+            output::print_info(&format!("Veld Desktop is installed at {}.", path.display()));
+            println!(
+                "  {}",
+                output::dim(
+                    "It is the Mac app for Veld's IDE — worktree tabs, terminal panes and browser \
+                     panes in one window. Earlier releases installed it alongside the CLI without \
+                     asking; from now on it is your choice, so this is the one time we ask."
+                )
+            );
+            println!();
+            println!(
+                "  {}",
+                output::dim("Yes — veld keeps it up to date on every update, as it does today.")
+            );
+            println!(
+                "  {}",
+                output::dim("No  — veld removes it now and never downloads it again.")
+            );
+            print!("  Keep Veld Desktop? [Y/n] ");
+        }
+        None => {
+            output::print_info(
+                "Veld Desktop — the Mac app for Veld's IDE — is not installed on this machine.",
+            );
+            println!(
+                "  {}",
+                output::dim(
+                    "Worktree tabs, terminal panes and browser panes in one window, over the same \
+                     daemon the CLI drives. A ~113 MB download, kept in step by `veld update`."
+                )
+            );
+            print!("  Install Veld Desktop? [y/N] ");
+        }
+    }
+    let _ = std::io::stdout().flush();
+
+    let mut line = String::new();
+    let read = std::io::stdin().lock().read_line(&mut line).unwrap_or(0);
+    if read == 0 {
+        // `read_line` returning 0 is EOF, so the cursor is still after the prompt.
+        println!();
+    }
+    let choice = desktop_answer(
+        if read == 0 { None } else { Some(line.as_str()) },
+        default_yes,
+    )?;
+    remember(choice);
+    println!(
+        "  {}",
+        output::dim(
+            "Remembered. Change it any time with 'veld desktop install' or \
+             'veld desktop uninstall'."
+        )
+    );
+    Some(choice)
+}
+
+/// What the typed answer means.
+///
+/// Split from the prompt because the prompt cannot be tested and this decides
+/// whether a GUI app gets downloaded or deleted.
+///
+/// **Unrecognised input is `None`, not "no"** — the opposite of `consent` in
+/// `update.rs`, and the difference is what the answer is used for. There, an
+/// unrecognised line declines to close a running app, and declining is the safe
+/// direction. Here the answer is *written down and obeyed forever*, so a stray
+/// keystroke must leave the question unanswered rather than opt somebody out of
+/// the app permanently. EOF is `None` for the same reason.
+fn desktop_answer(line: Option<&str>, default_yes: bool) -> Option<DesktopChoice> {
+    let line = line?;
+    match line.trim().to_lowercase().as_str() {
+        "" if default_yes => Some(DesktopChoice::Wanted),
+        "" => Some(DesktopChoice::Unwanted),
+        "y" | "yes" => Some(DesktopChoice::Wanted),
+        "n" | "no" => Some(DesktopChoice::Unwanted),
+        _ => None,
     }
 }
 
@@ -324,6 +588,11 @@ pub async fn status(json: bool) -> i32 {
     }
 
     let found = veld_core::setup::desktop_app_status();
+    // `null` for "never asked", which is a third state rather than a missing
+    // boolean — every user who installed veld before the app became optional is in
+    // it, with the app on their disk and no answer on record.
+    let preference = desktop_pref::read();
+    let preference_json = preference.map(DesktopChoice::as_str);
 
     if json {
         let payload = match &found {
@@ -335,6 +604,7 @@ pub async fn status(json: bool) -> i32 {
                 "version": version,
                 "cli_version": cli_version,
                 "in_sync": version.as_deref() == Some(cli_version),
+                "preference": preference_json,
                 "capabilities": capabilities(),
             }),
             None => serde_json::json!({
@@ -342,6 +612,7 @@ pub async fn status(json: bool) -> i32 {
                 "managed": true,
                 "platform": std::env::consts::OS,
                 "cli_version": cli_version,
+                "preference": preference_json,
                 "capabilities": capabilities(),
             }),
         };
@@ -357,7 +628,18 @@ pub async fn status(json: bool) -> i32 {
             let version = version.unwrap_or_else(|| "unknown".to_string());
             output::print_info(&format!("Veld Desktop {version}"));
             println!("  {}", output::dim(&path.display().to_string()));
-            if version != cli_version {
+            // The one combination worth stating rather than leaving to be
+            // discovered: the app is here and veld has been told not to keep it.
+            // Nothing else in the CLI would ever mention it again.
+            if preference == Some(DesktopChoice::Unwanted) {
+                println!(
+                    "  {}",
+                    output::dim(
+                        "You opted out of the app, so `veld update` leaves this copy alone. \
+                         'veld desktop install' opts back in; 'veld desktop uninstall' removes it."
+                    )
+                );
+            } else if version != cli_version {
                 println!();
                 output::print_info(&format!(
                     "The CLI is {cli_version}. Run 'veld desktop update' to match them."
@@ -367,7 +649,13 @@ pub async fn status(json: bool) -> i32 {
         }
         None => {
             output::print_info("Veld Desktop is not installed.");
-            println!("  {}", output::dim("veld desktop install"));
+            match preference {
+                Some(DesktopChoice::Unwanted) => println!(
+                    "  {}",
+                    output::dim("You opted out — 'veld desktop install' if you change your mind.")
+                ),
+                _ => println!("  {}", output::dim("veld desktop install")),
+            }
             0
         }
     }
@@ -535,6 +823,51 @@ mod tests {
         // A path with no parent cannot be reasoned about, so it gets the
         // conservative answer rather than the convenient one.
         assert!(!can_hand_off_full_update(Path::new("/")));
+    }
+
+    #[test]
+    fn the_default_answer_is_whatever_the_machine_already_looks_like() {
+        // App installed: Enter keeps it. The user is mid-`veld update` and did
+        // not come here to lose an app.
+        assert_eq!(
+            desktop_answer(Some("\n"), true),
+            Some(DesktopChoice::Wanted)
+        );
+        // No app: Enter does not start a 113 MB download.
+        assert_eq!(
+            desktop_answer(Some("\n"), false),
+            Some(DesktopChoice::Unwanted)
+        );
+
+        for yes in ["y", "Y", "yes", "YES", " yes \n"] {
+            assert_eq!(
+                desktop_answer(Some(yes), false),
+                Some(DesktopChoice::Wanted),
+                "{yes:?}"
+            );
+        }
+        for no in ["n", "N", "no", "NO", " no \n"] {
+            assert_eq!(
+                desktop_answer(Some(no), true),
+                Some(DesktopChoice::Unwanted),
+                "{no:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_answer_nobody_gave_is_not_recorded_as_one() {
+        // The failure this guards: this answer is written down and obeyed by
+        // every future update, so a stray keystroke or a closed pipe must leave
+        // the question open rather than opt somebody out of the app forever.
+        // Note it is the *opposite* rule from `update.rs`'s `consent`, where
+        // unrecognised means "do not close my app".
+        assert_eq!(desktop_answer(None, true), None);
+        assert_eq!(desktop_answer(None, false), None);
+        for junk in ["maybe", "q", "yeah", "0", "1", "sure"] {
+            assert_eq!(desktop_answer(Some(junk), true), None, "{junk:?}");
+            assert_eq!(desktop_answer(Some(junk), false), None, "{junk:?}");
+        }
     }
 
     #[test]

@@ -28,14 +28,46 @@ veld doctor
 
 ## Veld Desktop (macOS app)
 
-Installed by default alongside the CLI — the two are halves of one release. Set
-`VELD_DESKTOP=0` before the install script to skip it (CI boxes, servers).
+**Optional, and the answer is remembered.** Some people use veld as an
+orchestrator and never open the IDE; some use it as their IDE. The installer asks
+once, records the answer in `~/.veld/desktop.json`, and every install and update
+after that obeys it — so an orchestrator-only machine stops paying a ~113 MB
+download on every `veld update`.
 
 ```bash
-veld desktop status      # where it is, and whether it matches the CLI
-veld desktop install     # get it on a machine that skipped it
-veld desktop update      # bring it to this CLI's version
+veld desktop status         # where it is, whether it matches the CLI, and the recorded answer
+veld desktop install        # add it — and record "yes"
+veld desktop uninstall      # remove it — and record "no". Works with no app installed
+veld desktop update         # bring it to this CLI's version
 ```
+
+Three states, not two: yes, no, and **never asked**. The third is where every
+machine that installed veld before the app became optional starts, with the app
+on disk and no answer on record. Both installers handle it the same way:
+
+| State | Interactive run | Nobody to ask (agent, CI, the app's own handoff) |
+|---|---|---|
+| yes | install / keep in step | install / keep in step |
+| no | never installed, never updated | never installed, never updated |
+| never asked, app installed | asks once, then obeys the answer | keeps it in step |
+| never asked, no app | asks once, then obeys the answer | **skips it** — no download |
+
+The two asymmetries in that table are deliberate. A machine that *has* the app is
+running the IDE, so a run that cannot ask keeps it up to date rather than
+stranding it on an old version. A machine that has never had it has been managing
+without one, so a run that cannot ask does not decide by downloading it.
+
+**`VELD_DESKTOP=0` is a per-run override, not an answer.** It skips the app for
+that invocation (CI boxes, servers) and deliberately records nothing — an
+environment variable is a statement about one command, while the preference is
+something a user can be asked about and change. Use `veld desktop uninstall` to
+say "never" durably.
+
+**Answering "no" while the app is installed removes it**, on the spot, on the run
+where the answer was given. A *stored* "no" never removes anything later: if the
+app reappears — a `.dmg` dragged to `/Applications` — `veld update` leaves it
+alone and says so, because a recent manual install is a better signal than an old
+answer, and silently deleting an app is not something an update may do.
 
 Arriving through the CLI rather than a `.dmg` download is what avoids the
 Gatekeeper prompt: a browser marks a download with `com.apple.quarantine` and
@@ -58,13 +90,15 @@ through `veld update` and deliberately does move everything (see below).
 
 | Variable | Effect |
 |---|---|
-| `VELD_DESKTOP=0` | Skip the app. The opt-out for a CI box or a server |
+| `VELD_DESKTOP=0` | Skip the app **for this run**. Records no preference — see above |
 | `VELD_DESKTOP_ONLY=1` | Install *only* the app: no CLI, no services, no sudo. macOS only |
 | `VELD_DESKTOP_DIR=<dir>` | Where the app lives. When set it is the **only** location consulted, by the installer and by `veld desktop status` |
 | `VELD_BINARY_ICONS=0` | Leave the CLI/daemon/helper with the generic executable icon (see below) |
 
 **`veld uninstall` removes the app too**, and `veld doctor` reports it — where it
-is, which version, and whether it matches the CLI.
+is, which version, whether it matches the CLI, and whether you opted out (which
+is why an app can be legitimately stale). `veld desktop status --json` carries the
+same answer as `preference`: `"wanted"`, `"unwanted"`, or `null` for never asked.
 
 **If the app cannot find a CLI that understands `veld desktop`**, it falls back
 to pointing you at the release page rather than handing over to a CLI that would

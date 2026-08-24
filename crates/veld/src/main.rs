@@ -40,6 +40,18 @@ pub enum DesktopCommand {
         app_path: Option<std::path::PathBuf>,
     },
 
+    /// Remove the Mac app and stop veld installing it again.
+    ///
+    /// The opt-out half of an optional app: it deletes the bundle *and* records
+    /// the answer, so `veld update` skips the app from then on. Works with no app
+    /// installed too — that is how somebody who only uses veld as an orchestrator
+    /// says "never fetch this" up front.
+    Uninstall {
+        /// Do not ask for confirmation.
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
+
     /// Show where the app is installed and whether it matches this CLI.
     Status {
         /// Output as JSON.
@@ -1292,6 +1304,7 @@ async fn main() {
             Some(DesktopCommand::Install) => {
                 commands::desktop::install(None, None, false, None).await
             }
+            Some(DesktopCommand::Uninstall { yes }) => commands::desktop::uninstall(yes).await,
             Some(DesktopCommand::Update {
                 version,
                 wait_pid,
@@ -1489,7 +1502,8 @@ async fn main() {
 ///   the CLI by running `veld desktop status --json`, and its caller catches any
 ///   failure as "there is no veld CLI here", which silently demotes
 ///   *Check for Updates…* to the download-from-GitHub route. The install and
-///   update arms stay blocked — those move bytes.
+///   update arms stay blocked — those move bytes — and so does `uninstall`, which
+///   moves none but would delete the very bundle a running update is swapping.
 fn command_survives_an_update(command: &Command) -> bool {
     matches!(
         command,

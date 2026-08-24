@@ -348,6 +348,136 @@ fn every_advertised_capability_has_a_consumer_in_the_app() {
     );
 }
 
+/// Lift one shell function out of `install.sh` so it can be run on its own.
+///
+/// The script is not sourceable — it installs veld — so the only way to test a
+/// function in it is to cut it out and hand it to `bash`. Keyed on the definition
+/// line and the first column-zero `}`, which is the shape every function in that
+/// file has.
+fn shell_function(name: &str) -> String {
+    let script = std::fs::read_to_string(repo_root().join("install.sh")).unwrap();
+    let header = format!("\n{name}() {{\n");
+    let start = script
+        .find(&header)
+        .unwrap_or_else(|| panic!("install.sh no longer defines {name}()"))
+        + 1;
+    let body = &script[start..];
+    let end = body
+        .find("\n}\n")
+        .unwrap_or_else(|| panic!("{name}() in install.sh has no closing brace at column 0"))
+        + 3;
+    body[..end].to_string()
+}
+
+/// Run one of `install.sh`'s functions against a throwaway `HOME`.
+fn run_shell_function(name: &str, args: &[&str], home: &Path) -> String {
+    let out = std::process::Command::new("bash")
+        .arg("-c")
+        .arg(format!("set -u\n{}\n{name} \"$@\"", shell_function(name)))
+        .arg("bash") // $0
+        .args(args)
+        .env("HOME", home)
+        .output()
+        .expect("bash");
+    assert!(
+        out.status.success(),
+        "{name} exited {:?}: {}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// The Veld Desktop preference is **one file read by two languages**, and nothing
+/// else ties the halves together.
+///
+/// Rust writes `~/.veld/desktop.json` (`veld_core::desktop_pref`) and
+/// `install.sh` reads it to decide whether to download a ~113 MB app; the script
+/// writes it too, when it is the half that asked. Rename the key, nest it, or
+/// change what "unset" looks like on either side and there is no error anywhere —
+/// the app simply starts being installed for people who said no, or stops being
+/// installed for people who said yes, with `cargo test` and `bash -n` both green.
+/// That is the same class of failure as the capability string above, and it gets
+/// the same kind of guard.
+#[test]
+fn the_desktop_preference_means_the_same_thing_in_both_languages() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+
+    // Absent file: "nobody has been asked", which both halves must agree on —
+    // this is the state every pre-existing user is in, and reading it as either
+    // yes or no is a decision nobody made.
+    assert_eq!(veld_core::desktop_pref::read_in(home), None);
+    assert_eq!(run_shell_function("desktop_preference", &[], home), "");
+
+    // Rust writes → the script reads.
+    for (choice, expected) in [
+        (veld_core::desktop_pref::DesktopChoice::Wanted, "yes"),
+        (veld_core::desktop_pref::DesktopChoice::Unwanted, "no"),
+    ] {
+        veld_core::desktop_pref::write_in(home, choice).unwrap();
+        assert_eq!(
+            run_shell_function("desktop_preference", &[], home),
+            expected,
+            "install.sh cannot read what desktop_pref::write_in produced for {choice:?}",
+        );
+    }
+
+    // The script writes → Rust reads. `install.sh` is the half that asks on a
+    // fresh `curl … | bash`, where there is no veld binary yet to ask for it.
+    for (arg, expected) in [
+        ("yes", veld_core::desktop_pref::DesktopChoice::Wanted),
+        ("no", veld_core::desktop_pref::DesktopChoice::Unwanted),
+    ] {
+        run_shell_function("record_desktop_preference", &[arg], home);
+        assert_eq!(
+            veld_core::desktop_pref::read_in(home),
+            Some(expected),
+            "desktop_pref cannot read what install.sh recorded for {arg:?}",
+        );
+    }
+
+    // A torn or foreign file is "unset" on both sides, not a guess. The Rust half
+    // pins this too; here it is the *script's* reader being held to it, since a
+    // `case` pattern is easy to loosen into matching anything.
+    let file = home.join(".veld").join("desktop.json");
+    for junk in ["{\"wanted\":tr", "{}", "{\"wanted\":\"yes\"}", ""] {
+        std::fs::write(&file, junk).unwrap();
+        assert_eq!(
+            run_shell_function("desktop_preference", &[], home),
+            "",
+            "install.sh read an answer out of {junk:?}",
+        );
+        assert_eq!(veld_core::desktop_pref::read_in(home), None, "{junk:?}");
+    }
+
+    // A later key does not change the answer on either side — this is what lets
+    // the format grow a field without a flag day.
+    std::fs::write(&file, "{\"wanted\":false,\"asked_by\":\"install.sh\"}").unwrap();
+    assert_eq!(run_shell_function("desktop_preference", &[], home), "no");
+    assert_eq!(
+        veld_core::desktop_pref::read_in(home),
+        Some(veld_core::desktop_pref::DesktopChoice::Unwanted)
+    );
+
+    // **The literal must not be readable out of another key's string value.** An
+    // unanchored `*'"wanted":true'*` in the script read this as "yes" while serde
+    // read the real field and answered "unwanted" — the two parsers disagreeing
+    // about the file that gates a 113 MB download and, on one path, deleting an
+    // application. The script's answer is now "unanswered", which is the only
+    // direction a mismatch may fail in: it asks again.
+    std::fs::write(&file, "{\"wanted\":false,\"note\":\"\\\"wanted\\\":true\"}").unwrap();
+    assert_ne!(
+        run_shell_function("desktop_preference", &[], home),
+        "yes",
+        "install.sh read `yes` out of a string value belonging to another key",
+    );
+    assert_eq!(
+        veld_core::desktop_pref::read_in(home),
+        Some(veld_core::desktop_pref::DesktopChoice::Unwanted)
+    );
+}
+
 /// Both halves must name the same log file.
 ///
 /// The CLI writes it (`desktop_update_log_path`) and the app both redirects the

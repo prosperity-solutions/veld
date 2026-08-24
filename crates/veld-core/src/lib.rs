@@ -3,6 +3,7 @@ pub mod config;
 pub use uuid;
 pub mod console;
 pub mod db;
+pub mod desktop_pref;
 pub mod feedback;
 pub mod files;
 pub mod graph;

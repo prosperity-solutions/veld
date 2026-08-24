@@ -185,10 +185,11 @@ veld stop --name dev
 | `veld unshare [SHARE_ID] [--json]` | Stop hosting a share (defaults to the sole active share) |
 | `veld leave [JOIN_ID] [--json]` | Disconnect from a joined share (defaults to the sole active join) |
 | `veld ui` | Open the management dashboard in the browser |
-| `veld update [--force] [--verbose]` | Update the whole release — CLI, daemon, helper, and on macOS Veld Desktop. Asks before closing a running app and reopens it afterwards; a non-interactive run leaves it alone. Never asks for a password: the privileged helper restarts itself on request over its own socket, and sudo is offered only if that and its binary watcher have both failed. Only one update runs at a time; `--force` takes over from a run you know is dead, `--verbose` shows the install script's own output instead of veld's step summary |
+| `veld update [--force] [--verbose]` | Update the whole release — CLI, daemon, helper, and on macOS Veld Desktop when you asked for it (`veld desktop install`/`uninstall` is the answer; the first interactive update on a machine that was never asked puts the question). Asks before closing a running app and reopens it afterwards; a non-interactive run leaves it alone. Never asks for a password: the privileged helper restarts itself on request over its own socket, and sudo is offered only if that and its binary watcher have both failed. Only one update runs at a time; `--force` takes over from a run you know is dead, `--verbose` shows the install script's own output instead of veld's step summary |
 | `veld update --status [--json]` | What the update that is currently running is doing — who started it, which release, which phase. Installs nothing |
-| `veld desktop [status] [--json]` | Where Veld Desktop is installed and whether it matches the CLI. `--json` also lists what this CLI can be asked to do (`capabilities`) |
-| `veld desktop install` | Install the Mac app (macOS). Skips the Gatekeeper detour a browser download gets, since curl sets no quarantine flag |
+| `veld desktop [status] [--json]` | Where Veld Desktop is installed, whether it matches the CLI, and whether you asked for it (`preference`: `wanted`, `unwanted`, or `null` for never asked). `--json` also lists what this CLI can be asked to do (`capabilities`) |
+| `veld desktop install` | Install the Mac app (macOS), and remember that you want it — every later update keeps it in step. Skips the Gatekeeper detour a browser download gets, since curl sets no quarantine flag |
+| `veld desktop uninstall [-y]` | Remove the Mac app and remember that you don't want it — installs and updates skip the app half from then on. Works with no app installed, which is how a machine that only orchestrates opts out up front |
 | `veld desktop update [--relaunch]` | Update the installed app *only*, to this CLI's version. `veld update` covers this — reach for it when you want the app half on its own |
 | `veld gc` | Clean up stale state and logs |
 | `veld setup [unprivileged\|privileged]` | One-time system setup |
@@ -726,7 +727,13 @@ A pane can also leave its window: right-click a tab → *Open in a new window*, 
 
 **It needs the veld CLI**, which it does not ship. On a machine that has never had veld the app shows the two commands that get you there — the installer and `veld setup unprivileged` — and waits for the daemon to appear.
 
-On macOS **the installer brings it with the CLI** — `curl -fsSL https://veld.oss.life.li/get | bash` installs both halves, and `veld update` moves both. `VELD_DESKTOP=0` opts out (a CI box or a server that wants no Dock icon), and `veld desktop install` gets it on a machine that skipped it.
+**The app is optional, and the installer asks once.** Plenty of people use veld purely as an orchestrator and never open the IDE; making them download a ~113 MB app on every `veld update` was wrong. So on macOS the installer puts the question, records the answer in `~/.veld/desktop.json`, and every install and update after that obeys it — `veld update` moves both halves for someone who wants the app and skips it entirely for someone who doesn't.
+
+Change your mind at any time: `veld desktop install` adds it and records *yes*, `veld desktop uninstall` removes it and records *no*. That second one works on a machine with no app installed too, which is how an orchestrator-only box says "never fetch this" up front. `veld desktop status` and `veld doctor` both show the recorded answer, so an app that is deliberately stale reads as deliberate rather than broken.
+
+**If you have been running veld for a while, you have the app and were never asked** — every release before this one installed it along with the CLI. The next interactive `veld update` (or `curl … | bash`) says so and asks whether to keep it: yes keeps it up to date exactly as today, no removes it there and then and stops veld fetching it again. It is asked once.
+
+A run with nobody to ask — an agent, CI, the app's own *Check for Updates…* — never puts up a prompt and never guesses in the expensive direction: an app that is already installed is kept in step, and one that has never been installed is not downloaded. `VELD_DESKTOP=0` still skips the app for a single run and deliberately records nothing, because an environment variable is a statement about one command rather than a preference you can be asked about.
 
 Installing it this way is also what **skips the Gatekeeper detour.** A build downloaded in a browser carries `com.apple.quarantine`, and that flag is what makes macOS refuse the first launch of an app that is not notarized. curl does not set it, so an app installed by veld simply opens. `veld desktop status` says what is installed and whether it matches the CLI.
 
