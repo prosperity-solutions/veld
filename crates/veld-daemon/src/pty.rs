@@ -3985,16 +3985,21 @@ async fn serve_socket(socket: WebSocket, session: Arc<Session>, size: PtySize, r
         return;
     }
 
-    // A resumed shell very likely has a full-screen program on it (a coding
-    // agent, vim, top) that has drawn a screen and will not draw it again on its
-    // own. The replay above just wrote a snapshot of that program's own output
-    // stream over whatever the client's terminal already held, and the program
-    // cannot know — which is the "it comes back mixed up until I drag the pane"
-    // report. Ask it to repaint.
+    // A resumed shell very likely has a full-screen program on it that has drawn
+    // a screen and will not draw it again on its own. The replay above just wrote
+    // a snapshot of that program's own output stream over whatever the client's
+    // terminal already held, and the program cannot know — which is the "it comes
+    // back mixed up until I drag the pane" report. Ask it to repaint.
     //
-    // **After the replay, deliberately.** Frame order on this socket is the order
-    // the client parses in, so a repaint sent first would be overwritten by the
-    // very snapshot it was meant to correct.
+    // **After the snapshot, necessarily.** The two halves travel on different
+    // channels: the request goes out on `to_holder`, and the repaint it provokes
+    // comes back as PTY output on `session.output`. Ordering against the *replay
+    // frames* is therefore not the hazard — those are written from this task, and
+    // a repaint issued earlier would simply queue in the broadcast and still be
+    // delivered after `ReplayEnd`. The hazard is ordering against the *snapshot*
+    // taken at the top of this function: a repaint provoked before that would be
+    // recorded into the scrollback and replayed as history, putting a second copy
+    // of the program's screen into the buffer it was meant to correct.
     //
     // Only on `resumed`: a shell spawned by this attach has printed nothing yet
     // and has no foreground program to ask.
@@ -4169,6 +4174,16 @@ async fn resize_session(session: &Session, cols: u16, rows: u16) {
 /// session that reattaches exactly as it used to.
 async fn redraw_session(session: &Session) {
     if !session.redraw_supported {
+        // Worth a line: "it still comes back mixed up" otherwise has an adopted
+        // pre-update holder as a silent explanation, indistinguishable from a
+        // program that ignored the repaint.
+        debug!(session = %session.id, "no redraw: this holder predates the frame");
+        return;
+    }
+    // The same gate `query_busy` applies, for the same reason: there is no
+    // foreground program on a finished shell to ask, so the frame would travel
+    // the whole way to be dropped by the holder's own size read.
+    if session.exited().is_some() {
         return;
     }
     if session
@@ -6087,11 +6102,11 @@ mod tests {
         /// no signal at all, and it is the overwhelmingly common one — coming back
         /// to a window nobody moved.
         ///
-        /// The markers are assembled by `printf` rather than written literally
-        /// because the terminal echoes what is typed into it *and the replay
-        /// replays that echo*: a literal `VELDWINCH` in the command would be
-        /// matched out of the replayed echo of the command itself, and the test
-        /// would pass without any signal ever being delivered.
+        /// The sizes are reported by `stty size`, and the ready marker is assembled
+        /// by `printf`, because the terminal echoes what is typed into it *and the
+        /// replay replays that echo*: a literal marker in the command would be
+        /// matched out of the replayed echo of the command itself, and the test would
+        /// pass without anything having been delivered.
         #[tokio::test]
         async fn a_reattach_at_the_same_size_makes_the_foreground_program_repaint() {
             let addr = serve().await;
@@ -6100,11 +6115,21 @@ mod tests {
 
             let mut ws = open(addr, &sid, dir.path(), "&cols=90&rows=30").await;
             read_control(&mut ws, "ready").await;
-            // Stands in for a full-screen program: something on this terminal that
-            // reacts to SIGWINCH and to nothing else. 28 is SIGWINCH on both Linux
-            // and Darwin, and the numeric form is what every shell accepts.
+            // Stands in for a full-screen program: a foreground **job**, in its own
+            // process group, that reacts to SIGWINCH and to nothing else and reports
+            // the size it would have rendered at. Deliberately not a `trap` in the
+            // interactive shell itself — that shell shares the tty's foreground group
+            // with nothing, so it would not exercise the reason the repaint is aimed
+            // at `tcgetpgrp`'s answer rather than the shell, and a shell sitting in
+            // readline only runs its trap once both `ioctl`s have already landed, so
+            // it cannot observe the intermediate size at all.
+            //
+            // It busy-loops because a POSIX shell defers a trap until the foreground
+            // command it is waiting on returns, so a `sleep`-based loop could not see
+            // the nudge either. 28 is SIGWINCH on both Linux and Darwin; the numeric
+            // form is what every shell accepts.
             ws.send(WsMessage::Binary(
-                b"trap 'printf \"VELDW%sH\" INC' 28; printf \"VELDR%sY\" EAD\n"
+                b"sh -c 'trap \"stty size\" 28; printf \"VELDR%sY\" EAD; while :; do :; done'\n"
                     .to_vec()
                     .into(),
             ))
@@ -6122,7 +6147,20 @@ mod tests {
                 "the reattach must be a resume; a fresh shell would carry no trap \
                  and this test would be asserting nothing"
             );
-            read_until(&mut again, "VELDWINCH").await;
+            // `30 90` is the assertion, not "something arrived": the program must be
+            // handed a size it has *not* already rendered at (`29 90`) and then the
+            // real one back. A bare same-size SIGWINCH — the first version of this
+            // fix — delivers neither, and a renderer that diffs its own output would
+            // write nothing at all in response to it.
+            let seen = read_until(&mut again, "30 90").await;
+            let nudged = seen
+                .find("29 90")
+                .expect("the reattach must hand the program a changed size, not just a signal");
+            assert!(
+                nudged < seen.find("30 90").unwrap(),
+                "the nudge must precede the restore, or the pane is left a row short: \
+                 {seen:?}"
+            );
             end_session(&sid, "test cleanup").await;
         }
 
