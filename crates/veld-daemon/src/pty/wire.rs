@@ -96,15 +96,19 @@ pub const HANGUP: u8 = 0x83;
 /// an older holder that does not know the kind would drop the connection
 /// rather than ignore it, which is the one outcome that must never happen.
 pub const QUERY_BUSY: u8 = 0x84;
-/// Make the foreground program repaint, by signalling `SIGWINCH` to the PTY's
+/// Make the foreground program repaint, by giving it a real `winsize` change —
+/// one row shorter, a gap, then the true size — so the *kernel* signals the PTY's
 /// foreground process group.
 ///
-/// Empty payload — the size is not part of this frame, deliberately. A repaint
-/// is asked for when the size has *not* changed, which is precisely the case
-/// [`RESIZE`] cannot cover: both Linux (`tty_do_resize`) and XNU
-/// (`ttioctl_locked`) skip the `SIGWINCH` when the new `winsize` equals the old
-/// one, so re-sending the size a shell already has reaches nothing. See
-/// `redraw` in the holder for what this does instead.
+/// Empty payload — the size is not part of this frame, deliberately. The holder
+/// reads the pty's current size itself, because the daemon asks for a repaint
+/// precisely when the size has *not* changed, which is the case [`RESIZE`] cannot
+/// cover: both Linux (`tty_do_resize`) and XNU (`ttioctl_locked`) skip the
+/// `SIGWINCH` when the new `winsize` equals the old one, so re-sending the size a
+/// shell already has reaches nothing. A bare signal is not enough either — a
+/// renderer that diffs its own output recomputes an identical frame and writes
+/// nothing — which is why this is a change and not a notification. See
+/// `redraw_nudge` in the holder.
 ///
 /// Sent only to a holder that advertised [`Hello::supports_redraw`], for the
 /// same reason [`QUERY_BUSY`] is gated: an older holder drops the connection on

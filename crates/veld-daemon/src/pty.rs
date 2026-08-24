@@ -4188,7 +4188,7 @@ async fn resize_session(session: &Session, cols: u16, rows: u16) {
 /// already called on every attach with the client's current size, and when that
 /// size matches what the shell already has — every reattach into an unchanged
 /// pane — the kernel suppresses the `SIGWINCH` and the frame reaches nothing.
-/// See [`wire::REDRAW`] and the holder's `redraw`.
+/// See [`wire::REDRAW`] and the holder's `redraw_nudge`.
 ///
 /// Silently a no-op against a holder from before the frame existed, which is a
 /// session that reattaches exactly as it used to.

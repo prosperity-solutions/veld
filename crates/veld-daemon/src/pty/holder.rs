@@ -120,8 +120,8 @@ const TAKEOVER_PROBATION: Duration = Duration::from_secs(1);
 /// this long collapses back into the 0 ms case: both signals coalesce, the program
 /// reads only the final size, and the repaint silently does not happen. There is
 /// no retry and no verification — the daemon cannot tell a program that ignored
-/// the signal from one that had nothing to redraw. The value is chosen for margin
-/// against scheduler latency rather than because 80 ms is a bound on it, and the
+/// the signal from one that had nothing to redraw. The value below is chosen for
+/// margin against scheduler latency, not because it is a *bound* on it, and the
 /// failure mode is the pre-existing one (a screen that needs a manual resize), not
 /// a worse one. Raise it before suspecting anything subtler if the repaint starts
 /// missing under load.
@@ -129,7 +129,11 @@ const TAKEOVER_PROBATION: Duration = Duration::from_secs(1);
 /// Bounded, and that is what makes awaiting it in the control loop acceptable
 /// where the output path needs [`OUTPUT_SEND_TIMEOUT`]: the hazard there is a peer
 /// that never reads, i.e. *unbounded* parking, which would take `HANGUP` handling
-/// down with it. This is a fixed 40 ms, once per resumed attach.
+/// down with it. This is one fixed gap, once per resumed attach.
+///
+/// Deliberately not restated as a figure anywhere above: a comment that repeats
+/// the value drifts from it silently, and this one already had. The number lives on
+/// the line below and nowhere else.
 ///
 /// It parks the whole `select!` for that window, not just the next daemon frame —
 /// the PTY-read branch included, so the repaint the nudge provokes waits in the
@@ -609,15 +613,15 @@ async fn serve(cfg: &HolderConfig, listener: UnixListener) -> anyhow::Result<()>
                     // except that it is not a peer worth promoting.
                     else if pending.as_ref().is_some_and(|c| c.generation == seq)
                         && !frame.is_ignorable()
-                        // `REDRAW` belongs beside `INPUT`/`RESIZE` here *and* in the
-                        // promotion list above, and load-bearingly so: the daemon sends it
+                        // `REDRAW` here is defensive and, as the lists stand, unreachable:
+                        // the promotion arm above matches the same three kinds and does
+                        // `pending.take()`, so a probationary peer's `REDRAW` has already
+                        // become the writer before control gets here. The listing that is
+                        // actually load-bearing is that one — the daemon sends `REDRAW`
                         // immediately after an attach, which is exactly when a peer is
-                        // still probationary. Listed only here it would be dropped with no
-                        // log and no repaint, working purely because `resize_session`
-                        // happens to precede it on the same ordered channel and promote
-                        // the peer first — so removing that redundant same-size resize,
-                        // which this module's own docs argue is useless, would silently
-                        // disable the repaint on every adoption.
+                        // still probationary, and dropping it from up there costs the
+                        // repaint on every adoption with no log to say so. Kept in step
+                        // with it so the two cannot disagree if either is edited.
                         && !matches!(frame.kind, wire::INPUT | wire::RESIZE | wire::REDRAW)
                     {
                         warn!(
