@@ -111,15 +111,38 @@ const TAKEOVER_PROBATION: Duration = Duration::from_secs(1);
 /// program once and it reads only the final size — for a renderer that diffs its
 /// own output, an identical frame and nothing written. Measured through the real
 /// daemon against such a renderer: a 0 ms gap redrew 0 frames, 5 ms redrew 2.
-/// This is that floor plus margin for an event loop that is busy rendering, and
-/// it is the whole visible cost of a reattach — one stale bottom row, once.
+/// This is that floor with margin, and it is the whole visible cost of a
+/// reattach — one stale bottom row, once, which is imperceptible anywhere in this
+/// range.
+///
+/// **Best-effort, and it cannot be otherwise.** The gap only works if the program
+/// is scheduled and renders inside it, so a machine loaded enough to starve it for
+/// this long collapses back into the 0 ms case: both signals coalesce, the program
+/// reads only the final size, and the repaint silently does not happen. There is
+/// no retry and no verification — the daemon cannot tell a program that ignored
+/// the signal from one that had nothing to redraw. The value is chosen for margin
+/// against scheduler latency rather than because 80 ms is a bound on it, and the
+/// failure mode is the pre-existing one (a screen that needs a manual resize), not
+/// a worse one. Raise it before suspecting anything subtler if the repaint starts
+/// missing under load.
 ///
 /// Bounded, and that is what makes awaiting it in the control loop acceptable
-/// where the output path needs [`OUTPUT_SEND_TIMEOUT`]: the hazard there is a
-/// peer that never reads, i.e. *unbounded* parking, which would take `HANGUP`
-/// handling down with it. This delays the next frame by a fixed 40 ms, once per
-/// resumed attach.
-const REDRAW_NUDGE: Duration = Duration::from_millis(40);
+/// where the output path needs [`OUTPUT_SEND_TIMEOUT`]: the hazard there is a peer
+/// that never reads, i.e. *unbounded* parking, which would take `HANGUP` handling
+/// down with it. This is a fixed 40 ms, once per resumed attach.
+///
+/// It parks the whole `select!` for that window, not just the next daemon frame —
+/// the PTY-read branch included, so the repaint the nudge provokes waits in the
+/// kernel buffer until the restore is done. That is harmless at this size and is
+/// worth knowing before adding a second blocking step nearby.
+///
+/// Parking is also what makes the window *safe* rather than merely tolerable: a
+/// client resize arriving mid-nudge cannot race the restore, because it queues on
+/// `to_holder` and is applied strictly after it. Measured — a resize sent inside
+/// the window left the pty at the client's size, not the restored one. Moving this
+/// sleep off the control loop would turn that into a real race and could leave a
+/// terminal permanently one row short.
+const REDRAW_NUDGE: Duration = Duration::from_millis(80);
 
 /// How long the holder waits, after handing a daemon the exit code, for that
 /// daemon to close the connection.
@@ -1241,9 +1264,12 @@ fn redraw_nudge(master: &dyn MasterPty) -> Option<PtySize> {
     // Down a row, not up: a program that draws one row short leaves the bottom
     // line stale for the length of the gap, while one that draws a row *past* the
     // screen scrolls the display and moves everything the user was looking at.
-    // `rows` can be 1 (or 0 from a pty nobody sized), and 0 would mean "no
-    // constraint" to a program rather than a smaller screen, so a one-row terminal
-    // nudges the only direction it can.
+    //
+    // The `else` is for a one-row terminal, which can only be nudged upwards. It is
+    // deliberately not claimed to cover `rows == 0`: that is unreachable — the spawn
+    // size and every `resize` run through `clamp_dimension`, which maps 0 to the
+    // default — and it would not work if it were, because the restore below goes
+    // through that same clamp and would set 24 rows rather than putting 0 back.
     let nudged = if size.rows > 1 {
         size.rows - 1
     } else {
@@ -2000,6 +2026,54 @@ mod tests {
         })
         .await;
         assert!(closed.is_ok(), "the displaced connection must be dropped");
+    }
+
+    /// A peer whose **only** frame is a `REDRAW` gets the session at once, the same
+    /// as one that sends `INPUT` or `RESIZE`.
+    ///
+    /// This is the promotion list at the top of the `Cmd::Frame` arm, and it needs a
+    /// test of its own because the code works without it. The daemon sends a
+    /// same-size `RESIZE` immediately before every `REDRAW` (`resize_session` then
+    /// `redraw_session` in `serve_socket`), and that `RESIZE` promotes the peer, so
+    /// deleting `REDRAW` from the promotion list leaves every other test in this
+    /// file green while the repaint is silently dropped on exactly the adoption
+    /// race the comment there claims to cover. Worse, the resize it depends on is
+    /// one this module's own docs argue is useless — a same-size resize signals
+    /// nothing — so the natural cleanup is what would break it.
+    ///
+    /// **The vacuity trap:** a silent peer is promoted anyway once
+    /// [`TAKEOVER_PROBATION`] elapses, so "the incumbent was eventually dropped"
+    /// would pass with no promotion arm at all. The assertion is therefore that the
+    /// handover beats that timer — promotion by frame is a channel send and a loop
+    /// turn, i.e. milliseconds, while the timer cannot fire before a full second.
+    #[tokio::test]
+    async fn a_peer_whose_only_frame_is_a_redraw_takes_the_session_over_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = echo_holder(dir.path(), "redrawtakeover").await;
+        let mut first = greet(&socket).await;
+        assert!(echoes_back(&mut first, "FIRST").await);
+
+        let mut second = greet(&socket).await;
+        // The only frame this peer ever sends. No `RESIZE` ahead of it, which is
+        // what makes the promotion attributable to `REDRAW` alone.
+        wire::write_frame(&mut second, wire::REDRAW, &[])
+            .await
+            .unwrap();
+
+        // The displaced connection ending is the only signal the protocol has for a
+        // completed handover. Bounded well under the probation so the timer cannot
+        // be what produced it.
+        let closed = tokio::time::timeout(TAKEOVER_PROBATION * 4 / 5, async {
+            while let Ok(Some(_)) = wire::read_frame(&mut first).await {}
+        })
+        .await;
+        assert!(
+            closed.is_ok(),
+            "a REDRAW must promote a probationary peer by itself — waiting for the \
+             probation timer instead means the repaint is dropped on every adoption"
+        );
+        // And it really owns the session: its input reaches the PTY.
+        assert!(echoes_back(&mut second, "OWNS-IT").await);
     }
 
     #[test]
