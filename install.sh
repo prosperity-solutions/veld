@@ -633,16 +633,25 @@ warn_unrecorded() {
 remove_desktop_app_via_cli() {
   local cli="${INSTALL_DIR}/veld" rc=0 err=""
   [ -x "$cli" ] || return 1
-  # stderr is **captured, not discarded**, and only clap's usage dump is thrown
-  # away. Suppressing all of it — the first version of this — cost the two
-  # diagnostics that are the whole reason a removal failed: "Veld Desktop did not
-  # quit … it may be showing a dialog" and "could not remove <path>: Permission
-  # denied". Without them the caller's "run 'veld desktop uninstall' to finish"
-  # sends the user at a command that will fail the same way with no reason given.
-  # An unknown subcommand (exit 2, an older binary — see above) is the one case
-  # where the child's output really is noise in front of a better explanation.
+  # **stderr is captured; stdout is discarded unconditionally.** Both halves are
+  # deliberate and the second is easy to misread, so it is stated: `>/dev/null`
+  # applies on every exit path, so the child's own `println!` lines — its
+  # "Removed <path>" success line and its dim recovery tip — never appear. That is
+  # fine only because this caller re-states both in its own words; anything new
+  # added to `uninstall()`'s *stdout* will not surface here.
+  #
+  # The captured stderr is re-printed for the failures where it is the only
+  # explanation: "Veld Desktop did not quit … it may be showing a dialog" and
+  # "could not remove <path>: Permission denied". Discarding all of it — the first
+  # version of this — left the caller's "run 'veld desktop uninstall' to finish"
+  # pointing at a command that would fail the same way with no reason given.
+  #
+  # Two exit codes are filtered instead, because for both this function has a
+  # better explanation of its own: **2** is clap's usage dump from a binary too
+  # old to have the subcommand, and **75** is EX_TEMPFAIL from the update gate,
+  # answered below. Reprinting either puts veld's two lines in front of ours.
   err="$("$cli" desktop uninstall --yes 2>&1 >/dev/null)" || rc=$?
-  if [ "$rc" -ne 0 ] && [ "$rc" -ne 2 ] && [ -n "$err" ]; then
+  if [ "$rc" -ne 0 ] && [ "$rc" -ne 2 ] && [ "$rc" -ne 75 ] && [ -n "$err" ]; then
     printf '%s\n' "$err" >&2
   fi
   # An `if`, not `[ … ] && return 0`: under `set -e` that compound *is* the
@@ -963,9 +972,15 @@ install_desktop_app() {
 # `veld update` still moves the app half through here — self-healing on the next
 # update, and the caller's version is not something a child process gets to audit.
 # And `VELD_DESKTOP_ONLY=1` is a documented variable (see the header), so a human
-# who sets it by hand installs the app without recording that they wanted it; the
-# machine then says so on every `veld update` ("… but you opted out, so the app
-# was left alone") rather than silently disagreeing with itself.
+# can set it by hand and install the app while recording nothing. What happens
+# next depends on what was already on disk, and it is worth being exact because an
+# earlier version of this paragraph named a message that cannot fire:
+#
+# - Nothing recorded: the next `veld update` either asks (interactively) or keeps
+#   the now-installed app in step without asking. Neither is wrong.
+# - A recorded "no": that answer still stands, so every later `veld update` says
+#   the app "was left alone" and the bundle goes stale where it is. Recovered with
+#   one `veld desktop install`, which is what that message names.
 if [ -n "$DESKTOP_ONLY" ]; then
   if ! install_desktop_app; then
     echo ""
@@ -1508,6 +1523,12 @@ if [ -n "$WANT_DESKTOP" ]; then
     *)
       if [ -n "$DESKTOP_APP" ]; then
         install_desktop_app || DESKTOP_FAILED="1"
+        # Said once, on the one path that moves the app with no answer on record.
+        # A run piped through `tee`, or one where the question was not answered,
+        # keeps the app in step and would otherwise never mention that there was a
+        # choice — which for the user this whole change is about is the difference
+        # between paying the download forever and knowing they need not.
+        say "Veld Desktop was kept up to date. 'veld desktop uninstall' removes it and stops that; 'veld desktop install' records that you want it."
       elif [ -n "$DESKTOP_ASKED" ]; then
         # Asked, and the answer was not yes or no. Saying "nobody to ask" to
         # somebody who was just asked is the wrong sentence.

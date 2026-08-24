@@ -164,49 +164,79 @@ do
   fi
 done
 
-# --- 4. A run nobody is watching never reaches a prompt --------------------
+# --- 4. The prompt gate's truth table, under a real pty ----------------------
 #
-# `desktop_can_ask` is the gate in front of the only question this script asks,
-# and every veld-driven run sets VELD_NON_INTERACTIVE=1 (pinned in
-# `crates/veld-core/tests/install_script_contract.rs`). If the gate stops
-# honouring it, `veld update` blocks forever on a prompt written to a terminal
-# nobody is at — and on the app's own handoff there is no terminal at all, so the
-# update would hang with the app already quit. `bash -n` sees nothing wrong with
-# that.
+# `desktop_can_ask` is the gate in front of the only question this script asks.
+# Two descriptors decide it, because they answer two halves of one question: the
+# prompt is printed to stderr (its stdout is captured by the caller's `$( )`) and
+# every consequence of the answer is `echo`ed to stdout. Delete either check and
+# a real user is harmed — `2>err.log` asks an invisible question and takes the
+# default; `>install.log` deletes a bundle and files the outcome in the log.
 #
-# The function is lifted out and run on its own, because the script itself
-# installs veld. Same technique as the Rust half's `shell_function`.
+# **This section used to be vacuous and that is the point of its shape now.** It
+# asserted only *refusals*, and this harness's own stdout and stderr are pipes in
+# CI — so every check passed on the round-1 gate it was added to reject, on the
+# original one-descriptor gate, on a gate ignoring VELD_NON_INTERACTIVE, and on a
+# gate hard-coded to `return 1`, which would silence the question entirely. A test
+# that passes on the bug is not a test. So the gate is now driven under a **pty**,
+# with a positive control first: it must say *yes* when both descriptors are
+# terminals, and only then do the refusals mean anything.
 gate="$(sed -n '/^desktop_can_ask() {/,/^}/p' "$SCRIPT")"
 if [ -z "$gate" ]; then
   bad "could not extract desktop_can_ask() from install.sh"
 else
-  if VELD_NON_INTERACTIVE=1 bash -c "${gate}
-desktop_can_ask"; then
-    bad "desktop_can_ask says yes under VELD_NON_INTERACTIVE=1"
-  else
-    ok "desktop_can_ask refuses under VELD_NON_INTERACTIVE=1"
+  # Cheap, portable, and independent of any pty: the two descriptor checks must
+  # both still be there. This is what catches the regression that actually
+  # happened (one of them deleted) even on a runner with no pty to be had.
+  case "$gate" in
+    *'[ -t 1 ]'*) ok "desktop_can_ask still tests fd 1 (where the outcome goes)" ;;
+    *) bad "desktop_can_ask no longer tests fd 1 — a redirected stdout would ask and then log the outcome" ;;
+  esac
+  case "$gate" in
+    *'[ -t 2 ]'*) ok "desktop_can_ask still tests fd 2 (where the prompt goes)" ;;
+    *) bad "desktop_can_ask no longer tests fd 2 — an invisible question would take the default" ;;
+  esac
+
+  # `script`'s argument order differs between util-linux (Linux CI) and BSD
+  # (macOS), so the flavour is probed rather than assumed. Neither available is
+  # reported as a skip, never as a pass.
+  PTY=""
+  if script -q -c 'true' /dev/null </dev/null >/dev/null 2>&1; then
+    PTY="util-linux"
+  elif script -q /dev/null true </dev/null >/dev/null 2>&1; then
+    PTY="bsd"
   fi
-  # And with **stderr** redirected, because that is where the question is
-  # printed — `ask_desktop_preference` writes the prompt to fd 2 so its stdout
-  # can be captured by the caller's `$( )`. Gating on fd 1 instead (the first
-  # version of this) meant `curl … | bash 2>err.log` put an invisible question up
-  # and then took the default from a user who never saw it. The rule is "only ask
-  # if the human can see the question".
-  # Both output descriptors, because they answer two halves of one question: the
-  # prompt goes to stderr, every consequence of the answer goes to stdout. Gating
-  # on fd 1 alone asked an invisible question under `2>err.log`; gating on fd 2
-  # alone deleted a bundle and filed the outcome in `install.log`.
-  if bash -c "${gate}
-desktop_can_ask" 2>/dev/null; then
-    bad "desktop_can_ask says yes with stderr — where the prompt goes — redirected"
+
+  # The redirection is applied to the `desktop_can_ask` call itself, not to the
+  # `echo` that reports it — so the function sees a redirected descriptor while
+  # its verdict still reaches the pty.
+  probe='
+if desktop_can_ask; then echo "BOTH=yes"; else echo "BOTH=no"; fi
+if desktop_can_ask >/dev/null; then echo "NOOUT=yes"; else echo "NOOUT=no"; fi
+if desktop_can_ask 2>/dev/null; then echo "NOERR=yes"; else echo "NOERR=no"; fi
+if VELD_NON_INTERACTIVE=1 desktop_can_ask; then echo "NONINT=yes"; else echo "NONINT=no"; fi
+'
+  if [ -z "$PTY" ]; then
+    echo "  skip no usable \`script\` for a pty — the two text checks above still ran"
   else
-    ok "desktop_can_ask refuses with stderr redirected"
-  fi
-  if bash -c "${gate}
-desktop_can_ask" >/dev/null; then
-    bad "desktop_can_ask says yes with stdout — where the outcome goes — redirected"
-  else
-    ok "desktop_can_ask refuses with stdout redirected"
+    if [ "$PTY" = "util-linux" ]; then
+      pty_out="$(script -q -c "bash -c '${gate//\'/\'\\\'\'}${probe//\'/\'\\\'\'}'" /dev/null </dev/null 2>&1 || true)"
+    else
+      pty_out="$(script -q /dev/null bash -c "${gate}${probe}" </dev/null 2>&1 || true)"
+    fi
+    pty_out="$(printf '%s' "$pty_out" | tr -d '\r')"
+    while IFS='|' read -r key expect what; do
+      [ -n "$key" ] || continue
+      case "$pty_out" in
+        *"${key}=${expect}"*) ok "$what" ;;
+        *) bad "$what — pty said: $(printf '%s' "$pty_out" | grep -o "${key}=[a-z]*" | head -1)" ;;
+      esac
+    done <<'CELLS'
+BOTH|yes|the positive control: it asks when both descriptors are terminals
+NOOUT|no|it refuses when stdout — where the outcome goes — is redirected
+NOERR|no|it refuses when stderr — where the prompt goes — is redirected
+NONINT|no|it refuses under VELD_NON_INTERACTIVE=1
+CELLS
   fi
 fi
 
