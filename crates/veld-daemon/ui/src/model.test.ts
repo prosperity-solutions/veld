@@ -11,6 +11,7 @@ import {
   fuzzyMatch,
   laneDropTarget,
   liveRuns,
+  MAIN_LANE,
   moveLane,
   moveWorktree,
   needsAttention,
@@ -734,7 +735,7 @@ describe("railGroups", () => {
     // The trash lane is always present and pinned last; these assertions are
     // about the live rail, so the always-on trash is filtered out.
     const live = groups.filter((g) => g.key !== TRASH_LANE && g.key !== DELETING_LANE);
-    expect(live.map((g) => g.key)).toEqual(["main", ""]);
+    expect(live.map((g) => g.key)).toEqual([MAIN_LANE, ""]);
     expect(live[0].pinned).toBe(true);
     expect(live[0].worktrees.map((w) => w.path)).toEqual(["/repo"]);
     expect(live[1].pinned).toBe(false);
@@ -796,7 +797,7 @@ describe("railGroups", () => {
       groups.filter((g) => g.addable).map((g) => g.key),
     ).toEqual(["", "review"]);
     // Never the main checkout's own section, the trash, or a removal in flight.
-    expect(groups.find((g) => g.key === "main")?.addable).toBe(false);
+    expect(groups.find((g) => g.key === MAIN_LANE)?.addable).toBe(false);
     expect(groups.find((g) => g.key === TRASH_LANE)?.addable).toBe(false);
     expect(groups.find((g) => g.key === DELETING_LANE)?.addable).toBe(false);
   });
@@ -823,7 +824,7 @@ describe("railGroups", () => {
       [lane("review", 0)],
     );
     expect(groups.filter((g) => g.label === null).map((g) => g.key)).toEqual([
-      "main",
+      MAIN_LANE,
     ]);
   });
 
@@ -951,7 +952,7 @@ describe("railGroups", () => {
     const live = groups.filter(
       (g) => g.key !== TRASH_LANE && g.key !== DELETING_LANE,
     );
-    expect(live.map((g) => g.key)).toEqual(["main", ""]);
+    expect(live.map((g) => g.key)).toEqual([MAIN_LANE, ""]);
     expect(live[0].worktrees.map((w) => w.path)).toEqual(["/repo"]);
   });
 });
@@ -977,7 +978,7 @@ describe("railGroups — batch actions", () => {
     expect(bulk.get("review")).toBe(true);
     // Every pinned section says no, each for its own reason (one row and it is
     // the repo; own header button; a lane move would be invisible; leaving).
-    expect(bulk.get("main")).toBe(false);
+    expect(bulk.get(MAIN_LANE)).toBe(false);
     expect(bulk.get(DETACHED_LANE)).toBe(false);
     expect(bulk.get(DELETING_LANE)).toBe(false);
     expect(bulk.get(TRASH_LANE)).toBe(false);
@@ -987,16 +988,36 @@ describe("railGroups — batch actions", () => {
     expect(ungrouped.editable).toBe(false);
   });
 
-  it("gives every menu-bearing section the same key and lane", () => {
-    // `onLaneMenu` is handed `group.lane`, and everything the menu does resolves
-    // the section by *key* (`sectionMembers`). That only works while the two are
-    // the same string for a section that has a menu — the main checkout is the
-    // one section where they differ (`key: "main"`, `lane: ""`), and it has no
-    // menu. Pinned here so a future section cannot quietly break it.
+  it("keys every section uniquely, even against lanes named like the sentinels", () => {
+    // **The invariant `sectionMembers` actually needs**, and the one an earlier
+    // `key === lane` assertion could not catch: that assertion held for a lane
+    // called `main` too, while `railGroups` was handing the pinned main section
+    // the literal key `"main"` — two sections, one key, and every lookup landing
+    // on the pinned one. So a lane named after the default branch listed the main
+    // checkout as its members and could never be trashed. The fixture names a lane
+    // after **every** section key the rail produces, so a future virtual section
+    // that picks a collidable key fails here rather than in someone's rail.
+    const collidable = ["main", "trash", "deleting", "detached", "Worktrees"];
     const groups = railGroups(
-      [rw("/repo", { is_main: true }), rw("/wts/a"), rw("/wts/b", { lane: "review" })],
-      [lane("review", 0)],
+      [
+        rw("/repo", { id: 1, is_main: true }),
+        rw("/wts/a", { id: 2 }),
+        rw("/wts/det", { id: 3, branch: "(detached)" }),
+        rw("/wts/gone", { id: 4, deleting: true, trashed_at: "2026-01-01T00:00:00Z" }),
+        rw("/wts/bin", { id: 5, trashed_at: "2026-01-01T00:00:00Z" }),
+        ...collidable.map((n, i) => rw(`/wts/lane-${i}`, { id: 10 + i, lane: n })),
+      ],
+      collidable.map((n, i) => lane(n, i)),
     );
+    const keys = groups.map((g) => g.key);
+    expect(new Set(keys).size).toBe(keys.length);
+    // And the consequence that matters: a lane called `main` resolves to its own
+    // members, not to the main checkout.
+    const byKey = (k: string) => groups.find((g) => g.key === k)!;
+    expect(byKey("main").worktrees.map((w) => w.path)).toEqual(["/wts/lane-0"]);
+    expect(byKey(MAIN_LANE).worktrees.map((w) => w.path)).toEqual(["/repo"]);
+    // `onLaneMenu` hands `group.lane` to a lookup that resolves by `key`, so the
+    // two must still agree for every section that has a menu.
     for (const g of groups) {
       if (g.editable || g.bulk) expect(g.key).toBe(g.lane);
     }
@@ -1155,7 +1176,7 @@ describe("moveWorktree", () => {
       [rw("/repo", { is_main: true }), rw("/wts/a")],
       [],
     );
-    expect(moveWorktree(withMain, "/wts/a", "main", 0)).toBeNull();
+    expect(moveWorktree(withMain, "/wts/a", MAIN_LANE, 0)).toBeNull();
   });
 
   it("refuses a drop into a section that does not exist", () => {

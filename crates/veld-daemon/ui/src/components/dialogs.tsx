@@ -1309,6 +1309,30 @@ const NEW_TARGET = "\u0000new";
 /** How many `git status` calls the trash confirmation runs at once. */
 const STATUS_CONCURRENCY = 4;
 
+/** How long the trash confirmation waits for those calls before giving up. */
+const STATUS_DEADLINE_MS = 8000;
+
+/**
+ * Freeze a derived list for as long as an action on it is in flight.
+ *
+ * Both batch dialogs render a list their caller re-derives from live state on
+ * every 5s poll — which is what makes a checkout added while the dialog is open
+ * appear in it. That is right up until the batch actually runs: the poll then
+ * shrinks the list *underneath the request that is emptying it*, so the dialog
+ * swapped to "the last worktree left while this was open" halfway through the
+ * batch doing exactly that, and the loading button unmounted with it — a long
+ * batch looked idle and then looked like it had never run.
+ *
+ * A render-phase ref write, deliberately: this is a cache of the last value seen
+ * while idle, not state anything renders differently, so there is nothing to
+ * schedule and an effect would land one render too late.
+ */
+function useLatched<T>(value: T, frozen: boolean): T {
+  const held = useRef(value);
+  if (!frozen) held.current = value;
+  return held.current;
+}
+
 /** The scroll box both batch dialogs show their "what is about to happen" list in. */
 function BatchList(props: { children: ReactNode }) {
   return (
@@ -1383,12 +1407,21 @@ export function MoveLaneWorktreesDialog(props: {
   const collides = props.taken.some(
     (n) => n.toLowerCase() === trimmed.toLowerCase(),
   );
-  const n = props.worktrees.length;
   const { busy, error, submit } = useSubmit(() =>
     props.onMove(making ? { newLane: trimmed } : { lane: to }),
   );
+  const rows = useLatched(props.worktrees, busy);
+  const n = rows.length;
   const ready =
-    n > 0 && (making ? trimmed !== "" && !collides : to !== NO_TARGET);
+    n > 0 &&
+    (making
+      ? trimmed !== "" && !collides
+      : // Not merely "something is selected": `targets` is recomputed from live
+        // lanes on every poll, so another window deleting or renaming the chosen
+        // destination leaves `to` naming a lane that is no longer offered. The
+        // radio then renders nothing selected while the button stayed enabled,
+        // and every PATCH answered 400 `no such lane in this repo`.
+        props.targets.some((t) => t.value === to));
   return (
     <Modal
       title={`Move everything in ${props.from}`}
@@ -1440,7 +1473,7 @@ export function MoveLaneWorktreesDialog(props: {
                 {n === 1 ? "Moving:" : `Moving ${n}:`}
               </Text>
               <BatchList>
-                {props.worktrees.map((w) => (
+                {rows.map((w) => (
                   /* Keyed by id, not by the label: a display name is free text
                      with no uniqueness constraint, so two rows can render the
                      same string. */
@@ -1495,9 +1528,14 @@ export function TrashLaneWorktreesDialog(props: {
 }) {
   const [dirty, setDirty] = useState<ReadonlySet<number>>(new Set());
   const [checking, setChecking] = useState(true);
+  const [incomplete, setIncomplete] = useState(false);
+  const { busy, error, submit } = useSubmit(() => props.onTrash());
+  const rows = useLatched(props.worktrees, busy);
   // The ids as a stable dependency: `props.worktrees` is derived by the caller on
-  // every render, so depending on the array itself would refetch forever.
-  const idKey = props.worktrees.map((w) => w.id).join(",");
+  // every render, so depending on the array itself would refetch forever. Read
+  // off the latched rows, so a batch in flight cannot re-arm the whole check
+  // against checkouts it is currently binning.
+  const idKey = rows.map((w) => w.id).join(",");
   useEffect(() => {
     let cancelled = false;
     const ids = idKey === "" ? [] : idKey.split(",").map(Number);
@@ -1521,21 +1559,33 @@ export function TrashLaneWorktreesDialog(props: {
         }
       }
     };
-    void Promise.all(
+    // Deadlined, because the button waits for this check and `api.request` has
+    // no timeout: one checkout whose `git status` hangs — an `index.lock` a dead
+    // rebase left behind, a stale network mount — would otherwise leave the
+    // batch permanently unreachable with no way past it. On expiry the dialog
+    // reports what it did learn and says the check was incomplete, which is a
+    // worse answer than the full one and a much better answer than none.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<"timeout">((resolve) => {
+      timer = setTimeout(() => resolve("timeout"), STATUS_DEADLINE_MS);
+    });
+    const all = Promise.all(
       Array.from({ length: Math.min(STATUS_CONCURRENCY, ids.length) }, worker),
-    ).then(() => {
+    ).then(() => "done" as const);
+    void Promise.race([all, deadline]).then((outcome) => {
       if (cancelled) return;
-      setDirty(found);
+      setDirty(new Set(found));
+      setIncomplete(outcome === "timeout");
       setChecking(false);
     });
     return () => {
       cancelled = true;
+      clearTimeout(timer);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [idKey]);
 
-  const { busy, error, submit } = useSubmit(() => props.onTrash());
-  const n = props.worktrees.length;
+  const n = rows.length;
   return (
     <Modal
       title={
@@ -1579,6 +1629,13 @@ export function TrashLaneWorktreesDialog(props: {
                   </Text>
                 </Group>
               )}
+              {!checking && incomplete && (
+                <Text size="sm" c="dimmed">
+                  The check for uncommitted changes did not finish in time, so
+                  the list below may be missing a badge. Nothing is deleted
+                  either way.
+                </Text>
+              )}
               {!checking && dirty.size > 0 && (
                 <Alert color="yellow" variant="light" p="sm">
                   <Text size="sm" fw={600}>
@@ -1594,7 +1651,7 @@ export function TrashLaneWorktreesDialog(props: {
                 </Alert>
               )}
               <BatchList>
-                {props.worktrees.map((w) => (
+                {rows.map((w) => (
                   <Group key={w.id} gap={6} wrap="nowrap">
                     <Text size="xs" c="dimmed">
                       {w.label}

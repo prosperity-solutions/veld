@@ -502,6 +502,28 @@ export const DELETING_LANE = "\u0000deleting";
  */
 export const DETACHED_LANE = "\u0000detached";
 
+/**
+ * Group key for the main checkout's own pinned section.
+ *
+ * NUL-prefixed like the other virtual sections, and for a reason that was paid
+ * for twice: it used to be the literal `"main"`, and `main` is a legal lane name
+ * (`valid_lane_name` rejects only empty, over-long, control characters, `.` and
+ * `..`). So a repo with a lane called `main` — the default branch, i.e. the most
+ * likely name anyone would pick — produced **two sections with the same key**,
+ * and every lookup by key silently resolved to whichever came first, which is the
+ * pinned main section. `laneAtOf` in the rail documents one symptom of that (a
+ * drag over the top of the rail resolving to the wrong section) and works around
+ * it by keying on `lane` behind `editable`; `moveWorktree` had the same bug
+ * unguarded, so a worktree could not be dropped into a lane called `main` at all.
+ *
+ * Fixed here rather than at the call sites: a key space that cannot collide is a
+ * guard by construction, and the alternative is remembering this at every future
+ * lookup. `model.test.ts` pins key *uniqueness* for exactly this reason — the
+ * `key === lane` assertion it used to carry held for the colliding lane too, so
+ * it could never have caught this.
+ */
+export const MAIN_LANE = "\u0000main";
+
 /** The branch a checkout carries when its HEAD is detached. Mirrors the daemon. */
 export const DETACHED_BRANCH = "(detached)";
 
@@ -574,7 +596,7 @@ export function railGroups(worktrees: Worktree[], lanes: Lane[]): RailGroup[] {
   const groups: RailGroup[] = [];
   if (main.length > 0) {
     groups.push({
-      key: "main",
+      key: MAIN_LANE,
       lane: "",
       label: null,
       pinned: true,

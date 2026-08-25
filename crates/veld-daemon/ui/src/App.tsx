@@ -2689,6 +2689,33 @@ function AppInner(props: {
   };
 
   /**
+   * Whether a batch action's request loop is running.
+   *
+   * A **ref**, because the reader is the window-level keydown handler below,
+   * which is bound once and closes over nothing. The dialogs' own `busy` state
+   * cannot reach it, and that gap was the whole bug: each batch dialog no-ops its
+   * `onClose` while busy, but Mantine's Escape listener is not the only one —
+   * App's own runs on `window` and called `closeDialog()` unconditionally, so
+   * Escape mid-batch unmounted the dialog while every remaining PATCH or DELETE
+   * kept firing. Which reads as a cancel, and is not one.
+   */
+  const batchBusy = useRef(false);
+
+  /**
+   * Run a batch action with [`batchBusy`] held for the whole of it — including a
+   * create-then-move's create, which is why this wraps the dialog callback
+   * rather than sitting inside the two request loops.
+   */
+  const runBatch = async (work: () => Promise<void>) => {
+    batchBusy.current = true;
+    try {
+      await work();
+    } finally {
+      batchBusy.current = false;
+    }
+  };
+
+  /**
    * The live worktrees of one rail section, by its group key.
    *
    * Resolved at the moment an action fires rather than captured when the menu
@@ -3209,7 +3236,15 @@ function AppInner(props: {
           return;
         }
       }
-      if (e.key === "Escape" && dialogRef.current.kind !== "none") closeDialog();
+      // Not while a batch is mid-flight: closing would read as a cancel and the
+      // requests would carry on regardless. See `batchBusy`.
+      if (
+        e.key === "Escape" &&
+        dialogRef.current.kind !== "none" &&
+        !batchBusy.current
+      ) {
+        closeDialog();
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -5567,18 +5602,25 @@ function AppInner(props: {
       detached={detachedInSection(worktrees, lanes, dialog.lane).length}
       onClose={closeDialog}
       onMove={async (target: BatchMoveTarget) => {
-        // Create-then-move is one gesture, the same way `new-lane` finishes the
-        // move it was opened from. The create is NOT caught here: a name the
-        // daemon refuses (a collision another window just made) has to keep the
-        // dialog open with the reason on the field, and `useSubmit` is what does
-        // that — swallowing it would move nothing and close as if it had worked.
-        if ("newLane" in target) {
-          if (!repo) return;
-          await api.createLane(repo.root, target.newLane);
-          await moveAllInSection(dialog.lane, target.newLane);
-        } else {
-          await moveAllInSection(dialog.lane, target.lane);
-        }
+        await runBatch(async () => {
+          // Create-then-move is one gesture, the same way `new-lane` finishes the
+          // move it was opened from. The create is NOT caught here: a name the
+          // daemon refuses (a collision another window just made) has to keep the
+          // dialog open with the reason on the field, and `useSubmit` is what does
+          // that — swallowing it would move nothing and close as if it had worked.
+          if ("newLane" in target) {
+            // Throws rather than returns: `useSubmit` only clears `busy` on a
+            // throw, so a silent return here left the dialog spinning with its
+            // own close guard holding the scrim and ✕ shut. Reachable — another
+            // window removing the project, or this window being handed a
+            // different one while the dialog is open.
+            if (!repo) throw new Error("no project is selected any more");
+            await api.createLane(repo.root, target.newLane);
+            await moveAllInSection(dialog.lane, target.newLane);
+          } else {
+            await moveAllInSection(dialog.lane, target.lane);
+          }
+        });
         closeDialog();
       }}
     />
@@ -5597,7 +5639,7 @@ function AppInner(props: {
       onStatus={(id) => api.worktreeGitStatus(id)}
       onClose={closeDialog}
       onTrash={async () => {
-        await trashAllInSection(dialog.lane);
+        await runBatch(() => trashAllInSection(dialog.lane));
         closeDialog();
       }}
     />
