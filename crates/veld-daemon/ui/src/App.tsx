@@ -59,6 +59,9 @@ import { TopBarControls } from "./components/TopBarControls";
 import {
   activeRun,
   bestFuzzyMatch,
+  bulkMoveTargets,
+  bulkTrashable,
+  detachedInSection,
   freshRunName,
   fuzzyMatch,
   laneDropTarget,
@@ -80,6 +83,7 @@ import {
   sortedUrls,
   spinnerAction,
   startRunName,
+  UNGROUPED_LABEL,
   worktreeStatus,
   worstStatus,
   DELETING_LANE,
@@ -264,9 +268,12 @@ import {
   ImportRepoDialog,
   LaneNameDialog,
   Modal,
+  MoveLaneWorktreesDialog,
+  type BatchMoveTarget,
   NewWorktreeDialog,
   RemoveRepoDialog,
   RenameWorktreeDialog,
+  TrashLaneWorktreesDialog,
   TrashWorktreeDialog,
   UpdateMainDirtyDialog,
 } from "./components/dialogs";
@@ -2153,6 +2160,19 @@ function AppInner(props: {
     /** `worktree` set means "create it, then move this one into it". */
     | { kind: "new-lane"; worktree?: Worktree }
     | { kind: "rename-lane"; lane: string }
+    /**
+     * The two batch actions on a whole rail section: move everything in it into
+     * another group, or move everything in it to the trash.
+     *
+     * Only the section is carried, never its members. The members are resolved
+     * from live state while the dialog renders and again when it fires, so a
+     * checkout the 5s poll adds or removes in between is not acted on from a
+     * list captured when the menu opened. `lane` is the section's group key,
+     * which for every section that has a menu is also its lane — `""` for the
+     * ungrouped section, a lane name for a real one.
+     */
+    | { kind: "move-lane-worktrees"; lane: string }
+    | { kind: "trash-lane-worktrees"; lane: string }
     | { kind: "settings" }
     | { kind: "shortcuts" }
     | { kind: "remove-repo"; repo: Repo }
@@ -2668,42 +2688,247 @@ function AppInner(props: {
     await refresh();
   };
 
+  /**
+   * Whether a batch action's request loop is running.
+   *
+   * A **ref**, because the reader is the window-level keydown handler below,
+   * which is bound once and closes over nothing. The dialogs' own `busy` state
+   * cannot reach it, and that gap was the whole bug: each batch dialog no-ops its
+   * `onClose` while busy, but Mantine's Escape listener is not the only one —
+   * App's own runs on `window` and called `closeDialog()` unconditionally, so
+   * Escape mid-batch unmounted the dialog while every remaining PATCH or DELETE
+   * kept firing. Which reads as a cancel, and is not one.
+   */
+  const batchBusy = useRef(false);
+
+  /**
+   * Run a batch action with [`batchBusy`] held for the whole of it — including a
+   * create-then-move's create, which is why this wraps the dialog callback
+   * rather than sitting inside the two request loops.
+   */
+  const runBatch = async (work: () => Promise<void>) => {
+    batchBusy.current = true;
+    try {
+      await work();
+    } finally {
+      batchBusy.current = false;
+    }
+  };
+
+  /**
+   * The live worktrees of one rail section, by its group key.
+   *
+   * Resolved at the moment an action fires rather than captured when the menu
+   * opened: the 5s poll can add or remove a row while a confirm dialog is on
+   * screen, and a batch acting on the captured list would miss the newcomer and
+   * 404 on the departed.
+   */
+  const sectionMembers = (key: string): Worktree[] =>
+    railGroups(worktrees, lanes).find((g) => g.key === key)?.worktrees ?? [];
+
+  /** What a section is called on screen — the rail's own header text. */
+  const sectionLabel = (lane: string) =>
+    lane === "" ? UNGROUPED_LABEL : lane;
+
+  /**
+   * How a batch move's *destination* is named in a toast.
+   *
+   * Not [`sectionLabel`]. Ungrouping is not "moving to Worktrees": the main
+   * checkout, which a lane can legitimately hold, leads the rail in a pinned
+   * section of its own once it is ungrouped rather than joining that header. The
+   * picker's own label makes the same distinction — see `bulkMoveTargets`.
+   */
+  const destinationLabel = (lane: string, count: number) =>
+    lane === ""
+      ? `out of ${count === 1 ? "its" : "their"} group`
+      : `to ${lane}`;
+
+  /**
+   * One toast for a batch's failures, not one per row.
+   *
+   * The realistic failure is not one bad row: another window deleting the
+   * destination lane makes *every* `patch_worktree` fail with `UnknownLane`, and
+   * a per-row `notifyError` then stacks twenty red toasts with no summary — which
+   * buries both the count and the reason it reports. The rows are named (capped,
+   * because a toast is not a list) and the last error carries the reason.
+   */
+  const notifyBatchFailure = (
+    verb: "move" | "trash",
+    failed: string[],
+    reason: unknown,
+  ) => {
+    const shown = failed.slice(0, 3).join(", ");
+    const rest = failed.length - 3;
+    const which = rest > 0 ? `${shown} and ${rest} more` : shown;
+    notifyError(
+      failed.length === 1
+        ? `Could not ${verb} ${which}`
+        : `Could not ${verb} ${failed.length} worktrees: ${which}`,
+      reason,
+    );
+  };
+
+  /**
+   * Move every worktree in one rail section into another group, in one go.
+   *
+   * A client-side loop over `patchWorktree`, the same shape `trashAllDetached`
+   * uses below and for the same reason: `Db::patch_worktree` is the one owner of
+   * worktree-row edits, so a bulk endpoint would be a second write path for a
+   * gesture that is rare and never larger than one group. Sequential, because
+   * the daemon's database is behind a single lock and a burst of parallel PATCHes
+   * buys contention rather than speed.
+   *
+   * Each move clears that worktree's manual position — the daemon does this, and
+   * on purpose: a position only means something inside one lane. So the arrivals
+   * land label-sorted after whatever the destination already had placed by hand,
+   * exactly as the single-row "Move to group" menu already behaves.
+   *
+   * A failure is reported per row and the loop continues: a batch that stops at
+   * the first refusal leaves the user with a half-moved group and no idea which
+   * half.
+   */
+  const moveAllInSection = async (
+    key: string,
+    to: string,
+  ): Promise<{ moved: number; failed: number }> => {
+    const members = sectionMembers(key);
+    let moved = 0;
+    const failed: string[] = [];
+    let reason: unknown = null;
+    for (const w of members) {
+      try {
+        await api.patchWorktree(w.id, { lane: to });
+        moved += 1;
+      } catch (e) {
+        failed.push(worktreeLabel(w));
+        reason = e;
+      }
+    }
+    if (moved > 0) {
+      notifyDone(
+        moved === 1
+          ? `Moved 1 worktree ${destinationLabel(to, 1)}`
+          : `Moved ${moved} worktrees ${destinationLabel(to, moved)}`,
+      );
+    }
+    if (failed.length > 0) notifyBatchFailure("move", failed, reason);
+    await refresh();
+    // Both halves, because "moved nothing" has two causes and they need opposite
+    // things said about them — see the create-then-move caller.
+    return { moved, failed: failed.length };
+  };
+
+  /**
+   * Move every worktree in one rail section to the trash, in one go (revertible).
+   *
+   * `bulkTrashable` is what keeps the main checkout out of it — see that function
+   * — so this loop has no special case of its own, and the count it reports is
+   * the same one the confirmation showed.
+   */
+  const trashAllInSection = async (key: string) => {
+    const members = bulkTrashable(sectionMembers(key));
+    let trashed = 0;
+    const failed: string[] = [];
+    let reason: unknown = null;
+    for (const w of members) {
+      try {
+        await api.deleteWorktree(w.id, false);
+        trashed += 1;
+      } catch (e) {
+        failed.push(worktreeLabel(w));
+        reason = e;
+      }
+    }
+    if (trashed > 0) {
+      notifyDone(
+        trashed === 1
+          ? "Moved 1 worktree to the trash"
+          : `Moved ${trashed} worktrees to the trash`,
+      );
+    }
+    if (failed.length > 0) notifyBatchFailure("trash", failed, reason);
+    await refresh();
+  };
+
+  /**
+   * The ⋮ menu on a rail section header.
+   *
+   * Two kinds of section reach it, and they get different halves. A **real
+   * lane** gets the identity entries (rename, reorder, delete) plus the batch
+   * ones; the **ungrouped section** gets only the batch ones, because there is no
+   * lane behind it to rename or delete — see `RailGroup.editable` vs
+   * `RailGroup.bulk`. `index < 0` is exactly "not a real lane", so it is what
+   * splits them: `lane` is `""` there and `lanes` never holds an empty name.
+   */
   const laneMenu = (lane: string) => {
     const index = lanes.findIndex((l) => l.name === lane);
+    const isLane = index >= 0;
     // One step is "swap places with that neighbour" — the same thing a drop onto
     // it says, which is why both go through `moveLane` by name. The bounds are
     // the `disabled` flags below; a neighbour that is not there is `null` here
     // and `moveLane` refuses it anyway.
     const move = (neighbour: Lane | undefined) =>
       void (neighbour && moveLaneTo(lane, neighbour.name));
+    const members = sectionMembers(lane);
     return showContextMenu([
+      ...(isLane
+        ? [
+            {
+              key: "lane-rename",
+              title: "Rename group…",
+              onClick: () => setDialog({ kind: "rename-lane", lane }),
+            },
+            {
+              key: "lane-up",
+              title: "Move group up",
+              disabled: index <= 0,
+              onClick: () => move(lanes[index - 1]),
+            },
+            {
+              key: "lane-down",
+              title: "Move group down",
+              disabled: index < 0 || index >= lanes.length - 1,
+              onClick: () => move(lanes[index + 1]),
+            },
+            { key: "lane-batch-divider" },
+          ]
+        : []),
       {
-        key: "lane-rename",
-        title: "Rename group…",
-        onClick: () => setDialog({ kind: "rename-lane", lane }),
+        key: "lane-move-all",
+        title: "Move all worktrees to…",
+        // Only "nothing to move" disables this. Having no *existing* group to
+        // move into does NOT: the dialog offers "New group…" as well, so the
+        // repo that has never defined a group — the one this is most useful in
+        // — is not the one case the action refuses. Disabled rather than hidden,
+        // because a menu whose entries come and go teaches nobody that the
+        // action exists.
+        disabled: members.length === 0,
+        onClick: () => setDialog({ kind: "move-lane-worktrees", lane }),
       },
       {
-        key: "lane-up",
-        title: "Move group up",
-        disabled: index <= 0,
-        onClick: () => move(lanes[index - 1]),
-      },
-      {
-        key: "lane-down",
-        title: "Move group down",
-        disabled: index < 0 || index >= lanes.length - 1,
-        onClick: () => move(lanes[index + 1]),
-      },
-      { key: "lane-divider" },
-      {
-        key: "lane-delete",
-        title: "Delete group",
+        key: "lane-trash-all",
+        title: "Move all worktrees to trash…",
         color: "red",
-        // No confirm: deleting a lane ungroups its worktrees and removes
-        // nothing, so there is nothing to lose and a dialog would only train
-        // people to dismiss dialogs.
-        onClick: () => void deleteLane(lane),
+        // Counted after `bulkTrashable`, so a lane holding only the main
+        // checkout offers nothing — which is the honest answer, since main is
+        // never binned.
+        disabled: bulkTrashable(members).length === 0,
+        onClick: () => setDialog({ kind: "trash-lane-worktrees", lane }),
       },
+      ...(isLane
+        ? [
+            { key: "lane-divider" },
+            {
+              key: "lane-delete",
+              title: "Delete group",
+              color: "red",
+              // No confirm: deleting a lane ungroups its worktrees and removes
+              // nothing, so there is nothing to lose and a dialog would only
+              // train people to dismiss dialogs.
+              onClick: () => void deleteLane(lane),
+            },
+          ]
+        : []),
     ]);
   };
 
@@ -3019,7 +3244,15 @@ function AppInner(props: {
           return;
         }
       }
-      if (e.key === "Escape" && dialogRef.current.kind !== "none") closeDialog();
+      // Not while a batch is mid-flight: closing would read as a cancel and the
+      // requests would carry on regardless. See `batchBusy`.
+      if (
+        e.key === "Escape" &&
+        dialogRef.current.kind !== "none" &&
+        !batchBusy.current
+      ) {
+        closeDialog();
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -4619,9 +4852,16 @@ function AppInner(props: {
    *
    *  The Detached lane exists because detached checkouts are usually
    *  throwaways, so this is the action that matches the lane's point: clear them
-   *  out without deleting each one by hand. Clean ones bin immediately; a dirty
-   *  one (uncommitted changes) refuses, as `git worktree remove` does, and stays
-   *  in the lane with the reason on its row. */
+   *  out without deleting each one by hand.
+   *
+   *  **Every one of them bins, dirty or not.** Binning marks the row and returns
+   *  — it never runs `git worktree remove`, so there is nothing for uncommitted
+   *  changes to refuse. (This comment used to claim a dirty checkout refused
+   *  here; it does not. The refusal comes later, when the trash is emptied or the
+   *  retention sweep tries the actual removal.) The batch actions on a group
+   *  confirm first and say which rows carry uncommitted work for exactly that
+   *  reason — see `TrashLaneWorktreesDialog`; this one does not, because a
+   *  detached checkout is a throwaway by definition. */
   const trashAllDetached = async () => {
     const detached = worktrees.filter((w) => isDetached(w) && !w.trashed_at);
     if (detached.length === 0) return;
@@ -5347,6 +5587,84 @@ function AppInner(props: {
       error={settingsError}
       onSave={saveSettings}
       onClose={closeDialog}
+    />
+  );
+
+  /**
+   * The two batch dialogs on a rail section.
+   *
+   * Their contents are read from live state here, not captured when the menu
+   * opened — see `sectionMembers`. Rendered from a `const` for readability
+   * rather than for hoisting: both are reachable only from the rail, which runs
+   * mode does not show.
+   */
+  const moveLaneWorktreesDialog = dialog.kind === "move-lane-worktrees" && (
+    <MoveLaneWorktreesDialog
+      from={sectionLabel(dialog.lane)}
+      worktrees={sectionMembers(dialog.lane).map((w) => ({
+        id: w.id,
+        label: worktreeLabel(w),
+      }))}
+      targets={bulkMoveTargets(lanes, dialog.lane)}
+      taken={lanes.map((l) => l.name)}
+      detached={detachedInSection(worktrees, lanes, dialog.lane).length}
+      onClose={closeDialog}
+      onMove={async (target: BatchMoveTarget) => {
+        await runBatch(async () => {
+          // Create-then-move is one gesture, the same way `new-lane` finishes the
+          // move it was opened from. The create is NOT caught here: a name the
+          // daemon refuses (a collision another window just made) has to keep the
+          // dialog open with the reason on the field, and `useSubmit` is what does
+          // that — swallowing it would move nothing and close as if it had worked.
+          if ("newLane" in target) {
+            // Throws rather than returns: `useSubmit` only clears `busy` on a
+            // throw, so a silent return here left the dialog spinning with its
+            // own close guard holding the scrim and ✕ shut. Reachable — another
+            // window removing the project, or this window being handed a
+            // different one while the dialog is open.
+            if (!repo) throw new Error("no project is selected any more");
+            await api.createLane(repo.root, target.newLane);
+            const { moved, failed } = await moveAllInSection(
+              dialog.lane,
+              target.newLane,
+            );
+            // The group exists either way, so say so when nothing followed it in
+            // — the section can empty between the click and the loop, and a
+            // silent close would leave an unexplained empty group in the rail.
+            //
+            // Not when the moves *failed*, though: `moveAllInSection` swallows
+            // per-row errors, so `moved === 0` covers both "there was nothing
+            // left" and "every single one was refused" — and reporting a success
+            // straight after its own `Could not move N worktrees` toast is worse
+            // than saying nothing.
+            if (moved === 0 && failed === 0) {
+              notifyDone(`Created the group "${target.newLane}"`);
+            }
+          } else {
+            await moveAllInSection(dialog.lane, target.lane);
+          }
+        });
+        closeDialog();
+      }}
+    />
+  );
+  const trashLaneWorktreesDialog = dialog.kind === "trash-lane-worktrees" && (
+    <TrashLaneWorktreesDialog
+      from={sectionLabel(dialog.lane)}
+      worktrees={bulkTrashable(sectionMembers(dialog.lane)).map((w) => ({
+        id: w.id,
+        label: worktreeLabel(w),
+      }))}
+      /* Only ever true for a lane the main checkout was filed into — the
+         ungrouped section never holds it (it has a pinned section of its own). */
+      mainExcluded={sectionMembers(dialog.lane).some((w) => w.is_main)}
+      detached={detachedInSection(worktrees, lanes, dialog.lane).length}
+      onStatus={(id) => api.worktreeGitStatus(id)}
+      onClose={closeDialog}
+      onTrash={async () => {
+        await runBatch(() => trashAllInSection(dialog.lane));
+        closeDialog();
+      }}
     />
   );
 
@@ -6259,6 +6577,8 @@ function AppInner(props: {
           }}
         />
       )}
+      {moveLaneWorktreesDialog}
+      {trashLaneWorktreesDialog}
       {settingsDialog}
       {configVarsDialog}
       {whatsNewDialog}
@@ -7587,14 +7907,18 @@ function Rail(props: {
    * holds none — the ungrouped section, the main checkout, and the two pending
    * -removal lanes are neither draggable nor lane drop targets.
    *
-   * Keyed on `lane` behind `editable`, never on `key`. The main checkout's key is
-   * the literal `"main"` and `"main"` is a legal lane name (`valid_lane_name`
-   * rejects only empty, over-long, control characters, `.` and `..`), so keying
-   * on it gave that pinned section the position of a lane called `main`: every
-   * drop over the top of the rail resolved there instead of to the first lane,
-   * and dragging that lane faded the main checkout row as if it were the one
-   * being carried. Same trap the header's `aria-label` already documents for
-   * `UNGROUPED_LABEL`.
+   * Keyed on `lane` behind `editable`, never on `key`. This used to be the *only*
+   * thing standing between the rail and a lane called `main`: the main checkout's
+   * section carried the literal key `"main"`, and `main` is a legal lane name
+   * (`valid_lane_name` rejects only empty, over-long, control characters, `.` and
+   * `..`), so keying on it gave that pinned section the position of the lane —
+   * every drop over the top of the rail resolved there instead of to the first
+   * lane, and dragging that lane faded the main checkout row as if it were the one
+   * being carried. That collision is fixed at its source now ([`MAIN_LANE`]), so
+   * this is no longer a workaround; it stands on its own reason, which is that
+   * only a section with a lane behind it holds a place in the lane order at all.
+   * The related trap the header's `aria-label` documents for `UNGROUPED_LABEL` is
+   * still live, because a label is not a key space.
    */
   const laneAtOf = (g: RailGroup) =>
     g.editable ? laneIndex.get(g.lane) : undefined;
@@ -7785,6 +8109,18 @@ function Rail(props: {
    */
   const renderGroup = (group: RailGroup) => {
     const laneAt = laneAtOf(group);
+    // Two different sections carry a ⋮, and for two different reasons: a real
+    // lane has an identity to rename and delete, and any section with worktrees
+    // in it has a set to move or bin. `editable || bulk` is the union rather
+    // than either flag, because the ungrouped section has only the second — see
+    // `RailGroup.bulk`.
+    const hasMenu = group.editable || group.bulk;
+    // "Menu for group X" is wrong on the ungrouped section: it is not a group,
+    // and calling it one in the accessible name contradicts the ＋ beside it,
+    // which says "not in a group".
+    const menuLabel = group.editable
+      ? `Menu for group ${group.label}`
+      : `Menu for ${group.label}`;
     // Where the dragged lane would land, drawn in the gutter beside the hovered
     // section. Which side is the travel direction: carrying a lane *up* onto this
     // one puts it above, carrying it *down* puts it below. Exactly one section
@@ -7855,9 +8191,7 @@ function Rail(props: {
                   e.dataTransfer.setData("text/plain", `lane:${group.lane}`);
                 }}
                 onContextMenu={
-                  group.editable
-                    ? (e) => props.onLaneMenu(e, group.lane)
-                    : undefined
+                  hasMenu ? (e) => props.onLaneMenu(e, group.lane) : undefined
                 }
               >
                 <span className="lane-name">{group.label}</span>
@@ -7954,14 +8288,15 @@ function Rail(props: {
                 )}
                 {/* Right-click alone is not an affordance — nothing on screen says
                     the header has a menu. The same ⋮ the rows carry, so the two read
-                    as the same gesture. Only on a real lane: the trash and the
-                    ungrouped section have nothing to rename or delete. */}
-                {group.editable && (
-                  <Tooltip label={`Menu for group ${group.label}`}>
+                    as the same gesture. Not on the pinned sections: the trash and
+                    Detached lanes carry their own batch button instead, and a
+                    removal in flight has no menu at all. */}
+                {hasMenu && (
+                  <Tooltip label={menuLabel}>
                     <button
                       type="button"
                       className="lane-edit"
-                      aria-label={`Menu for group ${group.label}`}
+                      aria-label={menuLabel}
                       onClick={(e) => {
                         e.stopPropagation();
                         props.onLaneMenu(e, group.lane);

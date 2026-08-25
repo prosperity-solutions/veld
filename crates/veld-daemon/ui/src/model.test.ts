@@ -3,11 +3,15 @@ import type { EnvironmentList, Lane, RunInfo, RunStatus, Worktree } from "./api"
 import {
   activeRun,
   bestFuzzyMatch,
+  bulkMoveTargets,
+  bulkTrashable,
+  detachedInSection,
   diagnosticsRun,
   freshRunName,
   fuzzyMatch,
   laneDropTarget,
   liveRuns,
+  MAIN_LANE,
   moveLane,
   moveWorktree,
   needsAttention,
@@ -731,7 +735,7 @@ describe("railGroups", () => {
     // The trash lane is always present and pinned last; these assertions are
     // about the live rail, so the always-on trash is filtered out.
     const live = groups.filter((g) => g.key !== TRASH_LANE && g.key !== DELETING_LANE);
-    expect(live.map((g) => g.key)).toEqual(["main", ""]);
+    expect(live.map((g) => g.key)).toEqual([MAIN_LANE, ""]);
     expect(live[0].pinned).toBe(true);
     expect(live[0].worktrees.map((w) => w.path)).toEqual(["/repo"]);
     expect(live[1].pinned).toBe(false);
@@ -793,7 +797,7 @@ describe("railGroups", () => {
       groups.filter((g) => g.addable).map((g) => g.key),
     ).toEqual(["", "review"]);
     // Never the main checkout's own section, the trash, or a removal in flight.
-    expect(groups.find((g) => g.key === "main")?.addable).toBe(false);
+    expect(groups.find((g) => g.key === MAIN_LANE)?.addable).toBe(false);
     expect(groups.find((g) => g.key === TRASH_LANE)?.addable).toBe(false);
     expect(groups.find((g) => g.key === DELETING_LANE)?.addable).toBe(false);
   });
@@ -820,7 +824,7 @@ describe("railGroups", () => {
       [lane("review", 0)],
     );
     expect(groups.filter((g) => g.label === null).map((g) => g.key)).toEqual([
-      "main",
+      MAIN_LANE,
     ]);
   });
 
@@ -948,8 +952,182 @@ describe("railGroups", () => {
     const live = groups.filter(
       (g) => g.key !== TRASH_LANE && g.key !== DELETING_LANE,
     );
-    expect(live.map((g) => g.key)).toEqual(["main", ""]);
+    expect(live.map((g) => g.key)).toEqual([MAIN_LANE, ""]);
     expect(live[0].worktrees.map((w) => w.path)).toEqual(["/repo"]);
+  });
+});
+
+describe("railGroups — batch actions", () => {
+  it("offers the batch actions on the ungrouped section and on real lanes", () => {
+    // `bulk` is not `editable`: the ungrouped section has no lane to rename or
+    // delete, but it does hold a set of worktrees to move or bin — and in a repo
+    // with no lanes it holds every checkout there is.
+    const groups = railGroups(
+      [
+        rw("/repo", { is_main: true }),
+        rw("/wts/a"),
+        rw("/wts/det", { branch: "(detached)" }),
+        rw("/wts/b", { lane: "review" }),
+        rw("/wts/gone", { deleting: true, trashed_at: "2026-01-01T00:00:00Z" }),
+        rw("/wts/bin", { trashed_at: "2026-01-01T00:00:00Z" }),
+      ],
+      [lane("review", 0)],
+    );
+    const bulk = new Map(groups.map((g) => [g.key, g.bulk]));
+    expect(bulk.get("")).toBe(true);
+    expect(bulk.get("review")).toBe(true);
+    // Every pinned section says no, each for its own reason (one row and it is
+    // the repo; own header button; a lane move would be invisible; leaving).
+    expect(bulk.get(MAIN_LANE)).toBe(false);
+    expect(bulk.get(DETACHED_LANE)).toBe(false);
+    expect(bulk.get(DELETING_LANE)).toBe(false);
+    expect(bulk.get(TRASH_LANE)).toBe(false);
+    // The ungrouped section is the one that has `bulk` without `editable`, which
+    // is the whole reason the two flags are separate.
+    const ungrouped = groups.find((g) => g.key === "")!;
+    expect(ungrouped.editable).toBe(false);
+  });
+
+  it("keys every section uniquely, even against lanes named like the sentinels", () => {
+    // **The invariant `sectionMembers` actually needs**, and the one an earlier
+    // `key === lane` assertion could not catch: that assertion held for a lane
+    // called `main` too, while `railGroups` was handing the pinned main section
+    // the literal key `"main"` — two sections, one key, and every lookup landing
+    // on the pinned one. So a lane named after the default branch listed the main
+    // checkout as its members and could never be trashed. The fixture names a lane
+    // after **every** section key the rail produces, so a future virtual section
+    // that picks a collidable key fails here rather than in someone's rail.
+    const collidable = ["main", "trash", "deleting", "detached", "Worktrees"];
+    const groups = railGroups(
+      [
+        rw("/repo", { id: 1, is_main: true }),
+        rw("/wts/a", { id: 2 }),
+        rw("/wts/det", { id: 3, branch: "(detached)" }),
+        rw("/wts/gone", { id: 4, deleting: true, trashed_at: "2026-01-01T00:00:00Z" }),
+        rw("/wts/bin", { id: 5, trashed_at: "2026-01-01T00:00:00Z" }),
+        ...collidable.map((n, i) => rw(`/wts/lane-${i}`, { id: 10 + i, lane: n })),
+      ],
+      collidable.map((n, i) => lane(n, i)),
+    );
+    const keys = groups.map((g) => g.key);
+    expect(new Set(keys).size).toBe(keys.length);
+    // And the consequence that matters: a lane called `main` resolves to its own
+    // members, not to the main checkout.
+    const byKey = (k: string) => groups.find((g) => g.key === k)!;
+    expect(byKey("main").worktrees.map((w) => w.path)).toEqual(["/wts/lane-0"]);
+    expect(byKey(MAIN_LANE).worktrees.map((w) => w.path)).toEqual(["/repo"]);
+    // `onLaneMenu` hands `group.lane` to a lookup that resolves by `key`, so the
+    // two must still agree for every section that has a menu.
+    for (const g of groups) {
+      if (g.editable || g.bulk) expect(g.key).toBe(g.lane);
+    }
+  });
+});
+
+describe("bulkMoveTargets", () => {
+  const three = [lane("review", 0), lane("wip", 1), lane("done", 2)];
+
+  it("offers the other lanes and the ungrouped section, in rail order", () => {
+    // Ungrouped leads because that is where it sits in the rail, and the labels
+    // read top-to-bottom the same way the user is looking at them.
+    expect(bulkMoveTargets(three, "wip")).toEqual([
+      { value: "", label: "No group" },
+      { value: "review", label: "review" },
+      { value: "done", label: "done" },
+    ]);
+  });
+
+  it("never offers the section the worktrees are already in", () => {
+    expect(bulkMoveTargets(three, "wip").map((t) => t.value)).not.toContain("wip");
+    // From ungrouped, the ungrouped option is the one that drops out.
+    expect(bulkMoveTargets(three, "").map((t) => t.value)).toEqual([
+      "review",
+      "wip",
+      "done",
+    ]);
+  });
+
+  it("does not label the ungrouped option with the rail header it does not mean", () => {
+    // Two reasons, both in `bulkMoveTargets`: `UNGROUPED_LABEL` is itself a legal
+    // lane name (so a repo with a lane called "Worktrees" would offer two
+    // byte-identical options), and — the sharper one — the main checkout does not
+    // land under that header when it is ungrouped, it leads the rail in a pinned
+    // section of its own. Naming the header would be wrong about exactly the row
+    // a batch is most likely to surprise someone with.
+    const targets = bulkMoveTargets([lane(UNGROUPED_LABEL, 0)], "other");
+    expect(new Set(targets.map((t) => t.label)).size).toBe(targets.length);
+    expect(targets.find((t) => t.value === "")?.label).not.toBe(UNGROUPED_LABEL);
+  });
+
+  it("is empty only for the ungrouped section of a repo with no lanes", () => {
+    // The one case with no *existing* destination — and it does NOT disable the
+    // gesture: the dialog also offers "New group…", so the repo that has never
+    // defined a group can still file its whole rail into one. A *lane* always has
+    // somewhere: ungrouping is a destination, so a repo's only lane still offers it.
+    expect(bulkMoveTargets([], "")).toEqual([]);
+    expect(bulkMoveTargets([lane("review", 0)], "review")).toEqual([
+      { value: "", label: "No group" },
+    ]);
+  });
+});
+
+describe("detachedInSection", () => {
+  const lanes = [lane("review", 0)];
+
+  it("finds the detached rows a lane's batch will leave behind", () => {
+    // They are filed into "review" but render under Detached, so the batch never
+    // sees them — and their `lane` still says "review", so checking a branch out
+    // again puts them back in a group the user emptied. Both dialogs say so.
+    const wts = [
+      rw("/wts/a", { id: 2, lane: "review" }),
+      rw("/wts/det", { id: 3, lane: "review", branch: "(detached)" }),
+    ];
+    expect(railGroups(wts, lanes).find((g) => g.key === "review")!.worktrees)
+      .toHaveLength(1);
+    expect(detachedInSection(wts, lanes, "review").map((w) => w.path)).toEqual([
+      "/wts/det",
+    ]);
+  });
+
+  it("counts a dangling lane as ungrouped, the way railGroups does", () => {
+    // A row whose lane no longer exists is ungrouped on the read path, so the
+    // ungrouped section's batch is the one that would leave it behind.
+    const wts = [rw("/wts/det", { id: 2, lane: "ghost", branch: "(detached)" })];
+    expect(detachedInSection(wts, lanes, "review")).toEqual([]);
+    expect(detachedInSection(wts, lanes, "").map((w) => w.path)).toEqual([
+      "/wts/det",
+    ]);
+  });
+
+  it("never counts the main checkout or a trashed row", () => {
+    // Main leads the rail even while detached and is a member of nothing; a
+    // trashed row is already out of every section.
+    const wts = [
+      rw("/repo", { id: 1, is_main: true, branch: "(detached)" }),
+      rw("/wts/bin", {
+        id: 2,
+        branch: "(detached)",
+        trashed_at: "2026-01-01T00:00:00Z",
+      }),
+    ];
+    expect(detachedInSection(wts, lanes, "")).toEqual([]);
+  });
+});
+
+describe("bulkTrashable", () => {
+  it("never includes the main checkout", () => {
+    // Main can be filed into a lane on purpose, so it does reach a lane's member
+    // list — but binning it would take the repository with it.
+    const members = [
+      rw("/repo", { id: 1, is_main: true, lane: "review" }),
+      rw("/wts/a", { id: 2, lane: "review" }),
+    ];
+    expect(bulkTrashable(members).map((w) => w.path)).toEqual(["/wts/a"]);
+  });
+
+  it("is empty for a lane holding only the main checkout", () => {
+    // Which is what disables the menu entry: there is nothing there to bin.
+    expect(bulkTrashable([rw("/repo", { is_main: true })])).toEqual([]);
   });
 });
 
@@ -998,7 +1176,27 @@ describe("moveWorktree", () => {
       [rw("/repo", { is_main: true }), rw("/wts/a")],
       [],
     );
-    expect(moveWorktree(withMain, "/wts/a", "main", 0)).toBeNull();
+    expect(moveWorktree(withMain, "/wts/a", MAIN_LANE, 0)).toBeNull();
+  });
+
+  it("can drop a worktree into a lane named after the default branch", () => {
+    // The other half of the key collision `MAIN_LANE` fixes, and it predates the
+    // batch actions: `moveWorktree` resolves its target by key, so while the
+    // pinned main section held the literal key `"main"` a drop aimed at a lane
+    // called `main` found that section first — pinned, so the move returned
+    // `null` and the worktree simply would not go in.
+    const groups = railGroups(
+      [
+        rw("/repo", { id: 1, is_main: true }),
+        rw("/wts/a", { id: 2 }),
+        rw("/wts/b", { id: 3, lane: "main" }),
+      ],
+      [lane("main", 0)],
+    );
+    const moved = moveWorktree(groups, "/wts/a", "main", 0);
+    expect(moved).not.toBeNull();
+    expect(moved!.lane).toBe("main");
+    expect(moved!.order).toContain("/wts/a");
   });
 
   it("refuses a drop into a section that does not exist", () => {

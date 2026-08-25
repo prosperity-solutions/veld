@@ -7,6 +7,7 @@ import {
   Group,
   Loader,
   Modal as MantineModal,
+  Radio,
   ScrollArea,
   SegmentedControl,
   Stack,
@@ -1280,6 +1281,455 @@ export function LaneNameDialog(props: {
           <Button type="submit" loading={busy} disabled={!trimmed || collides}>
             {props.confirmLabel}
           </Button>
+        </Stack>
+      </form>
+    </Modal>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Batch actions on a whole rail section
+// ---------------------------------------------------------------------------
+
+/**
+ * The picker value meaning "no destination chosen yet".
+ *
+ * The batch move has no preselected target on purpose — moving a whole group
+ * somewhere is not a gesture that should have a default sitting under the cursor
+ * — and `""` is a *real* value here (ungrouped), so "nothing chosen" cannot be
+ * spelled with an empty string. A leading NUL can never be a lane name
+ * (`valid_lane_name` rejects control characters), the same argument the rail's
+ * own sentinel lanes make, so this can never collide with a destination.
+ */
+const NO_TARGET = "\u0000none";
+
+/** The picker value for "make a new group and move them into that". */
+const NEW_TARGET = "\u0000new";
+
+/** How many `git status` calls the trash confirmation runs at once. */
+const STATUS_CONCURRENCY = 4;
+
+/**
+ * How long the trash confirmation's submit waits for those calls.
+ *
+ * A gate, **not** a give-up: the checks carry on past it and their results keep
+ * landing, so the badge list only ever gains rows. That is what makes a short
+ * value safe — and a give-up was the wrong shape twice over. `api.request` has no
+ * timeout, so one hung `git status` (an `index.lock` a dead rebase left behind, a
+ * stale network mount) must not hold the batch hostage; but abandoning the check
+ * on a fixed deadline made a *large* group — the case where the warning matters
+ * most, and the slowest to answer — the one that quietly stopped getting it.
+ */
+const STATUS_GATE_MS = 5000;
+
+/**
+ * Freeze a derived list for as long as an action on it is in flight.
+ *
+ * Both batch dialogs render a list their caller re-derives from live state on
+ * every 5s poll — which is what makes a checkout added while the dialog is open
+ * appear in it. That is right up until the batch actually runs: the poll then
+ * shrinks the list *underneath the request that is emptying it*, so the dialog
+ * swapped to "the last worktree left while this was open" halfway through the
+ * batch doing exactly that, and the loading button unmounted with it — a long
+ * batch looked idle and then looked like it had never run.
+ *
+ * A render-phase ref write, deliberately: this is a cache of the last value seen
+ * while idle, not state anything renders differently, so there is nothing to
+ * schedule and an effect would land one render too late.
+ */
+function useLatched<T>(value: T, frozen: boolean): T {
+  const held = useRef(value);
+  if (!frozen) held.current = value;
+  return held.current;
+}
+
+/** The scroll box both batch dialogs show their "what is about to happen" list in. */
+function BatchList(props: { children: ReactNode }) {
+  return (
+    <ScrollArea.Autosize mah={168} type="auto">
+      <Stack gap={4}>{props.children}</Stack>
+    </ScrollArea.Autosize>
+  );
+}
+
+/**
+ * The line both batch dialogs show when the section holds detached checkouts.
+ *
+ * They are filed into this section but are not members of it — a detached HEAD
+ * moves a row into the virtual Detached lane — so a batch cannot act on them,
+ * and their `lane` keeps pointing here. Said up front, because the surprise
+ * otherwise arrives much later: check a branch out again and the row is back in
+ * a group you emptied. See `detachedInSection`.
+ */
+function DetachedNote(props: { count: number; verb: string }) {
+  if (props.count === 0) return null;
+  return (
+    <Text size="sm" c="dimmed">
+      {props.count === 1
+        ? "One detached checkout is filed here"
+        : `${props.count} detached checkouts are filed here`}{" "}
+      but listed under <b>Detached</b> instead, so this cannot {props.verb}{" "}
+      {props.count === 1 ? "it" : "them"}. Check a branch out again and{" "}
+      {props.count === 1 ? "it comes" : "they come"} back here.
+    </Text>
+  );
+}
+
+/** What a batch move is aimed at: an existing group, or one to be created. */
+export type BatchMoveTarget = { lane: string } | { newLane: string };
+
+/**
+ * Move every worktree in one rail section into another group.
+ *
+ * What will move is listed before anything happens, for the same reason
+ * `NewWorktreeDialog` renders its derived names: a batch action whose size you
+ * learn afterwards is one you stop using. The caller reads that list from live
+ * state, so a checkout the 5s poll adds while this is open appears here too —
+ * and if the poll empties the section entirely, the dialog says so and offers no
+ * button rather than a "Move 0 worktrees" that does nothing.
+ *
+ * **"New group…" is one of the destinations**, mirroring the single-row *Move to
+ * group* submenu. Without it the batch refused exactly the repo it is most useful
+ * in: one that has never defined a group, and therefore has nothing to offer as
+ * an existing target.
+ */
+export function MoveLaneWorktreesDialog(props: {
+  /** Header text of the section the worktrees are leaving. */
+  from: string;
+  /** Exactly what will move, in rail order. */
+  worktrees: Array<{ id: number; label: string }>;
+  /** Existing destinations, in rail order — see `bulkMoveTargets`. May be empty. */
+  targets: Array<{ value: string; label: string }>;
+  /** Every lane name in the repo — the collision check for a new group. */
+  taken: string[];
+  /** Detached checkouts filed here that this cannot move — see `DetachedNote`. */
+  detached: number;
+  onMove: (target: BatchMoveTarget) => Promise<void>;
+  onClose: () => void;
+}) {
+  const [to, setTo] = useState(NO_TARGET);
+  const [newName, setNewName] = useState("");
+  const making = to === NEW_TARGET;
+  const trimmed = newName.trim();
+  // Case-insensitive, matching the daemon and `LaneNameDialog`: two rail headers
+  // differing only in case is a mistake every time. A courtesy check — the
+  // daemon decides inside its transaction.
+  const collides = props.taken.some(
+    // Not `n`: that names the row count a few lines down, and a later read of it
+    // inside this callback would silently get a lane name instead.
+    (taken) => taken.toLowerCase() === trimmed.toLowerCase(),
+  );
+  const { busy, error, submit } = useSubmit(() =>
+    props.onMove(making ? { newLane: trimmed } : { lane: to }),
+  );
+  const rows = useLatched(props.worktrees, busy);
+  const n = rows.length;
+  // `bulkMoveTargets` offers "No group" only when the source *is* a group, so on
+  // the ungrouped section — the one most repos live in — there is no such
+  // destination and the copy must not advertise one.
+  const canUngroup = props.targets.some((t) => t.value === "");
+  const ready =
+    n > 0 &&
+    (making
+      ? trimmed !== "" && !collides
+      : // Not merely "something is selected": `targets` is recomputed from live
+        // lanes on every poll, so another window deleting or renaming the chosen
+        // destination leaves `to` naming a lane that is no longer offered. The
+        // radio then renders nothing selected while the button stayed enabled,
+        // and every PATCH answered 400 `no such lane in this repo`.
+        props.targets.some((t) => t.value === to));
+  return (
+    <Modal
+      title={`Move everything in ${props.from}`}
+      /* A no-op while the batch runs: Escape, the scrim and the ✕ all land here,
+         and the loop firing the requests lives in the app rather than in this
+         component — so closing would read as a cancel while every remaining
+         request kept going. */
+      onClose={busy ? () => {} : props.onClose}
+    >
+      <form onSubmit={submit}>
+        <Stack gap="sm">
+          {n === 0 ? (
+            <Text size="sm" c="dimmed">
+              There is nothing in {props.from} any more — the last worktree left
+              it while this was open.
+            </Text>
+          ) : (
+            <>
+              <Text size="sm" c="dimmed">
+                Moves {n === 1 ? "this worktree" : `all ${n} worktrees`}{" "}
+                somewhere else in the rail — into another group
+                {canUngroup ? ", or out of any group" : ""}. Nothing is created,
+                deleted or checked out; only where the rows sit changes. Each one loses the
+                position you dragged it to, because a position only means
+                something inside one group.
+              </Text>
+              <DetachedNote count={props.detached} verb="move" />
+              <Radio.Group value={to} onChange={setTo} label="Move to">
+                <Stack gap={6} mt={6}>
+                  {props.targets.map((t) => (
+                    <Radio key={t.value} value={t.value} label={t.label} />
+                  ))}
+                  <Radio value={NEW_TARGET} label="New group…" />
+                </Stack>
+              </Radio.Group>
+              {making && (
+                <TextInput
+                  label="Group name"
+                  placeholder="review"
+                  value={newName}
+                  maxLength={MAX_LANE_NAME_LEN}
+                  onChange={(e) => setNewName(e.currentTarget.value)}
+                  error={
+                    collides ? "This repo already has a group with that name" : null
+                  }
+                  /* `autoFocus`, not `data-autofocus`: this field mounts when
+                     "New group…" is picked, long after the modal's focus trap has
+                     already chosen where to land, so the trap's marker would
+                     never fire for it. */
+                  autoFocus
+                />
+              )}
+              <Text size="xs" c="dimmed">
+                {n === 1 ? "Moving:" : `Moving ${n}:`}
+              </Text>
+              <BatchList>
+                {rows.map((w) => (
+                  /* Keyed by id, not by the label: a display name is free text
+                     with no uniqueness constraint, so two rows can render the
+                     same string. */
+                  <Text key={w.id} size="xs" c="dimmed">
+                    {w.label}
+                  </Text>
+                ))}
+              </BatchList>
+            </>
+          )}
+          <ErrorText error={error} />
+          {n > 0 && (
+            <Button type="submit" loading={busy} disabled={!ready}>
+              {n === 1 ? "Move 1 worktree" : `Move ${n} worktrees`}
+            </Button>
+          )}
+        </Stack>
+      </form>
+    </Modal>
+  );
+}
+
+/**
+ * Move every worktree in one rail section to the trash.
+ *
+ * Confirmed, unlike the Detached lane's "trash all" button beside it: that lane
+ * holds throwaways by definition, and a group holds whatever the user filed into
+ * it.
+ *
+ * The uncommitted-changes check is why this is more than a yes/no. Binning never
+ * refuses — `DELETE /api/worktrees/{id}` without `force` marks the row and
+ * returns, leaving the checkout on disk — so a dirty worktree bins silently, and
+ * the single-row flows in this app deliberately never let that happen. The
+ * statuses are fetched while the dialog is open and reported per row, and **the
+ * button waits for them**: a group large enough for the fan-out to be slow is
+ * exactly the one where binning before the badges arrive loses the warning this
+ * dialog exists to give.
+ */
+export function TrashLaneWorktreesDialog(props: {
+  /** Header text of the section being emptied. */
+  from: string;
+  /** Exactly what will be binned — `bulkTrashable`, so main is already out. */
+  worktrees: Array<{ id: number; label: string }>;
+  /** Whether the section also holds the main checkout, which is never binned. */
+  mainExcluded: boolean;
+  /** Detached checkouts filed here that this cannot bin — see `DetachedNote`. */
+  detached: number;
+  /** Fetch one worktree's git dirty state (the files blocking a later delete). */
+  onStatus: (id: number) => Promise<WorktreeGitStatus>;
+  onTrash: () => Promise<void>;
+  onClose: () => void;
+}) {
+  const [dirty, setDirty] = useState<ReadonlySet<number>>(new Set());
+  const [checking, setChecking] = useState(true);
+  /** Past the gate, with checks still outstanding — see [`STATUS_GATE_MS`]. */
+  const [pending, setPending] = useState(false);
+  const { busy, error, submit } = useSubmit(() => props.onTrash());
+  const rows = useLatched(props.worktrees, busy);
+  // The ids as a stable dependency: `props.worktrees` is derived by the caller on
+  // every render, so depending on the array itself would refetch forever. Read
+  // off the latched rows, so a batch in flight cannot re-arm the whole check
+  // against checkouts it is currently binning.
+  const idKey = rows.map((w) => w.id).join(",");
+  useEffect(() => {
+    let cancelled = false;
+    const ids = idKey === "" ? [] : idKey.split(",").map(Number);
+    setChecking(true);
+    setPending(false);
+    setDirty(new Set());
+    const found = new Set<number>();
+    // Bounded, not `Promise.allSettled` over the whole list. Each call runs git
+    // in a checkout on a machine that is already running this project's
+    // environments, and a thirty-worktree group would start thirty at once — the
+    // same contention argument that keeps the write loop in `App.tsx` sequential.
+    let next = 0;
+    const worker = async () => {
+      while (next < ids.length && !cancelled) {
+        const id = ids[next++];
+        try {
+          const status = await props.onStatus(id);
+          if (status.dirty) {
+            found.add(id);
+            // Published as each answer lands, not only at the gate and at
+            // completion. This is what makes the gate a gate: with one checkout
+            // git is slow to answer for, the other workers drain the queue and
+            // their findings still reach the list. Publishing only on settle
+            // froze the badges at the gate's snapshot while the notice below
+            // promised more were coming.
+            if (!cancelled) setDirty(new Set(found));
+          }
+        } catch {
+          // An unavailable status (git error, checkout gone) must not block a
+          // bin, which is non-destructive anyway. That row simply carries no
+          // badge — the same degradation `TrashWorktreeDialog` takes for one.
+        }
+      }
+    };
+    const all = Promise.all(
+      Array.from({ length: Math.min(STATUS_CONCURRENCY, ids.length) }, worker),
+    );
+    // Two publishes, not a `Promise.race` picking one. The gate expiring only
+    // *unblocks the button* — it must not stop the dialog reporting what the
+    // remaining checks find, which is what a race did: it published `found` once
+    // and left the workers filling a set nothing would ever render again, so a
+    // badge learned a second later was known and hidden.
+    // The gate only ungates — the badges are published by the workers above as
+    // they land, so there is nothing for it to snapshot.
+    const gate = setTimeout(() => {
+      if (cancelled) return;
+      setChecking(false);
+      setPending(true);
+    }, STATUS_GATE_MS);
+    void all.then(() => {
+      if (cancelled) return;
+      clearTimeout(gate);
+      // One last publish. Redundant while every dirty answer publishes itself
+      // above — kept as the backstop for the case that stops being true, since
+      // the failure it guards against (a badge known and never shown) is silent.
+      setDirty(new Set(found));
+      setChecking(false);
+      setPending(false);
+    });
+    return () => {
+      cancelled = true;
+      clearTimeout(gate);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [idKey]);
+
+  const n = rows.length;
+  return (
+    <Modal
+      title={
+        n === 0
+          ? `Nothing left in ${props.from}`
+          : n === 1
+            ? `Move 1 worktree from ${props.from} to the trash?`
+            : `Move ${n} worktrees from ${props.from} to the trash?`
+      }
+      /* A no-op while the batch runs — see the same guard on the move dialog. */
+      onClose={busy ? () => {} : props.onClose}
+    >
+      <form onSubmit={submit}>
+        <Stack gap="sm">
+          {n === 0 ? (
+            <Text size="sm" c="dimmed">
+              {props.mainExcluded
+                ? "Only the main checkout is left here, and that is the repository itself — it is never trashed."
+                : "There is nothing left to trash here — the last worktree left this section while the dialog was open."}
+            </Text>
+          ) : (
+            <>
+              <Text size="sm" c="dimmed">
+                Nothing is deleted. Every checkout stays on disk and can be
+                restored from the trash in the rail. They are deleted for good
+                when the retention period runs out (Settings → General, off by
+                default) or when you delete them from the trash. The branches are
+                always kept.
+              </Text>
+              {props.mainExcluded && (
+                <Text size="sm" c="dimmed">
+                  The main checkout stays where it is — it is the repository
+                  itself, so it is never trashed.
+                </Text>
+              )}
+              <DetachedNote count={props.detached} verb="trash" />
+              {checking && (
+                <Group gap="xs">
+                  <Loader size="xs" />
+                  <Text size="sm" c="dimmed">
+                    Checking for uncommitted changes…
+                  </Text>
+                </Group>
+              )}
+              {pending && (
+                /* A yellow Alert, the same weight as the warning it stands in
+                   for: a dimmed line reporting an incomplete check is quieter
+                   than the finding it stands in for, which is backwards. */
+                <Alert color="yellow" variant="light" p="sm">
+                  <Text size="sm" fw={600}>
+                    Still checking the rest for uncommitted changes
+                  </Text>
+                  <Text size="xs" c="dimmed" mt={2}>
+                    You can go ahead — nothing is deleted either way, and more
+                    badges will appear below as the checks finish.
+                  </Text>
+                </Alert>
+              )}
+              {!checking && dirty.size > 0 && (
+                <Alert color="yellow" variant="light" p="sm">
+                  <Text size="sm" fw={600}>
+                    {dirty.size} of these {dirty.size === 1 ? "has" : "have"}{" "}
+                    uncommitted changes
+                  </Text>
+                  <Text size="xs" c="dimmed" mt={2}>
+                    Trashing keeps them — nothing is lost now. But a later
+                    permanent delete refuses until those changes are reverted or
+                    discarded, so the rows sit in the trash until you deal with
+                    them.
+                  </Text>
+                </Alert>
+              )}
+              <BatchList>
+                {rows.map((w) => (
+                  <Group key={w.id} gap={6} wrap="nowrap">
+                    <Text size="xs" c="dimmed">
+                      {w.label}
+                    </Text>
+                    {dirty.has(w.id) && (
+                      <Badge size="xs" color="yellow" variant="light">
+                        uncommitted changes
+                      </Badge>
+                    )}
+                  </Group>
+                ))}
+              </BatchList>
+            </>
+          )}
+          <ErrorText error={error} />
+          {n > 0 && (
+            <Button
+              type="submit"
+              color="red"
+              variant="light"
+              loading={busy}
+              /* Waits for the statuses. Binning before the badges land is
+                 binning without the warning, and the slowest fan-out is the
+                 biggest group — the case where it matters most. */
+              disabled={checking}
+            >
+              {n === 1
+                ? "Move 1 worktree to trash"
+                : `Move ${n} worktrees to trash`}
+            </Button>
+          )}
         </Stack>
       </form>
     </Modal>
