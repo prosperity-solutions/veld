@@ -2738,8 +2738,10 @@ function AppInner(props: {
    * section of its own once it is ungrouped rather than joining that header. The
    * picker's own label makes the same distinction — see `bulkMoveTargets`.
    */
-  const destinationLabel = (lane: string) =>
-    lane === "" ? "out of their group" : `to ${lane}`;
+  const destinationLabel = (lane: string, count: number) =>
+    lane === ""
+      ? `out of ${count === 1 ? "its" : "their"} group`
+      : `to ${lane}`;
 
   /**
    * One toast for a batch's failures, not one per row.
@@ -2785,7 +2787,7 @@ function AppInner(props: {
    * the first refusal leaves the user with a half-moved group and no idea which
    * half.
    */
-  const moveAllInSection = async (key: string, to: string) => {
+  const moveAllInSection = async (key: string, to: string): Promise<number> => {
     const members = sectionMembers(key);
     let moved = 0;
     const failed: string[] = [];
@@ -2802,12 +2804,13 @@ function AppInner(props: {
     if (moved > 0) {
       notifyDone(
         moved === 1
-          ? `Moved 1 worktree ${destinationLabel(to)}`
-          : `Moved ${moved} worktrees ${destinationLabel(to)}`,
+          ? `Moved 1 worktree ${destinationLabel(to, 1)}`
+          : `Moved ${moved} worktrees ${destinationLabel(to, moved)}`,
       );
     }
     if (failed.length > 0) notifyBatchFailure("move", failed, reason);
     await refresh();
+    return moved;
   };
 
   /**
@@ -5616,7 +5619,13 @@ function AppInner(props: {
             // different one while the dialog is open.
             if (!repo) throw new Error("no project is selected any more");
             await api.createLane(repo.root, target.newLane);
-            await moveAllInSection(dialog.lane, target.newLane);
+            const moved = await moveAllInSection(dialog.lane, target.newLane);
+            // The group exists either way, so say so when nothing followed it in
+            // — the section can empty between the click and the loop, and a
+            // silent close would leave an unexplained empty group in the rail.
+            if (moved === 0) {
+              notifyDone(`Created the group "${target.newLane}"`);
+            }
           } else {
             await moveAllInSection(dialog.lane, target.lane);
           }
@@ -7884,14 +7893,18 @@ function Rail(props: {
    * holds none — the ungrouped section, the main checkout, and the two pending
    * -removal lanes are neither draggable nor lane drop targets.
    *
-   * Keyed on `lane` behind `editable`, never on `key`. The main checkout's key is
-   * the literal `"main"` and `"main"` is a legal lane name (`valid_lane_name`
-   * rejects only empty, over-long, control characters, `.` and `..`), so keying
-   * on it gave that pinned section the position of a lane called `main`: every
-   * drop over the top of the rail resolved there instead of to the first lane,
-   * and dragging that lane faded the main checkout row as if it were the one
-   * being carried. Same trap the header's `aria-label` already documents for
-   * `UNGROUPED_LABEL`.
+   * Keyed on `lane` behind `editable`, never on `key`. This used to be the *only*
+   * thing standing between the rail and a lane called `main`: the main checkout's
+   * section carried the literal key `"main"`, and `main` is a legal lane name
+   * (`valid_lane_name` rejects only empty, over-long, control characters, `.` and
+   * `..`), so keying on it gave that pinned section the position of the lane —
+   * every drop over the top of the rail resolved there instead of to the first
+   * lane, and dragging that lane faded the main checkout row as if it were the one
+   * being carried. That collision is fixed at its source now ([`MAIN_LANE`]), so
+   * this is no longer a workaround; it stands on its own reason, which is that
+   * only a section with a lane behind it holds a place in the lane order at all.
+   * The related trap the header's `aria-label` documents for `UNGROUPED_LABEL` is
+   * still live, because a label is not a key space.
    */
   const laneAtOf = (g: RailGroup) =>
     g.editable ? laneIndex.get(g.lane) : undefined;

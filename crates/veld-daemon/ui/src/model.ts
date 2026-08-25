@@ -511,10 +511,10 @@ export const DETACHED_LANE = "\u0000detached";
  * `..`). So a repo with a lane called `main` — the default branch, i.e. the most
  * likely name anyone would pick — produced **two sections with the same key**,
  * and every lookup by key silently resolved to whichever came first, which is the
- * pinned main section. `laneAtOf` in the rail documents one symptom of that (a
- * drag over the top of the rail resolving to the wrong section) and works around
- * it by keying on `lane` behind `editable`; `moveWorktree` had the same bug
- * unguarded, so a worktree could not be dropped into a lane called `main` at all.
+ * pinned main section. `laneAtOf` in the rail hit one symptom of that (a drag
+ * over the top of the rail resolving to the wrong section) and dodged it by
+ * keying on `lane` behind `editable`; `moveWorktree` had the same bug unguarded,
+ * so a worktree could not be dropped into a lane called `main` at all.
  *
  * Fixed here rather than at the call sites: a key space that cannot collide is a
  * guard by construction, and the alternative is remembering this at every future

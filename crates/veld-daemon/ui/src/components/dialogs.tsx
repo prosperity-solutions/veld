@@ -1309,8 +1309,18 @@ const NEW_TARGET = "\u0000new";
 /** How many `git status` calls the trash confirmation runs at once. */
 const STATUS_CONCURRENCY = 4;
 
-/** How long the trash confirmation waits for those calls before giving up. */
-const STATUS_DEADLINE_MS = 8000;
+/**
+ * How long the trash confirmation's submit waits for those calls.
+ *
+ * A gate, **not** a give-up: the checks carry on past it and their results keep
+ * landing, so the badge list only ever gains rows. That is what makes a short
+ * value safe — and a give-up was the wrong shape twice over. `api.request` has no
+ * timeout, so one hung `git status` (an `index.lock` a dead rebase left behind, a
+ * stale network mount) must not hold the batch hostage; but abandoning the check
+ * on a fixed deadline made a *large* group — the case where the warning matters
+ * most, and the slowest to answer — the one that quietly stopped getting it.
+ */
+const STATUS_GATE_MS = 5000;
 
 /**
  * Freeze a derived list for as long as an action on it is in flight.
@@ -1360,7 +1370,7 @@ function DetachedNote(props: { count: number; verb: string }) {
         : `${props.count} detached checkouts are filed here`}{" "}
       but listed under <b>Detached</b> instead, so this cannot {props.verb}{" "}
       {props.count === 1 ? "it" : "them"}. Check a branch out again and{" "}
-      {props.count === 1 ? "it rejoins" : "they rejoin"} this group.
+      {props.count === 1 ? "it comes" : "they come"} back here.
     </Text>
   );
 }
@@ -1405,7 +1415,9 @@ export function MoveLaneWorktreesDialog(props: {
   // differing only in case is a mistake every time. A courtesy check — the
   // daemon decides inside its transaction.
   const collides = props.taken.some(
-    (n) => n.toLowerCase() === trimmed.toLowerCase(),
+    // Not `n`: that names the row count a few lines down, and a later read of it
+    // inside this callback would silently get a lane name instead.
+    (taken) => taken.toLowerCase() === trimmed.toLowerCase(),
   );
   const { busy, error, submit } = useSubmit(() =>
     props.onMove(making ? { newLane: trimmed } : { lane: to }),
@@ -1441,9 +1453,10 @@ export function MoveLaneWorktreesDialog(props: {
           ) : (
             <>
               <Text size="sm" c="dimmed">
-                Moves {n === 1 ? "this worktree" : `all ${n} worktrees`} into
-                another group. Nothing is created, deleted or checked out — only
-                where the rows sit in the rail changes. Each one loses the
+                Moves {n === 1 ? "this worktree" : `all ${n} worktrees`}{" "}
+                somewhere else in the rail — into another group, or out of any
+                group. Nothing is created, deleted or checked out; only where the
+                rows sit changes. Each one loses the
                 position you dragged it to, because a position only means
                 something inside one group.
               </Text>
@@ -1466,7 +1479,11 @@ export function MoveLaneWorktreesDialog(props: {
                   error={
                     collides ? "This repo already has a group with that name" : null
                   }
-                  data-autofocus
+                  /* `autoFocus`, not `data-autofocus`: this field mounts when
+                     "New group…" is picked, long after the modal's focus trap has
+                     already chosen where to land, so the trap's marker would
+                     never fire for it. */
+                  autoFocus
                 />
               )}
               <Text size="xs" c="dimmed">
@@ -1528,7 +1545,8 @@ export function TrashLaneWorktreesDialog(props: {
 }) {
   const [dirty, setDirty] = useState<ReadonlySet<number>>(new Set());
   const [checking, setChecking] = useState(true);
-  const [incomplete, setIncomplete] = useState(false);
+  /** Past the gate, with checks still outstanding — see [`STATUS_GATE_MS`]. */
+  const [pending, setPending] = useState(false);
   const { busy, error, submit } = useSubmit(() => props.onTrash());
   const rows = useLatched(props.worktrees, busy);
   // The ids as a stable dependency: `props.worktrees` is derived by the caller on
@@ -1540,6 +1558,8 @@ export function TrashLaneWorktreesDialog(props: {
     let cancelled = false;
     const ids = idKey === "" ? [] : idKey.split(",").map(Number);
     setChecking(true);
+    setPending(false);
+    setDirty(new Set());
     const found = new Set<number>();
     // Bounded, not `Promise.allSettled` over the whole list. Each call runs git
     // in a checkout on a machine that is already running this project's
@@ -1559,28 +1579,30 @@ export function TrashLaneWorktreesDialog(props: {
         }
       }
     };
-    // Deadlined, because the button waits for this check and `api.request` has
-    // no timeout: one checkout whose `git status` hangs — an `index.lock` a dead
-    // rebase left behind, a stale network mount — would otherwise leave the
-    // batch permanently unreachable with no way past it. On expiry the dialog
-    // reports what it did learn and says the check was incomplete, which is a
-    // worse answer than the full one and a much better answer than none.
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const deadline = new Promise<"timeout">((resolve) => {
-      timer = setTimeout(() => resolve("timeout"), STATUS_DEADLINE_MS);
-    });
     const all = Promise.all(
       Array.from({ length: Math.min(STATUS_CONCURRENCY, ids.length) }, worker),
-    ).then(() => "done" as const);
-    void Promise.race([all, deadline]).then((outcome) => {
+    );
+    // Two publishes, not a `Promise.race` picking one. The gate expiring only
+    // *unblocks the button* — it must not stop the dialog reporting what the
+    // remaining checks find, which is what a race did: it published `found` once
+    // and left the workers filling a set nothing would ever render again, so a
+    // badge learned a second later was known and hidden.
+    const gate = setTimeout(() => {
       if (cancelled) return;
       setDirty(new Set(found));
-      setIncomplete(outcome === "timeout");
       setChecking(false);
+      setPending(true);
+    }, STATUS_GATE_MS);
+    void all.then(() => {
+      if (cancelled) return;
+      clearTimeout(gate);
+      setDirty(new Set(found));
+      setChecking(false);
+      setPending(false);
     });
     return () => {
       cancelled = true;
-      clearTimeout(timer);
+      clearTimeout(gate);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [idKey]);
@@ -1602,8 +1624,9 @@ export function TrashLaneWorktreesDialog(props: {
         <Stack gap="sm">
           {n === 0 ? (
             <Text size="sm" c="dimmed">
-              There is nothing left to trash here — the last worktree left this
-              section while the dialog was open.
+              {props.mainExcluded
+                ? "Only the main checkout is left here, and that is the repository itself — it is never trashed."
+                : "There is nothing left to trash here — the last worktree left this section while the dialog was open."}
             </Text>
           ) : (
             <>
@@ -1629,12 +1652,19 @@ export function TrashLaneWorktreesDialog(props: {
                   </Text>
                 </Group>
               )}
-              {!checking && incomplete && (
-                <Text size="sm" c="dimmed">
-                  The check for uncommitted changes did not finish in time, so
-                  the list below may be missing a badge. Nothing is deleted
-                  either way.
-                </Text>
+              {pending && (
+                /* A yellow Alert, the same weight as the warning it stands in
+                   for: a dimmed line reporting an incomplete check is quieter
+                   than the finding it stands in for, which is backwards. */
+                <Alert color="yellow" variant="light" p="sm">
+                  <Text size="sm" fw={600}>
+                    Still checking the rest for uncommitted changes
+                  </Text>
+                  <Text size="xs" c="dimmed" mt={2}>
+                    You can go ahead — nothing is deleted either way, and more
+                    badges will appear below as the checks finish.
+                  </Text>
+                </Alert>
               )}
               {!checking && dirty.size > 0 && (
                 <Alert color="yellow" variant="light" p="sm">
