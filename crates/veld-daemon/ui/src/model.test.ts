@@ -3,6 +3,8 @@ import type { EnvironmentList, Lane, RunInfo, RunStatus, Worktree } from "./api"
 import {
   activeRun,
   bestFuzzyMatch,
+  bulkMoveTargets,
+  bulkTrashable,
   diagnosticsRun,
   freshRunName,
   fuzzyMatch,
@@ -950,6 +952,112 @@ describe("railGroups", () => {
     );
     expect(live.map((g) => g.key)).toEqual(["main", ""]);
     expect(live[0].worktrees.map((w) => w.path)).toEqual(["/repo"]);
+  });
+});
+
+describe("railGroups — batch actions", () => {
+  it("offers the batch actions on the ungrouped section and on real lanes", () => {
+    // `bulk` is not `editable`: the ungrouped section has no lane to rename or
+    // delete, but it does hold a set of worktrees to move or bin — and in a repo
+    // with no lanes it holds every checkout there is.
+    const groups = railGroups(
+      [
+        rw("/repo", { is_main: true }),
+        rw("/wts/a"),
+        rw("/wts/det", { branch: "(detached)" }),
+        rw("/wts/b", { lane: "review" }),
+        rw("/wts/gone", { deleting: true, trashed_at: "2026-01-01T00:00:00Z" }),
+        rw("/wts/bin", { trashed_at: "2026-01-01T00:00:00Z" }),
+      ],
+      [lane("review", 0)],
+    );
+    const bulk = new Map(groups.map((g) => [g.key, g.bulk]));
+    expect(bulk.get("")).toBe(true);
+    expect(bulk.get("review")).toBe(true);
+    // Every pinned section says no, each for its own reason (one row and it is
+    // the repo; own header button; a lane move would be invisible; leaving).
+    expect(bulk.get("main")).toBe(false);
+    expect(bulk.get(DETACHED_LANE)).toBe(false);
+    expect(bulk.get(DELETING_LANE)).toBe(false);
+    expect(bulk.get(TRASH_LANE)).toBe(false);
+    // The ungrouped section is the one that has `bulk` without `editable`, which
+    // is the whole reason the two flags are separate.
+    const ungrouped = groups.find((g) => g.key === "")!;
+    expect(ungrouped.editable).toBe(false);
+  });
+
+  it("gives every menu-bearing section the same key and lane", () => {
+    // `onLaneMenu` is handed `group.lane`, and everything the menu does resolves
+    // the section by *key* (`sectionMembers`). That only works while the two are
+    // the same string for a section that has a menu — the main checkout is the
+    // one section where they differ (`key: "main"`, `lane: ""`), and it has no
+    // menu. Pinned here so a future section cannot quietly break it.
+    const groups = railGroups(
+      [rw("/repo", { is_main: true }), rw("/wts/a"), rw("/wts/b", { lane: "review" })],
+      [lane("review", 0)],
+    );
+    for (const g of groups) {
+      if (g.editable || g.bulk) expect(g.key).toBe(g.lane);
+    }
+  });
+});
+
+describe("bulkMoveTargets", () => {
+  const three = [lane("review", 0), lane("wip", 1), lane("done", 2)];
+
+  it("offers the other lanes and the ungrouped section, in rail order", () => {
+    // Ungrouped leads because that is where it sits in the rail, and the labels
+    // read top-to-bottom the same way the user is looking at them.
+    expect(bulkMoveTargets(three, "wip")).toEqual([
+      { value: "", label: `${UNGROUPED_LABEL} (no group)` },
+      { value: "review", label: "review" },
+      { value: "done", label: "done" },
+    ]);
+  });
+
+  it("never offers the section the worktrees are already in", () => {
+    expect(bulkMoveTargets(three, "wip").map((t) => t.value)).not.toContain("wip");
+    // From ungrouped, the ungrouped option is the one that drops out.
+    expect(bulkMoveTargets(three, "").map((t) => t.value)).toEqual([
+      "review",
+      "wip",
+      "done",
+    ]);
+  });
+
+  it("labels the ungrouped option so a lane of the same name cannot shadow it", () => {
+    // `UNGROUPED_LABEL` is itself a legal lane name, so a bare label would give
+    // two byte-identical options for two different destinations.
+    const targets = bulkMoveTargets([lane(UNGROUPED_LABEL, 0)], "other");
+    expect(new Set(targets.map((t) => t.label)).size).toBe(targets.length);
+    expect(targets.find((t) => t.value === "")?.label).not.toBe(UNGROUPED_LABEL);
+  });
+
+  it("is empty only for the ungrouped section of a repo with no lanes", () => {
+    // The one case with nowhere to go, and it disables the menu entry rather
+    // than opening a dialog with an empty picker. A *lane* always has somewhere:
+    // ungrouping is a destination, so a repo's only lane still offers it.
+    expect(bulkMoveTargets([], "")).toEqual([]);
+    expect(bulkMoveTargets([lane("review", 0)], "review")).toEqual([
+      { value: "", label: `${UNGROUPED_LABEL} (no group)` },
+    ]);
+  });
+});
+
+describe("bulkTrashable", () => {
+  it("never includes the main checkout", () => {
+    // Main can be filed into a lane on purpose, so it does reach a lane's member
+    // list — but binning it would take the repository with it.
+    const members = [
+      rw("/repo", { id: 1, is_main: true, lane: "review" }),
+      rw("/wts/a", { id: 2, lane: "review" }),
+    ];
+    expect(bulkTrashable(members).map((w) => w.path)).toEqual(["/wts/a"]);
+  });
+
+  it("is empty for a lane holding only the main checkout", () => {
+    // Which is what disables the menu entry: there is nothing there to bin.
+    expect(bulkTrashable([rw("/repo", { is_main: true })])).toEqual([]);
   });
 });
 

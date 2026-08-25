@@ -448,6 +448,23 @@ export interface RailGroup {
    * is why this cannot be spelled `!pinned`.
    */
   editable: boolean;
+  /**
+   * Whether the header's ⋮ menu offers the section's *content-wide* actions:
+   * move every worktree in it into another group, or move them all to the trash.
+   *
+   * Deliberately not spelled `editable`, and not derived from it. That flag
+   * answers "is there a lane here to rename, reorder and delete"; this one
+   * answers "is there a *set of worktrees* here to act on as a whole", and the
+   * ungrouped section satisfies the second while emphatically failing the first
+   * — it is where a repo with no lanes keeps every checkout it has, and filing
+   * that set into a group in one gesture is the whole point of the action.
+   *
+   * False for every pinned section, each for its own reason: the main checkout
+   * is one row and is the repository, the Detached and Trash lanes already carry
+   * their batch action as a header button, and a removal in flight is not a set
+   * to re-file.
+   */
+  bulk: boolean;
   worktrees: Worktree[];
 }
 
@@ -566,6 +583,8 @@ export function railGroups(worktrees: Worktree[], lanes: Lane[]): RailGroup[] {
       // exactly one row by construction.
       addable: false,
       editable: false,
+      // One row, and that row is the repository. There is no set here.
+      bulk: false,
       worktrees: main,
     });
   }
@@ -577,6 +596,9 @@ export function railGroups(worktrees: Worktree[], lanes: Lane[]): RailGroup[] {
     addable: true,
     // Not a lane: there is nothing here to rename or delete.
     editable: false,
+    // But there IS a set of worktrees here — the whole rail, in a repo that has
+    // defined no lanes — so the batch actions apply. See [`RailGroup.bulk`].
+    bulk: true,
     worktrees: ungrouped.filter((w) => !w.is_main),
   });
   // The virtual Detached lane, between the ungrouped worktrees and the real
@@ -593,6 +615,10 @@ export function railGroups(worktrees: Worktree[], lanes: Lane[]): RailGroup[] {
       pinned: true,
       addable: false,
       editable: false,
+      // Its "trash all" is a header button already, and a lane move would be
+      // invisible: a detached checkout is pulled out of whatever lane it is
+      // filed into, so the rows would not leave this section.
+      bulk: false,
       worktrees: detached,
     });
   }
@@ -606,6 +632,7 @@ export function railGroups(worktrees: Worktree[], lanes: Lane[]): RailGroup[] {
       pinned: false,
       addable: true,
       editable: true,
+      bulk: true,
       worktrees: live.filter((w) => w.lane === l.name && !isDetached(w)),
     });
   }
@@ -617,6 +644,8 @@ export function railGroups(worktrees: Worktree[], lanes: Lane[]): RailGroup[] {
       pinned: true,
       addable: false,
       editable: false,
+      // Past the point of no return: not a set to re-file or re-bin.
+      bulk: false,
       worktrees: deleting,
     });
   }
@@ -629,9 +658,62 @@ export function railGroups(worktrees: Worktree[], lanes: Lane[]): RailGroup[] {
     pinned: true,
     addable: false,
     editable: false,
+    // "Empty the trash" is its header button, and moving a trashed row into a
+    // lane is a restore, not a lane move.
+    bulk: false,
     worktrees: trashed,
   });
   return groups;
+}
+
+/**
+ * Where a section's batch "move all" may send its worktrees: every *other* real
+ * lane, plus the ungrouped section when the source is not already it.
+ *
+ * `from` is the source section's lane — `""` for ungrouped, a lane name
+ * otherwise. The virtual sections are absent by construction, because none of
+ * them is in `lanes` and none of them is somewhere a checkout can be *filed*:
+ * Detached and Deleting are states, and the trash has its own action because
+ * binning is not a lane move.
+ *
+ * An **empty** result happens in exactly one case — the ungrouped section of a
+ * repo that has defined no lanes — and the menu renders it as a disabled entry
+ * rather than opening a dialog with an empty picker. A real lane always has a
+ * destination, because ungrouping is one.
+ *
+ * Rail order: the ungrouped option leads, then the lanes in their own order —
+ * the same top-to-bottom the user is looking at while they choose.
+ */
+export function bulkMoveTargets(
+  lanes: Lane[],
+  from: string,
+): Array<{ value: string; label: string }> {
+  const targets = lanes
+    .filter((l) => l.name !== from)
+    .map((l) => ({ value: l.name, label: l.name }));
+  if (from !== "") {
+    // `patch_worktree` spells ungrouped as `lane: ""`, so that is the value.
+    // The label is **not** bare [`UNGROUPED_LABEL`]: that string is itself a
+    // legal lane name, so a repo with a lane called "Worktrees" would offer two
+    // byte-identical options for two different destinations.
+    targets.unshift({ value: "", label: `${UNGROUPED_LABEL} (no group)` });
+  }
+  return targets;
+}
+
+/**
+ * The worktrees of a section that a batch trash may actually bin.
+ *
+ * The main checkout is never one of them: it is the repository, and binning it
+ * would take every other worktree's parent with it. It can reach a lane at all
+ * because assigning it to one is legal — [`railGroups`] keeps it in the lane the
+ * user filed it into — so this is the guard, applied to the *value the dialog is
+ * handed* rather than as a `continue` inside the loop that fires the requests.
+ * The dialog then lists exactly what it will bin, and the count it shows cannot
+ * disagree with what happens.
+ */
+export function bulkTrashable(worktrees: Worktree[]): Worktree[] {
+  return worktrees.filter((w) => !w.is_main);
 }
 
 /**
