@@ -1303,6 +1303,12 @@ export function LaneNameDialog(props: {
  */
 const NO_TARGET = "\u0000none";
 
+/** The picker value for "make a new group and move them into that". */
+const NEW_TARGET = "\u0000new";
+
+/** How many `git status` calls the trash confirmation runs at once. */
+const STATUS_CONCURRENCY = 4;
+
 /** The scroll box both batch dialogs show their "what is about to happen" list in. */
 function BatchList(props: { children: ReactNode }) {
   return (
@@ -1313,61 +1319,144 @@ function BatchList(props: { children: ReactNode }) {
 }
 
 /**
+ * The line both batch dialogs show when the section holds detached checkouts.
+ *
+ * They are filed into this section but are not members of it — a detached HEAD
+ * moves a row into the virtual Detached lane — so a batch cannot act on them,
+ * and their `lane` keeps pointing here. Said up front, because the surprise
+ * otherwise arrives much later: check a branch out again and the row is back in
+ * a group you emptied. See `detachedInSection`.
+ */
+function DetachedNote(props: { count: number; verb: string }) {
+  if (props.count === 0) return null;
+  return (
+    <Text size="sm" c="dimmed">
+      {props.count === 1
+        ? "One detached checkout is filed here"
+        : `${props.count} detached checkouts are filed here`}{" "}
+      but listed under <b>Detached</b> instead, so this cannot {props.verb}{" "}
+      {props.count === 1 ? "it" : "them"}. Check a branch out again and{" "}
+      {props.count === 1 ? "it rejoins" : "they rejoin"} this group.
+    </Text>
+  );
+}
+
+/** What a batch move is aimed at: an existing group, or one to be created. */
+export type BatchMoveTarget = { lane: string } | { newLane: string };
+
+/**
  * Move every worktree in one rail section into another group.
  *
  * What will move is listed before anything happens, for the same reason
  * `NewWorktreeDialog` renders its derived names: a batch action whose size you
  * learn afterwards is one you stop using. The caller reads that list from live
- * state, so a checkout the 5s poll adds while this is open appears here too.
+ * state, so a checkout the 5s poll adds while this is open appears here too —
+ * and if the poll empties the section entirely, the dialog says so and offers no
+ * button rather than a "Move 0 worktrees" that does nothing.
+ *
+ * **"New group…" is one of the destinations**, mirroring the single-row *Move to
+ * group* submenu. Without it the batch refused exactly the repo it is most useful
+ * in: one that has never defined a group, and therefore has nothing to offer as
+ * an existing target.
  */
 export function MoveLaneWorktreesDialog(props: {
   /** Header text of the section the worktrees are leaving. */
   from: string;
-  /** Rendered labels of the worktrees that will move, in rail order. */
-  worktrees: string[];
-  /**
-   * Destinations, in rail order — see `bulkMoveTargets`. Never empty here: the
-   * menu entry that opens this dialog is disabled when there is nowhere to go.
-   */
+  /** Exactly what will move, in rail order. */
+  worktrees: Array<{ id: number; label: string }>;
+  /** Existing destinations, in rail order — see `bulkMoveTargets`. May be empty. */
   targets: Array<{ value: string; label: string }>;
-  onMove: (lane: string) => Promise<void>;
+  /** Every lane name in the repo — the collision check for a new group. */
+  taken: string[];
+  /** Detached checkouts filed here that this cannot move — see `DetachedNote`. */
+  detached: number;
+  onMove: (target: BatchMoveTarget) => Promise<void>;
   onClose: () => void;
 }) {
   const [to, setTo] = useState(NO_TARGET);
-  const chosen = to === NO_TARGET ? null : to;
-  const { busy, error, submit } = useSubmit(() => props.onMove(chosen ?? ""));
+  const [newName, setNewName] = useState("");
+  const making = to === NEW_TARGET;
+  const trimmed = newName.trim();
+  // Case-insensitive, matching the daemon and `LaneNameDialog`: two rail headers
+  // differing only in case is a mistake every time. A courtesy check — the
+  // daemon decides inside its transaction.
+  const collides = props.taken.some(
+    (n) => n.toLowerCase() === trimmed.toLowerCase(),
+  );
   const n = props.worktrees.length;
+  const { busy, error, submit } = useSubmit(() =>
+    props.onMove(making ? { newLane: trimmed } : { lane: to }),
+  );
+  const ready =
+    n > 0 && (making ? trimmed !== "" && !collides : to !== NO_TARGET);
   return (
-    <Modal title={`Move everything in ${props.from}`} onClose={props.onClose}>
+    <Modal
+      title={`Move everything in ${props.from}`}
+      /* A no-op while the batch runs: Escape, the scrim and the ✕ all land here,
+         and the loop firing the requests lives in the app rather than in this
+         component — so closing would read as a cancel while every remaining
+         request kept going. */
+      onClose={busy ? () => {} : props.onClose}
+    >
       <form onSubmit={submit}>
         <Stack gap="sm">
-          <Text size="sm" c="dimmed">
-            Moves {n === 1 ? "this worktree" : `all ${n} worktrees`} into another
-            group. Nothing is created, deleted or checked out — only where the rows
-            sit in the rail changes. Each one loses the position you dragged it to,
-            because a position only means something inside one group.
-          </Text>
-          <Radio.Group value={to} onChange={setTo} label="Move to">
-            <Stack gap={6} mt={6}>
-              {props.targets.map((t) => (
-                <Radio key={t.value} value={t.value} label={t.label} />
-              ))}
-            </Stack>
-          </Radio.Group>
-          <Text size="xs" c="dimmed">
-            {n === 1 ? "Moving:" : `Moving ${n}:`}
-          </Text>
-          <BatchList>
-            {props.worktrees.map((label) => (
-              <Text key={label} size="xs" c="dimmed">
-                {label}
+          {n === 0 ? (
+            <Text size="sm" c="dimmed">
+              There is nothing in {props.from} any more — the last worktree left
+              it while this was open.
+            </Text>
+          ) : (
+            <>
+              <Text size="sm" c="dimmed">
+                Moves {n === 1 ? "this worktree" : `all ${n} worktrees`} into
+                another group. Nothing is created, deleted or checked out — only
+                where the rows sit in the rail changes. Each one loses the
+                position you dragged it to, because a position only means
+                something inside one group.
               </Text>
-            ))}
-          </BatchList>
+              <DetachedNote count={props.detached} verb="move" />
+              <Radio.Group value={to} onChange={setTo} label="Move to">
+                <Stack gap={6} mt={6}>
+                  {props.targets.map((t) => (
+                    <Radio key={t.value} value={t.value} label={t.label} />
+                  ))}
+                  <Radio value={NEW_TARGET} label="New group…" />
+                </Stack>
+              </Radio.Group>
+              {making && (
+                <TextInput
+                  label="Group name"
+                  placeholder="review"
+                  value={newName}
+                  maxLength={MAX_LANE_NAME_LEN}
+                  onChange={(e) => setNewName(e.currentTarget.value)}
+                  error={
+                    collides ? "This repo already has a group with that name" : null
+                  }
+                  data-autofocus
+                />
+              )}
+              <Text size="xs" c="dimmed">
+                {n === 1 ? "Moving:" : `Moving ${n}:`}
+              </Text>
+              <BatchList>
+                {props.worktrees.map((w) => (
+                  /* Keyed by id, not by the label: a display name is free text
+                     with no uniqueness constraint, so two rows can render the
+                     same string. */
+                  <Text key={w.id} size="xs" c="dimmed">
+                    {w.label}
+                  </Text>
+                ))}
+              </BatchList>
+            </>
+          )}
           <ErrorText error={error} />
-          <Button type="submit" loading={busy} disabled={chosen === null}>
-            {n === 1 ? "Move 1 worktree" : `Move ${n} worktrees`}
-          </Button>
+          {n > 0 && (
+            <Button type="submit" loading={busy} disabled={!ready}>
+              {n === 1 ? "Move 1 worktree" : `Move ${n} worktrees`}
+            </Button>
+          )}
         </Stack>
       </form>
     </Modal>
@@ -1385,8 +1474,10 @@ export function MoveLaneWorktreesDialog(props: {
  * refuses — `DELETE /api/worktrees/{id}` without `force` marks the row and
  * returns, leaving the checkout on disk — so a dirty worktree bins silently, and
  * the single-row flows in this app deliberately never let that happen. The
- * statuses are fetched while the dialog is open and reported per row, so the
- * batch says which checkouts carry work before it takes them out of the rail.
+ * statuses are fetched while the dialog is open and reported per row, and **the
+ * button waits for them**: a group large enough for the fan-out to be slow is
+ * exactly the one where binning before the badges arrive loses the warning this
+ * dialog exists to give.
  */
 export function TrashLaneWorktreesDialog(props: {
   /** Header text of the section being emptied. */
@@ -1395,6 +1486,8 @@ export function TrashLaneWorktreesDialog(props: {
   worktrees: Array<{ id: number; label: string }>;
   /** Whether the section also holds the main checkout, which is never binned. */
   mainExcluded: boolean;
+  /** Detached checkouts filed here that this cannot bin — see `DetachedNote`. */
+  detached: number;
   /** Fetch one worktree's git dirty state (the files blocking a later delete). */
   onStatus: (id: number) => Promise<WorktreeGitStatus>;
   onTrash: () => Promise<void>;
@@ -1409,16 +1502,29 @@ export function TrashLaneWorktreesDialog(props: {
     let cancelled = false;
     const ids = idKey === "" ? [] : idKey.split(",").map(Number);
     setChecking(true);
-    // In parallel, and failures ignored: an unavailable status (git error,
-    // checkout gone) must not block a bin, which is non-destructive anyway. That
-    // row simply carries no badge — the same degradation `TrashWorktreeDialog`
-    // takes for a single checkout.
-    void Promise.allSettled(ids.map((id) => props.onStatus(id))).then((results) => {
+    const found = new Set<number>();
+    // Bounded, not `Promise.allSettled` over the whole list. Each call runs git
+    // in a checkout on a machine that is already running this project's
+    // environments, and a thirty-worktree group would start thirty at once — the
+    // same contention argument that keeps the write loop in `App.tsx` sequential.
+    let next = 0;
+    const worker = async () => {
+      while (next < ids.length && !cancelled) {
+        const id = ids[next++];
+        try {
+          const status = await props.onStatus(id);
+          if (status.dirty) found.add(id);
+        } catch {
+          // An unavailable status (git error, checkout gone) must not block a
+          // bin, which is non-destructive anyway. That row simply carries no
+          // badge — the same degradation `TrashWorktreeDialog` takes for one.
+        }
+      }
+    };
+    void Promise.all(
+      Array.from({ length: Math.min(STATUS_CONCURRENCY, ids.length) }, worker),
+    ).then(() => {
       if (cancelled) return;
-      const found = new Set<number>();
-      results.forEach((r, i) => {
-        if (r.status === "fulfilled" && r.value.dirty) found.add(ids[i]);
-      });
       setDirty(found);
       setChecking(false);
     });
@@ -1433,67 +1539,93 @@ export function TrashLaneWorktreesDialog(props: {
   return (
     <Modal
       title={
-        n === 1
-          ? `Move 1 worktree from ${props.from} to the trash?`
-          : `Move ${n} worktrees from ${props.from} to the trash?`
+        n === 0
+          ? `Nothing left in ${props.from}`
+          : n === 1
+            ? `Move 1 worktree from ${props.from} to the trash?`
+            : `Move ${n} worktrees from ${props.from} to the trash?`
       }
-      onClose={props.onClose}
+      /* A no-op while the batch runs — see the same guard on the move dialog. */
+      onClose={busy ? () => {} : props.onClose}
     >
       <form onSubmit={submit}>
         <Stack gap="sm">
-          <Text size="sm" c="dimmed">
-            Nothing is deleted. Every checkout stays on disk and can be restored
-            from the trash in the rail. They are deleted for good when the
-            retention period runs out (Settings → General, off by default) or when
-            you delete them from the trash. The branches are always kept.
-          </Text>
-          {props.mainExcluded && (
+          {n === 0 ? (
             <Text size="sm" c="dimmed">
-              The main checkout stays where it is — it is the repository itself, so
-              it is never trashed.
+              There is nothing left to trash here — the last worktree left this
+              section while the dialog was open.
             </Text>
-          )}
-          {checking && (
-            <Group gap="xs">
-              <Loader size="xs" />
+          ) : (
+            <>
               <Text size="sm" c="dimmed">
-                Checking for uncommitted changes…
+                Nothing is deleted. Every checkout stays on disk and can be
+                restored from the trash in the rail. They are deleted for good
+                when the retention period runs out (Settings → General, off by
+                default) or when you delete them from the trash. The branches are
+                always kept.
               </Text>
-            </Group>
-          )}
-          {!checking && dirty.size > 0 && (
-            <Alert color="yellow" variant="light" p="sm">
-              <Text size="sm" fw={600}>
-                {dirty.size} of these {dirty.size === 1 ? "has" : "have"}{" "}
-                uncommitted changes
-              </Text>
-              <Text size="xs" c="dimmed" mt={2}>
-                Trashing keeps them — nothing is lost now. But a later permanent
-                delete refuses until those changes are reverted or discarded, so
-                the rows sit in the trash until you deal with them.
-              </Text>
-            </Alert>
-          )}
-          <BatchList>
-            {props.worktrees.map((w) => (
-              <Group key={w.id} gap={6} wrap="nowrap">
-                <Text size="xs" c="dimmed">
-                  {w.label}
+              {props.mainExcluded && (
+                <Text size="sm" c="dimmed">
+                  The main checkout stays where it is — it is the repository
+                  itself, so it is never trashed.
                 </Text>
-                {dirty.has(w.id) && (
-                  <Badge size="xs" color="yellow" variant="light">
+              )}
+              <DetachedNote count={props.detached} verb="trash" />
+              {checking && (
+                <Group gap="xs">
+                  <Loader size="xs" />
+                  <Text size="sm" c="dimmed">
+                    Checking for uncommitted changes…
+                  </Text>
+                </Group>
+              )}
+              {!checking && dirty.size > 0 && (
+                <Alert color="yellow" variant="light" p="sm">
+                  <Text size="sm" fw={600}>
+                    {dirty.size} of these {dirty.size === 1 ? "has" : "have"}{" "}
                     uncommitted changes
-                  </Badge>
-                )}
-              </Group>
-            ))}
-          </BatchList>
+                  </Text>
+                  <Text size="xs" c="dimmed" mt={2}>
+                    Trashing keeps them — nothing is lost now. But a later
+                    permanent delete refuses until those changes are reverted or
+                    discarded, so the rows sit in the trash until you deal with
+                    them.
+                  </Text>
+                </Alert>
+              )}
+              <BatchList>
+                {props.worktrees.map((w) => (
+                  <Group key={w.id} gap={6} wrap="nowrap">
+                    <Text size="xs" c="dimmed">
+                      {w.label}
+                    </Text>
+                    {dirty.has(w.id) && (
+                      <Badge size="xs" color="yellow" variant="light">
+                        uncommitted changes
+                      </Badge>
+                    )}
+                  </Group>
+                ))}
+              </BatchList>
+            </>
+          )}
           <ErrorText error={error} />
-          <Button type="submit" color="red" variant="light" loading={busy}>
-            {n === 1
-              ? "Move 1 worktree to trash"
-              : `Move ${n} worktrees to trash`}
-          </Button>
+          {n > 0 && (
+            <Button
+              type="submit"
+              color="red"
+              variant="light"
+              loading={busy}
+              /* Waits for the statuses. Binning before the badges land is
+                 binning without the warning, and the slowest fan-out is the
+                 biggest group — the case where it matters most. */
+              disabled={checking}
+            >
+              {n === 1
+                ? "Move 1 worktree to trash"
+                : `Move ${n} worktrees to trash`}
+            </Button>
+          )}
         </Stack>
       </form>
     </Modal>

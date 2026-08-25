@@ -5,6 +5,7 @@ import {
   bestFuzzyMatch,
   bulkMoveTargets,
   bulkTrashable,
+  detachedInSection,
   diagnosticsRun,
   freshRunName,
   fuzzyMatch,
@@ -1009,7 +1010,7 @@ describe("bulkMoveTargets", () => {
     // Ungrouped leads because that is where it sits in the rail, and the labels
     // read top-to-bottom the same way the user is looking at them.
     expect(bulkMoveTargets(three, "wip")).toEqual([
-      { value: "", label: `${UNGROUPED_LABEL} (no group)` },
+      { value: "", label: "No group" },
       { value: "review", label: "review" },
       { value: "done", label: "done" },
     ]);
@@ -1025,22 +1026,70 @@ describe("bulkMoveTargets", () => {
     ]);
   });
 
-  it("labels the ungrouped option so a lane of the same name cannot shadow it", () => {
-    // `UNGROUPED_LABEL` is itself a legal lane name, so a bare label would give
-    // two byte-identical options for two different destinations.
+  it("does not label the ungrouped option with the rail header it does not mean", () => {
+    // Two reasons, both in `bulkMoveTargets`: `UNGROUPED_LABEL` is itself a legal
+    // lane name (so a repo with a lane called "Worktrees" would offer two
+    // byte-identical options), and — the sharper one — the main checkout does not
+    // land under that header when it is ungrouped, it leads the rail in a pinned
+    // section of its own. Naming the header would be wrong about exactly the row
+    // a batch is most likely to surprise someone with.
     const targets = bulkMoveTargets([lane(UNGROUPED_LABEL, 0)], "other");
     expect(new Set(targets.map((t) => t.label)).size).toBe(targets.length);
     expect(targets.find((t) => t.value === "")?.label).not.toBe(UNGROUPED_LABEL);
   });
 
   it("is empty only for the ungrouped section of a repo with no lanes", () => {
-    // The one case with nowhere to go, and it disables the menu entry rather
-    // than opening a dialog with an empty picker. A *lane* always has somewhere:
-    // ungrouping is a destination, so a repo's only lane still offers it.
+    // The one case with no *existing* destination — and it does NOT disable the
+    // gesture: the dialog also offers "New group…", so the repo that has never
+    // defined a group can still file its whole rail into one. A *lane* always has
+    // somewhere: ungrouping is a destination, so a repo's only lane still offers it.
     expect(bulkMoveTargets([], "")).toEqual([]);
     expect(bulkMoveTargets([lane("review", 0)], "review")).toEqual([
-      { value: "", label: `${UNGROUPED_LABEL} (no group)` },
+      { value: "", label: "No group" },
     ]);
+  });
+});
+
+describe("detachedInSection", () => {
+  const lanes = [lane("review", 0)];
+
+  it("finds the detached rows a lane's batch will leave behind", () => {
+    // They are filed into "review" but render under Detached, so the batch never
+    // sees them — and their `lane` still says "review", so checking a branch out
+    // again puts them back in a group the user emptied. Both dialogs say so.
+    const wts = [
+      rw("/wts/a", { id: 2, lane: "review" }),
+      rw("/wts/det", { id: 3, lane: "review", branch: "(detached)" }),
+    ];
+    expect(railGroups(wts, lanes).find((g) => g.key === "review")!.worktrees)
+      .toHaveLength(1);
+    expect(detachedInSection(wts, lanes, "review").map((w) => w.path)).toEqual([
+      "/wts/det",
+    ]);
+  });
+
+  it("counts a dangling lane as ungrouped, the way railGroups does", () => {
+    // A row whose lane no longer exists is ungrouped on the read path, so the
+    // ungrouped section's batch is the one that would leave it behind.
+    const wts = [rw("/wts/det", { id: 2, lane: "ghost", branch: "(detached)" })];
+    expect(detachedInSection(wts, lanes, "review")).toEqual([]);
+    expect(detachedInSection(wts, lanes, "").map((w) => w.path)).toEqual([
+      "/wts/det",
+    ]);
+  });
+
+  it("never counts the main checkout or a trashed row", () => {
+    // Main leads the rail even while detached and is a member of nothing; a
+    // trashed row is already out of every section.
+    const wts = [
+      rw("/repo", { id: 1, is_main: true, branch: "(detached)" }),
+      rw("/wts/bin", {
+        id: 2,
+        branch: "(detached)",
+        trashed_at: "2026-01-01T00:00:00Z",
+      }),
+    ];
+    expect(detachedInSection(wts, lanes, "")).toEqual([]);
   });
 });
 

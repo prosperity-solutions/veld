@@ -677,9 +677,12 @@ export function railGroups(worktrees: Worktree[], lanes: Lane[]): RailGroup[] {
  * binning is not a lane move.
  *
  * An **empty** result happens in exactly one case — the ungrouped section of a
- * repo that has defined no lanes — and the menu renders it as a disabled entry
- * rather than opening a dialog with an empty picker. A real lane always has a
- * destination, because ungrouping is one.
+ * repo that has defined no lanes — and it does **not** disable the gesture: the
+ * dialog always offers "New group…" as well, so the repo with no groups at all
+ * can still file its whole rail into one. That is the case the single-row *Move
+ * to group* submenu already covers with its own "New lane…", and the batch would
+ * have refused exactly the repo the feature is most useful in. A real lane always
+ * has an existing destination anyway, because ungrouping is one.
  *
  * Rail order: the ungrouped option leads, then the lanes in their own order —
  * the same top-to-bottom the user is looking at while they choose.
@@ -693,12 +696,53 @@ export function bulkMoveTargets(
     .map((l) => ({ value: l.name, label: l.name }));
   if (from !== "") {
     // `patch_worktree` spells ungrouped as `lane: ""`, so that is the value.
-    // The label is **not** bare [`UNGROUPED_LABEL`]: that string is itself a
-    // legal lane name, so a repo with a lane called "Worktrees" would offer two
-    // byte-identical options for two different destinations.
-    targets.unshift({ value: "", label: `${UNGROUPED_LABEL} (no group)` });
+    //
+    // The label is **"No group"**, not [`UNGROUPED_LABEL`], and both halves of
+    // that matter. It does not name the header the rows land under, because for
+    // one row that is a lie: the main checkout leads the rail in a pinned section
+    // of its own once it is ungrouped, so "move these to Worktrees" would be
+    // wrong about exactly the row a batch is most likely to be surprised by. And
+    // `UNGROUPED_LABEL` is itself a legal lane name, so a repo with a lane called
+    // "Worktrees" would have offered two byte-identical options for two different
+    // destinations. (A lane literally called "No group" can still collide with
+    // this label — accepted: the *values* stay distinct, so the picker still
+    // resolves correctly, and it is a cosmetic ambiguity rather than a wrong
+    // write.)
+    targets.unshift({ value: "", label: "No group" });
   }
   return targets;
+}
+
+/**
+ * The detached checkouts filed into one rail section that a batch action will
+ * **not** touch.
+ *
+ * A detached HEAD overrides where a row belongs, so [`railGroups`] pulls those
+ * rows out of their lane and into the virtual Detached section — which means they
+ * are not in the section's member list and a batch never sees them. Their `lane`
+ * column still names the section, though, so checking a branch out again puts the
+ * row back into a group the user believes they emptied. This is what lets both
+ * batch dialogs say so up front rather than surprising them later.
+ *
+ * `lane` is the section's key. For the ungrouped section (`""`) a row counts if
+ * its lane is empty *or* names a lane this repo no longer defines — the same
+ * "cannot be placed, so it is ungrouped" rule [`railGroups`] applies.
+ */
+export function detachedInSection(
+  worktrees: Worktree[],
+  lanes: Lane[],
+  lane: string,
+): Worktree[] {
+  const known = new Set(lanes.map((l) => l.name));
+  return worktrees.filter(
+    (w) =>
+      !w.trashed_at &&
+      // The main checkout leads the rail even while detached and is never a
+      // member of anything — see `railGroups`.
+      !w.is_main &&
+      isDetached(w) &&
+      (lane === "" ? !w.lane || !known.has(w.lane) : w.lane === lane),
+  );
 }
 
 /**

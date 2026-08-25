@@ -61,6 +61,7 @@ import {
   bestFuzzyMatch,
   bulkMoveTargets,
   bulkTrashable,
+  detachedInSection,
   freshRunName,
   fuzzyMatch,
   laneDropTarget,
@@ -268,6 +269,7 @@ import {
   LaneNameDialog,
   Modal,
   MoveLaneWorktreesDialog,
+  type BatchMoveTarget,
   NewWorktreeDialog,
   RemoveRepoDialog,
   RenameWorktreeDialog,
@@ -2702,6 +2704,42 @@ function AppInner(props: {
     lane === "" ? UNGROUPED_LABEL : lane;
 
   /**
+   * How a batch move's *destination* is named in a toast.
+   *
+   * Not [`sectionLabel`]. Ungrouping is not "moving to Worktrees": the main
+   * checkout, which a lane can legitimately hold, leads the rail in a pinned
+   * section of its own once it is ungrouped rather than joining that header. The
+   * picker's own label makes the same distinction — see `bulkMoveTargets`.
+   */
+  const destinationLabel = (lane: string) =>
+    lane === "" ? "out of their group" : `to ${lane}`;
+
+  /**
+   * One toast for a batch's failures, not one per row.
+   *
+   * The realistic failure is not one bad row: another window deleting the
+   * destination lane makes *every* `patch_worktree` fail with `UnknownLane`, and
+   * a per-row `notifyError` then stacks twenty red toasts with no summary — which
+   * buries both the count and the reason it reports. The rows are named (capped,
+   * because a toast is not a list) and the last error carries the reason.
+   */
+  const notifyBatchFailure = (
+    verb: "move" | "trash",
+    failed: string[],
+    reason: unknown,
+  ) => {
+    const shown = failed.slice(0, 3).join(", ");
+    const rest = failed.length - 3;
+    const which = rest > 0 ? `${shown} and ${rest} more` : shown;
+    notifyError(
+      failed.length === 1
+        ? `Could not ${verb} ${which}`
+        : `Could not ${verb} ${failed.length} worktrees: ${which}`,
+      reason,
+    );
+  };
+
+  /**
    * Move every worktree in one rail section into another group, in one go.
    *
    * A client-side loop over `patchWorktree`, the same shape `trashAllDetached`
@@ -2723,21 +2761,25 @@ function AppInner(props: {
   const moveAllInSection = async (key: string, to: string) => {
     const members = sectionMembers(key);
     let moved = 0;
+    const failed: string[] = [];
+    let reason: unknown = null;
     for (const w of members) {
       try {
         await api.patchWorktree(w.id, { lane: to });
         moved += 1;
       } catch (e) {
-        notifyError(`Could not move ${worktreeLabel(w)}`, e);
+        failed.push(worktreeLabel(w));
+        reason = e;
       }
     }
     if (moved > 0) {
       notifyDone(
         moved === 1
-          ? `Moved 1 worktree to ${sectionLabel(to)}`
-          : `Moved ${moved} worktrees to ${sectionLabel(to)}`,
+          ? `Moved 1 worktree ${destinationLabel(to)}`
+          : `Moved ${moved} worktrees ${destinationLabel(to)}`,
       );
     }
+    if (failed.length > 0) notifyBatchFailure("move", failed, reason);
     await refresh();
   };
 
@@ -2751,12 +2793,15 @@ function AppInner(props: {
   const trashAllInSection = async (key: string) => {
     const members = bulkTrashable(sectionMembers(key));
     let trashed = 0;
+    const failed: string[] = [];
+    let reason: unknown = null;
     for (const w of members) {
       try {
         await api.deleteWorktree(w.id, false);
         trashed += 1;
       } catch (e) {
-        notifyError(`Could not move ${worktreeLabel(w)} to the trash`, e);
+        failed.push(worktreeLabel(w));
+        reason = e;
       }
     }
     if (trashed > 0) {
@@ -2766,6 +2811,7 @@ function AppInner(props: {
           : `Moved ${trashed} worktrees to the trash`,
       );
     }
+    if (failed.length > 0) notifyBatchFailure("trash", failed, reason);
     await refresh();
   };
 
@@ -2789,11 +2835,6 @@ function AppInner(props: {
     const move = (neighbour: Lane | undefined) =>
       void (neighbour && moveLaneTo(lane, neighbour.name));
     const members = sectionMembers(lane);
-    // Disabled rather than hidden, in both cases: a menu whose entries come and
-    // go teaches nobody that the action exists. The reasons differ — nothing to
-    // move, or nowhere to move it (only the ungrouped section of a repo with no
-    // lanes) — and the second is why the dialog can assume a non-empty picker.
-    const targets = bulkMoveTargets(lanes, lane);
     return showContextMenu([
       ...(isLane
         ? [
@@ -2820,7 +2861,13 @@ function AppInner(props: {
       {
         key: "lane-move-all",
         title: "Move all worktrees to…",
-        disabled: members.length === 0 || targets.length === 0,
+        // Only "nothing to move" disables this. Having no *existing* group to
+        // move into does NOT: the dialog offers "New group…" as well, so the
+        // repo that has never defined a group — the one this is most useful in
+        // — is not the one case the action refuses. Disabled rather than hidden,
+        // because a menu whose entries come and go teaches nobody that the
+        // action exists.
+        disabled: members.length === 0,
         onClick: () => setDialog({ kind: "move-lane-worktrees", lane }),
       },
       {
@@ -5511,11 +5558,27 @@ function AppInner(props: {
   const moveLaneWorktreesDialog = dialog.kind === "move-lane-worktrees" && (
     <MoveLaneWorktreesDialog
       from={sectionLabel(dialog.lane)}
-      worktrees={sectionMembers(dialog.lane).map(worktreeLabel)}
+      worktrees={sectionMembers(dialog.lane).map((w) => ({
+        id: w.id,
+        label: worktreeLabel(w),
+      }))}
       targets={bulkMoveTargets(lanes, dialog.lane)}
+      taken={lanes.map((l) => l.name)}
+      detached={detachedInSection(worktrees, lanes, dialog.lane).length}
       onClose={closeDialog}
-      onMove={async (to) => {
-        await moveAllInSection(dialog.lane, to);
+      onMove={async (target: BatchMoveTarget) => {
+        // Create-then-move is one gesture, the same way `new-lane` finishes the
+        // move it was opened from. The create is NOT caught here: a name the
+        // daemon refuses (a collision another window just made) has to keep the
+        // dialog open with the reason on the field, and `useSubmit` is what does
+        // that — swallowing it would move nothing and close as if it had worked.
+        if ("newLane" in target) {
+          if (!repo) return;
+          await api.createLane(repo.root, target.newLane);
+          await moveAllInSection(dialog.lane, target.newLane);
+        } else {
+          await moveAllInSection(dialog.lane, target.lane);
+        }
         closeDialog();
       }}
     />
@@ -5530,6 +5593,7 @@ function AppInner(props: {
       /* Only ever true for a lane the main checkout was filed into — the
          ungrouped section never holds it (it has a pinned section of its own). */
       mainExcluded={sectionMembers(dialog.lane).some((w) => w.is_main)}
+      detached={detachedInSection(worktrees, lanes, dialog.lane).length}
       onStatus={(id) => api.worktreeGitStatus(id)}
       onClose={closeDialog}
       onTrash={async () => {
