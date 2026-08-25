@@ -1179,6 +1179,26 @@ describe("moveWorktree", () => {
     expect(moveWorktree(withMain, "/wts/a", MAIN_LANE, 0)).toBeNull();
   });
 
+  it("can drop a worktree into a lane named after the default branch", () => {
+    // The other half of the key collision `MAIN_LANE` fixes, and it predates the
+    // batch actions: `moveWorktree` resolves its target by key, so while the
+    // pinned main section held the literal key `"main"` a drop aimed at a lane
+    // called `main` found that section first — pinned, so the move returned
+    // `null` and the worktree simply would not go in.
+    const groups = railGroups(
+      [
+        rw("/repo", { id: 1, is_main: true }),
+        rw("/wts/a", { id: 2 }),
+        rw("/wts/b", { id: 3, lane: "main" }),
+      ],
+      [lane("main", 0)],
+    );
+    const moved = moveWorktree(groups, "/wts/a", "main", 0);
+    expect(moved).not.toBeNull();
+    expect(moved!.lane).toBe("main");
+    expect(moved!.order).toContain("/wts/a");
+  });
+
   it("refuses a drop into a section that does not exist", () => {
     expect(moveWorktree(groups(), "/wts/a", "ghost", 0)).toBeNull();
   });
