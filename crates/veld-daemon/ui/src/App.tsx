@@ -2787,7 +2787,10 @@ function AppInner(props: {
    * the first refusal leaves the user with a half-moved group and no idea which
    * half.
    */
-  const moveAllInSection = async (key: string, to: string): Promise<number> => {
+  const moveAllInSection = async (
+    key: string,
+    to: string,
+  ): Promise<{ moved: number; failed: number }> => {
     const members = sectionMembers(key);
     let moved = 0;
     const failed: string[] = [];
@@ -2810,7 +2813,9 @@ function AppInner(props: {
     }
     if (failed.length > 0) notifyBatchFailure("move", failed, reason);
     await refresh();
-    return moved;
+    // Both halves, because "moved nothing" has two causes and they need opposite
+    // things said about them — see the create-then-move caller.
+    return { moved, failed: failed.length };
   };
 
   /**
@@ -5619,11 +5624,20 @@ function AppInner(props: {
             // different one while the dialog is open.
             if (!repo) throw new Error("no project is selected any more");
             await api.createLane(repo.root, target.newLane);
-            const moved = await moveAllInSection(dialog.lane, target.newLane);
+            const { moved, failed } = await moveAllInSection(
+              dialog.lane,
+              target.newLane,
+            );
             // The group exists either way, so say so when nothing followed it in
             // — the section can empty between the click and the loop, and a
             // silent close would leave an unexplained empty group in the rail.
-            if (moved === 0) {
+            //
+            // Not when the moves *failed*, though: `moveAllInSection` swallows
+            // per-row errors, so `moved === 0` covers both "there was nothing
+            // left" and "every single one was refused" — and reporting a success
+            // straight after its own `Could not move N worktrees` toast is worse
+            // than saying nothing.
+            if (moved === 0 && failed === 0) {
               notifyDone(`Created the group "${target.newLane}"`);
             }
           } else {

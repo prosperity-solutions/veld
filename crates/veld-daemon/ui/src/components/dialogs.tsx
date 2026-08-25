@@ -1424,6 +1424,10 @@ export function MoveLaneWorktreesDialog(props: {
   );
   const rows = useLatched(props.worktrees, busy);
   const n = rows.length;
+  // `bulkMoveTargets` offers "No group" only when the source *is* a group, so on
+  // the ungrouped section — the one most repos live in — there is no such
+  // destination and the copy must not advertise one.
+  const canUngroup = props.targets.some((t) => t.value === "");
   const ready =
     n > 0 &&
     (making
@@ -1454,9 +1458,9 @@ export function MoveLaneWorktreesDialog(props: {
             <>
               <Text size="sm" c="dimmed">
                 Moves {n === 1 ? "this worktree" : `all ${n} worktrees`}{" "}
-                somewhere else in the rail — into another group, or out of any
-                group. Nothing is created, deleted or checked out; only where the
-                rows sit changes. Each one loses the
+                somewhere else in the rail — into another group
+                {canUngroup ? ", or out of any group" : ""}. Nothing is created,
+                deleted or checked out; only where the rows sit changes. Each one loses the
                 position you dragged it to, because a position only means
                 something inside one group.
               </Text>
@@ -1571,7 +1575,16 @@ export function TrashLaneWorktreesDialog(props: {
         const id = ids[next++];
         try {
           const status = await props.onStatus(id);
-          if (status.dirty) found.add(id);
+          if (status.dirty) {
+            found.add(id);
+            // Published as each answer lands, not only at the gate and at
+            // completion. This is what makes the gate a gate: with one checkout
+            // git is slow to answer for, the other workers drain the queue and
+            // their findings still reach the list. Publishing only on settle
+            // froze the badges at the gate's snapshot while the notice below
+            // promised more were coming.
+            if (!cancelled) setDirty(new Set(found));
+          }
         } catch {
           // An unavailable status (git error, checkout gone) must not block a
           // bin, which is non-destructive anyway. That row simply carries no
@@ -1587,15 +1600,18 @@ export function TrashLaneWorktreesDialog(props: {
     // remaining checks find, which is what a race did: it published `found` once
     // and left the workers filling a set nothing would ever render again, so a
     // badge learned a second later was known and hidden.
+    // The gate only ungates — the badges are published by the workers above as
+    // they land, so there is nothing for it to snapshot.
     const gate = setTimeout(() => {
       if (cancelled) return;
-      setDirty(new Set(found));
       setChecking(false);
       setPending(true);
     }, STATUS_GATE_MS);
     void all.then(() => {
       if (cancelled) return;
       clearTimeout(gate);
+      // One last publish, so a `dirty` set is never left behind by a worker that
+      // resolved between the previous publish and here.
       setDirty(new Set(found));
       setChecking(false);
       setPending(false);
