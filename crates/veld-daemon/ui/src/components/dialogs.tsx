@@ -1610,8 +1610,9 @@ export function TrashLaneWorktreesDialog(props: {
     void all.then(() => {
       if (cancelled) return;
       clearTimeout(gate);
-      // One last publish, so a `dirty` set is never left behind by a worker that
-      // resolved between the previous publish and here.
+      // One last publish. Redundant while every dirty answer publishes itself
+      // above — kept as the backstop for the case that stops being true, since
+      // the failure it guards against (a badge known and never shown) is silent.
       setDirty(new Set(found));
       setChecking(false);
       setPending(false);
