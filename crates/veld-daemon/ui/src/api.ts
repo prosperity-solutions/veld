@@ -569,7 +569,16 @@ export interface Repo {
    * whatever daemon is *installed*. Same reason `display_name` carries a `?`.
    */
   sort_position?: number | null;
-  /** False when the repo can't be listed on disk right now (moved/deleted). */
+  /**
+   * False when the repo can't be listed on disk right now (moved/deleted, or
+   * git failing on it).
+   *
+   * **Not about the database.** It used to also go false when the daemon's
+   * reconciling write failed, which meant a damaged SQLite page showed a healthy
+   * repo as `repository unavailable` and hid its start/stop controls. The
+   * daemon's own health is one global condition — see `DbHealth` — because one
+   * broken file is not N broken repositories.
+   */
   available: boolean;
   worktrees: Worktree[];
   /**
@@ -1209,6 +1218,68 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return (await res.json()) as T;
 }
 
+/**
+ * A backup artifact as the daemon lists it (`veld_core::db::backup::Artifact`).
+ */
+export interface BackupArtifact {
+  path: string;
+  takenAt: string;
+  schemaVersion: number;
+  bytes: number;
+  ownerOnly: boolean;
+}
+
+/**
+ * The health of veld's *own* database, and of the copies it keeps of it.
+ *
+ * Mirrors `HealthView` in `crates/veld-daemon/src/dbhealth.rs`. Every field a
+ * stale daemon might not send is optional, and the states are compared as
+ * strings rather than as a union of literals for the same reason: a daemon newer
+ * than this bundle may name a state it has never heard of, and the renderer's job
+ * is then to say "something is wrong" rather than to crash or to claim health.
+ */
+export interface DbHealth {
+  checkedAt?: string | null;
+  database: {
+    /** `"ok"` · `"corrupt"` · `"io"` — treat anything but `"ok"` as a fault. */
+    state: string;
+    detail?: string;
+    firstSeen?: string | null;
+    lastSeen?: string | null;
+    hits: number;
+    path: string;
+  };
+  backups: {
+    /** `"ok"` · `"failing"` · `"overdue"` · `"off"` · `"unknown"`. */
+    state: string;
+    lastOk?: string | null;
+    lastError?: string | null;
+    lastAttempt?: string | null;
+    consecutiveFailures: number;
+    newest?: BackupArtifact | null;
+    intervalMinutes: number;
+  };
+  restore: {
+    /** What a restore would put back, already deep-checked by the daemon. */
+    candidate?: BackupArtifact | null;
+    /** Whether the daemon comes back on its own after the restore restarts it. */
+    restartsAutomatically: boolean;
+    /** The command that brings it back when it will not do so itself. */
+    restartHint?: string | null;
+  };
+  /** Present when nobody has been told about this fault yet. */
+  notify?: { id: string; title: string; body: string } | null;
+}
+
+export interface RestoreDbResult {
+  restoredFrom: string;
+  previousMovedTo?: string | null;
+  schemaVersion: number;
+  restartsAutomatically: boolean;
+  /** The command to run when the daemon will not come back on its own. */
+  restartHint?: string | null;
+}
+
 export const api = {
   environments: () => request<EnvironmentList>("/api/environments"),
   /** Pure read (no reconciliation) — kept for consumers that must not
@@ -1220,6 +1291,30 @@ export const api = {
    * by the daemon, so several clients polling stay cheap.
    */
   refreshRepos: () => request<RepoList>("/api/repos/refresh", { method: "POST" }),
+  /**
+   * Whether veld's own database is intact and being backed up. A GET, so it
+   * keeps answering on a daemon whose database is refusing writes.
+   */
+  dbHealth: () => request<DbHealth>("/api/db-health"),
+  /**
+   * Claim a pending fault notification, so several open windows raise one
+   * system banner between them rather than one each.
+   *
+   * `claimed: false` means another window got there first — **do not show the
+   * notification**. The daemon settles the race under a lock; the caller's job
+   * is to honour the answer.
+   */
+  markDbHealthNotified: (id: string) =>
+    request<{ claimed: boolean }>("/api/db-health/notified", {
+      method: "POST",
+      body: JSON.stringify({ id }),
+    }),
+  /**
+   * Put the newest restorable backup back. The daemon restarts itself
+   * afterwards, so the next few polls are expected to fail — that is the
+   * offline notice's job, not an error to report.
+   */
+  restoreDb: () => request<RestoreDbResult>("/api/db-health/restore", { method: "POST" }),
   importRepo: (path: string) =>
     request<Repo>("/api/repos/import", {
       method: "POST",

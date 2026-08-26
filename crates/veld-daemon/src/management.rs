@@ -26,9 +26,18 @@ const DASHBOARD_HTML: &str = include_str!("../assets/management-ui.html");
 const IDE_HTML: &str = include_str!(concat!(env!("OUT_DIR"), "/management-ui-ide.html"));
 
 /// Open the central database, mapping failures to a 500.
+///
+/// **Every router's "cannot open the database" path funnels here**, and the error
+/// is classified on the way past — the same reasoning as `desktop::db_err`'s
+/// downcast, at the other choke point. These call sites discard the error (they
+/// map it straight to a status), so without this a database that has stopped
+/// opening at all would be invisible to `dbhealth` except through the probe, and
+/// the whole point of folding in what other subsystems trip over is that they
+/// trip over it *sooner* than the next probe.
 pub(crate) fn open_db() -> Result<Db, StatusCode> {
     Db::open().map_err(|e| {
         warn!("failed to open veld database: {e}");
+        crate::dbhealth::note_error(&e);
         StatusCode::INTERNAL_SERVER_ERROR
     })
 }

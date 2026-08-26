@@ -46,6 +46,7 @@ pub async fn run_stats_sampler() {
         interval.tick().await;
         if let Err(e) = sample_once(&mut collector).await {
             warn!("stats sampling error: {e}");
+            crate::dbhealth::note_reported(&e);
         }
     }
 }

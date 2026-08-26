@@ -2,6 +2,7 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "rea
 import {
   api,
   runRef,
+  type DbHealth,
   type EmojiHolder,
   type EnvironmentList,
   type ExtensionSpec,
@@ -249,6 +250,8 @@ import {
   setBrowserPolicy,
 } from "./panes/browserHost";
 import { watchOverlays } from "./panes/overlayGuard";
+import { DbHealthBanner } from "./dbhealth/Banner";
+import { noticeFor } from "./dbhealth/model";
 import {
   StartConfig,
   defaultStartSelection,
@@ -265,6 +268,7 @@ import { TopBarExtensions, useExtensionStatus } from "./components/Extensions";
 import {
   ChangeMarkerDialog,
   ConfirmDeleteWorktreeDialog,
+  DatabaseHealthDialog,
   ImportRepoDialog,
   LaneNameDialog,
   Modal,
@@ -879,6 +883,8 @@ function AppInner(props: {
   const [sharesStale, setSharesStale] = useState(false);
   const [stats, setStats] = useState<StatsResponse | null>(null);
   const [offline, setOffline] = useState(false);
+  /** Health of veld's *own* database. `null` until the first answer. */
+  const [dbHealth, setDbHealth] = useState<DbHealth | null>(null);
   // Runs mode does its own polling on its own cadence, so the diagnostics reads
   // below are fetched only while IDE mode is the one on screen.
   const wantRunState = mode === "ide";
@@ -900,6 +906,13 @@ function AppInner(props: {
     const extras = wantRunState
       ? Promise.allSettled([api.shares(), api.stats()])
       : null;
+    // Rides the same tick, `allSettled`-style for the same reason shares and
+    // stats do: this must never decide the offline banner, and an older daemon
+    // with no such endpoint must leave the rest of the poll intact rather than
+    // reading as "the daemon is gone". A rejection keeps the previous value —
+    // `null` on a daemon that has never answered, which `noticeFor` treats as
+    // "nothing to say".
+    const healthRequest = api.dbHealth();
     try {
       // refreshRepos (not the plain GET): reconciles worktree rows with git
       // so out-of-app `git worktree add/remove` appears on the next poll.
@@ -912,6 +925,13 @@ function AppInner(props: {
       setOffline(false);
     } catch {
       setOffline(true);
+    }
+    try {
+      setDbHealth(await healthRequest);
+    } catch {
+      // Deliberately silent. The offline notice already covers a daemon that is
+      // not answering at all, and a daemon too old for this endpoint is not a
+      // fault to report.
     }
     if (!extras) return;
     const [sharesResult, statsResult] = await extras;
@@ -2176,6 +2196,8 @@ function AppInner(props: {
     | { kind: "settings" }
     | { kind: "shortcuts" }
     | { kind: "remove-repo"; repo: Repo }
+    /** Veld's own database: what is wrong with it, and putting a backup back. */
+    | { kind: "db-health" }
     | { kind: "search" }
     /**
      * Values this machine owes the project. `retry` re-fires the start that
@@ -4227,6 +4249,12 @@ function AppInner(props: {
   useEffect(
     () =>
       desktopApp?.onNotifyClick?.(({ worktreeId, sessionId }) => {
+        // A notification that named no pane (veld's own database, say) echoes
+        // back a zero id and an empty session. The window has already been
+        // raised by the shell, which is the whole of the response — routing
+        // that through `focusPane` would hunt for worktree 0 and fetch a layout
+        // for it.
+        if (!worktreeId || !sessionId) return;
         void focusPane(worktreeId, sessionId);
       }) ?? (() => {}),
     [],
@@ -5488,6 +5516,47 @@ function AppInner(props: {
   // it the moment there is a project. (This gate lived on `TopBar`'s own `unreadNews`
   // before the bar was restructured, and moved here with the dot.)
   const unreadNews = repos.length === 0 ? 0 : promotions.unread;
+
+  /** What, if anything, to say about veld's own database. See `dbhealth/model`. */
+  const dbNotice = useMemo(() => noticeFor(dbHealth), [dbHealth]);
+
+  // The OS-level half of the banner, so a fault that starts while the window is
+  // in the background is not discovered tomorrow.
+  //
+  // **Claimed daemon-side before it is shown**, which is what keeps several open
+  // windows to one banner between them: the daemon stops offering `notify` once
+  // any client has claimed that id, and re-offers it only after its own cooldown.
+  // The claim is deliberately made *before* `showSystemNotification` — a
+  // notification the OS silently refuses (Do Not Disturb, no permission) must not
+  // leave the id unclaimed for the next poll to try again five seconds later.
+  const notifyId = dbNotice.notify?.id ?? null;
+  useEffect(() => {
+    const pending = dbNotice.notify;
+    if (!pending) return;
+    let cancelled = false;
+    void (async () => {
+      let claimed = true;
+      try {
+        // The daemon settles the race between windows under a lock and answers
+        // whether *this* one won. Honour it: showing the banner regardless is
+        // what made "one notification between all your windows" a claim the
+        // code did not keep.
+        claimed = (await api.markDbHealthNotified(pending.id)).claimed;
+      } catch {
+        // Failing to reach the daemon is not a reason to stay quiet — the daemon
+        // fails open here too, for the same reason: the conditions that produce
+        // these faults are the conditions that stop writes landing.
+      }
+      if (cancelled || !claimed) return;
+      showSystemNotification({ title: pending.title, body: pending.body });
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // Keyed on the id, not the object: the payload is rebuilt every poll and
+    // depending on it would re-fire this every five seconds.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [notifyId]);
   const overflowMenu = (
     <Menu position="bottom-end" width={220}>
       <Menu.Target>
@@ -6166,8 +6235,22 @@ function AppInner(props: {
         configVarsButton={configVarsButton}
         nodeActions={nodeActionsButton}
         hideDisabled={hideDisabled}
+        dbMarker={dbNotice.marker}
+        onOpenDbHealth={() => setDialog({ kind: "db-health" })}
       />
 
+      {/* Veld's own state, above the repo-level notices: if the database is
+          damaged, everything below it is reporting from a file that cannot be
+          trusted. Not dismissible — the condition is continuous, and a warning
+          that can be waved away is how this went unnoticed for 17 hours the
+          first time. */}
+      <DbHealthBanner
+        notice={dbNotice}
+        onDetails={() => setDialog({ kind: "db-health" })}
+        onRestore={
+          dbNotice.canRestore ? () => setDialog({ kind: "db-health" }) : undefined
+        }
+      />
       {offline && (
         <div
           style={{
@@ -6456,6 +6539,46 @@ function AppInner(props: {
             await refresh();
             closeDialog();
           }}
+        />
+      )}
+      {dialog.kind === "db-health" && dbHealth && (
+        <DatabaseHealthDialog
+          health={dbHealth}
+          restartHint={dbHealth.restore?.restartHint ?? undefined}
+          onClose={closeDialog}
+          // **`dbNotice.canRestore`, not just "is there a candidate".** The
+          // model deliberately withholds the action in the backups-failing state
+          // (`model.ts`: the live database is fine there, and putting an old copy
+          // over it would *lose* state) — keying on the candidate alone put a red
+          // "Restore the backup from …" button in a dialog reached from that
+          // state's own marker, where the daemon now refuses it with a 409.
+          onRestore={
+            dbNotice.canRestore && dbHealth.restore?.candidate
+              ? async () => {
+                  const result = await api.restoreDb();
+                  closeDialog();
+                  // The daemon is about to stop answering. Say so where the
+                  // user is already looking, and let the offline notice cover
+                  // the gap — its "Retrying…" is exactly right here, and the
+                  // first poll that lands after the restart carries the
+                  // restored state.
+                  notifyDone(
+                    result.restartsAutomatically
+                      ? "Database restored — Veld is restarting"
+                      : // Name the command when there is a safe one to name; on a
+                        // dev instance there is not (see `dbhealth::restart_hint`
+                        // — the obvious `veld start` can recreate the database and
+                        // undo the restore), so point at the dialog instead of
+                        // inventing an instruction.
+                        result.restartHint
+                        ? `Database restored — start the daemon again: ${result.restartHint}`
+                        : "Database restored — this daemon was part of a veld run, so start that run again to come back on the restored database",
+                  );
+                  setOffline(true);
+                  setDbHealth(null);
+                }
+              : undefined
+          }
         />
       )}
       {dialog.kind === "rename" && (
@@ -7133,6 +7256,9 @@ function TopBar(props: {
   /** Open a URL in a browser pane — for a status badge whose link asks for
    *  `open_in: "pane"`. Absent when there is no layout to open into. */
   onOpenInPane: ((url: string) => void) | undefined;
+  /** Short label for a fault in veld's own database, or `null` for none. */
+  dbMarker: string | null;
+  onOpenDbHealth: () => void;
 }) {
   const { worktree, run } = props;
   // One poll for the whole slot, not one per cluster: this component renders
@@ -7403,6 +7529,24 @@ function TopBar(props: {
               />
             </>
           )}
+          {/* **The database marker sits where the wrong label used to.** During
+              the incident this chip read `repository unavailable` over a repo in
+              perfect health, because a failed database write was folded into
+              `available`. It no longer is — so a database fault now says what it
+              actually is, in the same place somebody would look after seeing the
+              old wrong answer. Clickable, because unlike the other two states
+              there is something to do about it. */}
+          {props.dbMarker && (
+            <button
+              type="button"
+              className="chip"
+              style={{ color: "var(--warn)", cursor: "pointer" }}
+              title="Veld's own database is in trouble — open the details"
+              onClick={props.onOpenDbHealth}
+            >
+              {props.dbMarker}
+            </button>
+          )}
           {!canRun && (
             <span
               className="chip"
@@ -7410,7 +7554,7 @@ function TopBar(props: {
               title={
                 repoAvailable
                   ? "No veld.json in this worktree"
-                  : "Repository directory not found on disk — showing last known state"
+                  : "Repository directory not found on disk — showing last known state. Veld's own database is reported separately."
               }
             >
               {repoAvailable ? "no veld config" : "repository unavailable"}

@@ -202,7 +202,7 @@ veld stop --name dev
 | `veld settings set <key> <value> [--json]` | Change one setting. Values are written bare (`true`, `60`, `/bin/bash`); a list takes JSON or commas. A number outside its range is **clamped rather than refused**, and the clamp is reported |
 | `veld settings unset <key> [--json]` | Put one setting back on its default |
 | `veld settings describe <key> [--json]` | What a setting does, its type, its default, and every value it accepts — including whether an out-of-range number will be clamped |
-| `veld backup [--dir D] [--json]` | Every copy of Veld's database: when it was taken, its schema version, its size, and whether it can actually be restored. Works when the database itself will not open |
+| `veld backup [--dir D] [--json]` | Every copy of Veld's database: when it was taken, its schema version, its size, and whether it can actually be restored. Warns above the table when nothing has been written for two intervals. Works when the database itself will not open |
 | `veld backup now [--dir D] [--json]` | Take a copy immediately, outside the daemon's schedule. Retention still applies |
 | `veld backup restore [PATH] [--dir D] [--force] [-y] [--json]` | Put a copy back. With no `PATH`, the newest **usable** one — not simply the newest file. The database being replaced is renamed, never deleted. Refuses while the daemon is running unless `--force` |
 | `veld init` | Create a new veld.json (veld also reads veld.jsonc) |
@@ -441,6 +441,65 @@ veld settings backup            # the five settings, with their bounds
 check, and names `veld backup restore` when the database will not open — which is
 the state the whole thing exists for. The database being replaced is renamed, never
 deleted: it is the only evidence of what went wrong.
+
+### When the database itself goes wrong
+
+A damaged SQLite file does not announce itself. Most of it keeps working — reads
+and writes that never touch the damaged page succeed — so the failure mode is not
+a crash but *silence*, with backups quietly stopping because the thing being
+copied cannot be read. That is the shape of a real incident this now covers: one
+page of one table went bad, the daemon logged the same error 440 times over 17
+hours, no copy was written in all that time, and the only visible symptom was one
+project labelled `unavailable` in the IDE.
+
+So Veld watches its own file rather than waiting to trip over it:
+
+- **The daemon asks.** Every five minutes it runs SQLite's own `quick_check`
+  against the live database — about 15 ms — so damage is found in a table nothing
+  happens to be reading. Errors that other parts of the daemon hit are folded in
+  too, so the first symptom of a fault you *do* touch is recorded immediately.
+- **Backups are judged by whether they are actually happening.** Every attempt
+  records its outcome, including the one that cannot open the database at all —
+  the arm whose silence hid the incident — so a failing schedule is reportable
+  within an interval instead of after half a day. A copy written in the last two
+  intervals still settles it in the other direction, whoever wrote it: a
+  `veld backup now` that succeeds means you are protected, and the reason the
+  schedule failed is still on the details screen. `veld backup` prints a warning
+  above the table when nothing has been written for two intervals, and says it in
+  `--json` too.
+- **The IDE says so, once.** A banner names the fault, what is at risk and how old
+  the newest usable backup is, with a *Restore newest backup…* button beside it.
+  It is not dismissible while the fault is live. A system notification is raised
+  the first time, so a fault that starts while the window is in the background is
+  not discovered tomorrow — claimed daemon-side, so several open windows produce
+  one banner between them and not one each.
+- **Restoring asks twice, on purpose.** The IDE is served by the same daemon your
+  own dev app talks to, so a page on that origin can reach this API — which is
+  fine for renaming a worktree and not fine for replacing the whole database. So
+  a restore only runs when a fault is actually recorded, and only after you
+  confirm in a **native dialog** that a web page can neither draw nor dismiss. On
+  a machine with no way to show one, it refuses and points at
+  `veld backup restore`.
+- **Restoring is one click, and honest about its cost.** It puts back the newest
+  copy that passes a full integrity check — never merely the newest file — and the
+  dialog states the age of that copy, because everything Veld learned since it was
+  taken is lost. That includes run state: a copy carries `runs`, `nodes` and
+  `environments`, so an environment started *after* it was taken has no row in it
+  and Veld would lose track of one still running — stop your environments before
+  restoring. The daemon then restarts itself — when something is managing it, which
+  Veld checks rather than assumes, and says which case you are in before you commit
+  — and comes back on the restored file. Your terminals are left alone either way,
+  since their PTYs belong to their own holder processes.
+
+`veld doctor`'s database row asks the same question the daemon does. It used to
+report `Database OK` for any file that *opened*, which a damaged one does — that
+row now runs the integrity check and says `Database DAMAGED` with what SQLite
+said.
+
+A repository being unavailable and Veld's database being damaged are now
+different things, said in different places. The `repository unavailable` label
+means what it says — the checkout is gone from disk, or git cannot read it — and
+never that a write failed.
 
 Two things worth knowing about the copies themselves. Each carries everything the
 database does, **including your relay tokens** — Veld writes one readable only by

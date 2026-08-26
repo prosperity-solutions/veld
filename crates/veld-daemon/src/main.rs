@@ -1,5 +1,6 @@
 mod backup;
 mod broadcaster;
+mod dbhealth;
 mod feedback_server;
 mod gc;
 mod monitor;
@@ -265,6 +266,21 @@ async fn main() -> Result<()> {
     // versa.
     let backup_handle = tokio::spawn(backup::run_backup_scheduler());
 
+    // Whether the database is still intact, and whether those backups are
+    // actually happening. Its own task for the same reason the backup scheduler
+    // is: the interval is unrelated (a `quick_check` is cheap enough to run far
+    // more often than a backup is worth taking), and a probe that stopped
+    // because the *backup* path failed would be a health check that goes quiet
+    // exactly when it matters. See `dbhealth`'s module docs for the incident.
+    // **Every `Db::open()` failure in this process now reports itself.** The
+    // daemon opens the database from more than two dozen places and several of
+    // them map the error straight to a status; installing one observer covers all
+    // of them, where wiring each call site missed sites in three review rounds
+    // running. Per-query failures still report at their own funnels.
+    veld_core::db::observe_open_failures(dbhealth::note_error);
+    dbhealth::mark_start();
+    let dbhealth_handle = tokio::spawn(dbhealth::run_probe());
+
     // Which shell that resolution — and every terminal — uses. Published from
     // here because `veld_core::user_path` is linked into the gateway and the CLI
     // too, neither of which has a database to read a setting from; a failure to
@@ -376,6 +392,7 @@ async fn main() -> Result<()> {
     monitor_handle.abort();
     gc_handle.abort();
     backup_handle.abort();
+    dbhealth_handle.abort();
     stats_handle.abort();
     dashboard_ports_handle.abort();
     user_path_handle.abort();

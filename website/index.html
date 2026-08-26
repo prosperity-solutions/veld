@@ -501,7 +501,7 @@ veld share <span class="kw">--web</span>
         <div class="cli-row"><code>veld ui</code><span>Open the management dashboard</span></div>
         <div class="cli-row"><code>veld feedback next</code><span>Pull the next in-browser review comment (agent-facing)</span></div>
         <div class="cli-row"><code>veld doctor / gc</code><span>Check extension status; clean up stale state</span></div>
-        <div class="cli-row"><code>veld backup [now / restore]</code><span>Copies of veld's own state database, and putting one back</span></div>
+        <div class="cli-row"><code>veld backup [now / restore]</code><span>Copies of veld's own state database, and putting one back — and it says when copies have stopped being written</span></div>
       </div>
     </div>
   </section>
@@ -570,7 +570,7 @@ veld share <span class="kw">--web</span>
         <div class="comp"><div class="name">veld-helper</div><p>Manages DNS entries and Caddy routes over a minimal Unix socket. Privileged or unprivileged.</p></div>
         <div class="comp"><div class="name">veld-gateway</div><p>Public web gateway (one Docker container). Joins a share over iroh and reverse-proxies it onto a public URL.</p></div>
         <div class="comp"><div class="name">veld-share</div><p>Shared P2P transport built on iroh (QUIC, NAT hole-punching). Used by the daemon and the gateway.</p></div>
-        <div class="comp"><div class="name">SQLite</div><p>All state — runs, registry, logs, feedback, tokens — in one WAL-mode database. Versioned, migrates forward.</p></div>
+        <div class="comp"><div class="name">SQLite</div><p>All state — runs, registry, logs, feedback, tokens — in one WAL-mode database. Versioned, migrates forward. Backed up on an interval, integrity-checked on a timer, and restorable in one click when it isn't.</p></div>
       </div>
 
       <div class="diagram" role="img" aria-label="Architecture. Local: the veld CLI drives the daemon and helper; the helper configures Caddy, which terminates HTTPS and reverse-proxies your services on clean URLs; SQLite holds all state. Sharing over iroh: veld share connects your daemon straight to a colleague's Veld — no gateway involved (an optional self-hosted relay may sit in between). Only veld share --web routes through a veld-gateway to reach anyone in a browser.">

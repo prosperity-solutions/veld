@@ -74,6 +74,14 @@ fn run_once() {
             // The one error worth being loud about: if the database cannot be
             // opened, the backups already on disk are the whole remaining story.
             tracing::warn!("backup skipped — cannot open the database: {e}");
+            // **Recorded, not merely logged, and this is the arm the whole health
+            // feature was filed against.** `record` below writes the outcome into
+            // the database — which is unopenable here, by definition — so this arm
+            // used to leave `backup.lastRun` holding its last *successful* stamp
+            // while every attempt failed. It did that for 17 hours, and every
+            // surface that reads that row said backups were fine.
+            crate::dbhealth::note_backup_failure(&e);
+            crate::dbhealth::note_error(&e);
             return;
         }
     };
@@ -130,6 +138,7 @@ fn run_once() {
                     plan.dir.display(),
                 );
             }
+            crate::dbhealth::note_backup_success(report.taken_at);
             record(&db, serde_json::json!({ "ok": true, "path": report.path }));
         }
         Err(e) => {
@@ -137,6 +146,7 @@ fn run_once() {
             // indistinguishable from one that is working, right up until somebody
             // needs it. `veld doctor` reads this back.
             tracing::warn!("backup failed: {e}");
+            crate::dbhealth::note_backup_failure(&e);
             record(
                 &db,
                 serde_json::json!({ "ok": false, "error": e.to_string() }),
@@ -189,6 +199,7 @@ pub fn plan(db: &Db) -> Option<BackupPlan> {
     }
     let Some(dir) = prefs.dir.clone() else {
         tracing::warn!("backup skipped — no backup directory could be determined");
+        crate::dbhealth::note_backup_failure("no backup directory could be determined");
         return None;
     };
     let source = Db::default_path().ok()?;
@@ -201,6 +212,10 @@ pub fn plan(db: &Db) -> Option<BackupPlan> {
         Ok(true) => {}
         Err(e) => {
             tracing::warn!("backup skipped — could not claim the interval: {e}");
+            // A claim is a write, so this failing is usually the database being
+            // in trouble rather than a scheduling nicety.
+            crate::dbhealth::note_backup_failure(&e);
+            crate::dbhealth::note_error(&e);
             return None;
         }
     }

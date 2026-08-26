@@ -67,6 +67,12 @@ pub fn list(dir: Option<PathBuf>, json: bool) -> i32 {
         .map(|a| (a, backup::inspect(&a.path)))
         .collect();
 
+    // **Is anything still writing these?** The table answers "what is there",
+    // and during the incident that produced this warning it answered it
+    // perfectly: twenty-one healthy artifacts, the newest seventeen hours old,
+    // every row saying `ok`. Nothing on the screen said backups had stopped.
+    let overdue = overdue_verdict(artifacts.first());
+
     if json {
         let rows: Vec<serde_json::Value> = checked
             .iter()
@@ -91,12 +97,20 @@ pub fn list(dir: Option<PathBuf>, json: bool) -> i32 {
                 "directorySource": source,
                 "supportedSchemaVersion": Db::supported_schema_version(),
                 "backups": rows,
+                // Present and `null` when backups are keeping up, so an agent can
+                // tell "current" from "this field does not exist on this version".
+                "overdue": overdue,
             })
         );
         return 0;
     }
 
     println!("{} {}", output::bold("Backups in"), dir.display());
+    // Above the table, not below it: this is the one line that changes what the
+    // reader does next.
+    if let Some(reason) = &overdue {
+        output::print_error(&format!("  {reason}"), json);
+    }
     // **Say when this is a guess.** The fallback exists for the case where the
     // database will not open — which is also the case where `backup.dir` cannot be
     // read, so somebody who pointed their copies at an external drive is being shown
@@ -176,6 +190,103 @@ pub fn list(dir: Option<PathBuf>, json: bool) -> i32 {
         ),
     }
     0
+}
+
+/// Whether the newest backup is old enough that something has stopped working,
+/// as a sentence to print, or `None` when backups are keeping up.
+///
+/// Judged from the filesystem and the settings only — no `kv` read — because the
+/// state this exists to report is frequently a database that will not open, and
+/// a check that needs the database to say "the database is in trouble" is not a
+/// check.
+///
+/// Shares [`backup::overdue_after`] with the daemon's probe, so the two agree on
+/// **how long is too long**. They deliberately differ on the two cases where
+/// there is no usable timestamp to measure — nothing written yet, or a
+/// future-dated newest artifact: the daemon waits for its own uptime to exceed
+/// the window (it may have started seconds ago), while this has no uptime to
+/// reason from and answers immediately. A person who typed `veld backup` is
+/// asking now and deserves the impatient answer.
+fn overdue_verdict(newest: Option<&backup::Artifact>) -> Option<String> {
+    // One open, both questions: the settings and whether the database holds
+    // anything worth copying. Two opens could not disagree usefully (both default
+    // permissively) but it is a second point of failure for no gain.
+    let db = open_existing_db();
+    let prefs = db.as_ref().map(|db| db.backup_prefs());
+    // A disabled schedule is a choice, not a fault. Unknown (the database will
+    // not open) is treated as enabled: a broken database must not be able to
+    // silence the warning about its own backups.
+    if let Some(prefs) = &prefs
+        && !prefs.enabled
+    {
+        return None;
+    }
+    // **A database with nothing in it is owed no backup**, the same guard the
+    // daemon's probe carries (`dbhealth::check_overdue_backup`) and for the same
+    // reason: `backup::plan` deliberately declines to copy an empty one, so
+    // reporting that as a fault is a warning about a machine behaving exactly as
+    // designed. Without this, `veld backup` on a fresh install printed "No backup
+    // has ever been written" directly above its own "No backups yet — the daemon
+    // writes one on the interval" line.
+    //
+    // Unreadable counts as "has state", so a broken database cannot silence the
+    // warning about its own backups.
+    let holds_state = db
+        .as_ref()
+        .map(|db| db.holds_user_state().unwrap_or(true))
+        .unwrap_or(true);
+    if !holds_state {
+        return None;
+    }
+    let interval = prefs
+        .as_ref()
+        .map(|p| p.interval_minutes)
+        .unwrap_or(veld_core::db::DEFAULT_BACKUP_INTERVAL_MINUTES);
+    let limit = backup::overdue_after(interval);
+
+    let now = chrono::Utc::now();
+    // **An empty directory is the strongest form of the thing this reports.** The
+    // first version returned `None` here, and `None` is documented as "backups are
+    // keeping up" — so a machine that had *never* written one answered
+    // `"overdue": null` from the surface built to say so. Gated on uptime-free
+    // reasoning: if the schedule is on and nothing is there, it is overdue.
+    let Some(newest) = newest else {
+        return Some(format!(
+            "No backup has ever been written — one is due every {interval} minute(s). \
+             The reason is in the daemon log (`veld doctor` prints its location)."
+        ));
+    };
+    // `taken_at <= now` as well as the upper bound: a future-dated artifact (an
+    // NTP step, a NAS folder written by a machine whose clock runs ahead) makes
+    // `age` negative, which satisfies any `<= limit` test and would report a
+    // stopped schedule as healthy forever. `backup::newest_passing` guards the
+    // same way.
+    if newest.taken_at > now {
+        return Some(format!(
+            "The newest backup is dated in the future ({}) — check this machine's \
+             clock, and treat the schedule as unverified.",
+            newest.taken_at.to_rfc3339()
+        ));
+    }
+    let age = now - newest.taken_at;
+    if age <= limit {
+        return None;
+    }
+    // **Deliberately does not point at `veld doctor`.** Doctor judges staleness
+    // with its own, more generous rule (four intervals, floored at twelve hours
+    // — see `backup::overdue_after` for why the two differ on purpose), so
+    // between two and twelve hours this line would have said "doctor says why"
+    // and doctor would have answered "Database backup OK". The daemon log is the
+    // surface that actually holds the reason.
+    // `describe_age` appends " old" (its first caller was doctor's "newest 17
+    // hour(s) old" row), so this reads around it rather than producing
+    // "written for 17 hour(s) old".
+    Some(format!(
+        "The newest backup is {} — one is due every {interval} minute(s). \
+         Backups have stopped: the reason is in the daemon log \
+         (`veld doctor` prints its location).",
+        output::describe_age(age)
+    ))
 }
 
 /// `veld backup now` — take one immediately, outside the daemon's schedule.
@@ -409,6 +520,23 @@ pub async fn restore(
 
     match backup::restore(&chosen, &target) {
         Ok(report) => {
+            // **Clear the daemon's "we already told them" marker.** It lives beside
+            // the database (`db-health.json`) precisely so it survives a restart,
+            // and it keys on the *kind* of fault — so leaving a stale `corrupt`
+            // entry behind means a volume that damages the restored file within the
+            // cooldown raises no system notification at all. The daemon does this
+            // itself when the IDE drives the restore; this is the other path, and
+            // it is the one a headless machine is told to use.
+            if let Some(marker) = target.parent().map(|d| d.join("db-health.json"))
+                && let Err(e) = std::fs::remove_file(&marker)
+                && e.kind() != std::io::ErrorKind::NotFound
+            {
+                output::print_info(&format!(
+                    "  Note: could not clear {} ({e}) — a repeat fault may not raise a \
+                     system notification for a while.",
+                    marker.display()
+                ));
+            }
             if json {
                 // The restart instruction is part of the *result*, not chrome. An
                 // agent driving this surface has no other signal that the daemon is
