@@ -217,6 +217,8 @@ Controls which Veld capabilities are injected into `long_running` nodes' HTML re
 
 In this example, the project disables the feedback overlay by default, and the `api` node also disables client logs. But the `api:local` variant re-enables the feedback overlay.
 
+**The machine can override all of this.** The `feedback.suppressOverlay` Veld setting (`veld settings set feedback.suppressOverlay true`) forces the feedback overlay off on every routed site, for every project and node, even one whose config asks for it back on — for setups that use Veld purely as an orchestrator and don't collect feedback. It applies to routed sites you start after changing it, and leaves the client-log collector and the `/__veld__/*` routes alone.
+
 ### `proxy`
 
 Reverse-proxy header rules applied when forwarding requests to a service and responses back to the browser. Rules apply to **both** the local Caddy reverse proxy (local dev) and the public web gateway (`veld share --web`). They do **not** apply to direct iroh peer sharing (`veld share` without `--web`) — that path is a transport-level byte splice with no HTTP layer, so header rules cannot be applied there. The same override hierarchy applies: variant > node > project.

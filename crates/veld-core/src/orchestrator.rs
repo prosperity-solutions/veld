@@ -3620,6 +3620,21 @@ async fn execute_node_isolated(
     })
 }
 
+/// Apply the machine-wide feedback-overlay opt-out to a node's resolved feature flags.
+///
+/// When `suppressed`, the feedback overlay is forced off regardless of what the
+/// project's `veld.json` asked for — the whole point of `feedback.suppressOverlay`.
+/// The client-log collector and `/__veld__/*` routes are left alone.
+fn apply_feedback_overlay_override(
+    mut features: config::ResolvedFeatures,
+    suppressed: bool,
+) -> config::ResolvedFeatures {
+    if suppressed {
+        features.feedback_overlay = false;
+    }
+    features
+}
+
 /// Execute a `start_server` node without `&self`. Returns the `ServerHandle`.
 async fn execute_start_server_isolated(
     ctx: &NodeExecutionContext,
@@ -3728,7 +3743,14 @@ async fn execute_start_server_isolated(
     .await;
 
     // Resolve per-node feature flags (variant > node > project > default).
-    let features = resolved.features;
+    //
+    // The machine-wide opt-out wins over everything below it: `feedback.suppressOverlay`
+    // (a `veld settings` key) forces the feedback overlay off on every routed site,
+    // even one whose `veld.json` sets `features.feedback_overlay` back on. It is the
+    // per-machine answer for a setup that uses Veld purely as an orchestrator; the
+    // client-log collector and `/__veld__/*` routes are unaffected.
+    let features =
+        apply_feedback_overlay_override(resolved.features, ctx.db.feedback_overlay_suppressed());
     // Resolve client log levels (variant > node > project > default).
     let client_log_levels = resolved.client_log_levels.clone();
     // Resolve reverse-proxy header rules (variant > node > project). Only sent
@@ -5609,6 +5631,55 @@ mod tests {
             terminal_outputs: Some(HashMap::new()),
             step_observer: None,
         }
+    }
+
+    #[test]
+    fn feedback_overlay_opt_out_forces_the_overlay_off_and_leaves_the_rest() {
+        // The `suppressed` flag is the whole machine-wide answer, so the config a
+        // node resolved is irrelevant to it — even one that explicitly asked for
+        // the overlay on has it forced off. The client-log collector and the
+        // `/__veld__/*` routes are deliberately not collateral.
+        let base = config::ResolvedFeatures {
+            feedback_overlay: true,
+            client_logs: true,
+            inject: true,
+        };
+
+        // Off (the default): nothing changes.
+        let unchanged = apply_feedback_overlay_override(base, false);
+        assert!(unchanged.feedback_overlay);
+        assert!(unchanged.client_logs);
+        assert!(unchanged.inject);
+
+        // On: the overlay is forced off even though the config asked for it on.
+        let suppressed = apply_feedback_overlay_override(base, true);
+        assert!(!suppressed.feedback_overlay);
+        assert!(suppressed.client_logs);
+        assert!(suppressed.inject);
+    }
+
+    #[test]
+    fn feedback_overlay_suppression_reads_from_the_settings_database() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Db::open_at(&tmp.path().join("veld.db")).unwrap();
+
+        // Off by default — the switch ships as the off state so nothing moves.
+        assert!(!db.feedback_overlay_suppressed());
+
+        let set = |value: bool| {
+            let mut patch = std::collections::BTreeMap::new();
+            patch.insert(
+                "feedback.suppressOverlay".to_string(),
+                serde_json::Value::Bool(value),
+            );
+            db.patch_settings(&patch).unwrap();
+        };
+
+        set(true);
+        assert!(db.feedback_overlay_suppressed());
+
+        set(false);
+        assert!(!db.feedback_overlay_suppressed());
     }
 
     /// The `${veld.url*}` family is derived from the URL alone, so the stop path
