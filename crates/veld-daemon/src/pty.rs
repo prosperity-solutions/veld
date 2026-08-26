@@ -376,6 +376,7 @@ async fn list_pane_sessions(
     let db = open_db().map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "database error"))?;
     let rows = db.resumable_panes(worktree_id).map_err(|e| {
         warn!("pane sessions: database error: {e}");
+        crate::dbhealth::note_error(&e);
         err(StatusCode::INTERNAL_SERVER_ERROR, "database error")
     })?;
     let resumable: Vec<serde_json::Value> = rows
@@ -1356,6 +1357,7 @@ async fn resolve_pane(
                 .pane_session(session_id)
                 .map_err(|e| {
                     warn!("pty ticket: could not read the pane session: {e}");
+                    crate::dbhealth::note_error(&e);
                     err(StatusCode::INTERNAL_SERVER_ERROR, "database error")
                 })?
                 .filter(|s| s.worktree_id == worktree_id && s.spec_id == spec_id)
@@ -1735,6 +1737,7 @@ async fn mint_ticket(
         .get_worktree(body.worktree_id)
         .map_err(|e| {
             warn!("pty ticket: database error: {e}");
+            crate::dbhealth::note_error(&e);
             err(StatusCode::INTERNAL_SERVER_ERROR, "database error")
         })?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "worktree not found"))?;

@@ -17,7 +17,7 @@ use axum::http::StatusCode;
 use axum::routing::{delete, get, patch, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
-use tracing::warn;
+use tracing::{info, warn};
 use veld_core::db::{
     ConfigSource, Db, DiscoveredWorktree, GitCreateSource, RepoRecord, WorktreeRecord,
     default_alias,
@@ -89,6 +89,12 @@ pub fn routes() -> Router {
         .route("/api/lane-order", post(reorder_lanes))
         .route("/api/lanes/{name}", patch(rename_lane).delete(delete_lane))
         .route("/api/pick-directory", post(pick_directory))
+        // Veld's own database: is it intact, is it being backed up, and put a
+        // backup back. A GET for the read (so a browser tab can poll it without
+        // the CSRF header) and POSTs for the two things that change something.
+        .route("/api/db-health", get(db_health))
+        .route("/api/db-health/notified", post(db_health_notified))
+        .route("/api/db-health/restore", post(db_health_restore))
         .route(
             "/api/open-worktree-storage-dir",
             post(open_worktree_storage_dir),
@@ -557,7 +563,25 @@ pub(crate) fn err(code: StatusCode, msg: impl Into<String>) -> ApiError {
     (code, Json(serde_json::json!({ "error": msg.into() })))
 }
 
-pub(crate) fn db_err(e: impl std::fmt::Display) -> ApiError {
+/// **This is also where a damaged database gets noticed**, and the `Any` bound is
+/// what makes that free rather than a discipline.
+///
+/// Every desktop handler already funnels its database failures through here, so
+/// classifying the error at this one point means no call site has to remember to
+/// report a fault — and the next handler somebody writes inherits it. A
+/// `DbError` downcasts and is offered to [`crate::dbhealth`]; the handful of
+/// call sites that pass a bare message (`db_err("repo vanished after import")`)
+/// downcast to nothing and are unaffected.
+///
+/// The alternative — a second `db_err_typed` used at the ~50 sites where the
+/// concrete type is known — was rejected: the two would drift the moment anyone
+/// reached for the wrong one, and nothing would say so. This was the failure
+/// mode in the first place: 265 database errors passed through this exact
+/// function during the incident and every one of them was logged and forgotten.
+pub(crate) fn db_err(e: impl std::fmt::Display + std::any::Any) -> ApiError {
+    if let Some(db_error) = (&e as &dyn std::any::Any).downcast_ref::<veld_core::db::DbError>() {
+        crate::dbhealth::note_error(db_error);
+    }
     warn!("desktop api database error: {e}");
     err(StatusCode::INTERNAL_SERVER_ERROR, "database error")
 }
@@ -826,8 +850,11 @@ async fn git_status(dir: &FsPath) -> Result<Vec<DirtyFile>, String> {
 /// both cases and is deliberately not in this change: it puts a clock in the
 /// reconcile pass, and the pass having exactly one new branch is what makes it
 /// reviewable. Note the repo-level case is already covered — if the *repo root*
-/// is unreachable, `git worktree list` fails, `sync_repo_worktrees` returns `Err`,
-/// and `RepoView.available` goes false with every row left untouched.
+/// is unreachable, `git worktree list` fails, [`discover_worktrees`] returns
+/// `Err`, and `RepoView.available` goes false with every row left untouched.
+/// (It was `sync_repo_worktrees` that answered this before the two halves were
+/// split; that function's own `Err` is a *database* failure, which is now
+/// deliberately not what `available` reports.)
 fn parse_worktree_list(porcelain: &str) -> Vec<DiscoveredWorktree> {
     let mut out = Vec::new();
     let mut first = true;
@@ -888,11 +915,27 @@ fn canonicalize_discovered(mut discovered: Vec<DiscoveredWorktree>) -> Vec<Disco
 
 /// Discover a repo's worktrees on disk and reconcile the database rows.
 async fn sync_repo_worktrees(db: &Db, repo_root: &FsPath) -> Result<Vec<WorktreeRecord>, ApiError> {
+    let discovered = discover_worktrees(repo_root).await?;
+    db.sync_worktrees(repo_root, &discovered).map_err(db_err)
+}
+
+/// Ask git what checkouts this repo has. **Takes a path and nothing else**, and
+/// that is load-bearing rather than tidy.
+///
+/// This is the half of [`sync_repo_worktrees`] that answers "can this repo be
+/// operated on", and it is split out so that the answer has no access to a
+/// database result to be contaminated by. The two used to be one call whose
+/// `Result` was collapsed with `.is_ok()` in [`refresh_repos`], which meant a
+/// damaged SQLite page — in an unrelated table, reached only through a foreign
+/// key cascade — rendered as `repository unavailable` over a repo sitting right
+/// there on disk, with the start/stop controls hidden and the real error thrown
+/// away. Two functions with disjoint consumers is what stops that being
+/// re-collapsed by the next person in a hurry.
+async fn discover_worktrees(repo_root: &FsPath) -> Result<Vec<DiscoveredWorktree>, ApiError> {
     let porcelain = git(repo_root, &["worktree", "list", "--porcelain"])
         .await
         .map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
-    let discovered = canonicalize_discovered(parse_worktree_list(&porcelain));
-    db.sync_worktrees(repo_root, &discovered).map_err(db_err)
+    Ok(canonicalize_discovered(parse_worktree_list(&porcelain)))
 }
 
 // ---------------------------------------------------------------------------
@@ -1121,6 +1164,13 @@ struct RepoView {
     /// False when the repo can't be listed on disk right now (directory
     /// deleted or git failing) — the worktree rows below are then the last
     /// known state, not fresh.
+    ///
+    /// **Exactly that, and nothing about the database.** This field used to also
+    /// go false when the reconciling *write* failed, so a damaged SQLite page
+    /// reported a healthy repo as unavailable and hid its start/stop controls.
+    /// The daemon's own health is a single global condition
+    /// (`GET /api/db-health`), not one claim per repository — N repos would
+    /// otherwise each report the same one broken file.
     available: bool,
     worktrees: Vec<WorktreeView>,
     /// The repo's rail lanes, in their own order.
@@ -1862,6 +1912,396 @@ async fn repo_git_status(db: &Db, repo_root: &FsPath) -> RepoGitStatus {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Veld's own database: health and recovery
+// ---------------------------------------------------------------------------
+
+/// What the IDE polls to know whether veld's own state is intact.
+///
+/// A GET, and therefore ungated — which is correct here for the same reason
+/// [`list_repos`] is: it spawns nothing and takes no write lock. It does read
+/// the backups directory and deep-check one artifact, so it is `spawn_blocking`
+/// work rather than inline.
+async fn db_health() -> Result<Json<crate::dbhealth::HealthView>, ApiError> {
+    let view = tokio::task::spawn_blocking(crate::dbhealth::view_blocking)
+        .await
+        .map_err(|e| {
+            warn!("db health view panicked: {e}");
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not read database health",
+            )
+        })?;
+    Ok(Json(view))
+}
+
+#[derive(Deserialize)]
+struct NotifiedBody {
+    /// The `notify.id` the client is claiming.
+    id: String,
+}
+
+#[derive(Serialize)]
+struct ClaimResponse {
+    /// Whether *this* caller may raise the system notification. False means
+    /// another window already has.
+    claimed: bool,
+}
+
+/// Claim a pending notification, so several open windows raise one system banner
+/// between them rather than one each.
+///
+/// The claim is what makes "we already told the human" durable: it is written
+/// beside the database rather than into it, because the fault being announced is
+/// frequently the database refusing writes.
+///
+/// **The id is checked against the closed set, not against a length.** It becomes
+/// a key in a file the daemon rewrites whole and re-parses on every health poll,
+/// and this router is same-origin with any page a veld run serves — so a length
+/// bound plus a comment saying "the ids are a closed set" let any such page grow
+/// that file without limit and tax every poll.
+async fn db_health_notified(
+    Json(body): Json<NotifiedBody>,
+) -> Result<Json<ClaimResponse>, ApiError> {
+    if !crate::dbhealth::is_notify_id(&body.id) {
+        return Err(err(StatusCode::BAD_REQUEST, "not a notification id"));
+    }
+    let id = body.id.clone();
+    let claimed = tokio::task::spawn_blocking(move || crate::dbhealth::claim_notified(&id))
+        .await
+        .map_err(|e| {
+            warn!("recording a database notification panicked: {e}");
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not record the notification",
+            )
+        })?;
+    Ok(Json(ClaimResponse { claimed }))
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RestoreDbResponse {
+    /// The artifact that was put back.
+    restored_from: String,
+    /// Where the database that was there has been kept. It is never deleted —
+    /// it is the only evidence of what went wrong.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    previous_moved_to: Option<String>,
+    schema_version: i64,
+    /// Whether the daemon will come back by itself. False when nothing is
+    /// managing it, where the caller has to start it again.
+    restarts_automatically: bool,
+    /// What to run when it will *not* come back on its own.
+    ///
+    /// The CLI has said this since `veld backup restore` existed (its
+    /// `restart_hint`), and the IDE said only "start the daemon again" — leaving
+    /// somebody who had just replaced their database in a GUI strictly worse off
+    /// than the same person in a terminal. `None` when the restart is automatic.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    restart_hint: Option<String>,
+}
+
+/// Put the newest restorable backup back, then restart the daemon.
+///
+/// **Why this restarts rather than swapping the file underneath itself.** Every
+/// database access in this process is short-lived (`Db::open()` per request, per
+/// scheduler pass), but "short" is not "none": a stats tick holding a handle
+/// across the rename would keep writing into the displaced file, and those
+/// writes would be silently lost. `veld backup restore` refuses to run at all
+/// while a daemon is up for exactly this reason. Rather than invent a quiescing
+/// protocol for every task, this raises `SIGTERM` on itself once the file is in
+/// place: the ordinary graceful shutdown runs — which deliberately leaves
+/// terminal shells alive, because their PTYs belong to holder processes — and
+/// launchd (`KeepAlive`) or systemd (`Restart=always`) starts the daemon again
+/// within seconds, on the restored file. `veld update` already depends on this
+/// same property.
+/// **Two gates, and the CSRF header is not one of them.**
+///
+/// This router is merged into the server Caddy proxies at `/__veld__/*` on every
+/// run's own origin, so a script on the user's dev app is *same-origin* with it —
+/// the exposure [`crate::feedback_server::ide::get_state`] already documents. On
+/// that surface `check_csrf` is a header a same-origin `fetch` sets in one line,
+/// so it separates cross-origin from same-origin and nothing else. Every other
+/// mutation here is bounded by that reasoning; this one would not be — replacing
+/// the whole database and stopping the daemon is a different class of capability
+/// from renaming a worktree, and it reaches code execution by way of the settings
+/// table it installs.
+///
+/// So:
+///
+/// 1. **A fault must already be recorded.** On a healthy machine this endpoint
+///    does nothing at all, which removes "roll a working database back" from the
+///    set of things any caller can do.
+/// 2. **A human must confirm in a native dialog** the page cannot draw or
+///    dismiss — the same `osascript`/`zenity` mechanism [`pick_directory`] uses.
+///    No GUI to ask on (a headless box, a TCC refusal) means refusal, pointing at
+///    `veld backup restore`, which has its own daemon-down and TTY consent gates.
+///    The extra click is real friction on a rare, destructive action, and it is
+///    the only thing on this surface that distinguishes a person from a script.
+async fn db_health_restore() -> Result<Json<RestoreDbResponse>, ApiError> {
+    /// One restore at a time, process-wide. Two concurrent restores would race
+    /// over the same rename and the loser would displace the file the winner
+    /// just wrote. Taken before the dialog, so a second caller cannot stack a
+    /// second prompt on the user's screen either.
+    static RESTORING: SingleFlight = SingleFlight::new();
+    let _guard = RESTORING
+        .try_enter()
+        .ok_or_else(|| err(StatusCode::CONFLICT, "a restore is already running"))?;
+
+    // Gate 1. Also the honest answer to "why did nothing happen": a restore is a
+    // recovery action, and there is nothing to recover from.
+    //
+    // Keyed on *corruption*, not on any fault: a full disk or a read-only volume
+    // is not fixed by installing an old copy, and arming this endpoint on one
+    // would put a destructive action behind a transient condition.
+    if !crate::dbhealth::corruption_recorded() {
+        return Err(err(
+            StatusCode::CONFLICT,
+            "the database is not reporting damage — nothing to restore from",
+        ));
+    }
+
+    // Gate 2.
+    match confirm_destructive(
+        "Replace Veld's database with the newest backup?\n\nEverything Veld has \
+         learned since that copy was taken is lost, including which environments \
+         are running. The current database is kept, renamed.",
+    )
+    .await
+    {
+        Confirmed::Yes => {}
+        Confirmed::No => return Err(err(StatusCode::CONFLICT, "the restore was cancelled")),
+        Confirmed::CannotAsk(why) => {
+            warn!("database restore refused — cannot confirm with a human: {why}");
+            return Err(err(
+                StatusCode::CONFLICT,
+                "a restore has to be confirmed on this machine and no dialog could be \
+                 shown — run `veld backup restore` instead",
+            ));
+        }
+    }
+
+    let report = tokio::task::spawn_blocking(restore_newest_backup)
+        .await
+        .map_err(|e| {
+            warn!("database restore panicked: {e}");
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "the restore did not complete",
+            )
+        })??;
+
+    // Drops the fault *and* the "already told them" marker for it.
+    //
+    // The in-memory half is nearly ceremonial — the state is process-local and
+    // this process exits in 750 ms — and an earlier comment here claimed it was
+    // stopping the fault from "surviving into the restarted daemon's first health
+    // response", which it cannot do either way. The half that matters is the
+    // marker file, which *does* outlive the process: without clearing it, a
+    // failing volume that damages the restored file within the cooldown — the
+    // expected shape of this fault, not a freak one — would raise no system
+    // notification at all.
+    crate::dbhealth::clear_fault();
+
+    // After the response, not before it: the client needs to be told where its
+    // old database went, and this process is about to stop answering. A short
+    // delay is enough for axum to flush, and the restart is not urgent — the
+    // file on disk is already the restored one.
+    tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+        info!("restarting after a database restore");
+        request_own_shutdown();
+    });
+
+    Ok(Json(report))
+}
+
+/// The blocking half of [`db_health_restore`].
+fn restore_newest_backup() -> Result<RestoreDbResponse, ApiError> {
+    use veld_core::db::backup;
+
+    let target = Db::default_path().map_err(|e| {
+        warn!("database restore: no database path: {e}");
+        err(StatusCode::INTERNAL_SERVER_ERROR, "no database path")
+    })?;
+    let dir = Db::open()
+        .ok()
+        .and_then(|db| db.backup_prefs().dir)
+        .or_else(backup::default_dir)
+        .ok_or_else(|| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "no backup directory could be determined",
+            )
+        })?;
+
+    // `newest_restorable`, not `newest`: it deep-checks, so this cannot put back
+    // a copy that took the damage with it. A `None` here is a real answer — say
+    // so rather than restoring something unverified.
+    let candidate = backup::newest_restorable(&dir, chrono::Utc::now()).ok_or_else(|| {
+        err(
+            StatusCode::CONFLICT,
+            "none of the backups on disk can be restored",
+        )
+    })?;
+
+    let report = backup::restore(&candidate.path, &target).map_err(|e| {
+        warn!("database restore failed: {e}");
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("restore failed: {e}"),
+        )
+    })?;
+    info!(
+        "restored the database from {} (schema v{})",
+        report.restored_from.display(),
+        report.schema_version
+    );
+
+    let automatic = crate::dbhealth::service_manager_will_restart();
+    Ok(RestoreDbResponse {
+        restored_from: report.restored_from.display().to_string(),
+        previous_moved_to: report
+            .previous_moved_to
+            .as_ref()
+            .map(|p| p.display().to_string()),
+        schema_version: report.schema_version,
+        restarts_automatically: automatic,
+        restart_hint: if automatic {
+            None
+        } else {
+            crate::dbhealth::restart_hint()
+        },
+    })
+}
+
+/// The answer to a native yes/no prompt.
+enum Confirmed {
+    Yes,
+    No,
+    /// No dialog could be put on screen (headless, no backend installed, a TCC
+    /// refusal). **Never treated as yes**: the whole point of asking is that a
+    /// script cannot answer, so an unanswerable question is a refusal.
+    CannotAsk(String),
+}
+
+/// Put a destructive question on the user's screen and wait for the answer.
+///
+/// Backends in the same order and for the same reasons as [`pick_directory`]'s:
+/// `osascript` on macOS, then `zenity`/`kdialog` on Linux. Reuses [`run_picker`],
+/// whose cancel-versus-failure handling is already careful about the difference
+/// between "the user said no" and "GTK printed a warning".
+async fn confirm_destructive(message: &str) -> Confirmed {
+    // `display dialog` with an explicit `cancel button` is what makes a dismissal
+    // arrive as osascript's -128 rather than as a successful run whose stdout
+    // happens to say Cancel — `run_picker` keys on exactly that.
+    #[cfg(target_os = "macos")]
+    let attempts: Vec<(&str, Vec<String>)> = vec![(
+        "osascript",
+        vec![
+            "-e".to_string(),
+            format!(
+                r#"display dialog {} with title "Veld" buttons {{"Cancel", "Replace database"}} default button "Cancel" cancel button "Cancel" with icon caution"#,
+                applescript_string(message)
+            ),
+        ],
+    )];
+    #[cfg(not(target_os = "macos"))]
+    let attempts: Vec<(&str, Vec<String>)> = vec![
+        (
+            "zenity",
+            vec![
+                "--question".to_string(),
+                "--title=Veld".to_string(),
+                format!("--text={message}"),
+                "--ok-label=Replace database".to_string(),
+                "--cancel-label=Cancel".to_string(),
+            ],
+        ),
+        (
+            "kdialog",
+            vec![
+                "--title".to_string(),
+                "Veld".to_string(),
+                "--warningyesno".to_string(),
+                message.to_string(),
+            ],
+        ),
+    ];
+
+    // **Bounded, like `pick_directory`'s 10 minutes, and for a sharper reason
+    // here.** The request blocks while the dialog is up, and this handler holds a
+    // `SingleFlight` guard whose own docstring warns that leaking it "wedges the
+    // endpoint at 409 until the daemon restarts". Without a timeout, a dialog
+    // nobody ever answers — the machine is locked, the user walked away — does
+    // exactly that to the one endpoint that recovers a broken database.
+    // `run_picker` sets `kill_on_drop`, so the abandoned dialog leaves the screen
+    // when this future is dropped.
+    let asked = tokio::time::timeout(std::time::Duration::from_secs(600), async {
+        // A headless Linux daemon must not read as "the user said no". zenity and
+        // kdialog both exit 1 for a refusal *and* for a display they cannot open, and
+        // `run_picker` maps exit 1 to `Cancelled` — correct for a picker the user
+        // opened, wrong here, where the difference decides whether we tell them to
+        // run `veld backup restore` instead. With no display there is nobody to ask.
+        #[cfg(not(target_os = "macos"))]
+        if std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
+            return Confirmed::CannotAsk("no display to show a confirmation on".to_string());
+        }
+
+        let mut last = String::from("no dialog backend is available on this system");
+        for (cmd, args) in &attempts {
+            let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+            match run_picker(cmd, &borrowed).await {
+                Pick::Chosen(_) => return Confirmed::Yes,
+                Pick::Cancelled => return Confirmed::No,
+                Pick::Failed(why) => last = why,
+                Pick::Unavailable => continue,
+            }
+        }
+        Confirmed::CannotAsk(last)
+    })
+    .await;
+
+    // An unanswered question is not a yes. Reported as "could not ask" rather
+    // than as a cancellation, because the two deserve different messages: one
+    // means the user said no, the other means nobody was there.
+    asked.unwrap_or_else(|_| {
+        Confirmed::CannotAsk("nobody answered the confirmation dialog".to_string())
+    })
+}
+
+/// Quote a string for embedding in an AppleScript literal.
+///
+/// Only two characters matter inside AppleScript's double-quoted form —
+/// backslash and the quote itself — but they matter absolutely: this string is
+/// interpolated into a script that `osascript` then *executes*, so an unescaped
+/// quote is a script-injection hole rather than a rendering bug. The message is
+/// a constant today; this exists so it stays safe when somebody interpolates a
+/// path or an error detail into it, which is the obvious next edit.
+#[cfg(target_os = "macos")]
+fn applescript_string(raw: &str) -> String {
+    let escaped = raw.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("\"{escaped}\"")
+}
+
+/// Ask this process to shut down the way a service manager would.
+///
+/// `SIGTERM` to self rather than `std::process::exit`, so the existing
+/// `shutdown_signal()` path in `main` runs: it unregisters the helper routes it
+/// owns and records the terminal sessions it is leaving alive. Hand-rolling an
+/// exit here would be a second shutdown path that drifts from that one.
+fn request_own_shutdown() {
+    #[cfg(unix)]
+    // SAFETY: `raise` is async-signal-safe and this delivers SIGTERM to the
+    // calling process, which the daemon installs a handler for.
+    unsafe {
+        libc::raise(libc::SIGTERM);
+    }
+    #[cfg(not(unix))]
+    std::process::exit(0);
+}
+
 /// List repos from the database — a pure read (GETs on this router carry no
 /// CSRF gate, so they must not spawn subprocesses or take write locks).
 /// `available` here is only the cheap directory-exists check; the full git
@@ -1908,7 +2348,42 @@ async fn refresh_repos() -> Result<Json<RepoList>, ApiError> {
             // Repo imported inside the debounce window: not in the memo yet —
             // its rows were just written by import, dir-exists is fine.
             Some(memo) => memo.get(&repo.root).copied().unwrap_or(root.is_dir()),
-            None => sync_repo_worktrees(&db, &root).await.is_ok(),
+            None => {
+                // **Availability is git's answer, and only git's answer.**
+                //
+                // The reconcile below writes to SQLite and can fail on its own
+                // terms — a damaged page, a locked file, a full disk. Those are
+                // faults of the *daemon*, reported once and globally by
+                // `dbhealth`; folding them in here is what told a user their
+                // repository was unavailable while it sat on disk in perfect
+                // health, and took the start/stop controls away with it.
+                //
+                // Note the direction of the change: `available` is now `true` in
+                // strictly more situations than before. That matters for a
+                // cached IDE bundle, which keeps reading this field and gating
+                // its controls on it — a narrowing that can only turn `false`
+                // into `true` needs no coordinated rollout, where a renamed or
+                // retyped field would read as `undefined`, hence falsy, hence
+                // the incident made permanent in every stale tab.
+                match discover_worktrees(&root).await {
+                    Ok(discovered) => {
+                        if let Err(e) = db.sync_worktrees(&root, &discovered) {
+                            crate::dbhealth::note_error(&e);
+                            warn!("worktree reconcile failed for {}: {e}", repo.root);
+                        }
+                        true
+                    }
+                    // **Log it.** The `repository unavailable` label is what a
+                    // user sees, and until now the error explaining it was built
+                    // and dropped — by `.is_ok()` before this change, and by this
+                    // arm after it. A rewrite of this exact expression is the
+                    // moment to stop discarding the only breadcrumb.
+                    Err(e) => {
+                        warn!("worktree discovery failed for {}: {e:?}", repo.root);
+                        false
+                    }
+                }
+            }
         };
         availability.insert(repo.root.clone(), available);
         // Keep the remote-tracking refs fresh enough that the staleness signal
@@ -4000,6 +4475,54 @@ mod tests {
             b.body(Body::from(body.to_owned())).unwrap()
         }
 
+        /// **The gate that carries the authorization story for the most
+        /// destructive route in this router, and it had no test.**
+        ///
+        /// This router is same-origin with any page a veld run serves, so the CSRF
+        /// header is not a barrier there — the two things standing between such a
+        /// page and a replaced database are this precondition and a native dialog.
+        /// The dialog cannot be driven from a test; this half can, and it is also
+        /// the half that keeps the endpoint inert on every healthy machine.
+        ///
+        /// A clean process has no recorded corruption, so the refusal must come
+        /// *before* anything is moved and before any dialog is raised — if this
+        /// ever starts returning 200, a prompt is appearing on people's screens.
+        #[tokio::test]
+        async fn restoring_without_recorded_damage_is_refused() {
+            assert!(
+                !crate::dbhealth::corruption_recorded(),
+                "a fresh test process must not start out believing the database is damaged"
+            );
+            let res = super::super::routes()
+                .oneshot(req("POST", "/api/db-health/restore", true, ""))
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::CONFLICT);
+        }
+
+        /// The claim endpoint takes the closed set and nothing else — the id
+        /// becomes a key in a file the daemon rewrites whole and re-parses on
+        /// every health poll, reachable from any same-origin page.
+        #[tokio::test]
+        async fn a_notification_id_outside_the_closed_set_is_refused() {
+            for body in [
+                r#"{"id":"bogus"}"#,
+                r#"{"id":"../../etc/passwd"}"#,
+                r#"{"id":""}"#,
+                r#"{"id":"CORRUPT"}"#,
+            ] {
+                let res = super::super::routes()
+                    .oneshot(req("POST", "/api/db-health/notified", true, body))
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    res.status(),
+                    StatusCode::BAD_REQUEST,
+                    "{body} must not reach the marker file"
+                );
+            }
+        }
+
         #[tokio::test]
         async fn mutations_without_csrf_header_are_403() {
             // The csrf_layer covers every non-GET route by construction; this
@@ -4008,6 +4531,8 @@ mod tests {
             // Keep it in sync with routes().
             for (method, uri, body) in [
                 ("POST", "/api/repos/refresh", ""),
+                ("POST", "/api/db-health/notified", r#"{"id":"corrupt"}"#),
+                ("POST", "/api/db-health/restore", ""),
                 ("POST", "/api/repos/import", r#"{"path":"/tmp"}"#),
                 ("POST", "/api/repos/revert-root", r#"{"root":"/tmp"}"#),
                 ("DELETE", "/api/repos", r#"{"root":"/tmp"}"#),

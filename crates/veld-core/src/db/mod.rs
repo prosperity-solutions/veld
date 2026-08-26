@@ -152,6 +152,30 @@ pub enum DbError {
 }
 
 impl DbError {
+    /// This error as it should be *shown to a person*, without this enum's own
+    /// wrapper in front of it.
+    ///
+    /// [`DbError::Sqlite`]'s `Display` is `"database error: {0}"`, which is right
+    /// for a log line and wrong everywhere the surrounding UI has already said
+    /// what kind of thing went wrong. It shipped to a screen as
+    /// *"database error: database disk image is malformed"*, under a heading
+    /// reading **What SQLite said** — this crate's prefix presented as SQLite's
+    /// words, with "database" twice in six.
+    ///
+    /// Lives here rather than in the consumer that noticed: a caller stripping a
+    /// prefix it has to *know* this enum uses is a caller that silently stops
+    /// working when the `#[error(...)]` attribute above is reworded.
+    #[must_use]
+    pub fn reported_message(&self) -> String {
+        match self {
+            // Only this variant's own prefix. `Open` names the path it could not
+            // open and `CreateDir` the directory it could not make — both worth
+            // keeping.
+            DbError::Sqlite(e) => e.to_string(),
+            other => other.to_string(),
+        }
+    }
+
     /// Whether this is SQLite refusing a row rather than failing.
     ///
     /// The one distinction a caller usually needs, and the one that is easy to
@@ -168,6 +192,125 @@ impl DbError {
                 if inner.code == rusqlite::ErrorCode::ConstraintViolation
         )
     }
+
+    /// Whether this error says the *file* is in trouble, rather than the
+    /// statement being wrong about a row.
+    ///
+    /// **Why the distinction is worth a method.** Everything in `db/` funnels
+    /// through `DbError::Sqlite` via `#[from]`, so "the database is damaged" and
+    /// "that alias is taken" arrive at callers as the same variant and get the
+    /// same `warn!` — which is how a corrupted page produced 440 identical log
+    /// lines over 17 hours while every subsystem carried on as if nothing had
+    /// happened. A caller that wants to *escalate* needs to tell those apart
+    /// without linking `rusqlite` itself.
+    ///
+    /// Both the blanket `Sqlite` variant and the call-site-classified
+    /// [`DbError::Open`] are inspected: corruption is as likely to surface on
+    /// the `PRAGMA journal_mode=WAL` inside [`Db::open_at`] as on a later query.
+    #[must_use]
+    pub fn fault(&self) -> Option<DbFault> {
+        let source = match self {
+            DbError::Sqlite(e) => e,
+            DbError::Open { source, .. } => source,
+            _ => return None,
+        };
+        let rusqlite::Error::SqliteFailure(inner, _) = source else {
+            return None;
+        };
+        match inner.code {
+            // `NotADatabase` is corruption too, and the more alarming shape of
+            // it: the header itself no longer reads as SQLite. Grouped rather
+            // than split because the answer for both is the same — this file
+            // cannot be trusted, restore a backup.
+            rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase => {
+                Some(DbFault::Corrupt)
+            }
+            // Kept separate from corruption because the right response differs:
+            // I/O errors and a full disk are usually the *precursor* to damage
+            // and are often transient (an unmounted volume, a disk that filled
+            // for a minute), so they are worth reporting and worth not treating
+            // as "your database is broken, restore a backup".
+            //
+            // `ReadOnly` belongs here for a specific reason: a
+            // volume that APFS (or the kernel) has remounted read-only after I/O
+            // errors is *the* shape the real incident's precursor took, and it is
+            // a state in which nothing can be written and every reconcile fails
+            // forever. Left unclassified they returned `None`, which after this
+            // change means no banner, no marker and no log escalation — strictly
+            // less visible than the wrong label they used to produce.
+            //
+            // `CannotOpen` is deliberately **not** here, having been tried: SQLite
+            // returns it for any failed `open(2)`, so file-descriptor exhaustion
+            // in a daemon that holds PTYs and sockets, or a mode a past
+            // `sudo veld` left unreadable, would have been reported to the user
+            // as "your database is damaged".
+            rusqlite::ErrorCode::SystemIoFailure
+            | rusqlite::ErrorCode::DiskFull
+            | rusqlite::ErrorCode::ReadOnly => Some(DbFault::Io),
+            _ => None,
+        }
+    }
+}
+
+/// A fault that is about the database file, not about a row. See
+/// [`DbError::fault`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DbFault {
+    /// SQLite says the file is malformed — a damaged page, or a header that no
+    /// longer reads as a database at all.
+    Corrupt,
+    /// The storage underneath refused: an I/O error or a full disk.
+    Io,
+}
+
+impl DbFault {
+    /// A short, stable word for logs, `--json` output and the wire.
+    ///
+    /// `const` so a caller can build a compile-time list from it rather than
+    /// spelling these words a second time — see `dbhealth::NOTIFY_IDS`, where a
+    /// list that drifted from this one would silently stop notifying.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            DbFault::Corrupt => "corrupt",
+            DbFault::Io => "io",
+        }
+    }
+}
+
+/// What [`Db::integrity`] found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Integrity {
+    /// SQLite answered `ok`.
+    Ok,
+    /// SQLite reported damage, or could not complete the check because of it.
+    /// Carries what it said, for a log line and for the IDE's detail panel.
+    Damaged(String),
+}
+
+/// Where a failure to open the database gets reported, if anybody is listening.
+///
+/// **This exists because the alternative is a discipline, and the discipline kept
+/// failing.** The daemon wants every fault recorded so it can tell the user, and
+/// it opens this database from 27 different places — schedulers, request
+/// handlers, startup warm-ups — several of which map the error straight to a
+/// status and discard it. Wiring each call site was tried across three review
+/// rounds and missed sites every time, including the one that logged 247 of the
+/// 440 errors in the incident this reporting was built for.
+///
+/// A `fn` pointer rather than a boxed closure so this needs no allocation and no
+/// lock on the read path, and `OnceLock` so it can only be installed once — a
+/// second installer would silently replace the first.
+static OPEN_OBSERVER: std::sync::OnceLock<fn(&DbError)> = std::sync::OnceLock::new();
+
+/// Install the process's open-failure observer. Idempotent; later calls are
+/// ignored rather than overwriting.
+///
+/// Called once by the daemon at startup. Deliberately not called by the CLI:
+/// a one-shot command reports its own failure to the person who typed it.
+pub fn observe_open_failures(hook: fn(&DbError)) {
+    let _ = OPEN_OBSERVER.set(hook);
 }
 
 /// Handle to the central Veld database. Cheap to clone; all clones share one
@@ -307,8 +450,24 @@ impl Db {
     /// database is not the one the user's real state belongs in, and importing into
     /// it would both waste the work and mark the one-time import as done.
     pub fn open() -> Result<Self, DbError> {
-        let path = Self::default_path()?;
-        let db = Self::open_at(&path)?;
+        // Reported once, here, rather than at each of the caller's error arms —
+        // see [`OPEN_OBSERVER`]. `open_at` is deliberately *not* hooked: it is
+        // the tests' entry point, and a test that deliberately opens a damaged
+        // fixture must not publish a fault into the process it shares with every
+        // other test.
+        let opened = (|| {
+            let path = Self::default_path()?;
+            Self::open_at(&path)
+        })();
+        let db = match opened {
+            Ok(db) => db,
+            Err(e) => {
+                if let Some(observer) = OPEN_OBSERVER.get() {
+                    observer(&e);
+                }
+                return Err(e);
+            }
+        };
         // Mirrors `default_path`'s precedence: only the genuine `<data_dir>`
         // database gets the import (an empty VELD_DB_PATH counts as unset there
         // too).
@@ -441,6 +600,59 @@ impl Db {
         let conn = self.lock();
         let v: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
         Ok(v)
+    }
+
+    /// Ask SQLite whether the live database is intact, as a value rather than
+    /// as an error.
+    ///
+    /// **`quick_check`, not `integrity_check`, and the difference is the whole
+    /// reason this is affordable.** Measured on a real 8.7 MB `veld.db`, the
+    /// quick check costs ~15 ms — cheap enough for a timer — and it is
+    /// sufficient for the fault class that matters here: a damaged page header
+    /// is exactly what it reports. `integrity_check` additionally cross-checks
+    /// every index against its table, which is the right tool for judging a
+    /// *backup artifact* before restoring it ([`backup::inspect_deep`]) and the
+    /// wrong one to put on a schedule.
+    ///
+    /// **Both failure shapes are damage.** A database that is intact answers
+    /// with the single row `ok`; one that is not either answers with a
+    /// description of what is wrong *or* fails the statement outright with
+    /// `SQLITE_CORRUPT` (which is what the real incident did — the pragma could
+    /// not read the page it needed to report on). Returning `Ok(Damaged)` for
+    /// the first and `Err` for the second would make every caller handle the
+    /// same condition twice, so the corrupt-shaped error is folded into
+    /// `Damaged` here and only genuinely unrelated errors are returned as `Err`.
+    pub fn integrity(&self) -> Result<Integrity, DbError> {
+        let conn = self.lock();
+        // **Every row, not the first.** The pragma emits one row *per finding*,
+        // and `query_row` takes the first and discards the rest — which threw
+        // away the trailing `database disk image is malformed` and any second
+        // damaged page, in the one string the dialog labels "What SQLite said"
+        // and `veld doctor` prints.
+        let rows: Result<Vec<String>, _> = (|| {
+            let mut stmt = conn.prepare("PRAGMA quick_check")?;
+            let found = stmt
+                .query_map([], |r| r.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok::<_, rusqlite::Error>(found)
+        })();
+        match rows {
+            // A single `ok` row is SQLite's way of saying there were no findings.
+            Ok(found) if found.len() == 1 && found[0].trim() == "ok" => Ok(Integrity::Ok),
+            // No rows at all is not a clean bill of health — it is a pragma that
+            // answered nothing, which no version does for an intact file.
+            Ok(found) if found.is_empty() => Ok(Integrity::Damaged(
+                "quick_check returned no answer".to_string(),
+            )),
+            Ok(found) => Ok(Integrity::Damaged(found.join("\n"))),
+            Err(e) => {
+                let e = DbError::Sqlite(e);
+                match e.fault() {
+                    Some(DbFault::Corrupt) => Ok(Integrity::Damaged(e.to_string())),
+                    _ => Err(e),
+                }
+            }
+        }
     }
 
     /// Reclaim disk space after large deletes: move freed pages out of the
@@ -1381,9 +1593,172 @@ pub(crate) fn test_db() -> (tempfile::TempDir, Db) {
     (dir, db)
 }
 
+/// Overwrite one table's root page with rubbish, reproducing the fault class of
+/// the incident this module's health reporting was built for: a single damaged
+/// page, with the rest of the database perfectly readable.
+///
+/// The page number comes from `sqlite_schema.rootpage` for `table_name`, and
+/// pages are 1-indexed, hence the `- 1`. The connection must be closed before
+/// calling this (SQLite caches pages, so a live handle would keep answering from
+/// memory and the test would assert nothing).
+#[cfg(test)]
+pub(crate) fn corrupt_table_page(path: &Path, table_name: &str) {
+    use std::io::{Seek, SeekFrom, Write};
+
+    let (page_size, rootpage): (i64, i64) = {
+        let conn = Connection::open(path).unwrap();
+        let page_size = conn
+            .pragma_query_value(None, "page_size", |r| r.get(0))
+            .unwrap();
+        let rootpage = conn
+            .query_row(
+                "SELECT rootpage FROM sqlite_schema WHERE name = ?1",
+                [table_name],
+                |r| r.get(0),
+            )
+            .unwrap();
+        (page_size, rootpage)
+    };
+
+    let mut f = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+    f.seek(SeekFrom::Start(((rootpage - 1) * page_size) as u64))
+        .unwrap();
+    f.write_all(&[0xff; 200]).unwrap();
+    f.sync_all().unwrap();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The classifier earns its keep only if it separates "this file is in
+    /// trouble" from the constraint violations that arrive as the same variant.
+    #[test]
+    fn a_refused_row_is_not_a_fault() {
+        let (_dir, db) = test_db();
+        db.upsert_repo(Path::new("/tmp/r"), "r").unwrap();
+        // A foreign key that names nothing: SQLite refuses the row, which is
+        // emphatically not a damaged database.
+        let refused = {
+            let conn = db.lock();
+            conn.execute(
+                "INSERT INTO worktrees (repo_root, path, branch, alias, is_main, created_at)
+                 VALUES ('/tmp/nope', '/tmp/w', 'main', 'main', 0, '2026-01-01T00:00:00.000000Z')",
+                [],
+            )
+            .unwrap_err()
+        };
+        let err = DbError::Sqlite(refused);
+        assert!(err.is_constraint_violation());
+        assert_eq!(err.fault(), None, "a refused row is not a file fault");
+    }
+
+    /// A message shown under a heading reading "What SQLite said" must be
+    /// SQLite's words, not this enum's `Display` wrapper. It shipped to a screen
+    /// as `database error: database disk image is malformed`.
+    #[test]
+    fn a_reported_message_drops_this_enums_own_prefix() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("veld.db");
+        {
+            let db = Db::open_at(&path).unwrap();
+            db.upsert_repo(Path::new("/tmp/r"), "r").unwrap();
+        }
+        corrupt_table_page(&path, "pane_layouts");
+        let db = Db::open_at(&path).unwrap();
+        let err = {
+            let conn = db.lock();
+            DbError::Sqlite(
+                conn.query_row("SELECT COUNT(*) FROM pane_layouts", [], |r| {
+                    r.get::<_, i64>(0)
+                })
+                .unwrap_err(),
+            )
+        };
+
+        assert!(
+            err.to_string().starts_with("database error: "),
+            "if this stops being true the method below has nothing to do — and the \
+             point is that its caller no longer has to know either way: {err}"
+        );
+        let shown = err.reported_message();
+        assert!(
+            !shown.starts_with("database error: "),
+            "the wrapper must be gone: {shown:?}"
+        );
+        assert!(
+            shown.contains("malformed"),
+            "…and SQLite's own words must survive: {shown:?}"
+        );
+    }
+
+    /// Every other variant is shown exactly as it reads: `Open` names the path it
+    /// could not open, and losing that would cost the reader the useful half.
+    #[test]
+    fn a_reported_message_leaves_every_other_variant_alone() {
+        for e in [
+            DbError::AliasTaken("main".into()),
+            DbError::RefusingMainWorktree,
+            DbError::NoDataDir,
+        ] {
+            assert_eq!(e.reported_message(), e.to_string());
+        }
+    }
+
+    /// The whole point: a damaged page must come back as [`DbFault::Corrupt`]
+    /// through the same `DbError::Sqlite` variant every ordinary failure uses.
+    #[test]
+    fn a_damaged_page_is_classified_as_corruption() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("veld.db");
+        {
+            let db = Db::open_at(&path).unwrap();
+            db.upsert_repo(Path::new("/tmp/r"), "r").unwrap();
+        }
+        corrupt_table_page(&path, "pane_layouts");
+
+        let db = Db::open_at(&path).unwrap();
+        let err = {
+            let conn = db.lock();
+            conn.query_row("SELECT COUNT(*) FROM pane_layouts", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .unwrap_err()
+        };
+        assert_eq!(DbError::Sqlite(err).fault(), Some(DbFault::Corrupt));
+    }
+
+    /// `Db::open()` succeeding is not evidence of a healthy database — the
+    /// property that made `veld doctor` print "Database OK" throughout a
+    /// 17-hour incident. `integrity()` is what actually asks.
+    #[test]
+    fn integrity_sees_damage_that_opening_the_database_does_not() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("veld.db");
+        {
+            let db = Db::open_at(&path).unwrap();
+            db.upsert_repo(Path::new("/tmp/r"), "r").unwrap();
+            assert_eq!(db.integrity().unwrap(), Integrity::Ok);
+        }
+        corrupt_table_page(&path, "pane_layouts");
+
+        // Opening still works, and so does every read that does not traverse
+        // the damaged page. This is the incident in two assertions.
+        let db = Db::open_at(&path).expect("a damaged database still opens");
+        assert_eq!(
+            db.list_repos().unwrap().len(),
+            1,
+            "an untouched table still reads"
+        );
+
+        match db.integrity().unwrap() {
+            Integrity::Damaged(detail) => assert!(
+                !detail.trim().is_empty(),
+                "damage must come with something to show the user"
+            ),
+            Integrity::Ok => panic!("quick_check must not call a damaged database intact"),
+        }
+    }
 
     #[test]
     fn migrations_are_consecutive() {

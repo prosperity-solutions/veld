@@ -82,6 +82,7 @@ pub async fn run_gc_scheduler(share_manager: Arc<ShareManager>) {
             }
             Err(e) => {
                 warn!("gc error: {e}");
+                crate::dbhealth::note_reported(&e);
             }
         }
     }

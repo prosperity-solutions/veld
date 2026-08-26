@@ -137,6 +137,25 @@ pub fn fmt_bytes(bytes: u64) -> String {
     }
 }
 
+/// How old, in the largest unit that still says something.
+///
+/// Rounded down deliberately: a backup 23 hours old reading "0 day(s)" would make
+/// a stale one look fresh, so the hour branch keeps it until it really is a day.
+///
+/// Lives here rather than in `doctor` because two surfaces now report the age of
+/// the same thing — the doctor's backup row and `veld backup`'s overdue warning —
+/// and two formatters for one concept drift into saying different things about
+/// the same file.
+pub fn describe_age(age: chrono::Duration) -> String {
+    if age.num_hours() >= 24 {
+        format!("{} day(s) old", age.num_days())
+    } else if age.num_minutes() >= 60 {
+        format!("{} hour(s) old", age.num_hours())
+    } else {
+        format!("{} minute(s) old", age.num_minutes().max(0))
+    }
+}
+
 /// CPU usage as a whole-percent-of-one-core figure. Can exceed 100% for a
 /// multi-threaded process tree, which is correct and not a bug to clamp.
 pub fn fmt_cpu(percent: f32) -> String {

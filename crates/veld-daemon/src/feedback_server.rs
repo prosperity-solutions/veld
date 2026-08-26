@@ -560,6 +560,7 @@ async fn ingest_client_logs(
         Ok(r) => r,
         Err(e) => {
             warn!("failed to load registry for client logs: {e}");
+            crate::dbhealth::note_error(&e);
             return StatusCode::INTERNAL_SERVER_ERROR;
         }
     };

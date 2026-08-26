@@ -18,11 +18,13 @@ import {
 import {
   api,
   MAX_LANE_NAME_LEN,
+  type DbHealth,
   type DirtyFile,
   type EmojiHolder,
   type Repo,
   type WorktreeGitStatus,
 } from "../api";
+import { describeAge } from "../dbhealth/model";
 import type { GitCreateFrom, MarkerStyle } from "../shared/settings";
 import {
   aliasCollides,
@@ -148,6 +150,177 @@ export function ImportRepoDialog(props: {
           </Button>
         </Stack>
       </form>
+    </Modal>
+  );
+}
+
+/**
+ * What veld knows about its own database, and the one button that puts a backup
+ * back.
+ *
+ * **This dialog's job is to be honest about the cost.** Restoring is not a
+ * repair — it replaces the live file with an older copy, so everything veld
+ * learned since that copy was taken is gone: worktrees created, lanes arranged,
+ * settings changed, run history. The age of the candidate is therefore the most
+ * important thing on the screen, and it is stated in the button's own sentence
+ * rather than buried in prose above it.
+ */
+export function DatabaseHealthDialog(props: {
+  health: DbHealth;
+  /** The command that brings this daemon back, when nothing will do it for you.
+   *  Named here as well as in the toast: this is the screen where somebody
+   *  decides whether to go ahead. */
+  restartHint?: string;
+  /** `undefined` when the action is not being offered — either there is nothing
+   *  restorable, or the fault does not call for it (a failing backup schedule
+   *  over a healthy database). The two produce different copy below, because
+   *  telling somebody no copy passed its check when one did is a lie. */
+  onRestore?: () => Promise<void>;
+  onClose: () => void;
+}) {
+  const { busy, error, submit } = useSubmit(() => props.onRestore?.() ?? Promise.resolve());
+  const { database, backups, restore } = props.health;
+  const candidate = restore?.candidate ?? null;
+
+  return (
+    <Modal title="Veld's database" onClose={props.onClose} size={620}>
+      <Stack gap="sm">
+        {database.state !== "ok" && (
+          <Alert color="red" variant="light" p="sm">
+            <Text size="sm">
+              SQLite reports this database as damaged. Veld keeps working for
+              everything that does not touch the damaged part, which is why this
+              can go unnoticed — but writes that reach it fail, and the next
+              thing to fail may be one you care about.
+            </Text>
+          </Alert>
+        )}
+
+        <Stack gap={2}>
+          <Text size="xs" c="dimmed">
+            Database
+          </Text>
+          <Text size="xs" ff="monospace">
+            {database.path || "unknown"}
+          </Text>
+        </Stack>
+
+        {database.detail && (
+          <Stack gap={2}>
+            <Text size="xs" c="dimmed">
+              What SQLite said
+            </Text>
+            <Text size="xs" ff="monospace" style={{ whiteSpace: "pre-wrap" }}>
+              {database.detail}
+            </Text>
+            {database.firstSeen && (
+              <Text size="xs" c="dimmed">
+                First seen {describeAge(database.firstSeen)}
+                {database.hits > 1 ? ` · ${database.hits} occurrences since` : ""}
+              </Text>
+            )}
+          </Stack>
+        )}
+
+        <Stack gap={2}>
+          <Text size="xs" c="dimmed">
+            Backups
+          </Text>
+          <Text size="sm">
+            {backups.lastOk
+              ? `Last successful backup taken ${describeAge(backups.lastOk)}`
+              : backups.newest
+                ? `Newest copy on disk taken ${describeAge(backups.newest.takenAt)}`
+                : "No backups have been written"}
+            {backups.state === "off" ? " · switched off in settings" : ""}
+          </Text>
+          {backups.lastError && (
+            <Text size="xs" c="red" style={{ whiteSpace: "pre-wrap" }}>
+              {backups.lastError}
+            </Text>
+          )}
+        </Stack>
+
+        <ErrorText error={error} />
+
+        {candidate && props.onRestore ? (
+          <form onSubmit={submit}>
+            <Stack gap="xs">
+              <Text size="sm">
+                Restoring replaces the database with the copy taken{" "}
+                <strong>{describeAge(candidate.takenAt)}</strong>. Anything veld
+                learned since then — worktrees, lanes, settings, run history — is
+                lost. The database that is there now is kept, renamed, not
+                deleted.
+              </Text>
+              {/* Verified against a real artifact: a backup carries `runs`,
+                  `nodes` and `environments`, so this is not just history. A run
+                  started after that copy was taken has no row in it, and its
+                  processes keep going while veld no longer knows about them —
+                  which is a leak the user can avoid by stopping first, and
+                  cannot avoid if nobody tells them. */}
+              <Text size="sm">
+                <strong>Stop your running environments first.</strong> A run
+                started since that copy was taken is not in it, so veld would
+                lose track of one that is still running.
+              </Text>
+              <Text size="xs" c="dimmed">
+                Your machine will ask you to confirm in a dialog of its own —
+                replacing the database is not something a page is allowed to do
+                on its own.{" "}
+                {restore.restartsAutomatically
+                  ? "Veld's daemon restarts itself afterwards; your terminals are left alone."
+                  : props.restartHint
+                    ? `Nothing is managing this daemon, so it will not come back on its own — start it again afterwards with \`${props.restartHint}\`.`
+                    : // A dev instance. Deliberately no command: the daemon here is
+                      // a node of a veld run, and the presets that start it often
+                      // recreate this database (`dev-db:fresh`, `dev-db:from-real`),
+                      // which would replace the copy being restored right now.
+                      "This daemon is part of a veld run, so the run stops with it. Start that run again the way you started it — and check its selections first: `dev-db:fresh` and `dev-db:from-real` recreate this database, which would undo the restore."}
+              </Text>
+              <Button type="submit" color="red" variant="light" loading={busy}>
+                Restore the backup from {describeAge(candidate.takenAt)}
+              </Button>
+            </Stack>
+          </form>
+        ) : candidate ? (
+          // **A candidate exists and the action is still withheld**, which is a
+          // different sentence from "there is nothing to restore". This is the
+          // backups-failing state: the live database is fine, so putting an old
+          // copy over it would *lose* state rather than recover any. Saying
+          // "none of the copies passed their integrity check" here — which the
+          // single fallback used to say — is simply false, and one of them is
+          // sitting in `candidate`.
+          <Text size="sm" c="dimmed">
+            Nothing here needs restoring — the database itself is intact. The
+            newest usable backup was taken {describeAge(candidate.takenAt)}; use{" "}
+            <Text span ff="monospace" size="sm">
+              veld backup restore
+            </Text>{" "}
+            if you deliberately want to go back to it.
+          </Text>
+        ) : backups.newest ? (
+          <Text size="sm" c="dimmed">
+            There is no backup that can be restored — none of the copies on disk
+            passed their integrity check. Copy the database aside before doing
+            anything else, then see <Text span ff="monospace" size="sm">veld backup</Text>.
+          </Text>
+        ) : (
+          // **"No copy passed the check" is false when there is no copy.** Every
+          // attempt failing since install (an unwritable `backup.dir`) leaves
+          // `newest` empty and `candidate` empty, which landed on the sentence
+          // above and blamed a check that never ran — the same false-claim class
+          // the branch above this one was added to remove.
+          <Text size="sm" c="dimmed">
+            There are no backups to restore from — none has been written yet. Copy
+            the database aside before doing anything else, then see{" "}
+            <Text span ff="monospace" size="sm">
+              veld backup
+            </Text>{" "}
+            for why the schedule is not producing any.
+          </Text>
+        )}
+      </Stack>
     </Modal>
   );
 }

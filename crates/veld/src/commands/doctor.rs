@@ -468,18 +468,61 @@ impl Diagnostics {
                         .and_then(|p| std::fs::metadata(p).ok())
                         .map(|m| format!("{:.1} MB", m.len() as f64 / 1_048_576.0))
                         .unwrap_or_else(|| "?".into());
-                    self.checks.push(Check {
-                        pass: true,
-                        label: format!("Database OK ({path}, schema v{version}, {size})"),
-                    });
+                    // **Opening is not health, and this row used to claim it
+                    // was.** A database with one damaged page opens fine, reads
+                    // fine everywhere the damage is not, and reported "Database
+                    // OK" here for the whole 17 hours of the incident that
+                    // produced this check — while the daemon logged the same
+                    // corruption 440 times. `quick_check` is what actually
+                    // asks, and it costs ~15 ms on a real database.
+                    match db.integrity() {
+                        Ok(veld_core::db::Integrity::Ok) => self.checks.push(Check {
+                            pass: true,
+                            label: format!("Database OK ({path}, schema v{version}, {size})"),
+                        }),
+                        Ok(veld_core::db::Integrity::Damaged(detail)) => {
+                            self.checks.push(Check {
+                                pass: false,
+                                label: format!(
+                                    "Database DAMAGED ({path}, schema v{version}, {size}): \
+                                     {} — see the backup row below, then \
+                                     `veld backup restore`",
+                                    detail.lines().next().unwrap_or(&detail).trim()
+                                ),
+                            });
+                        }
+                        // The check itself could not run for a reason that is not
+                        // damage (a lock, a permission). Not a pass — but not a
+                        // corruption claim either.
+                        Err(e) => self.checks.push(Check {
+                            pass: false,
+                            label: format!(
+                                "Database could not be checked ({path}, schema v{version}): {e}"
+                            ),
+                        }),
+                    }
                 }
                 Err(e) => {
+                    // **What to advise depends on what went wrong.** Restoring a
+                    // backup is the answer to a damaged file and emphatically not
+                    // to a full disk or a volume that has been remounted
+                    // read-only — those clear on their own, and discarding every
+                    // change since the last copy to "fix" one is a real loss. The
+                    // daemon's restore endpoint refuses for exactly this reason
+                    // (`dbhealth::corruption_recorded`), so a doctor row that
+                    // sent the user to the CLI for the same condition would be
+                    // this tool contradicting the product.
+                    let advice = match e.fault() {
+                        Some(veld_core::db::DbFault::Io) => {
+                            "the storage underneath is refusing — check free space and \
+                             whether the volume is mounted read-only, then try again \
+                             before restoring anything"
+                        }
+                        _ => "see the backup row below, then `veld backup restore`",
+                    };
                     self.checks.push(Check {
                         pass: false,
-                        label: format!(
-                            "Database not usable at {path}: {e} — see the backup row below, \
-                             then `veld backup restore`"
-                        ),
+                        label: format!("Database not usable at {path}: {e} — {advice}"),
                     });
                 }
             }
@@ -1559,20 +1602,6 @@ fn cert_check_label(host: &str, health: &veld_core::tls_health::TlsHealth) -> St
     }
 }
 
-/// How old, in the largest unit that still says something.
-///
-/// Rounded down deliberately: a backup 23 hours old reading "0 day(s)" would make
-/// a stale one look fresh, so the hour branch keeps it until it really is a day.
-fn describe_age(age: chrono::Duration) -> String {
-    if age.num_hours() >= 24 {
-        format!("{} day(s) old", age.num_days())
-    } else if age.num_minutes() >= 60 {
-        format!("{} hour(s) old", age.num_hours())
-    } else {
-        format!("{} minute(s) old", age.num_minutes().max(0))
-    }
-}
-
 /// Whether there is a recent, usable copy of the database — and how to use it.
 ///
 /// **Passes on "there is a usable backup", not on "backups are switched on"**, and
@@ -1687,7 +1716,7 @@ fn check_backups() -> Check {
                 "Database backup {state} ({} of {} usable in {dir_note}, newest {}, schema v{})",
                 usable,
                 artifacts.len(),
-                describe_age(age),
+                output::describe_age(age),
                 a.schema_version,
             );
             if ahead {

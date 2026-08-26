@@ -52,6 +52,15 @@ impl SetupStatus {
 // ---------------------------------------------------------------------------
 
 /// Probe the system to determine setup status.
+/// The launchd job label, and the value launchd exports as `XPC_SERVICE_NAME`
+/// to the process it starts.
+///
+/// Published because the daemon needs to recognise *its own* job: launchd exports
+/// `XPC_SERVICE_NAME=0` to everything descended from a GUI-launched app, so
+/// "is that variable set" is true in an ordinary Terminal and cannot distinguish
+/// a managed daemon from a hand-started one.
+pub const DAEMON_LABEL: &str = "dev.veld.daemon";
+
 pub async fn check_setup() -> SetupStatus {
     let helper_running = check_helper_running().await;
     let caddy_present = crate::paths::caddy_bin().exists();
@@ -716,7 +725,7 @@ pub async fn install_daemon() -> Result<StepResult, anyhow::Error> {
 "#,
                 bin_path = veld_daemon_bin.display(),
             );
-            let label = "dev.veld.daemon";
+            let label = DAEMON_LABEL;
             let domain_target = format!("gui/{real_uid}/{label}");
             let domain = format!("gui/{real_uid}");
 

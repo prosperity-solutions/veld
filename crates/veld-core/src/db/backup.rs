@@ -424,6 +424,25 @@ pub struct Retention {
     pub keep_daily: i64,
 }
 
+/// How long after its due time a backup is *overdue* — the point at which the
+/// absence of a fresh copy is itself worth reporting.
+///
+/// **There are deliberately two staleness rules in this codebase, and this is
+/// the impatient one.** `veld doctor` judges a backup directory it has no memory
+/// of, on demand, so it is generous (four intervals, floored at twelve hours):
+/// a laptop that slept through a few slots is healthy, and a check that cries
+/// wolf is a check people learn to skip. This rule is for the surfaces that are
+/// *watching* — the daemon's health probe and `veld backup` — where twelve hours
+/// is not caution, it is how an incident stays invisible overnight. Two
+/// intervals rather than one so a single missed slot is still not an alarm.
+///
+/// Shared so the two watching surfaces cannot drift apart; the doctor's rule
+/// stays where it is, with its own reasoning next to it.
+#[must_use]
+pub fn overdue_after(interval_minutes: i64) -> chrono::Duration {
+    chrono::Duration::minutes(interval_minutes.max(1).saturating_mul(2))
+}
+
 /// Create a file that did not exist a moment ago, owner-readable only.
 ///
 /// `create_new` is `O_CREAT|O_EXCL`, which fails on an existing file **and on a

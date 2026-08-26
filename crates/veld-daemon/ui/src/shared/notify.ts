@@ -126,9 +126,15 @@ export interface SystemNotificationOptions {
   title: string;
   body?: string;
   /** The pane that produced the notification — echoed back on click so the
-   *  page can focus it. `sessionId` *is* the terminal tab id. */
-  worktreeId: number;
-  sessionId: string;
+   *  page can focus it. `sessionId` *is* the terminal tab id.
+   *
+   *  **Both optional, because not every system notification comes from a pane.**
+   *  A banner about veld's own state (a damaged database, backups that have
+   *  stopped) has nothing to focus; it omits them, the click just raises the
+   *  window, and the page's click handler must tolerate the absence — see
+   *  `App.tsx`'s `onNotifyClick`. */
+  worktreeId?: number;
+  sessionId?: string;
   /** Browser-only click handler. In Veld Desktop the click comes back through
    *  `desktopApp.onNotifyClick` instead, which the app subscribes to. */
   onClick?: () => void;
@@ -147,8 +153,8 @@ export function showSystemNotification(opts: SystemNotificationOptions): void {
     void bridge.notify({
       title: opts.title,
       body: opts.body ?? "",
-      worktreeId: opts.worktreeId,
-      sessionId: opts.sessionId,
+      worktreeId: opts.worktreeId ?? 0,
+      sessionId: opts.sessionId ?? "",
     });
     return;
   }

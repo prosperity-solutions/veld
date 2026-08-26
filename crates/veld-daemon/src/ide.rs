@@ -163,6 +163,7 @@ async fn get_layout(Path(worktree_id): Path<i64>) -> Result<Json<LayoutResponse>
     let db = open_db().map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "database error"))?;
     let stored = db.pane_layout(worktree_id).map_err(|e| {
         warn!("layout read: database error: {e}");
+        crate::dbhealth::note_error(&e);
         err(StatusCode::INTERNAL_SERVER_ERROR, "database error")
     })?;
     Ok(Json(match stored {
@@ -194,6 +195,13 @@ fn layout_write_error(e: veld_core::db::DbError) -> ApiError {
         return err(StatusCode::NOT_FOUND, "worktree not found");
     }
     warn!("layout write: database error: {e}");
+    // **The busiest funnel in the real incident**, and the one this feature would
+    // have missed: `layout write` accounted for 247 of the 440 corruption errors
+    // logged over those 17 hours, because `pane_layouts` was the damaged table and
+    // this is what writes it. Classified here rather than only in the desktop
+    // router — the layout endpoints live on their own router with their own error
+    // shaping, so `desktop::db_err`'s downcast never sees them.
+    crate::dbhealth::note_error(&e);
     err(StatusCode::INTERNAL_SERVER_ERROR, "database error")
 }
 
@@ -412,6 +420,9 @@ async fn get_state() -> Json<StateResponse> {
     // Outside the lock: this opens the database and does two reads per worktree,
     // and nothing in this module may hold the registry across that.
     let db = open_db()
+        // Reported inside `open_db` itself (`management::open_db`), and again by
+        // `Db::open`'s observer — this arm only has a `StatusCode` by the time it
+        // runs, which is the tell that the classification already happened.
         .inspect_err(|e| warn!("ide state: cannot open the database: {e}"))
         .ok();
     let worktrees = interesting
@@ -522,13 +533,17 @@ fn worktree_state(db: Option<&veld_core::db::Db>, worktree_id: i64) -> WorktreeS
         Ok(r) => (r, false),
         Err(e) => {
             warn!(worktree_id, "ide state: worktree lookup failed: {e}");
+            crate::dbhealth::note_error(&e);
             (None, true)
         }
     };
     let (layout_version, layout_failed) = match db.pane_layout(worktree_id) {
         Ok(l) => (l.map_or(0, |l| l.version), false),
         Err(e) => {
+            // `pane_layouts` was the damaged table in the incident, and this is
+            // the last read of it that was not classifying.
             warn!(worktree_id, "ide state: layout lookup failed: {e}");
+            crate::dbhealth::note_error(&e);
             (0, true)
         }
     };

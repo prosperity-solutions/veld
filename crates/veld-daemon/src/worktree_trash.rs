@@ -213,6 +213,7 @@ fn recover() -> usize {
         Ok(db) => recover_with(&db),
         Err(e) => {
             warn!("worktree trash: cannot open database for recovery: {e}");
+            crate::dbhealth::note_error(&e);
             0
         }
     }
@@ -241,6 +242,7 @@ async fn process(id: i64) {
         Ok(db) => db,
         Err(e) => {
             warn!("worktree trash: cannot open database: {e}");
+            crate::dbhealth::note_error(&e);
             return;
         }
     };

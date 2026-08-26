@@ -46,6 +46,7 @@ pub async fn run_health_monitor(broadcaster: Broadcaster) {
             }
             Err(e) => {
                 warn!("health scan error: {e}");
+                crate::dbhealth::note_reported(&e);
             }
         }
     }
