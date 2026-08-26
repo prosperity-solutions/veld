@@ -596,7 +596,7 @@ real `//` comment.
 | `cwd` | node, variant | Working directory. Relative paths resolve from project root. Variant overrides node. Supports `${...}` substitution. |
 | `hidden` | node | Hide from `veld nodes` output |
 | `client_log_levels` | project, node, variant | Browser log levels: `["log", "warn", "error", "info", "debug"]`. Exceptions always captured. |
-| `features` | project, node, variant | `{"feedback_overlay": bool, "client_logs": bool, "inject": bool}`. All default `true`. |
+| `features` | project, node, variant | `{"feedback_overlay": bool, "client_logs": bool, "inject": bool}`. All default `true`. The machine-wide `feedback.suppressOverlay` setting (`veld settings`) forces `feedback_overlay` off on every routed site regardless of this. |
 | `proxy` | project, node, variant | `{request?: {remove?: [str], set?: {k: v}}, response?: {...}}`. Reverse-proxy header rules for the local Caddy proxy + web gateway (NOT peer shares). Cascades: `remove` lists union, `set` maps merge (variant > node > project). Absent = no manipulation. See [Proxy](#proxy). |
 | `type` | node, variant | `long_running` (alias: `start_server`) or `command`. Lifecycle only — ports decide whether the node serves anything. Declare once on the node if all its variants agree. |
 | `argv` / `shell` | node, variant | What to run — exactly one of them. |

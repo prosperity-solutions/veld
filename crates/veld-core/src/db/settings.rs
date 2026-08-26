@@ -702,6 +702,7 @@ pub enum SettingKey {
     BackupKeep,
     BackupKeepDaily,
     BackupDir,
+    FeedbackSuppressOverlay,
     Unknown(String),
 }
 
@@ -737,6 +738,7 @@ impl SettingKey {
         Self::UiShowProjectColumn,
         Self::UiShowProjectNews,
         Self::NewsSource,
+        Self::FeedbackSuppressOverlay,
         // ── General › Database backups ───────────────────────────────────────
         Self::BackupEnabled,
         Self::BackupIntervalMinutes,
@@ -876,6 +878,7 @@ impl SettingKey {
             Self::BackupKeep => "backup.keep",
             Self::BackupKeepDaily => "backup.keepDaily",
             Self::BackupDir => "backup.dir",
+            Self::FeedbackSuppressOverlay => "feedback.suppressOverlay",
             Self::Unknown(k) => k,
         }
     }
@@ -943,6 +946,7 @@ impl SettingKey {
             "backup.keep" => Self::BackupKeep,
             "backup.keepDaily" => Self::BackupKeepDaily,
             "backup.dir" => Self::BackupDir,
+            "feedback.suppressOverlay" => Self::FeedbackSuppressOverlay,
             other => Self::Unknown(other.to_string()),
         }
     }
@@ -1051,6 +1055,7 @@ impl SettingKey {
             | Self::KeepAwakeSharingOnBattery
             | Self::KeepAwakeManualOnBattery
             | Self::BackupEnabled
+            | Self::FeedbackSuppressOverlay
             | Self::FilesViewWebPages
             | Self::FilesViewImages
             | Self::FilesViewPdfs
@@ -1915,6 +1920,11 @@ pub fn defaults() -> BTreeMap<String, Value> {
         // the machine and a value baked into one user's database would be wrong
         // on the next one they restore it onto.
         (SettingKey::BackupDir, Value::from("")),
+        // Off — the default is today's behaviour: the feedback overlay is injected
+        // into every routed site. The switch exists for someone who uses Veld
+        // purely as an orchestrator and does not collect feedback; see the accessor
+        // for what turning it on does.
+        (SettingKey::FeedbackSuppressOverlay, Value::from(false)),
     ]
     .into_iter()
     .map(|(k, v)| (k.as_str().to_string(), v))
@@ -2171,6 +2181,25 @@ impl Db {
             .flatten()
             .and_then(|v| v.as_bool())
             .unwrap_or(true)
+    }
+
+    /// Whether the global feedback-overlay opt-out is on.
+    ///
+    /// When it is, the orchestrator forces `features.feedback_overlay` off on
+    /// every routed site — even one whose `veld.json` asks for the overlay back
+    /// on — so the overlay is never injected into a reverse-proxied page. The
+    /// per-machine answer for a setup that uses Veld purely as an orchestrator
+    /// and does not collect feedback; the client-log collector and the
+    /// `/__veld__/*` routes are unaffected.
+    ///
+    /// Read by both the CLI and the daemon (each can run the orchestrator),
+    /// which is why it lives here beside the catalog rather than in the bundle.
+    pub fn feedback_overlay_suppressed(&self) -> bool {
+        self.setting(&SettingKey::FeedbackSuppressOverlay)
+            .ok()
+            .flatten()
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
     }
 
     /// The five keep-awake settings, read in one go.
