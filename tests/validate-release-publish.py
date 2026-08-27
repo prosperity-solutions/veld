@@ -81,8 +81,15 @@ case "$sub" in
       esac
     done
     # Bare `gh release view <tag>` is the existence probe.
+    if [ -z "$json" ]; then
+      probes=$(cat "$PROBES"); echo $((probes + 1)) > "$PROBES"
+      if [ "$probes" -lt "${FAIL_PROBE_UNTIL-0}" ]; then
+        echo "gh: 500 Internal Server Error" >&2; exit 1
+      fi
+      [ -f "$STATE" ] || exit 1
+      exit 0
+    fi
     [ -f "$STATE" ] || exit 1
-    [ -n "$json" ] || exit 0
     if [ "${FAIL_VIEW-0}" = "1" ]; then
       echo "gh: 500 Internal Server Error" >&2; exit 1
     fi
@@ -221,7 +228,7 @@ ARTIFACTS = ["veld-1.2.3-linux-amd64.tar.gz", "veld-desktop-1.2.3-mac-x64.zip",
 # Stub-control variables must not leak in from the caller's environment, or
 # `FAIL_VIEW=1 just workflow-gates` silently reconfigures every scenario.
 STUB_VARS = {"FAIL_FILES", "FAIL_UNTIL", "FAIL_MODE", "FAIL_VIEW", "FAIL_EDIT_UNTIL",
-             "EDIT_SILENT", "STAT_FAIL", "STATE", "DRAFTF", "GHLOG", "SLEEPLOG",
+             "EDIT_SILENT", "STAT_FAIL", "FAIL_PROBE_UNTIL", "PROBES", "STATE", "DRAFTF", "GHLOG", "SLEEPLOG",
              "TIMEOUTLOG", "ATTEMPT", "EDITS", "NOTESF", "LATESTF", "CREATEDRAFTF",
              "TAG", "GH_REPO"}
 
@@ -283,11 +290,12 @@ def run(script: str, env_overrides: dict[str, str] | None = None,
 
         files = {k: work / f"{k}.txt" for k in
                  ("state", "draft", "gh", "sleep", "timeout", "attempt", "edits",
-                  "notes", "latest", "createdraft")}
+                  "notes", "latest", "createdraft", "probes")}
         for f in files.values():
             f.touch()
         files["attempt"].write_text("1\n")
         files["edits"].write_text("0\n")
+        files["probes"].write_text("0\n")
         if preseed is not None:
             # A re-run of the job: the draft exists, carrying some assets.
             files["draft"].write_text("draft\n")
@@ -308,6 +316,7 @@ def run(script: str, env_overrides: dict[str, str] | None = None,
             "EDITS": str(files["edits"]), "NOTESF": str(files["notes"]),
             "LATESTF": str(files["latest"]),
             "CREATEDRAFTF": str(files["createdraft"]),
+            "PROBES": str(files["probes"]),
             **(env_overrides or {}),
         })
         proc = subprocess.run([BASH, "-c", script], cwd=work, env=env,
@@ -537,6 +546,39 @@ def scenario_clobber(script: str) -> None:
 
 # ── wiring ───────────────────────────────────────────────────────────────────
 
+def scenario_every_github_call_is_capped(script: str) -> None:
+    """The step header claims every GitHub call is retried AND time-capped.
+
+    A runtime check can only observe that *some* call was wrapped — with
+    several call sites, dropping the cap from one of them stays green. This
+    reads the script and holds every site to the claim.
+    """
+    uncapped = []
+    for lineno, line in enumerate(script.splitlines(), 1):
+        text = line.strip()
+        if text.startswith("#"):
+            continue
+        for call in ("gh release view", "gh release upload",
+                     "gh release create", "gh api"):
+            if call in text and "timeout -k" not in text:
+                uncapped.append(f"line {lineno}: {text[:60]}")
+    check("every GitHub call in the script is wrapped in a timeout",
+          not uncapped, "; ".join(uncapped))
+
+
+def scenario_probe_retries(script: str) -> None:
+    """A 5xx on the existence probe must not send a re-run into `release create`.
+
+    Real gh refuses to create a release for a tag that already has one, so
+    without the retry a transient 5xx on the probe fails the job — and the
+    probe is only reached on the top-up path, which is precisely the recovery
+    this step advertises for when GitHub is flaky.
+    """
+    r = run(script, {"FAIL_PROBE_UNTIL": "2"}, preseed=ARTIFACTS[:2])
+    check("a 5xx on the existence probe is retried, not treated as absent",
+          r.published and r.code == 0, f"code={r.code} draft={r.draft}")
+
+
 def scenario_step_env(step: dict) -> None:
     env = set(step.get("env") or {})
     check(f"the step passes {', '.join(sorted(REQUIRED_ENV))} to the script",
@@ -600,6 +642,8 @@ def main() -> int:
     scenario_refused_inputs(script)
     scenario_rerun(script)
     scenario_clobber(script)
+    scenario_every_github_call_is_capped(script)
+    scenario_probe_retries(script)
     scenario_step_env(step)
 
     if FAILURES:
