@@ -332,6 +332,9 @@ jobs:
       contents: write
     needs: [plan, release]
     runs-on: ubuntu-latest
+    # Five upload attempts with backoff cannot outlast this, so a wedged
+    # publish fails in an hour rather than holding a runner for six.
+    timeout-minutes: 60
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
@@ -355,13 +358,102 @@ jobs:
         env:
           RELEASE_NOTES: ${{ needs.release.outputs.new_release_notes }}
 
-      - name: Upload assets to GitHub Release
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65
-        with:
-          tag_name: ${{ needs.release.outputs.new_release_git_tag }}
-          name: ${{ needs.release.outputs.new_release_git_tag }}
-          body_path: release-notes.md
-          files: artifacts/*
+      # `softprops/action-gh-release` lived here until it stranded v16.57.1. It
+      # creates the release as a draft, uploads the assets, then flips
+      # `draft=false` — and it has no retry on a 5xx. One asset upload sat for
+      # five minutes and came back as GitHub's 500 HTML error page, the action
+      # threw, the flip never ran, and the release stayed an invisible draft
+      # while `releases/latest` still pointed at the previous version. Nothing
+      # a user touches — `veld update`, install.sh, Desktop auto-update — reads
+      # a draft, so the release simply did not exist for them, and the only
+      # signal was a red X on a job whose log was a page of HTML.
+      #
+      # So the publish is spelled out here. Same draft-first ordering, because
+      # a release must never be visible carrying a partial asset set, plus
+      # three properties the action does not have:
+      #
+      #   * a 5xx or a hang is retried, and only the assets still missing are
+      #     re-sent — not the ~700 MB that already landed;
+      #   * "present" means the name AND the byte size AND `state == uploaded`
+      #     all match, so a truncated or still-uploading asset is replaced
+      #     rather than counted;
+      #   * the flip to published is *gated* on that set being empty. An
+      #     incomplete release cannot publish, and a complete one cannot be
+      #     left a draft.
+      #
+      # Re-running the job is the recovery path: it finds the existing draft,
+      # tops up whatever is missing, and publishes.
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # There is no checkout in this job, so gh cannot infer the repo.
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.release.outputs.new_release_git_tag }}
+        run: |
+          set -euo pipefail
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists — topping it up."
+          else
+            gh release create "$TAG" --draft --title "$TAG" --notes-file release-notes.md
+          fi
+
+          # The same `-maxdepth 1 -type f` set the checksum step hashed, so the
+          # published assets and checksums.txt cannot describe different files.
+          mapfile -t expected < <(find artifacts -maxdepth 1 -type f | sort)
+          if [ "${#expected[@]}" -eq 0 ]; then
+            echo "::error::no artifacts to publish for $TAG"
+            exit 1
+          fi
+
+          # Sets the global `missing`. The `gh` read is not `|| true`-ed on
+          # purpose: under `set -e` a failed read aborts the job, so `missing`
+          # can only ever be computed from a release we actually saw. An empty
+          # `missing` therefore always means "complete", never "could not ask".
+          refresh_missing() {
+            gh release view "$TAG" --json assets \
+              --jq '.assets[] | select(.state == "uploaded") | "\(.name)\t\(.size)"' > have.tsv
+            declare -A have=()
+            local name size file
+            while IFS=$'\t' read -r name size; do
+              have["$name"]="$size"
+            done < have.tsv
+            missing=()
+            for file in "${expected[@]}"; do
+              name=$(basename "$file")
+              [ "${have[$name]-}" = "$(stat -c %s "$file")" ] || missing+=("$file")
+            done
+          }
+
+          backoff=15
+          for attempt in 1 2 3 4 5; do
+            refresh_missing
+            if [ "${#missing[@]}" -eq 0 ]; then
+              break
+            fi
+            if [ "$attempt" -gt 1 ]; then
+              echo "Retrying in ${backoff}s..."
+              sleep "$backoff"
+              backoff=$((backoff * 2))
+            fi
+            echo "Attempt $attempt: uploading ${#missing[@]} of ${#expected[@]} asset(s)."
+            # A hang, not an error, is what cost v16.57.1 — the request sat for
+            # five minutes before failing. Cap it and retry rather than wait it
+            # out. Killing an upload mid-flight leaves a partial asset, which
+            # the size/state check above catches next pass and `--clobber`
+            # overwrites, so the timeout cannot corrupt the release.
+            timeout 600 gh release upload "$TAG" "${missing[@]}" --clobber || true
+          done
+
+          refresh_missing
+          if [ "${#missing[@]}" -ne 0 ]; then
+            echo "::error::$TAG is missing ${#missing[@]} asset(s) after 5 attempts; leaving it a draft"
+            printf '  %s\n' "${missing[@]}"
+            exit 1
+          fi
+
+          gh release edit "$TAG" --draft=false --latest
+          echo "Published $TAG with ${#expected[@]} assets."
 
   # ── Gateway container image (multi-arch, from the built binaries) ──
   docker-gateway:

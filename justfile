@@ -468,6 +468,12 @@ topbar-height:
 workflow-gates:
     python3 tests/validate-workflow-gates.py --selftest
     python3 tests/validate-workflow-gates.py
+    # Same recipe because it has the same trigger — you touched
+    # .github/workflows/ — and the same PyYAML dep. This one runs release.yml's
+    # publish script against a stub `gh`; see the header there for what
+    # `softprops/action-gh-release` did to v16.57.1.
+    python3 tests/validate-release-publish.py --selftest
+    python3 tests/validate-release-publish.py
 
 # Check commit subjects against the pattern the `commits` job enforces. That job
 # is draft-guarded too, so without this a malformed subject is discovered only
