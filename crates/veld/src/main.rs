@@ -1430,35 +1430,59 @@ async fn main() {
                 (tx, handle, dropped)
             });
 
-            // **EOF is the only shutdown path, so SIGTERM must not pre-empt it.**
+            // **A stop must flush, and must not be slowed down.** Two wrong
+            // answers were measured before this one.
             //
-            // `kill_process` signals the whole *process group* and this process is
-            // in it by construction (the detached pipeline is
+            // The *default* action kills this process instantly, and it is in the
+            // process group `kill_process` signals (the detached pipeline is
             // `sh -c '{ cmd; } 2>&1 | veld _log …'` spawned with
-            // `process_group(0)`), so on every `veld stop`, `veld restart` and
-            // monitor auto-recovery the default action killed this process
-            // instantly — losing the in-flight batch and everything queued. That
-            // is precisely the output most worth keeping: the last thing a dying
-            // server said, which the foreground readers in `veld_core::process`
-            // go out of their way to preserve.
+            // `process_group(0)`), so every `veld stop`, `veld restart` and
+            // automatic recovery destroyed the in-flight batch and everything
+            // queued — the last thing a dying server said, which is the output
+            // most worth keeping.
             //
-            // Ignoring the signal costs nothing, which is worth spelling out
-            // because "ignore SIGTERM" normally means "delay every shutdown by
-            // the grace period". Not here: the server dies from the same group
-            // signal, its stdout closes, this process reads EOF within
-            // milliseconds and exits — and `kill_process` polls the group every
-            // 100 ms and returns as soon as it is empty, so it never reaches its
-            // 5-second budget. If something *does* hold the pipe open (a
-            // grandchild that inherited stdout, or a wedged database making the
-            // writer slow), the group stays alive for 5 s and then takes SIGKILL —
-            // exactly what happened before this change. SIGKILL remains the
-            // unconditional backstop, so this cannot wedge a stop.
+            // `SIG_IGN` fixes that and breaks something else. It leaves EOF as the
+            // only way out, and EOF only arrives when every holder of the pipe's
+            // write end is gone. A node that leaves a descendant outside the group
+            // — `setsid`, or a self-daemonizing gradle/pm2/ngrok-shaped process —
+            // keeps that write end open, so the pump waits, the group never
+            // empties, and `kill_process` spends its whole 5-second budget before
+            // SIGKILL. Measured: 5.0 s and the batch destroyed anyway, against
+            // 0.17 s for the default action.
+            //
+            // Exiting *promptly* on the signal is the third wrong answer, and the
+            // worst of them. This process is the read end of the server's stdout
+            // pipe: leaving while the server is still writing SIGPIPEs it, killing
+            // the thing mid-shutdown, and it also throws away the output a
+            // graceful shutdown produces — which is the output somebody stopping
+            // an environment most wants. Measured on the dev stack: a real
+            // `veld stop` went from 0.49 s to 6.64 s and *lost* the daemon's
+            // `shutdown signal received` / `veld-daemon stopped` lines.
+            //
+            // So: a real handler that records the signal, a read that is
+            // *interrupted* by it (`sa_flags` deliberately omits `SA_RESTART`, so
+            // `fill_buf` returns `ErrorKind::Interrupted`), and then **keep
+            // draining under a deadline**. EOF still ends the loop normally, which
+            // is what happens on every well-behaved node within milliseconds; the
+            // deadline only decides how long a node that leaves the pipe held open
+            // gets before this process flushes and leaves anyway. It sits inside
+            // `kill_process`'s 5-second budget on purpose, so the pathological node
+            // costs less than it did under `SIG_IGN` *and* gets its batch written
+            // rather than being SIGKILLed mid-write.
             #[cfg(unix)]
             unsafe {
-                // SAFETY: `SIG_IGN` installs no handler and runs none of our
-                // code, so there is no async-signal-safety obligation to meet.
-                libc::signal(libc::SIGTERM, libc::SIG_IGN);
-                libc::signal(libc::SIGINT, libc::SIG_IGN);
+                extern "C" fn note_signal(_: libc::c_int) {
+                    // Async-signal-safe: one relaxed atomic store, nothing else.
+                    LOG_PUMP_TERMINATING.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+                let mut action: libc::sigaction = std::mem::zeroed();
+                action.sa_sigaction = note_signal as *const () as libc::sighandler_t;
+                action.sa_flags = 0; // no SA_RESTART: the read must see EINTR
+                libc::sigemptyset(&mut action.sa_mask);
+                // SAFETY: `note_signal` touches only an `AtomicBool`, so it is
+                // legal to run in a signal handler.
+                libc::sigaction(libc::SIGTERM, &action, std::ptr::null_mut());
+                libc::sigaction(libc::SIGINT, &action, std::ptr::null_mut());
             }
 
             let stdin = std::io::stdin();
@@ -1492,14 +1516,58 @@ async fn main() {
                 }
             };
 
+            // When the stop signal arrived, or `None` if it has not.
+            let mut terminating_since: Option<std::time::Instant> = None;
+
             loop {
+                // Once stopping, wait for readability rather than blocking
+                // indefinitely, so a pipe somebody else is holding open cannot
+                // keep this process alive to its SIGKILL. `poll` rather than a
+                // non-blocking fd: it leaves `fill_buf`'s semantics alone, and a
+                // partial read is the one thing this loop must not have to handle.
+                if let Some(since) = terminating_since {
+                    let left = LOG_PUMP_STOP_GRACE.saturating_sub(since.elapsed());
+                    if left.is_zero() {
+                        break;
+                    }
+                    #[cfg(unix)]
+                    {
+                        let mut pfd = libc::pollfd {
+                            fd: 0,
+                            events: libc::POLLIN,
+                            revents: 0,
+                        };
+                        // SAFETY: one initialised `pollfd` describing this
+                        // process's own stdin.
+                        let ready = unsafe {
+                            libc::poll(&mut pfd, 1, left.as_millis().min(i32::MAX as u128) as i32)
+                        };
+                        // 0 is the deadline; -1 is EINTR or a bad fd, and either
+                        // way the next iteration re-checks the deadline.
+                        if ready == 0 {
+                            break;
+                        }
+                    }
+                }
+
                 let chunk = match reader.fill_buf() {
                     Ok([]) => break, // EOF
-                    // A signal can interrupt the read with nothing wrong with the
-                    // pipe. Treating that as EOF would stop draining while the
-                    // server is still writing, and it would then block forever on
-                    // a full pipe. Same reasoning as `drain_pipe`'s.
-                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    // A signal can interrupt the read with nothing wrong with
+                    // the pipe, and the two cases must be told apart. A plain
+                    // EINTR resumes: treating it as EOF would stop draining while
+                    // the server is still writing, and the server would then block
+                    // forever on a full pipe (same reasoning as `drain_pipe`'s).
+                    // A *termination* signal is the stop — flush what is buffered
+                    // and leave, rather than waiting for an EOF that a descendant
+                    // outside the process group may never deliver.
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {
+                        if LOG_PUMP_TERMINATING.load(std::sync::atomic::Ordering::Relaxed)
+                            && terminating_since.is_none()
+                        {
+                            terminating_since = Some(std::time::Instant::now());
+                        }
+                        continue;
+                    }
                     Err(_) => break,
                     Ok(buf) => buf.to_vec(),
                 };
@@ -1507,13 +1575,42 @@ async fn main() {
 
                 for byte in chunk {
                     match byte {
-                        b'\n' => emit(&mut pending),
-                        // Dropped rather than ending a line, which is what the
-                        // previous `trim_end_matches('\r')` amounted to for
-                        // `\r\n`. A `\r`-only meter therefore relies entirely on
-                        // the cap below — as it did before, except that the cap
-                        // now actually applies.
-                        b'\r' => {}
+                        // **`\r` is an ordinary byte here, and that is deliberate
+                        // — it is not what `drain_pipe` does.**
+                        //
+                        // The two readers genuinely disagree about what a line is,
+                        // and this side is the one the renderers are built for.
+                        // `crates/veld-daemon/ui/src/shared/ansi.ts` honours
+                        // exactly one cursor movement, carriage return, precisely
+                        // so that a row holding `12%\r34%\r100%` renders as
+                        // `100%` — its own comment says progress output "is
+                        // otherwise rendered as every frame of the animation at
+                        // once", and `veld logs` collapses it the same way. Emit a
+                        // row per redraw instead and the panel faithfully renders
+                        // two thousand frames, which is the failure that code
+                        // exists to prevent — and multiplies `log_lines` rows by
+                        // the redraw count in a change whose point is row volume.
+                        //
+                        // This was tried the other way round first, on the
+                        // reasoning that two readers of the same node's output
+                        // should agree. They should; but the fix belongs on
+                        // `drain_pipe`'s side, not this one, and it is not this
+                        // change's to make.
+                        //
+                        // A `\r`-only meter therefore still arrives as one row —
+                        // now bounded, because `\r` counts toward the cap below
+                        // like any other byte, which is what `read_line` never
+                        // did.
+                        b'\n' => {
+                            // `read_line` + `trim_end_matches('\n')` +
+                            // `trim_end_matches('\r')`, reproduced: a `\r\n`
+                            // ending contributes no `\r` to the stored line,
+                            // while an *embedded* one is kept for the renderers.
+                            while matches!(pending.last(), Some(b'\r')) {
+                                pending.pop();
+                            }
+                            emit(&mut pending);
+                        }
                         b => {
                             pending.push(b);
                             if pending.len() >= veld_core::process::MAX_LINE_BYTES {
@@ -1536,7 +1633,12 @@ async fn main() {
                 }
             }
 
-            // Output that never got its newline is still output.
+            // Output that never got its newline is still output. Trailing
+            // terminators are stripped here for the same reason as on the `\n`
+            // path, so a meter ending in `\r` does not store one.
+            while matches!(pending.last(), Some(b'\r' | b'\n')) {
+                pending.pop();
+            }
             if !pending.is_empty() {
                 emit(&mut pending);
             }
@@ -1688,6 +1790,22 @@ fn command_survives_an_update(command: &Command) -> bool {
 // `veld _log` pump
 // ---------------------------------------------------------------------------
 
+/// How long `veld _log` keeps draining after a stop signal before it gives up.
+///
+/// Bounded well inside `kill_process`'s 5-second SIGTERM budget so this process
+/// is never the reason a stop reaches SIGKILL, and long enough for a server's own
+/// graceful shutdown output — the lines somebody stopping an environment most
+/// wants — to arrive and be written. A well-behaved node's stdout closes within
+/// milliseconds and never reaches this at all.
+const LOG_PUMP_STOP_GRACE: std::time::Duration = std::time::Duration::from_millis(2_500);
+
+/// Set by `veld _log`'s SIGTERM/SIGINT handler; read by its reader loop.
+///
+/// A `static` rather than a captured variable because a signal handler is an
+/// `extern "C" fn` and can capture nothing.
+static LOG_PUMP_TERMINATING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// Lines the `veld _log` pump may have in flight to its writer thread.
 ///
 /// A bound, not a buffer target: with batching the writer keeps up with anything
@@ -1703,13 +1821,18 @@ fn command_survives_an_update(command: &Command) -> bool {
 /// database that has stopped answering, and after that lines are dropped and
 /// reported.
 ///
-/// **Memory ceiling: `LOG_PUMP_QUEUE × MAX_LINE_BYTES` = 1 GiB**, in the
+/// **Memory ceiling: `LOG_PUMP_QUEUE × MAX_LINE_BYTES × 3` = 3 GiB**, in the
 /// pathological case of a process emitting nothing but maximal lines while the
-/// database is wedged; a few MB for anything realistic. That product is asserted
-/// by `the_queue_is_bounded_in_bytes_not_just_in_lines`, because it is only true
-/// while the reader enforces the per-line cap — and this path had **no** per-line
-/// cap until it was given one, which is what made an earlier "a few MB" claim
-/// not merely wrong but unboundable.
+/// database is wedged; a few MB for anything realistic.
+///
+/// The ×3 is not padding. Lines are queued as `String`s built with
+/// `String::from_utf8_lossy`, which replaces every invalid byte with a 3-byte
+/// U+FFFD — so 64 KiB of `0xFF` becomes 192 KiB, on exactly the input class this
+/// subcommand documents itself as tolerating ("binary output from misbehaving
+/// processes"). `the_queue_is_bounded_in_bytes_not_just_in_lines` asserts the
+/// ceiling against a lossy-converted maximal line rather than against the product
+/// of the two constants, because the product is the number that looks right and
+/// is three times too small.
 ///
 /// A *bounded* channel because the alternative fails worse: unbounded, a wedged
 /// database turns a server's log volume into unbounded memory in a process the
@@ -1766,11 +1889,16 @@ fn log_pump_writer(
     // chasing lost logs must be able to tell veld's claim from the claim of the
     // program veld is watching, and the `internal` stream is the boundary that
     // makes that possible: nothing the child prints can reach it.
-    let report_drops = |lost: u64| {
+    // Returns whether the notice was written. **The caller must put the count
+    // back on failure**: lines get dropped precisely *because* the database is
+    // not keeping up, which is the same condition that makes this write fail — so
+    // consuming the count on a failed write re-creates the silence the whole drop
+    // accounting exists to remove, and does it in exactly the case that matters.
+    let report_drops = |lost: u64| -> bool {
         if lost == 0 {
-            return;
+            return true;
         }
-        let _ = db.append_log(
+        db.append_log(
             project_root,
             run,
             run_id.as_deref(),
@@ -1782,7 +1910,8 @@ fn log_pump_writer(
                 "[log] dropped {lost} line(s) from {node}:{variant} — the database was not \
                  keeping up with the process's output"
             ),
-        );
+        )
+        .is_ok()
     };
 
     // Nothing buffered: block for the first line rather than waking every flush
@@ -1814,9 +1943,13 @@ fn log_pump_writer(
         dropped.fetch_add(lost, Ordering::Relaxed);
 
         // Report between batches, so a run that drops lines in the middle says
-        // so while it is still running rather than only at the end. `swap` so
-        // the count is claimed exactly once.
-        report_drops(dropped.swap(0, Ordering::Relaxed));
+        // so while it is still running rather than only at the end. `swap` claims
+        // the count exactly once; a failed write hands it straight back, so the
+        // next batch retries rather than losing it.
+        let claimed = dropped.swap(0, Ordering::Relaxed);
+        if !report_drops(claimed) {
+            dropped.fetch_add(claimed, Ordering::Relaxed);
+        }
 
         if closed {
             break;
@@ -1825,10 +1958,23 @@ fn log_pump_writer(
 
     let lost = write(&mut batch);
     dropped.fetch_add(lost, Ordering::Relaxed);
-    // The residual, on the way out. This is the case that was silent: drops at
-    // the tail of a run, or a queue that stayed full to the end, left no trace
-    // anywhere at all.
-    report_drops(dropped.swap(0, Ordering::Relaxed));
+    // The residual, on the way out. This is the case that was silent: drops at the
+    // tail of a run, or a queue that stayed full to the end, left no trace
+    // anywhere at all. There is no later pass to retry from, so if this write
+    // fails too the count really is lost — say so rather than implying otherwise.
+    //
+    // The `eprintln!` is **not** a fallback for the detached case, and should not
+    // be read as one: `spawn_detached` gives the `sh` wrapper
+    // `.stderr(Stdio::null())`, and the script's `2>&1` redirects only the `{ … }`
+    // compound, so this process inherits fd 2 = `/dev/null` in every production
+    // run. It is here for somebody running `veld _log` by hand while debugging
+    // exactly this, and for nothing else.
+    let claimed = dropped.swap(0, Ordering::Relaxed);
+    if !report_drops(claimed) && claimed > 0 {
+        eprintln!(
+            "veld _log: dropped {claimed} line(s) from {node}:{variant} and could not record it"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2112,12 +2258,25 @@ mod log_pump_tests {
     /// changing either constant should force somebody to re-read the prose.
     #[test]
     fn the_queue_is_bounded_in_bytes_not_just_in_lines() {
-        let ceiling = LOG_PUMP_QUEUE as u64 * veld_core::process::MAX_LINE_BYTES as u64;
+        // A maximal line of bytes that are not valid UTF-8, converted the way the
+        // reader converts one. `from_utf8_lossy` turns each `0xFF` into a 3-byte
+        // U+FFFD, so this is 3x the raw cap — the factor the product of the two
+        // constants silently omits.
+        let worst_line =
+            String::from_utf8_lossy(&vec![0xFFu8; veld_core::process::MAX_LINE_BYTES]).into_owned();
+        assert_eq!(
+            worst_line.len(),
+            3 * veld_core::process::MAX_LINE_BYTES,
+            "lossy conversion is where the factor of three comes from; if this changes, the \
+             ceiling below and `LOG_PUMP_QUEUE`'s doc comment both need revisiting"
+        );
+
+        let ceiling = LOG_PUMP_QUEUE as u64 * worst_line.len() as u64;
         assert_eq!(
             ceiling,
-            1024 * 1024 * 1024,
-            "LOG_PUMP_QUEUE x MAX_LINE_BYTES is the worst-case resident size of a `veld _log` \
-             process, and its doc comment states this number in prose. If you changed either \
+            3 * 1024 * 1024 * 1024,
+            "this is the worst-case resident size of a `veld _log` process, and \
+             `LOG_PUMP_QUEUE`'s doc comment states it in prose. If you changed either \
              constant, update that comment too."
         );
     }

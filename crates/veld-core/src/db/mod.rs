@@ -371,6 +371,37 @@ fn log_corrupt_file_shape(path: &Path) {
     );
 }
 
+/// Resolve a symlink chain to the path it ultimately names, whether or not that
+/// path exists.
+///
+/// `fs::canonicalize` cannot be used here: it requires every component to exist,
+/// and the case this is for is precisely a link whose target does not. Bounded at
+/// 32 hops, well past any legitimate chain, which also terminates a symlink loop —
+/// on a loop the last path resolved is returned and the caller's `create_new`
+/// fails, which is the right outcome.
+#[cfg(unix)]
+fn resolve_link_chain(path: &Path) -> PathBuf {
+    let mut current = path.to_path_buf();
+    for _ in 0..32 {
+        match std::fs::read_link(&current) {
+            Ok(next) => {
+                current = if next.is_absolute() {
+                    next
+                } else {
+                    // A relative link resolves against the directory holding the
+                    // link, not the process's working directory.
+                    current
+                        .parent()
+                        .map_or_else(|| next.clone(), |d| d.join(&next))
+                };
+            }
+            // Not a symlink (or unreadable): the end of the chain.
+            Err(_) => return current,
+        }
+    }
+    current
+}
+
 /// Up to the first 16 bytes of a file, looping over short reads.
 ///
 /// `Ok` with fewer than 16 bytes means the file really is that short; an `Err`
@@ -704,10 +735,18 @@ impl Db {
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                     let lstat = std::fs::symlink_metadata(path);
                     if lstat.as_ref().is_ok_and(|m| m.is_file()) {
-                        // A real database. `symlink_metadata`, so this cannot be
-                        // following a link somebody else planted. Tightened
-                        // *before* the open on purpose: SQLite derives the mode of
+                        // A real database, as of the `lstat`. Tightened *before*
+                        // the open on purpose: SQLite derives the mode of
                         // `-wal`/`-shm` from the main file when it creates them.
+                        //
+                        // The `lstat` narrows the window rather than closing it —
+                        // `set_permissions` follows symlinks, so a path swapped for
+                        // a link in between would still be chmodded through. What
+                        // makes that acceptable is the parent directory, not this
+                        // check: `<data_dir>/veld` is the user's own, and anybody
+                        // who can write it can write the database directly. Stated
+                        // rather than implied, because the previous wording claimed
+                        // the check was the guarantee.
                         tighten(path);
                     } else if lstat.is_ok_and(|m| m.file_type().is_symlink()) {
                         match std::fs::metadata(path) {
@@ -717,19 +756,47 @@ impl Db {
                             Ok(m) if m.is_file() => tighten(path),
                             // Dangling: create the target ourselves, private, so
                             // SQLite opens a file that is already 0600 and its
-                            // sidecars inherit that. `create_new` cannot be used
-                            // through a symlink (see above), and this `create`
-                            // cannot be closing a descriptor on a live inode for
-                            // the reason that makes the whole hazard moot: a file
-                            // that does not exist has no connections to lose
-                            // locks.
+                            // sidecars inherit that mode.
+                            //
+                            // **`create_new` on the resolved target, not
+                            // `create` through the link**, and the difference is
+                            // the hazard this whole block exists to avoid.
+                            // `metadata` saying "dangling" does not survive to the
+                            // open: two `Db::open_at` calls racing through the
+                            // same link — routine for the daemon, which opens per
+                            // request — would have the second take this arm after
+                            // the first created the target, and a
+                            // `create(true)`+drop there is an `open()`/`close()`
+                            // on a live inode, cancelling the advisory locks the
+                            // first connection in this process holds. `O_EXCL`
+                            // does that checking atomically instead; losing the
+                            // race means the file now exists, so chmod it.
                             Err(_) => {
-                                let _ = std::fs::OpenOptions::new()
+                                // Follow the **whole** chain, not one hop. For
+                                // `veld.db` -> `a` -> missing `b`, resolving one
+                                // level leaves `a`, which is itself a symlink — so
+                                // `create_new` answers `AlreadyExists` again,
+                                // tightening follows to the missing `b` and fails
+                                // silently, and SQLite then creates `b` at its own
+                                // default mode. Measured: 0644 on the file holding
+                                // relay tokens — the regression this arm exists to
+                                // prevent, one link further out.
+                                let target = resolve_link_chain(path);
+                                match std::fs::OpenOptions::new()
                                     .write(true)
-                                    .create(true)
-                                    .truncate(false)
+                                    .create_new(true)
                                     .mode(0o600)
-                                    .open(path);
+                                    .open(&target)
+                                {
+                                    // Ours, and the only descriptor this inode has
+                                    // ever had — safe to drop.
+                                    Ok(_) => {}
+                                    // Somebody won the race; the file exists now.
+                                    Err(e2) if e2.kind() == std::io::ErrorKind::AlreadyExists => {
+                                        tighten(&target);
+                                    }
+                                    Err(_) => {}
+                                }
                             }
                             // A symlink to a directory or a device: leave it, and
                             // let `Connection::open` produce the real error.
@@ -2158,6 +2225,25 @@ mod tests {
             0o600,
             "a database created through a dangling symlink must not be left at the umask — \
              it holds relay tokens and sensitive node outputs"
+        );
+
+        // (3b) a **chain** of dangling links: `veld.db` -> `a` -> missing `b`.
+        // Resolving only one hop leaves `a`, itself a symlink, so `create_new`
+        // refuses again, the chmod follows to a file that does not exist, and
+        // SQLite creates the target at its own default mode. Measured at 0644
+        // before `resolve_link_chain`.
+        let chain_end = dir.path().join("chain-end.db");
+        let mid = dir.path().join("chain-mid.db");
+        let head = dir.path().join("chain-head.db");
+        std::os::unix::fs::symlink(&chain_end, &mid).unwrap();
+        std::os::unix::fs::symlink(&mid, &head).unwrap();
+        drop(Db::open_at(&head).unwrap());
+        assert!(chain_end.exists(), "the end of the chain must be created");
+        assert_eq!(
+            mode(&chain_end),
+            0o600,
+            "a database created through a *chain* of dangling links must be private too — \
+             one hop of resolution is not resolution"
         );
 
         // (4) a directory. It must be left exactly as it was, and the open must

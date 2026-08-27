@@ -138,11 +138,11 @@ pub async fn run_gc() -> anyhow::Result<GcSummary> {
     // Gated on `Corrupt` specifically and never on a generic error: an I/O blip
     // or a full disk is transient and usually sits on good data, and stopping
     // housekeeping on that would let a healthy file grow forever.
-    run_gc_pass(&db, crate::dbhealth::verified_not_corrupt()).await
+    run_gc_pass(&db, &|| crate::dbhealth::verified_not_corrupt()).await
 }
 
-/// One GC pass against an explicit database, with housekeeping explicitly
-/// permitted or not.
+/// One GC pass against an explicit database, asking `housekeeping` whether the
+/// destructive phases may run.
 ///
 /// **Both are parameters so the gate is testable at its call site.** The
 /// predicate itself is unit-tested in `dbhealth`, but that proved nothing about
@@ -151,7 +151,20 @@ pub async fn run_gc() -> anyhow::Result<GcSummary> {
 /// pages in a file SQLite has called malformed. Injecting the `Db` too keeps the
 /// test off `VELD_DB_PATH`, which is process-global state every other test in
 /// this binary shares.
-pub(crate) async fn run_gc_pass(db: &Db, housekeeping: bool) -> anyhow::Result<GcSummary> {
+///
+/// **A closure, not a `bool`, and the difference is the whole race.** Phase 1
+/// below reaps orphans, and each reap is a `kill_process` with a 5-second SIGTERM
+/// budget — so a pass can spend seconds there. The health probe (300 s) and this
+/// pass (600 s) tick together, so on the pass that first coincides with detection
+/// a `bool` evaluated at the top of `run_gc` answers "healthy" before the probe's
+/// blocking `quick_check` has recorded anything, and the pass then prunes and
+/// vacuums a file SQLite has called malformed. That is the measured 17 ms race
+/// this gate exists to close, re-opened to seconds wide by taking the reading
+/// early. Evaluated at the gate instead, where the old code read it.
+pub(crate) async fn run_gc_pass(
+    db: &Db,
+    housekeeping: &(dyn Fn() -> bool + Send + Sync),
+) -> anyhow::Result<GcSummary> {
     let mut summary = GcSummary::default();
     let helper = HelperClient::default_client();
 
@@ -334,6 +347,8 @@ pub(crate) async fn run_gc_pass(db: &Db, housekeeping: bool) -> anyhow::Result<G
     // worse than the writes. Stopping *all* writes needs a sentinel outside the
     // database, with defined clearing semantics — deliberately not attempted
     // here.
+    // Read here, not at the top of the pass — see `run_gc_pass`'s doc comment.
+    let housekeeping = housekeeping();
     if housekeeping {
         // Phase 1d: run-history retention — keep the newest RUN_HISTORY_KEEP ended
         // runs per environment, and nothing older than the log age cap. Deleting a
@@ -537,7 +552,9 @@ mod tests {
         )
         .unwrap();
 
-        let refused = run_gc_pass(&db, false).await.expect("pass should succeed");
+        let refused = run_gc_pass(&db, &|| false)
+            .await
+            .expect("pass should succeed");
         assert_eq!(
             refused.logs_pruned, 0,
             "a pass told the database is damaged must not prune a single row"
@@ -559,7 +576,9 @@ mod tests {
 
         // The same pass, permitted, deletes them — otherwise this test would
         // pass against a `run_gc_pass` that prunes nothing at all.
-        let allowed = run_gc_pass(&db, true).await.expect("pass should succeed");
+        let allowed = run_gc_pass(&db, &|| true)
+            .await
+            .expect("pass should succeed");
         assert_eq!(
             allowed.logs_pruned, 200,
             "a permitted pass must prune, or the refusal above proves nothing"

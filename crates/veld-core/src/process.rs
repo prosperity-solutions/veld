@@ -326,13 +326,18 @@ impl LogTarget {
     /// change rather than the previous behaviour continued: one autocommit
     /// `INSERT` per line lost exactly one line when it failed, and one
     /// transaction per batch loses up to `LOG_BATCH_MAX_LINES` of them. Silently
-    /// dropping 512 lines on the path that carries a foreground server's output —
-    /// where there is no terminal echo to fall back on either — is the shape of
-    /// gap #332 is a report about.
+    /// dropping 512 lines on the path that carries a foreground server's output is
+    /// the shape of gap #332 is a report about.
     ///
-    /// The notice goes on the run-level `internal` stream for the same reason as
-    /// `veld _log`'s: it is veld's own claim, and a supervised process can write
-    /// anything it likes to its own stream.
+    /// **Reported to `tracing`, not to the database — unlike `veld _log`'s
+    /// otherwise-identical notice.** A second write here would sit on the same
+    /// connection with the same 10-second `busy_timeout`, so a busy database would
+    /// stall this drain for up to 20 seconds per batch instead of 10 — doubling
+    /// the exact harm the paragraph above gives as the reason for swallowing the
+    /// error. `veld _log` can afford the database write because its writer thread
+    /// is off the drain path by construction; this task is the drain. Both readers
+    /// that reach here run inside the foreground `veld` process, so a `warn!`
+    /// lands where somebody is looking.
     fn append_batch(&self, lines: &[(chrono::DateTime<chrono::Utc>, String)]) {
         if lines.is_empty() {
             return;
@@ -350,20 +355,11 @@ impl LogTarget {
             )
             .is_err()
         {
-            let _ = self.db.append_log(
-                &self.project_root,
-                &self.run_name,
-                Some(&self.run_id),
-                None,
-                None,
-                LogStream::Internal,
-                chrono::Utc::now(),
-                &format!(
-                    "[log] dropped {} line(s) from {}:{} — the batch could not be written",
-                    lines.len(),
-                    self.node,
-                    self.variant
-                ),
+            tracing::warn!(
+                node = self.node.as_str(),
+                variant = self.variant.as_str(),
+                lines = lines.len(),
+                "dropped log line(s): the batch could not be written to the database"
             );
         }
     }
@@ -1069,7 +1065,14 @@ pub async fn run_command_streaming(
             // lose the last thing a step said, which
             // `drain_pipe` states as a rule for its sibling reader.
             let eof = matches!(read, Ok(0) | Err(_));
-            if eof && buf.is_empty() {
+            // **`all(terminators)`, not `is_empty()`.** A cancelled `read_until`
+            // can leave `buf` holding nothing but a bare `\r` (a step printed
+            // `done\n`, then a `\r`, then paused), and the `pop` loop below then
+            // empties it — emitting a blank line to the terminal and a blank row
+            // to `log_lines` where the pre-batching `Ok(0) => break` dropped it. A
+            // *genuine* blank line always arrives on an `Ok(n > 0)` read, where
+            // `eof` is false, so this cannot swallow one.
+            if eof && buf.iter().all(|b| matches!(b, b'\n' | b'\r')) {
                 break;
             }
 
@@ -1130,7 +1133,14 @@ pub async fn run_command_streaming(
             // Same reasoning as the stdout drain above: a non-empty `buf` at
             // EOF is a real final line, not leftovers.
             let eof = matches!(read, Ok(0) | Err(_));
-            if eof && buf.is_empty() {
+            // **`all(terminators)`, not `is_empty()`.** A cancelled `read_until`
+            // can leave `buf` holding nothing but a bare `\r` (a step printed
+            // `done\n`, then a `\r`, then paused), and the `pop` loop below then
+            // empties it — emitting a blank line to the terminal and a blank row
+            // to `log_lines` where the pre-batching `Ok(0) => break` dropped it. A
+            // *genuine* blank line always arrives on an `Ok(n > 0)` read, where
+            // `eof` is false, so this cannot swallow one.
+            if eof && buf.iter().all(|b| matches!(b, b'\n' | b'\r')) {
                 break;
             }
             while matches!(buf.last(), Some(b'\n' | b'\r')) {

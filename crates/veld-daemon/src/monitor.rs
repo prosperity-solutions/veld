@@ -20,8 +20,20 @@ use veld_core::user_path::cached_user_path_for;
 const SCAN_INTERVAL_SECS: u64 = 5;
 
 /// Tracks each node's liveness-probe bookkeeping.
-/// Key: `"project_root:run_name:node:variant"`.
-type LastCheckMap = HashMap<String, ProbeBookkeeping>;
+///
+/// **A tuple key, not a `:`-joined string, and that is load-bearing.** The key
+/// has to include the run *instance* (a restart must re-arm both the probe
+/// interval and the heartbeat) and entries for dead instances have to be pruned
+/// (the map lives as long as the daemon). Doing that against a joined string
+/// means a prefix match, and `--name` is free-form — it is passed through
+/// verbatim, never slugified — so `veld start --name dev` alongside
+/// `--name dev:eu` in one project had the `dev` scan delete `dev:eu`'s **live**
+/// entries on every 5-second scan. That node's `interval_ms` would then never be
+/// honoured and every probe would answer `Heartbeat`, i.e. ~17,000 internal rows
+/// per node per day — worse than the 11,200 that #332's fix 6 removed, and
+/// permanent. A tuple cannot be ambiguous, so the prune is an exact comparison.
+type LastCheckKey = (std::path::PathBuf, String, uuid::Uuid, String);
+type LastCheckMap = HashMap<LastCheckKey, ProbeBookkeeping>;
 
 /// How often a *passing* probe writes a line to the `internal` stream.
 ///
@@ -281,22 +293,18 @@ async fn run_liveness_checks(
 
     // Drop bookkeeping left by *previous instances* of this run name.
     //
-    // `last_checks` is created once for the daemon's lifetime and has never been
-    // pruned, which was harmless while its key was
-    // `project_root:run_name:node:variant` — bounded by the node count. The key
-    // now carries the run id (so a fresh run re-arms its probe interval and its
-    // heartbeat, see `check_key` below), and a run id is a new UUID per
-    // `veld start` — so without this the map would grow by one entry per node
-    // per restart, forever, on a daemon that survives `veld update`.
-    // The key is `:`-joined and a project path may legally contain a `:`, so a
-    // prefix match is not strictly unambiguous. Left as a prefix match on
-    // purpose: the worst case is pruning another run's entry, and the only
-    // consequence of that is one extra heartbeat line the next time it is probed.
-    // The alternative — a delimiter that cannot appear in a path — is a change to
-    // a key several unrelated things already build the same way.
-    let name_prefix = format!("{}:{}:", project_root.to_string_lossy(), run_name);
-    let live_prefix = format!("{name_prefix}{}:", run.run_id);
-    last_checks.retain(|k, _| !k.starts_with(&name_prefix) || k.starts_with(&live_prefix));
+    // `last_checks` is created once for the daemon's lifetime and was never
+    // pruned, which was harmless while the key was bounded by the node count. It
+    // now carries the run id — so a fresh run re-arms its probe interval and its
+    // heartbeat — and a run id is a new UUID per `veld start`, so without this the
+    // map grows by one entry per node per restart, forever, on a daemon that
+    // survives `veld update`.
+    //
+    // Exact field comparison, never a prefix: see [`LastCheckMap`] for what a
+    // prefix match did to a run whose name contained a `:`.
+    last_checks.retain(|(proj, name, id, _), _| {
+        proj != project_root || name != run_name || *id == run.run_id
+    });
 
     let mut changes = 0;
 
@@ -340,12 +348,11 @@ async fn run_liveness_checks(
         // `skills/veld/SKILL.md` promise a reader ("a quiet stream means
         // healthy"). `run.run_id` changes per instance, so a restart re-arms
         // both the probe interval and the heartbeat.
-        let check_key = format!(
-            "{}:{}:{}:{}",
-            project_root.to_string_lossy(),
-            run_name,
+        let check_key: LastCheckKey = (
+            project_root.to_path_buf(),
+            run_name.to_owned(),
             run.run_id,
-            key
+            key.clone(),
         );
         let probe_interval = Duration::from_millis(liveness.interval_ms);
         let book = last_checks.get(&check_key).copied();
