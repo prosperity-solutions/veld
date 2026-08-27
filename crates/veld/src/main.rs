@@ -1430,53 +1430,115 @@ async fn main() {
                 (tx, handle, dropped)
             });
 
+            // **EOF is the only shutdown path, so SIGTERM must not pre-empt it.**
+            //
+            // `kill_process` signals the whole *process group* and this process is
+            // in it by construction (the detached pipeline is
+            // `sh -c '{ cmd; } 2>&1 | veld _log …'` spawned with
+            // `process_group(0)`), so on every `veld stop`, `veld restart` and
+            // monitor auto-recovery the default action killed this process
+            // instantly — losing the in-flight batch and everything queued. That
+            // is precisely the output most worth keeping: the last thing a dying
+            // server said, which the foreground readers in `veld_core::process`
+            // go out of their way to preserve.
+            //
+            // Ignoring the signal costs nothing, which is worth spelling out
+            // because "ignore SIGTERM" normally means "delay every shutdown by
+            // the grace period". Not here: the server dies from the same group
+            // signal, its stdout closes, this process reads EOF within
+            // milliseconds and exits — and `kill_process` polls the group every
+            // 100 ms and returns as soon as it is empty, so it never reaches its
+            // 5-second budget. If something *does* hold the pipe open (a
+            // grandchild that inherited stdout, or a wedged database making the
+            // writer slow), the group stays alive for 5 s and then takes SIGKILL —
+            // exactly what happened before this change. SIGKILL remains the
+            // unconditional backstop, so this cannot wedge a stop.
+            #[cfg(unix)]
+            unsafe {
+                // SAFETY: `SIG_IGN` installs no handler and runs none of our
+                // code, so there is no async-signal-safety obligation to meet.
+                libc::signal(libc::SIGTERM, libc::SIG_IGN);
+                libc::signal(libc::SIGINT, libc::SIG_IGN);
+            }
+
             let stdin = std::io::stdin();
             let mut reader = stdin.lock();
-            let mut buf = String::new();
+            // Bytes of a line that has not ended yet. **Not `read_line`.**
+            //
+            // `read_line` returns only on `\n`, so a stream that emits none — a
+            // `\r`-only progress meter, the exact case `MAX_LINE_BYTES` exists
+            // for — grows its buffer without bound *before* any cap applied to
+            // the returned line can see it. Capping afterwards, as an earlier
+            // version of this did, therefore bounded nothing at all. The ceiling
+            // has to be enforced while accumulating, which is what `drain_pipe`
+            // does and what this now mirrors.
+            let mut pending: Vec<u8> = Vec::new();
 
-            loop {
-                buf.clear();
-                match reader.read_line(&mut buf) {
-                    Ok(0) => break, // EOF
-                    Ok(_) => {
-                        let Some((ref tx, _, ref dropped)) = writer else {
-                            continue;
-                        };
-                        let mut line = buf.trim_end_matches('\n').trim_end_matches('\r').to_owned();
-                        // **Cap the line here.** `MAX_LINE_BYTES` is enforced by
-                        // `drain_pipe`, which is the *other* reader — this path
-                        // gets raw pipe bytes through `read_line` and had no cap
-                        // at all, so a process emitting one enormous line (a
-                        // `\r`-only progress meter, a minified stack dump) could
-                        // put `LOG_PUMP_QUEUE` × that length in memory. With the
-                        // cap the queue's worst case is bounded by a number this
-                        // file can state honestly.
-                        if line.len() > veld_core::process::MAX_LINE_BYTES {
-                            // On a char boundary: splitting a multi-byte char
-                            // would corrupt one character at the cut.
-                            let mut end = veld_core::process::MAX_LINE_BYTES;
-                            while end > 0 && !line.is_char_boundary(end) {
-                                end -= 1;
-                            }
-                            line.truncate(end);
-                        }
-                        // `try_send`, never `send`: blocking here is what puts
-                        // the database back on the path that drains the server's
-                        // stdout pipe. Dropping is the sanctioned failure mode
-                        // for this process (see above), and the count is owned by
-                        // the writer thread — see `log_pump_writer`, which is
-                        // what reports it, because a reporter on this side cannot
-                        // report through a queue that is full.
-                        if tx.try_send((chrono::Utc::now(), line)).is_err() {
-                            dropped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        }
-                    }
-                    Err(_) => {
-                        // Invalid UTF-8 line — skip it rather than terminating.
-                        // This handles binary output from misbehaving processes.
-                        continue;
+            // Hand one completed line to the writer thread.
+            //
+            // `try_send`, never `send`: blocking here puts the database back on
+            // the path that drains the server's stdout pipe, and a reader that
+            // stops draining blocks the server on a full pipe. Dropping is the
+            // sanctioned failure mode for this process, and the count is owned by
+            // the writer — see `log_pump_writer`, which reports it, because a
+            // reporter on *this* side cannot report through a queue that is full.
+            let emit = |pending: &mut Vec<u8>| {
+                let line = String::from_utf8_lossy(pending).into_owned();
+                pending.clear();
+                if let Some((ref tx, _, ref dropped)) = writer {
+                    if tx.try_send((chrono::Utc::now(), line)).is_err() {
+                        dropped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     }
                 }
+            };
+
+            loop {
+                let chunk = match reader.fill_buf() {
+                    Ok([]) => break, // EOF
+                    // A signal can interrupt the read with nothing wrong with the
+                    // pipe. Treating that as EOF would stop draining while the
+                    // server is still writing, and it would then block forever on
+                    // a full pipe. Same reasoning as `drain_pipe`'s.
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(_) => break,
+                    Ok(buf) => buf.to_vec(),
+                };
+                reader.consume(chunk.len());
+
+                for byte in chunk {
+                    match byte {
+                        b'\n' => emit(&mut pending),
+                        // Dropped rather than ending a line, which is what the
+                        // previous `trim_end_matches('\r')` amounted to for
+                        // `\r\n`. A `\r`-only meter therefore relies entirely on
+                        // the cap below — as it did before, except that the cap
+                        // now actually applies.
+                        b'\r' => {}
+                        b => {
+                            pending.push(b);
+                            if pending.len() >= veld_core::process::MAX_LINE_BYTES {
+                                // **Split, do not truncate.** `drain_pipe` splits
+                                // an over-long line into successive rows and loses
+                                // nothing; truncating here would mean the same
+                                // node's output survived whole or was silently cut
+                                // depending only on whether it ran foreground or
+                                // detached. Cut on a character boundary so one
+                                // character is not corrupted on both sides of a
+                                // break the process never asked for.
+                                let keep = pending.len()
+                                    - veld_core::process::trailing_partial_char(&pending);
+                                let tail = pending.split_off(keep);
+                                emit(&mut pending);
+                                pending = tail;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Output that never got its newline is still output.
+            if !pending.is_empty() {
+                emit(&mut pending);
             }
 
             // Drop the sender so the writer sees the channel close, flushes its

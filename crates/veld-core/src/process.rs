@@ -120,11 +120,29 @@ pub type LineSink = std::sync::Arc<dyn Fn(&[String]) + Send + Sync>;
 /// its output accumulates in memory for the life of the step and lands as one
 /// enormous row. 64 KiB is far past any real log line.
 ///
-/// `pub` because there are **two** pipe readers and both need the same ceiling:
-/// this module's [`drain_pipe`], and the detached `veld _log` pump in
-/// `crates/veld/src/main.rs`, which buffers lines for its writer thread and so
-/// turns an uncapped line into an uncapped queue. Nothing in the type system
-/// ties them together — a third reader must reach for this too.
+/// `pub` because the detached `veld _log` pump in `crates/veld/src/main.rs`
+/// needs the same ceiling: it buffers lines for its writer thread, so an
+/// uncapped line there is an uncapped queue.
+///
+/// **Do not read that as "the readers are capped".** There are five loops in
+/// veld that assemble a line from a pipe, and only two honour this:
+///
+/// | reader | caps? |
+/// |---|---|
+/// | [`drain_pipe`] (`command` steps via `LineSink`) | yes |
+/// | `veld _log` (detached servers) | yes, at the enqueue |
+/// | [`log_pipe`] (foreground servers) | **no** |
+/// | `run_command_streaming` stdout | **no** |
+/// | `run_command_streaming` stderr | **no** |
+///
+/// The three that do not cannot be fixed by adding a length check, which is why
+/// they are still like this: `Lines::next_line` and `read_until` do not return
+/// until they see a delimiter or EOF, so there is no point at which a caller can
+/// intervene. `drain_pipe` gets this right by reading with `fill_buf` and
+/// assembling lines itself, and unifying the other three onto it is a refactor of
+/// its own rather than a length check. Until then a `\r`-only progress meter
+/// still accumulates without bound on those paths — a pre-existing hazard this
+/// table exists to stop the next reader from assuming away.
 pub const MAX_LINE_BYTES: usize = 64 * 1024;
 
 /// How long the pipe readers get to finish after the step's own process exits.
@@ -162,7 +180,10 @@ impl Drop for DrainTasks {
 /// whose remaining bytes have not arrived (0 if it ends on a boundary).
 ///
 /// A UTF-8 character is at most 4 bytes, so at most 3 can be pending.
-fn trailing_partial_char(buf: &[u8]) -> usize {
+/// `pub` so the `veld _log` pump can split an over-long line the same way
+/// [`drain_pipe`] does — same ceiling *and* same behaviour at it, rather than one
+/// path splitting and the other truncating.
+pub fn trailing_partial_char(buf: &[u8]) -> usize {
     for back in 1..=3.min(buf.len()) {
         let byte = buf[buf.len() - back];
         // Continuation bytes are 10xxxxxx; anything else starts a character.
@@ -299,22 +320,52 @@ impl LogTarget {
     /// -pages-per-line shape that [`Db::append_logs`] documents. Feed it from a
     /// [`crate::logging::LogBatch`].
     ///
-    /// Errors are dropped, as they were before: this runs on the task draining a
+    /// A failed write does not stop the drain — this runs on the task reading a
     /// child's stdout, and a drain that stops because the database was busy
-    /// blocks the child on a full pipe.
+    /// blocks the child on a full pipe. But it is **reported**, and that is a
+    /// change rather than the previous behaviour continued: one autocommit
+    /// `INSERT` per line lost exactly one line when it failed, and one
+    /// transaction per batch loses up to `LOG_BATCH_MAX_LINES` of them. Silently
+    /// dropping 512 lines on the path that carries a foreground server's output —
+    /// where there is no terminal echo to fall back on either — is the shape of
+    /// gap #332 is a report about.
+    ///
+    /// The notice goes on the run-level `internal` stream for the same reason as
+    /// `veld _log`'s: it is veld's own claim, and a supervised process can write
+    /// anything it likes to its own stream.
     fn append_batch(&self, lines: &[(chrono::DateTime<chrono::Utc>, String)]) {
         if lines.is_empty() {
             return;
         }
-        let _ = self.db.append_logs(
-            &self.project_root,
-            &self.run_name,
-            Some(&self.run_id),
-            Some(&self.node),
-            Some(&self.variant),
-            LogStream::Server,
-            lines,
-        );
+        if self
+            .db
+            .append_logs(
+                &self.project_root,
+                &self.run_name,
+                Some(&self.run_id),
+                Some(&self.node),
+                Some(&self.variant),
+                LogStream::Server,
+                lines,
+            )
+            .is_err()
+        {
+            let _ = self.db.append_log(
+                &self.project_root,
+                &self.run_name,
+                Some(&self.run_id),
+                None,
+                None,
+                LogStream::Internal,
+                chrono::Utc::now(),
+                &format!(
+                    "[log] dropped {} line(s) from {}:{} — the batch could not be written",
+                    lines.len(),
+                    self.node,
+                    self.variant
+                ),
+            );
+        }
     }
 }
 

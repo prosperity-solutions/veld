@@ -127,6 +127,14 @@ impl Db {
     /// Append one log line. `node`/`variant` are `None` for run-level streams
     /// (debug/internal). `run_id` scopes the line to one run instance; `None`
     /// only for writers that predate the run (never in new code paths).
+    ///
+    /// **For a single line only — a writer with a stream of them wants
+    /// [`Db::append_logs`].** One autocommit `INSERT` per line takes the
+    /// process-wide connection lock on its own and costs 6.47 WAL pages per row
+    /// against 0.658 batched; that method documents the measurement, and
+    /// `logging::LogBatch` turns a line-at-a-time reader into a batch. This
+    /// warning lives here as well as there because the simpler name is the one a
+    /// new writer reaches for first, and five production paths did.
     #[allow(clippy::too_many_arguments)]
     pub fn append_log(
         &self,

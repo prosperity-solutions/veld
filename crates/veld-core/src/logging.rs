@@ -394,6 +394,22 @@ mod log_batch_tests {
             "a flush window in a reader's polling range makes batching visible as lag"
         );
     }
+
+    /// The size cap has a ceiling too, and for a different reason than the
+    /// window: it is how long the process-wide connection mutex is held by one
+    /// transaction, and every pipe consumer in veld shares that mutex. "Raise it
+    /// to reduce write load" is the natural next edit and the write-amplification
+    /// curve is already flat past ~32 rows (see `Db::append_logs`), so there is
+    /// nothing to buy above this and a wedged environment to lose.
+    #[test]
+    fn the_batch_size_cap_stays_small_enough_to_hold_a_lock_briefly() {
+        assert!(
+            (32..=4096).contains(&LOG_BATCH_MAX_LINES),
+            "below ~32 the batching stops paying for itself; far above this one \
+             transaction holds the shared connection long enough to matter to every \
+             other veld process"
+        );
+    }
 }
 
 #[cfg(test)]

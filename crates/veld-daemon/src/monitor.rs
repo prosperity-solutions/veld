@@ -279,6 +279,19 @@ async fn run_liveness_checks(
     };
     let run = &mut run_owned;
 
+    // Drop bookkeeping left by *previous instances* of this run name.
+    //
+    // `last_checks` is created once for the daemon's lifetime and has never been
+    // pruned, which was harmless while its key was
+    // `project_root:run_name:node:variant` — bounded by the node count. The key
+    // now carries the run id (so a fresh run re-arms its probe interval and its
+    // heartbeat, see `check_key` below), and a run id is a new UUID per
+    // `veld start` — so without this the map would grow by one entry per node
+    // per restart, forever, on a daemon that survives `veld update`.
+    let name_prefix = format!("{}:{}:", project_root.to_string_lossy(), run_name);
+    let live_prefix = format!("{name_prefix}{}:", run.run_id);
+    last_checks.retain(|k, _| !k.starts_with(&name_prefix) || k.starts_with(&live_prefix));
+
     let mut changes = 0;
 
     // Collect nodes to check — both Healthy and Unhealthy nodes get probed.

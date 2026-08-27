@@ -371,6 +371,27 @@ fn log_corrupt_file_shape(path: &Path) {
     );
 }
 
+/// Up to the first 16 bytes of a file, looping over short reads.
+///
+/// `Ok` with fewer than 16 bytes means the file really is that short; an `Err`
+/// means it could not be read at all, which the caller reports rather than
+/// rendering as an empty field.
+fn read_first_bytes(path: &Path) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    let mut f = std::fs::File::open(path)?;
+    let mut head = [0u8; 16];
+    let mut filled = 0;
+    while filled < head.len() {
+        match f.read(&mut head[filled..]) {
+            Ok(0) => break, // genuine end of file
+            Ok(n) => filled += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(head[..filled].to_vec())
+}
+
 /// The three facts [`log_corrupt_file_shape`] reports.
 #[derive(Debug, PartialEq, Eq)]
 struct CorruptFileShape {
@@ -397,18 +418,26 @@ fn corrupt_file_shape(path: &Path) -> CorruptFileShape {
         .find(|p| size != 0 && size % p == 0)
         .unwrap_or(0);
 
-    let mut head = [0u8; 16];
-    let read = {
-        use std::io::Read;
-        std::fs::File::open(path)
-            .and_then(|mut f| f.read(&mut head))
-            .unwrap_or(0)
-    };
-    let first_16_bytes = head[..read]
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect::<Vec<_>>()
-        .join(" ");
+    // `read_exact`-style loop, and the error is reported rather than collapsed
+    // into an empty string.
+    //
+    // Both halves matter for the one field that does the actual discriminating.
+    // A single `read` may legally return fewer than 16 bytes, and
+    // `std::fs::metadata` needs only traverse on the parent while `File::open`
+    // needs *read* permission on the file — so a root-owned `veld.db` (veld had a
+    // sudo-install era) would have printed a size, a page-size verdict, and a
+    // blank byte field, indistinguishable from a genuinely empty file. This line
+    // is emitted once per process and is the whole point of fix 8; a blank field
+    // with no reason is the one outcome that wastes it.
+    let first_16_bytes = read_first_bytes(path)
+        .map(|bytes| {
+            bytes
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .unwrap_or_else(|e| format!("<unreadable: {e}>"));
 
     CorruptFileShape {
         size_bytes: size,
