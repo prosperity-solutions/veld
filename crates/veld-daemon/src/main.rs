@@ -114,6 +114,13 @@ async fn main() -> Result<()> {
     }
 
     info!("veld-daemon {VERSION} starting");
+    // The SQLite build is a *statically bundled* dependency, so a downgrade is
+    // invisible in every other way: nothing on the machine changes, no package
+    // manager records it, and the only trace is which `libsqlite3-sys` the
+    // binary was linked against. Corruption diagnosis starts by asking which
+    // SQLite wrote the file, and sqlite.org's own corruption guide is organised
+    // by version — #332 spent a paragraph establishing this from `Cargo.toml`.
+    info!("sqlite {}", veld_core::db::sqlite_version());
     info!("socket path: {}", args.socket_path.display());
 
     // Ensure the parent directory exists.

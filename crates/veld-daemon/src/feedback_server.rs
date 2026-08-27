@@ -620,6 +620,13 @@ async fn ingest_client_logs(
         veld_core::db::LogStream::Client,
     );
 
+    // The batching was already on the wire — up to 500 entries per request —
+    // and the database side threw it away, one transaction per entry. Rebuild
+    // the batch here and write it once; every entry keeps its own client-supplied
+    // timestamp, which is the whole reason this path uses `write_with_ts`.
+    let mut rows: Vec<(chrono::DateTime<chrono::Utc>, String)> =
+        Vec::with_capacity(batch.entries.len());
+
     for entry in &batch.entries {
         let ts = chrono::DateTime::parse_from_rfc3339(entry.ts.trim())
             .map(|t| t.with_timezone(&chrono::Utc))
@@ -659,10 +666,14 @@ async fn ingest_client_logs(
                 }
             }
         }
-        if let Err(e) = writer.write_with_ts(ts, &line) {
-            warn!("failed to write client log entry: {e}");
-            break;
-        }
+        rows.push((ts, line));
+    }
+
+    if let Err(e) = writer.write_stamped_lines(&rows) {
+        warn!(
+            "failed to write client log batch ({} entries): {e}",
+            rows.len()
+        );
     }
 
     StatusCode::NO_CONTENT

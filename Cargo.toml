@@ -38,7 +38,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 slug = "0.1"
 dirs = "6"
-rusqlite = { version = "0.37", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 # `user` is for `getuid`: `desktop_app_pids` scopes its `ps` scan to the calling
 # user, so another account's copy of Veld Desktop cannot be mistaken for this
 # one's (and signalled, fruitlessly, with EPERM).

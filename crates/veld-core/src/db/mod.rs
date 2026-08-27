@@ -313,6 +313,170 @@ pub fn observe_open_failures(hook: fn(&DbError)) {
     let _ = OPEN_OBSERVER.set(hook);
 }
 
+/// The bundled SQLite library's version, e.g. `"3.53.2"`.
+///
+/// Reported at daemon startup. veld links SQLite statically, so which one it is
+/// cannot be discovered from the machine — and it is the first question any
+/// corruption diagnosis asks, since sqlite.org's `howtocorrupt.html` is
+/// organised by the versions each documented bug is present in.
+#[must_use]
+pub fn sqlite_version() -> &'static str {
+    rusqlite::version()
+}
+
+/// Whether this process has already described a damaged file. See
+/// [`log_corrupt_file_shape`].
+static CORRUPT_SHAPE_LOGGED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Legal SQLite page sizes (`PRAGMA page_size` accepts these and nothing else).
+const SQLITE_PAGE_SIZES: [u64; 8] = [512, 1024, 2048, 4096, 8192, 16384, 32768, 65536];
+
+/// Describe the shape of a file that would not open, once per process.
+///
+/// The error itself already carries the path and SQLite's message, and that was
+/// never the gap — `DbError::Open` has carried the path since the database was
+/// created. What was missing is the three facts that separate the *recoverable*
+/// shape of this failure from the unrecoverable ones, and they can only be read
+/// from the bytes:
+///
+/// - **size**, and whether it is a whole multiple of a legal page size. A whole
+///   multiple means nothing was truncated mid-page — the pages are all still
+///   there and one of them is wrong. A size that divides by nothing legal means
+///   the file was cut short or something else was written over it.
+/// - **the first 16 bytes.** `SQLite format 3\0` means the header survived and
+///   the damage is deeper in. A b-tree page type byte (`0x02`/`0x05`/`0x0a`/
+///   `0x0d`) at offset 0 means another page's image landed on page 1 — the shape
+///   that is fully reconstructible. ASCII means a text file was copied over it.
+///
+/// One incident (#332) sat undiagnosed for a day and then took a page-by-page
+/// hand decode to establish exactly these three facts, all of which were a
+/// `stat` and a 16-byte read away.
+///
+/// **Once per process, not once per open**: the daemon opens the database per
+/// HTTP request and per scheduler pass, and a per-open version of this is a
+/// flood in the log of the machine that can least afford one.
+fn log_corrupt_file_shape(path: &Path) {
+    use std::sync::atomic::Ordering;
+    if CORRUPT_SHAPE_LOGGED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    let shape = corrupt_file_shape(path);
+    tracing::error!(
+        path = %path.display(),
+        size_bytes = shape.size_bytes,
+        whole_pages_of = shape.whole_pages_of,
+        first_16_bytes = %shape.first_16_bytes,
+        "database will not open and reads as damaged — recording its shape once for diagnosis"
+    );
+}
+
+/// Resolve a symlink chain to the path it ultimately names, whether or not that
+/// path exists.
+///
+/// `fs::canonicalize` cannot be used here: it requires every component to exist,
+/// and the case this is for is precisely a link whose target does not. Bounded at
+/// 32 hops, well past any legitimate chain, which also terminates a symlink loop —
+/// on a loop the last path resolved is returned and the caller's `create_new`
+/// fails, which is the right outcome.
+#[cfg(unix)]
+fn resolve_link_chain(path: &Path) -> PathBuf {
+    let mut current = path.to_path_buf();
+    for _ in 0..32 {
+        match std::fs::read_link(&current) {
+            Ok(next) => {
+                current = if next.is_absolute() {
+                    next
+                } else {
+                    // A relative link resolves against the directory holding the
+                    // link, not the process's working directory.
+                    current
+                        .parent()
+                        .map_or_else(|| next.clone(), |d| d.join(&next))
+                };
+            }
+            // Not a symlink (or unreadable): the end of the chain.
+            Err(_) => return current,
+        }
+    }
+    current
+}
+
+/// Up to the first 16 bytes of a file, looping over short reads.
+///
+/// `Ok` with fewer than 16 bytes means the file really is that short; an `Err`
+/// means it could not be read at all, which the caller reports rather than
+/// rendering as an empty field.
+fn read_first_bytes(path: &Path) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    let mut f = std::fs::File::open(path)?;
+    let mut head = [0u8; 16];
+    let mut filled = 0;
+    while filled < head.len() {
+        match f.read(&mut head[filled..]) {
+            Ok(0) => break, // genuine end of file
+            Ok(n) => filled += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(head[..filled].to_vec())
+}
+
+/// The three facts [`log_corrupt_file_shape`] reports.
+#[derive(Debug, PartialEq, Eq)]
+struct CorruptFileShape {
+    size_bytes: u64,
+    /// The largest legal page size the file divides by, or `0` for none.
+    whole_pages_of: u64,
+    /// Space-separated lowercase hex of the first (up to) 16 bytes.
+    first_16_bytes: String,
+}
+
+/// Read a damaged file's shape. Pure apart from the two reads, so the
+/// classification is testable against fixtures rather than against an incident.
+fn corrupt_file_shape(path: &Path) -> CorruptFileShape {
+    let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    // Read this as "whole pages are plausible", never as a measurement: a file
+    // with 4096-byte pages also divides by 512, and the header the real page
+    // size lives in is exactly what is gone. `0` — divides by no legal page size
+    // at all — is the *un*recoverable shape: something was truncated or written
+    // over wholesale rather than one page landing at the wrong address.
+    let whole_pages_of = SQLITE_PAGE_SIZES
+        .iter()
+        .rev()
+        .copied()
+        .find(|p| size != 0 && size % p == 0)
+        .unwrap_or(0);
+
+    // `read_exact`-style loop, and the error is reported rather than collapsed
+    // into an empty string.
+    //
+    // Both halves matter for the one field that does the actual discriminating.
+    // A single `read` may legally return fewer than 16 bytes, and
+    // `std::fs::metadata` needs only traverse on the parent while `File::open`
+    // needs *read* permission on the file — so a root-owned `veld.db` (veld had a
+    // sudo-install era) would have printed a size, a page-size verdict, and a
+    // blank byte field, indistinguishable from a genuinely empty file. This line
+    // is emitted once per process and is the whole point of fix 8; a blank field
+    // with no reason is the one outcome that wastes it.
+    let first_16_bytes = read_first_bytes(path)
+        .map(|bytes| {
+            bytes
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .unwrap_or_else(|e| format!("<unreadable: {e}>"));
+
+    CorruptFileShape {
+        size_bytes: size,
+        whole_pages_of,
+        first_16_bytes,
+    }
+}
+
 /// Handle to the central Veld database. Cheap to clone; all clones share one
 /// connection guarded by a mutex (SQLite serializes writers anyway, and WAL
 /// keeps other *processes* unblocked).
@@ -455,6 +619,16 @@ impl Db {
         // the tests' entry point, and a test that deliberately opens a damaged
         // fixture must not publish a fault into the process it shares with every
         // other test.
+        //
+        // One thing does now happen down in `open_at`: `log_corrupt_file_shape`
+        // emits a single `tracing::error!` describing a file that would not open.
+        // That is a deliberate exception and a much weaker one — it is a log
+        // line, not process state any other code reads, and it has to sit at
+        // `open_at` because that is the only layer holding the path whose bytes
+        // are the evidence (`veld doctor` and the backup verifier open by
+        // explicit path and want the forensics too). Its once-per-process flag is
+        // shared with the test binary, so a damaged-fixture test can consume it;
+        // that costs a log line and nothing else.
         let opened = (|| {
             let path = Self::default_path()?;
             Self::open_at(&path)
@@ -479,6 +653,19 @@ impl Db {
 
     /// Open (and migrate) a database at an explicit path. Used by tests.
     pub fn open_at(path: &Path) -> Result<Self, DbError> {
+        let opened = Self::open_at_inner(path);
+        if let Err(ref e) = opened {
+            // A file that will not open is the one moment its own bytes are the
+            // only evidence there is, and the moment veld has historically said
+            // least. See `log_corrupt_file_shape`.
+            if e.fault() == Some(DbFault::Corrupt) {
+                log_corrupt_file_shape(path);
+            }
+        }
+        opened
+    }
+
+    fn open_at_inner(path: &Path) -> Result<Self, DbError> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| DbError::CreateDir {
                 path: parent.to_path_buf(),
@@ -486,17 +673,141 @@ impl Db {
             })?;
         }
 
-        // Create the file 0600 up front — it stores secrets (sensitive node
-        // outputs, relay tokens). SQLite creates -wal/-shm with the same mode.
+        // The file holds secrets (sensitive node outputs, relay tokens), so it
+        // must be 0600. SQLite creates -wal/-shm with the same mode.
+        //
+        // **Never with an `open()` that is then closed.** sqlite.org's
+        // `howtocorrupt.html` §2.2: "the close() system call will cancel all
+        // POSIX advisory locks on the same file for all threads and all file
+        // descriptors in the process … developers should be careful to never
+        // use close() on an SQLite database file while one or more database
+        // connections are open, even in other threads." The daemon opens this
+        // database per HTTP request and per scheduler pass, so a `close(2)`
+        // here silently drops the advisory locks every *other* live connection
+        // in this process believes it still holds. Reproduced on APFS: with a
+        // read transaction open, `fcntl(F_GETLK)` on SQLite's SHARED byte range
+        // reports the lock held, and `F_UNLCK` immediately after an
+        // `open()`+`close()` from the same process.
+        //
+        // The paths below are deliberately different syscalls and none of them
+        // closes a descriptor on an inode another connection could hold locks on:
+        //
+        // - **new file**: `create_new` + `mode` — a brand-new inode nobody can
+        //   hold a lock on yet, so dropping that descriptor is safe.
+        // - **existing regular file**: `chmod(2)`, no descriptor at all. This is a
+        //   deliberate behaviour *change*: `OpenOptionsExt::mode` applies only
+        //   when the file is created, so the old code corrected nothing on an
+        //   existing database — it destroyed the process's advisory locks in
+        //   exchange for no effect whatsoever.
+        // - **symlink**: see the arm below. This is the case that made a naive
+        //   `is_file()` guard a permissions regression.
+        // - **anything else** (a directory, a socket): left alone entirely.
         #[cfg(unix)]
         {
-            use std::os::unix::fs::OpenOptionsExt;
-            let _ = std::fs::OpenOptions::new()
+            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+            let tighten = |p: &Path| {
+                let _ = std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o600));
+            };
+            match std::fs::OpenOptions::new()
                 .write(true)
-                .create(true)
-                .truncate(false)
+                .create_new(true)
                 .mode(0o600)
-                .open(path);
+                .open(path)
+            {
+                Ok(_) => {}
+                // `create_new` answers `AlreadyExists` for **more than an
+                // existing database**, and each of the other shapes has bitten
+                // this function once:
+                //
+                // - a **directory** (`EEXIST`, where the old `create(true)` open
+                //   got `EISDIR` and was inert), so an unguarded chmod here turns
+                //   `VELD_DB_PATH=$HOME` into `chmod 0600 $HOME` — traversal
+                //   broken for everything underneath it, silently, since the
+                //   error is discarded;
+                // - a **symlink**, including a dangling one: POSIX makes
+                //   `O_CREAT|O_EXCL` fail `EEXIST` on a symlink whatever its
+                //   target. Guarding the chmod with `symlink_metadata().is_file()`
+                //   correctly refuses to chmod *the link*, but then leaves the
+                //   target to be created by `Connection::open` below under the
+                //   process umask. Measured: a database reached through a dangling
+                //   symlink came out `-rw-r--r--`, where the pre-change code made
+                //   it 0600 — on the file holding relay tokens.
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    let lstat = std::fs::symlink_metadata(path);
+                    if lstat.as_ref().is_ok_and(|m| m.is_file()) {
+                        // A real database, as of the `lstat`. Tightened *before*
+                        // the open on purpose: SQLite derives the mode of
+                        // `-wal`/`-shm` from the main file when it creates them.
+                        //
+                        // The `lstat` narrows the window rather than closing it —
+                        // `set_permissions` follows symlinks, so a path swapped for
+                        // a link in between would still be chmodded through. What
+                        // makes that acceptable is the parent directory, not this
+                        // check: `<data_dir>/veld` is the user's own, and anybody
+                        // who can write it can write the database directly. Stated
+                        // rather than implied, because the previous wording claimed
+                        // the check was the guarantee.
+                        tighten(path);
+                    } else if lstat.is_ok_and(|m| m.file_type().is_symlink()) {
+                        match std::fs::metadata(path) {
+                            // Symlink to an existing file: tighten through it,
+                            // which is what the user asking veld to keep its
+                            // database there means.
+                            Ok(m) if m.is_file() => tighten(path),
+                            // Dangling: create the target ourselves, private, so
+                            // SQLite opens a file that is already 0600 and its
+                            // sidecars inherit that mode.
+                            //
+                            // **`create_new` on the resolved target, not
+                            // `create` through the link**, and the difference is
+                            // the hazard this whole block exists to avoid.
+                            // `metadata` saying "dangling" does not survive to the
+                            // open: two `Db::open_at` calls racing through the
+                            // same link — routine for the daemon, which opens per
+                            // request — would have the second take this arm after
+                            // the first created the target, and a
+                            // `create(true)`+drop there is an `open()`/`close()`
+                            // on a live inode, cancelling the advisory locks the
+                            // first connection in this process holds. `O_EXCL`
+                            // does that checking atomically instead; losing the
+                            // race means the file now exists, so chmod it.
+                            Err(_) => {
+                                // Follow the **whole** chain, not one hop. For
+                                // `veld.db` -> `a` -> missing `b`, resolving one
+                                // level leaves `a`, which is itself a symlink — so
+                                // `create_new` answers `AlreadyExists` again,
+                                // tightening follows to the missing `b` and fails
+                                // silently, and SQLite then creates `b` at its own
+                                // default mode. Measured: 0644 on the file holding
+                                // relay tokens — the regression this arm exists to
+                                // prevent, one link further out.
+                                let target = resolve_link_chain(path);
+                                match std::fs::OpenOptions::new()
+                                    .write(true)
+                                    .create_new(true)
+                                    .mode(0o600)
+                                    .open(&target)
+                                {
+                                    // Ours, and the only descriptor this inode has
+                                    // ever had — safe to drop.
+                                    Ok(_) => {}
+                                    // Somebody won the race; the file exists now.
+                                    Err(e2) if e2.kind() == std::io::ErrorKind::AlreadyExists => {
+                                        tighten(&target);
+                                    }
+                                    Err(_) => {}
+                                }
+                            }
+                            // A symlink to a directory or a device: leave it, and
+                            // let `Connection::open` produce the real error.
+                            Ok(_) => {}
+                        }
+                    }
+                }
+                // Anything else (a missing parent, a read-only volume) is
+                // reported by `Connection::open` below with better context.
+                Err(_) => {}
+            }
         }
 
         let conn = Connection::open(path).map_err(|e| DbError::Open {
@@ -655,17 +966,90 @@ impl Db {
         }
     }
 
-    /// Reclaim disk space after large deletes: move freed pages out of the
-    /// file (incremental vacuum) and truncate the WAL. Called by GC after
-    /// pruning; best-effort.
-    pub fn vacuum(&self) -> Result<(), DbError> {
+    /// Pages `Db::vacuum` reclaims per call.
+    ///
+    /// A bare `PRAGMA incremental_vacuum` empties the **whole** freelist. On a
+    /// pass that just deleted seven days of log rows that is tens of thousands
+    /// of page relocations under a single lock, while every other veld process
+    /// waits on its 10-second `busy_timeout` and `veld _log` drops lines when
+    /// that expires.
+    ///
+    /// 2,000 pages is ~8 MB at the 4 KiB page size this database uses, so at the
+    /// GC's 600-second interval a backlog drains at ~49 MB/hour — comfortably
+    /// faster than veld frees pages in steady state, slower after a one-off mass
+    /// delete. `incremental_vacuum` is resumable by design, so the remainder
+    /// simply goes on the next pass.
+    ///
+    /// The bound is load-bearing rather than theoretical **because the reclaim
+    /// only started working in this same change** — see [`Db::vacuum_pages`].
+    /// The first pass on an existing install meets a freelist that has been
+    /// accumulating for the life of the database, which is exactly the very long
+    /// write transaction this number exists to prevent.
+    ///
+    /// This is a lock-hold and churn bound. It is **not** a corruption fix: the
+    /// documented `auto_vacuum` algorithm is excluded as a cause of #332 (it
+    /// refuses to move a root page outright, and page 1 is never the source or
+    /// the destination of a relocation).
+    const VACUUM_PAGES_PER_PASS: u32 = 2_000;
+
+    /// Reclaim disk space after large deletes: move a bounded number of freed
+    /// pages out of the file (incremental vacuum) and truncate the WAL. Called
+    /// by GC after pruning; best-effort.
+    ///
+    /// Returns the number of pages still on the freelist afterwards, so a caller
+    /// can tell "nothing to do" from "more next pass".
+    ///
+    /// The reclaim is skipped entirely when the freelist is empty — the common
+    /// case on a healthy pass, and previously an unconditional write transaction
+    /// on every one. The gate is `freelist_count` and deliberately not the
+    /// prune counts: `node_process_stats` prunes on a 2-hour horizon every pass,
+    /// so "0 log rows pruned" is never "nothing was freed".
+    pub fn vacuum(&self) -> Result<u32, DbError> {
+        self.vacuum_pages(Self::VACUUM_PAGES_PER_PASS)
+    }
+
+    /// [`Db::vacuum`] with an explicit page budget, so the *bound* is testable
+    /// without writing 8 MB of fixture to exceed the production one.
+    ///
+    /// **The pragma is stepped, not `execute_batch`ed, and that is the whole
+    /// fix.** `PRAGMA incremental_vacuum` emits one result row per page it
+    /// relocates; `execute_batch` runs each statement with a single step, so it
+    /// stopped at the first row and reclaimed **exactly one page per call** —
+    /// whatever argument it was given, and whether or not it had one. Measured
+    /// on an 8,683-page freelist built from real `log_lines` rows:
+    ///
+    /// | how it is driven | pages reclaimed |
+    /// |---|---:|
+    /// | `execute_batch("PRAGMA incremental_vacuum;")` (what shipped) | **1** |
+    /// | `execute_batch("PRAGMA incremental_vacuum(2000);")` | **1** |
+    /// | stepped, `incremental_vacuum(2000)` | **2000** |
+    /// | stepped, bare `incremental_vacuum` | **8683** |
+    ///
+    /// So the GC's page reclaim has never reclaimed anything since the database
+    /// was created: a machine that pruned seven days of logs got one page back
+    /// per pass. #332 read this line as "an unbounded reclaim in one very long
+    /// write transaction" and the truth was the opposite — it was a no-op. Both
+    /// the bound and the stepping are needed, and neither is useful alone.
+    pub(crate) fn vacuum_pages(&self, max_pages: u32) -> Result<u32, DbError> {
         let conn = self.lock();
-        conn.execute_batch("PRAGMA incremental_vacuum;")?;
-        // wal_checkpoint returns a result row — use query_row.
+        let freelist: u32 = conn.query_row("PRAGMA freelist_count", [], |r| r.get(0))?;
+        if freelist > 0 {
+            // A pragma cannot take a bound parameter, hence the format!. It is a
+            // `u32` from a private constant, not caller input.
+            let mut stmt = conn.prepare(&format!("PRAGMA incremental_vacuum({max_pages})"))?;
+            let mut rows = stmt.query([])?;
+            // One row per relocated page; stepping to the end is what does the
+            // work. Nothing to read out of them.
+            while rows.next()?.is_some() {}
+        }
+        // wal_checkpoint returns a result row — use query_row. Run even with an
+        // empty freelist: the WAL grows from ordinary writes, and truncating it
+        // is the cheaper half of this call.
         let _: (i64, i64, i64) = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?))
         })?;
-        Ok(())
+        let remaining: u32 = conn.query_row("PRAGMA freelist_count", [], |r| r.get(0))?;
+        Ok(remaining)
     }
 
     // -----------------------------------------------------------------------
@@ -1630,6 +2014,326 @@ pub(crate) fn corrupt_table_page(path: &Path, table_name: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A file whose size is a whole number of pages is the *recoverable* shape —
+    /// nothing was truncated, one page is simply wrong — and one that divides by
+    /// no legal page size is not. Getting that classification the wrong way
+    /// round is the only way this reporting can mislead, so it is asserted
+    /// rather than reasoned about.
+    #[test]
+    fn a_damaged_files_shape_separates_whole_pages_from_a_truncated_file() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // 59,759 × 4096 was the real incident's size; three pages is the same
+        // fact at a size a test can write.
+        let whole = dir.path().join("whole.db");
+        std::fs::write(&whole, vec![0x0du8; 3 * 4096]).unwrap();
+        let shape = corrupt_file_shape(&whole);
+        assert_eq!(shape.size_bytes, 12_288);
+        assert_eq!(
+            shape.whole_pages_of, 4096,
+            "12288 divides by 512/1024/2048/4096 — the largest is what gets reported, \
+             because a smaller divisor is true of every file the larger one is true of"
+        );
+
+        // Cut one byte off and no legal page size divides it any more.
+        let cut = dir.path().join("cut.db");
+        std::fs::write(&cut, vec![0u8; 3 * 4096 - 1]).unwrap();
+        assert_eq!(
+            corrupt_file_shape(&cut).whole_pages_of,
+            0,
+            "a size that divides by no legal page size must report 0, not a fallback"
+        );
+
+        // An empty file divides by everything arithmetically and by nothing
+        // usefully; 0 is the honest answer.
+        let empty = dir.path().join("empty.db");
+        std::fs::write(&empty, b"").unwrap();
+        let shape = corrupt_file_shape(&empty);
+        assert_eq!((shape.size_bytes, shape.whole_pages_of), (0, 0));
+        assert_eq!(shape.first_16_bytes, "");
+    }
+
+    /// The 16 bytes are the fact that separates the three failure shapes, so
+    /// they have to be readable as bytes — not summarised, not interpreted.
+    #[test]
+    fn a_damaged_files_first_bytes_are_reported_verbatim() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // An intact header: the damage is deeper in, and the page-1 story does
+        // not apply.
+        let headered = dir.path().join("headered.db");
+        std::fs::write(&headered, b"SQLite format 3\0rest").unwrap();
+        assert_eq!(
+            corrupt_file_shape(&headered).first_16_bytes,
+            "53 51 4c 69 74 65 20 66 6f 72 6d 61 74 20 33 00"
+        );
+
+        // The incident's own first bytes: a `0x0d` table-b-tree leaf sitting
+        // where the file header belongs — another page's image at page 1's
+        // address, which is fully reconstructible.
+        let leaf = dir.path().join("leaf.db");
+        std::fs::write(
+            &leaf,
+            [
+                0x0d, 0x00, 0x00, 0x00, 0x02, 0x0f, 0xd5, 0x00, 0x0f, 0xef, 0x0f, 0xd5, 0, 0, 0, 0,
+            ],
+        )
+        .unwrap();
+        assert!(
+            corrupt_file_shape(&leaf)
+                .first_16_bytes
+                .starts_with("0d 00"),
+            "a b-tree page type byte at offset 0 is the recoverable shape and must be visible"
+        );
+
+        // Fewer than 16 bytes must not panic or pad.
+        let tiny = dir.path().join("tiny.db");
+        std::fs::write(&tiny, [0xffu8, 0x01]).unwrap();
+        assert_eq!(corrupt_file_shape(&tiny).first_16_bytes, "ff 01");
+    }
+
+    /// Opening this database must not `close(2)` a descriptor on the live file:
+    /// sqlite.org's `howtocorrupt.html` §2.2 is explicit that doing so cancels
+    /// *every* POSIX advisory lock the process holds on it, across all threads
+    /// and all descriptors, while the SQLite connections carry on believing they
+    /// still hold theirs. The daemon opens this database per HTTP request and per
+    /// scheduler pass, so the second open is the normal case, not a corner one.
+    ///
+    /// Asserted through SQLite's own SHARED byte range rather than through
+    /// behaviour, because there is no behaviour to observe: the locks are gone
+    /// and nothing notices until something else does.
+    #[cfg(unix)]
+    #[test]
+    fn a_second_open_leaves_the_first_connections_locks_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("veld.db");
+
+        let first = Db::open_at(&path).unwrap();
+        // A read transaction is what makes SQLite take the lock at all — with no
+        // statement in flight there is nothing for a stray `close` to destroy,
+        // which is how this defect stayed invisible.
+        let guard = first.lock();
+        let mut stmt = guard.prepare("SELECT count(*) FROM sqlite_schema").unwrap();
+        let mut rows = stmt.query([]).unwrap();
+        rows.next().unwrap();
+
+        assert!(
+            posix_lock_held(&path),
+            "precondition: an open read transaction must hold the SHARED range — if this \
+             fails the test proves nothing about the second open"
+        );
+
+        // The whole point: this runs the create/chmod path again on a file that
+        // already exists, in the same process.
+        let _second = Db::open_at(&path).unwrap();
+
+        assert!(
+            posix_lock_held(&path),
+            "a second Db::open_at in the same process destroyed the first connection's \
+             advisory lock — see howtocorrupt.html §2.2"
+        );
+
+        drop(rows);
+        drop(stmt);
+        drop(guard);
+    }
+
+    /// The deliberate behaviour change that comes with dropping the stray
+    /// `open()`: `OpenOptionsExt::mode` applies **only when the file is
+    /// created**, so the old code corrected nothing on an existing database — it
+    /// destroyed the process's advisory locks in exchange for no effect at all.
+    /// `chmod(2)` actually tightens one, which is what the file holding relay
+    /// tokens and sensitive node outputs needed all along.
+    #[cfg(unix)]
+    #[test]
+    fn opening_an_existing_database_tightens_its_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("veld.db");
+
+        // Create it, then loosen it the way a bad umask or a restored copy would.
+        drop(Db::open_at(&path).unwrap());
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        drop(Db::open_at(&path).unwrap());
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "an existing database with group/world-readable permissions must be tightened \
+             on open — it stores relay tokens and sensitive node outputs"
+        );
+    }
+
+    /// **`create_new` reports `AlreadyExists` for four different things, and
+    /// three of them have produced a bug in this function.** So each is pinned.
+    ///
+    /// - a regular file → tightened;
+    /// - a symlink to a file → tightened through the link;
+    /// - a **dangling** symlink → target created 0600, not left to the umask.
+    ///   Measured before the fix: `-rw-r--r--` on the file that holds relay
+    ///   tokens, where the code this replaced produced 0600;
+    /// - a directory → left completely alone, because chmod-ing it would break
+    ///   traversal of everything underneath (`VELD_DB_PATH=$HOME`).
+    #[cfg(unix)]
+    #[test]
+    fn every_shape_create_new_calls_already_existing_is_handled_on_its_own_terms() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+
+        // (1) an existing regular file with loose permissions
+        let dir = tempfile::tempdir().unwrap();
+        let plain = dir.path().join("plain.db");
+        drop(Db::open_at(&plain).unwrap());
+        std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o644)).unwrap();
+        drop(Db::open_at(&plain).unwrap());
+        assert_eq!(
+            mode(&plain),
+            0o600,
+            "an existing database must be tightened"
+        );
+
+        // (2) a symlink pointing at an existing, loose database
+        let target = dir.path().join("target.db");
+        drop(Db::open_at(&target).unwrap());
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let link = dir.path().join("link.db");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        drop(Db::open_at(&link).unwrap());
+        assert_eq!(
+            mode(&target),
+            0o600,
+            "a symlinked database must be tightened through the link"
+        );
+
+        // (3) a DANGLING symlink — the regression case. The target does not
+        // exist, so `create_new` still fails `AlreadyExists` and the target ends
+        // up created by whoever gets there first.
+        let missing = dir.path().join("not-yet.db");
+        let dangling = dir.path().join("dangling.db");
+        std::os::unix::fs::symlink(&missing, &dangling).unwrap();
+        drop(Db::open_at(&dangling).unwrap());
+        assert!(
+            missing.exists(),
+            "opening through a dangling link must create the target"
+        );
+        assert_eq!(
+            mode(&missing),
+            0o600,
+            "a database created through a dangling symlink must not be left at the umask — \
+             it holds relay tokens and sensitive node outputs"
+        );
+
+        // (3b) a **chain** of dangling links: `veld.db` -> `a` -> missing `b`.
+        // Resolving only one hop leaves `a`, itself a symlink, so `create_new`
+        // refuses again, the chmod follows to a file that does not exist, and
+        // SQLite creates the target at its own default mode. Measured at 0644
+        // before `resolve_link_chain`.
+        let chain_end = dir.path().join("chain-end.db");
+        let mid = dir.path().join("chain-mid.db");
+        let head = dir.path().join("chain-head.db");
+        std::os::unix::fs::symlink(&chain_end, &mid).unwrap();
+        std::os::unix::fs::symlink(&mid, &head).unwrap();
+        drop(Db::open_at(&head).unwrap());
+        assert!(chain_end.exists(), "the end of the chain must be created");
+        assert_eq!(
+            mode(&chain_end),
+            0o600,
+            "a database created through a *chain* of dangling links must be private too — \
+             one hop of resolution is not resolution"
+        );
+
+        // (4) a directory. It must be left exactly as it was, and the open must
+        // fail rather than silently succeeding against something that is not a
+        // database.
+        let as_dir = dir.path().join("adirectory");
+        std::fs::create_dir(&as_dir).unwrap();
+        std::fs::set_permissions(&as_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(
+            Db::open_at(&as_dir).is_err(),
+            "a directory is not a database and opening one must fail"
+        );
+        assert_eq!(
+            mode(&as_dir),
+            0o755,
+            "a directory at the database path must never be chmodded — this is what turns \
+             VELD_DB_PATH=$HOME into a broken home directory"
+        );
+    }
+
+    /// A database veld creates is never briefly world-readable.
+    #[cfg(unix)]
+    #[test]
+    fn a_new_database_is_created_private() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("veld.db");
+        drop(Db::open_at(&path).unwrap());
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "a freshly created database must be 0600");
+    }
+
+    /// Whether this process holds a lock on SQLite's SHARED byte range.
+    ///
+    /// **Probed from a forked child, and it has to be.** POSIX record locks are
+    /// per (process, inode) and a process never conflicts with itself, so an
+    /// `F_GETLK` issued from *this* process reports `F_UNLCK` whether the lock is
+    /// there or not — the test would pass identically against the defect it
+    /// exists to catch. Locks are not inherited across `fork`, so the child sees
+    /// the parent's lock as a genuine conflict.
+    #[cfg(unix)]
+    fn posix_lock_held(path: &Path) -> bool {
+        use nix::libc;
+        use nix::sys::wait::{WaitStatus, waitpid};
+        use nix::unistd::{ForkResult, fork};
+
+        // SQLite's SHARED range: `SHARED_FIRST`/`SHARED_SIZE` in `os_unix.c`,
+        // i.e. `PENDING_BYTE + 2` for 510 bytes.
+        const SHARED_FIRST: i64 = 0x4000_0002;
+        const SHARED_SIZE: i64 = 510;
+
+        // Built in the parent: `CString::new` allocates, which the child must not.
+        let c_path = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+
+        // SAFETY: the child calls only `open`, `fcntl` and `_exit` — all
+        // async-signal-safe — before exiting, which is what makes `fork` legal
+        // from a multi-threaded test binary. It allocates nothing and unwinds
+        // nowhere.
+        match unsafe { fork() }.expect("fork failed") {
+            ForkResult::Child => {
+                let code = unsafe {
+                    let fd = libc::open(c_path.as_ptr(), libc::O_RDWR);
+                    if fd < 0 {
+                        2
+                    } else {
+                        let mut fl: libc::flock = std::mem::zeroed();
+                        fl.l_type = libc::F_WRLCK as libc::c_short;
+                        fl.l_whence = libc::SEEK_SET as libc::c_short;
+                        fl.l_start = SHARED_FIRST as libc::off_t;
+                        fl.l_len = SHARED_SIZE as libc::off_t;
+                        if libc::fcntl(fd, libc::F_GETLK, &mut fl) != 0 {
+                            2
+                        } else if fl.l_type == libc::F_UNLCK as libc::c_short {
+                            1
+                        } else {
+                            0
+                        }
+                    }
+                };
+                unsafe { libc::_exit(code) }
+            }
+            ForkResult::Parent { child } => match waitpid(child, None).expect("waitpid failed") {
+                WaitStatus::Exited(_, 0) => true,
+                WaitStatus::Exited(_, 1) => false,
+                other => panic!("lock probe child failed: {other:?}"),
+            },
+        }
+    }
 
     /// The classifier earns its keep only if it separates "this file is in
     /// trouble" from the constraint violations that arrive as the same variant.

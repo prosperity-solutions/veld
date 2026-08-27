@@ -106,11 +106,41 @@ pub async fn run() -> i32 {
     }
 
     // Prune old log lines and orphaned feedback data (older than 7 days),
-    // then reclaim the freed pages.
-    let cutoff = chrono::Utc::now() - chrono::Duration::hours(MAX_LOG_AGE_HOURS);
-    let logs_pruned = db.prune_logs_older_than(cutoff).unwrap_or(0);
-    let feedback_cleaned = db.prune_orphaned_feedback(cutoff).unwrap_or(0);
-    let _ = db.vacuum();
+    // then reclaim the freed pages — **unless the file is damaged**.
+    //
+    // The daemon gates the same work on `dbhealth::verified_not_corrupt()`, and
+    // this path has to gate it too rather than being written off as "somebody
+    // typed `veld gc`". It is not hand-run in practice: `maybe_auto_gc` in
+    // `crates/veld/src/main.rs` detaches a `veld gc` subprocess from *any* CLI
+    // invocation once 30 minutes have passed — `veld logs`, `veld status`,
+    // `veld start`, precisely the commands somebody runs while diagnosing a
+    // corrupt database. Left ungated, the daemon's gate buys at most 30 minutes.
+    //
+    // This process has no `dbhealth` state (it is a one-shot CLI, and the
+    // daemon's is process-local), so it asks SQLite directly. That is a
+    // `quick_check` — the same one `veld doctor` runs — and it is affordable
+    // here for the same reason the prune is: this runs at most once every 30
+    // minutes, detached, off any foreground command's critical path.
+    //
+    // `Err` is treated as permission to continue, deliberately: an unrelated
+    // failure to run the check must not silently stop retention forever, which
+    // is unbounded growth in the direction nobody watches. Only a positive
+    // report of damage stops the work.
+    let damaged = matches!(db.integrity(), Ok(veld_core::db::Integrity::Damaged(_)));
+    let (logs_pruned, feedback_cleaned) = if damaged {
+        output::print_info(
+            "Database reports as damaged — skipping log retention and page reclaim, because \
+             both relocate pages in a file whose page map is not trustworthy. Run `veld doctor` \
+             for the details, and restore a backup to resume housekeeping.",
+        );
+        (0, 0)
+    } else {
+        let cutoff = chrono::Utc::now() - chrono::Duration::hours(MAX_LOG_AGE_HOURS);
+        let logs_pruned = db.prune_logs_older_than(cutoff).unwrap_or(0);
+        let feedback_cleaned = db.prune_orphaned_feedback(cutoff).unwrap_or(0);
+        let _ = db.vacuum();
+        (logs_pruned, feedback_cleaned)
+    };
 
     // Prune leftover pre-SQLite log files from each project's .veld/logs/
     // (same age policy as the daemon GC, so a daemon-less setup cleans up too).
@@ -157,10 +187,19 @@ pub async fn run() -> i32 {
         parts.push(format!("{feedback_cleaned} stale feedback run(s) removed"));
     }
 
-    if parts.is_empty() {
-        output::print_success("Nothing to clean up.");
-    } else {
+    if !parts.is_empty() {
         output::print_success(&parts.join(", "));
+    } else if damaged {
+        // **Not "Nothing to clean up."** There was very likely something to clean
+        // up; this run declined to touch it. Reporting success on an empty list
+        // here contradicts the skip notice printed above it, in the same
+        // invocation — and "nothing to do" is exactly the wrong thing to tell
+        // somebody whose database is filling up because retention is paused.
+        output::print_info(
+            "Retention was skipped, so nothing was pruned. Restore a backup to resume it.",
+        );
+    } else {
+        output::print_success("Nothing to clean up.");
     }
 
     0

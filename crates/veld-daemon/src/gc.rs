@@ -126,12 +126,48 @@ fn retention_cutoffs(
 
 /// Perform a single garbage-collection pass.
 pub async fn run_gc() -> anyhow::Result<GcSummary> {
-    let mut summary = GcSummary::default();
-    let helper = HelperClient::default_client();
-
     // Open per pass so the daemon self-heals across CLI upgrades that migrate
     // the schema.
     let db = Db::open()?;
+    // Note which way round this is asked: housekeeping needs a **positive**
+    // "checked, and not corrupt" answer, not merely the absence of a complaint.
+    // `dbhealth::verified_not_corrupt` documents the 17 ms race, measured on a
+    // real damaged database, that made the obvious spelling useless on every
+    // single daemon start.
+    //
+    // Gated on `Corrupt` specifically and never on a generic error: an I/O blip
+    // or a full disk is transient and usually sits on good data, and stopping
+    // housekeeping on that would let a healthy file grow forever.
+    run_gc_pass(&db, &|| crate::dbhealth::verified_not_corrupt()).await
+}
+
+/// One GC pass against an explicit database, asking `housekeeping` whether the
+/// destructive phases may run.
+///
+/// **Both are parameters so the gate is testable at its call site.** The
+/// predicate itself is unit-tested in `dbhealth`, but that proved nothing about
+/// *this* function — respelling the condition here left the whole suite green,
+/// and this is the line that decides whether veld deletes rows and relocates
+/// pages in a file SQLite has called malformed. Injecting the `Db` too keeps the
+/// test off `VELD_DB_PATH`, which is process-global state every other test in
+/// this binary shares.
+///
+/// **A closure, not a `bool`, and the difference is the whole race.** Phase 1
+/// below reaps orphans, and each reap is a `kill_process` with a 5-second SIGTERM
+/// budget — so a pass can spend seconds there. The health probe (300 s) and this
+/// pass (600 s) tick together, so on the pass that first coincides with detection
+/// a `bool` evaluated at the top of `run_gc` answers "healthy" before the probe's
+/// blocking `quick_check` has recorded anything, and the pass then prunes and
+/// vacuums a file SQLite has called malformed. That is the measured 17 ms race
+/// this gate exists to close, re-opened to seconds wide by taking the reading
+/// early. Evaluated at the gate instead, where the old code read it.
+pub(crate) async fn run_gc_pass(
+    db: &Db,
+    housekeeping: &(dyn Fn() -> bool + Send + Sync),
+) -> anyhow::Result<GcSummary> {
+    let mut summary = GcSummary::default();
+    let helper = HelperClient::default_client();
+
     let registry = db.registry()?;
 
     // Phase 1: Process each project's runs -- remove stale entries and kill orphans.
@@ -283,29 +319,91 @@ pub async fn run_gc() -> anyhow::Result<GcSummary> {
         }
     }
 
-    // Phase 1d: run-history retention — keep the newest RUN_HISTORY_KEEP ended
-    // runs per environment, and nothing older than the log age cap. Deleting a
-    // run cascades nodes/node_stats by FK and removes its log lines by run_id.
-    let history_cutoff = chrono::Utc::now() - chrono::Duration::hours(MAX_LOG_AGE_HOURS);
-    if let Ok(prunable) = db.prunable_run_ids(RUN_HISTORY_KEEP, history_cutoff) {
-        for run_id in prunable {
-            if db.delete_ended_run(&run_id).unwrap_or(false) {
-                summary.stale_removed += 1;
+    // Phases 1d, 2 and 2b are **retention housekeeping**: bulk deletes, a
+    // page-relocating vacuum, and an irreversible `git worktree remove`. Nothing
+    // depends on them happening on any particular pass, and on a database SQLite
+    // has already reported as damaged they are the worst writes veld can choose
+    // to make — tens of thousands of page moves aimed at a file whose page map is
+    // known to be wrong. Skip them until the file is healthy again (a restore
+    // clears the fault).
+    //
+    // Note the ceiling, because the log line reads as a bigger promise than it
+    // is: `dbhealth` is daemon-process-local, so this stops *this process's*
+    // page-moving traffic and nothing else's.
+    //
+    // The other pruning-and-vacuuming path is `veld gc`, which is emphatically
+    // **not** just a hand-run command — `maybe_auto_gc` detaches it from any CLI
+    // invocation every 30 minutes — so it carries its own gate, asking SQLite
+    // directly because it has no `dbhealth` state to read. See
+    // `crates/veld/src/commands/gc.rs`. Left ungated there, this gate would have
+    // bought at most 30 minutes.
+    //
+    // Still uncovered, named so the list is not read as complete: the detached
+    // `veld _log` writers keep inserting rows, and phases 1a-1c above still
+    // `save_run`/`finalize_crashed`/`clear_node_pid` and signal PIDs read out of
+    // this file. Those are *reconciliation* rather than housekeeping — they
+    // record what has already happened to real processes, and suppressing them
+    // would leave a damaged install unable to notice its own dead runs, which is
+    // worse than the writes. Stopping *all* writes needs a sentinel outside the
+    // database, with defined clearing semantics — deliberately not attempted
+    // here.
+    // Read here, not at the top of the pass — see `run_gc_pass`'s doc comment.
+    // Bound to a *different* name than the closure on purpose: shadowing it with
+    // a `bool` here is what silently turned phase 2b's `housekeeping()` below back
+    // into a reuse of this reading, while its comment claimed otherwise.
+    let housekeeping_now = housekeeping();
+    if housekeeping_now {
+        // Phase 1d: run-history retention — keep the newest RUN_HISTORY_KEEP ended
+        // runs per environment, and nothing older than the log age cap. Deleting a
+        // run cascades nodes/node_stats by FK and removes its log lines by run_id.
+        let history_cutoff = chrono::Utc::now() - chrono::Duration::hours(MAX_LOG_AGE_HOURS);
+        if let Ok(prunable) = db.prunable_run_ids(RUN_HISTORY_KEEP, history_cutoff) {
+            for run_id in prunable {
+                if db.delete_ended_run(&run_id).unwrap_or(false) {
+                    summary.stale_removed += 1;
+                }
             }
         }
-    }
 
-    // Phase 2: Prune old log lines and orphaned feedback data, then reclaim
-    // the freed pages (screenshot BLOBs and log rows add up).
-    let log_cutoff = chrono::Utc::now() - chrono::Duration::hours(MAX_LOG_AGE_HOURS);
-    summary.logs_pruned = db.prune_logs_older_than(log_cutoff).unwrap_or(0);
-    let _ = db.prune_orphaned_feedback(log_cutoff);
-    let (stats_cutoff, proc_cutoff) = retention_cutoffs(chrono::Utc::now());
-    summary.stats_pruned = db.prune_node_stats_older_than(stats_cutoff).unwrap_or(0);
-    summary.process_stats_pruned = db
-        .prune_node_process_stats_older_than(proc_cutoff)
-        .unwrap_or(0);
-    let _ = db.vacuum();
+        // Phase 2: Prune old log lines and orphaned feedback data, then reclaim
+        // the freed pages (screenshot BLOBs and log rows add up).
+        let log_cutoff = chrono::Utc::now() - chrono::Duration::hours(MAX_LOG_AGE_HOURS);
+        summary.logs_pruned = db.prune_logs_older_than(log_cutoff).unwrap_or(0);
+        let _ = db.prune_orphaned_feedback(log_cutoff);
+        let (stats_cutoff, proc_cutoff) = retention_cutoffs(chrono::Utc::now());
+        summary.stats_pruned = db.prune_node_stats_older_than(stats_cutoff).unwrap_or(0);
+        summary.process_stats_pruned = db
+            .prune_node_process_stats_older_than(proc_cutoff)
+            .unwrap_or(0);
+        // Bounded per pass (see `Db::vacuum`); a backlog drains over the
+        // following passes rather than in one long write transaction.
+        match db.vacuum() {
+            Ok(0) => {}
+            Ok(remaining) => debug!(
+                freelist_pages_remaining = remaining,
+                "page reclaim bounded this pass — the rest goes on the next one"
+            ),
+            Err(e) => debug!("page reclaim failed: {e}"),
+        }
+    } else if crate::dbhealth::corruption_recorded() {
+        // Gated on the recorded fault, **not** on `health_checked()`: a database
+        // that will not open at all never completes an integrity check, so it
+        // never sets `checked_at`, and a warning gated on that would go to the
+        // `debug!` below in exactly the worst case.
+        warn!(
+            "database is recorded as damaged — skipping log/stats retention, the page reclaim \
+             and the worktree-trash purge this pass, because each of them acts on a file \
+             whose page map is not trustworthy. Restore a backup to resume housekeeping."
+        );
+    } else {
+        // Normal for a few tens of milliseconds after startup, and the whole
+        // reason the gate is not `!corruption_recorded()`. Not a warning: there
+        // is nothing wrong and nothing for anybody to do.
+        debug!(
+            "database health not established yet — deferring retention and page reclaim to \
+             the next pass"
+        );
+    }
 
     // Phase 2b: Empty the worktree trash of anything past its retention period.
     //
@@ -314,7 +412,16 @@ pub async fn run_gc() -> anyhow::Result<GcSummary> {
     // background worker and the same **un-forced** `git worktree remove` as a
     // hand-clicked one, so a checkout that picked up uncommitted changes while it sat
     // in the trash comes back with git's reason rather than being discarded.
-    summary.trash_purged = crate::feedback_server::worktree_trash::purge_expired_trash(&db);
+    //
+    // **Inside the health gate, and this is the phase with the most to lose by
+    // being outside it**: it is retention housekeeping like 1d and 2, but the
+    // action it takes on a row is an *irreversible* `git worktree remove` on
+    // disk. Deciding to delete somebody's checkout from a `deleted_at` read out
+    // of a file whose page map SQLite has declared untrustworthy is not a risk
+    // worth taking to reclaim a directory ten minutes sooner.
+    if housekeeping() {
+        summary.trash_purged = crate::feedback_server::worktree_trash::purge_expired_trash(db);
+    }
 
     // Phase 3: Prune leftover pre-SQLite log files from each project's
     // .veld/logs/ directory (written by old veld versions and by legacy
@@ -418,6 +525,68 @@ fn is_process_alive(pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The gate, at its call site.** `dbhealth`'s unit test pins the predicate;
+    /// this pins the branch that uses it, which is the part that can be respelled
+    /// with the suite still green.
+    ///
+    /// Verified against the real failure: on a damaged-but-openable database with
+    /// 4,000 prunable rows, the ungated pass logged `4000 logs pruned` 17 ms
+    /// before the health probe recorded the fault.
+    #[tokio::test]
+    async fn a_pass_with_housekeeping_refused_prunes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open_at(&dir.path().join("gc.db")).unwrap();
+
+        // Log rows far older than MAX_LOG_AGE_HOURS — every one of them is
+        // something the ungated pass would delete.
+        let ancient = chrono::Utc::now() - chrono::Duration::hours(MAX_LOG_AGE_HOURS * 4);
+        let rows: Vec<(chrono::DateTime<chrono::Utc>, String)> = (0..200)
+            .map(|i| (ancient, format!("ancient {i}")))
+            .collect();
+        db.append_logs(
+            std::path::Path::new("/proj"),
+            "dev",
+            None,
+            Some("web"),
+            Some("local"),
+            veld_core::db::LogStream::Server,
+            &rows,
+        )
+        .unwrap();
+
+        let refused = run_gc_pass(&db, &|| false)
+            .await
+            .expect("pass should succeed");
+        assert_eq!(
+            refused.logs_pruned, 0,
+            "a pass told the database is damaged must not prune a single row"
+        );
+        assert_eq!(refused.trash_purged, 0, "nor empty the worktree trash");
+
+        // And the rows really are still there — `logs_pruned` being 0 could also
+        // mean there was nothing to prune, which would make the assertion above
+        // vacuous.
+        let remaining = db
+            .tail_logs(
+                std::path::Path::new("/proj"),
+                "dev",
+                &veld_core::db::LogFilter::default(),
+                1_000,
+            )
+            .unwrap();
+        assert_eq!(remaining.len(), 200, "the rows must survive a refused pass");
+
+        // The same pass, permitted, deletes them — otherwise this test would
+        // pass against a `run_gc_pass` that prunes nothing at all.
+        let allowed = run_gc_pass(&db, &|| true)
+            .await
+            .expect("pass should succeed");
+        assert_eq!(
+            allowed.logs_pruned, 200,
+            "a permitted pass must prune, or the refusal above proves nothing"
+        );
+    }
 
     #[test]
     fn run_history_horizon_matches_the_gc_window() {

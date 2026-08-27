@@ -836,8 +836,31 @@ Log sources, and where each kind of output lands:
 | `server` | Node output — both `long_running` processes and `command` steps (a `docker build`'s progress is here, under that node). Read one node with `--node <name>` |
 | `client` | Browser `console.*` from the client-log collector |
 | `setup` | Project-level `setup`/`teardown` step output, labelled `setup:<step name>` |
-| `internal` | Liveness probe outcomes, recovery decisions |
+| `internal` | Liveness probe **transitions** and recovery decisions — see below |
 | `all` (default) | All four, interleaved by timestamp |
+
+**Two `internal`-stream lines that mean something specific.**
+
+- `[log] dropped N line(s) from <node>:<variant>` — Veld could not keep up writing
+  that node's output to the database and **lost N lines**. It is on the `internal`
+  stream rather than the node's own precisely so it cannot be forged by the
+  process being watched: if you see it on `server`, the program printed it. Treat
+  a gap in a node's log as explained only when this line is present.
+- `database reports as damaged — skipping log retention and page reclaim` from
+  `veld gc`, and the matching daemon warning. While the database reads as damaged
+  Veld deliberately stops pruning logs, reclaiming pages and emptying the worktree
+  trash, so `veld gc` reporting `0` pruned is not a bug — run `veld doctor` and
+  `veld backup restore`. The database can grow in the meantime.
+
+**A quiet `internal` stream means healthy, not broken.** The liveness prober logs
+*changes*: a probe that starts failing, a node that recovers, a probe that cannot
+run, a recovery attempt. A node whose probe simply keeps passing writes one
+"probe passing" line an hour and nothing else. It used to write two lines per
+node per poll — on one real machine that was 22.7% of every log row in the
+database, all of them the same sentence — so do not read a long gap between
+`internal` lines as the prober having stopped. If you want to know a node is
+being probed right now, read its status (`veld status --json`), not its log
+volume.
 
 **Timestamps.** Lines are stored in UTC and printed in the machine's **local** time
 zone, so a human reading `veld logs` sees the clock on their wall. `--utc` prints the
