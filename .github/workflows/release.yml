@@ -332,11 +332,12 @@ jobs:
       contents: write
     needs: [plan, release]
     runs-on: ubuntu-latest
-    # The publish step's own worst case is ~70 min: 5 upload attempts capped at
-    # 10 min each, 225 s of upload backoff, ~2 min of read backoff, and ~14 min
-    # of publish retries. 90 leaves room for the ~1 GB artifact download ahead
-    # of it, so a wedged publish fails on its own terms rather than being
-    # cancelled mid-flip with nothing in the log to say why.
+    # The publish step's own worst case is ~75 min, counting the `-k` grace
+    # periods: 5 upload attempts at 600+30 s = 52.5 min, 225 s of upload
+    # backoff, 5 publish attempts at 120+30 s plus 225 s of backoff = 16.25
+    # min, and ~4 min across the capped, retried reads. 90 leaves room for the
+    # ~1 GB artifact download ahead of it, so a wedged publish fails on its own
+    # terms rather than being cancelled mid-flip with nothing in the log.
     timeout-minutes: 90
     steps:
       - name: Download all artifacts
@@ -375,23 +376,23 @@ jobs:
       # a release must never be visible carrying a partial asset set, plus the
       # properties the action lacked:
       #
-      #   * every GitHub call retries — uploads, the reads that decide whether
-      #     an upload worked, and the flip that publishes. A single unretried
-      #     call is the whole incident;
+      #   * every GitHub call is retried AND time-capped — the probe, the
+      #     create, the uploads, the reads that decide whether an upload
+      #     worked, and the flip that publishes. One unretried call is the
+      #     whole incident, and the incident was a *hang*, not an error;
       #   * a retry re-sends only the assets still missing, not the ~700 MB
       #     that already landed;
       #   * "present" means the name AND the byte size AND `state == uploaded`
       #     all match, so a truncated or still-uploading asset is replaced
       #     rather than counted;
-      #   * the flip is gated on that set being empty, and read back afterwards
-      #     — `gh release edit` returning 0 is not the same as the release
-      #     being published.
+      #   * the flip is gated on that set being empty, and read back
+      #     afterwards — `gh release edit` returning 0 is not the same fact as
+      #     the release being published.
       #
       # The rule the whole step is built around: **every failure must fall
-      # toward "do not publish"**. Every serious defect an earlier review round
-      # found here was the same shape — a check that answered "complete" when
-      # it meant "could not tell". So each step below either establishes a fact
-      # or exits; none of them degrade quietly.
+      # toward "do not publish"**. Every serious defect review found here was
+      # the same shape — a check that answered "complete" when it meant "could
+      # not tell". So each step below either establishes a fact or exits.
       #
       # Re-running the job is the recovery path: it finds the existing draft,
       # tops up what is missing, and publishes.
@@ -420,7 +421,7 @@ jobs:
           # say so. That was already true of the checksum step; make it loud.
           find artifacts -mindepth 1 -maxdepth 1 -not -type f > nonfiles.txt
           if [ -s nonfiles.txt ]; then
-            echo "::error::artifacts/ holds non-file entries — an upload glob has re-rooted"
+            echo "::error::artifacts/ holds entries that are not regular files — an upload glob has re-rooted, or something produced a symlink:"
             cat nonfiles.txt
             exit 1
           fi
@@ -438,29 +439,62 @@ jobs:
             exit 1
           fi
 
-          # Two filename shapes this pipeline cannot carry. `#` is `gh release
-          # upload`'s asset-label separator, so the asset lands under a
-          # truncated name. A newline cannot survive the tab-separated asset
-          # listing the completeness check reads back, so the asset uploads and
-          # then reads as permanently missing. Either way the release fails
-          # identically on every re-run, so refuse them here, where the message
-          # can name the file. (Reading `expected` NUL-delimited above is what
-          # makes this check see the whole name rather than half of it.)
+          # GitHub rewrites characters it dislikes in an asset filename — a
+          # space becomes a `.` — and `gh release upload` reads `#` as an
+          # asset-label separator. Either way the asset lands under a name the
+          # completeness check below can never match, so the job would spend
+          # all five upload rounds and then strand the release as a draft that
+          # no re-run can clear: strictly worse than the incident this step
+          # exists to fix. A newline is worse still, since it cannot survive
+          # the tab-separated asset listing that check reads back.
+          #
+          # Rather than track GitHub's normalisation rules, require the
+          # conservative set every artifact this repo builds already uses, and
+          # fail where the message can still name the file.
           for file in "${expected[@]}"; do
-            case "$file" in
-              *'#'*)
-                echo "::error::artifact name contains '#', which gh reads as an asset label: $file"
-                exit 1 ;;
-              *$'\n'*)
-                echo "::error::artifact name contains a newline: ${file@Q}"
+            case ${file##*/} in
+              *[!A-Za-z0-9._+-]*)
+                echo "::error::artifact name is not safe as a release asset: ${file@Q}"
+                echo "  allowed characters: letters, digits, and . _ + -"
                 exit 1 ;;
             esac
           done
 
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Release $TAG already exists — topping it up."
-          else
-            gh release create "$TAG" --draft --title "$TAG" --notes-file release-notes.md
+          # One read of the release, capped and retried. Returns empty on
+          # failure, which every caller treats as "not yet" — the safe
+          # direction, since the alternative is acting on a fact we do not have.
+          release_field() {
+            timeout -k 10 60 gh release view "$TAG" --json "$1" --jq ".$1" 2>/dev/null || true
+          }
+
+          # The probe and the create are GitHub calls too. Leaving them bare
+          # meant the advertised top-up recovery was unavailable exactly when
+          # GitHub was flaky, which is the only time it is needed.
+          open_release() {
+            local attempt delay=5
+            for attempt in 1 2 3; do
+              if timeout -k 10 60 gh release view "$TAG" >/dev/null 2>&1; then
+                echo "Release $TAG already exists — topping it up."
+                return 0
+              fi
+              if timeout -k 10 120 gh release create "$TAG" --draft --title "$TAG" \
+                   --notes-file release-notes.md; then
+                return 0
+              fi
+              # Either the probe 5xx'd and the release does exist, or the
+              # create lost a race. Look again rather than calling it fatal.
+              echo "Could not open a release for $TAG (attempt $attempt/3)."
+              if [ "$attempt" -lt 3 ]; then
+                sleep "$delay"
+                delay=$((delay * 3))
+              fi
+            done
+            return 1
+          }
+
+          if ! open_release; then
+            echo "::error::could not create or find a release for $TAG"
+            exit 1
           fi
 
           # A 5xx on a read is the same failure class as a 5xx on an upload, so
@@ -470,7 +504,7 @@ jobs:
           read_assets() {
             local attempt delay=5
             for attempt in 1 2 3; do
-              if gh release view "$TAG" --json assets \
+              if timeout -k 10 60 gh release view "$TAG" --json assets \
                    --jq '.assets[] | select(.state == "uploaded") | "\(.name)\t\(.size)"' \
                    > have.tsv; then
                 return 0
@@ -541,14 +575,27 @@ jobs:
 
           # The flip is what makes the release exist for users, and leaving it
           # as one unretried call would have reproduced the original incident
-          # exactly: every asset up, and the release still invisible. It is also
-          # read back, because `gh release edit` exiting 0 is not the same fact
-          # as the release being published.
+          # exactly: every asset up, and the release still invisible. It is
+          # also read back, because the API accepting the call is not the same
+          # fact as the release having left draft.
+          #
+          # `make_latest=legacy` — not gh's `--latest`, which hard-sets
+          # `make_latest=true`. The difference shows on the recovery path this
+          # step advertises: publishing an OLD stranded draft after a newer
+          # release has shipped would, with `true`, re-point `releases/latest`
+          # backwards, and install.sh resolves `/releases/latest`, so every
+          # `curl | bash` install and `veld update` would silently downgrade.
+          # `legacy` lets GitHub choose by version and date, which is right for
+          # a normal release and for a late top-up alike.
           publish() {
-            local attempt delay=15
+            local attempt delay=15 id
             for attempt in 1 2 3 4 5; do
-              if timeout -k 30 120 gh release edit "$TAG" --draft=false --latest \
-                 && [ "$(gh release view "$TAG" --json isDraft --jq .isDraft)" = "false" ]; then
+              id=$(release_field databaseId)
+              if [ -n "$id" ]; then
+                timeout -k 30 120 gh api -X PATCH "repos/$GH_REPO/releases/$id" \
+                  -F draft=false -f make_latest=legacy >/dev/null 2>&1 || true
+              fi
+              if [ "$(release_field isDraft)" = "false" ]; then
                 return 0
               fi
               echo "$TAG is not published yet (attempt $attempt/5)."
@@ -561,7 +608,11 @@ jobs:
           }
 
           if ! publish; then
-            echo "::error::$TAG carries all ${#expected[@]} assets but could not be published; it is still a draft"
+            # Deliberately not "it is still a draft": reaching here can also
+            # mean the flip landed and only the read-back failed. Claiming the
+            # stronger fact would be the same mistake this step is built to
+            # avoid, one step further out.
+            echo "::error::$TAG carries all ${#expected[@]} assets but could not be confirmed published; re-run this job to check"
             exit 1
           fi
           echo "Published $TAG with ${#expected[@]} assets."

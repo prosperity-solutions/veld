@@ -244,7 +244,7 @@ just dev-restore    # runs veld update
 | `just build` | Build Rust + frontend | No |
 | `just test` | Run all tests | No |
 | `just lint` | Clippy + rustfmt + TypeScript type check + JS/TS Biome lint | No |
-| `just workflow-gates` | Assert no CI job can run on a draft PR. Needs PyYAML: `python3 -m pip install --user pyyaml` | No |
+| `just workflow-gates` | Two workflow gates: no CI job can run on a draft PR, and `release.yml`'s publish script cannot ship an incomplete release or leave a complete one a draft. Run it whenever you touch `.github/workflows/`. Needs PyYAML: `python3 -m pip install --user pyyaml` | No |
 | `just commit-subjects` | Check your commit subjects against the conventional-commits pattern CI enforces | No |
 
 > **Git hooks (optional, recommended):** the repo ships `lefthook.yml`, a

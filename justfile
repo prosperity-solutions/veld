@@ -457,21 +457,24 @@ favicon:
 topbar-height:
     ./tests/validate-topbar-height.sh
 
-# Assert no CI job can run on a draft PR (AGENTS.md → CI cost convention).
-# Deliberately not folded into `lint`: this needs PyYAML, and `lint` is the
+# The two gates over .github/workflows/. Run this whenever you touch one.
+#
+#   1. No CI job can run on a draft PR (AGENTS.md → CI cost convention).
+#   2. release.yml's publish script cannot ship an incomplete release, or
+#      leave a complete one stranded as a draft — which is what
+#      softprops/action-gh-release did to v16.57.1.
+#
+# Deliberately not folded into `lint`: these need PyYAML, and `lint` is the
 # recipe every contributor runs constantly — it must not grow a Python dep.
 # Install it with `python3 -m pip install --user pyyaml`.
 # The `schema` job in ci.yml is the enforcing copy — and because that job is
-# itself draft-guarded, this local recipe is the ONLY thing that catches an
-# unguarded job before it has already run on a draft push. Run it whenever you
-# touch .github/workflows/.
+# itself draft-guarded, this local recipe is the ONLY thing that catches either
+# failure before CI has already spent a run on it.
 workflow-gates:
     python3 tests/validate-workflow-gates.py --selftest
     python3 tests/validate-workflow-gates.py
-    # Same recipe because it has the same trigger — you touched
-    # .github/workflows/ — and the same PyYAML dep. This one runs release.yml's
-    # publish script against a stub `gh`; see the header there for what
-    # `softprops/action-gh-release` did to v16.57.1.
+    # --selftest first, same reasoning as above: it mutates the completeness
+    # gate out of the publish script and asserts the suite goes red.
     python3 tests/validate-release-publish.py --selftest
     python3 tests/validate-release-publish.py
 

@@ -65,6 +65,9 @@ die64() { echo "gh stub: $1" >&2; exit 64; }
 
 sub="${1-} ${2-}"
 shift 2 2>/dev/null || true
+# `gh api -X PATCH <path> ...`: drop the verb so the path is $1, as it is for
+# the `release <verb> <tag>` forms.
+[ "$sub" = "api -X" ] && shift 2>/dev/null || true
 
 case "$sub" in
   "release view")
@@ -74,7 +77,7 @@ case "$sub" in
       case "$1" in
         --json) json=${2-}; shift 2 ;;
         --jq)   jq=${2-}; shift 2 ;;
-        *)      die64 "unmodelled `release view` flag: $1" ;;
+        *)      die64 "unmodelled release-view flag: $1" ;;
       esac
     done
     # Bare `gh release view <tag>` is the existence probe.
@@ -88,6 +91,8 @@ case "$sub" in
         awk -F'\t' '$3=="uploaded"{print $1"\t"$2}' "$STATE" ;;
       'isDraft|.isDraft')
         if [ "$(cat "$DRAFTF")" = "draft" ]; then echo true; else echo false; fi ;;
+      'databaseId|.databaseId')
+        echo 4242 ;;
       *)
         die64 "unmodelled query --json '$json' --jq '$jq'" ;;
     esac
@@ -101,9 +106,15 @@ case "$sub" in
         --draft)      draft=draft; shift ;;
         --title)      shift 2 ;;
         --notes-file) if [ -f "${2-}" ]; then notes=ok; else notes=missing; fi; shift 2 ;;
-        *)            die64 "unmodelled `release create` flag: $1" ;;
+        *)            die64 "unmodelled release-create flag: $1" ;;
       esac
     done
+    # Real gh refuses a tag that already carries a release; without this the
+    # stub would silently wipe a preseeded draft's assets and re-upload them.
+    if [ -f "$STATE" ]; then
+      echo "gh: a release for $TAG already exists" >&2; exit 1
+    fi
+    if [ "$draft" = draft ]; then echo yes > "$CREATEDRAFTF"; else echo no > "$CREATEDRAFTF"; fi
     : > "$STATE"; echo "$draft" > "$DRAFTF"; echo "$notes" > "$NOTESF"
     exit 0 ;;
 
@@ -134,22 +145,27 @@ case "$sub" in
     echo $((attempt + 1)) > "$ATTEMPT"
     exit $rc ;;
 
-  "release edit")
-    shift 2>/dev/null || true          # the tag
+  "api -X")
+    # `gh api -X PATCH repos/<repo>/releases/<id> -F draft=false -f make_latest=...`
+    shift 2>/dev/null || true          # the path
     edits=$(cat "$EDITS"); echo $((edits + 1)) > "$EDITS"
     if [ "$edits" -lt "${FAIL_EDIT_UNTIL-0}" ]; then
       echo "gh: 502 Bad Gateway" >&2; exit 1
     fi
-    want=""; latest=0
+    want=""
     while [ $# -gt 0 ]; do
       case "$1" in
-        --draft=false) want=published; shift ;;
-        --draft=true|--draft) want=draft; shift ;;
-        --latest) latest=1; shift ;;
-        *) die64 "unmodelled `release edit` flag: $1" ;;
+        -F|-f)
+          case "${2-}" in
+            draft=false)      want=published ;;
+            draft=true)       want=draft ;;
+            make_latest=*)    echo "${2#make_latest=}" > "$LATESTF" ;;
+            *)                die64 "unmodelled api field: ${2-}" ;;
+          esac
+          shift 2 ;;
+        *) die64 "unmodelled api flag: $1" ;;
       esac
     done
-    echo "$latest" > "$LATESTF"
     # EDIT_SILENT models the API accepting the call without the release
     # actually leaving draft — the case the script reads back to catch.
     if [ "${EDIT_SILENT-0}" = "1" ]; then exit 0; fi
@@ -184,8 +200,12 @@ while [ $# -gt 0 ]; do
     *) args+=("$1"); shift ;;
   esac
 done
-if [ ${#args[@]} -eq 0 ]; then
-  echo "timeout stub: no duration in: $*" >&2; exit 64
+secs=""
+for a in ${args[@]+"${args[@]}"}; do
+  case "$a" in ''|*[!0-9]*) ;; *) secs=$a ;; esac
+done
+if [ -z "$secs" ]; then
+  echo "timeout stub: no duration (only $* )" >&2; exit 64
 fi
 echo "${args[*]} :: $*" >> "$TIMEOUTLOG"
 exec "$@"
@@ -202,7 +222,8 @@ ARTIFACTS = ["veld-1.2.3-linux-amd64.tar.gz", "veld-desktop-1.2.3-mac-x64.zip",
 # `FAIL_VIEW=1 just workflow-gates` silently reconfigures every scenario.
 STUB_VARS = {"FAIL_FILES", "FAIL_UNTIL", "FAIL_MODE", "FAIL_VIEW", "FAIL_EDIT_UNTIL",
              "EDIT_SILENT", "STAT_FAIL", "STATE", "DRAFTF", "GHLOG", "SLEEPLOG",
-             "TIMEOUTLOG", "ATTEMPT", "EDITS", "NOTESF", "LATESTF", "TAG"}
+             "TIMEOUTLOG", "ATTEMPT", "EDITS", "NOTESF", "LATESTF", "CREATEDRAFTF",
+             "TAG", "GH_REPO"}
 
 
 def publish_step() -> dict:
@@ -215,7 +236,7 @@ def publish_step() -> dict:
         if step.get("name") == STEP_NAME:
             # A rename upstream would otherwise leave this gate running an
             # empty string and reporting a clean bill of health.
-            if "gh release edit" not in (step.get("run") or ""):
+            if "draft=false" not in (step.get("run") or ""):
                 sys.exit(f"step {STEP_NAME!r} no longer publishes the release")
             return step
     sys.exit(
@@ -227,10 +248,11 @@ def publish_step() -> dict:
 
 class Result:
     def __init__(self, code, out, state, uploads, sleeps, timeouts, draft,
-                 notes, latest, edits):
+                 notes, latest, edits, created_draft):
         self.code, self.out, self.state = code, out, state
         self.uploads, self.sleeps, self.timeouts = uploads, sleeps, timeouts
         self.draft, self.notes, self.latest, self.edits = draft, notes, latest, edits
+        self.created_draft = created_draft
 
     @property
     def published(self) -> bool:
@@ -261,7 +283,7 @@ def run(script: str, env_overrides: dict[str, str] | None = None,
 
         files = {k: work / f"{k}.txt" for k in
                  ("state", "draft", "gh", "sleep", "timeout", "attempt", "edits",
-                  "notes", "latest")}
+                  "notes", "latest", "createdraft")}
         for f in files.values():
             f.touch()
         files["attempt"].write_text("1\n")
@@ -279,18 +301,21 @@ def run(script: str, env_overrides: dict[str, str] | None = None,
         env.update({
             "PATH": f"{binw}{os.pathsep}{os.environ['PATH']}",
             "TAG": tag,
+            "GH_REPO": "example/veld",
             "STATE": str(files["state"]), "DRAFTF": str(files["draft"]),
             "GHLOG": str(files["gh"]), "SLEEPLOG": str(files["sleep"]),
             "TIMEOUTLOG": str(files["timeout"]), "ATTEMPT": str(files["attempt"]),
             "EDITS": str(files["edits"]), "NOTESF": str(files["notes"]),
             "LATESTF": str(files["latest"]),
+            "CREATEDRAFTF": str(files["createdraft"]),
             **(env_overrides or {}),
         })
         proc = subprocess.run([BASH, "-c", script], cwd=work, env=env,
                               capture_output=True, text=True, timeout=180)
 
-        # Records are `name\tsize\tstate\n`, and an asset name may itself
-        # contain a newline — the script handles those, so the parser must too.
+        # Records are `name\tsize\tstate\n`. Parsed by regex rather than by
+        # line so that a scenario feeding a rejected name (newline, tab) can
+        # still be inspected instead of crashing the harness.
         state: dict[str, tuple[int, str]] = {
             m[1]: (int(m[2]), m[3]) for m in re.finditer(
                 r"(?s)(.*?)\t(\d+)\t(uploaded|starter)\n",
@@ -305,7 +330,8 @@ def run(script: str, env_overrides: dict[str, str] | None = None,
             files["draft"].read_text().strip() or "none",
             files["notes"].read_text().strip() or "none",
             files["latest"].read_text().strip(),
-            [ln for ln in ghlog if ln.startswith("release edit")],
+            [ln for ln in ghlog if ln.startswith("api -X")],
+            files["createdraft"].read_text().strip() or "none",
         )
 
 
@@ -340,22 +366,36 @@ def scenario_draft_first(script: str) -> None:
     every release exactly as v16.57.1 was stranded — left the suite green.
     """
     r = run(script)
+    # Asserted from what the stub recorded, not from stdout: `"--draft" in
+    # r.out or r.published` was true on every successful run, so the check
+    # could not fail even when the release was created already visible.
     check("the release is created as a draft, not published mid-upload",
-          "--draft" in r.out or r.published,  # create path ran; see state below
-          r.out[-200:])
+          r.created_draft == "yes", f"created_draft={r.created_draft}")
     check("the release ends up explicitly published, not left in draft",
-          r.published and any("--draft=false" in e for e in r.edits), f"{r.edits}")
-    check("the published release is marked latest", r.latest == "1",
-          f"--latest seen: {r.latest}")
+          r.published and any("draft=false" in e for e in r.edits), f"{r.edits}")
+    # `legacy`, never `true`. `true` re-points `releases/latest` at whatever it
+    # is called on, so publishing an old stranded draft after a newer release
+    # shipped would downgrade every `curl | bash` install and `veld update`
+    # (install.sh resolves `/releases/latest`). `legacy` lets GitHub pick by
+    # version and date, which is correct for both a normal release and a
+    # late top-up.
+    check("latest is left to GitHub's version/date rule, not forced to this tag",
+          r.latest == "legacy", f"make_latest={r.latest!r}")
 
 
 def scenario_uploads_are_time_capped(script: str) -> None:
     r = run(script)
-    check("every upload runs under a timeout with a kill fallback",
-          len(r.timeouts) >= 1
-          and all("-k" in t for t in r.timeouts)
-          and all("gh release upload" in t for t in r.timeouts if "upload" in t),
+    # `any(...)` per call, not `all(... if "upload" in t)`: the latter is
+    # vacuously true when no upload was wrapped at all, and `publish()` wraps
+    # its own call, so the count alone stays satisfied. A hang — not an error —
+    # is what cost v16.57.1, so "wrapped at all" is the property worth naming.
+    check("the upload runs under a timeout with a kill fallback",
+          any("gh release upload" in t and "-k" in t for t in r.timeouts),
           f"{r.timeouts}")
+    check("the publish call runs under a timeout too",
+          any("gh api" in t and "-k" in t for t in r.timeouts), f"{r.timeouts}")
+    check("the release reads run under a timeout too",
+          any("gh release view" in t and "-k" in t for t in r.timeouts), f"{r.timeouts}")
 
 
 # ── retries ──────────────────────────────────────────────────────────────────
@@ -445,32 +485,34 @@ def scenario_never_completes(script: str) -> None:
 # ── inputs the job must refuse ───────────────────────────────────────────────
 
 def scenario_refused_inputs(script: str) -> None:
-    cases = [
+    cases: list = [
         ("an empty tag", dict(tag=""), "would otherwise read the latest published release"),
         ("no artifacts", dict(artifacts=[]), "an empty release"),
         ("a nested artifacts/ directory", dict(subdir=True), "a re-rooted upload glob"),
-        ("a '#' in an artifact name",
-         dict(artifacts=ARTIFACTS + ["veld#1.dmg"]), "gh reads it as an asset label"),
     ]
+    # Names GitHub or gh would not round-trip. Each uploads fine and then can
+    # never be matched back, so the job would spend all five upload rounds and
+    # strand the release as a draft no re-run can clear — worse than the
+    # incident this step fixes. `#` is gh's asset-label separator; a space is
+    # rewritten to `.` by GitHub; tab and newline cannot survive the
+    # tab-separated asset listing the completeness check reads back.
+    for bad, why in (("veld#1.dmg", "gh reads '#' as an asset label"),
+                     ("veld 1.dmg", "GitHub rewrites a space to '.'"),
+                     ("veld\t1.dmg", "a tab breaks the asset listing"),
+                     ("veld\n1.dmg", "a newline breaks the asset listing")):
+        cases.append((f"the artifact name {bad!r}",
+                      dict(artifacts=ARTIFACTS + [bad]), why))
+
     for label, kwargs, why in cases:
         r = run(script, **kwargs)
-        check(f"{label} fails the job instead of publishing ({why})",
-              r.code != 0 and not r.published, f"code={r.code} draft={r.draft}")
+        # `r.uploads == []` matters as much as the exit code: each of these is
+        # knowable before a byte is sent, and refusing only after five upload
+        # rounds is a different (worse) behaviour that the exit code alone
+        # cannot distinguish.
+        check(f"{label} fails the job before uploading anything ({why})",
+              r.code != 0 and not r.published and r.uploads == [],
+              f"code={r.code} draft={r.draft} uploads={len(r.uploads)}")
 
-
-def scenario_newline_in_name(script: str) -> None:
-    """A newline must be refused up front, not discovered as a stuck release.
-
-    It uploads fine, but cannot survive the tab-separated listing the
-    completeness check reads back, so the asset reads as permanently missing
-    and every re-run fails the same way. Reading `expected` NUL-delimited is
-    what lets the guard see the whole name and say so.
-    """
-    weird = "veld\nbad.dmg"
-    r = run(script, artifacts=ARTIFACTS + [weird])
-    check("an artifact name containing a newline is refused with a clear error",
-          r.code != 0 and not r.published and "newline" in r.out,
-          f"code={r.code} draft={r.draft} out={r.out[-160:]}")
 
 
 def scenario_rerun(script: str) -> None:
@@ -556,7 +598,6 @@ def main() -> int:
     scenario_unreadable_release(script)
     scenario_never_completes(script)
     scenario_refused_inputs(script)
-    scenario_newline_in_name(script)
     scenario_rerun(script)
     scenario_clobber(script)
     scenario_step_env(step)
@@ -571,7 +612,7 @@ def main() -> int:
 
 
 def find_bash() -> str:
-    """bash 4+ — the script uses `mapfile` and associative arrays.
+    """bash 4.4+ — the script uses `mapfile -d ''` and `${x@Q}`.
 
     ubuntu-latest ships bash 5. macOS still ships 3.2 as /bin/bash, so a
     contributor running `just workflow-gates` locally needs Homebrew's.
@@ -580,10 +621,10 @@ def find_bash() -> str:
         "/opt/homebrew/bin/bash", "/usr/local/bin/bash", "/bin/bash", "bash"]
     for candidate in candidates:
         path = shutil.which(candidate)
-        if path and subprocess.run([path, "-c", "((BASH_VERSINFO[0] >= 4))"],
+        if path and subprocess.run([path, "-c", "((BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 4)))"],
                                    capture_output=True).returncode == 0:
             return path
-    sys.exit("no bash >= 4 found (macOS /bin/bash is 3.2): `brew install bash`, "
+    sys.exit("no bash >= 4.4 found (macOS /bin/bash is 3.2): `brew install bash`, "
              "or point BASH_BIN at one.")
 
 
