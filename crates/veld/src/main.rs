@@ -1520,6 +1520,23 @@ async fn main() {
             let mut terminating_since: Option<std::time::Instant> = None;
 
             loop {
+                // **Arm the deadline here, not only where EINTR is caught.** A
+                // signal only interrupts a read the thread is *already* blocked
+                // in; one delivered at any other moment — during the database open
+                // and writer spawn above, or in the gap between finishing a chunk
+                // and the next `fill_buf` — sets the flag and interrupts nothing,
+                // so a version that armed only in the `Interrupted` arm below fell
+                // straight back to blocking forever on a pipe a detached
+                // descendant is holding open. That is precisely the failure this
+                // whole mechanism replaced. Reproduced with a standalone harness:
+                // the flag set outside a syscall left the next blocking read
+                // unresponsive indefinitely.
+                if terminating_since.is_none()
+                    && LOG_PUMP_TERMINATING.load(std::sync::atomic::Ordering::Relaxed)
+                {
+                    terminating_since = Some(std::time::Instant::now());
+                }
+
                 // Once stopping, wait for readability rather than blocking
                 // indefinitely, so a pipe somebody else is holding open cannot
                 // keep this process alive to its SIGKILL. `poll` rather than a
@@ -1542,10 +1559,18 @@ async fn main() {
                         let ready = unsafe {
                             libc::poll(&mut pfd, 1, left.as_millis().min(i32::MAX as u128) as i32)
                         };
-                        // 0 is the deadline; -1 is EINTR or a bad fd, and either
-                        // way the next iteration re-checks the deadline.
+                        // 0 is the deadline. A negative return is EINTR or a bad
+                        // fd, and it must go back to the top rather than fall
+                        // through — falling through reaches the blocking
+                        // `fill_buf` below *in the same iteration*, with the
+                        // signal already delivered and nothing left to interrupt
+                        // it, which is the pre-fix "wait for EOF however long that
+                        // takes" behaviour with extra steps.
                         if ready == 0 {
                             break;
+                        }
+                        if ready < 0 {
+                            continue;
                         }
                     }
                 }
@@ -1560,14 +1585,13 @@ async fn main() {
                     // A *termination* signal is the stop — flush what is buffered
                     // and leave, rather than waiting for an EOF that a descendant
                     // outside the process group may never deliver.
-                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {
-                        if LOG_PUMP_TERMINATING.load(std::sync::atomic::Ordering::Relaxed)
-                            && terminating_since.is_none()
-                        {
-                            terminating_since = Some(std::time::Instant::now());
-                        }
-                        continue;
-                    }
+                    // A plain EINTR resumes: treating it as EOF would stop
+                    // draining while the server is still writing, and the server
+                    // would then block forever on a full pipe (same reasoning as
+                    // `drain_pipe`'s). A termination signal is picked up by the
+                    // check at the top of the loop, which is where it has to be —
+                    // see there.
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                     Err(_) => break,
                     Ok(buf) => buf.to_vec(),
                 };
@@ -1633,10 +1657,11 @@ async fn main() {
                 }
             }
 
-            // Output that never got its newline is still output. Trailing
-            // terminators are stripped here for the same reason as on the `\n`
-            // path, so a meter ending in `\r` does not store one.
-            while matches!(pending.last(), Some(b'\r' | b'\n')) {
+            // Output that never got its newline is still output. Only `\r` can be
+            // here: every `\n` is consumed by the arm above, which emits and
+            // clears in the same iteration — so a trailing `\n` cannot reach this
+            // point, and matching one would be a branch that never fires.
+            while matches!(pending.last(), Some(b'\r')) {
                 pending.pop();
             }
             if !pending.is_empty() {

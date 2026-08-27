@@ -348,8 +348,11 @@ pub(crate) async fn run_gc_pass(
     // database, with defined clearing semantics — deliberately not attempted
     // here.
     // Read here, not at the top of the pass — see `run_gc_pass`'s doc comment.
-    let housekeeping = housekeeping();
-    if housekeeping {
+    // Bound to a *different* name than the closure on purpose: shadowing it with
+    // a `bool` here is what silently turned phase 2b's `housekeeping()` below back
+    // into a reuse of this reading, while its comment claimed otherwise.
+    let housekeeping_now = housekeeping();
+    if housekeeping_now {
         // Phase 1d: run-history retention — keep the newest RUN_HISTORY_KEEP ended
         // runs per environment, and nothing older than the log age cap. Deleting a
         // run cascades nodes/node_stats by FK and removes its log lines by run_id.
@@ -416,7 +419,7 @@ pub(crate) async fn run_gc_pass(
     // disk. Deciding to delete somebody's checkout from a `deleted_at` read out
     // of a file whose page map SQLite has declared untrustworthy is not a risk
     // worth taking to reclaim a directory ten minutes sooner.
-    if housekeeping {
+    if housekeeping() {
         summary.trash_purged = crate::feedback_server::worktree_trash::purge_expired_trash(db);
     }
 
