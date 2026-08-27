@@ -332,9 +332,12 @@ jobs:
       contents: write
     needs: [plan, release]
     runs-on: ubuntu-latest
-    # Five upload attempts with backoff cannot outlast this, so a wedged
-    # publish fails in an hour rather than holding a runner for six.
-    timeout-minutes: 60
+    # The publish step's own worst case is ~70 min: 5 upload attempts capped at
+    # 10 min each, 225 s of upload backoff, ~2 min of read backoff, and ~14 min
+    # of publish retries. 90 leaves room for the ~1 GB artifact download ahead
+    # of it, so a wedged publish fails on its own terms rather than being
+    # cancelled mid-flip with nothing in the log to say why.
+    timeout-minutes: 90
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
@@ -369,20 +372,29 @@ jobs:
       # signal was a red X on a job whose log was a page of HTML.
       #
       # So the publish is spelled out here. Same draft-first ordering, because
-      # a release must never be visible carrying a partial asset set, plus
-      # three properties the action does not have:
+      # a release must never be visible carrying a partial asset set, plus the
+      # properties the action lacked:
       #
-      #   * a 5xx or a hang is retried, and only the assets still missing are
-      #     re-sent — not the ~700 MB that already landed;
+      #   * every GitHub call retries — uploads, the reads that decide whether
+      #     an upload worked, and the flip that publishes. A single unretried
+      #     call is the whole incident;
+      #   * a retry re-sends only the assets still missing, not the ~700 MB
+      #     that already landed;
       #   * "present" means the name AND the byte size AND `state == uploaded`
       #     all match, so a truncated or still-uploading asset is replaced
       #     rather than counted;
-      #   * the flip to published is *gated* on that set being empty. An
-      #     incomplete release cannot publish, and a complete one cannot be
-      #     left a draft.
+      #   * the flip is gated on that set being empty, and read back afterwards
+      #     — `gh release edit` returning 0 is not the same as the release
+      #     being published.
+      #
+      # The rule the whole step is built around: **every failure must fall
+      # toward "do not publish"**. Every serious defect an earlier review round
+      # found here was the same shape — a check that answered "complete" when
+      # it meant "could not tell". So each step below either establishes a fact
+      # or exits; none of them degrade quietly.
       #
       # Re-running the job is the recovery path: it finds the existing draft,
-      # tops up whatever is missing, and publishes.
+      # tops up what is missing, and publishes.
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -392,27 +404,93 @@ jobs:
         run: |
           set -euo pipefail
 
+          # An empty TAG is worse than a failure: `gh release view ""` returns
+          # the repo's *latest published* release with exit 0, so the script
+          # would read a previous release's assets, find them all "present",
+          # and report success having published nothing.
+          if [ -z "${TAG:-}" ]; then
+            echo "::error::the release job produced no tag"
+            exit 1
+          fi
+
+          # `artifacts/` has to be a flat directory of regular files. When an
+          # upload-artifact glob re-roots (see the note on the desktop job), it
+          # nests everything one level deeper, where `-maxdepth 1` silently
+          # misses it — a release with no app on it and nothing in the log to
+          # say so. That was already true of the checksum step; make it loud.
+          find artifacts -mindepth 1 -maxdepth 1 -not -type f > nonfiles.txt
+          if [ -s nonfiles.txt ]; then
+            echo "::error::artifacts/ holds non-file entries — an upload glob has re-rooted"
+            cat nonfiles.txt
+            exit 1
+          fi
+
+          # NUL-delimited, and written to a file rather than read through
+          # `mapfile < <(find ...)`. Two separate traps: process substitution
+          # hides the exit status from `set -e`, so a `find` that died halfway
+          # would yield a short list nothing downstream can tell from a
+          # complete one; and a newline in a filename would split one path into
+          # two line-delimited entries, neither of which names a real file.
+          find artifacts -maxdepth 1 -type f -print0 > expected.nul
+          mapfile -d '' -t expected < expected.nul
+          if [ "${#expected[@]}" -eq 0 ]; then
+            echo "::error::no artifacts to publish for $TAG"
+            exit 1
+          fi
+
+          # Two filename shapes this pipeline cannot carry. `#` is `gh release
+          # upload`'s asset-label separator, so the asset lands under a
+          # truncated name. A newline cannot survive the tab-separated asset
+          # listing the completeness check reads back, so the asset uploads and
+          # then reads as permanently missing. Either way the release fails
+          # identically on every re-run, so refuse them here, where the message
+          # can name the file. (Reading `expected` NUL-delimited above is what
+          # makes this check see the whole name rather than half of it.)
+          for file in "${expected[@]}"; do
+            case "$file" in
+              *'#'*)
+                echo "::error::artifact name contains '#', which gh reads as an asset label: $file"
+                exit 1 ;;
+              *$'\n'*)
+                echo "::error::artifact name contains a newline: ${file@Q}"
+                exit 1 ;;
+            esac
+          done
+
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "Release $TAG already exists — topping it up."
           else
             gh release create "$TAG" --draft --title "$TAG" --notes-file release-notes.md
           fi
 
-          # The same `-maxdepth 1 -type f` set the checksum step hashed, so the
-          # published assets and checksums.txt cannot describe different files.
-          mapfile -t expected < <(find artifacts -maxdepth 1 -type f | sort)
-          if [ "${#expected[@]}" -eq 0 ]; then
-            echo "::error::no artifacts to publish for $TAG"
-            exit 1
-          fi
+          # A 5xx on a read is the same failure class as a 5xx on an upload, so
+          # it retries too. What it must never do is degrade to "assume
+          # nothing is missing" — hence the hard `return 1` rather than a
+          # `|| true`, and hence the caller aborting on it.
+          read_assets() {
+            local attempt delay=5
+            for attempt in 1 2 3; do
+              if gh release view "$TAG" --json assets \
+                   --jq '.assets[] | select(.state == "uploaded") | "\(.name)\t\(.size)"' \
+                   > have.tsv; then
+                return 0
+              fi
+              echo "Could not read $TAG (attempt $attempt/3)."
+              if [ "$attempt" -lt 3 ]; then
+                sleep "$delay"
+                delay=$((delay * 3))
+              fi
+            done
+            return 1
+          }
 
-          # Sets the global `missing`. The `gh` read is not `|| true`-ed on
-          # purpose: under `set -e` a failed read aborts the job, so `missing`
-          # can only ever be computed from a release we actually saw. An empty
-          # `missing` therefore always means "complete", never "could not ask".
+          # Sets the global `missing`. Every path out of here either reflects a
+          # release we actually read, or exits the job.
           refresh_missing() {
-            gh release view "$TAG" --json assets \
-              --jq '.assets[] | select(.state == "uploaded") | "\(.name)\t\(.size)"' > have.tsv
+            if ! read_assets; then
+              echo "::error::gave up reading $TAG; leaving it a draft rather than guessing"
+              exit 1
+            fi
             declare -A have=()
             local name size file
             while IFS=$'\t' read -r name size; do
@@ -421,7 +499,14 @@ jobs:
             missing=()
             for file in "${expected[@]}"; do
               name=$(basename "$file")
-              [ "${have[$name]-}" = "$(stat -c %s "$file")" ] || missing+=("$file")
+              # Measured on its own line so that a failed `stat` aborts the job.
+              # Inlined into the comparison it expands to "" — and "" is also
+              # what an absent asset compares as, so a file we could not measure
+              # scored as *present* and the release published without it.
+              size=$(stat -c %s "$file")
+              if [ "${have["$name"]-}" != "$size" ]; then
+                missing+=("$file")
+              fi
             done
           }
 
@@ -439,10 +524,12 @@ jobs:
             echo "Attempt $attempt: uploading ${#missing[@]} of ${#expected[@]} asset(s)."
             # A hang, not an error, is what cost v16.57.1 — the request sat for
             # five minutes before failing. Cap it and retry rather than wait it
-            # out. Killing an upload mid-flight leaves a partial asset, which
-            # the size/state check above catches next pass and `--clobber`
-            # overwrites, so the timeout cannot corrupt the release.
-            timeout 600 gh release upload "$TAG" "${missing[@]}" --clobber || true
+            # out; `-k` because a wedged `gh` that ignores SIGTERM would
+            # otherwise hold the job to its own ceiling. Killing an upload
+            # mid-flight leaves a partial asset, which the size/state check
+            # catches next pass and `--clobber` overwrites, so the timeout
+            # cannot corrupt the release.
+            timeout -k 30 600 gh release upload "$TAG" "${missing[@]}" --clobber || true
           done
 
           refresh_missing
@@ -452,7 +539,31 @@ jobs:
             exit 1
           fi
 
-          gh release edit "$TAG" --draft=false --latest
+          # The flip is what makes the release exist for users, and leaving it
+          # as one unretried call would have reproduced the original incident
+          # exactly: every asset up, and the release still invisible. It is also
+          # read back, because `gh release edit` exiting 0 is not the same fact
+          # as the release being published.
+          publish() {
+            local attempt delay=15
+            for attempt in 1 2 3 4 5; do
+              if timeout -k 30 120 gh release edit "$TAG" --draft=false --latest \
+                 && [ "$(gh release view "$TAG" --json isDraft --jq .isDraft)" = "false" ]; then
+                return 0
+              fi
+              echo "$TAG is not published yet (attempt $attempt/5)."
+              if [ "$attempt" -lt 5 ]; then
+                sleep "$delay"
+                delay=$((delay * 2))
+              fi
+            done
+            return 1
+          }
+
+          if ! publish; then
+            echo "::error::$TAG carries all ${#expected[@]} assets but could not be published; it is still a draft"
+            exit 1
+          fi
           echo "Published $TAG with ${#expected[@]} assets."
 
   # ── Gateway container image (multi-arch, from the built binaries) ──

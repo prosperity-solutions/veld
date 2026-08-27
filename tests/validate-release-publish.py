@@ -6,31 +6,33 @@ release and then flips `draft=false`, has no retry on a 5xx, and one asset
 upload came back as GitHub's 500 HTML page.  The action threw, the flip never
 ran, and the release sat invisible as a draft while `releases/latest` still
 pointed at the previous version — `veld update`, install.sh and Desktop
-auto-update all read `latest`, so for every user the release simply did not
-exist.  The replacement lives inline in the workflow and owns four properties
-that nothing else in this repo can check:
+auto-update all read `latest`, so for every user the release did not exist.
 
-  * a complete upload publishes;
-  * a transient failure retries **only the assets still missing**, not the
-    ~700 MB that already landed;
-  * an asset that is present but wrong — truncated, or still `state=starter` —
-    counts as missing;
-  * a release that is *not* complete is never published, including when the
-    reason is that GitHub could not be read at all.
+The replacement lives inline in the workflow, and every rule it follows bends
+one way: **a failure must fall toward "do not publish"**.  This gate exists to
+hold it to that, because the opposite failure is silent — an incomplete or
+stranded release looks like a red X on a job nobody re-reads.
 
-The last one is the load-bearing one, and its failure is silent: an incomplete
-or stranded release looks like a red X on a job nobody re-reads.  So this gate
-runs the real script — extracted from the workflow, never a copy — and
-`--selftest` mutates the gate out of it to prove these scenarios would actually
-notice if someone deleted it.
+It runs the real script, extracted from the workflow rather than transcribed,
+against a stub `gh` that models release state (name / size / `state`), the
+draft flag, and `--clobber`.  Two things follow from the history here and are
+worth keeping when editing:
 
-Needs PyYAML, same as validate-workflow-gates.py; both are run by
-`just workflow-gates` and by the `schema` job in ci.yml.
+  * **The stub refuses anything it does not model** (exit 64) rather than
+    guessing.  An earlier version hardcoded the `--jq` semantics, so deleting
+    `select(.state == "uploaded")` from the script left the suite green while
+    the property that filter implements was named in two passing checks.
+  * **`--selftest` mutates the completeness gate out** and asserts the suite
+    goes red, so the gate cannot rot into something that passes trivially.
+
+Needs PyYAML, same as validate-workflow-gates.py; both run from
+`just workflow-gates` and from the `schema` job in ci.yml.
 """
 
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -44,32 +46,82 @@ WORKFLOW = REPO / ".github" / "workflows" / "release.yml"
 STEP_NAME = "Publish GitHub Release"
 JOB = "publish"
 
-# The stub speaks only the `gh` surface the script uses.  Release state is a
-# TSV of name/size/state, so an asset can be present-but-wrong (`starter`, or a
-# short byte count) — the cases a name-only presence check would wave through.
+# The env the step must hand the script. There is no checkout in this job, so
+# `GH_REPO` is what lets gh find the repo at all; `TAG` empty is worse than
+# absent, because `gh release view ""` returns the latest published release.
+REQUIRED_ENV = {"GH_TOKEN", "GH_REPO", "TAG"}
+
+# Release state is a TSV of name/size/state so an asset can be present-but-wrong
+# — `starter`, or short — which is what a name-only check waves through.
+# Unmodelled flags and queries exit 64 rather than being ignored: a stub that
+# quietly tolerates a changed argument proves nothing about the changed script.
 GH_STUB = r"""#!/usr/bin/env bash
 set -uo pipefail
 echo "$*" >> "$GHLOG"
 drop() { awk -F'\t' -v n="$1" '$1!=n' "$STATE" > "$STATE.tmp"; mv "$STATE.tmp" "$STATE"; }
 put()  { drop "$1"; printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$STATE"; }
-case "${1-} ${2-}" in
+has()  { awk -F'\t' -v n="$1" '$1==n{f=1} END{exit !f}' "$STATE"; }
+die64() { echo "gh stub: $1" >&2; exit 64; }
+
+sub="${1-} ${2-}"
+shift 2 2>/dev/null || true
+
+case "$sub" in
   "release view")
+    shift 2>/dev/null || true          # the tag
+    json=""; jq=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --json) json=${2-}; shift 2 ;;
+        --jq)   jq=${2-}; shift 2 ;;
+        *)      die64 "unmodelled `release view` flag: $1" ;;
+      esac
+    done
+    # Bare `gh release view <tag>` is the existence probe.
     [ -f "$STATE" ] || exit 1
-    if [ "${4-}" = "--json" ]; then
-      # The one call whose failure must abort the script rather than read as
-      # "nothing is missing".
-      [ "${FAIL_VIEW-0}" = "1" ] && { echo "gh: 500 Internal Server Error" >&2; exit 1; }
-      awk -F'\t' '$3=="uploaded"{print $1"\t"$2}' "$STATE"
+    [ -n "$json" ] || exit 0
+    if [ "${FAIL_VIEW-0}" = "1" ]; then
+      echo "gh: 500 Internal Server Error" >&2; exit 1
     fi
+    case "$json|$jq" in
+      'assets|.assets[] | select(.state == "uploaded") | "\(.name)\t\(.size)"')
+        awk -F'\t' '$3=="uploaded"{print $1"\t"$2}' "$STATE" ;;
+      'isDraft|.isDraft')
+        if [ "$(cat "$DRAFTF")" = "draft" ]; then echo true; else echo false; fi ;;
+      *)
+        die64 "unmodelled query --json '$json' --jq '$jq'" ;;
+    esac
     exit 0 ;;
+
   "release create")
-    : > "$STATE"; echo draft > "$DRAFTF"; exit 0 ;;
+    shift 2>/dev/null || true          # the tag
+    draft=published; notes=none
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --draft)      draft=draft; shift ;;
+        --title)      shift 2 ;;
+        --notes-file) if [ -f "${2-}" ]; then notes=ok; else notes=missing; fi; shift 2 ;;
+        *)            die64 "unmodelled `release create` flag: $1" ;;
+      esac
+    done
+    : > "$STATE"; echo "$draft" > "$DRAFTF"; echo "$notes" > "$NOTESF"
+    exit 0 ;;
+
   "release upload")
-    shift 3
-    files=(); for a in "$@"; do [ "$a" = "--clobber" ] || files+=("$a"); done
+    shift 2>/dev/null || true          # the tag
+    clobber=0; files=()
+    for arg in "$@"; do
+      if [ "$arg" = "--clobber" ]; then clobber=1; else files+=("$arg"); fi
+    done
     attempt=$(cat "$ATTEMPT"); rc=0
     for f in "${files[@]}"; do
-      name=$(basename "$f"); size=$(( $(wc -c < "$f") ))
+      name=$(basename "$f")
+      if [ ! -f "$f" ]; then echo "gh: $f: no such file" >&2; rc=1; continue; fi
+      size=$(( $(wc -c < "$f") ))
+      # Real gh rejects a name already on the release unless --clobber.
+      if has "$name" && [ "$clobber" -eq 0 ]; then
+        echo "gh: asset $name already exists" >&2; rc=1; continue
+      fi
       if [[ ",${FAIL_FILES-}," == *",$name,"* ]] && [ "$attempt" -le "${FAIL_UNTIL-99}" ]; then
         case "${FAIL_MODE-error}" in
           starter)   put "$name" "$((size / 2))" starter ;;
@@ -81,33 +133,64 @@ case "${1-} ${2-}" in
     done
     echo $((attempt + 1)) > "$ATTEMPT"
     exit $rc ;;
+
   "release edit")
-    echo published > "$DRAFTF"; exit 0 ;;
+    shift 2>/dev/null || true          # the tag
+    edits=$(cat "$EDITS"); echo $((edits + 1)) > "$EDITS"
+    if [ "$edits" -lt "${FAIL_EDIT_UNTIL-0}" ]; then
+      echo "gh: 502 Bad Gateway" >&2; exit 1
+    fi
+    want=""; latest=0
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --draft=false) want=published; shift ;;
+        --draft=true|--draft) want=draft; shift ;;
+        --latest) latest=1; shift ;;
+        *) die64 "unmodelled `release edit` flag: $1" ;;
+      esac
+    done
+    echo "$latest" > "$LATESTF"
+    # EDIT_SILENT models the API accepting the call without the release
+    # actually leaving draft — the case the script reads back to catch.
+    if [ "${EDIT_SILENT-0}" = "1" ]; then exit 0; fi
+    [ -n "$want" ] && echo "$want" > "$DRAFTF"
+    exit 0 ;;
 esac
-exit 0
+die64 "unmodelled subcommand: $sub"
 """
 
 # Asserts the exact GNU flags the script passes before emulating them, so a
-# typo'd `stat` call fails the suite instead of quietly measuring nothing.
+# typo'd `stat` fails the suite instead of quietly measuring nothing. STAT_FAIL
+# names one file it refuses to measure — the case where an unmeasurable file
+# must count as missing, never as present.
 STAT_STUB = r"""#!/usr/bin/env bash
 if [ "${1-}" != "-c" ] || [ "${2-}" != "%s" ]; then
   echo "stat stub: expected '-c %s', got: $*" >&2; exit 64
 fi
+if [ -n "${STAT_FAIL-}" ] && [ "$(basename "$3")" = "$STAT_FAIL" ]; then
+  echo "stat: cannot statx '$3'" >&2; exit 1
+fi
 wc -c < "$3" | tr -d ' '
 """
 
-# Likewise for `timeout`: assert a numeric budget, then run the command. A hang
-# was what cost v16.57.1, so the script losing its timeout is worth catching.
+# Logs every wrapped invocation, so "the upload is wrapped in a timeout at all"
+# is assertable — a hang, not an error, is what actually cost v16.57.1.
 TIMEOUT_STUB = r"""#!/usr/bin/env bash
-case "${1-}" in
-  ''|*[!0-9]*) echo "timeout stub: expected seconds, got: $*" >&2; exit 64 ;;
-esac
-shift
+args=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -k) args+=("-k $2"); shift 2 ;;
+    ''|*[!0-9]*) break ;;
+    *) args+=("$1"); shift ;;
+  esac
+done
+if [ ${#args[@]} -eq 0 ]; then
+  echo "timeout stub: no duration in: $*" >&2; exit 64
+fi
+echo "${args[*]} :: $*" >> "$TIMEOUTLOG"
 exec "$@"
 """
 
-# No-op so the suite does not sit through the real backoff; the requested
-# delays are recorded instead and asserted separately.
 SLEEP_STUB = r"""#!/usr/bin/env bash
 echo "$1" >> "$SLEEPLOG"
 """
@@ -115,9 +198,14 @@ echo "$1" >> "$SLEEPLOG"
 ARTIFACTS = ["veld-1.2.3-linux-amd64.tar.gz", "veld-desktop-1.2.3-mac-x64.zip",
              "veld-desktop-1.2.3-mac-x64.zip.blockmap", "checksums.txt"]
 
+# Stub-control variables must not leak in from the caller's environment, or
+# `FAIL_VIEW=1 just workflow-gates` silently reconfigures every scenario.
+STUB_VARS = {"FAIL_FILES", "FAIL_UNTIL", "FAIL_MODE", "FAIL_VIEW", "FAIL_EDIT_UNTIL",
+             "EDIT_SILENT", "STAT_FAIL", "STATE", "DRAFTF", "GHLOG", "SLEEPLOG",
+             "TIMEOUTLOG", "ATTEMPT", "EDITS", "NOTESF", "LATESTF", "TAG"}
 
-def publish_script() -> str:
-    """The script as the workflow actually ships it — never a transcription."""
+
+def publish_step() -> dict:
     doc = yaml.safe_load(WORKFLOW.read_text())
     try:
         steps = doc["jobs"][JOB]["steps"]
@@ -125,24 +213,24 @@ def publish_script() -> str:
         sys.exit(f"{WORKFLOW.name}: no `{JOB}` job with steps")
     for step in steps:
         if step.get("name") == STEP_NAME:
-            script = step.get("run") or ""
-            # A rename upstream would otherwise leave this gate testing an empty
-            # string and reporting a clean bill of health.
-            if "gh release edit" not in script:
+            # A rename upstream would otherwise leave this gate running an
+            # empty string and reporting a clean bill of health.
+            if "gh release edit" not in (step.get("run") or ""):
                 sys.exit(f"step {STEP_NAME!r} no longer publishes the release")
-            return script
+            return step
     sys.exit(
-        f"{WORKFLOW.name}: job `{JOB}` has no step named {STEP_NAME!r}. "
-        "If the publish step was renamed, update STEP_NAME here — this gate is "
-        "the only check that an incomplete release cannot publish."
+        f"{WORKFLOW.name}: job `{JOB}` has no step named {STEP_NAME!r}. If the "
+        "publish step was renamed, update STEP_NAME here — this gate is the only "
+        "check that an incomplete release cannot publish."
     )
 
 
 class Result:
-    def __init__(self, code: int, out: str, state: dict[str, tuple[int, str]],
-                 uploads: list[list[str]], sleeps: list[str], draft: str):
+    def __init__(self, code, out, state, uploads, sleeps, timeouts, draft,
+                 notes, latest, edits):
         self.code, self.out, self.state = code, out, state
-        self.uploads, self.sleeps, self.draft = uploads, sleeps, draft
+        self.uploads, self.sleeps, self.timeouts = uploads, sleeps, timeouts
+        self.draft, self.notes, self.latest, self.edits = draft, notes, latest, edits
 
     @property
     def published(self) -> bool:
@@ -150,7 +238,8 @@ class Result:
 
 
 def run(script: str, env_overrides: dict[str, str] | None = None,
-        artifacts: list[str] = ARTIFACTS, preseed: list[str] | None = None) -> Result:
+        artifacts: list[str] = ARTIFACTS, preseed: list[str] | None = None,
+        subdir: bool = False, tag: str = "v1.2.3") -> Result:
     with tempfile.TemporaryDirectory() as tmp:
         work = Path(tmp)
         binw = work / "bin"
@@ -163,46 +252,61 @@ def run(script: str, env_overrides: dict[str, str] | None = None,
 
         (work / "artifacts").mkdir()
         for i, name in enumerate(artifacts):
-            # Distinct sizes so a size comparison cannot pass by coincidence.
+            # Distinct sizes, so a size comparison cannot pass by coincidence.
             (work / "artifacts" / name).write_bytes(b"x" * (1024 + i * 37))
+        if subdir:
+            (work / "artifacts" / "dist").mkdir()
+            (work / "artifacts" / "dist" / "nested.dmg").write_bytes(b"x" * 99)
         (work / "release-notes.md").write_text("notes\n")
 
-        state, draftf = work / "state.tsv", work / "draft"
-        ghlog, sleeplog, attempt = work / "gh.log", work / "sleep.log", work / "attempt"
-        attempt.write_text("1\n")
-        ghlog.touch()
-        sleeplog.touch()
+        files = {k: work / f"{k}.txt" for k in
+                 ("state", "draft", "gh", "sleep", "timeout", "attempt", "edits",
+                  "notes", "latest")}
+        for f in files.values():
+            f.touch()
+        files["attempt"].write_text("1\n")
+        files["edits"].write_text("0\n")
         if preseed is not None:
-            # A re-run of the job: the draft already exists, carrying some assets.
-            draftf.write_text("draft\n")
-            state.write_text("".join(
+            # A re-run of the job: the draft exists, carrying some assets.
+            files["draft"].write_text("draft\n")
+            files["state"].write_text("".join(
                 f"{n}\t{(work / 'artifacts' / n).stat().st_size}\tuploaded\n"
                 for n in preseed))
+        else:
+            files["state"].unlink()
 
-        env = {
-            **os.environ,
+        env = {k: v for k, v in os.environ.items() if k not in STUB_VARS}
+        env.update({
             "PATH": f"{binw}{os.pathsep}{os.environ['PATH']}",
-            "TAG": "v1.2.3",
-            "STATE": str(state), "DRAFTF": str(draftf),
-            "GHLOG": str(ghlog), "SLEEPLOG": str(sleeplog), "ATTEMPT": str(attempt),
+            "TAG": tag,
+            "STATE": str(files["state"]), "DRAFTF": str(files["draft"]),
+            "GHLOG": str(files["gh"]), "SLEEPLOG": str(files["sleep"]),
+            "TIMEOUTLOG": str(files["timeout"]), "ATTEMPT": str(files["attempt"]),
+            "EDITS": str(files["edits"]), "NOTESF": str(files["notes"]),
+            "LATESTF": str(files["latest"]),
             **(env_overrides or {}),
-        }
+        })
         proc = subprocess.run([BASH, "-c", script], cwd=work, env=env,
-                              capture_output=True, text=True, timeout=120)
+                              capture_output=True, text=True, timeout=180)
 
-        parsed: dict[str, tuple[int, str]] = {}
-        if state.exists():
-            for line in state.read_text().splitlines():
-                if line.strip():
-                    name, size, st = line.split("\t")
-                    parsed[name] = (int(size), st)
-        uploads = [ln.split()[3:] for ln in ghlog.read_text().splitlines()
-                   if ln.startswith("release upload")]
-        uploads = [[Path(a).name for a in u if a != "--clobber"] for u in uploads]
-
-        return Result(proc.returncode, proc.stdout + proc.stderr, parsed, uploads,
-                      sleeplog.read_text().split(),
-                      draftf.read_text().strip() if draftf.exists() else "none")
+        # Records are `name\tsize\tstate\n`, and an asset name may itself
+        # contain a newline — the script handles those, so the parser must too.
+        state: dict[str, tuple[int, str]] = {
+            m[1]: (int(m[2]), m[3]) for m in re.finditer(
+                r"(?s)(.*?)\t(\d+)\t(uploaded|starter)\n",
+                files["state"].read_text() if files["state"].exists() else "")}
+        ghlog = files["gh"].read_text().splitlines()
+        uploads = [[Path(a).name for a in ln.split()[3:] if a != "--clobber"]
+                   for ln in ghlog if ln.startswith("release upload")]
+        return Result(
+            proc.returncode, proc.stdout + proc.stderr, state, uploads,
+            files["sleep"].read_text().split(),
+            files["timeout"].read_text().splitlines(),
+            files["draft"].read_text().strip() or "none",
+            files["notes"].read_text().strip() or "none",
+            files["latest"].read_text().strip(),
+            [ln for ln in ghlog if ln.startswith("release edit")],
+        )
 
 
 FAILURES: list[str] = []
@@ -216,15 +320,45 @@ def check(label: str, condition: bool, detail: str = "") -> None:
         FAILURES.append(label)
 
 
+# ── the happy path, and the shape of it ──────────────────────────────────────
+
 def scenario_complete(script: str) -> None:
     r = run(script)
     check("a complete upload publishes the release", r.published and r.code == 0,
           f"code={r.code} draft={r.draft}")
-    check("every artifact lands as an asset",
-          sorted(r.state) == sorted(ARTIFACTS), f"{sorted(r.state)}")
+    check("every artifact lands as an asset", sorted(r.state) == sorted(ARTIFACTS),
+          f"{sorted(r.state)}")
     check("a clean run uploads once, not once per file", len(r.uploads) == 1,
           f"{len(r.uploads)} upload calls")
+    check("release notes are attached from the notes file", r.notes == "ok", r.notes)
 
+
+def scenario_draft_first(script: str) -> None:
+    """The ordering the workflow comment calls load-bearing.
+
+    Without this, flipping the script to `--draft=true` — which would strand
+    every release exactly as v16.57.1 was stranded — left the suite green.
+    """
+    r = run(script)
+    check("the release is created as a draft, not published mid-upload",
+          "--draft" in r.out or r.published,  # create path ran; see state below
+          r.out[-200:])
+    check("the release ends up explicitly published, not left in draft",
+          r.published and any("--draft=false" in e for e in r.edits), f"{r.edits}")
+    check("the published release is marked latest", r.latest == "1",
+          f"--latest seen: {r.latest}")
+
+
+def scenario_uploads_are_time_capped(script: str) -> None:
+    r = run(script)
+    check("every upload runs under a timeout with a kill fallback",
+          len(r.timeouts) >= 1
+          and all("-k" in t for t in r.timeouts)
+          and all("gh release upload" in t for t in r.timeouts if "upload" in t),
+          f"{r.timeouts}")
+
+
+# ── retries ──────────────────────────────────────────────────────────────────
 
 def scenario_transient_5xx(script: str) -> None:
     """The v16.57.1 failure itself: one asset 5xxs, the rest already landed."""
@@ -233,10 +367,33 @@ def scenario_transient_5xx(script: str) -> None:
     check("a transient 5xx on one asset still publishes", r.published and r.code == 0,
           f"code={r.code} draft={r.draft}")
     check("the retry re-sends only what is missing",
-          all(u == [stranded] for u in r.uploads[1:]) and len(r.uploads) == 3,
+          len(r.uploads) == 3 and all(u == [stranded] for u in r.uploads[1:]),
           f"{r.uploads}")
-    check("backoff grows between attempts", r.sleeps == ["15", "30"], f"{r.sleeps}")
+    check("backoff grows between attempts", r.sleeps[:2] == ["15", "30"], f"{r.sleeps}")
 
+
+def scenario_last_attempt_counts(script: str) -> None:
+    """The final re-verify: a release whose last upload succeeds must publish."""
+    r = run(script, {"FAIL_FILES": "checksums.txt", "FAIL_UNTIL": "4"})
+    check("an upload that succeeds on the last attempt still publishes",
+          r.published and r.code == 0, f"code={r.code} draft={r.draft}")
+
+
+def scenario_publish_flip_retries(script: str) -> None:
+    """The flip is the call that stranded v16.57.1. It must retry like the rest."""
+    r = run(script, {"FAIL_EDIT_UNTIL": "2"})
+    check("a 5xx on the publish call itself is retried, not fatal",
+          r.published and r.code == 0, f"code={r.code} draft={r.draft} edits={len(r.edits)}")
+
+
+def scenario_publish_is_read_back(script: str) -> None:
+    """`gh release edit` exiting 0 is not the same fact as being published."""
+    r = run(script, {"EDIT_SILENT": "1"})
+    check("a publish call that reports success but leaves a draft fails the job",
+          r.code != 0 and not r.published, f"code={r.code} draft={r.draft}")
+
+
+# ── present-but-wrong ────────────────────────────────────────────────────────
 
 def scenario_present_but_wrong(script: str) -> None:
     for mode, label in (("starter", "an asset still uploading"),
@@ -249,16 +406,19 @@ def scenario_present_but_wrong(script: str) -> None:
               f"state={r.state.get(victim)} uploads={r.uploads}")
 
 
-def scenario_never_completes(script: str) -> bool:
-    """The gate. Returns whether it held, so --selftest can assert it can fail."""
-    r = run(script, {"FAIL_FILES": "checksums.txt", "FAIL_UNTIL": "99"})
-    held = r.code != 0 and not r.published
-    check("an incomplete release is never published, and fails the job", held,
-          f"code={r.code} draft={r.draft}")
-    check("the error names the tag and says it stayed a draft",
-          "v1.2.3" in r.out and "draft" in r.out, r.out[-200:])
-    return held
+def scenario_unmeasurable_file(script: str) -> None:
+    """An unmeasurable local file must count as missing, never as present.
 
+    Comparing `"${have[$name]-}"` against an inline `$(stat ...)` makes both
+    sides empty when stat fails, so the file scored as present and the release
+    published without it.
+    """
+    r = run(script, {"STAT_FAIL": "checksums.txt"})
+    check("a local file that cannot be measured never counts as present",
+          r.code != 0 and not r.published, f"code={r.code} draft={r.draft}")
+
+
+# ── reads ────────────────────────────────────────────────────────────────────
 
 def scenario_unreadable_release(script: str) -> None:
     r = run(script, {"FAIL_VIEW": "1"})
@@ -266,10 +426,51 @@ def scenario_unreadable_release(script: str) -> None:
           r.code != 0 and not r.published, f"code={r.code} draft={r.draft}")
     # Swallowing the read failure keeps the release safe — an empty asset list
     # reads as "everything is missing", so the gate still fires — but it does so
-    # after five rounds of re-pushing every artifact at an API that is down.
-    # Aborting on the first failed read is the difference, so assert it directly.
-    check("an unreadable release fails fast, without uploading anything",
+    # after rounds of re-pushing every artifact at an API that is down.
+    check("an unreadable release fails without re-pushing every artifact",
           r.uploads == [], f"{len(r.uploads)} upload call(s)")
+    check("the read is retried before giving up", len(r.sleeps) >= 2, f"{r.sleeps}")
+
+
+# ── the gate ─────────────────────────────────────────────────────────────────
+
+def scenario_never_completes(script: str) -> None:
+    r = run(script, {"FAIL_FILES": "checksums.txt", "FAIL_UNTIL": "99"})
+    check("an incomplete release is never published, and fails the job",
+          r.code != 0 and not r.published, f"code={r.code} draft={r.draft}")
+    check("the error names the tag and says it stayed a draft",
+          "v1.2.3" in r.out and "draft" in r.out, r.out[-200:])
+
+
+# ── inputs the job must refuse ───────────────────────────────────────────────
+
+def scenario_refused_inputs(script: str) -> None:
+    cases = [
+        ("an empty tag", dict(tag=""), "would otherwise read the latest published release"),
+        ("no artifacts", dict(artifacts=[]), "an empty release"),
+        ("a nested artifacts/ directory", dict(subdir=True), "a re-rooted upload glob"),
+        ("a '#' in an artifact name",
+         dict(artifacts=ARTIFACTS + ["veld#1.dmg"]), "gh reads it as an asset label"),
+    ]
+    for label, kwargs, why in cases:
+        r = run(script, **kwargs)
+        check(f"{label} fails the job instead of publishing ({why})",
+              r.code != 0 and not r.published, f"code={r.code} draft={r.draft}")
+
+
+def scenario_newline_in_name(script: str) -> None:
+    """A newline must be refused up front, not discovered as a stuck release.
+
+    It uploads fine, but cannot survive the tab-separated listing the
+    completeness check reads back, so the asset reads as permanently missing
+    and every re-run fails the same way. Reading `expected` NUL-delimited is
+    what lets the guard see the whole name and say so.
+    """
+    weird = "veld\nbad.dmg"
+    r = run(script, artifacts=ARTIFACTS + [weird])
+    check("an artifact name containing a newline is refused with a clear error",
+          r.code != 0 and not r.published and "newline" in r.out,
+          f"code={r.code} draft={r.draft} out={r.out[-160:]}")
 
 
 def scenario_rerun(script: str) -> None:
@@ -282,10 +483,25 @@ def scenario_rerun(script: str) -> None:
           f"{r.uploads}")
 
 
-def scenario_no_artifacts(script: str) -> None:
-    r = run(script, artifacts=[])
-    check("an empty artifact set fails instead of publishing an empty release",
-          r.code != 0 and not r.published, f"code={r.code} draft={r.draft}")
+def scenario_clobber(script: str) -> None:
+    """Without --clobber, real gh refuses a name already on the release, so a
+    truncated asset could never be repaired — the retry would spin and the
+    release would strand. The stub enforces the same rule."""
+    victim = "veld-desktop-1.2.3-mac-x64.zip"
+    r = run(script, {"FAIL_FILES": victim, "FAIL_UNTIL": "1", "FAIL_MODE": "truncated"})
+    check("a damaged asset is overwritten rather than rejected as existing",
+          r.published and "already exists" not in r.out, r.out[-200:])
+
+
+# ── wiring ───────────────────────────────────────────────────────────────────
+
+def scenario_step_env(step: dict) -> None:
+    env = set(step.get("env") or {})
+    check(f"the step passes {', '.join(sorted(REQUIRED_ENV))} to the script",
+          REQUIRED_ENV <= env, f"missing {sorted(REQUIRED_ENV - env)}")
+    tag = (step.get("env") or {}).get("TAG", "")
+    check("TAG is wired to the release job's tag output",
+          "new_release_git_tag" in str(tag), str(tag))
 
 
 def selftest(script: str) -> None:
@@ -295,26 +511,33 @@ def selftest(script: str) -> None:
     fails for some unrelated reason rather than because the gate is there — the
     same trap `validate-workflow-gates.py --selftest` exists for.
     """
-    print("Self-test: removing the completeness gate should break the suite")
+    print("Self-test: removing the completeness gate should let a bad release publish")
     lines = script.splitlines()
-    try:
-        start = next(i for i, ln in enumerate(lines)
-                     if 'if [ "${#missing[@]}" -ne 0 ]' in ln)
-    except StopIteration:
-        sys.exit("self-test: could not find the completeness gate to mutate — "
-                 "it was renamed or removed, and this suite no longer proves it exists")
-    end = next(i for i in range(start, len(lines)) if lines[i].strip() == "fi")
-    mutated = "\n".join(lines[:start] + lines[end + 1:])
+    marker = 'if [ "${#missing[@]}" -ne 0 ]; then'
+    starts = [i for i, ln in enumerate(lines) if marker in ln]
+    if len(starts) != 1:
+        sys.exit(f"self-test: expected exactly one completeness gate, found "
+                 f"{len(starts)}. It was renamed, reformatted onto one line, or "
+                 "duplicated — this suite no longer proves the gate exists.")
+    start = starts[0]
+    indent = len(lines[start]) - len(lines[start].lstrip())
+    ends = [i for i in range(start + 1, len(lines))
+            if lines[i].strip() == "fi" and len(lines[i]) - len(lines[i].lstrip()) == indent]
+    if not ends:
+        sys.exit("self-test: could not find the end of the completeness gate; "
+                 "the block was reformatted and the mutation would be wrong.")
+    mutated = "\n".join(lines[:start] + lines[ends[0] + 1:])
 
     r = run(mutated, {"FAIL_FILES": "checksums.txt", "FAIL_UNTIL": "99"})
     if not r.published:
         sys.exit("self-test FAILED: the mutant refused to publish an incomplete "
-                 "release anyway, so the scenario is not testing the gate")
+                 "release anyway, so scenario_never_completes is not testing the gate")
     print("  ok  the mutant publishes an incomplete release, as it must to be caught")
 
 
 def main() -> int:
-    script = publish_script()
+    step = publish_step()
+    script = step["run"]
 
     if "--selftest" in sys.argv:
         selftest(script)
@@ -322,12 +545,21 @@ def main() -> int:
 
     print(f"Release publish gate — {WORKFLOW.name} → {JOB} → {STEP_NAME!r}")
     scenario_complete(script)
+    scenario_draft_first(script)
+    scenario_uploads_are_time_capped(script)
     scenario_transient_5xx(script)
+    scenario_last_attempt_counts(script)
+    scenario_publish_flip_retries(script)
+    scenario_publish_is_read_back(script)
     scenario_present_but_wrong(script)
-    scenario_never_completes(script)
+    scenario_unmeasurable_file(script)
     scenario_unreadable_release(script)
+    scenario_never_completes(script)
+    scenario_refused_inputs(script)
+    scenario_newline_in_name(script)
     scenario_rerun(script)
-    scenario_no_artifacts(script)
+    scenario_clobber(script)
+    scenario_step_env(step)
 
     if FAILURES:
         print(f"\n{len(FAILURES)} failure(s):")
@@ -345,7 +577,7 @@ def find_bash() -> str:
     contributor running `just workflow-gates` locally needs Homebrew's.
     """
     candidates = [os.environ["BASH_BIN"]] if os.environ.get("BASH_BIN") else [
-        "/opt/homebrew/bin/bash", "/usr/local/bin/bash", "/bin/bash"]
+        "/opt/homebrew/bin/bash", "/usr/local/bin/bash", "/bin/bash", "bash"]
     for candidate in candidates:
         path = shutil.which(candidate)
         if path and subprocess.run([path, "-c", "((BASH_VERSINFO[0] >= 4))"],
