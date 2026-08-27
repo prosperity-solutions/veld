@@ -173,7 +173,10 @@ Capture output verbatim.
   new job is discovered only once the five macOS legs have already dispatched.
   `just workflow-gates` is the sole thing standing between an unguarded job and a
   draft that quietly runs it, because the gate's CI home (the `schema` job) is
-  draft-guarded too.
+  draft-guarded too. It now carries a second gate in the same recipe:
+  `release.yml`'s publish script, which a subagent reading a diff cannot
+  exercise at all — it is run against a stub `gh` and held to the rule that a
+  failure must fall toward *not* publishing.
 - **Everything the pre-pass reports is out of scope for every subagent.** Put
   this line in every brief: *"The typechecker, linter and tests already ran;
   their output is in the context pack. Do not re-report it. Findings that

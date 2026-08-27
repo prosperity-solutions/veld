@@ -160,6 +160,18 @@ jobs:
           # check trivially, which reads as a clean bill of health.
           python3 tests/validate-workflow-gates.py --selftest
           python3 tests/validate-workflow-gates.py
+      # Static, checkout-only and PyYAML-only, so it rides along with the gate
+      # above — which is also where PyYAML is installed, so this step must stay
+      # after it. What it guards is the release path itself: release.yml publishes
+      # by hand now, and the invariant that matters — an incomplete release is
+      # never published, and a complete one never left a draft — has no other
+      # check. Its failure is silent, which is exactly how v16.57.1 shipped to
+      # nobody. `--selftest` first, same reasoning as above: it mutates the
+      # completeness gate out of the script and asserts the suite goes red.
+      - name: Release publish script holds its invariants
+        run: |
+          python3 tests/validate-release-publish.py --selftest
+          python3 tests/validate-release-publish.py
       # Same reasoning: static, checkout-only, and the thing it guards (one
       # favicon inlined into five files across three languages) has no compiler
       # or linter that can see the drift.
