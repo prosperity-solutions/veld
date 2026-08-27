@@ -170,8 +170,9 @@ pub const LOG_BATCH_MAX_LINES: usize = 512;
 /// How long a partial batch waits for company before being written anyway.
 ///
 /// This is the *only* latency this batching adds, and it is invisible to every
-/// reader veld has: the four `--follow` loops poll at 200 ms and the `/ide` log
-/// panel refetches at 2,000 ms. Do not raise it into their range to buy a bigger
+/// reader veld has: the three interactive `--follow` loops poll at 200 ms, the
+/// orchestrator's log watcher at 10 s, and the `/ide` log panel refetches at
+/// 2,000 ms. Do not raise it into their range to buy a bigger
 /// batch — the cap above is what does that job under load, and a process that is
 /// producing enough output for the window to matter is hitting the cap anyway.
 pub const LOG_BATCH_FLUSH: std::time::Duration = std::time::Duration::from_millis(50);

@@ -658,42 +658,83 @@ impl Db {
         // reports the lock held, and `F_UNLCK` immediately after an
         // `open()`+`close()` from the same process.
         //
-        // The two paths are deliberately different syscalls and neither closes
-        // a descriptor on a live inode:
+        // The paths below are deliberately different syscalls and none of them
+        // closes a descriptor on an inode another connection could hold locks on:
         //
-        // - **create**: `create_new` + `mode`, i.e. a brand-new inode nobody can
-        //   hold a lock on yet. `AlreadyExists` means somebody else won the race
-        //   and is handled by the existing-file path.
-        // - **existing**: `chmod(2)`, no descriptor at all. Note this is a
+        // - **new file**: `create_new` + `mode` — a brand-new inode nobody can
+        //   hold a lock on yet, so dropping that descriptor is safe.
+        // - **existing regular file**: `chmod(2)`, no descriptor at all. This is a
         //   deliberate behaviour *change*: `OpenOptionsExt::mode` applies only
         //   when the file is created, so the old code corrected nothing on an
         //   existing database — it destroyed the process's advisory locks in
-        //   exchange for no effect whatsoever. A pre-existing database with
-        //   wrong permissions now actually gets tightened to 0600.
+        //   exchange for no effect whatsoever.
+        // - **symlink**: see the arm below. This is the case that made a naive
+        //   `is_file()` guard a permissions regression.
+        // - **anything else** (a directory, a socket): left alone entirely.
         #[cfg(unix)]
         {
             use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+            let tighten = |p: &Path| {
+                let _ = std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o600));
+            };
             match std::fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
                 .mode(0o600)
                 .open(path)
             {
-                // Dropping *this* descriptor is safe: it is the only one that
-                // has ever existed for this inode.
                 Ok(_) => {}
-                // **Only a regular file gets chmodded, and the check is not
-                // defensive padding.** `create_new` answers `AlreadyExists` for
-                // a *directory* too (`EEXIST`, where the old `create(true)` open
-                // got `EISDIR` and was therefore inert), so an unguarded chmod
-                // here turns `VELD_DB_PATH=$HOME` into `chmod 0600 $HOME` —
-                // traversal broken for everything underneath it, silently, since
-                // the error is discarded. `symlink_metadata` rather than
-                // `metadata` so a symlink at this path is not followed either.
+                // `create_new` answers `AlreadyExists` for **more than an
+                // existing database**, and each of the other shapes has bitten
+                // this function once:
+                //
+                // - a **directory** (`EEXIST`, where the old `create(true)` open
+                //   got `EISDIR` and was inert), so an unguarded chmod here turns
+                //   `VELD_DB_PATH=$HOME` into `chmod 0600 $HOME` — traversal
+                //   broken for everything underneath it, silently, since the
+                //   error is discarded;
+                // - a **symlink**, including a dangling one: POSIX makes
+                //   `O_CREAT|O_EXCL` fail `EEXIST` on a symlink whatever its
+                //   target. Guarding the chmod with `symlink_metadata().is_file()`
+                //   correctly refuses to chmod *the link*, but then leaves the
+                //   target to be created by `Connection::open` below under the
+                //   process umask. Measured: a database reached through a dangling
+                //   symlink came out `-rw-r--r--`, where the pre-change code made
+                //   it 0600 — on the file holding relay tokens.
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    if std::fs::symlink_metadata(path).is_ok_and(|m| m.is_file()) {
-                        let _ =
-                            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+                    let lstat = std::fs::symlink_metadata(path);
+                    if lstat.as_ref().is_ok_and(|m| m.is_file()) {
+                        // A real database. `symlink_metadata`, so this cannot be
+                        // following a link somebody else planted. Tightened
+                        // *before* the open on purpose: SQLite derives the mode of
+                        // `-wal`/`-shm` from the main file when it creates them.
+                        tighten(path);
+                    } else if lstat.is_ok_and(|m| m.file_type().is_symlink()) {
+                        match std::fs::metadata(path) {
+                            // Symlink to an existing file: tighten through it,
+                            // which is what the user asking veld to keep its
+                            // database there means.
+                            Ok(m) if m.is_file() => tighten(path),
+                            // Dangling: create the target ourselves, private, so
+                            // SQLite opens a file that is already 0600 and its
+                            // sidecars inherit that. `create_new` cannot be used
+                            // through a symlink (see above), and this `create`
+                            // cannot be closing a descriptor on a live inode for
+                            // the reason that makes the whole hazard moot: a file
+                            // that does not exist has no connections to lose
+                            // locks.
+                            Err(_) => {
+                                let _ = std::fs::OpenOptions::new()
+                                    .write(true)
+                                    .create(true)
+                                    .truncate(false)
+                                    .mode(0o600)
+                                    .open(path);
+                            }
+                            // A symlink to a directory or a device: leave it, and
+                            // let `Connection::open` produce the real error.
+                            Ok(_) => {}
+                        }
                     }
                 }
                 // Anything else (a missing parent, a read-only volume) is
@@ -2056,6 +2097,84 @@ mod tests {
             mode, 0o600,
             "an existing database with group/world-readable permissions must be tightened \
              on open — it stores relay tokens and sensitive node outputs"
+        );
+    }
+
+    /// **`create_new` reports `AlreadyExists` for four different things, and
+    /// three of them have produced a bug in this function.** So each is pinned.
+    ///
+    /// - a regular file → tightened;
+    /// - a symlink to a file → tightened through the link;
+    /// - a **dangling** symlink → target created 0600, not left to the umask.
+    ///   Measured before the fix: `-rw-r--r--` on the file that holds relay
+    ///   tokens, where the code this replaced produced 0600;
+    /// - a directory → left completely alone, because chmod-ing it would break
+    ///   traversal of everything underneath (`VELD_DB_PATH=$HOME`).
+    #[cfg(unix)]
+    #[test]
+    fn every_shape_create_new_calls_already_existing_is_handled_on_its_own_terms() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+
+        // (1) an existing regular file with loose permissions
+        let dir = tempfile::tempdir().unwrap();
+        let plain = dir.path().join("plain.db");
+        drop(Db::open_at(&plain).unwrap());
+        std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o644)).unwrap();
+        drop(Db::open_at(&plain).unwrap());
+        assert_eq!(
+            mode(&plain),
+            0o600,
+            "an existing database must be tightened"
+        );
+
+        // (2) a symlink pointing at an existing, loose database
+        let target = dir.path().join("target.db");
+        drop(Db::open_at(&target).unwrap());
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let link = dir.path().join("link.db");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        drop(Db::open_at(&link).unwrap());
+        assert_eq!(
+            mode(&target),
+            0o600,
+            "a symlinked database must be tightened through the link"
+        );
+
+        // (3) a DANGLING symlink — the regression case. The target does not
+        // exist, so `create_new` still fails `AlreadyExists` and the target ends
+        // up created by whoever gets there first.
+        let missing = dir.path().join("not-yet.db");
+        let dangling = dir.path().join("dangling.db");
+        std::os::unix::fs::symlink(&missing, &dangling).unwrap();
+        drop(Db::open_at(&dangling).unwrap());
+        assert!(
+            missing.exists(),
+            "opening through a dangling link must create the target"
+        );
+        assert_eq!(
+            mode(&missing),
+            0o600,
+            "a database created through a dangling symlink must not be left at the umask — \
+             it holds relay tokens and sensitive node outputs"
+        );
+
+        // (4) a directory. It must be left exactly as it was, and the open must
+        // fail rather than silently succeeding against something that is not a
+        // database.
+        let as_dir = dir.path().join("adirectory");
+        std::fs::create_dir(&as_dir).unwrap();
+        std::fs::set_permissions(&as_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(
+            Db::open_at(&as_dir).is_err(),
+            "a directory is not a database and opening one must fail"
+        );
+        assert_eq!(
+            mode(&as_dir),
+            0o755,
+            "a directory at the database path must never be chmodded — this is what turns \
+             VELD_DB_PATH=$HOME into a broken home directory"
         );
     }
 

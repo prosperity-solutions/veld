@@ -288,6 +288,12 @@ async fn run_liveness_checks(
     // heartbeat, see `check_key` below), and a run id is a new UUID per
     // `veld start` — so without this the map would grow by one entry per node
     // per restart, forever, on a daemon that survives `veld update`.
+    // The key is `:`-joined and a project path may legally contain a `:`, so a
+    // prefix match is not strictly unambiguous. Left as a prefix match on
+    // purpose: the worst case is pruning another run's entry, and the only
+    // consequence of that is one extra heartbeat line the next time it is probed.
+    // The alternative — a delimiter that cannot appear in a path — is a change to
+    // a key several unrelated things already build the same way.
     let name_prefix = format!("{}:{}:", project_root.to_string_lossy(), run_name);
     let live_prefix = format!("{name_prefix}{}:", run.run_id);
     last_checks.retain(|k, _| !k.starts_with(&name_prefix) || k.starts_with(&live_prefix));
@@ -388,11 +394,14 @@ async fn run_liveness_checks(
 
         match check_result {
             Ok(()) => {
-                // A passing probe writes at most one line, and only when it
-                // carries information: the recovery itself, or the periodic
-                // heartbeat that keeps a long-healthy run from reading as
-                // silent. Both reads happen *before* the counters below reset
-                // them. See `PASS_HEARTBEAT` and `pass_log_decision`.
+                // A passing probe writes at most **two** lines, and only when
+                // they carry information: this one — the probe's own recovery,
+                // or the periodic heartbeat that keeps a long-healthy run from
+                // reading as silent — plus, on an `Unhealthy` -> `Healthy`
+                // transition, the pre-existing "self-healed" line further down,
+                // which reports the *node's status* rather than the probe's
+                // result. Both reads below happen *before* the counters are
+                // reset. See `PASS_HEARTBEAT` and `pass_log_decision`.
                 let was_unhealthy = node_state.status == NodeStatus::Unhealthy;
                 let recovered = node_state.consecutive_failures > 0 || was_unhealthy;
                 let decision = pass_log_decision(

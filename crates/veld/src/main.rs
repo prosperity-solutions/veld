@@ -1694,18 +1694,22 @@ fn command_survives_an_update(command: &Command) -> bool {
 /// a real server produces, so this only fills when the database is genuinely
 /// stuck.
 ///
-/// **The worst case, stated properly, because the first version of this comment
-/// got both factors wrong and the wrongness is what made the number look safe.**
-/// At the observed volume of the #332 incident (4.06 rows/s mean, 17.5/s in the
-/// peak hour) 16,384 lines is about *four minutes* of the busiest output ever
-/// measured through this path — not "a couple of seconds". And the memory bound
-/// is not "a few MB": it is 16,384 × the longest line, which is why the reader
-/// now truncates to `veld_core::process::MAX_LINE_BYTES` (64 KiB) before
-/// enqueueing. Without that cap this path had no per-line limit at all —
-/// `MAX_LINE_BYTES` is enforced by `drain_pipe`, which is the other reader — so
-/// the ceiling was unbounded rather than large. With it the ceiling is 1 GiB in
-/// the pathological case of a process emitting nothing but maximal lines while
-/// the database is wedged, and a few MB for anything realistic.
+/// **How much backlog, not how much time.** Two earlier versions of this comment
+/// tried to express it as a duration and got the arithmetic wrong both times, so:
+/// at the volume measured in the #332 incident, 16,384 lines is ~67 minutes of
+/// output at the 4.06 rows/s mean and ~16 minutes at the 17.5 rows/s peak hour.
+/// Neither figure is the useful one, because the queue only fills while the
+/// *writer* is stalled — so what this bounds is how much history survives a
+/// database that has stopped answering, and after that lines are dropped and
+/// reported.
+///
+/// **Memory ceiling: `LOG_PUMP_QUEUE × MAX_LINE_BYTES` = 1 GiB**, in the
+/// pathological case of a process emitting nothing but maximal lines while the
+/// database is wedged; a few MB for anything realistic. That product is asserted
+/// by `the_queue_is_bounded_in_bytes_not_just_in_lines`, because it is only true
+/// while the reader enforces the per-line cap — and this path had **no** per-line
+/// cap until it was given one, which is what made an earlier "a few MB" claim
+/// not merely wrong but unboundable.
 ///
 /// A *bounded* channel because the alternative fails worse: unbounded, a wedged
 /// database turns a server's log volume into unbounded memory in a process the
@@ -2096,6 +2100,26 @@ mod log_pump_tests {
         .into_iter()
         .map(|r| r.line)
         .collect()
+    }
+
+    /// The one derived number in `LOG_PUMP_QUEUE`'s doc comment, asserted rather
+    /// than restated.
+    ///
+    /// That comment has been wrong four times across this branch's review rounds —
+    /// on the duration, twice, and on the memory ceiling, twice — and the ceiling
+    /// is the claim that matters, because it is what makes a bounded channel a
+    /// bound at all. It holds only while the reader enforces the per-line cap, so
+    /// changing either constant should force somebody to re-read the prose.
+    #[test]
+    fn the_queue_is_bounded_in_bytes_not_just_in_lines() {
+        let ceiling = LOG_PUMP_QUEUE as u64 * veld_core::process::MAX_LINE_BYTES as u64;
+        assert_eq!(
+            ceiling,
+            1024 * 1024 * 1024,
+            "LOG_PUMP_QUEUE x MAX_LINE_BYTES is the worst-case resident size of a `veld _log` \
+             process, and its doc comment states this number in prose. If you changed either \
+             constant, update that comment too."
+        );
     }
 
     /// Everything the reader sends is written, in order, and closing the sender

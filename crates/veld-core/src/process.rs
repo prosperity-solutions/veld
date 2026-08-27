@@ -632,7 +632,7 @@ fn flush_out(target: &Option<LogTarget>, batch: &mut crate::logging::LogBatch) {
 /// and it used to be one autocommit `INSERT` per line. The batch flushes on
 /// `LOG_BATCH_MAX_LINES` under load and on `LOG_BATCH_FLUSH` when the server goes
 /// quiet, so a line is never held longer than the flush window — well inside the
-/// 200 ms every `--follow` loop polls at.
+/// 200 ms the interactive `--follow` loops poll at.
 async fn log_pipe<R: tokio::io::AsyncRead + Unpin>(reader: R, target: LogTarget) {
     use crate::logging::LogBatch;
 

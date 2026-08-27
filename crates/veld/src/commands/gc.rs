@@ -187,10 +187,19 @@ pub async fn run() -> i32 {
         parts.push(format!("{feedback_cleaned} stale feedback run(s) removed"));
     }
 
-    if parts.is_empty() {
-        output::print_success("Nothing to clean up.");
-    } else {
+    if !parts.is_empty() {
         output::print_success(&parts.join(", "));
+    } else if damaged {
+        // **Not "Nothing to clean up."** There was very likely something to clean
+        // up; this run declined to touch it. Reporting success on an empty list
+        // here contradicts the skip notice printed above it, in the same
+        // invocation — and "nothing to do" is exactly the wrong thing to tell
+        // somebody whose database is filling up because retention is paused.
+        output::print_info(
+            "Retention was skipped, so nothing was pruned. Restore a backup to resume it.",
+        );
+    } else {
+        output::print_success("Nothing to clean up.");
     }
 
     0

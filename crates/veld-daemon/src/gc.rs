@@ -373,9 +373,9 @@ pub(crate) async fn run_gc_pass(db: &Db, housekeeping: bool) -> anyhow::Result<G
         // never sets `checked_at`, and a warning gated on that would go to the
         // `debug!` below in exactly the worst case.
         warn!(
-            "database is recorded as damaged — skipping log/stats retention and page reclaim \
-             this pass, because both relocate pages in a file whose page map is not \
-             trustworthy. Restore a backup to resume housekeeping."
+            "database is recorded as damaged — skipping log/stats retention, the page reclaim \
+             and the worktree-trash purge this pass, because each of them acts on a file \
+             whose page map is not trustworthy. Restore a backup to resume housekeeping."
         );
     } else {
         // Normal for a few tens of milliseconds after startup, and the whole
