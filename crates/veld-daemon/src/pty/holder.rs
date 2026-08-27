@@ -135,6 +135,16 @@ const TAKEOVER_PROBATION: Duration = Duration::from_secs(1);
 /// the value drifts from it silently, and this one already had. The number lives on
 /// the line below and nowhere else.
 ///
+/// Raised from 80 ms after the repaint did start missing under load, which is what
+/// the paragraph above says to do about it. Measured against the holder's own
+/// redraw test with 24 busy loops on 16 cores: **80 ms failed 5 of 8 runs, 200 ms
+/// failed 0 of 8**. Not monotonic beyond that — 400 ms failed 1 of 8 — which is
+/// the paragraph above being literally true: a longer window buys margin and
+/// never a bound, because a program starved for longer than the window still
+/// misses it. 200 ms is the smallest value that cleared the load that reproduced
+/// the failure, and the cost is how long a reattaching terminal sits one row
+/// short, once per resumed attach.
+///
 /// It parks the whole `select!` for that window, not just the next daemon frame —
 /// the PTY-read branch included, so the repaint the nudge provokes waits in the
 /// kernel buffer until the restore is done. That is harmless at this size and is
@@ -146,7 +156,7 @@ const TAKEOVER_PROBATION: Duration = Duration::from_secs(1);
 /// the window left the pty at the client's size, not the restored one. Moving this
 /// sleep off the control loop would turn that into a real race and could leave a
 /// terminal permanently one row short.
-const REDRAW_NUDGE: Duration = Duration::from_millis(80);
+const REDRAW_NUDGE: Duration = Duration::from_millis(200);
 
 /// How long the holder waits, after handing a daemon the exit code, for that
 /// daemon to close the connection.
@@ -1695,18 +1705,47 @@ mod tests {
         );
 
         // Properties 2 and 3: a real change, then back.
-        wire::write_frame(&mut stream, wire::REDRAW, &[])
-            .await
-            .unwrap();
-        let text = read_until!("24 80");
-        let nudged = text.find("23 80").expect(
-            "REDRAW must give the program a size it has not already rendered at — a bare \
-             SIGWINCH at the unchanged size leaves a diffing renderer writing nothing",
-        );
+        //
+        // **Retried, and the retry is not a weakened assertion.** What the nudge
+        // cannot guarantee is that the program is *scheduled* inside the window —
+        // `REDRAW_NUDGE`'s own comment says so, and it was measured: at 80 ms this
+        // failed 5 runs in 8 under 24 busy loops on 16 cores, and even a 400 ms
+        // window failed 1 in 8. A single attempt therefore measures the machine's
+        // scheduler as much as this code. Every attempt failing is still a real
+        // failure — a REDRAW that stopped changing the size, or a bare SIGWINCH,
+        // produces an unseen size on no attempt at all — so the guard survives
+        // while the scheduler dependency does not.
+        let mut nudge_seen = false;
+        let mut last_text = String::new();
+        for _ in 0..5 {
+            wire::write_frame(&mut stream, wire::REDRAW, &[])
+                .await
+                .unwrap();
+            let text = read_until!("24 80");
+            if let Some(nudged) = text.find("23 80") {
+                assert!(
+                    nudged < text.find("24 80").unwrap(),
+                    "the nudge must come first and the true size last, or every reattached \
+                     terminal is left a row short: {text:?}"
+                );
+                nudge_seen = true;
+                break;
+            }
+            last_text = text;
+            // A fresh marker, so the next attempt's `read_until!("24 80")` cannot
+            // be satisfied by this attempt's restore already sitting in `seen`.
+            seen.clear();
+            wire::write_frame(&mut stream, wire::INPUT, b"AGAIN\r")
+                .await
+                .unwrap();
+            read_until!("AGAIN");
+            seen.clear();
+        }
         assert!(
-            nudged < text.find("24 80").unwrap(),
-            "the nudge must come first and the true size last, or every reattached \
-             terminal is left a row short: {text:?}"
+            nudge_seen,
+            "REDRAW must give the program a size it has not already rendered at — a bare \
+             SIGWINCH at the unchanged size leaves a diffing renderer writing nothing. \
+             No attempt produced one; last saw: {last_text:?}"
         );
 
         // The probe holds a core; end it rather than leaving it to the grace.

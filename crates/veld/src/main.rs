@@ -1487,18 +1487,15 @@ async fn main() {
 
             let stdin = std::io::stdin();
             let mut reader = stdin.lock();
-            // Bytes of a line that has not ended yet. **Not `read_line`.**
-            //
-            // `read_line` returns only on `\n`, so a stream that emits none — a
-            // `\r`-only progress meter, the exact case `MAX_LINE_BYTES` exists
-            // for — grows its buffer without bound *before* any cap applied to
-            // the returned line can see it. Capping afterwards, as an earlier
-            // version of this did, therefore bounded nothing at all. The ceiling
-            // has to be enforced while accumulating, which is what `drain_pipe`
-            // does and what this now mirrors.
-            let mut pending: Vec<u8> = Vec::new();
+            // **The same line assembler the two foreground readers use.** It was
+            // an inline copy of this loop here first; sharing it is what keeps the
+            // detached path and the foreground ones from drifting on what a line
+            // is, and `MAX_LINE_BYTES` is enforced while accumulating rather than
+            // after `read_line` has already returned an unbounded one.
+            let mut assembler = veld_core::process::LineAssembler::new();
+            let mut lines: Vec<String> = Vec::new();
 
-            // Hand one completed line to the writer thread.
+            // Hand completed lines to the writer thread.
             //
             // `try_send`, never `send`: blocking here puts the database back on
             // the path that drains the server's stdout pipe, and a reader that
@@ -1506,12 +1503,12 @@ async fn main() {
             // sanctioned failure mode for this process, and the count is owned by
             // the writer — see `log_pump_writer`, which reports it, because a
             // reporter on *this* side cannot report through a queue that is full.
-            let emit = |pending: &mut Vec<u8>| {
-                let line = String::from_utf8_lossy(pending).into_owned();
-                pending.clear();
-                if let Some((ref tx, _, ref dropped)) = writer {
-                    if tx.try_send((chrono::Utc::now(), line)).is_err() {
-                        dropped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let queue = |lines: &mut Vec<String>| {
+                for line in lines.drain(..) {
+                    if let Some((ref tx, _, ref dropped)) = writer {
+                        if tx.try_send((chrono::Utc::now(), line)).is_err() {
+                            dropped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
                     }
                 }
             };
@@ -1577,14 +1574,6 @@ async fn main() {
 
                 let chunk = match reader.fill_buf() {
                     Ok([]) => break, // EOF
-                    // A signal can interrupt the read with nothing wrong with
-                    // the pipe, and the two cases must be told apart. A plain
-                    // EINTR resumes: treating it as EOF would stop draining while
-                    // the server is still writing, and the server would then block
-                    // forever on a full pipe (same reasoning as `drain_pipe`'s).
-                    // A *termination* signal is the stop — flush what is buffered
-                    // and leave, rather than waiting for an EOF that a descendant
-                    // outside the process group may never deliver.
                     // A plain EINTR resumes: treating it as EOF would stop
                     // draining while the server is still writing, and the server
                     // would then block forever on a full pipe (same reasoning as
@@ -1597,75 +1586,14 @@ async fn main() {
                 };
                 reader.consume(chunk.len());
 
-                for byte in chunk {
-                    match byte {
-                        // **`\r` is an ordinary byte here, and that is deliberate
-                        // — it is not what `drain_pipe` does.**
-                        //
-                        // The two readers genuinely disagree about what a line is,
-                        // and this side is the one the renderers are built for.
-                        // `crates/veld-daemon/ui/src/shared/ansi.ts` honours
-                        // exactly one cursor movement, carriage return, precisely
-                        // so that a row holding `12%\r34%\r100%` renders as
-                        // `100%` — its own comment says progress output "is
-                        // otherwise rendered as every frame of the animation at
-                        // once", and `veld logs` collapses it the same way. Emit a
-                        // row per redraw instead and the panel faithfully renders
-                        // two thousand frames, which is the failure that code
-                        // exists to prevent — and multiplies `log_lines` rows by
-                        // the redraw count in a change whose point is row volume.
-                        //
-                        // This was tried the other way round first, on the
-                        // reasoning that two readers of the same node's output
-                        // should agree. They should; but the fix belongs on
-                        // `drain_pipe`'s side, not this one, and it is not this
-                        // change's to make.
-                        //
-                        // A `\r`-only meter therefore still arrives as one row —
-                        // now bounded, because `\r` counts toward the cap below
-                        // like any other byte, which is what `read_line` never
-                        // did.
-                        b'\n' => {
-                            // `read_line` + `trim_end_matches('\n')` +
-                            // `trim_end_matches('\r')`, reproduced: a `\r\n`
-                            // ending contributes no `\r` to the stored line,
-                            // while an *embedded* one is kept for the renderers.
-                            while matches!(pending.last(), Some(b'\r')) {
-                                pending.pop();
-                            }
-                            emit(&mut pending);
-                        }
-                        b => {
-                            pending.push(b);
-                            if pending.len() >= veld_core::process::MAX_LINE_BYTES {
-                                // **Split, do not truncate.** `drain_pipe` splits
-                                // an over-long line into successive rows and loses
-                                // nothing; truncating here would mean the same
-                                // node's output survived whole or was silently cut
-                                // depending only on whether it ran foreground or
-                                // detached. Cut on a character boundary so one
-                                // character is not corrupted on both sides of a
-                                // break the process never asked for.
-                                let keep = pending.len()
-                                    - veld_core::process::trailing_partial_char(&pending);
-                                let tail = pending.split_off(keep);
-                                emit(&mut pending);
-                                pending = tail;
-                            }
-                        }
-                    }
-                }
+                assembler.push_chunk(&chunk, &mut lines);
+                queue(&mut lines);
             }
 
-            // Output that never got its newline is still output. Only `\r` can be
-            // here: every `\n` is consumed by the arm above, which emits and
-            // clears in the same iteration — so a trailing `\n` cannot reach this
-            // point, and matching one would be a branch that never fires.
-            while matches!(pending.last(), Some(b'\r')) {
-                pending.pop();
-            }
-            if !pending.is_empty() {
-                emit(&mut pending);
+            // Output that never got its newline is still output.
+            if let Some(last) = assembler.finish() {
+                lines.push(last);
+                queue(&mut lines);
             }
 
             // Drop the sender so the writer sees the channel close, flushes its

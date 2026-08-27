@@ -176,6 +176,90 @@ impl Drop for DrainTasks {
     }
 }
 
+/// Assembles lines from a byte stream, with [`MAX_LINE_BYTES`] enforced **while**
+/// accumulating.
+///
+/// **This exists because a length check cannot be bolted onto the obvious
+/// readers.** `Lines::next_line` and `read_until` do not return until they see a
+/// delimiter or EOF, so a stream that never emits one — a `\r`-only progress
+/// meter, the exact case the cap is for — grows their buffer without bound before
+/// any caller-side check can look at it. Three of veld's pipe readers were built
+/// on those two functions and were therefore uncapped: [`log_pipe`] (foreground
+/// servers) and both drain tasks of [`run_command_streaming`]. They now share this.
+///
+/// **Line semantics, matching what those readers already did**, so adopting it
+/// changes only the bound:
+///
+/// - `\n` ends a line; a trailing `\r` is stripped from it (`\r\n` therefore
+///   stores neither).
+/// - An *embedded* `\r` is data and is kept. It is not a line terminator here —
+///   deliberately unlike [`drain_pipe`], whose `LineSink` contract splits on it.
+///   The renderers want it kept: `ui/src/shared/ansi.ts` honours carriage return
+///   inside a row so a progress line collapses to its last frame, and splitting
+///   instead makes the log panel render every frame.
+/// - At the cap the line is **split, not truncated**, on a character boundary. No
+///   bytes are lost and no character is corrupted across the break.
+///
+/// One deliberate unification: a line ending `\r\r\n` stores `x` rather than
+/// `x\r`. `read_until`'s pop-loop already did that; tokio's `Lines` stripped only
+/// one `\r`. Nothing can observe the difference — a *trailing* CR is dropped by
+/// the renderer anyway.
+#[derive(Default)]
+pub struct LineAssembler {
+    pending: Vec<u8>,
+}
+
+impl LineAssembler {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Feed a chunk of bytes, appending every line it completes to `out`.
+    pub fn push_chunk(&mut self, chunk: &[u8], out: &mut Vec<String>) {
+        for &byte in chunk {
+            if byte == b'\n' {
+                while matches!(self.pending.last(), Some(b'\r')) {
+                    self.pending.pop();
+                }
+                out.push(self.take_pending());
+                continue;
+            }
+            self.pending.push(byte);
+            if self.pending.len() >= MAX_LINE_BYTES {
+                // Cut on a character boundary and keep the trailing partial
+                // character for the next line, so one character is not corrupted
+                // on both sides of a break the process never asked for. No
+                // terminator is stripped here: this is an arbitrary split point,
+                // not the end of a line.
+                let keep = self.pending.len() - trailing_partial_char(&self.pending);
+                let tail = self.pending.split_off(keep);
+                out.push(self.take_pending());
+                self.pending = tail;
+            }
+        }
+    }
+
+    /// The bytes left over at EOF: output that never got its newline, which is
+    /// still output. `None` when there is nothing, or nothing but terminators.
+    pub fn finish(&mut self) -> Option<String> {
+        while matches!(self.pending.last(), Some(b'\r' | b'\n')) {
+            self.pending.pop();
+        }
+        if self.pending.is_empty() {
+            None
+        } else {
+            Some(self.take_pending())
+        }
+    }
+
+    fn take_pending(&mut self) -> String {
+        let line = String::from_utf8_lossy(&self.pending).into_owned();
+        self.pending.clear();
+        line
+    }
+}
+
 /// How many bytes at the end of `buf` are the start of a multi-byte character
 /// whose remaining bytes have not arrived (0 if it ends on a boundary).
 ///
@@ -632,21 +716,29 @@ fn flush_out(target: &Option<LogTarget>, batch: &mut crate::logging::LogBatch) {
 async fn log_pipe<R: tokio::io::AsyncRead + Unpin>(reader: R, target: LogTarget) {
     use crate::logging::LogBatch;
 
-    let mut lines = BufReader::new(reader).lines();
+    // `fill_buf` + `LineAssembler`, not `BufReader::lines()`. `Lines::next_line`
+    // does not return until it sees a `\n`, so a server emitting a `\r`-only
+    // progress meter grew its buffer without bound — `MAX_LINE_BYTES` could not
+    // be applied from out here because there was no point at which to apply it.
+    // The assembler enforces the cap while accumulating and keeps this path's line
+    // semantics unchanged otherwise.
+    let mut reader = BufReader::new(reader);
+    let mut assembler = LineAssembler::new();
     let mut batch = LogBatch::new();
+    let mut lines: Vec<String> = Vec::new();
 
     loop {
         // With nothing buffered there is no deadline to honour — block for the
-        // first line rather than spinning on an expired timeout.
-        let next = match batch.deadline() {
-            None => lines.next_line().await,
+        // first read rather than spinning on an expired timeout.
+        let chunk = match batch.deadline() {
+            None => reader.fill_buf().await.map(<[u8]>::to_vec),
             Some(deadline) => {
-                match tokio::time::timeout_at(deadline.into(), lines.next_line()).await {
-                    Ok(read) => read,
+                match tokio::time::timeout_at(deadline.into(), reader.fill_buf()).await {
+                    Ok(read) => read.map(<[u8]>::to_vec),
                     Err(_) => {
-                        // Deadline reached with a partial batch. `next_line` is
-                        // cancel-safe (its partial line stays in the reader's
-                        // own buffer), so nothing is lost by dropping it here.
+                        // Deadline reached with a partial batch. `fill_buf` is
+                        // cancel-safe — a cancelled call consumes nothing, so the
+                        // bytes are still there for the next one.
                         target.append_batch(&batch.take());
                         continue;
                     }
@@ -654,20 +746,140 @@ async fn log_pipe<R: tokio::io::AsyncRead + Unpin>(reader: R, target: LogTarget)
             }
         };
 
-        match next {
-            Ok(Some(line)) => {
-                batch.push(line);
-                if batch.is_full() {
-                    target.append_batch(&batch.take());
+        match chunk {
+            Ok(chunk) if chunk.is_empty() => break, // EOF
+            Ok(chunk) => {
+                reader.consume(chunk.len());
+                lines.clear();
+                assembler.push_chunk(&chunk, &mut lines);
+                for line in lines.drain(..) {
+                    batch.push(line);
+                    if batch.is_full() {
+                        target.append_batch(&batch.take());
+                    }
                 }
             }
-            // EOF or a read error: write what is buffered before leaving. The
-            // last thing a dying server said is the line most worth having.
-            Ok(None) | Err(_) => break,
+            // A signal can interrupt the read with nothing wrong with the pipe;
+            // treating that as EOF would stop draining while the server is still
+            // writing, and it would then block forever on a full pipe.
+            Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
         }
     }
 
+    // EOF: the last thing a dying server said is the line most worth having, and
+    // it may never have got its newline.
+    if let Some(last) = assembler.finish() {
+        batch.push(last);
+    }
     target.append_batch(&batch.take());
+}
+
+/// Drain one of a `command` step's pipes: echo every line to the terminal as it
+/// arrives, and batch the same lines into the database.
+///
+/// **One function for both pipes.** They were two near-identical `read_until`
+/// loops, and every defect found in one had to be found again in the other —
+/// which is how a trailing-line loss and a spurious blank row each shipped twice.
+///
+/// `fill_buf` + [`LineAssembler`] rather than `read_until`, which buys two things.
+/// `MAX_LINE_BYTES` is now enforced while accumulating, so a step emitting a
+/// `\r`-only progress meter no longer grows an unbounded buffer — `read_until`
+/// gave no point at which a caller could apply the cap. And `fill_buf` is
+/// cancel-safe in the way that matters: a cancelled call consumes nothing, where a
+/// cancelled `read_until` left partial bytes in the caller's buffer and reported
+/// only its own byte count, which is what made the flush deadline able to lose the
+/// last line of a step.
+///
+/// `outputs` is `Some` for stdout only: `VELD_OUTPUT key=value` control lines are
+/// peeled off there and sent back rather than echoed or logged, because they can
+/// carry sensitive node outputs. stderr is forwarded verbatim.
+async fn drain_to_terminal_and_log<R, W>(
+    reader: R,
+    mut terminal: W,
+    log: Option<LogTarget>,
+    outputs: Option<tokio::sync::mpsc::UnboundedSender<(String, String)>>,
+) where
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    let mut reader = BufReader::new(reader);
+    let mut assembler = LineAssembler::new();
+    // The terminal echo stays line-at-a-time and immediate — only the *database*
+    // write is batched, so nothing about what a person watching the run sees
+    // changes. With no log target the batch is never pushed, so `deadline()` stays
+    // `None` and the read is never wrapped.
+    let mut batch = crate::logging::LogBatch::new();
+    let mut lines: Vec<String> = Vec::new();
+
+    loop {
+        let chunk = match batch.deadline() {
+            None => reader.fill_buf().await.map(<[u8]>::to_vec),
+            Some(deadline) => {
+                match tokio::time::timeout_at(deadline.into(), reader.fill_buf()).await {
+                    Ok(read) => read.map(<[u8]>::to_vec),
+                    Err(_) => {
+                        flush_out(&log, &mut batch);
+                        continue;
+                    }
+                }
+            }
+        };
+
+        let chunk = match chunk {
+            Ok(chunk) if chunk.is_empty() => break, // EOF
+            Ok(chunk) => chunk,
+            // A signal can interrupt the read with nothing wrong with the pipe.
+            Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        };
+        reader.consume(chunk.len());
+
+        lines.clear();
+        assembler.push_chunk(&chunk, &mut lines);
+        for line in lines.drain(..) {
+            emit_step_line(line, &mut terminal, &log, &outputs, &mut batch).await;
+        }
+    }
+
+    // Output that never got its newline is still output — the last thing a failing
+    // step printed is the line most worth having.
+    if let Some(last) = assembler.finish() {
+        emit_step_line(last, &mut terminal, &log, &outputs, &mut batch).await;
+    }
+    flush_out(&log, &mut batch);
+}
+
+/// Echo one line and queue it for the database, peeling off a control line.
+async fn emit_step_line<W: tokio::io::AsyncWrite + Unpin>(
+    line: String,
+    terminal: &mut W,
+    log: &Option<LogTarget>,
+    outputs: &Option<tokio::sync::mpsc::UnboundedSender<(String, String)>>,
+    batch: &mut crate::logging::LogBatch,
+) {
+    use tokio::io::AsyncWriteExt;
+
+    if let Some(tx) = outputs {
+        if let Some(kv) = line.strip_prefix("VELD_OUTPUT ") {
+            if let Some((key, value)) = kv.split_once('=') {
+                let _ = tx.send((key.trim().to_owned(), value.trim().to_owned()));
+            }
+            // Control line — never echoed or logged.
+            return;
+        }
+    }
+
+    let _ = terminal.write_all(line.as_bytes()).await;
+    let _ = terminal.write_all(b"\n").await;
+    let _ = terminal.flush().await;
+
+    if log.is_some() {
+        batch.push(line);
+        if batch.is_full() {
+            flush_out(log, batch);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -940,8 +1152,6 @@ pub async fn run_command_streaming(
     log_target: Option<LogTarget>,
     on_spawn: Option<Box<dyn FnOnce(u32) + Send>>,
 ) -> Result<CommandOutput, ProcessError> {
-    use tokio::io::AsyncWriteExt;
-
     // Prepare the output file and augmented env (mirrors `run_command`).
     let mut env = env.clone();
     if let Some(path) = output_file {
@@ -1021,148 +1231,11 @@ pub async fn run_command_streaming(
     let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel::<(String, String)>();
     let out_log = log_target.clone();
     let out_task = tokio::spawn(async move {
-        let mut reader = BufReader::new(stdout);
-        let mut w = tokio::io::stdout();
-        let mut buf = Vec::new();
-        // The terminal echo below stays line-at-a-time and immediate — only the
-        // *database* write is batched, so nothing about what a person watching
-        // the run sees changes. When there is no log target the batch is never
-        // pushed, so `deadline()` stays `None` and the read is never wrapped.
-        let mut batch = crate::logging::LogBatch::new();
-        loop {
-            let read = match batch.deadline() {
-                None => reader.read_until(b'\n', &mut buf).await,
-                Some(deadline) => {
-                    match tokio::time::timeout_at(
-                        deadline.into(),
-                        reader.read_until(b'\n', &mut buf),
-                    )
-                    .await
-                    {
-                        Ok(read) => read,
-                        Err(_) => {
-                            // Flush deadline. `read_until` appends into `buf`
-                            // and is NOT cancel-safe the way `Lines::next_line`
-                            // is: a cancelled read leaves its partial bytes
-                            // there for the next call to continue from, which is
-                            // exactly why `buf` is cleared where a line is
-                            // *consumed* rather than at the top of the loop.
-                            flush_out(&out_log, &mut batch);
-                            continue;
-                        }
-                    }
-                }
-            };
-            // EOF or a read error. `buf` may still hold a real, final line —
-            // a step that printed without a trailing newline, or one whose
-            // last partial line was left here by the flush deadline above
-            // cancelling `read_until`. `read_until` reports only the bytes
-            // *its own* call read (`mem::replace(read, 0)` in tokio's
-            // `read_until_internal`), so the call after a cancellation answers
-            // `Ok(0)` at EOF while the partial line is still buffered. The
-            // pre-batching loop cleared `buf` on every iteration and so could
-            // never reach this state; dropping the line here would silently
-            // lose the last thing a step said, which
-            // `drain_pipe` states as a rule for its sibling reader.
-            let eof = matches!(read, Ok(0) | Err(_));
-            // **`all(terminators)`, not `is_empty()`.** A cancelled `read_until`
-            // can leave `buf` holding nothing but a bare `\r` (a step printed
-            // `done\n`, then a `\r`, then paused), and the `pop` loop below then
-            // empties it — emitting a blank line to the terminal and a blank row
-            // to `log_lines` where the pre-batching `Ok(0) => break` dropped it. A
-            // *genuine* blank line always arrives on an `Ok(n > 0)` read, where
-            // `eof` is false, so this cannot swallow one.
-            if eof && buf.iter().all(|b| matches!(b, b'\n' | b'\r')) {
-                break;
-            }
-
-            while matches!(buf.last(), Some(b'\n' | b'\r')) {
-                buf.pop();
-            }
-            let line = String::from_utf8_lossy(&buf).into_owned();
-            buf.clear();
-            if let Some(kv) = line.strip_prefix("VELD_OUTPUT ") {
-                if let Some((key, value)) = kv.split_once('=') {
-                    let _ = out_tx.send((key.trim().to_owned(), value.trim().to_owned()));
-                }
-                // Control line — never echoed or logged.
-            } else {
-                let _ = w.write_all(line.as_bytes()).await;
-                let _ = w.write_all(b"\n").await;
-                let _ = w.flush().await;
-                if out_log.is_some() {
-                    batch.push(line);
-                    if batch.is_full() {
-                        flush_out(&out_log, &mut batch);
-                    }
-                }
-            }
-
-            if eof {
-                break;
-            }
-        }
-        // The last thing a failing step printed is the line most worth having,
-        // so whatever is buffered is written before this task ends.
-        flush_out(&out_log, &mut batch);
+        drain_to_terminal_and_log(stdout, tokio::io::stdout(), out_log, Some(out_tx)).await;
     });
     let err_log = log_target.clone();
     let err_task = tokio::spawn(async move {
-        let mut reader = BufReader::new(stderr);
-        let mut w = tokio::io::stderr();
-        let mut buf = Vec::new();
-        let mut batch = crate::logging::LogBatch::new();
-        loop {
-            let read = match batch.deadline() {
-                None => reader.read_until(b'\n', &mut buf).await,
-                Some(deadline) => {
-                    match tokio::time::timeout_at(
-                        deadline.into(),
-                        reader.read_until(b'\n', &mut buf),
-                    )
-                    .await
-                    {
-                        Ok(read) => read,
-                        Err(_) => {
-                            flush_out(&err_log, &mut batch);
-                            continue;
-                        }
-                    }
-                }
-            };
-            // Same reasoning as the stdout drain above: a non-empty `buf` at
-            // EOF is a real final line, not leftovers.
-            let eof = matches!(read, Ok(0) | Err(_));
-            // **`all(terminators)`, not `is_empty()`.** A cancelled `read_until`
-            // can leave `buf` holding nothing but a bare `\r` (a step printed
-            // `done\n`, then a `\r`, then paused), and the `pop` loop below then
-            // empties it — emitting a blank line to the terminal and a blank row
-            // to `log_lines` where the pre-batching `Ok(0) => break` dropped it. A
-            // *genuine* blank line always arrives on an `Ok(n > 0)` read, where
-            // `eof` is false, so this cannot swallow one.
-            if eof && buf.iter().all(|b| matches!(b, b'\n' | b'\r')) {
-                break;
-            }
-            while matches!(buf.last(), Some(b'\n' | b'\r')) {
-                buf.pop();
-            }
-            let line = String::from_utf8_lossy(&buf).into_owned();
-            buf.clear();
-            let _ = w.write_all(line.as_bytes()).await;
-            let _ = w.write_all(b"\n").await;
-            let _ = w.flush().await;
-            if err_log.is_some() {
-                batch.push(line);
-                if batch.is_full() {
-                    flush_out(&err_log, &mut batch);
-                }
-            }
-
-            if eof {
-                break;
-            }
-        }
-        flush_out(&err_log, &mut batch);
+        drain_to_terminal_and_log(stderr, tokio::io::stderr(), err_log, None).await;
     });
 
     // Wait for both drain tasks to finish; a Ctrl+C kills the child's process
@@ -2252,6 +2325,77 @@ mod batched_drain_tests {
         );
     }
 
+    /// **The bound, on the reader that had none.** `log_pipe` used
+    /// `BufReader::lines()`, which does not return until it sees a `\n` — so a
+    /// foreground server emitting a `\r`-only progress meter accumulated its
+    /// entire output as one row, and `MAX_LINE_BYTES` could not be applied from
+    /// outside because there was no point at which to apply it.
+    #[tokio::test]
+    async fn log_pipe_bounds_a_stream_that_never_sends_a_newline() {
+        let (_dir, target) = temp_target();
+        let mut payload = Vec::new();
+        for i in 0..20_000 {
+            payload.extend_from_slice(format!("progress {i}\r").as_bytes());
+        }
+        let raw_len = payload.len();
+        assert!(
+            raw_len > MAX_LINE_BYTES * 3,
+            "the fixture must exceed the cap several times"
+        );
+
+        log_pipe(std::io::Cursor::new(payload), target.clone()).await;
+
+        let rows = stored(&target);
+        assert!(
+            rows.len() > 1,
+            "an uncapped reader would have stored exactly one row"
+        );
+        assert!(
+            rows.iter().all(|l| l.len() <= MAX_LINE_BYTES),
+            "no row may exceed the cap"
+        );
+        assert_eq!(
+            rows.iter().map(String::len).sum::<usize>(),
+            raw_len - 1,
+            "splitting must lose nothing but the one trailing terminator"
+        );
+    }
+
+    /// Same bound, on `run_command_streaming`'s drains — which had the same
+    /// unbounded shape via `read_until`, on the path a `docker build`'s progress
+    /// output takes.
+    #[tokio::test]
+    async fn a_command_steps_progress_meter_is_bounded_on_both_pipes() {
+        for pipe in ["", " >&2"] {
+            let (_dir, target) = temp_target();
+            run_command_streaming(
+                &CommandSpec::Shell(format!(
+                    "python3 -c \"
+import sys
+for i in range(20000): sys.stdout.write('progress %06d\\r'%i)
+\"{pipe}"
+                )),
+                &std::env::temp_dir(),
+                &HashMap::new(),
+                None,
+                Some(target.clone()),
+                None,
+            )
+            .await
+            .expect("run should succeed");
+
+            let rows = stored(&target);
+            assert!(
+                rows.len() > 1,
+                "an uncapped drain stored one row for pipe {pipe:?}"
+            );
+            assert!(
+                rows.iter().all(|l| l.len() <= MAX_LINE_BYTES),
+                "no row may exceed the cap on pipe {pipe:?}"
+            );
+        }
+    }
+
     /// `VELD_OUTPUT` control lines are machinery and must never reach the log,
     /// batched or not — they can carry sensitive node outputs.
     #[tokio::test]
@@ -2305,6 +2449,126 @@ mod batched_drain_tests {
             internal.is_empty(),
             "a line printed by the supervised process must stay on its own stream, \
              whatever it says: {internal:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod line_assembler_tests {
+    use super::{LineAssembler, MAX_LINE_BYTES};
+
+    fn feed(chunks: &[&[u8]]) -> Vec<String> {
+        let mut a = LineAssembler::new();
+        let mut out = Vec::new();
+        for c in chunks {
+            a.push_chunk(c, &mut out);
+        }
+        out.extend(a.finish());
+        out
+    }
+
+    /// The semantics the three readers this replaces already had.
+    #[test]
+    fn line_endings_match_what_the_readers_it_replaces_did() {
+        assert_eq!(feed(&[b"a\nb\n"]), vec!["a", "b"]);
+        assert_eq!(
+            feed(&[b"a\r\nb\r\n"]),
+            vec!["a", "b"],
+            "CRLF stores neither"
+        );
+        assert_eq!(
+            feed(&[b"a\rb\n"]),
+            vec!["a\rb"],
+            "an embedded CR is data — the renderer collapses it to the last frame"
+        );
+        assert_eq!(feed(&[b"x\r\r\n"]), vec!["x"], "all trailing CRs go");
+        assert_eq!(feed(&[b"\n\n"]), vec!["", ""], "blank lines are lines");
+    }
+
+    /// Output that never got its newline is still output.
+    #[test]
+    fn a_final_line_without_a_newline_is_emitted() {
+        assert_eq!(feed(&[b"a\nlast-no-newline"]), vec!["a", "last-no-newline"]);
+        assert_eq!(feed(&[b"only"]), vec!["only"]);
+    }
+
+    /// EOF with nothing but terminators emits no row. A blank line always arrives
+    /// with its `\n`, so this cannot swallow one.
+    #[test]
+    fn eof_with_only_terminators_emits_nothing() {
+        assert_eq!(feed(&[b"a\n", b"\r"]), vec!["a"]);
+        assert_eq!(feed(&[b""]), Vec::<String>::new());
+    }
+
+    /// **The bound, which is the whole reason this type exists.** A stream with no
+    /// newline at all must not accumulate: `Lines::next_line` and `read_until`
+    /// would have held all of it in memory.
+    #[test]
+    fn a_stream_with_no_newline_is_split_at_the_cap_and_loses_nothing() {
+        let raw = vec![b'A'; MAX_LINE_BYTES * 3 + 17];
+        let lines = feed(&[&raw]);
+        assert_eq!(lines.len(), 4, "3 full lines plus the remainder");
+        for l in &lines[..3] {
+            assert_eq!(
+                l.len(),
+                MAX_LINE_BYTES,
+                "each split lands exactly on the cap"
+            );
+        }
+        assert_eq!(lines[3].len(), 17);
+        assert_eq!(
+            lines.iter().map(String::len).sum::<usize>(),
+            raw.len(),
+            "splitting must lose no bytes — truncating would"
+        );
+    }
+
+    /// A `\r`-only progress meter is the case the cap is for.
+    #[test]
+    fn a_carriage_return_only_meter_is_bounded() {
+        let mut raw = Vec::new();
+        for i in 0..20_000 {
+            raw.extend_from_slice(format!("progress {i}\r").as_bytes());
+        }
+        let lines = feed(&[&raw]);
+        assert!(
+            lines.iter().all(|l| l.len() <= MAX_LINE_BYTES),
+            "no row may exceed the cap"
+        );
+        assert_eq!(
+            lines.iter().map(String::len).sum::<usize>(),
+            raw.len() - 1,
+            "every byte of the meter is still stored, just across rows — less the one \
+             trailing `\\r`, which is a line ending rather than data"
+        );
+    }
+
+    /// Multi-byte characters must not be corrupted by the split.
+    #[test]
+    fn the_cap_splits_on_a_character_boundary() {
+        // 'é' is 2 bytes, so a naive cut at MAX_LINE_BYTES lands mid-character.
+        let raw = "é".repeat(MAX_LINE_BYTES).into_bytes();
+        let lines = feed(&[&raw]);
+        assert!(
+            !lines.iter().any(|l| l.contains('\u{fffd}')),
+            "a split on a character boundary produces no replacement characters"
+        );
+        assert_eq!(
+            lines.iter().map(|l| l.chars().count()).sum::<usize>(),
+            MAX_LINE_BYTES,
+            "every character survives"
+        );
+    }
+
+    /// Chunk boundaries are not line boundaries — a line split across two reads,
+    /// and a `\r\n` split between them, must still come out whole.
+    #[test]
+    fn a_line_split_across_chunks_is_reassembled() {
+        assert_eq!(feed(&[b"he", b"ll", b"o\n"]), vec!["hello"]);
+        assert_eq!(
+            feed(&[b"crlf\r", b"\nnext\n"]),
+            vec!["crlf", "next"],
+            "a CRLF straddling two reads still ends exactly one line"
         );
     }
 }
