@@ -161,7 +161,8 @@ jobs:
           python3 tests/validate-workflow-gates.py --selftest
           python3 tests/validate-workflow-gates.py
       # Static, checkout-only and PyYAML-only, so it rides along with the gate
-      # above. What it guards is the release path itself: release.yml publishes
+      # above — which is also where PyYAML is installed, so this step must stay
+      # after it. What it guards is the release path itself: release.yml publishes
       # by hand now, and the invariant that matters — an incomplete release is
       # never published, and a complete one never left a draft — has no other
       # check. Its failure is silent, which is exactly how v16.57.1 shipped to
