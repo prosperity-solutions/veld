@@ -193,6 +193,12 @@ export function DatabaseHealthDialog(props: {
               can go unnoticed — but writes that reach it fail, and the next
               thing to fail may be one you care about.
             </Text>
+            <Text size="sm" mt={6}>
+              While it reads as damaged, Veld stops pruning old logs and stops
+              reclaiming free pages: that housekeeping moves pages around, and
+              this file's page map can no longer be trusted. The database may
+              grow until you restore it.
+            </Text>
           </Alert>
         )}
 

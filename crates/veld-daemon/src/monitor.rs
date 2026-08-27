@@ -19,9 +19,77 @@ use veld_core::user_path::cached_user_path_for;
 /// Interval between health-check scans (seconds).
 const SCAN_INTERVAL_SECS: u64 = 5;
 
-/// Tracks when each node's liveness probe was last executed.
+/// Tracks each node's liveness-probe bookkeeping.
 /// Key: `"project_root:run_name:node:variant"`.
-type LastCheckMap = HashMap<String, Instant>;
+type LastCheckMap = HashMap<String, ProbeBookkeeping>;
+
+/// How often a *passing* probe writes a line to the `internal` stream.
+///
+/// The prober used to write two rows per node per poll unconditionally — one
+/// before the probe and one after a success. In the #332 incident that was
+/// **77,539 rows, 22.7% of the run's logs and 3.66 MiB of text**, every row
+/// carrying the same sentence, bought at a fifth of the database. It is a
+/// successful-probe history and nothing reads it.
+///
+/// A transition is what carries information, and those lines already exist
+/// separately (failed / cannot run / self-healed). This heartbeat exists only so
+/// a long-healthy run does not look *silent* to somebody watching
+/// `veld logs --source internal`: ~21 rows per node per day instead of ~11,200.
+const PASS_HEARTBEAT: Duration = Duration::from_secs(3600);
+
+/// What a *passing* liveness probe should write to the `internal` stream.
+#[derive(Debug, PartialEq, Eq)]
+enum PassLog {
+    /// The probe had been failing and is not any more — the transition, which is
+    /// the line that carries information.
+    Recovered,
+    /// Nothing changed; this is the periodic "still passing" line.
+    Heartbeat,
+    /// Write nothing. The overwhelmingly common case, and the point of #332's
+    /// fix 6.
+    Quiet,
+}
+
+/// Decide what a passing probe writes.
+///
+/// Split out from the probe loop and given `Duration` rather than `Instant` so
+/// the policy is testable: the loop's own `Instant`s cannot be moved backwards
+/// portably, and this decision has three inputs that interact.
+fn pass_log_decision(
+    consecutive_failures: u32,
+    was_unhealthy: bool,
+    since_last_pass_log: Option<Duration>,
+) -> PassLog {
+    if consecutive_failures > 0 {
+        return PassLog::Recovered;
+    }
+    // A zero counter with an unhealthy status is the `Unrunnable` shape: the
+    // probe could not run at all, so no attempt was ever counted. That is still
+    // a transition worth a line, and it is why this is not just the heartbeat
+    // check.
+    if was_unhealthy {
+        return PassLog::Heartbeat;
+    }
+    // `None` — nothing logged yet in this daemon's lifetime — logs immediately,
+    // so a fresh daemon says something about every node rather than going quiet
+    // for an hour.
+    if since_last_pass_log.is_none_or(|d| d >= PASS_HEARTBEAT) {
+        return PassLog::Heartbeat;
+    }
+    PassLog::Quiet
+}
+
+/// Per-node liveness bookkeeping that must survive between scans.
+#[derive(Clone, Copy)]
+struct ProbeBookkeeping {
+    /// When the probe last ran — what `liveness.interval_ms` is measured against.
+    last_probe: Instant,
+    /// When a *passing* probe last wrote a line, `None` if none ever has.
+    /// Drives [`PASS_HEARTBEAT`]; `None` makes the first pass after a daemon
+    /// start always log, so a fresh daemon says something about every node
+    /// rather than going quiet for an hour.
+    last_pass_logged: Option<Instant>,
+}
 
 /// Periodically scan all runs from the global registry and check process health.
 /// When a status change is detected, update the registry and broadcast the event.
@@ -246,12 +314,19 @@ async fn run_liveness_checks(
         // Respect per-probe interval_ms — skip if not enough time has elapsed.
         let check_key = format!("{}:{}:{}", project_root.to_string_lossy(), run_name, key);
         let probe_interval = Duration::from_millis(liveness.interval_ms);
-        if let Some(last) = last_checks.get(&check_key) {
-            if last.elapsed() < probe_interval {
+        let book = last_checks.get(&check_key).copied();
+        if let Some(b) = book {
+            if b.last_probe.elapsed() < probe_interval {
                 continue;
             }
         }
-        last_checks.insert(check_key, Instant::now());
+        last_checks.insert(
+            check_key.clone(),
+            ProbeBookkeeping {
+                last_probe: Instant::now(),
+                last_pass_logged: book.and_then(|b| b.last_pass_logged),
+            },
+        );
 
         // Run a single liveness check attempt.
         let working_dir = config::resolve_cwd(
@@ -262,14 +337,10 @@ async fn run_liveness_checks(
 
         let node_label = format!("{node_name}:{variant_name}");
 
-        if let Some(log) = internal_log {
-            let _ = log
-                .write_line(&format!(
-                    "[liveness] {node_label} — running probe (type: {})",
-                    liveness.check_type
-                ))
-                .await;
-        }
+        // No "running probe" line. It was written before *every* probe and said
+        // nothing a reader could act on — the only fact in it that was not
+        // already in the node's config is the check type, which the failure
+        // lines below now carry instead. See `PASS_HEARTBEAT`.
 
         let check_result = run_single_liveness_check(
             liveness,
@@ -289,14 +360,40 @@ async fn run_liveness_checks(
 
         match check_result {
             Ok(()) => {
+                // A passing probe writes at most one line, and only when it
+                // carries information: the recovery itself, or the periodic
+                // heartbeat that keeps a long-healthy run from reading as
+                // silent. Both reads happen *before* the counters below reset
+                // them. See `PASS_HEARTBEAT` and `pass_log_decision`.
+                let was_unhealthy = node_state.status == NodeStatus::Unhealthy;
+                let recovered = node_state.consecutive_failures > 0 || was_unhealthy;
+                let decision = pass_log_decision(
+                    node_state.consecutive_failures,
+                    was_unhealthy,
+                    book.and_then(|b| b.last_pass_logged).map(|t| t.elapsed()),
+                );
                 if let Some(log) = internal_log {
-                    let _ = log
-                        .write_line(&format!("[liveness] {node_label} — probe passed"))
-                        .await;
+                    let line = match decision {
+                        PassLog::Recovered => Some(format!(
+                            "[liveness] {node_label} — probe passed again after {} failed \
+                             attempt(s)",
+                            node_state.consecutive_failures
+                        )),
+                        PassLog::Heartbeat => Some(format!(
+                            "[liveness] {node_label} — probe passing (type: {})",
+                            liveness.check_type
+                        )),
+                        PassLog::Quiet => None,
+                    };
+                    if let Some(line) = line {
+                        let _ = log.write_line(&line).await;
+                        if let Some(b) = last_checks.get_mut(&check_key) {
+                            b.last_pass_logged = Some(Instant::now());
+                        }
+                    }
                 }
                 // Reset failure counter on success.
-                if node_state.consecutive_failures > 0 || node_state.status == NodeStatus::Unhealthy
-                {
+                if recovered {
                     node_state.consecutive_failures = 0;
                     node_state.last_liveness_error = None;
                     // Transition Unhealthy -> Healthy (probe started passing again).
@@ -363,12 +460,17 @@ async fn run_liveness_checks(
                 );
 
                 if let Some(log) = internal_log {
+                    // The check type is named here rather than on a line before
+                    // every probe — this is the one place a reader needs it.
                     let _ = log
-                    .write_line(&format!(
-                        "[liveness] {node_label} — probe failed ({}/{} consecutive): {error_detail}",
-                        node_state.consecutive_failures, liveness.failure_threshold
-                    ))
-                    .await;
+                        .write_line(&format!(
+                            "[liveness] {node_label} — probe failed ({}/{} consecutive, type: \
+                             {}): {error_detail}",
+                            node_state.consecutive_failures,
+                            liveness.failure_threshold,
+                            liveness.check_type
+                        ))
+                        .await;
                 }
 
                 // **Never spend a recovery attempt during an update.** Recovery
@@ -784,42 +886,44 @@ async fn run_veld_restart(project_root: &Path, run_name: &str, internal_log: Opt
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
 
+            // One transaction for the whole restart report, not one per line: a
+            // `veld restart` can print hundreds of lines and the loops below
+            // used to take the process-wide connection lock for each of them.
             if output.status.success() {
                 info!(run = run_name, "veld restart completed successfully");
                 if let Some(log) = internal_log {
-                    let _ = log
-                        .write_line(&format!(
-                            "[recovery] veld restart completed (exit code {code})"
-                        ))
-                        .await;
-                    if !stdout.trim().is_empty() {
-                        for line in stdout.trim().lines() {
-                            let _ = log.write_line(&format!("[recovery]   {line}")).await;
-                        }
-                    }
+                    let mut lines = vec![format!(
+                        "[recovery] veld restart completed (exit code {code})"
+                    )];
+                    lines.extend(
+                        stdout
+                            .trim()
+                            .lines()
+                            .filter(|l| !l.is_empty())
+                            .map(|line| format!("[recovery]   {line}")),
+                    );
+                    let _ = log.write_lines(chrono::Utc::now(), &lines);
                 }
             } else {
                 warn!(run = run_name, exit_code = code, "veld restart failed");
                 if let Some(log) = internal_log {
-                    let _ = log
-                        .write_line(&format!(
-                            "[recovery] veld restart FAILED (exit code {code})"
-                        ))
-                        .await;
-                    if !stdout.trim().is_empty() {
-                        for line in stdout.trim().lines() {
-                            let _ = log
-                                .write_line(&format!("[recovery]   stdout: {line}"))
-                                .await;
-                        }
-                    }
-                    if !stderr.trim().is_empty() {
-                        for line in stderr.trim().lines() {
-                            let _ = log
-                                .write_line(&format!("[recovery]   stderr: {line}"))
-                                .await;
-                        }
-                    }
+                    let mut lines =
+                        vec![format!("[recovery] veld restart FAILED (exit code {code})")];
+                    lines.extend(
+                        stdout
+                            .trim()
+                            .lines()
+                            .filter(|l| !l.is_empty())
+                            .map(|line| format!("[recovery]   stdout: {line}")),
+                    );
+                    lines.extend(
+                        stderr
+                            .trim()
+                            .lines()
+                            .filter(|l| !l.is_empty())
+                            .map(|line| format!("[recovery]   stderr: {line}")),
+                    );
+                    let _ = log.write_lines(chrono::Utc::now(), &lines);
                 }
             }
         }
@@ -867,6 +971,77 @@ mod tests {
         ns.port = port;
         run.nodes.insert("web:local".into(), ns);
         run
+    }
+
+    /// The 22.7% of #332's database that this fix is about. A healthy node whose
+    /// probe passed recently writes **nothing** — that is the whole point, and it
+    /// is the assertion most likely to be quietly undone by a later change.
+    #[test]
+    fn a_healthy_node_that_keeps_passing_writes_nothing() {
+        assert_eq!(
+            pass_log_decision(0, false, Some(Duration::from_secs(1))),
+            PassLog::Quiet
+        );
+        assert_eq!(
+            pass_log_decision(0, false, Some(PASS_HEARTBEAT - Duration::from_secs(1))),
+            PassLog::Quiet,
+            "one second inside the window is still inside it"
+        );
+    }
+
+    /// A run that has been healthy for hours must not read as *silent*, which is
+    /// the one thing the old two-rows-per-poll behaviour did buy.
+    #[test]
+    fn a_long_healthy_node_still_says_so_once_an_interval() {
+        assert_eq!(
+            pass_log_decision(0, false, Some(PASS_HEARTBEAT)),
+            PassLog::Heartbeat,
+            "the boundary is inclusive — at exactly the interval the heartbeat is due"
+        );
+        assert_eq!(
+            pass_log_decision(0, false, Some(PASS_HEARTBEAT * 3)),
+            PassLog::Heartbeat
+        );
+        assert_eq!(
+            pass_log_decision(0, false, None),
+            PassLog::Heartbeat,
+            "nothing logged yet in this daemon's lifetime must log immediately, or a \
+             freshly started daemon looks dead for an hour"
+        );
+    }
+
+    /// The transitions are what the `internal` stream is *for*, and they must
+    /// survive the quieting. Note the second case: a node marked unhealthy
+    /// because its probe could not run at all has a zero failure counter, so a
+    /// gate written only against the counter would let its recovery pass silently.
+    #[test]
+    fn a_transition_back_to_passing_is_always_reported() {
+        assert_eq!(
+            pass_log_decision(3, false, Some(Duration::from_secs(1))),
+            PassLog::Recovered,
+            "a probe that had been failing must report recovering even mid-window"
+        );
+        assert_eq!(
+            pass_log_decision(0, true, Some(Duration::from_secs(1))),
+            PassLog::Heartbeat,
+            "the `Unrunnable` shape: unhealthy with no counted attempt must still \
+             report that the probe is answering again"
+        );
+        // And a failing counter outranks an unhealthy status, so the line names
+        // the number of attempts rather than falling through to the heartbeat.
+        assert_eq!(pass_log_decision(2, true, None), PassLog::Recovered);
+    }
+
+    /// The heartbeat only pays for itself if it is rare. At one hour a node
+    /// costs ~24 rows a day where the old behaviour cost ~11,200 per probe
+    /// stream; drop the interval into the probe's own cadence and the fix is
+    /// undone without a single test failing.
+    #[test]
+    fn the_heartbeat_interval_stays_far_above_the_probe_cadence() {
+        assert!(
+            PASS_HEARTBEAT >= Duration::from_secs(900),
+            "a heartbeat this frequent re-creates the row volume it was written to remove"
+        );
     }
 
     fn probe(check_type: &str) -> LivenessProbe {

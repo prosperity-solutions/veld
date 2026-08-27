@@ -326,6 +326,55 @@ pub fn corruption_recorded() -> bool {
     state().lock().expect("dbhealth state poisoned").fault.kind == Some(DbFault::Corrupt)
 }
 
+/// Whether the database has been **checked** and found not to be corrupt.
+///
+/// The precondition for destructive housekeeping (the GC's retention deletes and
+/// its page reclaim), and deliberately *not* `!corruption_recorded()`.
+///
+/// **The difference is a race that fires on every single daemon start.**
+/// `corruption_recorded()` is also false before the first probe has completed,
+/// and this task and the GC are spawned together with intervals that both tick
+/// immediately — so "no corruption recorded" is the state the first GC pass
+/// reliably observes, whatever the file actually looks like. Measured on a
+/// deliberately damaged database: the GC pass logged `4000 logs pruned` at
+/// `06:50:04.058` and this probe recorded the fault at `06:50:04.075`, 17 ms
+/// later. A gate on the absence of a verdict would have let exactly the pass it
+/// exists to stop straight through, and on a daemon that is restarting (auto
+/// recovery, `veld update`) it would let *every* pass through.
+///
+/// So housekeeping waits for a positive answer. The cost is at most one skipped
+/// pass — retention has a 168-hour horizon and does not care about 600 seconds —
+/// and `checked_at` is normally set within tens of milliseconds of startup.
+///
+/// A fault that is *not* corruption (a full disk, a read-only volume, an I/O
+/// blip) does not block housekeeping: those are transient and usually sit on
+/// perfectly good data, and pausing retention on them would let a healthy file
+/// grow forever. See [`corruption_recorded`] for the same distinction.
+#[must_use]
+pub fn verified_not_corrupt() -> bool {
+    let st = state().lock().expect("dbhealth state poisoned");
+    housekeeping_allowed(st.checked_at.is_some(), st.fault.kind)
+}
+
+/// The gate itself, as a function of the two facts rather than of the
+/// process-wide singleton — same reason as [`Fault::observe`]: the properties
+/// that matter are testable without a global every other test in this binary
+/// shares.
+fn housekeeping_allowed(checked: bool, fault: Option<DbFault>) -> bool {
+    checked && fault != Some(DbFault::Corrupt)
+}
+
+/// Whether the first integrity probe has completed, so a caller can tell
+/// "not checked yet" from "checked and damaged" and say the right thing.
+#[must_use]
+pub fn health_checked() -> bool {
+    state()
+        .lock()
+        .expect("dbhealth state poisoned")
+        .checked_at
+        .is_some()
+}
+
 /// Forget the current fault, **and that anybody was told about it**.
 ///
 /// Called after a restore. Clearing the in-memory fault alone would have been
@@ -1026,6 +1075,47 @@ mod tests {
             state,
             ..Default::default()
         }
+    }
+
+    /// **The bug this gate was rewritten for, pinned.** Destructive housekeeping
+    /// must wait for a positive answer, because "no corruption recorded" is also
+    /// what an un-probed database looks like — and the GC and the probe are
+    /// spawned together with intervals that both tick immediately, so the first
+    /// GC pass of every daemon start lands in exactly that window.
+    ///
+    /// Measured on a deliberately damaged database before this was fixed: the
+    /// pass logged `4000 logs pruned` 17 ms *before* the probe recorded the
+    /// fault. Spell this `!corruption_recorded()` again and the whole fix
+    /// silently reverts to letting the first pass through.
+    #[test]
+    fn housekeeping_waits_for_a_verdict_rather_than_for_the_absence_of_one() {
+        assert!(
+            !housekeeping_allowed(false, None),
+            "nothing checked yet is NOT permission to delete and relocate pages — this is \
+             the 17 ms window the first GC pass of every daemon start runs in"
+        );
+        assert!(
+            !housekeeping_allowed(false, Some(DbFault::Corrupt)),
+            "un-probed and already known damaged is emphatically not allowed"
+        );
+        assert!(
+            housekeeping_allowed(true, None),
+            "checked and clean is the only state that permits housekeeping"
+        );
+        assert!(
+            !housekeeping_allowed(true, Some(DbFault::Corrupt)),
+            "checked and corrupt must stop retention and the page reclaim"
+        );
+    }
+
+    /// Corruption is the only fault that pauses housekeeping. An I/O blip or a
+    /// full disk is transient and usually sits on perfectly good data, so
+    /// pausing retention on one would let a healthy database grow without bound
+    /// — trading the bug for a worse version of the bug the retention exists to
+    /// prevent.
+    #[test]
+    fn a_transient_fault_does_not_pause_housekeeping() {
+        assert!(housekeeping_allowed(true, Some(DbFault::Io)));
     }
 
     /// A healthy pair says nothing. The banner and the notification are the same

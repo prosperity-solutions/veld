@@ -157,13 +157,30 @@ impl Db {
         Ok(())
     }
 
-    /// Append many lines that share a scope, as one transaction.
+    /// Append many lines that share a scope, as one transaction. Each line
+    /// carries its own timestamp.
     ///
     /// A build tool emits tens of thousands of lines through one sink, and each
     /// autocommit `INSERT` takes the process-wide connection lock on its own —
     /// serializing against every other node in the stage and against the daemon.
     /// Grouping the batch the reader already produced makes that one lock
     /// acquisition and one commit.
+    ///
+    /// **Measured, on the #332 incident data: 6.47 WAL pages written per log
+    /// line at one row per transaction, 0.658 at 32 rows — a 9.8× reduction.**
+    /// That is the single largest write-amplification lever in this codebase,
+    /// and it needs no migration, no setting and no reader change. Every
+    /// per-line writer should reach for this rather than [`Db::append_log`];
+    /// `logging::LogBatch` is the buffer that makes one out of a line-at-a-time
+    /// reader.
+    ///
+    /// Timestamps are **per row**, not per batch. An earlier shape stamped the
+    /// whole batch with one `ts`, which is fine for a batch that came out of a
+    /// single `read` but wrong for one assembled over a flush window: readers
+    /// tiebreak on `id` so within-source ordering stays exact either way, but a
+    /// shared stamp fuzzes cross-source interleaving by the whole window and
+    /// quietly makes `veld logs --since` answer from a coarser clock than it
+    /// looks like it has.
     #[allow(clippy::too_many_arguments)]
     pub fn append_logs(
         &self,
@@ -173,8 +190,7 @@ impl Db {
         node: Option<&str>,
         variant: Option<&str>,
         stream: LogStream,
-        ts: chrono::DateTime<chrono::Utc>,
-        lines: &[String],
+        lines: &[(chrono::DateTime<chrono::Utc>, String)],
     ) -> Result<(), DbError> {
         if lines.is_empty() {
             return Ok(());
@@ -187,8 +203,7 @@ impl Db {
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             )?;
             let root = root_key(project_root);
-            let ts = ts_to_str(ts);
-            for line in lines {
+            for (ts, line) in lines {
                 stmt.execute(params![
                     root,
                     run_name,
@@ -196,7 +211,7 @@ impl Db {
                     node,
                     variant,
                     stream.as_str(),
-                    ts,
+                    ts_to_str(*ts),
                     line,
                 ])?;
             }
@@ -407,6 +422,163 @@ mod tests {
             .tail_logs(Path::new("/tmp/p"), "dev", &LogFilter::default(), 100)
             .unwrap();
         assert_eq!(rest.len(), 1);
+    }
+
+    /// Each row keeps its own arrival time. A shared per-batch stamp is what
+    /// this replaced, and it made the flush window visible in the data: every
+    /// line in a batch answering `--since` from the same coarse instant.
+    #[test]
+    fn a_batch_stamps_every_line_with_its_own_time() {
+        let (_dir, db) = test_db();
+        let early = chrono::DateTime::parse_from_rfc3339("2026-08-12T15:26:20.000000Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let late = early + chrono::Duration::seconds(7);
+
+        db.append_logs(
+            Path::new("/tmp/p"),
+            "dev",
+            None,
+            Some("web"),
+            Some("local"),
+            LogStream::Server,
+            &[(early, "first".to_owned()), (late, "second".to_owned())],
+        )
+        .unwrap();
+
+        let rows = db
+            .tail_logs(Path::new("/tmp/p"), "dev", &LogFilter::default(), 10)
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].line, "first");
+        assert_eq!(rows[1].line, "second");
+        assert_ne!(
+            rows[0].ts, rows[1].ts,
+            "two lines batched together must not collapse onto one timestamp"
+        );
+        assert!(
+            rows[0].ts.starts_with("2026-08-12T15:26:20"),
+            "got {}",
+            rows[0].ts
+        );
+        assert!(
+            rows[1].ts.starts_with("2026-08-12T15:26:27"),
+            "got {}",
+            rows[1].ts
+        );
+    }
+
+    /// An empty batch must be a no-op rather than an empty transaction — the
+    /// flush paths call it on every deadline, whether or not anything arrived.
+    #[test]
+    fn an_empty_batch_writes_nothing() {
+        let (_dir, db) = test_db();
+        db.append_logs(
+            Path::new("/tmp/p"),
+            "dev",
+            None,
+            None,
+            None,
+            LogStream::Internal,
+            &[],
+        )
+        .unwrap();
+        assert!(
+            db.tail_logs(Path::new("/tmp/p"), "dev", &LogFilter::default(), 10)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// The reclaim is bounded per call and resumable, and it reports what is
+    /// left so a caller can say so. Before this it was a bare
+    /// `PRAGMA incremental_vacuum` — the whole freelist in one write transaction,
+    /// on every GC pass, whether or not anything had been freed.
+    #[test]
+    fn page_reclaim_is_skipped_when_there_is_nothing_to_reclaim() {
+        let (_dir, db) = test_db();
+        // Nothing deleted yet, so nothing on the freelist and nothing to do.
+        assert_eq!(
+            db.vacuum().unwrap(),
+            0,
+            "a database with an empty freelist must report nothing remaining"
+        );
+    }
+
+    /// The bound is the point of fix 9: one pass must relocate at most its page
+    /// budget, so a mass delete drains over several GC passes instead of one very
+    /// long write transaction that every other veld process waits behind on its
+    /// 10-second `busy_timeout`.
+    ///
+    /// Tested through the injectable budget rather than the production 2,000,
+    /// because exceeding 2,000 free pages needs ~8 MB of fixture and this suite
+    /// does not need to be slow to make the point.
+    #[test]
+    fn page_reclaim_is_bounded_per_pass_and_resumable() {
+        let (_dir, db) = test_db();
+        for i in 0..3_000 {
+            append(
+                &db,
+                Some("web"),
+                LogStream::Server,
+                &format!("line {i} {}", "x".repeat(200)),
+            );
+        }
+        db.prune_logs_older_than(chrono::Utc::now() + chrono::Duration::hours(1))
+            .unwrap();
+
+        let freelist = || -> u32 {
+            let conn = db.lock();
+            conn.query_row("PRAGMA freelist_count", [], |r| r.get(0))
+                .unwrap()
+        };
+        let before = freelist();
+        assert!(
+            before > 30,
+            "precondition: deleting 3,000 fat rows must free well over 30 pages, or the \
+             budget below is never the binding constraint and this test asserts nothing \
+             (got {before})"
+        );
+
+        const BUDGET: u32 = 10;
+        let after_one = db.vacuum_pages(BUDGET).unwrap();
+        assert!(
+            before - after_one <= BUDGET,
+            "one pass reclaimed {} pages against a budget of {BUDGET}",
+            before - after_one
+        );
+        assert!(
+            after_one < before,
+            "a bounded pass must still make progress, not stall"
+        );
+
+        // Resumable by construction — `incremental_vacuum` picks up where it
+        // left off. It converges to SQLite's own floor (pages it will not
+        // relocate, e.g. a root page), which is not necessarily zero, so the
+        // assertion is convergence rather than a number.
+        let mut remaining = after_one;
+        for _ in 0..200 {
+            let next = db.vacuum_pages(BUDGET).unwrap();
+            assert!(next <= remaining, "the freelist must never grow");
+            if next == remaining {
+                break;
+            }
+            remaining = next;
+        }
+        assert!(
+            remaining < before / 2,
+            "repeated bounded passes must reclaim the bulk of the freelist \
+             ({before} -> {remaining})"
+        );
+
+        // And the database is still usable afterwards.
+        append(&db, Some("web"), LogStream::Server, "after vacuum");
+        assert_eq!(
+            db.tail_logs(Path::new("/tmp/p"), "dev", &LogFilter::default(), 10)
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]

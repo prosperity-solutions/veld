@@ -1386,27 +1386,79 @@ async fn main() {
             let db = veld_core::db::Db::open()
                 .map_err(|e| eprintln!("veld _log: failed to open database, dropping logs: {e}"))
                 .ok();
+
+            // The database write happens on its own thread, fed over a channel,
+            // for two reasons that both matter more here than anywhere else in
+            // the tree.
+            //
+            // **Batching.** This is the highest-volume writer in the system —
+            // 242,729 of one incident run's 342,328 log rows came through it,
+            // one autocommit `INSERT` each. Batching is worth 9.8× in WAL pages
+            // per line (see `Db::append_logs`), and a batch needs a flush
+            // deadline, which a thread blocked in `read_line` cannot honour.
+            //
+            // **Not blocking the drain.** Read the comment above again: this
+            // process is the read end of the server's stdout pipe, so if it
+            // stops draining, the server blocks on a full pipe. Today the
+            // database write is *on* the read path — a contended write waits up
+            // to the 10 s `busy_timeout` with the pipe backing up behind it.
+            // Moving the write off this thread means a slow database costs
+            // buffered lines (bounded, counted, and reported below) instead of
+            // stalling the environment.
+            let writer = db.map(|db| {
+                let (tx, rx) = std::sync::mpsc::sync_channel::<(
+                    chrono::DateTime<chrono::Utc>,
+                    String,
+                )>(LOG_PUMP_QUEUE);
+                let scope = (
+                    project_root.clone(),
+                    run.clone(),
+                    run_id.clone(),
+                    node.clone(),
+                    variant.clone(),
+                );
+                let handle = std::thread::spawn(move || {
+                    log_pump_writer(&db, &scope, &rx);
+                });
+                (tx, handle)
+            });
+
             let stdin = std::io::stdin();
             let mut reader = stdin.lock();
             let mut buf = String::new();
+            // Lines the queue was too full to accept. Reported on the next line
+            // that fits, so the gap is visible in the log it happened to rather
+            // than only in this process's stderr, which nobody reads.
+            let mut dropped = 0u64;
 
             loop {
                 buf.clear();
                 match reader.read_line(&mut buf) {
                     Ok(0) => break, // EOF
                     Ok(_) => {
-                        let Some(ref db) = db else { continue };
-                        let trimmed = buf.trim_end_matches('\n').trim_end_matches('\r');
-                        let _ = db.append_log(
-                            &project_root,
-                            &run,
-                            run_id.as_deref(),
-                            Some(&node),
-                            Some(&variant),
-                            veld_core::db::LogStream::Server,
-                            chrono::Utc::now(),
-                            trimmed,
-                        );
+                        let Some((ref tx, _)) = writer else { continue };
+                        let trimmed = buf.trim_end_matches('\n').trim_end_matches('\r').to_owned();
+                        let now = chrono::Utc::now();
+                        if dropped > 0
+                            && tx
+                                .try_send((
+                                    now,
+                                    format!(
+                                        "[VELD] dropped {dropped} log line(s) — the database was \
+                                         not keeping up"
+                                    ),
+                                ))
+                                .is_ok()
+                        {
+                            dropped = 0;
+                        }
+                        // `try_send`, never `send`: blocking here is what puts
+                        // the database back on the drain path. Dropping is the
+                        // sanctioned failure mode for this process (see above),
+                        // and it is now counted rather than silent.
+                        if tx.try_send((now, trimmed)).is_err() {
+                            dropped = dropped.saturating_add(1);
+                        }
                     }
                     Err(_) => {
                         // Invalid UTF-8 line — skip it rather than terminating.
@@ -1414,6 +1466,14 @@ async fn main() {
                         continue;
                     }
                 }
+            }
+
+            // Drop the sender so the writer sees the channel close, flushes its
+            // partial batch and exits; then wait for it, so the last lines the
+            // server produced are on disk before this process is.
+            if let Some((tx, handle)) = writer {
+                drop(tx);
+                let _ = handle.join();
             }
             0
         }
@@ -1549,6 +1609,88 @@ fn command_survives_an_update(command: &Command) -> bool {
             // one way to turn a stuck update into a lost database.
             | Command::Backup { cmd: None, .. }
     )
+}
+
+// ---------------------------------------------------------------------------
+// `veld _log` pump
+// ---------------------------------------------------------------------------
+
+/// Lines the `veld _log` pump may have in flight to its writer thread.
+///
+/// A bound, not a buffer target: with batching the writer keeps up with anything
+/// a real server produces, so this only fills when the database is genuinely
+/// stuck. 16,384 lines is a couple of seconds of the busiest output ever
+/// measured through this path (17.5 rows/s mean, ~4× that at peak) and a few MB
+/// of memory at veld's 64 KiB per-line ceiling in the pathological case.
+///
+/// A *bounded* channel because the alternative fails worse: unbounded, a wedged
+/// database turns a server's log volume into unbounded memory in a process the
+/// user cannot see and did not start.
+const LOG_PUMP_QUEUE: usize = 16_384;
+
+/// The `veld _log` pump's database side: batch what the reader thread sends and
+/// write each batch as one transaction.
+///
+/// Exits when the channel closes (the reader hit EOF), after writing whatever is
+/// buffered.
+fn log_pump_writer(
+    db: &veld_core::db::Db,
+    scope: &(std::path::PathBuf, String, Option<String>, String, String),
+    rx: &std::sync::mpsc::Receiver<(chrono::DateTime<chrono::Utc>, String)>,
+) {
+    use std::sync::mpsc::RecvTimeoutError;
+
+    let (project_root, run, run_id, node, variant) = scope;
+    let mut batch: Vec<(chrono::DateTime<chrono::Utc>, String)> = Vec::new();
+
+    let write = |batch: &mut Vec<(chrono::DateTime<chrono::Utc>, String)>| {
+        if batch.is_empty() {
+            return;
+        }
+        let _ = db.append_logs(
+            project_root,
+            run,
+            run_id.as_deref(),
+            Some(node),
+            Some(variant),
+            veld_core::db::LogStream::Server,
+            batch,
+        );
+        batch.clear();
+    };
+
+    // Nothing buffered: block for the first line rather than waking every flush
+    // interval on an idle server. `recv` erroring means the reader thread hit
+    // EOF and dropped the sender.
+    while let Ok(first) = rx.recv() {
+        batch.push(first);
+
+        // The deadline belongs to the batch, not to each line — see
+        // `veld_core::logging::LogBatch`, which is the async half of this and
+        // documents why a per-line deadline is the bug to avoid.
+        let deadline = std::time::Instant::now() + veld_core::logging::LOG_BATCH_FLUSH;
+        let mut closed = false;
+        while batch.len() < veld_core::logging::LOG_BATCH_MAX_LINES {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            match rx.recv_timeout(left) {
+                Ok(item) => batch.push(item),
+                Err(RecvTimeoutError::Timeout) => break,
+                Err(RecvTimeoutError::Disconnected) => {
+                    closed = true;
+                    break;
+                }
+            }
+        }
+        write(&mut batch);
+        if closed {
+            break;
+        }
+    }
+
+    write(&mut batch);
 }
 
 // ---------------------------------------------------------------------------

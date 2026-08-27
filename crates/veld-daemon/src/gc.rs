@@ -283,29 +283,77 @@ pub async fn run_gc() -> anyhow::Result<GcSummary> {
         }
     }
 
-    // Phase 1d: run-history retention — keep the newest RUN_HISTORY_KEEP ended
-    // runs per environment, and nothing older than the log age cap. Deleting a
-    // run cascades nodes/node_stats by FK and removes its log lines by run_id.
-    let history_cutoff = chrono::Utc::now() - chrono::Duration::hours(MAX_LOG_AGE_HOURS);
-    if let Ok(prunable) = db.prunable_run_ids(RUN_HISTORY_KEEP, history_cutoff) {
-        for run_id in prunable {
-            if db.delete_ended_run(&run_id).unwrap_or(false) {
-                summary.stale_removed += 1;
+    // Phases 1d and 2 are **retention housekeeping**: bulk deletes plus a
+    // page-relocating vacuum. Nothing depends on them happening on any
+    // particular pass, and on a database SQLite has already reported as damaged
+    // they are the worst writes veld can choose to make — tens of thousands of
+    // page moves aimed at a file whose page map is known to be wrong. Skip them
+    // until the file is healthy again (a restore clears the fault).
+    //
+    // Note which way round this is asked: housekeeping needs a **positive**
+    // "checked, and not corrupt" answer, not merely the absence of a complaint.
+    // `dbhealth::verified_not_corrupt` documents the 17 ms race, measured on a
+    // real damaged database, that made the obvious spelling useless on every
+    // single daemon start.
+    //
+    // Gated on `Corrupt` specifically and never on a generic error: an I/O blip
+    // or a full disk is transient and usually sits on good data, and stopping
+    // housekeeping on that would let a healthy file grow forever.
+    //
+    // Note the ceiling, because the log line reads as a bigger promise than it
+    // is: `dbhealth` is daemon-process-local. This stops the page-moving
+    // traffic, which is the part that matters most, and it cannot stop the
+    // detached `veld _log` writers or a hand-run `veld gc`. Stopping *all*
+    // writes needs a sentinel outside the database, with defined clearing
+    // semantics — deliberately not attempted here.
+    if crate::dbhealth::verified_not_corrupt() {
+        // Phase 1d: run-history retention — keep the newest RUN_HISTORY_KEEP ended
+        // runs per environment, and nothing older than the log age cap. Deleting a
+        // run cascades nodes/node_stats by FK and removes its log lines by run_id.
+        let history_cutoff = chrono::Utc::now() - chrono::Duration::hours(MAX_LOG_AGE_HOURS);
+        if let Ok(prunable) = db.prunable_run_ids(RUN_HISTORY_KEEP, history_cutoff) {
+            for run_id in prunable {
+                if db.delete_ended_run(&run_id).unwrap_or(false) {
+                    summary.stale_removed += 1;
+                }
             }
         }
-    }
 
-    // Phase 2: Prune old log lines and orphaned feedback data, then reclaim
-    // the freed pages (screenshot BLOBs and log rows add up).
-    let log_cutoff = chrono::Utc::now() - chrono::Duration::hours(MAX_LOG_AGE_HOURS);
-    summary.logs_pruned = db.prune_logs_older_than(log_cutoff).unwrap_or(0);
-    let _ = db.prune_orphaned_feedback(log_cutoff);
-    let (stats_cutoff, proc_cutoff) = retention_cutoffs(chrono::Utc::now());
-    summary.stats_pruned = db.prune_node_stats_older_than(stats_cutoff).unwrap_or(0);
-    summary.process_stats_pruned = db
-        .prune_node_process_stats_older_than(proc_cutoff)
-        .unwrap_or(0);
-    let _ = db.vacuum();
+        // Phase 2: Prune old log lines and orphaned feedback data, then reclaim
+        // the freed pages (screenshot BLOBs and log rows add up).
+        let log_cutoff = chrono::Utc::now() - chrono::Duration::hours(MAX_LOG_AGE_HOURS);
+        summary.logs_pruned = db.prune_logs_older_than(log_cutoff).unwrap_or(0);
+        let _ = db.prune_orphaned_feedback(log_cutoff);
+        let (stats_cutoff, proc_cutoff) = retention_cutoffs(chrono::Utc::now());
+        summary.stats_pruned = db.prune_node_stats_older_than(stats_cutoff).unwrap_or(0);
+        summary.process_stats_pruned = db
+            .prune_node_process_stats_older_than(proc_cutoff)
+            .unwrap_or(0);
+        // Bounded per pass (see `Db::vacuum`); a backlog drains over the
+        // following passes rather than in one long write transaction.
+        match db.vacuum() {
+            Ok(0) => {}
+            Ok(remaining) => debug!(
+                freelist_pages_remaining = remaining,
+                "page reclaim bounded this pass — the rest goes on the next one"
+            ),
+            Err(e) => debug!("page reclaim failed: {e}"),
+        }
+    } else if crate::dbhealth::health_checked() {
+        warn!(
+            "database is recorded as damaged — skipping log/stats retention and page reclaim \
+             this pass, because both relocate pages in a file whose page map is not \
+             trustworthy. Restore a backup to resume housekeeping."
+        );
+    } else {
+        // Normal for a few tens of milliseconds after startup, and the whole
+        // reason the gate is not `!corruption_recorded()`. Not a warning: there
+        // is nothing wrong and nothing for anybody to do.
+        debug!(
+            "database health not established yet — deferring retention and page reclaim to \
+             the next pass"
+        );
+    }
 
     // Phase 2b: Empty the worktree trash of anything past its retention period.
     //

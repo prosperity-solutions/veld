@@ -286,16 +286,28 @@ async fn drain_pipe<R: tokio::io::AsyncRead + Unpin>(
 }
 
 impl LogTarget {
-    fn append(&self, line: &str) {
-        let _ = self.db.append_log(
+    /// Write a batch of individually-stamped lines as one transaction.
+    ///
+    /// There is deliberately no single-line sibling: every reader on this type
+    /// is a pipe drain, and one autocommit `INSERT` per line is the 6.47-WAL-
+    /// -pages-per-line shape that [`Db::append_logs`] documents. Feed it from a
+    /// [`crate::logging::LogBatch`].
+    ///
+    /// Errors are dropped, as they were before: this runs on the task draining a
+    /// child's stdout, and a drain that stops because the database was busy
+    /// blocks the child on a full pipe.
+    fn append_batch(&self, lines: &[(chrono::DateTime<chrono::Utc>, String)]) {
+        if lines.is_empty() {
+            return;
+        }
+        let _ = self.db.append_logs(
             &self.project_root,
             &self.run_name,
             Some(&self.run_id),
             Some(&self.node),
             Some(&self.variant),
             LogStream::Server,
-            chrono::Utc::now(),
-            line,
+            lines,
         );
     }
 }
@@ -545,16 +557,64 @@ pub fn spawn_detached(
     Ok(ServerHandle::Detached { pid })
 }
 
-/// Read lines from an async reader and store them in the database.
+/// Write a batch to an optional log target, clearing it either way.
+///
+/// The `None` case still has to empty the batch: a step with no log target never
+/// pushes, so this is belt-and-braces rather than a live path, and leaving lines
+/// behind would arm a deadline that never clears.
+fn flush_out(target: &Option<LogTarget>, batch: &mut crate::logging::LogBatch) {
+    let lines = batch.take();
+    if let Some(t) = target {
+        t.append_batch(&lines);
+    }
+}
+
+/// Read lines from an async reader and store them in the database, in batches.
+///
+/// A foreground server's stdout is one of the highest-volume writers veld has,
+/// and it used to be one autocommit `INSERT` per line. The batch flushes on
+/// `LOG_BATCH_MAX_LINES` under load and on `LOG_BATCH_FLUSH` when the server goes
+/// quiet, so a line is never held longer than the flush window — well inside the
+/// 200 ms every `--follow` loop polls at.
 async fn log_pipe<R: tokio::io::AsyncRead + Unpin>(reader: R, target: LogTarget) {
+    use crate::logging::LogBatch;
+
     let mut lines = BufReader::new(reader).lines();
+    let mut batch = LogBatch::new();
+
     loop {
-        match lines.next_line().await {
-            Ok(Some(line)) => target.append(&line),
-            Ok(None) => break,
-            Err(_) => break,
+        // With nothing buffered there is no deadline to honour — block for the
+        // first line rather than spinning on an expired timeout.
+        let next = match batch.deadline() {
+            None => lines.next_line().await,
+            Some(deadline) => {
+                match tokio::time::timeout_at(deadline.into(), lines.next_line()).await {
+                    Ok(read) => read,
+                    Err(_) => {
+                        // Deadline reached with a partial batch. `next_line` is
+                        // cancel-safe (its partial line stays in the reader's
+                        // own buffer), so nothing is lost by dropping it here.
+                        target.append_batch(&batch.take());
+                        continue;
+                    }
+                }
+            }
+        };
+
+        match next {
+            Ok(Some(line)) => {
+                batch.push(line);
+                if batch.is_full() {
+                    target.append_batch(&batch.take());
+                }
+            }
+            // EOF or a read error: write what is buffered before leaving. The
+            // last thing a dying server said is the line most worth having.
+            Ok(None) | Err(_) => break,
         }
     }
+
+    target.append_batch(&batch.take());
 }
 
 // ---------------------------------------------------------------------------
@@ -911,15 +971,43 @@ pub async fn run_command_streaming(
         let mut reader = BufReader::new(stdout);
         let mut w = tokio::io::stdout();
         let mut buf = Vec::new();
+        // The terminal echo below stays line-at-a-time and immediate — only the
+        // *database* write is batched, so nothing about what a person watching
+        // the run sees changes. When there is no log target the batch is never
+        // pushed, so `deadline()` stays `None` and the read is never wrapped.
+        let mut batch = crate::logging::LogBatch::new();
         loop {
-            buf.clear();
-            match reader.read_until(b'\n', &mut buf).await {
+            let read = match batch.deadline() {
+                None => reader.read_until(b'\n', &mut buf).await,
+                Some(deadline) => {
+                    match tokio::time::timeout_at(
+                        deadline.into(),
+                        reader.read_until(b'\n', &mut buf),
+                    )
+                    .await
+                    {
+                        Ok(read) => read,
+                        Err(_) => {
+                            // Flush deadline. `read_until` appends into `buf`
+                            // and is NOT cancel-safe the way `Lines::next_line`
+                            // is: a cancelled read leaves its partial bytes
+                            // there for the next call to continue from, which is
+                            // exactly why `buf` is cleared where a line is
+                            // *consumed* rather than at the top of the loop.
+                            flush_out(&out_log, &mut batch);
+                            continue;
+                        }
+                    }
+                }
+            };
+            match read {
                 Ok(0) | Err(_) => break,
                 Ok(_) => {
                     while matches!(buf.last(), Some(b'\n' | b'\r')) {
                         buf.pop();
                     }
-                    let line = String::from_utf8_lossy(&buf);
+                    let line = String::from_utf8_lossy(&buf).into_owned();
+                    buf.clear();
                     if let Some(kv) = line.strip_prefix("VELD_OUTPUT ") {
                         if let Some((key, value)) = kv.split_once('=') {
                             let _ = out_tx.send((key.trim().to_owned(), value.trim().to_owned()));
@@ -929,37 +1017,65 @@ pub async fn run_command_streaming(
                         let _ = w.write_all(line.as_bytes()).await;
                         let _ = w.write_all(b"\n").await;
                         let _ = w.flush().await;
-                        if let Some(ref t) = out_log {
-                            t.append(&line);
+                        if out_log.is_some() {
+                            batch.push(line);
+                            if batch.is_full() {
+                                flush_out(&out_log, &mut batch);
+                            }
                         }
                     }
                 }
             }
         }
+        // EOF: the last thing a failing step printed is the line most worth
+        // having, so it is written before this task ends.
+        flush_out(&out_log, &mut batch);
     });
     let err_log = log_target.clone();
     let err_task = tokio::spawn(async move {
         let mut reader = BufReader::new(stderr);
         let mut w = tokio::io::stderr();
         let mut buf = Vec::new();
+        let mut batch = crate::logging::LogBatch::new();
         loop {
-            buf.clear();
-            match reader.read_until(b'\n', &mut buf).await {
+            let read = match batch.deadline() {
+                None => reader.read_until(b'\n', &mut buf).await,
+                Some(deadline) => {
+                    match tokio::time::timeout_at(
+                        deadline.into(),
+                        reader.read_until(b'\n', &mut buf),
+                    )
+                    .await
+                    {
+                        Ok(read) => read,
+                        Err(_) => {
+                            flush_out(&err_log, &mut batch);
+                            continue;
+                        }
+                    }
+                }
+            };
+            match read {
                 Ok(0) | Err(_) => break,
                 Ok(_) => {
                     while matches!(buf.last(), Some(b'\n' | b'\r')) {
                         buf.pop();
                     }
-                    let line = String::from_utf8_lossy(&buf);
+                    let line = String::from_utf8_lossy(&buf).into_owned();
+                    buf.clear();
                     let _ = w.write_all(line.as_bytes()).await;
                     let _ = w.write_all(b"\n").await;
                     let _ = w.flush().await;
-                    if let Some(ref t) = err_log {
-                        t.append(&line);
+                    if err_log.is_some() {
+                        batch.push(line);
+                        if batch.is_full() {
+                            flush_out(&err_log, &mut batch);
+                        }
                     }
                 }
             }
         }
+        flush_out(&err_log, &mut batch);
     });
 
     // Wait for both drain tasks to finish; a Ctrl+C kills the child's process
