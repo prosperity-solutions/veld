@@ -301,11 +301,19 @@ pub async fn run_gc() -> anyhow::Result<GcSummary> {
     // housekeeping on that would let a healthy file grow forever.
     //
     // Note the ceiling, because the log line reads as a bigger promise than it
-    // is: `dbhealth` is daemon-process-local. This stops the page-moving
-    // traffic, which is the part that matters most, and it cannot stop the
-    // detached `veld _log` writers or a hand-run `veld gc`. Stopping *all*
-    // writes needs a sentinel outside the database, with defined clearing
-    // semantics — deliberately not attempted here.
+    // is: `dbhealth` is daemon-process-local, so this stops *this process's*
+    // page-moving traffic and nothing else's.
+    //
+    // The other pruning-and-vacuuming path is `veld gc`, which is emphatically
+    // **not** just a hand-run command — `maybe_auto_gc` detaches it from any CLI
+    // invocation every 30 minutes — so it carries its own gate, asking SQLite
+    // directly because it has no `dbhealth` state to read. See
+    // `crates/veld/src/commands/gc.rs`. Left ungated there, this gate would have
+    // bought at most 30 minutes.
+    //
+    // Still uncovered: the detached `veld _log` writers keep inserting rows.
+    // Stopping *all* writes needs a sentinel outside the database, with defined
+    // clearing semantics — deliberately not attempted here.
     if crate::dbhealth::verified_not_corrupt() {
         // Phase 1d: run-history retention — keep the newest RUN_HISTORY_KEEP ended
         // runs per environment, and nothing older than the log age cap. Deleting a
@@ -339,7 +347,11 @@ pub async fn run_gc() -> anyhow::Result<GcSummary> {
             ),
             Err(e) => debug!("page reclaim failed: {e}"),
         }
-    } else if crate::dbhealth::health_checked() {
+    } else if crate::dbhealth::corruption_recorded() {
+        // Gated on the recorded fault, **not** on `health_checked()`: a database
+        // that will not open at all never completes an integrity check, so it
+        // never sets `checked_at`, and a warning gated on that would go to the
+        // `debug!` below in exactly the worst case.
         warn!(
             "database is recorded as damaged — skipping log/stats retention and page reclaim \
              this pass, because both relocate pages in a file whose page map is not \

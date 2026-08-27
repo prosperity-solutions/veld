@@ -505,6 +505,90 @@ mod tests {
         );
     }
 
+    /// **The production bound, pinned.** The test below drives an injected
+    /// budget, which proves `vacuum_pages` respects its argument and proves
+    /// nothing about `vacuum()` — reverting that to a bare
+    /// `PRAGMA incremental_vacuum;` left the whole suite green.
+    ///
+    /// A bare pragma drains the freelist to SQLite's floor in one transaction,
+    /// so the tell is that a single `vacuum()` must leave `before - budget`
+    /// pages behind.
+    ///
+    /// **The fixture is deliberately several times the budget.** A first version
+    /// used 20,000 rows for a ~2,200-page freelist, and at that size the two
+    /// cases are indistinguishable: SQLite's own floor was ~300 pages, so the
+    /// unbounded pass reclaimed ~1,900 — inside the 2,000 budget — and the test
+    /// passed against the exact reversion it was written to catch. Verified by
+    /// re-introducing the bare pragma and watching it fail.
+    #[test]
+    fn one_vacuum_pass_reclaims_at_most_its_page_budget() {
+        let (_dir, db) = test_db();
+
+        // Enough fat rows that deleting them frees several times one pass's
+        // budget. Batched, so this costs milliseconds rather than 60,000
+        // transactions.
+        let filler = "x".repeat(400);
+        let rows: Vec<(chrono::DateTime<chrono::Utc>, String)> = (0..60_000)
+            .map(|i| (chrono::Utc::now(), format!("line {i} {filler}")))
+            .collect();
+        for chunk in rows.chunks(5_000) {
+            db.append_logs(
+                Path::new("/tmp/p"),
+                "dev",
+                None,
+                Some("web"),
+                Some("local"),
+                LogStream::Server,
+                chunk,
+            )
+            .unwrap();
+        }
+        db.prune_logs_older_than(chrono::Utc::now() + chrono::Duration::hours(1))
+            .unwrap();
+
+        let freelist = || -> u32 {
+            let conn = db.lock();
+            conn.query_row("PRAGMA freelist_count", [], |r| r.get(0))
+                .unwrap()
+        };
+        let before = freelist();
+        let budget = Db::VACUUM_PAGES_PER_PASS;
+        assert!(
+            before > budget * 2,
+            "precondition: the freelist ({before}) must be well clear of one pass's budget \
+             ({budget}), or this test cannot tell a bounded pass from an unbounded one — see \
+             the doc comment"
+        );
+
+        let remaining = db.vacuum().unwrap();
+        let reclaimed = before - remaining;
+
+        // Upper bound: the pass is bounded. A stepped *bare* pragma empties the
+        // whole freelist and trips this.
+        assert!(
+            reclaimed <= budget,
+            "one pass reclaimed {reclaimed} pages against a budget of {budget} — the reclaim \
+             is unbounded again"
+        );
+        // Lower bound: the pass actually *works*, and this half is the one that
+        // catches the subtler reversion. Driving the pragma with
+        // `execute_batch` reclaims exactly ONE page per call regardless of the
+        // argument, because the pragma emits a result row per relocated page and
+        // `execute_batch` steps a statement once — see `Db::vacuum_pages`. That
+        // shape satisfies the bound above perfectly while reclaiming nothing,
+        // which is what shipped for the life of this database.
+        //
+        // Measured at exactly `budget` on this fixture; asserted at 90% of it so
+        // a future SQLite that declines to relocate a page or two does not turn
+        // a working reclaim into a red suite.
+        assert!(
+            reclaimed >= budget * 9 / 10,
+            "one pass reclaimed only {reclaimed} of a {before}-page freelist against a budget \
+             of {budget}. One page means the pragma is being run with `execute_batch` instead \
+             of being stepped."
+        );
+    }
+
     /// The bound is the point of fix 9: one pass must relocate at most its page
     /// budget, so a mass delete drains over several GC passes instead of one very
     /// long write transaction that every other veld process waits behind on its

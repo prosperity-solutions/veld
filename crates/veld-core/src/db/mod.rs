@@ -559,6 +559,16 @@ impl Db {
         // the tests' entry point, and a test that deliberately opens a damaged
         // fixture must not publish a fault into the process it shares with every
         // other test.
+        //
+        // One thing does now happen down in `open_at`: `log_corrupt_file_shape`
+        // emits a single `tracing::error!` describing a file that would not open.
+        // That is a deliberate exception and a much weaker one — it is a log
+        // line, not process state any other code reads, and it has to sit at
+        // `open_at` because that is the only layer holding the path whose bytes
+        // are the evidence (`veld doctor` and the backup verifier open by
+        // explicit path and want the forensics too). Its once-per-process flag is
+        // shared with the test binary, so a damaged-fixture test can consume it;
+        // that costs a log line and nothing else.
         let opened = (|| {
             let path = Self::default_path()?;
             Self::open_at(&path)
@@ -643,8 +653,19 @@ impl Db {
                 // Dropping *this* descriptor is safe: it is the only one that
                 // has ever existed for this inode.
                 Ok(_) => {}
+                // **Only a regular file gets chmodded, and the check is not
+                // defensive padding.** `create_new` answers `AlreadyExists` for
+                // a *directory* too (`EEXIST`, where the old `create(true)` open
+                // got `EISDIR` and was therefore inert), so an unguarded chmod
+                // here turns `VELD_DB_PATH=$HOME` into `chmod 0600 $HOME` —
+                // traversal broken for everything underneath it, silently, since
+                // the error is discarded. `symlink_metadata` rather than
+                // `metadata` so a symlink at this path is not followed either.
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+                    if std::fs::symlink_metadata(path).is_ok_and(|m| m.is_file()) {
+                        let _ =
+                            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+                    }
                 }
                 // Anything else (a missing parent, a read-only volume) is
                 // reported by `Connection::open` below with better context.
@@ -810,17 +831,23 @@ impl Db {
 
     /// Pages `Db::vacuum` reclaims per call.
     ///
-    /// A bare `PRAGMA incremental_vacuum` reclaims the **whole** freelist in one
-    /// write transaction. On a pass that just deleted seven days of log rows
-    /// that is tens of thousands of page relocations under a single lock, while
-    /// every other veld process waits on its 10-second `busy_timeout` and
-    /// `veld _log` drops lines when that expires.
+    /// A bare `PRAGMA incremental_vacuum` empties the **whole** freelist. On a
+    /// pass that just deleted seven days of log rows that is tens of thousands
+    /// of page relocations under a single lock, while every other veld process
+    /// waits on its 10-second `busy_timeout` and `veld _log` drops lines when
+    /// that expires.
     ///
     /// 2,000 pages is ~8 MB at the 4 KiB page size this database uses, so at the
     /// GC's 600-second interval a backlog drains at ~49 MB/hour — comfortably
     /// faster than veld frees pages in steady state, slower after a one-off mass
-    /// delete. `incremental_vacuum` has always been resumable by design, so the
-    /// remainder simply goes on the next pass.
+    /// delete. `incremental_vacuum` is resumable by design, so the remainder
+    /// simply goes on the next pass.
+    ///
+    /// The bound is load-bearing rather than theoretical **because the reclaim
+    /// only started working in this same change** — see [`Db::vacuum_pages`].
+    /// The first pass on an existing install meets a freelist that has been
+    /// accumulating for the life of the database, which is exactly the very long
+    /// write transaction this number exists to prevent.
     ///
     /// This is a lock-hold and churn bound. It is **not** a corruption fix: the
     /// documented `auto_vacuum` algorithm is excluded as a cause of #332 (it
@@ -846,11 +873,37 @@ impl Db {
 
     /// [`Db::vacuum`] with an explicit page budget, so the *bound* is testable
     /// without writing 8 MB of fixture to exceed the production one.
+    ///
+    /// **The pragma is stepped, not `execute_batch`ed, and that is the whole
+    /// fix.** `PRAGMA incremental_vacuum` emits one result row per page it
+    /// relocates; `execute_batch` runs each statement with a single step, so it
+    /// stopped at the first row and reclaimed **exactly one page per call** —
+    /// whatever argument it was given, and whether or not it had one. Measured
+    /// on an 8,683-page freelist built from real `log_lines` rows:
+    ///
+    /// | how it is driven | pages reclaimed |
+    /// |---|---:|
+    /// | `execute_batch("PRAGMA incremental_vacuum;")` (what shipped) | **1** |
+    /// | `execute_batch("PRAGMA incremental_vacuum(2000);")` | **1** |
+    /// | stepped, `incremental_vacuum(2000)` | **2000** |
+    /// | stepped, bare `incremental_vacuum` | **8683** |
+    ///
+    /// So the GC's page reclaim has never reclaimed anything since the database
+    /// was created: a machine that pruned seven days of logs got one page back
+    /// per pass. #332 read this line as "an unbounded reclaim in one very long
+    /// write transaction" and the truth was the opposite — it was a no-op. Both
+    /// the bound and the stepping are needed, and neither is useful alone.
     pub(crate) fn vacuum_pages(&self, max_pages: u32) -> Result<u32, DbError> {
         let conn = self.lock();
         let freelist: u32 = conn.query_row("PRAGMA freelist_count", [], |r| r.get(0))?;
         if freelist > 0 {
-            conn.execute_batch(&format!("PRAGMA incremental_vacuum({max_pages});"))?;
+            // A pragma cannot take a bound parameter, hence the format!. It is a
+            // `u32` from a private constant, not caller input.
+            let mut stmt = conn.prepare(&format!("PRAGMA incremental_vacuum({max_pages})"))?;
+            let mut rows = stmt.query([])?;
+            // One row per relocated page; stepping to the end is what does the
+            // work. Nothing to read out of them.
+            while rows.next()?.is_some() {}
         }
         // wal_checkpoint returns a result row — use query_row. Run even with an
         // empty freelist: the WAL grows from ordinary writes, and truncating it

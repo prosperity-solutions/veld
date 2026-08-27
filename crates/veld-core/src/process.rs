@@ -119,7 +119,13 @@ pub type LineSink = std::sync::Arc<dyn Fn(&[String]) + Send + Sync>;
 /// line breaks at all from a `\n`-only reader's point of view — without a cap
 /// its output accumulates in memory for the life of the step and lands as one
 /// enormous row. 64 KiB is far past any real log line.
-const MAX_LINE_BYTES: usize = 64 * 1024;
+///
+/// `pub` because there are **two** pipe readers and both need the same ceiling:
+/// this module's [`drain_pipe`], and the detached `veld _log` pump in
+/// `crates/veld/src/main.rs`, which buffers lines for its writer thread and so
+/// turns an uncapped line into an uncapped queue. Nothing in the type system
+/// ties them together — a third reader must reach for this too.
+pub const MAX_LINE_BYTES: usize = 64 * 1024;
 
 /// How long the pipe readers get to finish after the step's own process exits.
 ///
@@ -1000,35 +1006,50 @@ pub async fn run_command_streaming(
                     }
                 }
             };
-            match read {
-                Ok(0) | Err(_) => break,
-                Ok(_) => {
-                    while matches!(buf.last(), Some(b'\n' | b'\r')) {
-                        buf.pop();
-                    }
-                    let line = String::from_utf8_lossy(&buf).into_owned();
-                    buf.clear();
-                    if let Some(kv) = line.strip_prefix("VELD_OUTPUT ") {
-                        if let Some((key, value)) = kv.split_once('=') {
-                            let _ = out_tx.send((key.trim().to_owned(), value.trim().to_owned()));
-                        }
-                        // Control line — never echoed or logged.
-                    } else {
-                        let _ = w.write_all(line.as_bytes()).await;
-                        let _ = w.write_all(b"\n").await;
-                        let _ = w.flush().await;
-                        if out_log.is_some() {
-                            batch.push(line);
-                            if batch.is_full() {
-                                flush_out(&out_log, &mut batch);
-                            }
-                        }
+            // EOF or a read error. `buf` may still hold a real, final line —
+            // a step that printed without a trailing newline, or one whose
+            // last partial line was left here by the flush deadline above
+            // cancelling `read_until`. `read_until` reports only the bytes
+            // *its own* call read (`mem::replace(read, 0)` in tokio's
+            // `read_until_internal`), so the call after a cancellation answers
+            // `Ok(0)` at EOF while the partial line is still buffered. The
+            // pre-batching loop cleared `buf` on every iteration and so could
+            // never reach this state; dropping the line here would silently
+            // lose the last thing a step said, which
+            // `drain_pipe` states as a rule for its sibling reader.
+            let eof = matches!(read, Ok(0) | Err(_));
+            if eof && buf.is_empty() {
+                break;
+            }
+
+            while matches!(buf.last(), Some(b'\n' | b'\r')) {
+                buf.pop();
+            }
+            let line = String::from_utf8_lossy(&buf).into_owned();
+            buf.clear();
+            if let Some(kv) = line.strip_prefix("VELD_OUTPUT ") {
+                if let Some((key, value)) = kv.split_once('=') {
+                    let _ = out_tx.send((key.trim().to_owned(), value.trim().to_owned()));
+                }
+                // Control line — never echoed or logged.
+            } else {
+                let _ = w.write_all(line.as_bytes()).await;
+                let _ = w.write_all(b"\n").await;
+                let _ = w.flush().await;
+                if out_log.is_some() {
+                    batch.push(line);
+                    if batch.is_full() {
+                        flush_out(&out_log, &mut batch);
                     }
                 }
             }
+
+            if eof {
+                break;
+            }
         }
-        // EOF: the last thing a failing step printed is the line most worth
-        // having, so it is written before this task ends.
+        // The last thing a failing step printed is the line most worth having,
+        // so whatever is buffered is written before this task ends.
         flush_out(&out_log, &mut batch);
     });
     let err_log = log_target.clone();
@@ -1055,24 +1076,29 @@ pub async fn run_command_streaming(
                     }
                 }
             };
-            match read {
-                Ok(0) | Err(_) => break,
-                Ok(_) => {
-                    while matches!(buf.last(), Some(b'\n' | b'\r')) {
-                        buf.pop();
-                    }
-                    let line = String::from_utf8_lossy(&buf).into_owned();
-                    buf.clear();
-                    let _ = w.write_all(line.as_bytes()).await;
-                    let _ = w.write_all(b"\n").await;
-                    let _ = w.flush().await;
-                    if err_log.is_some() {
-                        batch.push(line);
-                        if batch.is_full() {
-                            flush_out(&err_log, &mut batch);
-                        }
-                    }
+            // Same reasoning as the stdout drain above: a non-empty `buf` at
+            // EOF is a real final line, not leftovers.
+            let eof = matches!(read, Ok(0) | Err(_));
+            if eof && buf.is_empty() {
+                break;
+            }
+            while matches!(buf.last(), Some(b'\n' | b'\r')) {
+                buf.pop();
+            }
+            let line = String::from_utf8_lossy(&buf).into_owned();
+            buf.clear();
+            let _ = w.write_all(line.as_bytes()).await;
+            let _ = w.write_all(b"\n").await;
+            let _ = w.flush().await;
+            if err_log.is_some() {
+                batch.push(line);
+                if batch.is_full() {
+                    flush_out(&err_log, &mut batch);
                 }
+            }
+
+            if eof {
+                break;
             }
         }
         flush_out(&err_log, &mut batch);
@@ -2024,5 +2050,200 @@ mod command_capture_tests {
 
         assert_eq!(out.exit_code, 0);
         assert!(lines.lock().unwrap().contains(&"after".to_owned()));
+    }
+}
+
+#[cfg(test)]
+mod batched_drain_tests {
+    use super::*;
+    use crate::db::{LogFilter, LogStream};
+
+    /// A `LogTarget` backed by a real temp database, so the batched drains can
+    /// be asserted on what actually landed in `log_lines`.
+    ///
+    /// `Db::open_at` rather than the shared `test_db()` helper, for the reason
+    /// the wrapper test above gives: an explicit fresh path cannot collide with
+    /// another test's schema version.
+    fn temp_target() -> (tempfile::TempDir, LogTarget) {
+        let dir = tempfile::tempdir().unwrap();
+        let target = LogTarget {
+            db: Db::open_at(&dir.path().join("drain.db")).unwrap(),
+            project_root: PathBuf::from("/proj"),
+            run_name: "dev".into(),
+            run_id: "rid".into(),
+            node: "api".into(),
+            variant: "local".into(),
+        };
+        (dir, target)
+    }
+
+    fn stored(target: &LogTarget) -> Vec<String> {
+        target
+            .db
+            .tail_logs(
+                &target.project_root,
+                &target.run_name,
+                &LogFilter::default(),
+                10_000,
+            )
+            .unwrap()
+            .into_iter()
+            .map(|r| r.line)
+            .collect()
+    }
+
+    /// Every line a server prints lands exactly once, in order, through the
+    /// batched path — including the last one, and including one that never got
+    /// its newline.
+    ///
+    /// The batching is invisible from here, which is the point: the flush cap and
+    /// the flush deadline are both internal, and no reader is supposed to be able
+    /// to tell how the rows were grouped into transactions.
+    #[tokio::test]
+    async fn log_pipe_stores_every_line_including_an_unterminated_last_one() {
+        let (_dir, target) = temp_target();
+        // 1,200 lines crosses `LOG_BATCH_MAX_LINES` (512) twice, so the size cap
+        // fires and the remainder leaves a partial batch for the EOF flush.
+        let mut payload = String::new();
+        for i in 0..1_200 {
+            payload.push_str(&format!("line {i}\n"));
+        }
+        payload.push_str("no trailing newline");
+
+        log_pipe(std::io::Cursor::new(payload.into_bytes()), target.clone()).await;
+
+        let rows = stored(&target);
+        assert_eq!(rows.len(), 1_201, "every line must land exactly once");
+        assert_eq!(rows[0], "line 0");
+        assert_eq!(rows[1_199], "line 1199");
+        assert_eq!(
+            rows[1_200], "no trailing newline",
+            "a final line with no newline is still output and must be stored"
+        );
+    }
+
+    /// The regression that the batching introduced and that this test now pins:
+    /// a trailing line with no newline, printed after a pause long enough for the
+    /// flush deadline to fire, used to be **lost from both the terminal and the
+    /// database**.
+    ///
+    /// The pause is what makes it a regression rather than a hypothetical. It
+    /// lets the deadline cancel a `read_until` that has already appended the
+    /// partial bytes into the caller's buffer; the next call then reports `Ok(0)`
+    /// at EOF (tokio resets its per-future byte count), and the old `Ok(0) =>
+    /// break` dropped the buffer on the floor. Before the batching there was no
+    /// deadline and `buf` was cleared every iteration, so this state could not
+    /// arise at all.
+    #[tokio::test]
+    async fn a_trailing_line_after_a_flush_deadline_is_not_lost() {
+        let (_dir, target) = temp_target();
+        let out = run_command_streaming(
+            // **Order matters and is the whole repro.** The partial line must
+            // be written *before* the pause, so `read_until` has already
+            // appended its bytes into `buf` when the 50 ms deadline cancels it;
+            // the pause then holds the pipe open with nothing more to read, so
+            // the next call reaches EOF and reports `Ok(0)`. Put the sleep
+            // between the two writes instead and the cancelled read appended
+            // nothing, the partial arrives on a fresh `Ok(n>0)`, and the test
+            // passes against the very bug it is written for — which this one did
+            // until it was checked by re-introducing the defect.
+            &CommandSpec::Shell("printf 'first\\npartial-no-newline'; sleep 0.4".to_owned()),
+            &std::env::temp_dir(),
+            &HashMap::new(),
+            None,
+            Some(target.clone()),
+            None,
+        )
+        .await
+        .expect("run should succeed");
+        assert_eq!(out.exit_code, 0);
+
+        let rows = stored(&target);
+        assert!(
+            rows.contains(&"first".to_owned()),
+            "the terminated line must be stored; got {rows:?}"
+        );
+        assert!(
+            rows.contains(&"partial-no-newline".to_owned()),
+            "the unterminated final line must survive the flush deadline; got {rows:?}"
+        );
+    }
+
+    /// Same for stderr, which is a second copy of the same loop.
+    #[tokio::test]
+    async fn a_trailing_stderr_line_after_a_flush_deadline_is_not_lost() {
+        let (_dir, target) = temp_target();
+        run_command_streaming(
+            &CommandSpec::Shell("printf 'err-first\\nerr-partial' >&2; sleep 0.4".to_owned()),
+            &std::env::temp_dir(),
+            &HashMap::new(),
+            None,
+            Some(target.clone()),
+            None,
+        )
+        .await
+        .expect("run should succeed");
+
+        let rows = stored(&target);
+        assert!(
+            rows.contains(&"err-partial".to_owned()),
+            "the unterminated final stderr line must survive; got {rows:?}"
+        );
+    }
+
+    /// `VELD_OUTPUT` control lines are machinery and must never reach the log,
+    /// batched or not — they can carry sensitive node outputs.
+    #[tokio::test]
+    async fn control_lines_are_not_stored_by_the_batched_drain() {
+        let (_dir, target) = temp_target();
+        let out = run_command_streaming(
+            &CommandSpec::Shell("echo VELD_OUTPUT token=s3cr3t; echo ordinary".to_owned()),
+            &std::env::temp_dir(),
+            &HashMap::new(),
+            None,
+            Some(target.clone()),
+            None,
+        )
+        .await
+        .expect("run should succeed");
+        assert_eq!(out.outputs.get("token").map(String::as_str), Some("s3cr3t"));
+
+        let rows = stored(&target);
+        assert!(rows.contains(&"ordinary".to_owned()), "got {rows:?}");
+        assert!(
+            !rows.iter().any(|l| l.contains("s3cr3t")),
+            "a VELD_OUTPUT control line must never be logged; got {rows:?}"
+        );
+    }
+
+    /// The `internal` stream is where veld's own words go, and the batched
+    /// drains must not put a supervised process's output there — that boundary
+    /// is what lets a reader tell veld's claims from the child's.
+    #[tokio::test]
+    async fn a_processs_output_never_reaches_the_internal_stream() {
+        let (_dir, target) = temp_target();
+        log_pipe(
+            std::io::Cursor::new(b"[log] dropped 5 lines\n".to_vec()),
+            target.clone(),
+        )
+        .await;
+
+        let internal = target
+            .db
+            .tail_logs(
+                &target.project_root,
+                &target.run_name,
+                &LogFilter {
+                    streams: Some(vec![LogStream::Internal.as_str()]),
+                    ..Default::default()
+                },
+                100,
+            )
+            .unwrap();
+        assert!(
+            internal.is_empty(),
+            "a line printed by the supervised process must stay on its own stream, \
+             whatever it says: {internal:?}"
+        );
     }
 }

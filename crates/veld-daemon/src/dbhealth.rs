@@ -364,17 +364,6 @@ fn housekeeping_allowed(checked: bool, fault: Option<DbFault>) -> bool {
     checked && fault != Some(DbFault::Corrupt)
 }
 
-/// Whether the first integrity probe has completed, so a caller can tell
-/// "not checked yet" from "checked and damaged" and say the right thing.
-#[must_use]
-pub fn health_checked() -> bool {
-    state()
-        .lock()
-        .expect("dbhealth state poisoned")
-        .checked_at
-        .is_some()
-}
-
 /// Forget the current fault, **and that anybody was told about it**.
 ///
 /// Called after a restore. Clearing the in-memory fault alone would have been
@@ -1085,8 +1074,13 @@ mod tests {
     ///
     /// Measured on a deliberately damaged database before this was fixed: the
     /// pass logged `4000 logs pruned` 17 ms *before* the probe recorded the
-    /// fault. Spell this `!corruption_recorded()` again and the whole fix
-    /// silently reverts to letting the first pass through.
+    /// fault.
+    ///
+    /// **What this pins and what it does not.** It pins the predicate. It does
+    /// **not** pin the call site: `run_gc` opens the real database and has no
+    /// test, so respelling `crates/veld-daemon/src/gc.rs`'s condition as
+    /// `!corruption_recorded()` leaves the whole suite green. The gate's
+    /// polarity there is held by the comment above it and by nothing else.
     #[test]
     fn housekeeping_waits_for_a_verdict_rather_than_for_the_absence_of_one() {
         assert!(

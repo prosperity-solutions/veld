@@ -1417,47 +1417,58 @@ async fn main() {
                     node.clone(),
                     variant.clone(),
                 );
+                // Shared, not passed through the channel, and owned by the
+                // *writer* for reporting: a notice sent through the queue can
+                // only be delivered when the queue has room, i.e. never in the
+                // one situation it exists to describe. Measured before this:
+                // 20,000 lines piped in, 2,592 dropped, and not one notice.
+                let dropped = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+                let writer_dropped = std::sync::Arc::clone(&dropped);
                 let handle = std::thread::spawn(move || {
-                    log_pump_writer(&db, &scope, &rx);
+                    log_pump_writer(&db, &scope, &rx, &writer_dropped);
                 });
-                (tx, handle)
+                (tx, handle, dropped)
             });
 
             let stdin = std::io::stdin();
             let mut reader = stdin.lock();
             let mut buf = String::new();
-            // Lines the queue was too full to accept. Reported on the next line
-            // that fits, so the gap is visible in the log it happened to rather
-            // than only in this process's stderr, which nobody reads.
-            let mut dropped = 0u64;
 
             loop {
                 buf.clear();
                 match reader.read_line(&mut buf) {
                     Ok(0) => break, // EOF
                     Ok(_) => {
-                        let Some((ref tx, _)) = writer else { continue };
-                        let trimmed = buf.trim_end_matches('\n').trim_end_matches('\r').to_owned();
-                        let now = chrono::Utc::now();
-                        if dropped > 0
-                            && tx
-                                .try_send((
-                                    now,
-                                    format!(
-                                        "[VELD] dropped {dropped} log line(s) — the database was \
-                                         not keeping up"
-                                    ),
-                                ))
-                                .is_ok()
-                        {
-                            dropped = 0;
+                        let Some((ref tx, _, ref dropped)) = writer else {
+                            continue;
+                        };
+                        let mut line = buf.trim_end_matches('\n').trim_end_matches('\r').to_owned();
+                        // **Cap the line here.** `MAX_LINE_BYTES` is enforced by
+                        // `drain_pipe`, which is the *other* reader — this path
+                        // gets raw pipe bytes through `read_line` and had no cap
+                        // at all, so a process emitting one enormous line (a
+                        // `\r`-only progress meter, a minified stack dump) could
+                        // put `LOG_PUMP_QUEUE` × that length in memory. With the
+                        // cap the queue's worst case is bounded by a number this
+                        // file can state honestly.
+                        if line.len() > veld_core::process::MAX_LINE_BYTES {
+                            // On a char boundary: splitting a multi-byte char
+                            // would corrupt one character at the cut.
+                            let mut end = veld_core::process::MAX_LINE_BYTES;
+                            while end > 0 && !line.is_char_boundary(end) {
+                                end -= 1;
+                            }
+                            line.truncate(end);
                         }
                         // `try_send`, never `send`: blocking here is what puts
-                        // the database back on the drain path. Dropping is the
-                        // sanctioned failure mode for this process (see above),
-                        // and it is now counted rather than silent.
-                        if tx.try_send((now, trimmed)).is_err() {
-                            dropped = dropped.saturating_add(1);
+                        // the database back on the path that drains the server's
+                        // stdout pipe. Dropping is the sanctioned failure mode
+                        // for this process (see above), and the count is owned by
+                        // the writer thread — see `log_pump_writer`, which is
+                        // what reports it, because a reporter on this side cannot
+                        // report through a queue that is full.
+                        if tx.try_send((chrono::Utc::now(), line)).is_err() {
+                            dropped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         }
                     }
                     Err(_) => {
@@ -1471,7 +1482,7 @@ async fn main() {
             // Drop the sender so the writer sees the channel close, flushes its
             // partial batch and exits; then wait for it, so the last lines the
             // server produced are on disk before this process is.
-            if let Some((tx, handle)) = writer {
+            if let Some((tx, handle, _)) = writer {
                 drop(tx);
                 let _ = handle.join();
             }
@@ -1619,9 +1630,20 @@ fn command_survives_an_update(command: &Command) -> bool {
 ///
 /// A bound, not a buffer target: with batching the writer keeps up with anything
 /// a real server produces, so this only fills when the database is genuinely
-/// stuck. 16,384 lines is a couple of seconds of the busiest output ever
-/// measured through this path (17.5 rows/s mean, ~4× that at peak) and a few MB
-/// of memory at veld's 64 KiB per-line ceiling in the pathological case.
+/// stuck.
+///
+/// **The worst case, stated properly, because the first version of this comment
+/// got both factors wrong and the wrongness is what made the number look safe.**
+/// At the observed volume of the #332 incident (4.06 rows/s mean, 17.5/s in the
+/// peak hour) 16,384 lines is about *four minutes* of the busiest output ever
+/// measured through this path — not "a couple of seconds". And the memory bound
+/// is not "a few MB": it is 16,384 × the longest line, which is why the reader
+/// now truncates to `veld_core::process::MAX_LINE_BYTES` (64 KiB) before
+/// enqueueing. Without that cap this path had no per-line limit at all —
+/// `MAX_LINE_BYTES` is enforced by `drain_pipe`, which is the other reader — so
+/// the ceiling was unbounded rather than large. With it the ceiling is 1 GiB in
+/// the pathological case of a process emitting nothing but maximal lines while
+/// the database is wedged, and a few MB for anything realistic.
 ///
 /// A *bounded* channel because the alternative fails worse: unbounded, a wedged
 /// database turns a server's log volume into unbounded memory in a process the
@@ -1632,12 +1654,14 @@ const LOG_PUMP_QUEUE: usize = 16_384;
 /// write each batch as one transaction.
 ///
 /// Exits when the channel closes (the reader hit EOF), after writing whatever is
-/// buffered.
+/// buffered and reporting anything the reader had to drop.
 fn log_pump_writer(
     db: &veld_core::db::Db,
     scope: &(std::path::PathBuf, String, Option<String>, String, String),
     rx: &std::sync::mpsc::Receiver<(chrono::DateTime<chrono::Utc>, String)>,
+    dropped: &std::sync::atomic::AtomicU64,
 ) {
+    use std::sync::atomic::Ordering;
     use std::sync::mpsc::RecvTimeoutError;
 
     let (project_root, run, run_id, node, variant) = scope;
@@ -1645,9 +1669,10 @@ fn log_pump_writer(
 
     let write = |batch: &mut Vec<(chrono::DateTime<chrono::Utc>, String)>| {
         if batch.is_empty() {
-            return;
+            return 0u64;
         }
-        let _ = db.append_logs(
+        let n = batch.len() as u64;
+        let lost = match db.append_logs(
             project_root,
             run,
             run_id.as_deref(),
@@ -1655,8 +1680,43 @@ fn log_pump_writer(
             Some(variant),
             veld_core::db::LogStream::Server,
             batch,
-        );
+        ) {
+            Ok(()) => 0,
+            // A failed batch loses every line in it, where the pre-batching
+            // shape lost one. Counted into the same total rather than discarded,
+            // so the gap is reported rather than merely being absent.
+            Err(_) => n,
+        };
         batch.clear();
+        lost
+    };
+
+    // Say what was lost, and say it on the **run-level `internal` stream**, not
+    // on the node's own `server` stream.
+    //
+    // Two reasons, both load-bearing. It is written by veld, so it belongs on
+    // veld's stream — and the supervised process can write anything it likes to
+    // its own stream, including a forged `[VELD] dropped …` line. A reader
+    // chasing lost logs must be able to tell veld's claim from the claim of the
+    // program veld is watching, and the `internal` stream is the boundary that
+    // makes that possible: nothing the child prints can reach it.
+    let report_drops = |lost: u64| {
+        if lost == 0 {
+            return;
+        }
+        let _ = db.append_log(
+            project_root,
+            run,
+            run_id.as_deref(),
+            None,
+            None,
+            veld_core::db::LogStream::Internal,
+            chrono::Utc::now(),
+            &format!(
+                "[log] dropped {lost} line(s) from {node}:{variant} — the database was not \
+                 keeping up with the process's output"
+            ),
+        );
     };
 
     // Nothing buffered: block for the first line rather than waking every flush
@@ -1684,13 +1744,25 @@ fn log_pump_writer(
                 }
             }
         }
-        write(&mut batch);
+        let lost = write(&mut batch);
+        dropped.fetch_add(lost, Ordering::Relaxed);
+
+        // Report between batches, so a run that drops lines in the middle says
+        // so while it is still running rather than only at the end. `swap` so
+        // the count is claimed exactly once.
+        report_drops(dropped.swap(0, Ordering::Relaxed));
+
         if closed {
             break;
         }
     }
 
-    write(&mut batch);
+    let lost = write(&mut batch);
+    dropped.fetch_add(lost, Ordering::Relaxed);
+    // The residual, on the way out. This is the case that was silent: drops at
+    // the tail of a run, or a queue that stayed full to the end, left no trace
+    // anywhere at all.
+    report_drops(dropped.swap(0, Ordering::Relaxed));
 }
 
 // ---------------------------------------------------------------------------
@@ -1926,5 +1998,149 @@ mod update_gate_tests {
             assert_eq!(dir.as_deref(), Some(std::path::Path::new("/tmp/b")));
             assert!(matches!(cmd, Some(BackupCmd::Now { .. })));
         }
+    }
+}
+
+#[cfg(test)]
+mod log_pump_tests {
+    use super::{LOG_PUMP_QUEUE, log_pump_writer};
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicU64;
+    use veld_core::db::{Db, LogFilter, LogStream};
+
+    type Scope = (std::path::PathBuf, String, Option<String>, String, String);
+
+    fn scope() -> Scope {
+        (
+            std::path::PathBuf::from("/proj"),
+            "dev".to_owned(),
+            Some("rid".to_owned()),
+            "api".to_owned(),
+            "local".to_owned(),
+        )
+    }
+
+    fn stored(db: &Db, stream: LogStream) -> Vec<String> {
+        db.tail_logs(
+            std::path::Path::new("/proj"),
+            "dev",
+            &LogFilter {
+                streams: Some(vec![stream.as_str()]),
+                ..Default::default()
+            },
+            100_000,
+        )
+        .unwrap()
+        .into_iter()
+        .map(|r| r.line)
+        .collect()
+    }
+
+    /// Everything the reader sends is written, in order, and closing the sender
+    /// mid-batch still flushes what was buffered.
+    ///
+    /// 1,200 lines crosses `LOG_BATCH_MAX_LINES` (512) twice, so two batches
+    /// flush on the size cap and the remaining 176 can only reach the database
+    /// through the post-loop flush.
+    #[test]
+    fn every_line_reaches_the_database_including_the_final_partial_batch() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open_at(&dir.path().join("pump.db")).unwrap();
+        let (tx, rx) = std::sync::mpsc::sync_channel(LOG_PUMP_QUEUE);
+        for i in 0..1_200 {
+            tx.send((chrono::Utc::now(), format!("line {i}"))).unwrap();
+        }
+        drop(tx);
+
+        let dropped = AtomicU64::new(0);
+        log_pump_writer(&db, &scope(), &rx, &dropped);
+
+        let rows = stored(&db, LogStream::Server);
+        assert_eq!(
+            rows.len(),
+            1_200,
+            "no line may be lost at the batch boundary"
+        );
+        assert_eq!(rows[0], "line 0");
+        assert_eq!(rows[1_199], "line 1199");
+    }
+
+    /// Lines the reader had to drop are reported, and reported on the run-level
+    /// `internal` stream rather than on the node's own.
+    ///
+    /// **This is the case that was silent.** The count used to be reported by
+    /// piggy-backing on the next line that fit in the queue, so a run that
+    /// dropped lines at its tail — or one whose queue stayed full to the end —
+    /// left no trace anywhere. Measured before the fix: 20,000 lines piped into
+    /// `veld _log`, 2,592 dropped, and not one notice written.
+    ///
+    /// The stream matters as much as the count: the supervised process can print
+    /// anything it likes onto its own `server` stream, including a forged notice.
+    /// `internal` is the boundary that keeps veld's claim distinguishable from
+    /// the claim of the program veld is watching.
+    #[test]
+    fn dropped_lines_are_reported_on_the_internal_stream() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open_at(&dir.path().join("pump.db")).unwrap();
+        let (tx, rx) = std::sync::mpsc::sync_channel(LOG_PUMP_QUEUE);
+        tx.send((chrono::Utc::now(), "survivor".to_owned()))
+            .unwrap();
+        drop(tx);
+
+        // What the reader does when `try_send` is refused.
+        let dropped = AtomicU64::new(7);
+        log_pump_writer(&db, &scope(), &rx, &dropped);
+
+        assert_eq!(stored(&db, LogStream::Server), vec!["survivor".to_owned()]);
+
+        let internal = stored(&db, LogStream::Internal);
+        assert_eq!(internal.len(), 1, "exactly one notice: {internal:?}");
+        assert!(
+            internal[0].contains("dropped 7 line(s)") && internal[0].contains("api:local"),
+            "the notice must name the count and the node it belongs to: {internal:?}"
+        );
+    }
+
+    /// A run that dropped nothing says nothing — the notice is a real signal, so
+    /// it must not appear on every healthy run.
+    #[test]
+    fn a_run_that_dropped_nothing_writes_no_notice() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open_at(&dir.path().join("pump.db")).unwrap();
+        let (tx, rx) = std::sync::mpsc::sync_channel(LOG_PUMP_QUEUE);
+        tx.send((chrono::Utc::now(), "only line".to_owned()))
+            .unwrap();
+        drop(tx);
+
+        let dropped = AtomicU64::new(0);
+        log_pump_writer(&db, &scope(), &rx, &dropped);
+
+        assert!(stored(&db, LogStream::Internal).is_empty());
+    }
+
+    /// The count is claimed exactly once, so a long run does not repeat the same
+    /// notice on every batch afterwards.
+    #[test]
+    fn a_drop_count_is_reported_once_and_then_cleared() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open_at(&dir.path().join("pump.db")).unwrap();
+        let (tx, rx) = std::sync::mpsc::sync_channel(LOG_PUMP_QUEUE);
+        // Two batches' worth, so the writer reports between them and again on
+        // the way out.
+        for i in 0..(veld_core::logging::LOG_BATCH_MAX_LINES + 10) {
+            tx.send((chrono::Utc::now(), format!("l{i}"))).unwrap();
+        }
+        drop(tx);
+
+        let dropped = Arc::new(AtomicU64::new(3));
+        log_pump_writer(&db, &scope(), &rx, &dropped);
+
+        let internal = stored(&db, LogStream::Internal);
+        assert_eq!(
+            internal.len(),
+            1,
+            "the same drop count must not be re-reported on every later batch: {internal:?}"
+        );
+        assert_eq!(dropped.load(std::sync::atomic::Ordering::Relaxed), 0);
     }
 }

@@ -312,7 +312,22 @@ async fn run_liveness_checks(
         };
 
         // Respect per-probe interval_ms — skip if not enough time has elapsed.
-        let check_key = format!("{}:{}:{}", project_root.to_string_lossy(), run_name, key);
+        //
+        // **Keyed on the run instance, not just the run name.** This map is
+        // per-daemon and never pruned, so a name-only key carries a *previous*
+        // run's `last_pass_logged` into a fresh `veld start` of the same name —
+        // and the new run's `internal` stream then says nothing about that node
+        // for up to `PASS_HEARTBEAT`, which is not what README and
+        // `skills/veld/SKILL.md` promise a reader ("a quiet stream means
+        // healthy"). `run.run_id` changes per instance, so a restart re-arms
+        // both the probe interval and the heartbeat.
+        let check_key = format!(
+            "{}:{}:{}:{}",
+            project_root.to_string_lossy(),
+            run_name,
+            run.run_id,
+            key
+        );
         let probe_interval = Duration::from_millis(liveness.interval_ms);
         let book = last_checks.get(&check_key).copied();
         if let Some(b) = book {
