@@ -467,6 +467,14 @@ So Veld watches its own file rather than waiting to trip over it:
   schedule failed is still on the details screen. `veld backup` prints a warning
   above the table when nothing has been written for two intervals, and says it in
   `--json` too.
+- **Housekeeping stops.** While the file reads as damaged, Veld stops pruning old
+  logs, stops reclaiming free pages and stops emptying the worktree trash — all
+  three relocate pages or delete rows, and this file's page map can no longer be
+  trusted. The daemon and `veld gc` each decide this for themselves, so an
+  automatic GC cannot undo it. Running environments keep writing their logs, so
+  the database may grow until you restore it; the trade is deliberate, because the
+  alternative is deciding to delete a checkout from a row read out of a file
+  SQLite has called malformed.
 - **The IDE says so, once.** A banner names the fault, what is at risk and how old
   the newest usable backup is, with a *Restore newest backup…* button beside it.
   It is not dismissible while the fault is live. A system notification is raised
