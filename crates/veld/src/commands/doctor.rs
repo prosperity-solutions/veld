@@ -472,6 +472,13 @@ impl Diagnostics {
     /// newly-derived gate locks out is by construction *not* the installing
     /// user and has no such file, so keying on the mode marker would silence
     /// this row for exactly the reader who needs it.
+    ///
+    /// The cost of that choice is a second reader it cannot tell apart: a user
+    /// on a shared machine whose privileged veld legitimately belongs to
+    /// somebody else. They reach the 0o777 socket, are refused, and are equally
+    /// entitled to an explanation — but the remedy that fits the first reader
+    /// would have them rewrite a system service that is not theirs. So the
+    /// refusal row names both readings and tells the second one to do nothing.
     async fn check_helper_uid_gate(&mut self) {
         let socket = veld_core::helper::system_socket_path();
         let data = match veld_core::helper::HelperClient::connect_to(&socket).await {
@@ -496,10 +503,13 @@ impl Diagnostics {
                     pass: false,
                     label: format!(
                         "Helper socket is gated to a DIFFERENT uid — it refused {me}, so no \
-                         `veld` command can drive it. The helper derives the uid from the owner \
-                         of its install directory when the service definition carries none, so \
-                         this is an install owned by another account. Run `veld setup \
-                         privileged` to write the correct uid explicitly."
+                         `veld` command of yours can drive it. If this machine's privileged \
+                         veld belongs to another account, that is working as intended and \
+                         there is nothing for you to fix here — do NOT run `veld setup \
+                         privileged`, which would repoint the system service at your install \
+                         and lock the owner out. If the install IS yours, its directory is \
+                         owned by another account (a restored backup, or a renumbered user); \
+                         `veld setup privileged` writes the correct uid explicitly."
                     ),
                 });
                 return;
