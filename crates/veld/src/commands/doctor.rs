@@ -498,21 +498,10 @@ impl Diagnostics {
             {
                 GateReport::Refused
             }
-            // Nothing is listening. The socket row above already says so, and a
-            // helper that is down has no gate to report.
-            Err(veld_core::helper::HelperError::ConnectionFailed { .. }) => return,
-            // Something accepted the connection and then the exchange broke.
-            //
-            // This is the refusal above arriving by its other route, and the
-            // reason this arm exists at all: `reject_connection` writes its
-            // refusal and drops the stream **without reading the request**, so
-            // if that close wins the race against our own write we get
-            // `SendFailed(EPIPE)` instead of the message. Both `reject_connection`
-            // and `REJECTED_PEER_ERROR` are explicit that the reply is
-            // best-effort and must never be depended on — so this row does not
-            // depend on it. It claims only what is certain in both cases: a
-            // helper answered, and the gate could not be read.
-            Err(_) => GateReport::Unreadable,
+            Err(e) => match gate_report_for_error(&e) {
+                Some(report) => report,
+                None => return,
+            },
         };
 
         self.checks.push(gate_check(&reported, invoking_uid()));
@@ -1511,6 +1500,36 @@ fn gate_source_label(source: Option<GateSource>) -> &'static str {
             GateSource::RefusedRootLibDir | GateSource::UnreadableLibDir | GateSource::Unprivileged,
         )
         | None => "source unknown",
+    }
+}
+
+/// What a failed `status` probe on the system socket says about the gate.
+///
+/// `None` means stay silent: nothing is listening, which the socket row above
+/// already reports, and a helper that is down has no gate to report.
+///
+/// Everything else becomes [`GateReport::Unreadable`] — something answered, and
+/// the gate could not be read. Two distinct routes land there and neither may be
+/// swallowed:
+///
+/// * `SendFailed`/`ReadFailed`, which is **the refusal arriving without its
+///   message**. `reject_connection` writes and drops the stream *without reading
+///   the request*, so when that close wins the race against our own write we get
+///   `EPIPE` rather than the text. Both `reject_connection` and
+///   `REJECTED_PEER_ERROR` are explicit that the reply is best-effort and must
+///   never be depended on, so this row does not depend on it.
+/// * `ConnectionFailed` **carrying `TimedOut`**, which is not a connection
+///   failure at all: `HelperClient::try_connect` synthesises it when its own 3s
+///   status probe expires against a helper that accepted the connection and then
+///   wedged. Reading that as "nothing is listening" is how the row disappeared
+///   for a helper that is running — the exact failure this whole arm exists to
+///   prevent, arriving through the more likely door.
+fn gate_report_for_error(error: &veld_core::helper::HelperError) -> Option<GateReport> {
+    match error {
+        veld_core::helper::HelperError::ConnectionFailed { source, .. } => {
+            (source.kind() == std::io::ErrorKind::TimedOut).then_some(GateReport::Unreadable)
+        }
+        _ => Some(GateReport::Unreadable),
     }
 }
 
@@ -2707,6 +2726,61 @@ mod tests {
         );
         assert!(c.pass);
         assert!(c.label.contains("source unknown"));
+    }
+
+    /// Which probe failures make the gate row appear, and which make it stay
+    /// silent.
+    ///
+    /// The trap this pins: `HelperClient::try_connect` wraps its own status
+    /// probe in a 3s timeout and reports the expiry as
+    /// `ConnectionFailed { source: TimedOut }` — a *helper that is up and
+    /// wedged*, wearing the error name of one that is absent. Reading the
+    /// variant alone made the row vanish for a running helper, which is the
+    /// failure the `Unreadable` state was introduced to prevent, arriving
+    /// through the likelier door.
+    #[test]
+    fn only_an_absent_helper_silences_the_gate_row() {
+        use super::{GateReport, gate_report_for_error};
+        use std::io::{Error, ErrorKind};
+        use veld_core::helper::HelperError;
+
+        let connection_failed = |kind: ErrorKind| HelperError::ConnectionFailed {
+            path: std::path::PathBuf::from("/var/run/veld-helper.sock"),
+            source: Error::new(kind, "test"),
+        };
+
+        // Nothing is listening: the socket row already says so.
+        assert!(gate_report_for_error(&connection_failed(ErrorKind::NotFound)).is_none());
+        assert!(gate_report_for_error(&connection_failed(ErrorKind::ConnectionRefused)).is_none());
+
+        // Up, but wedged — `try_connect`'s synthesised timeout. Must NOT be
+        // mistaken for absent.
+        assert!(matches!(
+            gate_report_for_error(&connection_failed(ErrorKind::TimedOut)),
+            Some(GateReport::Unreadable)
+        ));
+
+        // The refusal arriving without its best-effort message.
+        assert!(matches!(
+            gate_report_for_error(&HelperError::SendFailed(Error::new(
+                ErrorKind::BrokenPipe,
+                "test"
+            ))),
+            Some(GateReport::Unreadable)
+        ));
+        assert!(matches!(
+            gate_report_for_error(&HelperError::ReadFailed(Error::new(
+                ErrorKind::UnexpectedEof,
+                "test"
+            ))),
+            Some(GateReport::Unreadable)
+        ));
+
+        // A helper that answered with something unexpected is still a helper.
+        assert!(matches!(
+            gate_report_for_error(&HelperError::CommandError("unknown command".into())),
+            Some(GateReport::Unreadable)
+        ));
     }
 
     /// No failing gate row may hand a reader a remedy without saying it might
