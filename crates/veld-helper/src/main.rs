@@ -777,6 +777,55 @@ mod tests {
         );
     }
 
+    /// The refusal a gated socket writes must reach `veld doctor` as the error
+    /// it keys off — end to end, through the real client.
+    ///
+    /// Two halves already had tests and the seam between them had none:
+    /// `a_refused_peer_gets_the_same_bytes_it_always_did` pins what the helper
+    /// writes, and `gate_check`'s tests cover what the row does with a refusal,
+    /// but nothing asserted that `HelperClient` turns the first into the second.
+    /// A change to `HelperError`'s variants, or to `send_inner`'s `ok: false`
+    /// handling, would make the doctor branch dead code with every other test
+    /// still green.
+    #[tokio::test]
+    async fn a_refused_peer_reaches_the_client_as_the_error_doctor_matches_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("helper.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+
+        // Stand in for the accept loop's gate: refuse without reading, exactly
+        // as `reject_connection` does.
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                use tokio::io::AsyncWriteExt;
+                let _ = stream.write_all(super::rejection_bytes().as_bytes()).await;
+            }
+        });
+
+        let err = veld_core::helper::HelperClient::connect_to(&socket)
+            .await
+            .err()
+            .expect("a refused peer must not connect successfully");
+
+        match err {
+            veld_core::helper::HelperError::CommandError(message) => assert!(
+                message.contains(veld_core::helper_gate::REJECTED_PEER_ERROR),
+                "doctor matches this error's text; got {message:?}"
+            ),
+            // The write can still lose the race against the client's own — which
+            // is why `veld doctor` has an `Unreadable` arm and does not depend on
+            // this message. Anything else means the mapping changed.
+            other => assert!(
+                matches!(
+                    other,
+                    veld_core::helper::HelperError::SendFailed(_)
+                        | veld_core::helper::HelperError::ReadFailed(_)
+                ),
+                "unexpected error kind for a refused peer: {other:?}"
+            ),
+        }
+    }
+
     /// `is_system_socket` is the switch deciding whether a root helper derives a
     /// gate at all, so the real socket paths must land on the right side of it —
     /// including on Linux, where the user socket must not be mistaken for a

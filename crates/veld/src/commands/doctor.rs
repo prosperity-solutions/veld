@@ -498,12 +498,24 @@ impl Diagnostics {
             {
                 GateReport::Refused
             }
-            Err(_) => return, // helper down — already reported by the socket check
+            // Nothing is listening. The socket row above already says so, and a
+            // helper that is down has no gate to report.
+            Err(veld_core::helper::HelperError::ConnectionFailed { .. }) => return,
+            // Something accepted the connection and then the exchange broke.
+            //
+            // This is the refusal above arriving by its other route, and the
+            // reason this arm exists at all: `reject_connection` writes its
+            // refusal and drops the stream **without reading the request**, so
+            // if that close wins the race against our own write we get
+            // `SendFailed(EPIPE)` instead of the message. Both `reject_connection`
+            // and `REJECTED_PEER_ERROR` are explicit that the reply is
+            // best-effort and must never be depended on — so this row does not
+            // depend on it. It claims only what is certain in both cases: a
+            // helper answered, and the gate could not be read.
+            Err(_) => GateReport::Unreadable,
         };
 
-        if let Some(check) = gate_check(&reported, invoking_uid()) {
-            self.checks.push(check);
-        }
+        self.checks.push(gate_check(&reported, invoking_uid()));
     }
 
     async fn gather_checks(&mut self) {
@@ -1527,8 +1539,12 @@ const NOT_YOUR_INSTALL: &str = " If this machine's privileged veld belongs to an
 /// arrives as a connection error, not as data — travels the same path as every
 /// other outcome and cannot be forgotten by a future branch.
 enum GateReport {
-    /// The gate rejected this caller before it could ask anything.
+    /// The gate rejected this caller before it could ask anything, and said so.
     Refused,
+    /// Something answered on the system socket but the exchange did not
+    /// complete. Indistinguishable from [`Self::Refused`] arriving without its
+    /// (deliberately best-effort) message, so the row must not assert either.
+    Unreadable,
     /// The helper's `status` payload.
     Status(serde_json::Value),
 }
@@ -1542,15 +1558,17 @@ enum GateReport {
 /// than a crash — which no amount of running `veld doctor` on a healthy machine
 /// would reveal.
 ///
-/// `None` means "say nothing", reserved for a report this build cannot make any
-/// honest statement about.
-fn gate_check(report: &GateReport, invoking: Option<u64>) -> Option<Check> {
+/// Always produces a row: by the time a [`GateReport`] exists, the helper has
+/// said something, and every something has an honest rendering. The decision to
+/// stay silent belongs to the caller, which makes it before it has a report at
+/// all — see [`Diagnostics::check_helper_uid_gate`].
+fn gate_check(report: &GateReport, invoking: Option<u64>) -> Check {
     let data = match report {
         GateReport::Refused => {
             let me = invoking
                 .map(|u| format!("uid {u}"))
                 .unwrap_or_else(|| "this user".into());
-            return Some(Check {
+            return Check {
                 pass: false,
                 label: format!(
                     "Helper socket is gated to a DIFFERENT uid — it refused {me}, so no \
@@ -1562,7 +1580,19 @@ fn gate_check(report: &GateReport, invoking: Option<u64>) -> Option<Check> {
                      owned by another account (a restored backup, or a renumbered user); \
                      `veld setup privileged` writes the correct uid explicitly."
                 ),
-            });
+            };
+        }
+        GateReport::Unreadable => {
+            return Check {
+                pass: false,
+                label: format!(
+                    "Helper socket uid gate cannot be confirmed — something is listening on \
+                     the privileged helper's socket but the check did not complete. If the \
+                     gate refused this connection, no `veld` command of yours can drive that \
+                     helper; run `veld doctor` again to tell a refusal from a restart.\
+                     {NOT_YOUR_INSTALL}"
+                ),
+            };
         }
         GateReport::Status(data) => data,
     };
@@ -1572,13 +1602,13 @@ fn gate_check(report: &GateReport, invoking: Option<u64>) -> Option<Check> {
     // `--allow-uid` its plist carries, so it is "cannot tell", never "not
     // gated". `Null` is a current helper reporting no gate. A number is a gate.
     let Some(reported) = data.get(veld_core::helper_gate::ALLOW_UID_FIELD) else {
-        return Some(Check {
+        return Check {
             pass: false,
             label: format!(
                 "Helper socket uid gate cannot be confirmed — {}{NOT_YOUR_INSTALL}",
                 unreportable_gate_reason()
             ),
-        });
+        };
     };
     let source = data
         .get(veld_core::helper_gate::ALLOW_UID_SOURCE_FIELD)
@@ -1591,7 +1621,7 @@ fn gate_check(report: &GateReport, invoking: Option<u64>) -> Option<Check> {
     // established that "cannot read" must never become the definite claim that
     // the socket is open. `as_u64()` alone would collapse the two.
     if !reported.is_null() && reported.as_u64().is_none() {
-        return Some(Check {
+        return Check {
             pass: false,
             label: format!(
                 "Helper socket uid gate cannot be confirmed — the helper reported `{}` as its \
@@ -1599,10 +1629,10 @@ fn gate_check(report: &GateReport, invoking: Option<u64>) -> Option<Check> {
                  the CLI and the helper match.{NOT_YOUR_INSTALL}",
                 veld_core::helper_gate::ALLOW_UID_FIELD
             ),
-        });
+        };
     }
 
-    Some(match reported.as_u64() {
+    match reported.as_u64() {
         // Gated to root only. Reachable solely from a hand-written
         // `--allow-uid 0`, which the helper honours as the deliberate
         // instruction it is — but it means no `veld` command can drive the
@@ -1644,7 +1674,7 @@ fn gate_check(report: &GateReport, invoking: Option<u64>) -> Option<Check> {
                 ungated_reason(source)
             ),
         },
-    })
+    }
 }
 
 /// Whether a helper gated to `reported` locks out the user running this CLI.
@@ -2566,10 +2596,6 @@ mod tests {
         );
     }
 
-    /// Every way the helper can report "no gate" must produce a remedy the user
-    /// can actually run. A red row with no exit is a row people learn to skip —
-    /// and this particular row is the only place an exposed root socket shows up
-    /// at all.
     /// Every outcome of the gate row, decided without a socket.
     ///
     /// The row is the only place an exposed root socket is reported anywhere, and
@@ -2583,7 +2609,7 @@ mod tests {
         use super::{GateReport, gate_check};
 
         let status = |v: serde_json::Value| GateReport::Status(v);
-        let row = |report: &GateReport, me: Option<u64>| gate_check(report, me).unwrap();
+        let row = gate_check;
 
         // Gated to the reader: the only green outcome there is.
         let c = row(
@@ -2664,6 +2690,15 @@ mod tests {
         let c = row(&GateReport::Refused, None);
         assert!(c.label.contains("refused this user"));
 
+        // A refusal whose (best-effort) message lost the race arrives as a
+        // broken exchange. It must not assert a refusal it cannot prove, and it
+        // must not stay silent either — silence is how the one failure mode this
+        // gate introduces would go unreported.
+        let c = row(&GateReport::Unreadable, Some(501));
+        assert!(!c.pass);
+        assert!(c.label.contains("cannot be confirmed"));
+        assert!(!c.label.contains("NOT gated"));
+
         // A source only a newer helper knows: gated is still gated, and the
         // provenance simply goes unnamed rather than being invented.
         let c = row(
@@ -2692,6 +2727,7 @@ mod tests {
 
         let reports = [
             GateReport::Refused,
+            GateReport::Unreadable,
             GateReport::Status(serde_json::json!({ "version": "16.58.1" })),
             GateReport::Status(serde_json::json!({ "allow_uid": "501" })),
             GateReport::Status(serde_json::json!({ "allow_uid": 0 })),
@@ -2704,9 +2740,7 @@ mod tests {
 
         for report in &reports {
             for me in [Some(501u64), Some(0), None] {
-                let Some(check) = gate_check(report, me) else {
-                    continue;
-                };
+                let check = gate_check(report, me);
                 if check.pass {
                     continue;
                 }
