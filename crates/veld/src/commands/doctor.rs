@@ -481,9 +481,9 @@ impl Diagnostics {
     /// refusal row names both readings and tells the second one to do nothing.
     async fn check_helper_uid_gate(&mut self) {
         let socket = veld_core::helper::system_socket_path();
-        let data = match veld_core::helper::HelperClient::connect_to(&socket).await {
+        let reported = match veld_core::helper::HelperClient::connect_to(&socket).await {
             Ok(client) => match client.status().await.ok().and_then(|r| r.data) {
-                Some(data) => data,
+                Some(data) => GateReport::Status(data),
                 None => return,
             },
             // The gate refused *us*. `connect_to` probes with a `status`, and a
@@ -496,107 +496,14 @@ impl Diagnostics {
             Err(veld_core::helper::HelperError::CommandError(e))
                 if e.contains(veld_core::helper_gate::REJECTED_PEER_ERROR) =>
             {
-                let me = invoking_uid()
-                    .map(|u| format!("uid {u}"))
-                    .unwrap_or_else(|| "this user".into());
-                self.checks.push(Check {
-                    pass: false,
-                    label: format!(
-                        "Helper socket is gated to a DIFFERENT uid — it refused {me}, so no \
-                         `veld` command of yours can drive it. If this machine's privileged \
-                         veld belongs to another account, that is working as intended and \
-                         there is nothing for you to fix here — do NOT run `veld setup \
-                         privileged`, which would repoint the system service at your install \
-                         and lock the owner out. If the install IS yours, its directory is \
-                         owned by another account (a restored backup, or a renumbered user); \
-                         `veld setup privileged` writes the correct uid explicitly."
-                    ),
-                });
-                return;
+                GateReport::Refused
             }
             Err(_) => return, // helper down — already reported by the socket check
         };
 
-        // Three states, and conflating any two of them tells somebody something
-        // false. `None` is the field being ABSENT — a helper predating #337,
-        // which may still be gated by an `--allow-uid` its plist carries, so it
-        // is "cannot tell", never "not gated". `Some(Null)` is a current helper
-        // reporting no gate. `Some(n)` is a gate.
-        let Some(reported) = data.get(veld_core::helper_gate::ALLOW_UID_FIELD) else {
-            self.checks.push(Check {
-                pass: false,
-                label: format!(
-                    "Helper socket uid gate cannot be confirmed — {}",
-                    unreportable_gate_reason()
-                ),
-            });
-            return;
-        };
-        let source = data
-            .get(veld_core::helper_gate::ALLOW_UID_SOURCE_FIELD)
-            .and_then(|v| v.as_str())
-            .and_then(GateSource::from_wire);
-
-        // `null` is the only shape that means "ungated". Anything else that is
-        // not a number — a uid emitted as a string by some future helper, say —
-        // is a response this build cannot read, and the field-absent case above
-        // already established that "cannot read" must never become the definite
-        // claim that the socket is open. `as_u64()` alone would collapse the two.
-        if !reported.is_null() && reported.as_u64().is_none() {
-            self.checks.push(Check {
-                pass: false,
-                label: format!(
-                    "Helper socket uid gate cannot be confirmed — the helper reported \
-                     `{}` as its allowed uid, which this version of `veld` cannot read. \
-                     Run `veld update` so the CLI and the helper match.",
-                    veld_core::helper_gate::ALLOW_UID_FIELD
-                ),
-            });
-            return;
+        if let Some(check) = gate_check(&reported, invoking_uid()) {
+            self.checks.push(check);
         }
-
-        let check = match reported.as_u64() {
-            // Gated to root only. Reachable solely from a hand-written
-            // `--allow-uid 0`, which the helper honours as the deliberate
-            // instruction it is — but it means no `veld` command can drive the
-            // helper, and only a root reader ever gets far enough to see this.
-            Some(0) => Check {
-                pass: false,
-                label: "Helper socket gated to uid 0 — that admits only root, so the `veld` CLI \
-                        cannot drive its own helper. Run `veld setup privileged` to write the \
-                        installing user's uid."
-                    .into(),
-            },
-            // Gated, but not to the user reading this. Only reachable as root
-            // (every other uid is refused before it can ask), which is exactly
-            // when it is worth saying: `sudo veld doctor` is where somebody
-            // investigating a locked-out CLI ends up.
-            Some(uid) if gate_locks_out(uid, invoking_uid()) => Check {
-                pass: false,
-                label: format!(
-                    "Helper socket gated to uid {uid}, but you are uid {} — your `veld` commands \
-                     cannot drive it. Run `veld setup privileged` to write the correct uid.",
-                    invoking_uid().unwrap_or(0)
-                ),
-            },
-            Some(uid) => Check {
-                pass: true,
-                label: format!(
-                    "Helper socket gated to uid {uid} ({})",
-                    gate_source_label(source)
-                ),
-            },
-            None => Check {
-                pass: false,
-                label: format!(
-                    "Helper socket NOT gated to a uid — any local process can drive the root \
-                     helper, including `shutdown`, which stops Caddy and drops every live \
-                     URL. {}",
-                    ungated_reason(source)
-                ),
-            },
-        };
-        self.checks.push(check);
     }
 
     async fn gather_checks(&mut self) {
@@ -1595,6 +1502,129 @@ fn gate_source_label(source: Option<GateSource>) -> &'static str {
     }
 }
 
+/// What the privileged helper told `veld doctor` about its gate.
+///
+/// A type rather than a bare `Option<Value>` so the *refused* answer — which
+/// arrives as a connection error, not as data — travels the same path as every
+/// other outcome and cannot be forgotten by a future branch.
+enum GateReport {
+    /// The gate rejected this caller before it could ask anything.
+    Refused,
+    /// The helper's `status` payload.
+    Status(serde_json::Value),
+}
+
+/// The gate row, decided purely from what the helper reported.
+///
+/// Split from [`Diagnostics::check_helper_uid_gate`] so every outcome is
+/// reachable in a test without a root helper and a socket. That matters more
+/// here than in most rows: this one is the only place an exposed root socket is
+/// reported at all, and its failure mode is a *confident wrong sentence* rather
+/// than a crash — which no amount of running `veld doctor` on a healthy machine
+/// would reveal.
+///
+/// `None` means "say nothing", reserved for a report this build cannot make any
+/// honest statement about.
+fn gate_check(report: &GateReport, invoking: Option<u64>) -> Option<Check> {
+    let data = match report {
+        GateReport::Refused => {
+            let me = invoking
+                .map(|u| format!("uid {u}"))
+                .unwrap_or_else(|| "this user".into());
+            return Some(Check {
+                pass: false,
+                label: format!(
+                    "Helper socket is gated to a DIFFERENT uid — it refused {me}, so no \
+                     `veld` command of yours can drive it. If this machine's privileged \
+                     veld belongs to another account, that is working as intended and \
+                     there is nothing for you to fix here — do NOT run `veld setup \
+                     privileged`, which would repoint the system service at your install \
+                     and lock the owner out. If the install IS yours, its directory is \
+                     owned by another account (a restored backup, or a renumbered user); \
+                     `veld setup privileged` writes the correct uid explicitly."
+                ),
+            });
+        }
+        GateReport::Status(data) => data,
+    };
+
+    // Three states, and conflating any two of them tells somebody something
+    // false. Absent is a helper predating #337, which may still be gated by an
+    // `--allow-uid` its plist carries, so it is "cannot tell", never "not
+    // gated". `Null` is a current helper reporting no gate. A number is a gate.
+    let Some(reported) = data.get(veld_core::helper_gate::ALLOW_UID_FIELD) else {
+        return Some(Check {
+            pass: false,
+            label: format!(
+                "Helper socket uid gate cannot be confirmed — {}",
+                unreportable_gate_reason()
+            ),
+        });
+    };
+    let source = data
+        .get(veld_core::helper_gate::ALLOW_UID_SOURCE_FIELD)
+        .and_then(|v| v.as_str())
+        .and_then(GateSource::from_wire);
+
+    // `null` is the only shape that means "ungated". Anything else that is not a
+    // number — a uid emitted as a string by some future helper, say — is a
+    // response this build cannot read, and the field-absent case above already
+    // established that "cannot read" must never become the definite claim that
+    // the socket is open. `as_u64()` alone would collapse the two.
+    if !reported.is_null() && reported.as_u64().is_none() {
+        return Some(Check {
+            pass: false,
+            label: format!(
+                "Helper socket uid gate cannot be confirmed — the helper reported `{}` as its \
+                 allowed uid, which this version of `veld` cannot read. Run `veld update` so \
+                 the CLI and the helper match.",
+                veld_core::helper_gate::ALLOW_UID_FIELD
+            ),
+        });
+    }
+
+    Some(match reported.as_u64() {
+        // Gated to root only. Reachable solely from a hand-written
+        // `--allow-uid 0`, which the helper honours as the deliberate
+        // instruction it is — but it means no `veld` command can drive the
+        // helper, and only a root reader ever gets far enough to see this.
+        Some(0) => Check {
+            pass: false,
+            label: "Helper socket gated to uid 0 — that admits only root, so the `veld` CLI \
+                    cannot drive its own helper. Run `veld setup privileged` to write the \
+                    installing user's uid."
+                .into(),
+        },
+        // Gated, but not to the user reading this. Only reachable as root
+        // (every other uid is refused before it can ask), which is exactly
+        // when it is worth saying: `sudo veld doctor` is where somebody
+        // investigating a locked-out CLI ends up.
+        Some(uid) if gate_locks_out(uid, invoking) => Check {
+            pass: false,
+            label: format!(
+                "Helper socket gated to uid {uid}, but you are uid {} — your `veld` commands \
+                 cannot drive it. Run `veld setup privileged` to write the correct uid.",
+                invoking.unwrap_or(0)
+            ),
+        },
+        Some(uid) => Check {
+            pass: true,
+            label: format!(
+                "Helper socket gated to uid {uid} ({})",
+                gate_source_label(source)
+            ),
+        },
+        None => Check {
+            pass: false,
+            label: format!(
+                "Helper socket NOT gated to a uid — any local process can drive the root \
+                 helper, including `shutdown`, which stops Caddy and drops every live URL. {}",
+                ungated_reason(source)
+            ),
+        },
+    })
+}
+
 /// Whether a helper gated to `reported` locks out the user running this CLI.
 ///
 /// A free function with its own test because the `invoking == Some(0)` escape is
@@ -2518,6 +2548,110 @@ mod tests {
     /// can actually run. A red row with no exit is a row people learn to skip —
     /// and this particular row is the only place an exposed root socket shows up
     /// at all.
+    /// Every outcome of the gate row, decided without a socket.
+    ///
+    /// The row is the only place an exposed root socket is reported anywhere, and
+    /// its failure mode is a confident wrong sentence rather than a crash — so
+    /// running `veld doctor` on a healthy machine proves nothing about the seven
+    /// other branches. Each assertion below pins the one thing that must not
+    /// drift: whether the row passes, and whether it makes a claim it cannot
+    /// support.
+    #[test]
+    fn the_gate_row_states_only_what_the_helper_actually_reported() {
+        use super::{GateReport, gate_check};
+
+        let status = |v: serde_json::Value| GateReport::Status(v);
+        let row = |report: &GateReport, me: Option<u64>| gate_check(report, me).unwrap();
+
+        // Gated to the reader: the only green outcome there is.
+        let c = row(
+            &status(serde_json::json!({ "allow_uid": 501, "allow_uid_source": "lib-dir-owner" })),
+            Some(501),
+        );
+        assert!(c.pass);
+        assert!(c.label.contains("gated to uid 501"));
+        assert!(
+            c.label
+                .contains("derived from the install directory's owner")
+        );
+
+        // Explicitly ungated: the state #337 exists to remove. A definite claim
+        // is correct HERE and nowhere else.
+        let c = row(
+            &status(serde_json::json!({
+                "allow_uid": serde_json::Value::Null,
+                "allow_uid_source": "refused-root-lib-dir",
+            })),
+            Some(501),
+        );
+        assert!(!c.pass);
+        assert!(c.label.contains("NOT gated"));
+        assert!(c.label.contains("root-owned"));
+
+        // Field absent — a helper predating the report. It may well be gated by
+        // its plist, so this must NOT read as an open socket.
+        let c = row(
+            &status(serde_json::json!({ "version": "16.58.1" })),
+            Some(501),
+        );
+        assert!(!c.pass);
+        assert!(!c.label.contains("NOT gated"));
+        assert!(c.label.contains("cannot be confirmed"));
+        assert!(c.label.contains("`veld update`"));
+
+        // A shape this build cannot read is also "cannot confirm", never "open".
+        let c = row(
+            &status(serde_json::json!({ "allow_uid": "501", "allow_uid_source": "flag" })),
+            Some(501),
+        );
+        assert!(!c.pass);
+        assert!(!c.label.contains("NOT gated"));
+        assert!(c.label.contains("cannot be confirmed"));
+
+        // Gated to root only: honoured, but the CLI cannot drive it.
+        let c = row(
+            &status(serde_json::json!({ "allow_uid": 0, "allow_uid_source": "flag" })),
+            Some(0),
+        );
+        assert!(
+            !c.pass,
+            "uid 0 admits only root and must never read as green"
+        );
+        assert!(c.label.contains("uid 0"));
+
+        // Gated to somebody else. Only a root reader gets this far.
+        let c = row(
+            &status(serde_json::json!({ "allow_uid": 999, "allow_uid_source": "flag" })),
+            Some(501),
+        );
+        assert!(!c.pass);
+        assert!(c.label.contains("gated to uid 999"));
+        assert!(c.label.contains("you are uid 501"));
+
+        // Refused outright — the one failure mode deriving the uid introduces.
+        // It must not send a shared machine's non-owner to rewrite the service.
+        let c = row(&GateReport::Refused, Some(501));
+        assert!(!c.pass);
+        assert!(c.label.contains("refused uid 501"));
+        assert!(
+            c.label.contains("do NOT run `veld setup privileged`"),
+            "a reader who is not the install's owner must be told to leave it alone"
+        );
+
+        // An unresolvable invoking uid still produces a usable sentence.
+        let c = row(&GateReport::Refused, None);
+        assert!(c.label.contains("refused this user"));
+
+        // A source only a newer helper knows: gated is still gated, and the
+        // provenance simply goes unnamed rather than being invented.
+        let c = row(
+            &status(serde_json::json!({ "allow_uid": 501, "allow_uid_source": "invented-later" })),
+            Some(501),
+        );
+        assert!(c.pass);
+        assert!(c.label.contains("source unknown"));
+    }
+
     /// The uid-match rule, isolated from the socket call so the `root` escape
     /// cannot be "simplified" away without a red test.
     ///
