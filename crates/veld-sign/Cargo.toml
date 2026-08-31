@@ -13,3 +13,20 @@ path = "src/main.rs"
 
 [dependencies]
 ed25519-dalek = { workspace = true, features = ["pkcs8", "pem"] }
+
+# `tests/smoke.rs` drives the built binary as a subprocess, so it links
+# against nothing in this crate and needs the key types in its own right:
+# it generates a throwaway key, encodes it as PKCS#8/SPKI PEM, and verifies
+# the detached signature the tool wrote.
+[dev-dependencies]
+ed25519-dalek = { workspace = true, features = ["pkcs8", "pem"] }
+# The smoke test verifies with the SAME code the root helper's fail-closed
+# relaunch gate uses, rather than a second hand-rolled ed25519 check. The `.sig`
+# path rule and the accepted signature shape are a cross-crate contract with no
+# compiler tie: veld-sign writes, veld-core reads, and drift between them ships a
+# helper that refuses to relaunch. This dependency is what makes that drift fail
+# a PR instead of a release.
+veld-core = { path = "../veld-core" }
+# Only to build the "right label, body is not PKCS#8" fixture — the shape that
+# used to leak a key byte into the error message.
+base64 = { workspace = true }
