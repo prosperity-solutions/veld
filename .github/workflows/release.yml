@@ -174,7 +174,25 @@ jobs:
           # Ship license + third-party attribution alongside the binaries
           # (MIT/Apache-2.0 etc. require the notices travel with the code).
           cp LICENSE THIRD-PARTY-LICENSES.md dist/
+          # Sign the helper (issue #261) so a running root helper refuses to
+          # relaunch onto a swapped, unsigned binary. On macOS the binary MUST
+          # be ad-hoc signed FIRST (mimicking install.sh's own `codesign --force
+          # --sign -`) so that install.sh's later re-sign is a byte-idempotent
+          # no-op and the .sig still matches the on-disk bytes. The ad-hoc
+          # identifier is derived from the file's basename, so both signings must
+          # see it named `veld-helper` — hence signing dist/, not target/. On
+          # Linux there is no re-sign, so we ed25519-sign the raw build.
+          if [ "${{ matrix.goos }}" = "darwin" ]; then
+            codesign --force --sign - dist/veld-helper
+          fi
+          # veld-sign is a CI tool that must RUN on the runner, so it is built
+          # for the host — never for ${{ matrix.target }}, whose binary is
+          # cross-compiled (aarch64 on an x86_64 runner) and cannot execute here.
+          cargo build --release -p veld-sign
+          ./target/release/veld-sign --key-env SIGNING_PRIVATE_KEY dist/veld-helper
           tar -czf veld-${{ needs.plan.outputs.new_release_version }}-${{ matrix.suffix }}.tar.gz -C dist .
+        env:
+          SIGNING_PRIVATE_KEY: ${{ secrets.SIGNING_PRIVATE_KEY }}
 
       # Gateway: separate per-arch tarball, consumed by the docker-gateway job
       # and attached to the release for operators who run it outside Docker.

@@ -557,6 +557,35 @@ impl Diagnostics {
                 .await;
         }
 
+        // The privileged helper's fail-closed signing gate (#261) refuses to
+        // relaunch onto an on-disk binary without a valid org .sig — so a
+        // signature mismatch means the next `veld update` will sit on the old
+        // version. Check the SERVICE-pinned binary (the one the gate actually
+        // verifies via `current_exe()`), not a lib-dir guess: on a machine
+        // carrying both ~/.local and /usr/local, the guess would accuse a file
+        // the helper never runs.
+        if mode.as_deref() == Some("privileged") {
+            let path = veld_core::setup::privileged_helper_program()
+                .await
+                .unwrap_or_else(|| std::path::PathBuf::from(self.helper_path.clone()));
+            match veld_core::signing::relaunch_guard(&path) {
+                None => self.checks.push(Check {
+                    pass: true,
+                    label: format!("Helper binary signature OK ({})", tilde_path(&path)),
+                }),
+                Some(reason) => self.checks.push(Check {
+                    pass: false,
+                    label: format!(
+                        "{reason} — the running helper is still the genuine one, but it will \
+                         refuse to update onto this file. Re-deploy a signed helper with \
+                         `veld update` (or `veld setup privileged`). Do NOT force a restart: \
+                         `launchctl kill`/`systemctl restart` would run this unverified binary \
+                         as root, which is exactly what the gate is refusing"
+                    ),
+                }),
+            }
+        }
+
         // Determine HTTPS port for later checks. When the helper is down we
         // can't ask it, so fall back based on the configured mode — privileged
         // serves on 443; probing 18443 there checks a port nothing should be

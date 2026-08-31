@@ -22,6 +22,12 @@ pub struct State {
     /// is what stops the command being served at all.
     sleep: Option<SleepManager>,
     shutdown_tx: tokio::sync::watch::Sender<bool>,
+    /// Whether this helper is the privileged system daemon (root, on the
+    /// system socket). Only *this* one needs the swap-relaunch signing gate:
+    /// relaunching an unprivileged helper executes it as the user, not root, so
+    /// a signature requirement there would only add spurious refusals for
+    /// unsigned dev builds.
+    privileged: bool,
 }
 
 impl State {
@@ -31,7 +37,8 @@ impl State {
         caddy_bin: Option<std::path::PathBuf>,
         shutdown_tx: tokio::sync::watch::Sender<bool>,
         // Whether this helper runs as root on the system socket. Only such a
-        // helper may take the sleep setting — see the `sleep` field.
+        // helper may take the sleep setting — see the `sleep` field — or is
+        // bound by the swap-relaunch signing gate (`crate::signing`).
         privileged: bool,
     ) -> Self {
         Self {
@@ -45,6 +52,7 @@ impl State {
             // covers that case, so there is nothing for this to add there.
             sleep: (privileged && cfg!(target_os = "macos")).then(SleepManager::new),
             shutdown_tx,
+            privileged,
         }
     }
 
@@ -143,7 +151,7 @@ impl State {
     /// the watcher ([`crate::restart_blocker`]), so neither path can exit into a
     /// hole the other refuses.
     async fn handle_restart(&self) -> Handled {
-        if let Some(reason) = crate::restart_blocker().await {
+        if let Some(reason) = crate::restart_blocker(self.privileged).await {
             warn!(reason, "refusing restart request");
             return Handled::reply(Response::err(reason));
         }
@@ -415,6 +423,34 @@ impl State {
     /// two exiting commands on the old path would also have been a trap for whoever
     /// adds the third.
     async fn handle_shutdown(&self) -> Handled {
+        // Exiting relaunches us (KeepAlive relaunches onto the on-disk binary),
+        // so refuse to exit onto a swapped, unsigned binary — the same fail-closed
+        // signing gate as the watcher and `restart` (#261). Only the privileged
+        // (system) helper needs this: it relaunches as root, where an
+        // unprivileged helper relaunches as its own (unsigned) user. A legit
+        // teardown of the system helper goes through `launchctl bootout`
+        // (SIGTERM), not this command, so refusing here never blocks uninstall.
+        if self.privileged {
+            let exe = match std::env::current_exe() {
+                Ok(e) => e,
+                Err(e) => {
+                    warn!(
+                        error = %e,
+                        "refusing shutdown: cannot resolve own executable to verify it"
+                    );
+                    return Handled::reply(Response::err(
+                        "cannot resolve own executable to verify it before exiting",
+                    ));
+                }
+            };
+            if let Some(reason) = crate::signing::relaunch_guard(&exe) {
+                warn!(
+                    reason,
+                    "refusing shutdown: exiting would relaunch a tampered binary"
+                );
+                return Handled::reply(Response::err(reason));
+            }
+        }
         info!("shutdown command received, stopping caddy and signalling exit");
         if let Err(e) = self.caddy.stop().await {
             warn!("error stopping caddy during shutdown: {e:#}");

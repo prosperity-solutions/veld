@@ -868,6 +868,12 @@ async fn install_helper_inner(
 ) -> Result<StepResult, anyhow::Error> {
     let socket = crate::helper::system_socket_path();
 
+    // The privileged helper runs as root, but its socket is world-writable so
+    // the unprivileged CLI (running as the installing user) can drive it. Pass
+    // that user's uid down as `--allow-uid` so the helper rejects every other
+    // peer — see the peer-credential gate in `veld-helper/src/main.rs`.
+    let allow_uid = resolve_real_uid()?;
+
     // Register as a system service. No silent direct-spawn fallback here: a
     // directly-spawned root helper has no service manager behind it, so it
     // dies permanently on the next binary update or reboot — and it can
@@ -876,8 +882,8 @@ async fn install_helper_inner(
     // `VELD_ALLOW_UNMANAGED_HELPER=1` restores the old fallback for
     // environments with no working service manager (e.g. containers).
     let service_result = match std::env::consts::OS {
-        "macos" => install_helper_macos(&veld_helper_bin, caddy_bin.as_deref()).await,
-        "linux" => install_helper_linux(&veld_helper_bin, caddy_bin.as_deref()).await,
+        "macos" => install_helper_macos(&veld_helper_bin, caddy_bin.as_deref(), allow_uid).await,
+        "linux" => install_helper_linux(&veld_helper_bin, caddy_bin.as_deref(), allow_uid).await,
         other => anyhow::bail!("unsupported OS: {other}"),
     };
     let allow_unmanaged = matches!(
@@ -893,6 +899,8 @@ async fn install_helper_inner(
             eprintln!("  Warning: service registration failed: {e:#}");
             eprintln!("  Starting unmanaged helper (VELD_ALLOW_UNMANAGED_HELPER=1).");
             let _child = std::process::Command::new(&veld_helper_bin)
+                .arg("--allow-uid")
+                .arg(allow_uid.to_string())
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
@@ -957,7 +965,28 @@ async fn install_helper_inner(
     )))
 }
 
-async fn install_helper_macos(bin: &Path, caddy_bin: Option<&Path>) -> Result<(), anyhow::Error> {
+/// The `<key>ProgramArguments</key>` array of the privileged helper's macOS
+/// plist: the binary path, the `--allow-uid` gate (the installing user's uid),
+/// and the optional `--caddy-bin`. Pure so the wiring can be pinned by a test.
+fn helper_plist_program_args(bin: &Path, caddy_bin: Option<&Path>, allow_uid: u32) -> String {
+    let mut program_args = format!(
+        "        <string>{}</string>\n        <string>--allow-uid</string>\n        <string>{allow_uid}</string>",
+        bin.display()
+    );
+    if let Some(caddy) = caddy_bin {
+        program_args.push_str(&format!(
+            "\n        <string>--caddy-bin</string>\n        <string>{}</string>",
+            caddy.display()
+        ));
+    }
+    program_args
+}
+
+async fn install_helper_macos(
+    bin: &Path,
+    caddy_bin: Option<&Path>,
+    allow_uid: u32,
+) -> Result<(), anyhow::Error> {
     let plist_path_buf = PathBuf::from(format!(
         "/Library/LaunchDaemons/{}",
         helper_plist_filename()
@@ -965,14 +994,9 @@ async fn install_helper_macos(bin: &Path, caddy_bin: Option<&Path>) -> Result<()
     let plist_path = plist_path_buf.as_path();
     let label = HELPER_LABEL_MACOS;
 
-    // Build ProgramArguments with optional --caddy-bin.
-    let mut program_args = format!("        <string>{}</string>", bin.display());
-    if let Some(caddy) = caddy_bin {
-        program_args.push_str(&format!(
-            "\n        <string>--caddy-bin</string>\n        <string>{}</string>",
-            caddy.display()
-        ));
-    }
+    // Build ProgramArguments with --allow-uid (the peer-credential gate's
+    // allowed uid) and optional --caddy-bin.
+    let program_args = helper_plist_program_args(bin, caddy_bin, allow_uid);
 
     // Log to a file next to the binary so the self-healing story (watchdog
     // restarts, Caddy recovery, pid adoption) is observable — launchd otherwise
@@ -1529,12 +1553,19 @@ pub fn parse_launchctl_pid(output: &str) -> Option<u32> {
     None
 }
 
-async fn install_helper_linux(bin: &Path, caddy_bin: Option<&Path>) -> Result<(), anyhow::Error> {
+async fn install_helper_linux(
+    bin: &Path,
+    caddy_bin: Option<&Path>,
+    allow_uid: u32,
+) -> Result<(), anyhow::Error> {
     let unit_path_buf = PathBuf::from(format!(
         "/etc/systemd/system/{HELPER_SERVICE_LINUX}.service"
     ));
     let unit_path = unit_path_buf.as_path();
-    let mut exec_start = bin.display().to_string();
+    // --allow-uid is the peer-credential gate's allowed uid: the helper runs
+    // as root but its socket is world-writable so the unprivileged CLI (the
+    // installing user) can drive it, and every other peer must be rejected.
+    let mut exec_start = format!("{} --allow-uid {allow_uid}", bin.display());
     if let Some(caddy) = caddy_bin {
         exec_start.push_str(&format!(" --caddy-bin {}", caddy.display()));
     }
@@ -2968,6 +2999,63 @@ fn resolve_real_user_home() -> Option<PathBuf> {
     dirs::home_dir()
 }
 
+/// The installing user's uid, for the privileged helper's `--allow-uid` gate.
+/// `SUDO_UID` when running under sudo (privileged setup re-execs through
+/// `sudo`, so the effective uid is root while the *installing* user is the one
+/// who will drive the helper), then `SUDO_USER`, else `id -u`. Cross-platform:
+/// privileged setup runs on both macOS and Linux.
+///
+/// Refuses to resolve to 0. The gate written into the plist decides who may
+/// drive the root helper, and the CLI that drives it runs as the *user*: a
+/// `--allow-uid 0` would lock every `veld` command out of its own helper. That
+/// happens when setup is run from a root shell (`sudo -i`), where the sudo
+/// variables are gone and `id -u` is legitimately 0 — indistinguishable from a
+/// real root install, so fail loudly with the fix rather than write a plist
+/// that silently bricks the CLI.
+fn resolve_real_uid() -> Result<u32, anyhow::Error> {
+    if let Ok(uid) = std::env::var("SUDO_UID") {
+        if !uid.is_empty() {
+            if let Ok(u) = uid.parse::<u32>() {
+                return Ok(u);
+            }
+        }
+    }
+    // A root shell entered via `sudo su`/`sudo -i` keeps SUDO_USER but drops
+    // SUDO_UID, so resolve the name before falling back to the effective uid.
+    if let Ok(user) = std::env::var("SUDO_USER") {
+        if !user.is_empty() {
+            if let Ok(out) = std::process::Command::new("id")
+                .args(["-u", &user])
+                .output()
+            {
+                if out.status.success() {
+                    if let Ok(u) = String::from_utf8_lossy(&out.stdout).trim().parse::<u32>() {
+                        if u != 0 {
+                            return Ok(u);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let out = std::process::Command::new("id")
+        .arg("-u")
+        .output()
+        .context("failed to run `id -u` to resolve the installing user's uid")?;
+    let uid = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let uid: u32 = uid
+        .parse()
+        .with_context(|| format!("could not parse the installing user's uid `{uid}`"))?;
+    if uid == 0 {
+        anyhow::bail!(
+            "could not tell which user is installing: running as root with no SUDO_UID/SUDO_USER \
+             (a root shell?). The privileged helper would then admit only root and the `veld` CLI \
+             could not drive it. Re-run as your own user and let it elevate: `veld setup privileged`"
+        );
+    }
+    Ok(uid)
+}
+
 /// Resolve the real (non-root) user when running under `sudo` on macOS.
 ///
 /// Returns `(username, uid_string, home_dir)`. When not running as root,
@@ -3284,10 +3372,10 @@ mod tests {
 
     use super::{
         INSTALL_SCRIPT_ATTEMPTS, download_install_script, first_existing_file, github_outage_hint,
-        init_lua_loads_veld_spoon, install_script_override_from, is_install_script_unavailable,
-        is_transient_status, linux_desktop_candidates, looks_like_install_script,
-        parse_launchctl_pid, parse_launchctl_program, parse_systemd_exec_start,
-        parse_systemd_main_pid, pids_running_from, remove_spoon_files,
+        helper_plist_program_args, init_lua_loads_veld_spoon, install_script_override_from,
+        is_install_script_unavailable, is_transient_status, linux_desktop_candidates,
+        looks_like_install_script, parse_launchctl_pid, parse_launchctl_program,
+        parse_systemd_exec_start, parse_systemd_main_pid, pids_running_from, remove_spoon_files,
     };
 
     /// Byte-for-byte what `raw.githubusercontent.com` served during the GitHub
@@ -3562,6 +3650,24 @@ mod tests {
         assert!(!is_install_script_unavailable(&anyhow::anyhow!(
             "install script exited with code 1"
         )));
+    }
+
+    /// The peer-credential gate's plist wiring.
+    #[test]
+    fn helper_plist_args_carry_allow_uid() {
+        let args = helper_plist_program_args(std::path::Path::new("/x/veld-helper"), None, 501);
+        assert!(args.contains("--allow-uid"));
+        assert!(args.contains("501"));
+        assert!(args.contains("/x/veld-helper"));
+        // A caddy bin is appended after, not replacing, the gate.
+        let with_caddy = helper_plist_program_args(
+            std::path::Path::new("/x/veld-helper"),
+            Some(std::path::Path::new("/x/caddy")),
+            501,
+        );
+        assert!(with_caddy.contains("--caddy-bin"));
+        assert!(with_caddy.contains("/x/caddy"));
+        assert!(with_caddy.contains("--allow-uid"));
     }
 
     /// This user, in the fixture below.
