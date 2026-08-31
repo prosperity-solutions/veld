@@ -151,7 +151,7 @@ impl State {
     /// the watcher ([`crate::restart_blocker`]), so neither path can exit into a
     /// hole the other refuses.
     async fn handle_restart(&self) -> Handled {
-        if let Some(reason) = crate::restart_blocker().await {
+        if let Some(reason) = crate::restart_blocker(self.privileged).await {
             warn!(reason, "refusing restart request");
             return Handled::reply(Response::err(reason));
         }

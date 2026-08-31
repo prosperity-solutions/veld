@@ -498,7 +498,9 @@ async fn watch_own_binary() {
                 // fail transiently (a bounded service query timing out, a write
                 // still in flight), and the binary still differs from baseline,
                 // so a later tick gets another chance to exit.
-                match restart_blocker().await {
+                // Spawned only for the system socket (see `main`), so this
+                // watcher is the privileged helper by construction.
+                match restart_blocker(true).await {
                     // Re-stat *after* the gate, not only before it. The gate
                     // takes real time (a service query plus an exec), and the
                     // write sequence this debounce exists for is cp + chmod +
@@ -542,7 +544,13 @@ async fn watch_own_binary() {
 /// Every check here is "refuse unless proven safe": a query that fails or times
 /// out blocks the exit, because staying on an old binary is recoverable and
 /// exiting into a hole is not.
-pub(crate) async fn restart_blocker() -> Option<String> {
+///
+/// `privileged` selects whether the org signing gate applies. It is the whole
+/// point for the system helper, which relaunches as root; an unprivileged
+/// helper relaunches as its own user, so requiring a signature there would buy
+/// no privilege boundary and would refuse `veld update` for anyone running a
+/// locally built (unsigned) helper.
+pub(crate) async fn restart_blocker(privileged: bool) -> Option<String> {
     if !service_manager_owns_us().await {
         return Some(
             "this helper is not managed by a service manager, so nothing would relaunch it".into(),
@@ -562,8 +570,10 @@ pub(crate) async fn restart_blocker() -> Option<String> {
     // signing gate from #261): relaunching onto a swapped, unsigned binary is
     // the #247 escalation. Shared by the watcher and the `restart` command so
     // neither can exit onto a binary the other refuses.
-    if let Some(reason) = signing::relaunch_guard(&exe) {
-        return Some(reason);
+    if privileged {
+        if let Some(reason) = signing::relaunch_guard(&exe) {
+            return Some(reason);
+        }
     }
     None
 }

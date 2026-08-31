@@ -3002,8 +3002,16 @@ fn resolve_real_user_home() -> Option<PathBuf> {
 /// The installing user's uid, for the privileged helper's `--allow-uid` gate.
 /// `SUDO_UID` when running under sudo (privileged setup re-execs through
 /// `sudo`, so the effective uid is root while the *installing* user is the one
-/// who will drive the helper); else `id -u`. Cross-platform: privileged setup
-/// runs on both macOS and Linux.
+/// who will drive the helper), then `SUDO_USER`, else `id -u`. Cross-platform:
+/// privileged setup runs on both macOS and Linux.
+///
+/// Refuses to resolve to 0. The gate written into the plist decides who may
+/// drive the root helper, and the CLI that drives it runs as the *user*: a
+/// `--allow-uid 0` would lock every `veld` command out of its own helper. That
+/// happens when setup is run from a root shell (`sudo -i`), where the sudo
+/// variables are gone and `id -u` is legitimately 0 — indistinguishable from a
+/// real root install, so fail loudly with the fix rather than write a plist
+/// that silently bricks the CLI.
 fn resolve_real_uid() -> Result<u32, anyhow::Error> {
     if let Ok(uid) = std::env::var("SUDO_UID") {
         if !uid.is_empty() {
@@ -3012,13 +3020,40 @@ fn resolve_real_uid() -> Result<u32, anyhow::Error> {
             }
         }
     }
+    // A root shell entered via `sudo su`/`sudo -i` keeps SUDO_USER but drops
+    // SUDO_UID, so resolve the name before falling back to the effective uid.
+    if let Ok(user) = std::env::var("SUDO_USER") {
+        if !user.is_empty() {
+            if let Ok(out) = std::process::Command::new("id")
+                .args(["-u", &user])
+                .output()
+            {
+                if out.status.success() {
+                    if let Ok(u) = String::from_utf8_lossy(&out.stdout).trim().parse::<u32>() {
+                        if u != 0 {
+                            return Ok(u);
+                        }
+                    }
+                }
+            }
+        }
+    }
     let out = std::process::Command::new("id")
         .arg("-u")
         .output()
         .context("failed to run `id -u` to resolve the installing user's uid")?;
     let uid = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    uid.parse::<u32>()
-        .with_context(|| format!("could not parse the installing user's uid `{uid}`"))
+    let uid: u32 = uid
+        .parse()
+        .with_context(|| format!("could not parse the installing user's uid `{uid}`"))?;
+    if uid == 0 {
+        anyhow::bail!(
+            "could not tell which user is installing: running as root with no SUDO_UID/SUDO_USER \
+             (a root shell?). The privileged helper would then admit only root and the `veld` CLI \
+             could not drive it. Re-run as your own user and let it elevate: `veld setup privileged`"
+        );
+    }
+    Ok(uid)
 }
 
 /// Resolve the real (non-root) user when running under `sudo` on macOS.
@@ -3336,11 +3371,11 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        INSTALL_SCRIPT_ATTEMPTS, download_install_script, first_existing_file, github_outage_hint, helper_plist_program_args,
-        init_lua_loads_veld_spoon, install_script_override_from, is_install_script_unavailable,
-        is_transient_status, linux_desktop_candidates, looks_like_install_script,
-        parse_launchctl_pid, parse_launchctl_program, parse_systemd_exec_start,
-        parse_systemd_main_pid, pids_running_from, remove_spoon_files,
+        INSTALL_SCRIPT_ATTEMPTS, download_install_script, first_existing_file, github_outage_hint,
+        helper_plist_program_args, init_lua_loads_veld_spoon, install_script_override_from,
+        is_install_script_unavailable, is_transient_status, linux_desktop_candidates,
+        looks_like_install_script, parse_launchctl_pid, parse_launchctl_program,
+        parse_systemd_exec_start, parse_systemd_main_pid, pids_running_from, remove_spoon_files,
     };
 
     /// Byte-for-byte what `raw.githubusercontent.com` served during the GitHub

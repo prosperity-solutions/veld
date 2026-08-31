@@ -18,10 +18,10 @@ published on [crates.io](https://crates.io) at the crate's name and version, and
 at the repository linked beside each crate below. Veld redistributes these crates
 unmodified.
 
-- Apache License 2.0 (274)
+- Apache License 2.0 (281)
 - MIT License (89)
 - Unicode License v3 (19)
-- BSD 3-Clause &quot;New&quot; or &quot;Revised&quot; License (7)
+- BSD 3-Clause &quot;New&quot; or &quot;Revised&quot; License (9)
 - ISC License (5)
 - BSD 2-Clause &quot;Simplified&quot; License (2)
 - Mozilla Public License 2.0 (2)
@@ -4218,7 +4218,7 @@ limitations under the License.
 
 ## Apache License 2.0
 
-Used by [ed25519 3.0.0](https://github.com/RustCrypto/signatures).
+Used by [ed25519 2.2.3](https://github.com/RustCrypto/signatures/tree/master/ed25519), [ed25519 3.0.0](https://github.com/RustCrypto/signatures).
 
 ```
                               Apache License
@@ -6517,7 +6517,7 @@ limitations under the License.
 
 ## Apache License 2.0
 
-Used by [aes-gcm 0.10.3](https://github.com/RustCrypto/AEADs), [aes 0.8.4](https://github.com/RustCrypto/block-ciphers), [base16ct 1.0.0](https://github.com/RustCrypto/formats), [base64ct 1.8.3](https://github.com/RustCrypto/formats), [block-buffer 0.10.4](https://github.com/RustCrypto/utils), [block-buffer 0.12.1](https://github.com/RustCrypto/utils), [chacha20 0.10.1](https://github.com/RustCrypto/stream-ciphers), [cipher 0.4.4](https://github.com/RustCrypto/traits), [const-oid 0.10.2](https://github.com/RustCrypto/formats), [cpufeatures 0.2.17](https://github.com/RustCrypto/utils), [cpufeatures 0.3.0](https://github.com/RustCrypto/utils), [crypto-common 0.1.7](https://github.com/RustCrypto/traits), [crypto-common 0.2.2](https://github.com/RustCrypto/traits), [ctr 0.9.2](https://github.com/RustCrypto/block-modes), [der 0.8.0](https://github.com/RustCrypto/formats), [der_derive 0.8.0](https://github.com/RustCrypto/formats), [digest 0.10.7](https://github.com/RustCrypto/traits), [digest 0.11.3](https://github.com/RustCrypto/traits), [ghash 0.5.1](https://github.com/RustCrypto/universal-hashes), [hmac 0.12.1](https://github.com/RustCrypto/MACs), [hybrid-array 0.4.10](https://github.com/RustCrypto/hybrid-array), [inout 0.1.4](https://github.com/RustCrypto/utils), [opaque-debug 0.3.1](https://github.com/RustCrypto/utils), [pem-rfc7468 1.0.0](https://github.com/RustCrypto/formats), [pkcs8 0.11.0](https://github.com/RustCrypto/formats), [polyval 0.6.2](https://github.com/RustCrypto/universal-hashes), [sha1 0.10.6](https://github.com/RustCrypto/hashes), [sha2 0.10.9](https://github.com/RustCrypto/hashes), [sha2 0.11.0](https://github.com/RustCrypto/hashes), [signature 3.0.0](https://github.com/RustCrypto/traits), [spki 0.8.0](https://github.com/RustCrypto/formats), [universal-hash 0.5.1](https://github.com/RustCrypto/traits), [x509-cert 0.3.0](https://github.com/RustCrypto/formats).
+Used by [aes-gcm 0.10.3](https://github.com/RustCrypto/AEADs), [aes 0.8.4](https://github.com/RustCrypto/block-ciphers), [base16ct 1.0.0](https://github.com/RustCrypto/formats), [base64ct 1.8.3](https://github.com/RustCrypto/formats), [block-buffer 0.10.4](https://github.com/RustCrypto/utils), [block-buffer 0.12.1](https://github.com/RustCrypto/utils), [chacha20 0.10.1](https://github.com/RustCrypto/stream-ciphers), [cipher 0.4.4](https://github.com/RustCrypto/traits), [const-oid 0.10.2](https://github.com/RustCrypto/formats), [const-oid 0.9.6](https://github.com/RustCrypto/formats/tree/master/const-oid), [cpufeatures 0.2.17](https://github.com/RustCrypto/utils), [cpufeatures 0.3.0](https://github.com/RustCrypto/utils), [crypto-common 0.1.7](https://github.com/RustCrypto/traits), [crypto-common 0.2.2](https://github.com/RustCrypto/traits), [ctr 0.9.2](https://github.com/RustCrypto/block-modes), [der 0.7.10](https://github.com/RustCrypto/formats/tree/master/der), [der 0.8.0](https://github.com/RustCrypto/formats), [der_derive 0.8.0](https://github.com/RustCrypto/formats), [digest 0.10.7](https://github.com/RustCrypto/traits), [digest 0.11.3](https://github.com/RustCrypto/traits), [ghash 0.5.1](https://github.com/RustCrypto/universal-hashes), [hmac 0.12.1](https://github.com/RustCrypto/MACs), [hybrid-array 0.4.10](https://github.com/RustCrypto/hybrid-array), [inout 0.1.4](https://github.com/RustCrypto/utils), [opaque-debug 0.3.1](https://github.com/RustCrypto/utils), [pem-rfc7468 0.7.0](https://github.com/RustCrypto/formats/tree/master/pem-rfc7468), [pem-rfc7468 1.0.0](https://github.com/RustCrypto/formats), [pkcs8 0.10.2](https://github.com/RustCrypto/formats/tree/master/pkcs8), [pkcs8 0.11.0](https://github.com/RustCrypto/formats), [polyval 0.6.2](https://github.com/RustCrypto/universal-hashes), [sha1 0.10.6](https://github.com/RustCrypto/hashes), [sha2 0.10.9](https://github.com/RustCrypto/hashes), [sha2 0.11.0](https://github.com/RustCrypto/hashes), [signature 2.2.0](https://github.com/RustCrypto/traits/tree/master/signature), [signature 3.0.0](https://github.com/RustCrypto/traits), [spki 0.7.3](https://github.com/RustCrypto/formats/tree/master/spki), [spki 0.8.0](https://github.com/RustCrypto/formats), [universal-hash 0.5.1](https://github.com/RustCrypto/traits), [x509-cert 0.3.0](https://github.com/RustCrypto/formats).
 
 ```
                               Apache License
@@ -8717,7 +8717,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ## BSD 3-Clause &quot;New&quot; or &quot;Revised&quot; License
 
-Used by [ed25519-dalek 3.0.0-rc.0](https://github.com/dalek-cryptography/curve25519-dalek/tree/main/ed25519-dalek).
+Used by [ed25519-dalek 2.2.0](https://github.com/dalek-cryptography/curve25519-dalek/tree/main/ed25519-dalek), [ed25519-dalek 3.0.0-rc.0](https://github.com/dalek-cryptography/curve25519-dalek/tree/main/ed25519-dalek).
 
 ```
 Copyright (c) 2017-2019 isis agora lovecruft. All rights reserved.
@@ -8753,7 +8753,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ## BSD 3-Clause &quot;New&quot; or &quot;Revised&quot; License
 
-Used by [aws-lc-sys 0.42.0](https://github.com/aws/aws-lc-rs), [sha1_smol 1.0.1](https://github.com/mitsuhiko/sha1-smol).
+Used by [aws-lc-sys 0.42.0](https://github.com/aws/aws-lc-rs), [curve25519-dalek 4.1.3](https://github.com/dalek-cryptography/curve25519-dalek/tree/main/curve25519-dalek), [sha1_smol 1.0.1](https://github.com/mitsuhiko/sha1-smol).
 
 ```
 Copyright (c) &lt;year&gt; &lt;owner&gt;. 

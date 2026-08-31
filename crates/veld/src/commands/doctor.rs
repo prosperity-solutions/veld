@@ -576,10 +576,11 @@ impl Diagnostics {
                 Some(reason) => self.checks.push(Check {
                     pass: false,
                     label: format!(
-                        "{reason} — run `veld update` or `veld setup privileged` to \
-                         redeploy it; to force the installed binary now: \
-                         `sudo launchctl kill TERM system/dev.veld.helper` \
-                         (Linux: `sudo systemctl restart veld-helper`)"
+                        "{reason} — the running helper is still the genuine one, but it will \
+                         refuse to update onto this file. Re-deploy a signed helper with \
+                         `veld update` (or `veld setup privileged`). Do NOT force a restart: \
+                         `launchctl kill`/`systemctl restart` would run this unverified binary \
+                         as root, which is exactly what the gate is refusing"
                     ),
                 }),
             }
