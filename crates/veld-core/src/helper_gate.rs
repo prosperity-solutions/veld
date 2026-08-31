@@ -10,6 +10,26 @@
 
 use std::path::Path;
 
+/// The `status` response field carrying the admitted uid (`null` when the socket
+/// is ungated).
+///
+/// A constant, not a literal at each end, because the *names* are as much of the
+/// contract as the values: rename one side and both crates still compile while
+/// the `veld doctor` row silently reports a current helper as too old to check.
+pub const ALLOW_UID_FIELD: &str = "allow_uid";
+
+/// The `status` response field carrying [`GateSource::as_str`].
+pub const ALLOW_UID_SOURCE_FIELD: &str = "allow_uid_source";
+
+/// What the helper writes back before dropping a connection the gate refused.
+///
+/// Shared because `veld doctor` matches on it to tell "the gate refused *you*"
+/// apart from "the helper is down" — which is the difference between naming the
+/// one failure mode this gate can introduce and saying nothing at all. The peer
+/// is untrusted, so this is for diagnosis only; nothing may depend on receiving
+/// it (see `reject_connection`).
+pub const REJECTED_PEER_ERROR: &str = "permission denied: untrusted peer uid";
+
 /// Where the privileged helper's peer-uid gate got the uid it admits — or why
 /// it has none.
 ///
@@ -24,9 +44,6 @@ pub enum GateSource {
     /// Derived from the owner of the directory the helper binary lives in,
     /// because the service definition carries no `--allow-uid`.
     LibDirOwner,
-    /// The service definition says `--allow-uid 0`. Ignored — see
-    /// [`Gate::resolve`].
-    RefusedRootFlag,
     /// The install directory is root-owned, so there is no installing user to
     /// derive. Ignored — see [`Gate::resolve`].
     RefusedRootLibDir,
@@ -43,7 +60,6 @@ impl GateSource {
         match self {
             GateSource::Flag => "flag",
             GateSource::LibDirOwner => "lib-dir-owner",
-            GateSource::RefusedRootFlag => "refused-root-flag",
             GateSource::RefusedRootLibDir => "refused-root-lib-dir",
             GateSource::UnreadableLibDir => "unreadable-lib-dir",
             GateSource::Unprivileged => "unprivileged",
@@ -57,7 +73,6 @@ impl GateSource {
         [
             GateSource::Flag,
             GateSource::LibDirOwner,
-            GateSource::RefusedRootFlag,
             GateSource::RefusedRootLibDir,
             GateSource::UnreadableLibDir,
             GateSource::Unprivileged,
@@ -98,17 +113,42 @@ impl Gate {
     /// the helper lives in `$HOME/.local/lib/veld`, created by `install.sh` as
     /// the installing user — the same user whose CLI drives this helper. The
     /// owner is also not attacker-controllable: giving a file away to another
-    /// uid requires root on both macOS and Linux, so no local process can point
-    /// the gate at itself. (A directory an attacker can *write* is a strictly
-    /// larger problem — they would replace the binary — and is what #262
-    /// closes.) The uid is never taken from the socket caller, which would be
-    /// the caller nominating its own permissions.
+    /// uid requires root on both macOS and Linux (`_POSIX_CHOWN_RESTRICTED`,
+    /// `CAP_CHOWN`), so no local process can point the gate at itself. The one
+    /// way an owner appears without a `chown` is a `uid=`-mapped mount
+    /// (exFAT/msdos, SMB/NFS, an image attached with ownership disabled) — and
+    /// there a non-root mount maps to the *mounting* user, so an attacker still
+    /// cannot name somebody else's uid. (A directory an attacker can *write* is
+    /// a strictly larger problem — they would replace the binary — and is what
+    /// #262 closes.) The uid is never taken from the socket caller, which would
+    /// be the caller nominating its own permissions.
     ///
-    /// **Why uid 0 is never a gate target, whatever its source.** A system-paths
-    /// install (`/usr/local/lib/veld`, created under `sudo`) is root-owned, and
-    /// gating to 0 would admit only root — locking the user's own CLI out of its
+    /// **Why a *derived* uid 0 is refused.** A system-paths install
+    /// (`/usr/local/lib/veld`, created under `sudo`) is root-owned, and gating
+    /// to 0 would admit only root — locking the user's own CLI out of its
     /// helper. That is the exact bug `resolve_real_uid()` was fixed for in #253,
-    /// and it presents as a helper that is simply broken.
+    /// and it presents as a helper that is simply broken. So that class of
+    /// install stays **ungated**, which is an acknowledged exception to #338's
+    /// "no user runs anything" rule: nothing on disk says who its installing
+    /// user is, so there is nothing to derive, and the remedy is the `veld setup
+    /// privileged` that `veld doctor` names.
+    ///
+    /// **An explicit `--allow-uid 0` is honoured, not refused.** The rule above
+    /// is about a uid this code *guessed*; a 0 in the service definition is one
+    /// an operator typed, and it means "root only". No veld version writes it
+    /// (`resolve_real_uid()` bails), so it only exists by hand-editing —
+    /// and turning it into "no gate" would silently reopen a root socket that
+    /// was deliberately closed. Availability is the user's to trade away here;
+    /// it is not ours to trade away for them.
+    ///
+    /// **Why once, at startup, rather than per connection.** The gate is a
+    /// property of the install, and the install changes by replacing this
+    /// binary — which restarts the process (`veld update` bounces the helper,
+    /// and `watch_own_binary` exits onto a swapped one), so the derivation
+    /// re-runs exactly when its inputs can have changed. A `chown` of the
+    /// install directory under a running helper does leave a stale gate until
+    /// the next restart; `veld doctor` compares the reported uid against the
+    /// invoking user's, so that state is visible rather than mysterious.
     ///
     /// **Why the error paths leave the socket ungated rather than shut.** Every
     /// "cannot tell" branch here resolves to no gate, which is fail-open — but
@@ -128,10 +168,6 @@ impl Gate {
             return Self::unprivileged();
         }
         match flag {
-            Some(0) => Self {
-                uid: None,
-                source: GateSource::RefusedRootFlag,
-            },
             Some(uid) => Self {
                 uid: Some(uid),
                 source: GateSource::Flag,
@@ -174,9 +210,15 @@ impl Gate {
 /// helper exec'd through a symlink: Linux's `/proc/self/exe` is already
 /// resolved, while macOS's `_NSGetExecutablePath` hands back the path used to
 /// exec.
+///
+/// A canonicalise that fails is `None`, never a fallback to the unresolved
+/// path. Guessing there would stat whatever the unresolved parent happens to
+/// be — the one branch where a symlinked path component would decide the
+/// admitted uid, and the only place the gap between resolving and stat'ing is
+/// worth anything to anyone. "Cannot tell" is a state this code already handles.
 fn lib_dir_owner(exe: &Path) -> Option<u32> {
     use std::os::unix::fs::MetadataExt;
-    let resolved = std::fs::canonicalize(exe).unwrap_or_else(|_| exe.to_path_buf());
+    let resolved = std::fs::canonicalize(exe).ok()?;
     let dir = resolved.parent()?;
     std::fs::metadata(dir).ok().map(|m| m.uid())
 }
@@ -214,10 +256,13 @@ mod tests {
         assert_eq!(g.uid(), None);
         assert_eq!(g.source(), GateSource::RefusedRootLibDir);
 
-        // Same rule for a hand-written `--allow-uid 0`, whatever its source.
+        // A hand-written `--allow-uid 0` is HONOURED, not refused: it is an
+        // operator's explicit "root only", no veld version writes it, and
+        // turning it into `None` would silently reopen a root socket somebody
+        // deliberately closed. The refusal above is for a uid this code guessed.
         let g = Gate::from_owner(Some(0), true, Some(INSTALLING));
-        assert_eq!(g.uid(), None);
-        assert_eq!(g.source(), GateSource::RefusedRootFlag);
+        assert_eq!(g.uid(), Some(0));
+        assert_eq!(g.source(), GateSource::Flag);
 
         // An unreadable directory is "no gate", never uid 0.
         let g = Gate::from_owner(None, true, None);
@@ -234,7 +279,6 @@ mod tests {
         for (source, wire) in [
             (GateSource::Flag, "flag"),
             (GateSource::LibDirOwner, "lib-dir-owner"),
-            (GateSource::RefusedRootFlag, "refused-root-flag"),
             (GateSource::RefusedRootLibDir, "refused-root-lib-dir"),
             (GateSource::UnreadableLibDir, "unreadable-lib-dir"),
             (GateSource::Unprivileged, "unprivileged"),

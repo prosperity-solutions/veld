@@ -188,11 +188,14 @@ async fn main() -> Result<()> {
     // no `--allow-uid` in its service definition (only `veld setup privileged`
     // writes one) and must still end up gated. See [`Gate::resolve`].
     let privileged = is_system_socket(&config.socket_path);
-    let gate = Gate::resolve(
-        config.allow_uid,
-        privileged,
-        std::env::current_exe().ok().as_deref(),
-    );
+    // `current_exe()` failing and the install directory being unreadable both
+    // land on `UnreadableLibDir`, whose user-facing text names the directory —
+    // so log the io error here or it is gone from the one place a support
+    // transcript would look for it.
+    let exe = std::env::current_exe()
+        .inspect_err(|e| warn!(error = %e, "could not read own executable path; the peer-uid gate cannot be derived"))
+        .ok();
+    let gate = Gate::resolve(config.allow_uid, privileged, exe.as_deref());
     log_gate(&gate);
 
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
@@ -478,7 +481,16 @@ async fn reject_connection(stream: tokio::net::UnixStream) {
     use tokio::io::AsyncWriteExt;
     let mut stream = stream;
     let _ = stream
-        .write_all(b"{\"ok\":false,\"error\":\"permission denied: untrusted peer uid\"}\n")
+        .write_all(
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "ok": false,
+                    "error": veld_core::helper_gate::REJECTED_PEER_ERROR,
+                })
+            )
+            .as_bytes(),
+        )
         .await;
 }
 
@@ -740,6 +752,32 @@ mod tests {
         assert!(!peer_allowed(502, INSTALLING));
         // A root helper whose --allow-uid is root-only still allows root.
         assert!(peer_allowed(0, 0));
+    }
+
+    /// `is_system_socket` is the switch deciding whether a root helper gates its
+    /// socket *at all*, so the two real socket paths must land on the right side
+    /// of it — including on Linux, where the user socket must not be mistaken
+    /// for a system one.
+    #[test]
+    fn only_the_system_domain_socket_reads_as_privileged() {
+        use super::is_system_socket;
+        use std::path::Path;
+
+        // The paths `veld-core` actually hands out.
+        assert!(is_system_socket(&veld_core::helper::system_socket_path()));
+        assert!(!is_system_socket(&veld_core::helper::user_socket_path()));
+
+        // Both platforms' system paths read as privileged wherever the suite
+        // runs, because the plist/unit pins an absolute path, not a cfg.
+        assert!(is_system_socket(Path::new("/var/run/veld-helper.sock")));
+        assert!(is_system_socket(Path::new("/run/veld-helper.sock")));
+
+        // The user helper's own path, and the `/tmp` fallback `user_socket_path`
+        // degrades to when there is no home directory, are NOT privileged —
+        // they rely on the 0o700 owner-only socket instead.
+        assert!(!is_system_socket(Path::new("/Users/x/.veld/helper.sock")));
+        assert!(!is_system_socket(Path::new("/home/x/.veld/helper.sock")));
+        assert!(!is_system_socket(Path::new("/tmp/veld-helper.sock")));
     }
 
     /// The kernel-attested peer uid of a same-process peer is this process's

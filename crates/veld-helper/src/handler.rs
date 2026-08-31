@@ -352,8 +352,8 @@ impl State {
             // flag can front a perfectly gated helper, and reading the plist
             // would report the opposite. `null` means the socket is ungated;
             // `allow_uid_source` says why.
-            "allow_uid": self.gate.uid(),
-            "allow_uid_source": self.gate.source().as_str(),
+            veld_core::helper_gate::ALLOW_UID_FIELD: self.gate.uid(),
+            veld_core::helper_gate::ALLOW_UID_SOURCE_FIELD: self.gate.source().as_str(),
         }))
     }
 
@@ -521,6 +521,49 @@ mod tests {
         // Wrong shape (a string where an object is expected) → default, no panic.
         let args = serde_json::json!({ "proxy": "not-an-object" });
         assert!(parse_proxy_arg(&args).is_empty());
+    }
+
+    /// The `status` response must carry the gate under the exact field names
+    /// `veld doctor` reads, with the uid as a bare number.
+    ///
+    /// Nothing else pins this. Rename a field or drop it and both crates still
+    /// compile, while the doctor row degrades to "this helper is too old to
+    /// report the gate" on a perfectly current helper — a red row nobody can
+    /// act on, for a machine that is fine. `helper_gate`'s round-trip test
+    /// covers the source *values*; this covers the *keys* and the payload shape.
+    #[tokio::test]
+    async fn status_reports_the_uid_gate_under_the_names_doctor_reads() {
+        use veld_core::helper_gate::{ALLOW_UID_FIELD, ALLOW_UID_SOURCE_FIELD, Gate};
+
+        // Ungated (the unprivileged fixture): the field is present and null, not
+        // absent — doctor tells those two apart, and only "absent" means "this
+        // helper predates the report".
+        let data = test_state().handle_status().await.data.unwrap();
+        assert_eq!(data.get(ALLOW_UID_FIELD), Some(&serde_json::Value::Null));
+        assert_eq!(
+            data.get(ALLOW_UID_SOURCE_FIELD).and_then(|v| v.as_str()),
+            Some("unprivileged")
+        );
+
+        // Gated: a bare number, so `as_u64()` on the reading side works.
+        let (tx, _rx) = tokio::sync::watch::channel(false);
+        let gated = State::new(
+            443,
+            80,
+            None,
+            tx,
+            true,
+            Gate::from_owner(None, true, Some(501)),
+        );
+        let data = gated.handle_status().await.data.unwrap();
+        assert_eq!(
+            data.get(ALLOW_UID_FIELD).and_then(|v| v.as_u64()),
+            Some(501)
+        );
+        assert_eq!(
+            data.get(ALLOW_UID_SOURCE_FIELD).and_then(|v| v.as_str()),
+            Some("lib-dir-owner")
+        );
     }
 
     /// An **unprivileged** `State`: it holds no `SleepManager` at all.
