@@ -482,9 +482,17 @@ impl Diagnostics {
     async fn check_helper_uid_gate(&mut self) {
         let socket = veld_core::helper::system_socket_path();
         let reported = match veld_core::helper::HelperClient::connect_to(&socket).await {
+            // `connect_to` already *made* a status call as its liveness probe —
+            // and threw the payload away. This second one is the round-trip that
+            // actually carries the gate, so it can fail where the first
+            // succeeded (a helper that restarted in between, which `veld update`
+            // makes routine). A failure here is the same "something answered and
+            // the gate could not be read" as the error arms below; going silent
+            // was the third instance of the disappearing-row bug this review
+            // found, so it does not get a fourth spelling.
             Ok(client) => match client.status().await.ok().and_then(|r| r.data) {
                 Some(data) => GateReport::Status(data),
-                None => return,
+                None => GateReport::Unreadable,
             },
             // The gate refused *us*. `connect_to` probes with a `status`, and a
             // rejected peer gets an `ok:false` reply, so a live-but-refusing
