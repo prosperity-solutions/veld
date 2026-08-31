@@ -67,6 +67,7 @@ const BASE_URL = process.env.VELD_DESKTOP_URL ?? "http://127.0.0.1:19899";
 const HEALTH_URL = `${BASE_URL}/api/health`;
 const ENVIRONMENTS_URL = `${BASE_URL}/api/environments`;
 const REPOS_URL = `${BASE_URL}/api/repos`;
+const SETTINGS_URL = `${BASE_URL}/api/settings`;
 
 /**
  * Height of the UI's top bar in the Electron build (`.topbar.electron` in
@@ -473,12 +474,82 @@ function newWindowOrSayWhyNot() {
   });
 }
 
+/** How often the tray's menu is rebuilt — and `desktop.menuBarIcon` re-read. */
+const TRAY_TICK_MS = 10_000;
+
+/**
+ * Whether the menu-bar icon is wanted (`desktop.menuBarIcon`, on by default).
+ *
+ * Cached rather than read at the point of use, and that is the load-bearing part:
+ * a daemon that is down, starting, or older than the key must not make the icon
+ * *disappear*. Only a boolean `false` from a daemon that answered moves this off
+ * its default, so every failure mode keeps the icon the user already has.
+ */
+let menuBarIcon = true;
+
+/**
+ * Re-read `desktop.menuBarIcon` from the daemon.
+ *
+ * The shell polls rather than waiting to be told because the setting is one
+ * document shared by every client (`crates/veld-daemon/src/settings.rs`): it can
+ * be changed from a plain browser tab, or from `veld settings set`, with no window
+ * of this app open to forward it. The renderer's push
+ * (`veld:app:menu-bar-icon`) is what makes the *common* case immediate; this is
+ * what makes it correct.
+ */
+async function readMenuBarIconSetting() {
+  try {
+    const res = await fetch(SETTINGS_URL, { signal: AbortSignal.timeout(2000) });
+    if (!res.ok) return;
+    const data = await res.json();
+    const value = data?.settings?.["desktop.menuBarIcon"];
+    if (typeof value === "boolean") menuBarIcon = value;
+  } catch {
+    // Unreachable or older daemon — keep the last answer. See `menuBarIcon`.
+  }
+}
+
 function createTray() {
   tray = new Tray(trayIcon());
   tray.setToolTip("Veld");
   refreshTray = async () => tray?.setContextMenu(await trayMenu());
   void refreshTray();
-  setInterval(() => void refreshTray?.(), 10_000);
+}
+
+/**
+ * Take the icon out of the menu bar.
+ *
+ * `refreshTray` is cleared with it because the updater calls it on every skew
+ * change: left pointing at a destroyed `Tray` it would throw from a code path
+ * whose whole job is to report a version mismatch. Every caller already spells it
+ * `refreshTray?.()`.
+ */
+function destroyTray() {
+  tray?.destroy();
+  tray = null;
+  refreshTray = null;
+}
+
+/**
+ * Bring the menu bar in line with `menuBarIcon` — the only place a `Tray` is
+ * created or destroyed, so "is there an icon" has one answer.
+ */
+async function applyMenuBarIcon() {
+  if (process.platform !== "darwin") return;
+  if (!menuBarIcon) {
+    destroyTray();
+    return;
+  }
+  // `createTray` builds the first menu itself, so this is not an else-branch that
+  // skips a refresh — it is the refresh, for a tray that already exists.
+  if (!tray) createTray();
+  else await refreshTray?.();
+}
+
+/** The 10s tick: what the setting says, then what the menu says. */
+async function syncTray() {
+  await readMenuBarIconSetting();
+  await applyMenuBarIcon();
 }
 
 /**
@@ -670,6 +741,18 @@ app.whenReady().then(async () => {
     permissionsFile: path.join(app.getPath("userData"), "permissions.json"),
   });
   registerWindowIpc(ipcMain);
+  // A renderer saw the settings document change. The tick below would converge on
+  // its own within ten seconds; this is what makes a toggle in the settings dialog
+  // land while the user is still looking at it.
+  //
+  // The nudge carries **no value** (see `settingsChanged` in `ui/src/shell.ts`):
+  // the document is the daemon's, a page's copy can be a stale `localStorage`
+  // mirror, and taking the page's word for it would put an icon back that the
+  // daemon says is off. So this re-reads, exactly like the tick.
+  ipcMain.handle("veld:app:settings-changed", async () => {
+    if (process.platform !== "darwin") return;
+    await syncTray();
+  });
   buildAppMenu();
   app.setAboutPanelOptions({
     applicationName: "Veld",
@@ -699,7 +782,10 @@ app.whenReady().then(async () => {
   // live shells, and reopening only the main window would leave them running,
   // unreachable, until the detach grace hangs them up.
   restoreWindows();
-  if (process.platform === "darwin") createTray();
+  if (process.platform === "darwin") {
+    void syncTray();
+    setInterval(() => void syncTray(), TRAY_TICK_MS);
+  }
   app.on("activate", () => {
     setQuitting(false);
     if (BrowserWindow.getAllWindows().length === 0) focusPrimary();

@@ -703,6 +703,7 @@ pub enum SettingKey {
     BackupKeepDaily,
     BackupDir,
     FeedbackSuppressOverlay,
+    DesktopMenuBarIcon,
     Unknown(String),
 }
 
@@ -739,6 +740,7 @@ impl SettingKey {
         Self::UiShowProjectNews,
         Self::NewsSource,
         Self::FeedbackSuppressOverlay,
+        Self::DesktopMenuBarIcon,
         // ── General › Database backups ───────────────────────────────────────
         Self::BackupEnabled,
         Self::BackupIntervalMinutes,
@@ -879,6 +881,7 @@ impl SettingKey {
             Self::BackupKeepDaily => "backup.keepDaily",
             Self::BackupDir => "backup.dir",
             Self::FeedbackSuppressOverlay => "feedback.suppressOverlay",
+            Self::DesktopMenuBarIcon => "desktop.menuBarIcon",
             Self::Unknown(k) => k,
         }
     }
@@ -947,6 +950,7 @@ impl SettingKey {
             "backup.keepDaily" => Self::BackupKeepDaily,
             "backup.dir" => Self::BackupDir,
             "feedback.suppressOverlay" => Self::FeedbackSuppressOverlay,
+            "desktop.menuBarIcon" => Self::DesktopMenuBarIcon,
             other => Self::Unknown(other.to_string()),
         }
     }
@@ -1056,6 +1060,7 @@ impl SettingKey {
             | Self::KeepAwakeManualOnBattery
             | Self::BackupEnabled
             | Self::FeedbackSuppressOverlay
+            | Self::DesktopMenuBarIcon
             | Self::FilesViewWebPages
             | Self::FilesViewImages
             | Self::FilesViewPdfs
@@ -1925,6 +1930,13 @@ pub fn defaults() -> BTreeMap<String, Value> {
         // purely as an orchestrator and does not collect feedback; see the accessor
         // for what turning it on does.
         (SettingKey::FeedbackSuppressOverlay, Value::from(false)),
+        // On — the menu-bar icon is how Veld Desktop says it is running, and it
+        // is the only place a run's status is visible with no window open. Off is
+        // for a crowded menu bar: the app is still reachable from its Dock icon,
+        // which macOS keeps as long as the process lives, so turning it off costs
+        // ambient status rather than access. Read by the Electron shell only —
+        // a browser tab has no menu bar to put anything in.
+        (SettingKey::DesktopMenuBarIcon, Value::from(true)),
     ]
     .into_iter()
     .map(|(k, v)| (k.as_str().to_string(), v))

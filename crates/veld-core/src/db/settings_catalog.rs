@@ -689,6 +689,15 @@ impl SettingKey {
                  log collector and the /__veld__/* routes are unaffected.",
                 General,
             ),
+            Self::DesktopMenuBarIcon => toggle(
+                "Show the menu bar icon",
+                "Veld Desktop puts an icon in the macOS menu bar: running runs, a window to \
+                 open, and the update check, reachable with no Veld window on screen. Turn it \
+                 off for a crowded menu bar — the app is still there in the Dock, and clicking \
+                 it brings a window back. Only the desktop app reads this; a browser tab has no \
+                 menu bar to put anything in.",
+                General,
+            ),
 
             // ── General › Database backups ───────────────────────────────────
             Self::BackupEnabled => toggle_in(

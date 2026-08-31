@@ -305,6 +305,10 @@ contextBridge.exposeInMainWorld("veldDesktop", {
      *  on click via `onNotifyClick` so the page can focus the pane. */
     notify: (payload) => ipcRenderer.invoke("veld:app:notify", payload),
     onNotifyClick: (fn) => on("veld:app:notify-click", fn),
+    /** The settings document changed; the main process re-reads the keys it acts
+     *  on (`desktop.menuBarIcon`). A nudge with no value: the daemon owns the
+     *  document and the shell polls it anyway, so this only buys immediacy. */
+    settingsChanged: () => ipcRenderer.invoke("veld:app:settings-changed"),
   },
   browser: {
     /** Drop views left behind by a previous page. Called once, before any
