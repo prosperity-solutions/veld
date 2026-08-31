@@ -527,6 +527,24 @@ impl Diagnostics {
             .and_then(|v| v.as_str())
             .and_then(GateSource::from_wire);
 
+        // `null` is the only shape that means "ungated". Anything else that is
+        // not a number — a uid emitted as a string by some future helper, say —
+        // is a response this build cannot read, and the field-absent case above
+        // already established that "cannot read" must never become the definite
+        // claim that the socket is open. `as_u64()` alone would collapse the two.
+        if !reported.is_null() && reported.as_u64().is_none() {
+            self.checks.push(Check {
+                pass: false,
+                label: format!(
+                    "Helper socket uid gate cannot be confirmed — the helper reported \
+                     `{}` as its allowed uid, which this version of `veld` cannot read. \
+                     Run `veld update` so the CLI and the helper match.",
+                    veld_core::helper_gate::ALLOW_UID_FIELD
+                ),
+            });
+            return;
+        }
+
         let check = match reported.as_u64() {
             // Gated to root only. Reachable solely from a hand-written
             // `--allow-uid 0`, which the helper honours as the deliberate

@@ -163,10 +163,16 @@ impl Gate {
     /// property of the install, and the install changes by replacing this
     /// binary — which restarts the process (`veld update` bounces the helper,
     /// and `watch_own_binary` exits onto a swapped one), so the derivation
-    /// re-runs exactly when its inputs can have changed. A `chown` of the
-    /// install directory under a running helper does leave a stale gate until
-    /// the next restart; `veld doctor` compares the reported uid against the
-    /// invoking user's, so that state is visible rather than mysterious.
+    /// re-runs exactly when its inputs can have changed.
+    ///
+    /// Two things do go stale in between, and neither is silent. A `chown` of
+    /// the install directory under a running helper leaves the old uid until the
+    /// next restart. And an `--allow-uid` in the service definition is never
+    /// re-derived at all, so an account renumbered under it — Migration
+    /// Assistant, MDM re-creating the user, a restored backup — keeps a gate
+    /// pointing at a uid that no longer exists. In both cases `veld doctor`
+    /// compares the reported uid against the invoking user's and, if the peer is
+    /// refused outright, says the gate refused *you* rather than "helper down".
     ///
     /// **Why the error paths leave the socket ungated rather than shut.** Every
     /// "cannot tell" branch here resolves to no gate, which is fail-open — but
@@ -182,14 +188,20 @@ impl Gate {
     /// [`Gate::resolve`] with the filesystem lookup already done, so the policy
     /// is testable without a chown.
     pub fn from_owner(flag: Option<u32>, privileged: bool, lib_dir_owner: Option<u32>) -> Self {
-        if !privileged {
-            return Self::unprivileged();
-        }
         match flag {
+            // Honoured on any socket, not just the system one. `privileged`
+            // gates the *derivation* — the guess — not an instruction somebody
+            // wrote down; dropping the flag on an unprivileged helper would
+            // silently discard it (`log_gate` says nothing in that case) and
+            // contradict the rule two paragraphs up. It also matches what
+            // origin/main did, which applied the flag whatever the socket path.
+            // No shipped path passes it to a user helper — both setup writers
+            // use the system socket — so this is consistency, not a feature.
             Some(uid) => Self {
                 uid: Some(uid),
                 source: GateSource::Flag,
             },
+            None if !privileged => Self::unprivileged(),
             None => match lib_dir_owner {
                 Some(0) => Self {
                     uid: None,
@@ -234,6 +246,15 @@ impl Gate {
 /// be — the one branch where a symlinked path component would decide the
 /// admitted uid, and the only place the gap between resolving and stat'ing is
 /// worth anything to anyone. "Cannot tell" is a state this code already handles.
+///
+/// **The exe is resolved first, then its parent taken — not the other way
+/// round**, and the order is the whole point. `exe.parent()` on a helper exec'd
+/// through a symlink gives the directory the *symlink* sits in, which can be
+/// root-owned `/tmp` while the real install belongs to the user; resolving
+/// first lands on the directory the binary is actually served from.
+/// `a_helper_reached_through_a_symlink_derives_from_the_real_install_dir` pins
+/// it, because "just take the parent, it is all you need" is the natural
+/// simplification and it is wrong.
 fn lib_dir_owner(exe: &Path) -> Option<u32> {
     use std::os::unix::fs::MetadataExt;
     let resolved = std::fs::canonicalize(exe).ok()?;
@@ -251,11 +272,18 @@ mod tests {
     fn gate_policy_covers_every_way_a_uid_can_be_absent() {
         const INSTALLING: u32 = 501;
 
-        // An unprivileged helper is never gated, whatever the filesystem says:
-        // its 0o700 owner-only socket is the restriction.
-        let g = Gate::from_owner(Some(INSTALLING), false, Some(INSTALLING));
+        // An unprivileged helper never *derives* a gate, whatever the filesystem
+        // says: its 0o700 owner-only socket is the restriction.
+        let g = Gate::from_owner(None, false, Some(INSTALLING));
         assert_eq!(g.uid(), None);
         assert_eq!(g.source(), GateSource::Unprivileged);
+
+        // But an explicit flag is honoured wherever it appears — `privileged`
+        // gates the guess, not a written-down instruction. Silently dropping it
+        // is what origin/main did not do, and it would leave no trace.
+        let g = Gate::from_owner(Some(INSTALLING), false, Some(999));
+        assert_eq!(g.uid(), Some(INSTALLING));
+        assert_eq!(g.source(), GateSource::Flag);
 
         // The service definition wins when it carries a usable uid.
         let g = Gate::from_owner(Some(INSTALLING), true, Some(999));
@@ -317,6 +345,39 @@ mod tests {
         }
         // A helper newer than this build is "unknown", never a wrong match.
         assert_eq!(GateSource::from_wire("invented-later"), None);
+    }
+
+    /// Exec'd through a symlink, the gate must derive from the **real** install
+    /// directory's owner — not from the directory the symlink happens to sit in.
+    ///
+    /// This is the test that stops `lib_dir_owner` being "simplified" to
+    /// `exe.parent()` then canonicalise. That reads as equivalent and is not: a
+    /// helper reached through a link in a root-owned directory would derive root
+    /// and refuse to gate, turning a protected install into an unprotected one.
+    /// Proven on real hardware before it was written — a root helper exec'd via
+    /// `/tmp/veld-helper-symlink` still gated to the lib dir's owner.
+    #[test]
+    fn a_helper_reached_through_a_symlink_derives_from_the_real_install_dir() {
+        let real = tempfile::tempdir().unwrap();
+        let exe = real.path().join("veld-helper");
+        std::fs::write(&exe, b"not really a binary").unwrap();
+
+        // The link lives somewhere else entirely; only the target's directory
+        // may decide the uid.
+        let elsewhere = tempfile::tempdir().unwrap();
+        let link = elsewhere.path().join("veld-helper-symlink");
+        std::os::unix::fs::symlink(&exe, &link).unwrap();
+
+        assert_eq!(
+            super::lib_dir_owner(&link),
+            super::lib_dir_owner(&exe),
+            "a symlinked path must resolve to the real install directory's owner"
+        );
+
+        // A dangling link is "cannot tell", never a guess at the link's own
+        // parent — which is the branch a root-owned link directory would abuse.
+        std::fs::remove_file(&exe).unwrap();
+        assert_eq!(super::lib_dir_owner(&link), None);
     }
 
     /// The derivation reads a real directory's owner, not a constant — and
