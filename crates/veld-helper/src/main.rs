@@ -13,6 +13,7 @@ use anyhow::{Context, Result};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 use tracing::{debug, error, info, warn};
+use veld_core::helper_gate::{Gate, GateSource};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -53,10 +54,11 @@ struct HelperConfig {
     http_port: u16,
     /// Override the Caddy binary path (avoids lib_dir() resolution issues under sudo).
     caddy_bin: Option<PathBuf>,
-    /// When set, only this uid (and root, uid 0 — privileged setup connects as
-    /// root to verify the socket) may drive this helper over its socket. Only
-    /// the privileged system daemon is given one; an unprivileged helper relies
-    /// on its 0o700 owner-only socket instead.
+    /// `--allow-uid` as written into the service definition by
+    /// `veld setup privileged`: the one uid (besides root) allowed to drive this
+    /// helper over its socket. An *override*, not the whole story — a privileged
+    /// helper with no flag derives the uid instead, so that installs predating
+    /// the flag are gated without anyone re-running setup. See [`Gate::resolve`].
     allow_uid: Option<u32>,
 }
 
@@ -181,6 +183,18 @@ async fn main() -> Result<()> {
         config.socket_path.display()
     );
 
+    // The peer-uid gate. Resolved once, here, rather than read straight off
+    // `config.allow_uid` in the accept loop: an existing privileged install has
+    // no `--allow-uid` in its service definition (only `veld setup privileged`
+    // writes one) and must still end up gated. See [`Gate::resolve`].
+    let privileged = is_system_socket(&config.socket_path);
+    let gate = Gate::resolve(
+        config.allow_uid,
+        privileged,
+        std::env::current_exe().ok().as_deref(),
+    );
+    log_gate(&gate);
+
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
 
     let state = Arc::new(handler::State::new(
@@ -191,7 +205,8 @@ async fn main() -> Result<()> {
         // The privileged system daemon (root) is the only one the swap-relaunch
         // signing gate protects; an unprivileged user helper relaunches as the
         // user and needs no signature to shut down.
-        is_system_socket(&config.socket_path),
+        privileged,
+        gate,
     ));
 
     // Startup reconcile: if a Caddy is already running (orphaned across our own
@@ -277,7 +292,7 @@ async fn main() -> Result<()> {
     // LaunchAgent is already restarted by the installer via user-domain
     // launchctl (no sudo), and the auto-bootstrapped helper is ephemeral and
     // has nothing to relaunch it — so exiting there would just drop URLs.
-    if is_system_socket(&config.socket_path) {
+    if privileged {
         tokio::spawn(watch_own_binary());
     }
 
@@ -291,15 +306,16 @@ async fn main() -> Result<()> {
                 match result {
                     Ok((stream, _addr)) => {
                         // Peer-credential gate, applied to the *privileged* system
-                        // daemon only (the one with `--allow-uid`). The socket is
-                        // world-writable (0o777) so the unprivileged CLI can connect,
-                        // which means *any* local process can currently drive a root
-                        // helper — including `shutdown`, which stops Caddy and drops
-                        // every live URL. The kernel attests the connecting process's
-                        // uid at connect time, so this cannot be spoofed by holding the
-                        // socket open. Only the installing user (and root, which
-                        // privileged setup connects as to verify the socket) is allowed.
-                        if let Some(allowed) = config.allow_uid {
+                        // daemon only. The socket is world-writable (0o777) so the
+                        // unprivileged CLI can connect, which means *any* local process
+                        // could otherwise drive a root helper — including `shutdown`,
+                        // which stops Caddy and drops every live URL. The kernel
+                        // attests the connecting process's uid at connect time, so this
+                        // cannot be spoofed by holding the socket open. Only the
+                        // installing user (and root, which privileged setup connects as
+                        // to verify the socket) is allowed; `gate` decides which uid
+                        // that is, from the service definition or from the filesystem.
+                        if let Some(allowed) = gate.uid() {
                             match peer_uid(&stream) {
                                 Some(uid) if peer_allowed(uid, allowed) => {}
                                 Some(uid) => {
@@ -629,6 +645,27 @@ async fn service_manager_owns_us() -> bool {
 fn is_system_socket(path: &Path) -> bool {
     let s = path.to_string_lossy();
     s.starts_with("/var/run") || s.starts_with("/run")
+}
+
+/// Say what the peer-uid gate resolved to, once, at startup.
+///
+/// An ungated *privileged* helper warns rather than informs: it is the state
+/// #337 exists to remove, and the helper's own log is where a support
+/// transcript looks first. See [`veld_core::helper_gate::Gate::resolve`].
+fn log_gate(gate: &Gate) {
+    match gate.uid() {
+        Some(uid) => info!(
+            allow_uid = uid,
+            source = gate.source().as_str(),
+            "privileged helper socket gated to a single uid"
+        ),
+        None if gate.source() == GateSource::Unprivileged => {}
+        None => warn!(
+            source = gate.source().as_str(),
+            "privileged helper socket is NOT uid-gated — any local process can drive it; \
+             run `veld setup privileged` to write the gate explicitly"
+        ),
+    }
 }
 
 /// A cheap change signature for a file: (size, mtime-seconds).

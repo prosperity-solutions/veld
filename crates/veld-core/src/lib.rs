@@ -9,6 +9,7 @@ pub mod files;
 pub mod graph;
 pub mod health;
 pub mod helper;
+pub mod helper_gate;
 pub mod ide;
 pub mod include;
 pub mod instance;

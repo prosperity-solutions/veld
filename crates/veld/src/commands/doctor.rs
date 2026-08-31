@@ -3,6 +3,7 @@ use std::net::ToSocketAddrs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
+use veld_core::helper_gate::GateSource;
 
 /// `veld doctor` — comprehensive system diagnostics.
 pub async fn run(json: bool) -> i32 {
@@ -441,6 +442,54 @@ impl Diagnostics {
         });
     }
 
+    /// Whether the privileged helper's socket is actually gated to one uid.
+    ///
+    /// The socket is world-writable (`0o777`) so the unprivileged CLI can reach
+    /// it, so an ungated privileged helper takes `shutdown` — which stops Caddy
+    /// and drops every live URL — from *any* local process. Until #337 that
+    /// state passed every other row in this command: green-but-unprotected, the
+    /// worst thing a diagnostic can say.
+    ///
+    /// Asked of the running helper, never of the service definition. A helper
+    /// with no `--allow-uid` in its plist derives the uid from its own install
+    /// directory at startup, so the plist and the truth routinely disagree —
+    /// and the direction they disagree in is the one that would report a gated
+    /// helper as exposed.
+    async fn check_helper_uid_gate(&mut self) {
+        let socket = veld_core::helper::system_socket_path();
+        let Ok(client) = veld_core::helper::HelperClient::connect_to(&socket).await else {
+            return; // helper down — already reported by the socket check
+        };
+        let Some(data) = client.status().await.ok().and_then(|r| r.data) else {
+            return;
+        };
+        let source = data
+            .get("allow_uid_source")
+            .and_then(|v| v.as_str())
+            .and_then(GateSource::from_wire);
+        let uid = data.get("allow_uid").and_then(|v| v.as_u64());
+
+        let check = match (uid, source) {
+            (Some(uid), source) => Check {
+                pass: true,
+                label: format!(
+                    "Helper socket gated to uid {uid} ({})",
+                    gate_source_label(source)
+                ),
+            },
+            (None, source) => Check {
+                pass: false,
+                label: format!(
+                    "Helper socket NOT gated to a uid — any local process can drive the root \
+                     helper, including `shutdown`, which stops Caddy and drops every live \
+                     URL. {}",
+                    ungated_reason(source)
+                ),
+            },
+        };
+        self.checks.push(check);
+    }
+
     async fn gather_checks(&mut self) {
         // 0. Central database opens and is at a supported schema version.
         // Everything (run state, logs, feedback, tokens) lives here now, so a
@@ -584,6 +633,11 @@ impl Diagnostics {
                     ),
                 }),
             }
+
+            // Same gate as the row above in spirit, opposite direction: signing
+            // protects the *update* path, this protects the socket the CLI
+            // drives the helper through.
+            self.check_helper_uid_gate().await;
         }
 
         // Determine HTTPS port for later checks. When the helper is down we
@@ -1414,6 +1468,54 @@ fn launchd_string_after_key(xml: &str, key: &str) -> Option<String> {
 }
 
 /// Replace the home directory prefix with `~`.
+/// How a *gated* helper says where its uid came from. Kept short — the row is
+/// already a pass, and the interesting half is the uid.
+fn gate_source_label(source: Option<GateSource>) -> &'static str {
+    match source {
+        Some(GateSource::Flag) => "from the service definition",
+        Some(GateSource::LibDirOwner) => "derived from the install directory's owner",
+        // The other variants cannot accompany a uid, and `None` is a helper
+        // newer than this CLI. Say nothing rather than guess.
+        _ => "source unknown",
+    }
+}
+
+/// Why an *ungated* privileged helper has no uid, and what to do about it.
+///
+/// Every branch names a remedy that actually works, because a red row with no
+/// exit is a row users learn to ignore. The common case — a pre-#337 helper —
+/// is fixed by `veld update` alone, with no sudo and nothing to configure; that
+/// is the bar #338 sets, and this row exists to prove it was met.
+fn ungated_reason(source: Option<GateSource>) -> &'static str {
+    match source {
+        // The helper predates the derivation *and* the field, so it can only be
+        // gated by a plist that was never rewritten. Its own uid is unknowable
+        // from here; updating replaces it with one that gates itself.
+        None => "This helper is too old to gate itself or to report the gate — run `veld update`.",
+        Some(GateSource::RefusedRootLibDir) => {
+            "The helper's install directory is root-owned (a system-paths install), so the \
+             installing user cannot be derived — gating to root would admit only root and \
+             lock your own CLI out. Run `veld setup privileged` to write the uid explicitly."
+        }
+        Some(GateSource::RefusedRootFlag) => {
+            "The service definition says `--allow-uid 0`, which would admit only root and \
+             lock your own CLI out, so it was ignored. Run `veld setup privileged` to \
+             rewrite it."
+        }
+        Some(GateSource::UnreadableLibDir) => {
+            "The helper's install directory could not be read, so the installing user could \
+             not be derived. Run `veld setup privileged` to write the uid explicitly."
+        }
+        // `Unprivileged` here means this helper does not consider itself the
+        // system daemon while setup mode says it is — a socket-path mismatch,
+        // which re-running setup is also the fix for. `Flag`/`LibDirOwner`
+        // cannot reach this branch: both carry a uid.
+        Some(GateSource::Flag | GateSource::LibDirOwner | GateSource::Unprivileged) => {
+            "Run `veld setup privileged` to write the uid explicitly."
+        }
+    }
+}
+
 fn tilde_path(path: &Path) -> String {
     if let Some(home) = dirs::home_dir() {
         if let Ok(suffix) = path.strip_prefix(&home) {
@@ -2261,6 +2363,49 @@ mod tests {
             ),
             None,
             "an unterminated element is unreadable, not a path"
+        );
+    }
+
+    /// Every way the helper can report "no gate" must produce a remedy the user
+    /// can actually run. A red row with no exit is a row people learn to skip —
+    /// and this particular row is the only place an exposed root socket shows up
+    /// at all.
+    #[test]
+    fn every_ungated_state_names_a_remedy() {
+        use super::{GateSource, gate_source_label, ungated_reason};
+
+        // The case that matters: a helper too old to gate itself. `veld update`
+        // alone fixes it — no sudo, nothing to configure. That is #338's bar.
+        assert!(ungated_reason(None).contains("`veld update`"));
+        assert!(!ungated_reason(None).contains("sudo"));
+
+        for source in [
+            GateSource::RefusedRootLibDir,
+            GateSource::RefusedRootFlag,
+            GateSource::UnreadableLibDir,
+            GateSource::Unprivileged,
+        ] {
+            let reason = ungated_reason(Some(source));
+            assert!(
+                reason.contains("`veld setup privileged`"),
+                "{source:?} left the user with no remedy: {reason}"
+            );
+        }
+
+        // A gated helper says where the uid came from; anything else — including
+        // a source only a newer helper knows — says nothing rather than guessing.
+        assert_eq!(
+            gate_source_label(Some(GateSource::Flag)),
+            "from the service definition"
+        );
+        assert_eq!(
+            gate_source_label(Some(GateSource::LibDirOwner)),
+            "derived from the install directory's owner"
+        );
+        assert_eq!(gate_source_label(None), "source unknown");
+        assert_eq!(
+            gate_source_label(Some(GateSource::RefusedRootLibDir)),
+            "source unknown"
         );
     }
 }

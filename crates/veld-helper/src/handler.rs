@@ -28,6 +28,13 @@ pub struct State {
     /// a signature requirement there would only add spurious refusals for
     /// unsigned dev builds.
     privileged: bool,
+    /// The peer-uid gate this helper enforces on its socket, reported over
+    /// `status`. Held here purely so `veld doctor` can tell an active gate from
+    /// an absent one — a privileged helper that is not gated serves every
+    /// command to anybody and looks identical from the outside, which is the
+    /// green-but-unprotected state #337 removes. The accept loop reads the same
+    /// value directly; this is not a second source of truth.
+    gate: veld_core::helper_gate::Gate,
 }
 
 impl State {
@@ -40,6 +47,7 @@ impl State {
         // helper may take the sleep setting — see the `sleep` field — or is
         // bound by the swap-relaunch signing gate (`crate::signing`).
         privileged: bool,
+        gate: veld_core::helper_gate::Gate,
     ) -> Self {
         Self {
             dns: DnsManager::new(),
@@ -53,6 +61,7 @@ impl State {
             sleep: (privileged && cfg!(target_os = "macos")).then(SleepManager::new),
             shutdown_tx,
             privileged,
+            gate,
         }
     }
 
@@ -336,6 +345,15 @@ impl State {
                 Some(sleep) => sleep.held().await,
                 None => false,
             },
+            // The peer-uid gate, as this process actually resolved it — read by
+            // `veld doctor` (`crates/veld/src/commands/doctor.rs`). The service
+            // definition is NOT the answer: a privileged helper with no
+            // `--allow-uid` derives the uid at startup (#337), so a plist with no
+            // flag can front a perfectly gated helper, and reading the plist
+            // would report the opposite. `null` means the socket is ungated;
+            // `allow_uid_source` says why.
+            "allow_uid": self.gate.uid(),
+            "allow_uid_source": self.gate.source().as_str(),
         }))
     }
 
@@ -516,7 +534,14 @@ mod tests {
     /// assert on is still the argument one.
     fn test_state() -> State {
         let (tx, _rx) = tokio::sync::watch::channel(false);
-        State::new(443, 80, None, tx, false)
+        State::new(
+            443,
+            80,
+            None,
+            tx,
+            false,
+            veld_core::helper_gate::Gate::unprivileged(),
+        )
     }
 
     /// A lease request with no usable `lease_secs` is refused *before* anything
