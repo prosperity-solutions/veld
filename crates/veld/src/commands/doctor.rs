@@ -517,7 +517,7 @@ impl Diagnostics {
                 pass: false,
                 label: format!(
                     "Helper socket uid gate cannot be confirmed — {}",
-                    ungated_reason(None)
+                    unreportable_gate_reason()
                 ),
             });
             return;
@@ -1565,24 +1565,17 @@ fn gate_source_label(source: Option<GateSource>) -> &'static str {
 /// Why an *ungated* privileged helper has no uid, and what to do about it.
 ///
 /// Every branch names a remedy that actually works, because a red row with no
-/// exit is a row users learn to ignore. The common case — a pre-#337 helper —
-/// is fixed by `veld update` alone, with no sudo and nothing to configure; that
-/// is the bar #338 sets, and this row exists to prove it was met.
+/// exit is a row users learn to ignore.
+///
+/// `None` here means the helper reported a source string this build does not
+/// know — a helper newer than the CLI — **not** a helper too old to report one.
+/// Those two are different rows entirely; the second is
+/// [`unreportable_gate_reason`]. Reaching this function at all means the helper
+/// said, in so many words, that its socket is ungated.
+///
+/// Each string is a complete sentence, because it is appended to one.
 fn ungated_reason(source: Option<GateSource>) -> &'static str {
     match source {
-        // The helper predates the derivation *and* the field, so it can only be
-        // gated by a plist that was never rewritten. Its own uid is unknowable
-        // from here; updating replaces it with one that gates itself.
-        // The FIELD was absent, so this helper predates #337 entirely. It may
-        // still be gated by an `--allow-uid` its plist carries (every install
-        // that ran `veld setup privileged` on v16.58.x has one), so this must
-        // not claim the socket is open — only that the answer is unavailable.
-        // Updating replaces it with a helper that gates itself and says so.
-        None => {
-            "this helper predates the check and cannot report it. Its socket may or may not be \
-             gated by an `--allow-uid` in its service definition. Run `veld update`; the new \
-             helper gates itself and reports it."
-        }
         Some(GateSource::RefusedRootLibDir) => {
             "The helper's install directory is root-owned (a system-paths install), so the \
              installing user cannot be derived — gating to root would admit only root and \
@@ -1592,14 +1585,34 @@ fn ungated_reason(source: Option<GateSource>) -> &'static str {
             "The helper's install directory could not be read, so the installing user could \
              not be derived. Run `veld setup privileged` to write the uid explicitly."
         }
-        // `Unprivileged` here means this helper does not consider itself the
-        // system daemon while setup mode says it is — a socket-path mismatch,
-        // which re-running setup is also the fix for. `Flag`/`LibDirOwner`
-        // cannot reach this branch: both carry a uid.
-        Some(GateSource::Flag | GateSource::LibDirOwner | GateSource::Unprivileged) => {
+        // `Unprivileged` means the helper does not consider itself the system
+        // daemon even though it answered on the system socket — a `--socket-path`
+        // that does not match what setup writes. `Flag`/`LibDirOwner` cannot
+        // reach this branch: both carry a uid. `None` is a source only a newer
+        // helper knows; the remedy is the same one, and it is better than
+        // guessing at a cause.
+        Some(GateSource::Flag | GateSource::LibDirOwner | GateSource::Unprivileged) | None => {
             "Run `veld setup privileged` to write the uid explicitly."
         }
     }
+}
+
+/// What to say when the helper does not report the gate at all.
+///
+/// The field being **absent** means a helper predating #337. It may still be
+/// perfectly gated by an `--allow-uid` its service definition carries — every
+/// install that ran `veld setup privileged` on v16.58.x has one — so this must
+/// never claim the socket is open, only that the answer is unavailable.
+/// `veld update` settles it either way: the new helper gates itself and says so,
+/// with no sudo and nothing to configure. That is #338's bar, and this row is
+/// how it gets checked.
+///
+/// Lower-case and mid-sentence: it is appended to a clause, not started after
+/// a full stop like [`ungated_reason`]'s strings.
+fn unreportable_gate_reason() -> &'static str {
+    "this helper predates the check and cannot report it. Its socket may or may not be gated \
+     by an `--allow-uid` in its service definition. Run `veld update`; the new helper gates \
+     itself and reports it."
 }
 
 fn tilde_path(path: &Path) -> String {
@@ -2458,19 +2471,29 @@ mod tests {
     /// at all.
     #[test]
     fn every_ungated_state_names_a_remedy() {
-        use super::{GateSource, gate_source_label, ungated_reason};
+        use super::{GateSource, gate_source_label, ungated_reason, unreportable_gate_reason};
 
         // The case that matters: a helper too old to report the gate. `veld
         // update` alone fixes it — no sudo, nothing to configure. That is #338's
         // bar. It must NOT claim the socket is open: an install that ran
         // `veld setup privileged` on v16.58.x carries `--allow-uid` in its plist
         // and is genuinely gated, it just cannot say so.
-        let unknown = ungated_reason(None);
+        let unknown = unreportable_gate_reason();
         assert!(unknown.contains("`veld update`"));
         assert!(!unknown.contains("sudo"));
         assert!(
             unknown.contains("may or may not be"),
             "the unknown state must not be reported as a known-open socket: {unknown}"
+        );
+
+        // A source only a NEWER helper knows is not the same thing as a helper
+        // too old to report one, and must not borrow its text: this helper said
+        // outright that its socket is ungated.
+        let newer = ungated_reason(None);
+        assert!(newer.contains("`veld setup privileged`"));
+        assert!(
+            !newer.contains("predates"),
+            "an unknown source from a newer helper must not read as an older one: {newer}"
         );
 
         for source in [
