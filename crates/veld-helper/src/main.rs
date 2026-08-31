@@ -13,6 +13,7 @@ use anyhow::{Context, Result};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 use tracing::{debug, error, info, warn};
+use veld_core::helper_gate::{Gate, GateSource};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -53,10 +54,11 @@ struct HelperConfig {
     http_port: u16,
     /// Override the Caddy binary path (avoids lib_dir() resolution issues under sudo).
     caddy_bin: Option<PathBuf>,
-    /// When set, only this uid (and root, uid 0 — privileged setup connects as
-    /// root to verify the socket) may drive this helper over its socket. Only
-    /// the privileged system daemon is given one; an unprivileged helper relies
-    /// on its 0o700 owner-only socket instead.
+    /// `--allow-uid` as written into the service definition by
+    /// `veld setup privileged`: the one uid (besides root) allowed to drive this
+    /// helper over its socket. An *override*, not the whole story — a privileged
+    /// helper with no flag derives the uid instead, so that installs predating
+    /// the flag are gated without anyone re-running setup. See [`Gate::resolve`].
     allow_uid: Option<u32>,
 }
 
@@ -181,6 +183,21 @@ async fn main() -> Result<()> {
         config.socket_path.display()
     );
 
+    // The peer-uid gate. Resolved once, here, rather than read straight off
+    // `config.allow_uid` in the accept loop: an existing privileged install has
+    // no `--allow-uid` in its service definition (only `veld setup privileged`
+    // writes one) and must still end up gated. See [`Gate::resolve`].
+    let privileged = is_system_socket(&config.socket_path);
+    // `current_exe()` failing and the install directory being unreadable both
+    // land on `UnreadableLibDir`, whose user-facing text names the directory —
+    // so log the io error here or it is gone from the one place a support
+    // transcript would look for it.
+    let exe = std::env::current_exe()
+        .inspect_err(|e| warn!(error = %e, "could not read own executable path; the peer-uid gate cannot be derived"))
+        .ok();
+    let gate = Gate::resolve(config.allow_uid, privileged, exe.as_deref());
+    log_gate(&gate);
+
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
 
     let state = Arc::new(handler::State::new(
@@ -191,7 +208,8 @@ async fn main() -> Result<()> {
         // The privileged system daemon (root) is the only one the swap-relaunch
         // signing gate protects; an unprivileged user helper relaunches as the
         // user and needs no signature to shut down.
-        is_system_socket(&config.socket_path),
+        privileged,
+        gate,
     ));
 
     // Startup reconcile: if a Caddy is already running (orphaned across our own
@@ -277,7 +295,7 @@ async fn main() -> Result<()> {
     // LaunchAgent is already restarted by the installer via user-domain
     // launchctl (no sudo), and the auto-bootstrapped helper is ephemeral and
     // has nothing to relaunch it — so exiting there would just drop URLs.
-    if is_system_socket(&config.socket_path) {
+    if privileged {
         tokio::spawn(watch_own_binary());
     }
 
@@ -291,15 +309,16 @@ async fn main() -> Result<()> {
                 match result {
                     Ok((stream, _addr)) => {
                         // Peer-credential gate, applied to the *privileged* system
-                        // daemon only (the one with `--allow-uid`). The socket is
-                        // world-writable (0o777) so the unprivileged CLI can connect,
-                        // which means *any* local process can currently drive a root
-                        // helper — including `shutdown`, which stops Caddy and drops
-                        // every live URL. The kernel attests the connecting process's
-                        // uid at connect time, so this cannot be spoofed by holding the
-                        // socket open. Only the installing user (and root, which
-                        // privileged setup connects as to verify the socket) is allowed.
-                        if let Some(allowed) = config.allow_uid {
+                        // daemon only. The socket is world-writable (0o777) so the
+                        // unprivileged CLI can connect, which means *any* local process
+                        // could otherwise drive a root helper — including `shutdown`,
+                        // which stops Caddy and drops every live URL. The kernel
+                        // attests the connecting process's uid at connect time, so this
+                        // cannot be spoofed by holding the socket open. Only the
+                        // installing user (and root, which privileged setup connects as
+                        // to verify the socket) is allowed; `gate` decides which uid
+                        // that is, from the service definition or from the filesystem.
+                        if let Some(allowed) = gate.uid() {
                             match peer_uid(&stream) {
                                 Some(uid) if peer_allowed(uid, allowed) => {}
                                 Some(uid) => {
@@ -461,9 +480,23 @@ fn peer_uid_fd(fd: i32) -> Option<u32> {
 async fn reject_connection(stream: tokio::net::UnixStream) {
     use tokio::io::AsyncWriteExt;
     let mut stream = stream;
-    let _ = stream
-        .write_all(b"{\"ok\":false,\"error\":\"permission denied: untrusted peer uid\"}\n")
-        .await;
+    let _ = stream.write_all(rejection_bytes().as_bytes()).await;
+}
+
+/// The exact bytes [`reject_connection`] writes.
+///
+/// Built from [`crate::protocol::Response`] rather than a hand-written literal
+/// so the shared [`veld_core::helper_gate::REJECTED_PEER_ERROR`] is escaped by
+/// the same serializer as every other reply — and so the field order stays the
+/// one a struct gives (`ok` then `error`), which a `serde_json::json!` map would
+/// have sorted alphabetically instead. Separate from the writer so a test can
+/// read it without a socket.
+fn rejection_bytes() -> String {
+    let response = protocol::Response::err(veld_core::helper_gate::REJECTED_PEER_ERROR);
+    format!(
+        "{}\n",
+        serde_json::to_string(&response).expect("response serialization cannot fail")
+    )
 }
 
 /// Poll the helper's own executable; when its size/mtime changes and settles,
@@ -631,6 +664,27 @@ fn is_system_socket(path: &Path) -> bool {
     s.starts_with("/var/run") || s.starts_with("/run")
 }
 
+/// Say what the peer-uid gate resolved to, once, at startup.
+///
+/// An ungated *privileged* helper warns rather than informs: it is the state
+/// #337 exists to remove, and the helper's own log is where a support
+/// transcript looks first. See [`veld_core::helper_gate::Gate::resolve`].
+fn log_gate(gate: &Gate) {
+    match gate.uid() {
+        Some(uid) => info!(
+            allow_uid = uid,
+            source = gate.source().as_str(),
+            "privileged helper socket gated to a single uid"
+        ),
+        None if gate.source() == GateSource::Unprivileged => {}
+        None => warn!(
+            source = gate.source().as_str(),
+            "privileged helper socket is NOT uid-gated — any local process can drive it; \
+             run `veld setup privileged` to write the gate explicitly"
+        ),
+    }
+}
+
 /// A cheap change signature for a file: (size, mtime-seconds).
 fn binary_signature(path: &Path) -> Option<(u64, i64)> {
     let meta = std::fs::metadata(path).ok()?;
@@ -703,6 +757,116 @@ mod tests {
         assert!(!peer_allowed(502, INSTALLING));
         // A root helper whose --allow-uid is root-only still allows root.
         assert!(peer_allowed(0, 0));
+    }
+
+    /// The refusal a gated socket writes back is a wire contract in two
+    /// directions: `veld doctor` matches its text to say "the gate refused you"
+    /// rather than "helper down", and it must stay the shape every other reply
+    /// has. Pinned to the exact bytes `origin/main` sent, since a client reading
+    /// it is by definition one the helper cannot negotiate with.
+    #[test]
+    fn a_refused_peer_gets_the_same_bytes_it_always_did() {
+        assert_eq!(
+            super::rejection_bytes(),
+            "{\"ok\":false,\"error\":\"permission denied: untrusted peer uid\"}\n"
+        );
+        // And the text `veld doctor` keys off is really in there.
+        assert!(
+            super::rejection_bytes().contains(veld_core::helper_gate::REJECTED_PEER_ERROR),
+            "doctor's refusal detection matches on this string"
+        );
+    }
+
+    /// The refusal a gated socket writes must reach `veld doctor` as the error
+    /// it keys off — end to end, through the real client.
+    ///
+    /// Two halves already had tests and the seam between them had none:
+    /// `a_refused_peer_gets_the_same_bytes_it_always_did` pins what the helper
+    /// writes, and `gate_check`'s tests cover what the row does with a refusal,
+    /// but nothing asserted that `HelperClient` turns the first into the second.
+    /// A change to `HelperError`'s variants, or to `send_inner`'s `ok: false`
+    /// handling, would make the doctor branch dead code with every other test
+    /// still green.
+    #[tokio::test]
+    async fn a_refused_peer_reaches_the_client_as_the_error_doctor_matches_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("helper.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+
+        // Stand in for the accept loop's gate: refuse without reading, exactly
+        // as `reject_connection` does.
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                use tokio::io::AsyncWriteExt;
+                let _ = stream.write_all(super::rejection_bytes().as_bytes()).await;
+            }
+        });
+
+        let err = veld_core::helper::HelperClient::connect_to(&socket)
+            .await
+            .err()
+            .expect("a refused peer must not connect successfully");
+
+        match err {
+            veld_core::helper::HelperError::CommandError(message) => assert!(
+                message.contains(veld_core::helper_gate::REJECTED_PEER_ERROR),
+                "doctor matches this error's text; got {message:?}"
+            ),
+            // The write can still lose the race against the client's own — which
+            // is why `veld doctor` has an `Unreadable` arm and does not depend on
+            // this message. Anything else means the mapping changed.
+            other => assert!(
+                matches!(
+                    other,
+                    veld_core::helper::HelperError::SendFailed(_)
+                        | veld_core::helper::HelperError::ReadFailed(_)
+                ),
+                "unexpected error kind for a refused peer: {other:?}"
+            ),
+        }
+    }
+
+    /// `is_system_socket` is the switch deciding whether a root helper derives a
+    /// gate at all, so the real socket paths must land on the right side of it —
+    /// including on Linux, where the user socket must not be mistaken for a
+    /// system one.
+    ///
+    /// The last assertion pins a known imprecision rather than a guarantee; read
+    /// its comment before "fixing" it.
+    #[test]
+    fn only_the_system_domain_socket_reads_as_privileged() {
+        use super::is_system_socket;
+        use std::path::Path;
+
+        // The paths `veld-core` actually hands out.
+        assert!(is_system_socket(&veld_core::helper::system_socket_path()));
+        assert!(!is_system_socket(&veld_core::helper::user_socket_path()));
+
+        // Both platforms' system paths read as privileged wherever the suite
+        // runs, because the plist/unit pins an absolute path, not a cfg.
+        assert!(is_system_socket(Path::new("/var/run/veld-helper.sock")));
+        assert!(is_system_socket(Path::new("/run/veld-helper.sock")));
+
+        // The user helper's own path, and the `/tmp` fallback `user_socket_path`
+        // degrades to when there is no home directory, are NOT privileged —
+        // they rely on the 0o700 owner-only socket instead.
+        assert!(!is_system_socket(Path::new("/Users/x/.veld/helper.sock")));
+        assert!(!is_system_socket(Path::new("/home/x/.veld/helper.sock")));
+        assert!(!is_system_socket(Path::new("/tmp/veld-helper.sock")));
+
+        // **The gap, asserted rather than glossed.** This is a string prefix,
+        // not a path-component match, so Linux's user-writable
+        // `$XDG_RUNTIME_DIR` (`/run/user/<uid>`) reads as privileged too. Benign
+        // today and deliberately left alone: no shipped path passes such a
+        // `--socket-path` (both service writers use the two paths above, and
+        // auto-bootstrap uses `user_socket_path()`), and a helper there would
+        // run as the user, derive a gate to itself, and gate *more* than it does
+        // now. Tightening it would also move the signing gate and the sleep
+        // manager, which read the same predicate and which this change did not
+        // introduce — so it is a separate change, not a silent one made here.
+        assert!(is_system_socket(Path::new(
+            "/run/user/1000/veld-helper.sock"
+        )));
     }
 
     /// The kernel-attested peer uid of a same-process peer is this process's
