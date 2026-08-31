@@ -791,6 +791,10 @@ app.whenReady().then(async () => {
   // unreachable, until the detach grace hangs them up.
   restoreWindows();
   if (process.platform === "darwin") {
+    // The icon now appears after one settings read rather than immediately, and
+    // that order is deliberate: creating it first would flash an icon in the menu
+    // bar of the very user who turned it off, then take it away. The read is a
+    // loopback GET capped at 2s, and it fails to "keep the icon".
     void syncTray();
     setInterval(() => void syncTray(), TRAY_TICK_MS);
   }
