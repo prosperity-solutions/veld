@@ -1,7 +1,7 @@
 {
   "name": "@veld/desktop",
   "private": true,
-  "version": "16.58.1",
+  "version": "16.58.2",
   "description": "Veld Desktop — Electron shell around the veld management UI (/ide)",
   "author": "Prosperity Solutions <veld@life.li>",
   "homepage": "https://veld.oss.life.li",
