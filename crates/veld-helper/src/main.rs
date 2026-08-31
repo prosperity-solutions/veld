@@ -777,10 +777,13 @@ mod tests {
         );
     }
 
-    /// `is_system_socket` is the switch deciding whether a root helper gates its
-    /// socket *at all*, so the two real socket paths must land on the right side
-    /// of it — including on Linux, where the user socket must not be mistaken
-    /// for a system one.
+    /// `is_system_socket` is the switch deciding whether a root helper derives a
+    /// gate at all, so the real socket paths must land on the right side of it —
+    /// including on Linux, where the user socket must not be mistaken for a
+    /// system one.
+    ///
+    /// The last assertion pins a known imprecision rather than a guarantee; read
+    /// its comment before "fixing" it.
     #[test]
     fn only_the_system_domain_socket_reads_as_privileged() {
         use super::is_system_socket;
@@ -801,6 +804,20 @@ mod tests {
         assert!(!is_system_socket(Path::new("/Users/x/.veld/helper.sock")));
         assert!(!is_system_socket(Path::new("/home/x/.veld/helper.sock")));
         assert!(!is_system_socket(Path::new("/tmp/veld-helper.sock")));
+
+        // **The gap, asserted rather than glossed.** This is a string prefix,
+        // not a path-component match, so Linux's user-writable
+        // `$XDG_RUNTIME_DIR` (`/run/user/<uid>`) reads as privileged too. Benign
+        // today and deliberately left alone: no shipped path passes such a
+        // `--socket-path` (both service writers use the two paths above, and
+        // auto-bootstrap uses `user_socket_path()`), and a helper there would
+        // run as the user, derive a gate to itself, and gate *more* than it does
+        // now. Tightening it would also move the signing gate and the sleep
+        // manager, which read the same predicate and which this change did not
+        // introduce — so it is a separate change, not a silent one made here.
+        assert!(is_system_socket(Path::new(
+            "/run/user/1000/veld-helper.sock"
+        )));
     }
 
     /// The kernel-attested peer uid of a same-process peer is this process's

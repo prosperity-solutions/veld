@@ -1502,6 +1502,25 @@ fn gate_source_label(source: Option<GateSource>) -> &'static str {
     }
 }
 
+/// Appended to every *failing* gate row.
+///
+/// The row runs for whoever types `veld doctor`, because the reader a
+/// newly-derived gate locks out is by construction not the installing user (see
+/// [`Diagnostics::check_helper_uid_gate`]). The cost is that a second reader —
+/// someone on a shared machine whose privileged veld legitimately belongs to
+/// another account — sees the same red row, and every remedy it could offer is
+/// wrong for them: `veld setup privileged` resolves the binary through
+/// `which_self`, so following it would leave a root LaunchDaemon exec'ing a
+/// binary out of *their* home directory and gate the socket to them, locking the
+/// real owner out. `veld update` is merely futile — it cannot touch somebody
+/// else's root service, so the row would stay red forever.
+///
+/// Nothing here can tell the two readers apart, so every failing row says so.
+/// One sentence of noise for the owner is the right price for not handing the
+/// other reader a hijack.
+const NOT_YOUR_INSTALL: &str = " If this machine's privileged veld belongs to another account, \
+                                none of this is yours to fix — leave it to its owner.";
+
 /// What the privileged helper told `veld doctor` about its gate.
 ///
 /// A type rather than a bare `Option<Value>` so the *refused* answer — which
@@ -1556,7 +1575,7 @@ fn gate_check(report: &GateReport, invoking: Option<u64>) -> Option<Check> {
         return Some(Check {
             pass: false,
             label: format!(
-                "Helper socket uid gate cannot be confirmed — {}",
+                "Helper socket uid gate cannot be confirmed — {}{NOT_YOUR_INSTALL}",
                 unreportable_gate_reason()
             ),
         });
@@ -1577,7 +1596,7 @@ fn gate_check(report: &GateReport, invoking: Option<u64>) -> Option<Check> {
             label: format!(
                 "Helper socket uid gate cannot be confirmed — the helper reported `{}` as its \
                  allowed uid, which this version of `veld` cannot read. Run `veld update` so \
-                 the CLI and the helper match.",
+                 the CLI and the helper match.{NOT_YOUR_INSTALL}",
                 veld_core::helper_gate::ALLOW_UID_FIELD
             ),
         });
@@ -1590,10 +1609,11 @@ fn gate_check(report: &GateReport, invoking: Option<u64>) -> Option<Check> {
         // helper, and only a root reader ever gets far enough to see this.
         Some(0) => Check {
             pass: false,
-            label: "Helper socket gated to uid 0 — that admits only root, so the `veld` CLI \
-                    cannot drive its own helper. Run `veld setup privileged` to write the \
-                    installing user's uid."
-                .into(),
+            label: format!(
+                "Helper socket gated to uid 0 — that admits only root, so the `veld` CLI \
+                 cannot drive its own helper. Run `veld setup privileged` to write the \
+                 installing user's uid.{NOT_YOUR_INSTALL}"
+            ),
         },
         // Gated, but not to the user reading this. Only reachable as root
         // (every other uid is refused before it can ask), which is exactly
@@ -1603,7 +1623,8 @@ fn gate_check(report: &GateReport, invoking: Option<u64>) -> Option<Check> {
             pass: false,
             label: format!(
                 "Helper socket gated to uid {uid}, but you are uid {} — your `veld` commands \
-                 cannot drive it. Run `veld setup privileged` to write the correct uid.",
+                 cannot drive it. Run `veld setup privileged` to write the correct \
+                 uid.{NOT_YOUR_INSTALL}",
                 invoking.unwrap_or(0)
             ),
         },
@@ -1618,7 +1639,8 @@ fn gate_check(report: &GateReport, invoking: Option<u64>) -> Option<Check> {
             pass: false,
             label: format!(
                 "Helper socket NOT gated to a uid — any local process can drive the root \
-                 helper, including `shutdown`, which stops Caddy and drops every live URL. {}",
+                 helper, including `shutdown`, which stops Caddy and drops every live \
+                 URL. {}{NOT_YOUR_INSTALL}",
                 ungated_reason(source)
             ),
         },
@@ -2650,6 +2672,51 @@ mod tests {
         );
         assert!(c.pass);
         assert!(c.label.contains("source unknown"));
+    }
+
+    /// No failing gate row may hand a reader a remedy without saying it might
+    /// not be theirs to run.
+    ///
+    /// The row runs for whoever types `veld doctor`, and on a shared machine
+    /// that includes somebody whose privileged veld belongs to another account.
+    /// For them `veld setup privileged` is a hijack — it repoints a root service
+    /// at their own binary and gates the socket to them — and `veld update`
+    /// cannot touch the other account's service at all. An earlier fix put the
+    /// caveat on the refused branch only, and the ungated branch (which every
+    /// local uid reaches, because an ungated helper refuses nobody) went on
+    /// advising the hijack. This asserts the property across every branch rather
+    /// than one at a time, so a new branch inherits the requirement.
+    #[test]
+    fn no_failing_gate_row_tells_a_stranger_to_take_over_the_service() {
+        use super::{GateReport, gate_check};
+
+        let reports = [
+            GateReport::Refused,
+            GateReport::Status(serde_json::json!({ "version": "16.58.1" })),
+            GateReport::Status(serde_json::json!({ "allow_uid": "501" })),
+            GateReport::Status(serde_json::json!({ "allow_uid": 0 })),
+            GateReport::Status(serde_json::json!({ "allow_uid": 999 })),
+            GateReport::Status(serde_json::json!({
+                "allow_uid": serde_json::Value::Null,
+                "allow_uid_source": "refused-root-lib-dir",
+            })),
+        ];
+
+        for report in &reports {
+            for me in [Some(501u64), Some(0), None] {
+                let Some(check) = gate_check(report, me) else {
+                    continue;
+                };
+                if check.pass {
+                    continue;
+                }
+                assert!(
+                    check.label.contains("belongs to another account"),
+                    "a failing row offered a remedy with no owner caveat: {}",
+                    check.label
+                );
+            }
+        }
     }
 
     /// The uid-match rule, isolated from the socket call so the `root` escape
